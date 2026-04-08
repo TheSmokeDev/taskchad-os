@@ -1,0 +1,89 @@
+[project]
+name = "thehomie"
+version = "1.1.0"
+description = "The Homie — personal AI agent framework"
+requires-python = ">=3.12"
+dependencies = [
+    "claude-agent-sdk>=0.1.48",
+    "python-dotenv>=1.0.0",
+    "win10toast-click>=0.1.2; sys_platform == 'win32'",
+    "setuptools<81; sys_platform == 'win32'",
+    "tzdata>=2024.1",
+    # Phase 3: Memory Search
+    "fastembed>=0.4.0",
+    "sqlite-vec>=0.1.6",
+    "numpy>=1.26.0",
+    # Postgres + pgvector (optional — SQLite used as fallback)
+    "psycopg[binary]>=3.1.0",
+    "pgvector>=0.3.0",
+    # Phase 5: Direct Platform Integrations
+    "google-api-python-client>=2.100.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+    "asana>=5.0.0",
+    "slack-sdk>=3.27.0",
+    # Phase 6: Chat Interface
+    "slack-bolt>=1.20.0",
+    "aiohttp>=3.9.0",
+    # Phase 7: Telegram Chat
+    "python-telegram-bot>=21.0",
+    # Phase 8: Voice Support (STT + TTS)
+    "openai>=1.0.0",
+    "edge-tts>=7.0.0",
+    # Phase 9: Dashboard Backend
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "markdown>=3.7",
+    "openpyxl>=3.1.5",
+    # Phase 10: Additional Chat Adapters (Move 4)
+    "discord.py>=2.4.0",
+    "httpx>=0.27.0",
+    # Gateway: WebSocket server
+    "websockets>=13.0",
+    "pytest-asyncio>=1.3.0",
+    "pdfplumber>=0.11.9",
+    # Phase 12: CLI
+    "click>=8.1.0",
+    "pyreadline3>=3.4.0; sys_platform == 'win32'",
+    "langfuse>=4.0.1",
+    "langsmith[claude-agent-sdk,otel]>=0.7.22",
+    "otel-instrumentation-claude-agent-sdk @ git+https://github.com/justinbarias/opentelemetry-instrumentation-claude-agent-sdk.git",
+    # Observability: error tracking (GlitchTip/Sentry)
+    "sentry-sdk>=2.0.0",
+]
+
+[project.scripts]
+thehomie = "cli_entry:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.8.0",
+    "ruff>=0.2.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.27.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

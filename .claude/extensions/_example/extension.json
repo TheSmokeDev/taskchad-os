@@ -1,0 +1,27 @@
+{
+  "id": "_example",
+  "name": "Example Extension",
+  "version": "1.0.0",
+  "description": "Template extension demonstrating the manifest format and handler pattern.",
+  "enabledByDefault": false,
+
+  "commands": [
+    {
+      "name": "example-hello",
+      "description": "Say hello from the example extension",
+      "type": "router",
+      "minRole": "viewer",
+      "handler": "handlers:handle_hello"
+    }
+  ],
+
+  "dataIntents": [
+    {
+      "command": "example-hello",
+      "keywords": ["example", "hello example"],
+      "includedInBrief": false
+    }
+  ],
+
+  "envRequirements": []
+}

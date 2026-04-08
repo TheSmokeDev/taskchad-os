@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Homie Dashboard</title>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            thehomie: { blue: '#3B82F6', dark: '#2563EB', light: '#60A5FA' },
+            surface: 'rgba(0,0,0,0.4)',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background: #07090F;
+      color: rgba(255,255,255,0.98);
+      font-family: 'Inter', system-ui, sans-serif;
+    }
+    .glass {
+      background: rgba(0,0,0,0.4);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px;
+    }
+    .glass-hover:hover {
+      border-color: rgba(59,130,246,0.3);
+      background: rgba(0,0,0,0.5);
+    }
+    .text-muted { color: rgba(255,255,255,0.5); }
+    .text-secondary { color: rgba(255,255,255,0.7); }
+    .glow-blue { box-shadow: 0 0 20px rgba(59,130,246,0.15); }
+
+    /* Tab active indicator */
+    .tab-active {
+      color: #3B82F6;
+      border-bottom: 2px solid #3B82F6;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+
+    /* Markdown content styling */
+    .md-content h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
+    .md-content h2 { font-size: 1.25rem; font-weight: 600; margin: 1rem 0 0.5rem; color: rgba(255,255,255,0.9); }
+    .md-content h3 { font-size: 1.1rem; font-weight: 600; margin: 0.75rem 0 0.25rem; color: rgba(255,255,255,0.85); }
+    .md-content p { margin: 0.5rem 0; line-height: 1.6; color: rgba(255,255,255,0.8); }
+    .md-content ul, .md-content ol { margin: 0.5rem 0; padding-left: 1.5rem; color: rgba(255,255,255,0.8); }
+    .md-content li { margin: 0.25rem 0; }
+    .md-content code { font-family: 'JetBrains Mono', monospace; background: rgba(255,255,255,0.08); padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.875rem; }
+    .md-content pre { background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 0.75rem 0; }
+    .md-content pre code { background: none; padding: 0; }
+    .md-content a { color: #60A5FA; text-decoration: underline; }
+    .md-content table { border-collapse: collapse; width: 100%; margin: 0.75rem 0; }
+    .md-content th, .md-content td { border: 1px solid rgba(255,255,255,0.1); padding: 0.5rem 0.75rem; text-align: left; }
+    .md-content th { background: rgba(255,255,255,0.05); font-weight: 600; }
+    .md-content strong { color: rgba(255,255,255,0.95); }
+    .md-content hr { border-color: rgba(255,255,255,0.1); margin: 1rem 0; }
+
+    /* Chat bubbles */
+    .bubble-user {
+      background: rgba(59,130,246,0.2);
+      border: 1px solid rgba(59,130,246,0.3);
+      border-radius: 12px 12px 4px 12px;
+    }
+    .bubble-assistant {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px 12px 12px 4px;
+    }
+
+    /* Pulse animation for live indicator */
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+    /* Skeleton loading */
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.1) 50%, rgba(255,255,255,0.05) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body class="min-h-screen" x-data="dashboard()" x-init="init()">
+
+  <!-- Header -->
+  <header class="sticky top-0 z-50 glass border-b border-white/10" style="border-radius:0">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+      <h1 class="text-lg font-bold tracking-tight">
+        <span class="text-thehomie-blue">The Homie</span>
+        <span class="text-muted font-normal ml-2 text-sm">Dashboard</span>
+      </h1>
+      <nav class="flex gap-1">
+        <template x-for="t in tabs" :key="t.id">
+          <button
+            @click="switchTab(t.id)"
+            :class="tab === t.id ? 'tab-active text-white' : 'text-secondary hover:text-white'"
+            class="px-3 py-2 text-sm font-medium transition-colors"
+            x-text="t.label"
+          ></button>
+        </template>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="max-w-6xl mx-auto px-4 py-6">
+
+    <!-- ============ STATUS TAB ============ -->
+    <div x-show="tab === 'status'" x-cloak>
+
+      <!-- Loading skeleton -->
+      <template x-if="statusLoading">
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <template x-for="i in 4"><div class="glass p-6"><div class="skeleton h-4 w-24 mb-3"></div><div class="skeleton h-8 w-16"></div></div></template>
+        </div>
+      </template>
+
+      <!-- Status cards -->
+      <template x-if="!statusLoading && status">
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+
+          <!-- Bot Status -->
+          <div class="glass p-5 glow-blue">
+            <div class="text-muted text-xs font-medium uppercase tracking-wider mb-2">Bot Status</div>
+            <div class="flex items-center gap-2">
+              <div class="w-2.5 h-2.5 rounded-full" :class="status.bot.alive ? 'bg-emerald-500 pulse-dot' : 'bg-red-500'"></div>
+              <span class="text-xl font-bold" x-text="status.bot.alive ? 'Running' : 'Stopped'"></span>
+            </div>
+            <div class="text-muted text-xs mt-2" x-show="status.bot.pid">
+              PID: <span x-text="status.bot.pid" class="font-mono"></span>
+            </div>
+          </div>
+
+          <!-- Heartbeat -->
+          <div class="glass p-5">
+            <div class="text-muted text-xs font-medium uppercase tracking-wider mb-2">Heartbeat</div>
+            <template x-if="status.heartbeat && status.heartbeat.last_run">
+              <div>
+                <div class="text-xl font-bold text-emerald-400">OK</div>
+                <div class="text-muted text-xs mt-2">Last: <span x-text="timeAgo(status.heartbeat.last_run)"></span></div>
+              </div>
+            </template>
+            <template x-if="!status.heartbeat || !status.heartbeat.last_run">
+              <div class="text-xl font-bold text-secondary">No data</div>
+            </template>
+          </div>
+
+          <!-- Reflection -->
+          <div class="glass p-5">
+            <div class="text-muted text-xs font-medium uppercase tracking-wider mb-2">Reflection</div>
+            <template x-if="status.reflection && status.reflection.last_run">
+              <div>
+                <div class="text-xl font-bold text-emerald-400">OK</div>
+                <div class="text-muted text-xs mt-2">Last: <span x-text="timeAgo(status.reflection.last_run)"></span></div>
+              </div>
+            </template>
+            <template x-if="!status.reflection || !status.reflection.last_run">
+              <div class="text-xl font-bold text-secondary">No data</div>
+            </template>
+          </div>
+
+          <!-- Crashes -->
+          <div class="glass p-5">
+            <div class="text-muted text-xs font-medium uppercase tracking-wider mb-2">Crashes Today</div>
+            <div class="text-xl font-bold" :class="status.crashes_today > 0 ? 'text-amber-400' : 'text-emerald-400'" x-text="status.crashes_today"></div>
+          </div>
+
+        </div>
+      </template>
+    </div>
+
+    <!-- ============ CONVERSATIONS TAB ============ -->
+    <div x-show="tab === 'conversations'" x-cloak>
+
+      <!-- Session list -->
+      <template x-if="!selectedSession">
+        <div>
+          <template x-if="sessionsLoading">
+            <div class="space-y-3">
+              <template x-for="i in 5"><div class="glass p-4"><div class="skeleton h-4 w-full mb-2"></div><div class="skeleton h-3 w-2/3"></div></div></template>
+            </div>
+          </template>
+
+          <template x-if="!sessionsLoading && sessions.length === 0">
+            <div class="glass p-8 text-center text-muted">No conversations yet.</div>
+          </template>
+
+          <template x-if="!sessionsLoading && sessions.length > 0">
+            <div class="space-y-2">
+              <template x-for="s in sessions" :key="s.id">
+                <button @click="loadSession(s.id)" class="glass glass-hover w-full text-left p-4 transition-all">
+                  <div class="flex items-center justify-between mb-1">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-mono px-2 py-0.5 rounded bg-thehomie-blue/20 text-thehomie-light" x-text="s.platform"></span>
+                      <span class="text-sm font-medium" x-text="formatDate(s.created_at)"></span>
+                    </div>
+                    <div class="flex items-center gap-3 text-xs text-muted">
+                      <span x-text="s.message_count + ' msgs'"></span>
+                      <span x-text="formatCost(s.total_cost_usd)"></span>
+                      <span class="px-1.5 py-0.5 rounded text-xs"
+                        :class="s.status === 'active' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-white/5 text-muted'"
+                        x-text="s.status"></span>
+                    </div>
+                  </div>
+                  <div class="text-xs text-muted">
+                    Mode: <span x-text="s.mode" class="text-secondary"></span>
+                    &middot; Updated <span x-text="timeAgo(s.updated_at)"></span>
+                  </div>
+                </button>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Session detail (message thread) -->
+      <template x-if="selectedSession">
+        <div>
+          <button @click="selectedSession = null" class="flex items-center gap-1 text-sm text-thehomie-light hover:text-white mb-4 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+            Back to sessions
+          </button>
+
+          <!-- Session header -->
+          <div class="glass p-4 mb-4">
+            <div class="flex items-center gap-3">
+              <span class="text-xs font-mono px-2 py-0.5 rounded bg-thehomie-blue/20 text-thehomie-light" x-text="selectedSession.platform"></span>
+              <span class="text-sm" x-text="formatDate(selectedSession.created_at)"></span>
+              <span class="text-xs text-muted" x-text="selectedSession.message_count + ' messages'"></span>
+              <span class="text-xs text-muted" x-text="formatCost(selectedSession.total_cost_usd)"></span>
+            </div>
+          </div>
+
+          <!-- Messages -->
+          <template x-if="sessionLoading">
+            <div class="space-y-3">
+              <template x-for="i in 4"><div class="skeleton h-16 w-3/4" :class="i % 2 === 0 ? 'ml-auto' : ''"></div></template>
+            </div>
+          </template>
+
+          <template x-if="!sessionLoading">
+            <div class="space-y-3 max-w-3xl mx-auto">
+              <template x-if="selectedSession.messages && selectedSession.messages.length === 0">
+                <div class="text-center text-muted py-8">No transcript available for this session.</div>
+              </template>
+              <template x-for="msg in (selectedSession.messages || [])" :key="msg.timestamp">
+                <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
+                  <div class="max-w-[80%] px-4 py-3" :class="msg.role === 'user' ? 'bubble-user' : 'bubble-assistant'">
+                    <div class="text-xs mb-1" :class="msg.role === 'user' ? 'text-blue-300' : 'text-muted'" x-text="msg.role === 'user' ? 'You' : 'The Homie'"></div>
+                    <div class="text-sm leading-relaxed whitespace-pre-wrap" x-text="msg.content"></div>
+                    <div class="text-xs text-muted mt-1" x-text="formatTime(msg.timestamp)" x-show="msg.timestamp"></div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+
+    <!-- ============ LOGS TAB ============ -->
+    <div x-show="tab === 'logs'" x-cloak>
+      <div class="flex gap-4" style="min-height: 60vh">
+
+        <!-- Date sidebar -->
+        <div class="w-48 shrink-0 space-y-1">
+          <template x-if="logsLoading">
+            <div class="space-y-2">
+              <template x-for="i in 6"><div class="skeleton h-8 w-full"></div></template>
+            </div>
+          </template>
+          <template x-if="!logsLoading">
+            <div class="space-y-1">
+              <template x-if="logs.length === 0">
+                <div class="text-sm text-muted p-2">No logs found.</div>
+              </template>
+              <template x-for="log in logs" :key="log.date">
+                <button
+                  @click="loadLog(log.date)"
+                  class="w-full text-left px-3 py-2 rounded-lg text-sm transition-colors"
+                  :class="selectedLogDate === log.date ? 'bg-thehomie-blue/20 text-thehomie-light border border-thehomie-blue/30' : 'text-secondary hover:text-white hover:bg-white/5'"
+                  x-text="log.date"
+                ></button>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <!-- Log content -->
+        <div class="flex-1 glass p-6 overflow-y-auto" style="max-height: 75vh">
+          <template x-if="logLoading">
+            <div class="space-y-3"><div class="skeleton h-6 w-48 mb-4"></div><div class="skeleton h-4 w-full"></div><div class="skeleton h-4 w-5/6"></div><div class="skeleton h-4 w-4/6"></div></div>
+          </template>
+          <template x-if="!logLoading && !selectedLogContent">
+            <div class="text-muted text-center py-12">Select a date to view the log.</div>
+          </template>
+          <template x-if="!logLoading && selectedLogContent">
+            <div class="md-content" x-html="selectedLogContent"></div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ MEMORY TAB ============ -->
+    <div x-show="tab === 'memory'" x-cloak>
+
+      <!-- File selector -->
+      <div class="flex gap-2 mb-4">
+        <template x-for="f in memoryFiles" :key="f">
+          <button
+            @click="loadMemory(f)"
+            class="px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+            :class="selectedMemoryFile === f ? 'bg-thehomie-blue/20 text-thehomie-light border border-thehomie-blue/30' : 'glass text-secondary hover:text-white'"
+            x-text="f"
+          ></button>
+        </template>
+      </div>
+
+      <!-- Memory content -->
+      <div class="glass p-6 overflow-y-auto" style="max-height: 75vh">
+        <template x-if="memoryLoading">
+          <div class="space-y-3"><div class="skeleton h-6 w-48 mb-4"></div><div class="skeleton h-4 w-full"></div><div class="skeleton h-4 w-5/6"></div><div class="skeleton h-4 w-4/6"></div></div>
+        </template>
+        <template x-if="!memoryLoading && memoryContent">
+          <div>
+            <div class="text-xs text-muted mb-4" x-show="memoryLastModified">
+              Last modified: <span x-text="timeAgo(memoryLastModified)"></span>
+            </div>
+            <div class="md-content" x-html="memoryContent"></div>
+          </div>
+        </template>
+        <template x-if="!memoryLoading && !memoryContent">
+          <div class="text-muted text-center py-12">Select a memory file to view.</div>
+        </template>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="text-center text-xs text-muted py-6">
+    The Homie &middot; YourAgent
+  </footer>
+
+  <script>
+    function dashboard() {
+      return {
+        tab: 'status',
+        tabs: [
+          { id: 'status', label: 'Status' },
+          { id: 'conversations', label: 'Conversations' },
+          { id: 'logs', label: 'Logs' },
+          { id: 'memory', label: 'Memory' },
+        ],
+        memoryFiles: ['MEMORY.md', 'SOUL.md', 'USER.md', 'HEARTBEAT.md'],
+
+        // Status
+        status: null,
+        statusLoading: true,
+
+        // Sessions
+        sessions: [],
+        sessionsLoading: false,
+        selectedSession: null,
+        sessionLoading: false,
+
+        // Logs
+        logs: [],
+        logsLoading: false,
+        selectedLogDate: null,
+        selectedLogContent: null,
+        logLoading: false,
+
+        // Memory
+        selectedMemoryFile: null,
+        memoryContent: null,
+        memoryLastModified: null,
+        memoryLoading: false,
+
+        async init() {
+          await this.loadStatus();
+        },
+
+        async switchTab(t) {
+          this.tab = t;
+          if (t === 'status' && !this.status) await this.loadStatus();
+          if (t === 'conversations' && this.sessions.length === 0) await this.loadSessions();
+          if (t === 'logs' && this.logs.length === 0) await this.loadLogs();
+          if (t === 'memory' && !this.memoryContent) await this.loadMemory('MEMORY.md');
+        },
+
+        async loadStatus() {
+          this.statusLoading = true;
+          try {
+            const resp = await fetch('/api/status');
+            this.status = await resp.json();
+          } catch (e) {
+            console.error('Failed to load status:', e);
+          }
+          this.statusLoading = false;
+        },
+
+        async loadSessions() {
+          this.sessionsLoading = true;
+          try {
+            const resp = await fetch('/api/sessions');
+            this.sessions = await resp.json();
+          } catch (e) {
+            console.error('Failed to load sessions:', e);
+          }
+          this.sessionsLoading = false;
+        },
+
+        async loadSession(id) {
+          this.sessionLoading = true;
+          try {
+            const resp = await fetch(`/api/sessions/${id}`);
+            this.selectedSession = await resp.json();
+          } catch (e) {
+            console.error('Failed to load session:', e);
+          }
+          this.sessionLoading = false;
+        },
+
+        async loadLogs() {
+          this.logsLoading = true;
+          try {
+            const resp = await fetch('/api/logs');
+            this.logs = await resp.json();
+          } catch (e) {
+            console.error('Failed to load logs:', e);
+          }
+          this.logsLoading = false;
+        },
+
+        async loadLog(date) {
+          this.selectedLogDate = date;
+          this.logLoading = true;
+          try {
+            const resp = await fetch(`/api/logs/${date}`);
+            const data = await resp.json();
+            this.selectedLogContent = data.html;
+          } catch (e) {
+            console.error('Failed to load log:', e);
+          }
+          this.logLoading = false;
+        },
+
+        async loadMemory(file) {
+          this.selectedMemoryFile = file;
+          this.memoryLoading = true;
+          try {
+            const resp = await fetch(`/api/memory/${file}`);
+            const data = await resp.json();
+            this.memoryContent = data.html;
+            this.memoryLastModified = data.last_modified;
+          } catch (e) {
+            console.error('Failed to load memory file:', e);
+          }
+          this.memoryLoading = false;
+        },
+
+        // --- Helpers ---
+
+        formatDate(iso) {
+          if (!iso) return '';
+          const d = new Date(iso);
+          return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        },
+
+        formatTime(iso) {
+          if (!iso) return '';
+          const d = new Date(iso);
+          return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        },
+
+        formatCost(usd) {
+          if (usd == null || usd === 0) return '$0.00';
+          return '$' + usd.toFixed(2);
+        },
+
+        timeAgo(iso) {
+          if (!iso) return 'unknown';
+          const now = new Date();
+          const then = new Date(iso);
+          const diffMs = now - then;
+          const diffMin = Math.floor(diffMs / 60000);
+          if (diffMin < 1) return 'just now';
+          if (diffMin < 60) return diffMin + 'm ago';
+          const diffHr = Math.floor(diffMin / 60);
+          if (diffHr < 24) return diffHr + 'h ago';
+          const diffDay = Math.floor(diffHr / 24);
+          return diffDay + 'd ago';
+        },
+      };
+    }
+  </script>
+</body>
+</html>

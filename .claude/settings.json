@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR/.claude/scripts\" && PATH=\"$PATH:/root/.local/bin\" uv run python \"$CLAUDE_PROJECT_DIR/.claude/hooks/prp-confidence-check.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR/.claude/scripts\" && PATH=\"$PATH:/root/.local/bin\" uv run python \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-compact-flush.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "prompt_input_exit|clear|other",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR/.claude/scripts\" && PATH=\"$PATH:/root/.local/bin\" uv run python \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end-flush.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR/.claude/scripts\" && PATH=\"$PATH:/root/.local/bin\" uv run python \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-context.py\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

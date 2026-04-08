@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  bot:
+    build: .
+    container_name: thehomie-bot
+    restart: unless-stopped
+    ports:
+      - "${HEALTH_CHECK_PORT:-8787}:8787"
+      - "${WHATSAPP_WEBHOOK_PORT:-8443}:8443"
+    volumes:
+      - bot-data:/app/data
+      - ./vault/memory:/app/memory  # RW — background jobs write daily logs, MEMORY.md
+    env_file:
+      - .claude/scripts/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=${TZ:-America/Los_Angeles}
+
+  scheduler:
+    build: .
+    container_name: thehomie-scheduler
+    restart: unless-stopped
+    entrypoint: ["/app/cron_entrypoint.sh"]
+    volumes:
+      - bot-data:/app/data
+      - ./vault/memory:/app/memory  # RW — writes daily logs, MEMORY.md, weekly summaries
+    env_file:
+      - .claude/scripts/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=${TZ:-America/Los_Angeles}
+    depends_on:
+      - bot
+
+volumes:
+  bot-data:
+    driver: local

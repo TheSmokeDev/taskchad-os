@@ -1,0 +1,540 @@
+"""
+Daily Reflection Script for The Homie
+
+Reviews yesterday's daily log (and optionally last N days) and uses Claude
+Agent SDK to promote important items to MEMORY.md. Runs daily at 8 AM via
+OS scheduler.
+
+Usage:
+    uv run python memory_reflect.py              # Run reflection
+    uv run python memory_reflect.py --test       # Dry run (no file edits)
+    uv run python memory_reflect.py --days 3     # Review last 3 days
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+from datetime import timedelta
+from pathlib import Path
+
+from config import (
+    DAILY_DIR,
+    GOALS_FILE,
+    MEMORY_DIR,
+    MEMORY_FILE,
+    OWNER_NAME,
+    PROJECT_ROOT,
+    REFLECTION_STATE_FILE,
+    SELF_FILE,
+    SOUL_FILE,
+    USER_FILE,
+    ensure_directories,
+    get_today_log_path,
+    now_local,
+)
+from runtime.base import RuntimeRequest
+from runtime.capabilities import TOOL_REASONING
+from runtime.registry import run_with_fallback
+from shared import append_to_daily_log, file_lock, load_state, save_state, validate_bash_command
+
+# =============================================================================
+# LOG HELPERS
+# =============================================================================
+
+MAX_LOG_CHARS = 20_000
+
+
+def get_recent_logs(days: int = 1) -> list[tuple[str, str]]:
+    """Read the last N days of daily logs.
+
+    Returns list of (date_str, content) tuples, most recent first.
+    """
+    logs: list[tuple[str, str]] = []
+    today = now_local().date()
+
+    for i in range(1, days + 1):
+        target_date = today - timedelta(days=i)
+        date_str = target_date.strftime("%Y-%m-%d")
+        log_path = DAILY_DIR / f"{date_str}.md"
+
+        if log_path.exists():
+            content = log_path.read_text(encoding="utf-8")
+            # Truncate to limit token usage — keep the end (freshest entries)
+            if len(content) > MAX_LOG_CHARS:
+                content = "... (truncated)\n\n" + content[-MAX_LOG_CHARS:]
+            logs.append((date_str, content))
+
+    return logs
+
+
+def load_current_memory() -> str:
+    """Read current MEMORY.md content."""
+    if MEMORY_FILE.exists():
+        return MEMORY_FILE.read_text(encoding="utf-8")
+    return ""
+
+
+def load_user_file() -> str:
+    """Read current USER.md content."""
+    if USER_FILE.exists():
+        return USER_FILE.read_text(encoding="utf-8")
+    return ""
+
+
+def load_soul_file() -> str:
+    """Read current SOUL.md content."""
+    if SOUL_FILE.exists():
+        return SOUL_FILE.read_text(encoding="utf-8")
+    return ""
+
+
+def load_goals_file() -> str:
+    """Read current GOALS.md content."""
+    if GOALS_FILE.exists():
+        return GOALS_FILE.read_text(encoding="utf-8")
+    return ""
+
+
+def load_self_file() -> str:
+    """Read current SELF.md content."""
+    if SELF_FILE.exists():
+        return SELF_FILE.read_text(encoding="utf-8")
+    return ""
+
+
+# =============================================================================
+# MAIN REFLECTION FUNCTION
+# =============================================================================
+
+
+async def run_reflection(test_mode: bool = False, days: int = 1) -> str | None:
+    """Run daily reflection with concurrency guard.
+
+    Wraps the inner reflection with a file lock to prevent simultaneous runs.
+    """
+    try:
+        with file_lock(REFLECTION_STATE_FILE, timeout=5.0):
+            return await _run_reflection_inner(test_mode, days)
+    except TimeoutError:
+        print(f"[{now_local()}] Another reflection is already running, skipping")
+        return None
+
+
+async def _run_reflection_inner(test_mode: bool = False, days: int = 1) -> str | None:
+    """Run daily reflection using Agent SDK.
+
+    Reviews recent daily logs and promotes important items to MEMORY.md.
+
+    Args:
+        test_mode: If True, run in dry-run mode (no file edits).
+        days: Number of days of logs to review (default: 1 = yesterday only).
+
+    Returns:
+        Response summary, or None if REFLECTION_OK.
+    """
+    from claude_agent_sdk import HookMatcher
+
+    print(f"[{now_local()}] Running daily reflection (days={days}, test={test_mode})...")
+
+    # Load recent logs
+    logs = get_recent_logs(days=days)
+    if not logs:
+        msg = f"No daily logs found for the last {days} day(s), skipping reflection"
+        print(f"[{now_local()}] {msg}")
+        append_to_daily_log(f"REFLECTION_SKIPPED - {msg}", "Reflection")
+        return None
+
+    # Build log context
+    log_sections: list[str] = []
+    for date_str, content in logs:
+        log_sections.append(f"### Daily Log: {date_str}\n\n{content}")
+    log_context = "\n\n---\n\n".join(log_sections)
+
+    # Proactive recall — search memory for context related to today's logs
+    recalled_section = ""
+    try:
+        _chat_dir = Path(__file__).resolve().parent.parent / "chat"
+        if str(_chat_dir) not in sys.path:
+            sys.path.insert(0, str(_chat_dir))
+        from recall_service import recall as recall_fn
+
+        from config import RECALL_BACKGROUND_MAX_CHARS, RECALL_BACKGROUND_MAX_RESULTS
+
+        log_summary = log_context[:300] if log_context else ""
+        if log_summary:
+            recall_resp = await recall_fn(
+                query=log_summary,
+                memory_dir=MEMORY_DIR,
+                caller="reflection",
+                max_results=RECALL_BACKGROUND_MAX_RESULTS,
+            )
+            if recall_resp.formatted_text:
+                recalled_section = (
+                    "\n\n## Recalled Context (from memory search)\n\n"
+                    "The following related content was found in memory. "
+                    "Check for duplicates before promoting.\n\n"
+                    + recall_resp.formatted_text[:RECALL_BACKGROUND_MAX_CHARS]
+                )
+                print(f"[{now_local()}] Recalled {len(recalled_section)} chars for reflection")
+    except Exception as e:
+        print(f"[{now_local()}] Recall for reflection failed (non-blocking): {e}")
+
+    # Load current files
+    current_memory = load_current_memory()
+    current_user = load_user_file()
+    current_soul = load_soul_file()
+    current_goals = load_goals_file()
+    current_self = load_self_file()
+
+    dry_run_note = (
+        "\n\nDRY RUN: Do NOT edit any files. Just describe what you would change.\n"
+        if test_mode
+        else ""
+    )
+
+    reflection_prompt = f"""Daily memory reflection. Review recent daily logs and update \
+long-term memory files.
+{dry_run_note}
+## Current MEMORY.md
+
+{current_memory}
+
+## Current USER.md
+
+{current_user}
+
+## Current SOUL.md
+
+{current_soul}
+
+## Current SELF.md
+
+{current_self}
+
+## Current GOALS.md (read-only context — do NOT edit this file during reflection)
+
+{current_goals}
+
+## Recent Daily Logs
+
+{log_context}
+{recalled_section}
+## Instructions
+
+Review the daily logs carefully and update up to FOUR files as needed:
+
+### 1. MEMORY.md ({MEMORY_FILE})
+Promote important items:
+- Key decisions and their rationale
+- Lessons learned or mistakes
+- Important facts or configurations
+- Project status updates
+- Upcoming events needing preparation
+
+### 2. USER.md ({USER_FILE})
+Update when you notice patterns about {OWNER_NAME or "the user"}:
+- Communication preferences (how they like to interact)
+- Schedule patterns (when they work, meeting patterns, creative time)
+- Content preferences (what topics, formats, or styles they gravitate toward)
+- Tool/workflow preferences (what they use, how they like things done)
+- Team updates (new collaborators, role changes)
+- New integrations or account info
+
+### 3. SOUL.md ({SOUL_FILE})
+Update ONLY if you see clear evidence of communication style adaptations:
+- Tone preferences confirmed through repeated interactions
+- Behavioral patterns that should be codified
+- Changes to how the assistant should operate
+
+### 4. SELF.md ({SELF_FILE})
+Update ONLY when you see clear evidence in the logs — require 2+ instances or an explicit lesson.
+Do NOT update for one-off mentions.
+
+- **Capabilities** — A new tool or approach confirmed to work
+- **Patterns** — A recurring successful behavior observed this week
+- **Failure Modes** — A mistake that recurred in the logs
+- **Confidence Notes** — An assumption corrected, or a known uncertain area
+
+1-2 sentences per entry. If nothing meets the bar, skip this file.
+
+**Rules:**
+- Use the Edit tool to update files directly
+- Do NOT duplicate items already present in a file
+- Keep entries concise
+- Only update USER.md/SOUL.md when there is clear, repeated evidence (not one-off mentions)
+- Log what you changed to today's daily log ({get_today_log_path()})
+
+If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
+"""
+
+    try:
+        result = await run_with_fallback(
+            RuntimeRequest(
+                prompt=reflection_prompt,
+                cwd=PROJECT_ROOT,
+                task_name="memory_reflect",
+                capability=TOOL_REASONING,
+                setting_sources=["user", "project"],
+                system_prompt={"type": "preset", "preset": "claude_code"},
+                allowed_tools=[
+                    "Read",
+                    "Edit",
+                    "Glob",
+                    "Grep",
+                    "Bash",
+                ],
+                permission_mode="acceptEdits",
+                max_turns=20,
+                hooks={
+                    "PreToolUse": [
+                        HookMatcher(
+                            matcher="Bash",
+                            hooks=[validate_bash_command],
+                        )
+                    ]
+                },
+            )
+        )
+        response_text = result.text
+        print(
+            f"[{now_local()}] Reflection completed via {result.provider}:{result.model}"
+            + (f" cost=${result.cost_usd:.4f}" if result.cost_usd else "")
+        )
+
+    except Exception as e:
+        print(f"[{now_local()}] Reflection error: {e}")
+        append_to_daily_log(f"**ERROR**: Reflection failed - {e}", "Reflection")
+        return None
+
+    # --- Promotion Pipeline (Move 2) ---
+    try:
+        from cognition.promotion import run_promotion_pipeline
+        from cognition.staging import StagingStore
+
+        from config import STAGING_STORE_PATH
+
+        store = StagingStore(STAGING_STORE_PATH)
+        promotion_results = await run_promotion_pipeline(
+            staging_store=store,
+            memory_dir=MEMORY_DIR,
+            cwd=PROJECT_ROOT,
+            dry_run=test_mode,
+        )
+
+        promoted = [r for r in promotion_results if r.action == "promoted"]
+        rejected = [r for r in promotion_results if r.action == "rejected"]
+
+        if promoted:
+            targets: dict[str, int] = {}
+            for r in promoted:
+                targets[r.target_file] = targets.get(r.target_file, 0) + 1
+            target_summary = ", ".join(f"{v} to {k}" for k, v in targets.items())
+            append_to_daily_log(
+                f"Promoted {len(promoted)} candidates from staging: {target_summary}",
+                "Promotion",
+            )
+        if rejected:
+            reasons: dict[str, int] = {}
+            for r in rejected:
+                key = r.reason.split(" (")[0]
+                reasons[key] = reasons.get(key, 0) + 1
+            reason_summary = ", ".join(f"{v}x {k}" for k, v in reasons.items())
+            append_to_daily_log(
+                f"Rejected {len(rejected)} staging candidates: {reason_summary}",
+                "Promotion",
+            )
+
+        expired = store.cleanup_expired()
+        if expired:
+            append_to_daily_log(
+                f"Cleaned up {expired} expired staging candidates", "Promotion"
+            )
+
+    except ImportError:
+        pass  # Cognition module not available — skip promotion
+    except Exception as e:
+        print(f"[{now_local()}] Promotion pipeline error (non-blocking): {e}")
+        append_to_daily_log(f"**WARNING**: Promotion pipeline failed - {e}", "Promotion")
+
+    # --- Move 5a: Inference decay + state sync ---
+    try:
+        from cognition.self_model import InferenceTracker
+
+        from config import INFERENCE_STATE_FILE
+
+        tracker = InferenceTracker(INFERENCE_STATE_FILE)
+        decayed = tracker.decay_old_inferences()
+        if decayed > 0:
+            print(f"[{now_local()}] Decayed {decayed} old inferences")
+            append_to_daily_log(
+                f"Decayed {decayed} old inferences (confidence lowered)", "Self-Model"
+            )
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[{now_local()}] Inference decay error (non-blocking): {e}")
+
+    try:
+        from state_sync import sync_state_to_vault
+
+        sync_results = sync_state_to_vault()
+        synced = [k for k, v in sync_results.items() if v]
+        if synced:
+            print(f"[{now_local()}] Synced state to vault: {synced}")
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[{now_local()}] State sync error (non-blocking): {e}")
+
+    # Update state
+    state = load_state(REFLECTION_STATE_FILE)
+    state["last_run"] = now_local().isoformat()
+    state["days_reviewed"] = days
+    state["logs_found"] = len(logs)
+    state["result"] = "REFLECTION_OK" if "REFLECTION_OK" in response_text else "promoted"
+    save_state(state, REFLECTION_STATE_FILE)
+
+    response_text = response_text.strip()
+
+    if "REFLECTION_OK" in response_text:
+        append_to_daily_log("REFLECTION_OK - Nothing to promote from recent logs", "Reflection")
+        print(f"[{now_local()}] Reflection OK - nothing to promote")
+    else:
+        append_to_daily_log(f"Promoted items from last {days} day(s) to MEMORY.md", "Reflection")
+
+        if test_mode:
+            print(f"[{now_local()}] DRY RUN - would have promoted:\n{response_text[:500]}")
+        else:
+            print(f"[{now_local()}] Reflection promoted items to MEMORY.md")
+
+    # Reindex AFTER all daily log appends + state saves — catches everything
+    try:
+        _chat_dir_ri = Path(__file__).resolve().parent.parent / "chat"
+        if str(_chat_dir_ri) not in sys.path:
+            sys.path.insert(0, str(_chat_dir_ri))
+        from recall_service import reindex_changed
+
+        stats = reindex_changed(MEMORY_DIR)
+        if stats["files_indexed"] > 0:
+            print(f"[{now_local()}] Reindexed {stats['files_indexed']} memory files after reflection")
+    except Exception as e:
+        print(f"[{now_local()}] Reindex after reflection failed (non-blocking): {e}")
+
+    # Entity compilation: compile concepts from the daily log(s) reviewed
+    if not test_mode and "REFLECTION_OK" not in response_text:
+        try:
+            from entity_extractor import compile_single_log
+
+            for date_str, _content in get_recent_logs(days):
+                log_path = DAILY_DIR / f"{date_str}.md"
+                report = compile_single_log(log_path, MEMORY_DIR)
+                if report and (report.pages_created or report.pages_updated):
+                    print(
+                        f"[{now_local()}] Compiled entities from {date_str}: "
+                        f"+{len(report.pages_created)} created, ~{len(report.pages_updated)} updated"
+                    )
+        except Exception as e:
+            print(f"[{now_local()}] Entity compilation after reflection failed (non-blocking): {e}")
+
+    # --- Sweep + Lint post-step ---
+    if not test_mode:
+        try:
+            from entity_extractor import sweep_uncompiled
+
+            totals = sweep_uncompiled(MEMORY_DIR)
+            if totals["files_compiled"] > 0:
+                print(
+                    f"[{now_local()}] Sweep: {totals['files_compiled']} notes compiled, "
+                    f"+{totals['pages_created']} concepts"
+                )
+        except Exception as e:
+            print(f"[{now_local()}] Sweep after reflection failed (non-blocking): {e}")
+
+        try:
+            from vault_lint import run_lint
+            from entity_extractor import load_schema
+
+            schema = load_schema(MEMORY_DIR)
+            issues = run_lint(MEMORY_DIR, schema=schema)
+            errors = [i for i in issues if i.severity == "error"]
+            warnings = [i for i in issues if i.severity == "warning"]
+            if errors or warnings:
+                print(
+                    f"[{now_local()}] Vault lint: {len(errors)} errors, {len(warnings)} warnings"
+                )
+                # Log top 5 errors to daily log for visibility
+                top = errors[:5] if errors else warnings[:5]
+                lint_summary = "; ".join(f"[{i.check}] {i.file}" for i in top)
+                append_to_daily_log(f"Vault lint: {len(errors)}E/{len(warnings)}W — {lint_summary}", "Lint")
+            else:
+                print(f"[{now_local()}] Vault lint: clean")
+        except Exception as e:
+            print(f"[{now_local()}] Vault lint after reflection failed (non-blocking): {e}")
+
+    # --- Dream consolidation post-step ---
+    if not test_mode:
+        try:
+            from memory_dream import run_dream
+
+            dream_result = await run_dream(test_mode=False, force=False, days=days)
+            if dream_result and dream_result != "DREAM_SILENT":
+                print(f"[{now_local()}] Dream consolidation completed post-reflection")
+                append_to_daily_log("Dream consolidation ran as reflection post-step", "Reflection")
+            elif dream_result == "DREAM_SILENT":
+                print(f"[{now_local()}] Dream post-reflection: no signal (SILENT)")
+        except Exception as e:
+            print(f"[{now_local()}] Dream post-reflection failed (non-blocking): {e}")
+
+    # --- Hermes Scout post-step (daily upstream intelligence) ---
+    if not test_mode:
+        try:
+            from example_scout import run_example_scout
+
+            scout_result = await run_example_scout(test_mode=False, days=1)
+            if scout_result and scout_result != "HERMES_SILENT":
+                print(f"[{now_local()}] Hermes Scout completed post-reflection")
+                append_to_daily_log("Hermes Scout ran as daily post-step", "Reflection")
+            elif scout_result == "HERMES_SILENT":
+                print(f"[{now_local()}] Hermes Scout: no upstream activity (SILENT)")
+        except Exception as exc:
+            print(f"[{now_local()}] Hermes Scout post-reflection failed (non-blocking): {exc}")
+
+    if "REFLECTION_OK" in response_text:
+        return None
+    return response_text
+
+
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
+
+
+def main() -> None:
+    """Main entry point."""
+    ensure_directories()
+
+    parser = argparse.ArgumentParser(description="Daily memory reflection")
+    parser.add_argument("--test", action="store_true", help="Dry run mode")
+    parser.add_argument("--days", type=int, default=1, help="Days of logs to review (default: 1)")
+    args = parser.parse_args()
+
+    if args.test:
+        print("Running in TEST MODE (dry run, no file edits)")
+        print(f"Project root: {PROJECT_ROOT}")
+        print(f"Reviewing last {args.days} day(s) of logs")
+
+    result = asyncio.run(run_reflection(test_mode=args.test, days=args.days))
+
+    if result:
+        try:
+            print(f"\nReflection result:\n{result[:500]}")
+        except UnicodeEncodeError:
+            print(f"\nReflection result:\n{result[:500].encode('ascii', 'replace').decode()}")
+    else:
+        print("\nReflection complete: OK or skipped")
+
+
+if __name__ == "__main__":
+    main()

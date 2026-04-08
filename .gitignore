@@ -1,0 +1,50 @@
+/content-engine
+/TheHomie
+/obsidian-ai-agent
+/video-processor
+/remotion-videos
+.claude/skills/pptx-generator/.tmp/
+/.tmp/
+/tmp
+mcp-config.json
+master.env
+.mcp.json
+# .claude/settings.local.json 
+__pycache__/
+
+
+# Memory files now live in vault/memory/ (Obsidian vault, synced)
+.claude/memory/
+
+# Heartbeat scripts
+# .claude/scripts/.env 
+.claude/scripts/.venv/
+.claude/scripts/heartbeat_runs.log
+.claude/scripts/monthly_finance_runs.log
+.claude/scripts/reflection_runs.log
+.claude/scripts/weekly_runs.log
+.claude/scripts/uv.lock
+.claude/chat/*.log
+.claude/dashboard/*.log
+.claude/skills/generated/
+.context/
+
+# Memory search data (Phase 3)
+.claude/data/
+
+# User-specific tone of voice (copied from templates on setup)
+.claude/tone-of-voice.md
+
+# Phase 5: Integration credentials & tokens
+.claude/scripts/integrations/google_credentials.json
+.claude/scripts/integrations/google_token.json
+
+# Certificates and private keys
+*.pem
+*.key
+*.p8
+*.p12
+.claude/scripts/certs/
+
+# Windows artifacts
+NUL

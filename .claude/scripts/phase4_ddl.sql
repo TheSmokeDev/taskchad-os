@@ -1,0 +1,11 @@
+ALTER TABLE finance_budgets ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'allocation';
+ALTER TABLE finance_budgets ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE finance_budgets ADD COLUMN IF NOT EXISTS amount_limit NUMERIC(12,2);
+ALTER TABLE finance_budgets ADD COLUMN IF NOT EXISTS net_worth NUMERIC(12,2);
+ALTER TABLE finance_budgets ADD COLUMN IF NOT EXISTS period_start DATE;
+ALTER TABLE finance_budgets ADD COLUMN IF NOT EXISTS carry_forward NUMERIC(12,2);
+ALTER TABLE finance_budgets ADD COLUMN IF NOT EXISTS report_path TEXT;
+ALTER TABLE finance_budgets ALTER COLUMN pay_date DROP NOT NULL;
+ALTER TABLE finance_budgets ALTER COLUMN gross_income DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_finance_budgets_type ON finance_budgets(type);
+CREATE INDEX IF NOT EXISTS idx_finance_budgets_category ON finance_budgets(category);

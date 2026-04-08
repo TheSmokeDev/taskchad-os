@@ -1,0 +1,30 @@
+[Unit]
+Description=The Homie Chat Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/opt/thehomie/.claude/scripts
+ExecStart=/opt/thehomie/.claude/scripts/.venv/bin/python \
+    /opt/thehomie/.claude/chat/main.py --fg
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+EnvironmentFile=/opt/thehomie/.claude/scripts/.env
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/thehomie/.claude/data
+ReadWritePaths=/opt/thehomie/vault/memory
+
+# Logging
+StandardOutput=append:/var/log/thehomie.log
+StandardError=append:/var/log/thehomie.error.log
+
+[Install]
+WantedBy=multi-user.target
