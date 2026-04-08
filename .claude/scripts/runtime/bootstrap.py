@@ -52,6 +52,41 @@ def get_recent_daily_log(
     return ""
 
 
+def _extract_capsule(content: str, max_chars: int = 1200) -> str:
+    """Extract a compact capsule from a memory file.
+
+    Takes the frontmatter + first two H2 sections, capped at max_chars.
+    For SOUL.md this gives identity + core values (~1.2KB vs 6.4KB full).
+    """
+    lines = content.strip().splitlines()
+    h2_count = 0
+    cut_line = len(lines)
+    in_frontmatter = False
+    past_frontmatter = False
+
+    for i, line in enumerate(lines):
+        if i == 0 and line.strip() == "---":
+            in_frontmatter = True
+            continue
+        if in_frontmatter and line.strip() == "---":
+            in_frontmatter = False
+            past_frontmatter = True
+            continue
+        if past_frontmatter and line.startswith("## "):
+            h2_count += 1
+            if h2_count > 2:
+                cut_line = i
+                break
+
+    capsule = "\n".join(lines[:cut_line]).strip()
+    if len(capsule) > max_chars:
+        capsule = capsule[:max_chars]
+        last_nl = capsule.rfind("\n")
+        if last_nl > 0:
+            capsule = capsule[:last_nl]
+    return capsule
+
+
 def build_session_start_context(
     source: str,
     *,
@@ -60,7 +95,17 @@ def build_session_start_context(
     max_context_chars: int = MAX_CONTEXT_CHARS,
     resume_max_chars: int = RESUME_MAX_CHARS,
 ) -> str:
-    """Build the shared memory bootstrap context."""
+    """Build the shared memory bootstrap context.
+
+    Assembly order is priority-ranked so the most critical content survives
+    the MAX_CONTEXT_CHARS truncation cap:
+      1. MEMORY.md — behavioral rules, lessons, projects, urgents
+      2. GOALS.md — quarterly objectives
+      3. SOUL.md capsule — identity + core values (first 2 sections)
+      4. USER.md capsule — profile + working style (first 2 sections)
+      5. SELF.md capsule — capabilities overview (first 2 sections)
+      6. Recent daily log tail
+    """
 
     parts: list[str] = []
 
@@ -68,26 +113,30 @@ def build_session_start_context(
     if bootstrap:
         parts.append("## BOOTSTRAP (First-Run Onboarding)\n" + bootstrap.strip())
 
-    soul = read_file_safe(memory_dir / "SOUL.md")
-    if soul:
-        parts.append("## Soul\n" + soul.strip())
-
-    self_model = read_file_safe(memory_dir / "SELF.md")
-    if self_model:
-        parts.append("## Self-Model\n" + self_model.strip())
-
-    user = read_file_safe(memory_dir / "USER.md")
-    if user:
-        parts.append("## User\n" + user.strip())
-
+    # Priority 1: MEMORY.md — full content (already pruned by dream cycle)
     memory = read_file_safe(memory_dir / "MEMORY.md")
     if memory:
         parts.append("## Long-Term Memory\n" + memory.strip())
 
+    # Priority 2: GOALS.md — full content (small file, ~1.7KB)
     goals = read_file_safe(memory_dir / "GOALS.md")
     if goals:
         parts.append("## Goals\n" + goals.strip())
 
+    # Priority 3-5: Identity files as capsules (~1.2KB each vs 5-6KB full)
+    soul = read_file_safe(memory_dir / "SOUL.md")
+    if soul:
+        parts.append("## Soul\n" + _extract_capsule(soul))
+
+    user = read_file_safe(memory_dir / "USER.md")
+    if user:
+        parts.append("## User\n" + _extract_capsule(user))
+
+    self_model = read_file_safe(memory_dir / "SELF.md")
+    if self_model:
+        parts.append("## Self-Model\n" + _extract_capsule(self_model))
+
+    # Priority 6: Recent daily log
     daily = get_recent_daily_log(daily_dir=daily_dir)
     if daily:
         parts.append("## Recent Daily Log\n" + daily.strip())
