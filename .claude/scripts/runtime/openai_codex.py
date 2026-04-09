@@ -226,6 +226,8 @@ def _parse_codex_json_events(stdout_text: str) -> dict[str, object]:
         if item_type == "command_execution" and isinstance(item_id, str) and item_id:
             existing = tool_calls_by_id.get(item_id)
             raw_command = item.get("command")
+            if _is_internal_framework_command(raw_command):
+                continue
             arguments: dict[str, object] | None = None
             if isinstance(raw_command, str) and raw_command.strip():
                 arguments = {"command": raw_command.strip()}
@@ -247,6 +249,28 @@ def _parse_codex_json_events(stdout_text: str) -> dict[str, object]:
         "error_text": "\n".join(error_messages),
         "non_json_text": "\n".join(non_json_lines),
     }
+
+
+def _is_internal_framework_command(raw_command: object) -> bool:
+    """Return True for framework housekeeping commands we do not want to count.
+
+    These commands are infrastructure noise from the local environment, not
+    user-facing tool work. Keeping them out prevents inflated tool counts and
+    cleaner downstream analytics.
+    """
+
+    if not isinstance(raw_command, str):
+        return False
+
+    text = raw_command.lower()
+    return any(
+        marker in text
+        for marker in (
+            "check_live_chat.py",
+            "\\.claude\\hooks\\check_live_chat.py",
+            "~/.claude/hooks/check_live_chat.py",
+        )
+    )
 
 
 def _map_codex_error(message: str) -> Exception:

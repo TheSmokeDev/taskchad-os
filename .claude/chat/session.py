@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from session_keys import build_session_key
 
@@ -31,6 +33,7 @@ class Session:
     runtime_provider: str = "claude"
     runtime_model: str = ""
     runtime_profile_key: str = ""
+    runtime_tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def runtime_session_id(self) -> str:
@@ -62,6 +65,35 @@ class ChatMessage:
     role: str
     content: str
     created_at: datetime
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _serialize_tool_calls(tool_calls: Any) -> str:
+    """Serialize normalized tool call records for storage."""
+
+    if not tool_calls:
+        return "[]"
+    try:
+        return json.dumps(tool_calls)
+    except TypeError:
+        return "[]"
+
+
+def _parse_tool_calls(raw: Any) -> list[dict[str, Any]]:
+    """Parse stored tool call JSON from the database."""
+
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+    return []
 
 
 def _quote_fts_query(query: str) -> str:
@@ -103,7 +135,8 @@ class SQLiteSessionStore:
                     total_cost_usd REAL DEFAULT 0.0,
                     status TEXT DEFAULT 'active',
                     mode TEXT DEFAULT 'execute',
-                    tool_call_count INTEGER DEFAULT 0
+                    tool_call_count INTEGER DEFAULT 0,
+                    runtime_tool_calls_json TEXT DEFAULT '[]'
                 );
                 CREATE INDEX IF NOT EXISTS idx_platform_thread
                     ON chat_sessions(platform, channel_id, thread_id);
@@ -121,7 +154,8 @@ class SQLiteSessionStore:
                     session_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    tool_calls_json TEXT DEFAULT '[]'
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
                     ON chat_messages(session_id, created_at);
@@ -161,6 +195,8 @@ class SQLiteSessionStore:
                 "ALTER TABLE chat_sessions ADD COLUMN runtime_model TEXT DEFAULT ''",
                 "ALTER TABLE chat_sessions ADD COLUMN runtime_profile_key TEXT DEFAULT ''",
                 "ALTER TABLE chat_sessions ADD COLUMN tool_call_count INTEGER DEFAULT 0",
+                "ALTER TABLE chat_sessions ADD COLUMN runtime_tool_calls_json TEXT DEFAULT '[]'",
+                "ALTER TABLE chat_messages ADD COLUMN tool_calls_json TEXT DEFAULT '[]'",
             ):
                 try:
                     conn.execute(statement)
@@ -218,6 +254,11 @@ class SQLiteSessionStore:
                 if "runtime_profile_key" in row.keys() and row["runtime_profile_key"]
                 else ""
             ),
+            runtime_tool_calls=(
+                _parse_tool_calls(row["runtime_tool_calls_json"])
+                if "runtime_tool_calls_json" in row.keys()
+                else []
+            ),
         )
 
     def _row_to_chat_message(self, row: sqlite3.Row) -> ChatMessage:
@@ -229,6 +270,11 @@ class SQLiteSessionStore:
             role=row["role"],
             content=row["content"],
             created_at=datetime.fromisoformat(row["created_at"]),
+            tool_calls=(
+                _parse_tool_calls(row["tool_calls_json"])
+                if "tool_calls_json" in row.keys()
+                else []
+            ),
         )
 
     def get(self, platform: str, channel_id: str, thread_id: str) -> Session | None:
@@ -252,8 +298,8 @@ class SQLiteSessionStore:
                    (session_id, agent_session_id, runtime_session_id, runtime_provider,
                     runtime_model, runtime_profile_key, platform, channel_id, thread_id, user_id,
                     created_at, updated_at, message_count, total_cost_usd,
-                    status, mode, tool_call_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    status, mode, tool_call_count, runtime_tool_calls_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session.session_id,
                     session.agent_session_id,
@@ -272,6 +318,7 @@ class SQLiteSessionStore:
                     session.status,
                     session.mode,
                     session.tool_call_count,
+                    _serialize_tool_calls(session.runtime_tool_calls),
                 ),
             )
 
@@ -282,7 +329,7 @@ class SQLiteSessionStore:
                 """UPDATE chat_sessions
                    SET agent_session_id = ?, runtime_session_id = ?, runtime_provider = ?,
                        runtime_model = ?, runtime_profile_key = ?, updated_at = ?, message_count = ?,
-                       total_cost_usd = ?, tool_call_count = ?, status = ?, mode = ?
+                       total_cost_usd = ?, tool_call_count = ?, status = ?, mode = ?, runtime_tool_calls_json = ?
                    WHERE session_id = ?""",
                 (
                     session.agent_session_id,
@@ -296,6 +343,7 @@ class SQLiteSessionStore:
                     session.tool_call_count,
                     session.status,
                     session.mode,
+                    _serialize_tool_calls(session.runtime_tool_calls),
                     session.session_id,
                 ),
             )
@@ -336,15 +384,16 @@ class SQLiteSessionStore:
         role: str,
         content: str,
         created_at: datetime | None = None,
+        tool_calls: Any = None,
     ) -> None:
         """Persist one chat message for transcript replay/search."""
 
         timestamp = (created_at or datetime.now()).isoformat()
         with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.execute(
-                """INSERT INTO chat_messages (session_id, role, content, created_at)
-                   VALUES (?, ?, ?, ?)""",
-                (session_id, role, content, timestamp),
+                """INSERT INTO chat_messages (session_id, role, content, created_at, tool_calls_json)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (session_id, role, content, timestamp, _serialize_tool_calls(tool_calls)),
             )
 
     def list_messages(self, session_id: str, limit: int = 200) -> list[ChatMessage]:
@@ -353,7 +402,7 @@ class SQLiteSessionStore:
         with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """SELECT id, session_id, role, content, created_at
+                """SELECT id, session_id, role, content, created_at, tool_calls_json
                    FROM chat_messages
                    WHERE session_id = ?
                    ORDER BY created_at ASC, id ASC
@@ -379,7 +428,7 @@ class SQLiteSessionStore:
             if session_id:
                 rows = conn.execute(
                     """
-                    SELECT m.id, m.session_id, m.role, m.content, m.created_at
+                    SELECT m.id, m.session_id, m.role, m.content, m.created_at, m.tool_calls_json
                     FROM chat_messages_fts
                     JOIN chat_messages m ON m.id = chat_messages_fts.rowid
                     WHERE chat_messages_fts MATCH ? AND m.session_id = ?
@@ -391,7 +440,7 @@ class SQLiteSessionStore:
             else:
                 rows = conn.execute(
                     """
-                    SELECT m.id, m.session_id, m.role, m.content, m.created_at
+                    SELECT m.id, m.session_id, m.role, m.content, m.created_at, m.tool_calls_json
                     FROM chat_messages_fts
                     JOIN chat_messages m ON m.id = chat_messages_fts.rowid
                     WHERE chat_messages_fts MATCH ?
@@ -477,7 +526,8 @@ class PostgresSessionStore:
                 total_cost_usd DOUBLE PRECISION DEFAULT 0.0,
                 status TEXT DEFAULT 'active',
                 mode TEXT DEFAULT 'execute',
-                tool_call_count INTEGER DEFAULT 0
+                tool_call_count INTEGER DEFAULT 0,
+                runtime_tool_calls_json TEXT DEFAULT '[]'
             )
         """)
         cur.execute("""
@@ -506,6 +556,10 @@ class PostgresSessionStore:
             (
                 "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS "
                 "tool_call_count INTEGER DEFAULT 0"
+            ),
+            (
+                "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS "
+                "runtime_tool_calls_json TEXT DEFAULT '[]'"
             ),
         ):
             cur.execute(statement)
@@ -536,7 +590,8 @@ class PostgresSessionStore:
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL
+                created_at TIMESTAMPTZ NOT NULL,
+                tool_calls_json TEXT DEFAULT '[]'
             )
         """)
         cur.execute("""
@@ -579,6 +634,7 @@ class PostgresSessionStore:
             runtime_provider=runtime_provider,
             runtime_model=runtime_model,
             runtime_profile_key=runtime_profile_key,
+            runtime_tool_calls=_parse_tool_calls(row[18] if len(row) > 18 else None),
         )
 
     def get(self, platform: str, channel_id: str, thread_id: str) -> Session | None:
@@ -602,8 +658,8 @@ class PostgresSessionStore:
                (session_id, agent_session_id, runtime_session_id, runtime_provider,
                 runtime_model, runtime_profile_key, platform, channel_id, thread_id, user_id,
                 created_at, updated_at, message_count, total_cost_usd,
-                status, mode, tool_call_count)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                status, mode, tool_call_count, runtime_tool_calls_json)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 session.session_id,
                 session.agent_session_id,
@@ -622,6 +678,7 @@ class PostgresSessionStore:
                 session.status,
                 session.mode,
                 session.tool_call_count,
+                _serialize_tool_calls(session.runtime_tool_calls),
             ),
         )
 
@@ -632,7 +689,7 @@ class PostgresSessionStore:
             """UPDATE chat_sessions
                SET agent_session_id = %s, runtime_session_id = %s, runtime_provider = %s,
                    runtime_model = %s, runtime_profile_key = %s, updated_at = %s, message_count = %s,
-                   total_cost_usd = %s, tool_call_count = %s, status = %s, mode = %s
+                   total_cost_usd = %s, tool_call_count = %s, status = %s, mode = %s, runtime_tool_calls_json = %s
                WHERE session_id = %s""",
             (
                 session.agent_session_id,
@@ -646,6 +703,7 @@ class PostgresSessionStore:
                 session.tool_call_count,
                 session.status,
                 session.mode,
+                _serialize_tool_calls(session.runtime_tool_calls),
                 session.session_id,
             ),
         )
@@ -694,14 +752,15 @@ class PostgresSessionStore:
         role: str,
         content: str,
         created_at: datetime | None = None,
+        tool_calls: Any = None,
     ) -> None:
         """Persist one chat message for transcript replay/search."""
 
         cur = self._conn.cursor()
         cur.execute(
-            """INSERT INTO chat_messages (session_id, role, content, created_at)
-               VALUES (%s, %s, %s, %s)""",
-            (session_id, role, content, created_at or datetime.now()),
+            """INSERT INTO chat_messages (session_id, role, content, created_at, tool_calls_json)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (session_id, role, content, created_at or datetime.now(), _serialize_tool_calls(tool_calls)),
         )
 
     def list_messages(self, session_id: str, limit: int = 200) -> list[ChatMessage]:
@@ -710,7 +769,7 @@ class PostgresSessionStore:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT id, session_id, role, content, created_at
+            SELECT id, session_id, role, content, created_at, tool_calls_json
             FROM chat_messages
             WHERE session_id = %s
             ORDER BY created_at ASC, id ASC
@@ -726,6 +785,7 @@ class PostgresSessionStore:
                 role=row[2],
                 content=row[3],
                 created_at=(row[4] if isinstance(row[4], datetime) else datetime.fromisoformat(str(row[4]))),
+                tool_calls=_parse_tool_calls(row[5] if len(row) > 5 else None),
             )
             for row in rows
         ]
@@ -745,7 +805,7 @@ class PostgresSessionStore:
         if session_id:
             cur.execute(
                 """
-                SELECT id, session_id, role, content, created_at
+                SELECT id, session_id, role, content, created_at, tool_calls_json
                 FROM chat_messages
                 WHERE session_id = %s
                   AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
@@ -757,7 +817,7 @@ class PostgresSessionStore:
         else:
             cur.execute(
                 """
-                SELECT id, session_id, role, content, created_at
+                SELECT id, session_id, role, content, created_at, tool_calls_json
                 FROM chat_messages
                 WHERE to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
                 ORDER BY created_at DESC, id DESC
@@ -773,6 +833,7 @@ class PostgresSessionStore:
                 role=row[2],
                 content=row[3],
                 created_at=(row[4] if isinstance(row[4], datetime) else datetime.fromisoformat(str(row[4]))),
+                tool_calls=_parse_tool_calls(row[5] if len(row) > 5 else None),
             )
             for row in rows
         ]

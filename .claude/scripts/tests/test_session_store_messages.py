@@ -41,17 +41,48 @@ def test_sqlite_session_store_persists_and_searches_chat_messages(tmp_path) -> N
     )
 
     store.add_message(session_id, "user", "Tell me about convoy retries", now)
-    store.add_message(session_id, "assistant", "Convoy retries need jitter", now)
+    store.add_message(
+        session_id,
+        "assistant",
+        "Convoy retries need jitter",
+        now,
+        tool_calls=[{"id": "tc-1", "name": "Read", "arguments": {"path": "convoy.py"}}],
+    )
 
     messages = store.list_messages(session_id)
     assert [msg.role for msg in messages] == ["user", "assistant"]
     assert messages[0].content == "Tell me about convoy retries"
     assert messages[1].content == "Convoy retries need jitter"
+    assert messages[1].tool_calls == [{"id": "tc-1", "name": "Read", "arguments": {"path": "convoy.py"}}]
 
     search_results = store.search_messages("jitter", session_id=session_id)
     assert len(search_results) == 1
     assert search_results[0].role == "assistant"
     assert "jitter" in search_results[0].content.lower()
+
+
+def test_sqlite_session_store_persists_runtime_tool_calls_on_session(tmp_path) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    session_id = build_session_key("web", "channel-1", "thread-1")
+    now = datetime.now()
+
+    store.create(
+        Session(
+            session_id=session_id,
+            agent_session_id="agent-1",
+            platform="web",
+            channel_id="channel-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            created_at=now,
+            updated_at=now,
+            runtime_tool_calls=[{"id": "tc-1", "name": "Read", "arguments": {"path": "foo.py"}}],
+        )
+    )
+
+    persisted = store.get("web", "channel-1", "thread-1")
+    assert persisted is not None
+    assert persisted.runtime_tool_calls == [{"id": "tc-1", "name": "Read", "arguments": {"path": "foo.py"}}]
 
 
 def test_session_delete_cascades_chat_messages(tmp_path) -> None:

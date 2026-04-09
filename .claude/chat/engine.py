@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import asdict
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
@@ -844,12 +845,14 @@ class ConversationEngine:
 
         # Persist session metadata with runtime-neutral fields.
         persisted_runtime_session_id = session_id_from_sdk or resume_session_id
+        normalized_tool_calls = [asdict(tool_call) for tool_call in (result.tool_calls or [])]
         now = datetime.now()
         if existing:
             existing.runtime_session_id = persisted_runtime_session_id
             existing.runtime_provider = result.provider
             existing.runtime_model = result.model or ""
             existing.runtime_profile_key = result.profile_key or ""
+            existing.runtime_tool_calls = normalized_tool_calls
             existing.message_count += 1
             existing.total_cost_usd += cost_usd or 0.0
             existing.tool_call_count += result.tool_call_count or 0
@@ -872,6 +875,7 @@ class ConversationEngine:
                 runtime_provider=result.provider,
                 runtime_model=result.model or "",
                 runtime_profile_key=result.profile_key or "",
+                runtime_tool_calls=normalized_tool_calls,
             )
             self.session_store.create(session)
 
@@ -887,6 +891,7 @@ class ConversationEngine:
                 "assistant",
                 response_text,
                 now,
+                tool_calls=normalized_tool_calls,
             )
         except Exception as e:
             print(f"[{datetime.now()}] [Messages] Persist failed (non-blocking): {e}")

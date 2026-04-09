@@ -10,7 +10,7 @@ from engine import ConversationEngine
 from models import Channel, IncomingMessage, Platform, Thread, User
 from session import Session, SQLiteSessionStore
 
-from runtime.base import RuntimeResult
+from runtime.base import RuntimeResult, RuntimeToolCall
 
 
 def _make_message(text: str = "Need a summary") -> IncomingMessage:
@@ -46,6 +46,14 @@ async def test_engine_persists_runtime_metadata(
             profile_key="primary-claude",
             session_id="runtime-session-123",
             cost_usd=0.12,
+            tool_calls=[
+                RuntimeToolCall(
+                    id="tc-1",
+                    name="Read",
+                    arguments={"path": "src/auth.py"},
+                    provider_type="tool_use",
+                )
+            ],
         )
 
     monkeypatch.setattr(engine_module, "run_with_fallback", fake_run)
@@ -59,6 +67,25 @@ async def test_engine_persists_runtime_metadata(
     assert persisted.runtime_provider == "claude"
     assert persisted.runtime_model == "claude-sonnet-4-6"
     assert persisted.runtime_profile_key == "primary-claude"
+    assert persisted.runtime_tool_calls == [
+        {
+            "id": "tc-1",
+            "name": "Read",
+            "arguments": {"path": "src/auth.py"},
+            "provider_type": "tool_use",
+            "status": None,
+        }
+    ]
+    messages = store.list_messages("telegram:chat-1:thread-1")
+    assert messages[1].tool_calls == [
+        {
+            "id": "tc-1",
+            "name": "Read",
+            "arguments": {"path": "src/auth.py"},
+            "provider_type": "tool_use",
+            "status": None,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -140,6 +167,7 @@ def test_sqlite_session_store_adds_runtime_columns(tmp_path: Path) -> None:
         "runtime_provider",
         "runtime_model",
         "runtime_profile_key",
+        "runtime_tool_calls_json",
     } <= columns
 
 

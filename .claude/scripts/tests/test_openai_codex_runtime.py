@@ -216,6 +216,21 @@ def test_parse_codex_json_events_collects_errors_and_non_json() -> None:
     assert summary["non_json_text"] == "plain text line"
 
 
+def test_parse_codex_json_events_ignores_internal_hook_commands() -> None:
+    summary = openai_codex._parse_codex_json_events(
+        "\n".join(
+            [
+                '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","status":"completed","command":"python ~/.claude/hooks/check_live_chat.py --agent codex"}}',
+                '{"type":"item.completed","item":{"id":"item_2","type":"command_execution","status":"completed","command":"Get-Content file.txt"}}',
+            ]
+        )
+    )
+
+    assert summary["tool_call_count"] == 1
+    assert len(summary["tool_calls"]) == 1
+    assert summary["tool_calls"][0].arguments == {"command": "Get-Content file.txt"}
+
+
 @pytest.mark.asyncio
 async def test_openai_codex_runtime_requires_login(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = openai_codex.OpenAICodexRuntime(_codex_profile(key_prefix="primary"))
