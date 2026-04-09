@@ -34,6 +34,17 @@ class RuntimeRequest:
 
 
 @dataclass(slots=True)
+class RuntimeToolCall:
+    """Normalized tool-call record across providers."""
+
+    id: str = ""
+    name: str = ""
+    arguments: dict[str, Any] | str | None = None
+    provider_type: str | None = None
+    status: str | None = None
+
+
+@dataclass(slots=True)
 class RuntimeResult:
     """Normalized runtime result."""
 
@@ -46,3 +57,4 @@ class RuntimeResult:
     subtype: str | None = None
     tool_call_count: int = 0
     tool_names_used: list[str] = field(default_factory=list)
+    tool_calls: list[RuntimeToolCall] = field(default_factory=list)

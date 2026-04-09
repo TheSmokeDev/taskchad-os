@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .base import RuntimeRequest, RuntimeResult
+from .base import RuntimeRequest, RuntimeResult, RuntimeToolCall
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .errors import RuntimeConfigError, RuntimeRetryableError, RuntimeUnsupportedCapabilityError
 from .profiles import RuntimeProfile
@@ -213,6 +213,7 @@ class ClaudeSdkRuntime:
         subtype: str | None = None
         tool_call_count = 0
         tool_names_used: list[str] = []
+        tool_calls: list[RuntimeToolCall] = []
 
         try:
             async for message in query(
@@ -227,6 +228,14 @@ class ClaudeSdkRuntime:
                         elif isinstance(block, ToolUseBlock):
                             tool_call_count += 1
                             tool_names_used.append(block.name)
+                            tool_calls.append(
+                                RuntimeToolCall(
+                                    id=getattr(block, "id", ""),
+                                    name=block.name,
+                                    arguments=getattr(block, "input", None),
+                                    provider_type="tool_use",
+                                )
+                            )
                     if turn_text.strip():
                         response_text = turn_text
                 elif isinstance(message, ResultMessage):
@@ -256,4 +265,5 @@ class ClaudeSdkRuntime:
             subtype=subtype,
             tool_call_count=tool_call_count,
             tool_names_used=tool_names_used,
+            tool_calls=tool_calls,
         )

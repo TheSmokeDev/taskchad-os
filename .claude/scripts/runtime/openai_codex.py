@@ -8,13 +8,14 @@ Fallback provider in the chain: Claude → Codex → Gemini.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import tempfile
 from pathlib import Path
 
 from .auth_profiles import CodexAuthProfile, codex_auth_status
-from .base import RuntimeRequest, RuntimeResult
+from .base import RuntimeRequest, RuntimeResult, RuntimeToolCall
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .errors import (
     RuntimeConfigError,
@@ -80,6 +81,7 @@ class OpenAICodexRuntime:
             resolved,
             "exec",
             "-",
+            "--json",
             "--cd",
             str(request.cwd),
             "--sandbox",
@@ -117,8 +119,15 @@ class OpenAICodexRuntime:
 
         stdout_text = stdout.decode("utf-8", errors="replace")
         stderr_text = stderr.decode("utf-8", errors="replace")
+        event_summary = _parse_codex_json_events(stdout_text)
         combined_output = "\n".join(
-            part.strip() for part in (stdout_text, stderr_text) if part and part.strip()
+            part.strip()
+            for part in (
+                event_summary["error_text"],
+                event_summary["non_json_text"],
+                stderr_text,
+            )
+            if part and part.strip()
         )
 
         if process.returncode != 0:
@@ -135,6 +144,9 @@ class OpenAICodexRuntime:
             provider=self.profile.provider,
             model=model,
             profile_key=self.profile.key,
+            tool_call_count=int(event_summary["tool_call_count"]),
+            tool_names_used=list(event_summary["tool_names_used"]),
+            tool_calls=list(event_summary["tool_calls"]),
         )
 
 
@@ -175,6 +187,66 @@ def _read_last_message(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
+
+
+def _parse_codex_json_events(stdout_text: str) -> dict[str, object]:
+    """Extract tool telemetry and error text from Codex JSONL output.
+
+    Codex CLI emits JSONL events when run with ``--json``. The main tool-like
+    items we've observed are ``command_execution`` items. We count unique item
+    ids so started/completed pairs do not double-count. Error events and any
+    non-JSON lines are preserved for diagnostics.
+    """
+
+    tool_calls_by_id: dict[str, RuntimeToolCall] = {}
+    error_messages: list[str] = []
+    non_json_lines: list[str] = []
+
+    for raw_line in stdout_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            non_json_lines.append(line)
+            continue
+
+        if event.get("type") == "error":
+            message = event.get("message")
+            if isinstance(message, str) and message.strip():
+                error_messages.append(message.strip())
+
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+
+        item_type = item.get("type")
+        item_id = item.get("id")
+        if item_type == "command_execution" and isinstance(item_id, str) and item_id:
+            existing = tool_calls_by_id.get(item_id)
+            raw_command = item.get("command")
+            arguments: dict[str, object] | None = None
+            if isinstance(raw_command, str) and raw_command.strip():
+                arguments = {"command": raw_command.strip()}
+            tool_calls_by_id[item_id] = RuntimeToolCall(
+                id=item_id,
+                name="command_execution",
+                arguments=arguments if arguments is not None else (existing.arguments if existing else None),
+                provider_type=item_type,
+                status=str(item.get("status")) if item.get("status") is not None else (existing.status if existing else None),
+            )
+
+    tool_calls = list(tool_calls_by_id.values())
+    tool_names_used = sorted({tool.name for tool in tool_calls if tool.name})
+
+    return {
+        "tool_call_count": len(tool_calls),
+        "tool_names_used": tool_names_used,
+        "tool_calls": tool_calls,
+        "error_text": "\n".join(error_messages),
+        "non_json_text": "\n".join(non_json_lines),
+    }
 
 
 def _map_codex_error(message: str) -> Exception:

@@ -86,7 +86,7 @@ async def test_openai_codex_runtime_executes_via_codex_cli(
             async def communicate(self, data: bytes):
                 captured["prompt"] = data.decode("utf-8")
                 output_path.write_text("Codex says hello", encoding="utf-8")
-                return (b"", b"")
+                return (b'{"type":"thread.started","thread_id":"t1"}\n', b"")
 
         return FakeProcess()
 
@@ -104,6 +104,7 @@ async def test_openai_codex_runtime_executes_via_codex_cli(
     assert result.text == "Codex says hello"
     assert result.provider == "openai-codex"
     assert result.profile_key == "primary-openai-codex"
+    assert "--json" in captured["args"]
     assert "--sandbox" in captured["args"]
     assert "model_reasoning_effort=\"medium\"" in captured["args"]
     assert "Stay concise." in captured["prompt"]
@@ -139,7 +140,7 @@ async def test_openai_codex_runtime_skips_explicit_model_for_plan_default(
 
             async def communicate(self, _data: bytes):
                 output_path.write_text("ok", encoding="utf-8")
-                return (b"", b"")
+                return (b'{"type":"thread.started","thread_id":"t1"}\n', b"")
 
         return FakeProcess()
 
@@ -149,6 +150,70 @@ async def test_openai_codex_runtime_skips_explicit_model_for_plan_default(
 
     assert result.text == "ok"
     assert "--model" not in captured["args"]
+
+
+@pytest.mark.asyncio
+async def test_openai_codex_runtime_extracts_command_execution_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = openai_codex.OpenAICodexRuntime(_codex_profile(key_prefix="primary"))
+
+    monkeypatch.setattr(
+        openai_codex,
+        "codex_auth_status",
+        lambda _profile=None: AuthProfileStatus(True, "Logged in using ChatGPT"),
+    )
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        output_path = Path(args[args.index("--output-last-message") + 1])
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self, _data: bytes):
+                output_path.write_text("TOKEN", encoding="utf-8")
+                stdout = (
+                    b'{"type":"item.started","item":{"id":"item_1","type":"command_execution","status":"in_progress"}}\n'
+                    b'{"type":"item.completed","item":{"id":"item_1","type":"command_execution","status":"completed","command":"Get-Content file.txt"}}\n'
+                    b'{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"done"}}\n'
+                )
+                return (stdout, b"")
+
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await runtime.run(
+        RuntimeRequest(prompt="Read file", cwd=tmp_path, task_name="summary")
+    )
+
+    assert result.text == "TOKEN"
+    assert result.tool_call_count == 1
+    assert result.tool_names_used == ["command_execution"]
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "command_execution"
+    assert result.tool_calls[0].arguments == {"command": "Get-Content file.txt"}
+    assert result.tool_calls[0].status == "completed"
+
+
+def test_parse_codex_json_events_collects_errors_and_non_json() -> None:
+    summary = openai_codex._parse_codex_json_events(
+        "\n".join(
+            [
+                '{"type":"error","message":"Reconnecting..."}',
+                '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","status":"declined"}}',
+                "plain text line",
+            ]
+        )
+    )
+
+    assert summary["tool_call_count"] == 1
+    assert summary["tool_names_used"] == ["command_execution"]
+    assert len(summary["tool_calls"]) == 1
+    assert summary["tool_calls"][0].provider_type == "command_execution"
+    assert summary["error_text"] == "Reconnecting..."
+    assert summary["non_json_text"] == "plain text line"
 
 
 @pytest.mark.asyncio
