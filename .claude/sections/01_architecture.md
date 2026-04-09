@@ -47,6 +47,24 @@ Important:
 - voice STT/TTS stays separate from the main reasoning runtime
 - business behavior and slash-command semantics must not depend on one vendor-specific auth path
 
+### Framework vs. Adapter Boundary
+
+The Homie is provider-agnostic. Claude Code, Codex, Gemini, Kimi, OpenRouter — they're interchangeable batteries. The framework doesn't care which one is running.
+
+This creates two layers with different rules:
+
+| Layer | Examples | Design Rule |
+|-------|----------|-------------|
+| **Framework** | bootstrap.py, engine.py, recall, memory, cognition, adapters | Must work for ANY provider. No assumptions about provider-specific features (Read tool, CLAUDE.md, hooks). Self-contained. |
+| **Adapter** | CLAUDE.md, `.claude/hooks/`, `.claude/settings.json`, MCP bridges | Provider-specific integration surface. Can assume provider capabilities. Not part of the framework. |
+
+Key implications:
+
+- `build_session_start_context()` in bootstrap.py is **framework-level** — its output is the AI's orientation regardless of provider. Design it to be self-contained, not reliant on CLAUDE.md being present.
+- CLAUDE.md is **adapter-level** — it tells Claude Code CLI how the codebase works. It is NOT part of The Homie framework. When heartbeat/reflection/synthesis run through Codex or Gemini fallback, nothing from CLAUDE.md is needed or used.
+- SOUL.md, SELF.md, USER.md, MEMORY.md are **framework identity** — they travel with the framework and must be injected by bootstrap.py for any provider.
+- Don't optimize framework behavior around one provider's specific capabilities (e.g., "the AI can just Read the file" assumes Claude Code's Read tool).
+
 ### Canonical Memory Contract
 
 The Obsidian vault remains the source of truth. `memory.db` and `chat.db` are derived state and caches.

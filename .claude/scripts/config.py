@@ -190,7 +190,7 @@ TIER1_GRAPH_MAX_NEIGHBORS = int(os.getenv("TIER1_GRAPH_MAX_NEIGHBORS", "5"))
 # ~6500 tokens * 4 = ~26K chars + ~3K overhead = fits under limit.
 REGION_BUDGETS = {
     "identity": int(os.getenv("REGION_BUDGET_IDENTITY", "1500")),
-    "self_model": int(os.getenv("REGION_BUDGET_SELF_MODEL", "200")),
+    "self_model": int(os.getenv("REGION_BUDGET_SELF_MODEL", "400")),
     "user_model": int(os.getenv("REGION_BUDGET_USER_MODEL", "1000")),
     "durable_memory": int(os.getenv("REGION_BUDGET_MEMORY", "2000")),
     "continuity": int(os.getenv("REGION_BUDGET_CONTINUITY", "500")),

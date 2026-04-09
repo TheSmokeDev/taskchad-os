@@ -10,6 +10,40 @@ Format inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
 ---
 
+## The Homie v1.2.0 (v2026.4.8)
+
+**Release Date:** April 8, 2026
+
+> The context diet release — session start context drops from 14.2KB to 5.9KB with a briefing engine that extracts what matters and skips what doesn't. 1,266 tests.
+
+---
+
+### Highlights
+
+- **Briefing Engine** — `bootstrap.py` now generates a compact ~6KB orientation instead of dumping entire memory files (~14KB). Smart extractors pull SOUL/SELF/USER capsules, terse project status, date-filtered urgents, goal names, finance summary, and a repo-relative memory index. 58% token reduction at session start.
+
+- **Fail-Open Guard** — If required sections (identity, capabilities, rules) are missing from the briefing, falls back to the full dump automatically. Checks section presence, not just total length.
+
+- **SELF.md Region Budget Fix** — Bot path `self_model` budget bumped from 200 to 400 tokens. Was truncating 6KB SELF.md to ~800 chars, worse than the briefing capsule.
+
+- **Framework vs. Adapter Boundary** — Architecture docs now explicitly document the two-layer design: framework (provider-agnostic, self-contained) vs. adapter (CLAUDE.md, hooks, provider-specific). Prevents future work from assuming Claude Code features.
+
+- **Unified Context Lifecycle PRD** — Merged briefing engine, Hermes Buffet V2 quick wins, and Phase 6 self-evolution into one 7-component PRD across 3 phases.
+
+### Runtime
+
+- `build_session_briefing()` — new function, 10 priority-ranked sections, 6KB cap
+- `_extract_section()`, `_extract_project_status()`, `_extract_urgents()`, `_extract_last_session()`, `_extract_goal_names()`, `_build_memory_index()` — 6 new extractors
+- `_build_full_dump()` — legacy builder preserved as fail-open fallback
+- `build_session_start_context()` now delegates to briefing engine; BOOTSTRAP.md override preserved
+
+### Tests
+
+- 15 briefing engine tests replace 3 legacy tests (net +12)
+- 1,266 total tests passing
+
+---
+
 ## The Homie v1.1.0 (v2026.4.5)
 
 **Release Date:** April 5, 2026
