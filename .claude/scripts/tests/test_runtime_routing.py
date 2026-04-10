@@ -63,6 +63,58 @@ def test_routing_skips_unhealthy_primary_provider(monkeypatch: pytest.MonkeyPatc
     assert resolved[0].provider == "openai-codex"
 
 
+def test_chat_turn_text_only_prefers_text_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_FALLBACK_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        routing,
+        "build_profile_for_provider",
+        lambda provider, *, key_prefix, request=None: _profile(provider, key_prefix),
+    )
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+
+    resolved = routing.resolve_runtime_profiles(
+        RuntimeRequest(prompt="hi", cwd=".", task_name="chat_turn")
+    )
+
+    assert [profile.provider for profile in resolved] == [
+        "gemini-cli",
+        "openai-codex",
+        "openrouter",
+        "openai-compatible",
+        "claude",
+    ]
+
+
+def test_chat_turn_tool_mode_uses_full_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_FALLBACK_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        routing,
+        "build_profile_for_provider",
+        lambda provider, *, key_prefix, request=None: _profile(provider, key_prefix),
+    )
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+
+    resolved = routing.resolve_runtime_profiles(
+        RuntimeRequest(
+            prompt="read file",
+            cwd=".",
+            task_name="chat_turn",
+            capability="tool_reasoning",
+            allowed_tools=["Read"],
+        )
+    )
+
+    assert [profile.provider for profile in resolved] == [
+        "claude",
+        "openai-codex",
+        "gemini-cli",
+        "openrouter",
+        "openai-compatible",
+    ]
+
+
 def test_openrouter_profile_is_distinct_lane(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_MODEL", raising=False)

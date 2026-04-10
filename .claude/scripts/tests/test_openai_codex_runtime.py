@@ -231,6 +231,30 @@ def test_parse_codex_json_events_ignores_internal_hook_commands() -> None:
     assert summary["tool_calls"][0].arguments == {"command": "Get-Content file.txt"}
 
 
+def test_codex_reasoning_effort_uses_low_for_tiny_chat_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_CODEX_REASONING_EFFORT", raising=False)
+
+    request = RuntimeRequest(
+        prompt="Reply with exactly: OK",
+        cwd=".",
+        task_name="chat_turn",
+    )
+
+    assert openai_codex._codex_reasoning_effort(request) == "low"
+
+
+def test_codex_reasoning_effort_keeps_medium_for_normal_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_CODEX_REASONING_EFFORT", raising=False)
+
+    request = RuntimeRequest(
+        prompt="Summarize the architecture and list tradeoffs.",
+        cwd=".",
+        task_name="summary",
+    )
+
+    assert openai_codex._codex_reasoning_effort(request) == "medium"
+
+
 @pytest.mark.asyncio
 async def test_openai_codex_runtime_requires_login(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = openai_codex.OpenAICodexRuntime(_codex_profile(key_prefix="primary"))

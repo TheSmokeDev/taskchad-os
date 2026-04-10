@@ -35,15 +35,13 @@ DEFAULT_TEXT_ROUTE = (
 DEFAULT_TOOL_ROUTE = DEFAULT_PROVIDER_CHAIN
 
 TASK_ROUTE_DEFAULTS = {
-    # Background text jobs — use cheap providers first
+    # Background text jobs - use cheap providers first
     "memory_flush": DEFAULT_TEXT_ROUTE,
     "heartbeat_formatter": DEFAULT_TEXT_ROUTE,
-    # Tool-heavy jobs — use the full chain
+    # Tool-heavy jobs - use the full chain
     "heartbeat": DEFAULT_PROVIDER_CHAIN,
     "memory_reflect": DEFAULT_PROVIDER_CHAIN,
     "memory_weekly": DEFAULT_PROVIDER_CHAIN,
-    # Chat turns — use the full chain (Claude first, fallback to Codex/Gemini)
-    "chat_turn": DEFAULT_PROVIDER_CHAIN,
 }
 
 
@@ -129,6 +127,8 @@ def _pinned_primary_provider() -> str | None:
 
 
 def _default_route(request: RuntimeRequest) -> tuple[str, ...]:
+    if request.task_name == "chat_turn":
+        return DEFAULT_TOOL_ROUTE if request.capability == TOOL_REASONING else DEFAULT_TEXT_ROUTE
     if request.task_name in TASK_ROUTE_DEFAULTS:
         return _dedupe_order(list(TASK_ROUTE_DEFAULTS[request.task_name]))
     if request.capability == TOOL_REASONING:

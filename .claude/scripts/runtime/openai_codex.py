@@ -93,7 +93,7 @@ class OpenAICodexRuntime:
             "--output-last-message",
             str(last_message_path),
         ]
-        args.extend(_codex_config_args())
+        args.extend(_codex_config_args(request))
         if model and model != "chatgpt-plan-default":
             args.extend(["--model", model])
 
@@ -168,16 +168,47 @@ def _reserve_output_path() -> Path:
     return Path(path)
 
 
-def _codex_config_args() -> list[str]:
+def _codex_config_args(request: RuntimeRequest | None = None) -> list[str]:
     """Apply safe Codex CLI overrides for subscription-backed background tasks."""
 
-    reasoning_effort = (
-        os.getenv("SECOND_BRAIN_CODEX_REASONING_EFFORT", "medium").strip() or "medium"
-    )
+    reasoning_effort = _codex_reasoning_effort(request)
     return [
         "--config",
         f'model_reasoning_effort="{reasoning_effort}"',
     ]
+
+
+def _codex_reasoning_effort(request: RuntimeRequest | None = None) -> str:
+    """Choose reasoning effort for Codex CLI requests.
+
+    The default remains medium, but tiny one-shot text chat turns do not need
+    planner-grade deliberation. Lowering them to ``low`` reduces latency for
+    smoke checks and short user-facing replies without changing tool-capable
+    or multi-step tasks.
+    """
+
+    default_effort = os.getenv("SECOND_BRAIN_CODEX_REASONING_EFFORT", "medium").strip() or "medium"
+    if request is None:
+        return default_effort
+
+    prompt = request.prompt.strip().lower()
+    is_tiny_chat_turn = (
+        request.task_name == "chat_turn"
+        and request.capability == TEXT_REASONING
+        and not request.allowed_tools
+        and len(prompt) <= 160
+        and any(
+            marker in prompt
+            for marker in (
+                "reply with exactly",
+                "reply exactly",
+                "nothing else",
+            )
+        )
+    )
+    if is_tiny_chat_turn:
+        return "low"
+    return default_effort
 
 
 def _read_last_message(path: Path) -> str:
