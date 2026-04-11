@@ -7,7 +7,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .base import RuntimeRequest, RuntimeResult, RuntimeToolCall
+from .base import (
+    RUNTIME_LANE_CLAUDE_NATIVE,
+    RuntimeRequest,
+    RuntimeResult,
+    RuntimeToolCall,
+)
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .errors import RuntimeConfigError, RuntimeRetryableError, RuntimeUnsupportedCapabilityError
 from .profiles import RuntimeProfile
@@ -257,6 +262,7 @@ class ClaudeSdkRuntime:
 
         return RuntimeResult(
             text=response_text.strip(),
+            runtime_lane=RUNTIME_LANE_CLAUDE_NATIVE,
             provider=self.profile.provider,
             model=request.model or self.profile.model,
             profile_key=self.profile.key,

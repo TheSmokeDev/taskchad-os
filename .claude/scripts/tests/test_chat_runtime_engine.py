@@ -10,7 +10,7 @@ from engine import ConversationEngine
 from models import Channel, IncomingMessage, Platform, Thread, User
 from session import Session, SQLiteSessionStore
 
-from runtime.base import RuntimeResult, RuntimeToolCall
+from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE, RuntimeResult, RuntimeToolCall
 
 
 def _make_message(text: str = "Need a summary") -> IncomingMessage:
@@ -41,6 +41,7 @@ async def test_engine_persists_runtime_metadata(
     async def fake_run(_request):
         return RuntimeResult(
             text="Runtime says hello",
+            runtime_lane=RUNTIME_LANE_CLAUDE_NATIVE,
             provider="claude",
             model="claude-sonnet-4-6",
             profile_key="primary-claude",
@@ -56,7 +57,7 @@ async def test_engine_persists_runtime_metadata(
             ],
         )
 
-    monkeypatch.setattr(engine_module, "run_with_fallback", fake_run)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
 
     outputs = [out async for out in convo.handle_message(_make_message())]
     assert outputs[-1].text == "Runtime says hello"
@@ -64,6 +65,7 @@ async def test_engine_persists_runtime_metadata(
     persisted = store.get("telegram", "chat-1", "thread-1")
     assert persisted is not None
     assert persisted.runtime_session_id == "runtime-session-123"
+    assert persisted.runtime_lane == "claude_native"
     assert persisted.runtime_provider == "claude"
     assert persisted.runtime_model == "claude-sonnet-4-6"
     assert persisted.runtime_profile_key == "primary-claude"
@@ -119,17 +121,48 @@ async def test_engine_uses_runtime_session_for_resume(
         captured["resume"] = request.resume
         return RuntimeResult(
             text="Resumed successfully",
+            runtime_lane=RUNTIME_LANE_CLAUDE_NATIVE,
             provider="claude",
             model="claude-sonnet-4-6",
             profile_key="primary-claude",
             session_id="runtime-session-existing",
         )
 
-    monkeypatch.setattr(engine_module, "run_with_fallback", fake_run)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
 
     outputs = [out async for out in convo.handle_message(_make_message("Continue"))]
     assert outputs[-1].text == "Resumed successfully"
     assert captured["resume"] == "runtime-session-existing"
+
+
+@pytest.mark.asyncio
+async def test_short_casual_telegram_message_uses_text_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["capability"] = request.capability
+        captured["allowed_tools"] = list(request.allowed_tools)
+        return RuntimeResult(
+            text="yo",
+            runtime_lane="generic_runtime",
+            provider="gemini-cli",
+            model="gemini-3-flash-preview",
+            profile_key="primary-gemini-cli",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [out async for out in convo.handle_message(_make_message("yo"))]
+
+    assert outputs[-1].text == "yo"
+    assert captured["capability"] == "text_reasoning"
+    assert captured["allowed_tools"] == []
 
 
 def test_sqlite_session_store_adds_runtime_columns(tmp_path: Path) -> None:
@@ -147,12 +180,14 @@ def test_sqlite_session_store_adds_runtime_columns(tmp_path: Path) -> None:
         runtime_provider="openai-compatible",
         runtime_model="gpt-4.1-mini",
         runtime_profile_key="fallback-openai",
+        runtime_lane="generic_runtime",
     )
     store.create(session)
 
     persisted = store.get("telegram", "chat-1", "thread-1")
     assert persisted is not None
     assert persisted.runtime_session_id == "runtime-session-999"
+    assert persisted.runtime_lane == "generic_runtime"
     assert persisted.runtime_provider == "openai-compatible"
     assert persisted.runtime_model == "gpt-4.1-mini"
     assert persisted.runtime_profile_key == "fallback-openai"
@@ -167,6 +202,7 @@ def test_sqlite_session_store_adds_runtime_columns(tmp_path: Path) -> None:
         "runtime_provider",
         "runtime_model",
         "runtime_profile_key",
+        "runtime_lane",
         "runtime_tool_calls_json",
     } <= columns
 

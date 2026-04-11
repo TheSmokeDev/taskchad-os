@@ -36,7 +36,7 @@ from config import (
 )
 from runtime.base import RuntimeRequest
 from runtime.capabilities import TOOL_REASONING
-from runtime.registry import run_with_fallback
+from runtime.lane_router import run_with_runtime_lanes
 from shared import append_to_daily_log, file_lock, load_state, save_state, validate_bash_command
 
 # =============================================================================
@@ -270,7 +270,7 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
 """
 
     try:
-        result = await run_with_fallback(
+        result = await run_with_runtime_lanes(
             RuntimeRequest(
                 prompt=reflection_prompt,
                 cwd=PROJECT_ROOT,

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head><title>YourBrand Icon Generator</title></head>
+<body style="margin:0;background:#111;display:flex;justify-content:center;align-items:center;height:100vh;">
+<canvas id="c" width="1024" height="1024"></canvas>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const W = 1024;
+
+// Background - dark rounded square
+ctx.fillStyle = '#0f0f0f';
+ctx.beginPath();
+ctx.roundRect(0, 0, W, W, 120);
+ctx.fill();
+
+// Gradient background
+const bg = ctx.createLinearGradient(0, 0, W, W);
+bg.addColorStop(0, '#1a1a2e');
+bg.addColorStop(0.5, '#16213e');
+bg.addColorStop(1, '#0f3460');
+ctx.fillStyle = bg;
+ctx.beginPath();
+ctx.roundRect(0, 0, W, W, 120);
+ctx.fill();
+
+// Smoke wisps (stylized S curves)
+ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+ctx.lineWidth = 40;
+for (let i = 0; i < 3; i++) {
+  ctx.beginPath();
+  ctx.moveTo(200 + i*150, W);
+  ctx.bezierCurveTo(100 + i*150, 700, 500 + i*100, 500, 300 + i*120, 200);
+  ctx.bezierCurveTo(200 + i*100, 50, 600 + i*80, -50, 500 + i*100, 0);
+  ctx.stroke();
+}
+
+// Main "SM" monogram
+ctx.fillStyle = '#ffffff';
+ctx.font = 'bold 420px "Segoe UI", Arial, sans-serif';
+ctx.textAlign = 'center';
+ctx.textBaseline = 'middle';
+ctx.fillText('SM', W/2, W/2 - 20);
+
+// Accent line below
+const accent = ctx.createLinearGradient(260, 0, 760, 0);
+accent.addColorStop(0, '#e94560');
+accent.addColorStop(1, '#533483');
+ctx.fillStyle = accent;
+ctx.beginPath();
+ctx.roundRect(260, 640, 500, 8, 4);
+ctx.fill();
+
+// Small tagline
+ctx.fillStyle = 'rgba(255,255,255,0.5)';
+ctx.font = '500 64px "Segoe UI", Arial, sans-serif';
+ctx.fillText('YourBrand', W/2, 720);
+
+// Export as PNG
+setTimeout(() => {
+  const link = document.createElement('a');
+  link.download = 'YourBrand-icon-1024.png';
+  link.href = c.toDataURL('image/png');
+  link.click();
+  document.title = 'DONE - Check Downloads';
+}, 500);
+</script>
+</body>
+</html>

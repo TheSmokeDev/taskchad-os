@@ -22,7 +22,7 @@ from runtime.base import RuntimeRequest
 from runtime.bootstrap import build_second_brain_identity_context
 from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
 from runtime.errors import RuntimeExecutionError
-from runtime.registry import run_with_fallback
+from runtime.lane_router import run_with_runtime_lanes
 
 # Cognition module — graceful degradation if unavailable
 try:
@@ -70,6 +70,52 @@ try:
     _PROCESSES_AVAILABLE = True
 except ImportError:
     _PROCESSES_AVAILABLE = False
+
+
+_TEXT_ONLY_FAST_MARKERS = (
+    "reply with exactly",
+    "reply exactly",
+    "nothing else",
+    "exactly its contents",
+    "exactly the first line",
+)
+
+_TOOL_INTENT_MARKERS = (
+    "read ",
+    "write ",
+    "edit ",
+    "grep",
+    "glob",
+    "search",
+    "find ",
+    "look up",
+    "check ",
+    "show ",
+    "run ",
+    "debug",
+    "fix ",
+    "analyze",
+    "investigate",
+    "open ",
+    "use tool",
+    "use tools",
+    "/",
+)
+
+
+def _should_use_text_only_fast_path(message: IncomingMessage) -> bool:
+    """Return True for short low-intent chat turns that do not need tools."""
+
+    prompt = message.text.strip().lower()
+    if message.is_piv or message.prefetched_context or message.attachments:
+        return False
+    if any(marker in prompt for marker in _TEXT_ONLY_FAST_MARKERS):
+        return True
+    if len(prompt) > 40 or len(prompt.split()) > 8:
+        return False
+    if any(marker in prompt for marker in _TOOL_INTENT_MARKERS):
+        return False
+    return True
 
 
 class ConversationEngine:
@@ -295,6 +341,7 @@ class ConversationEngine:
         # Look up existing session
         existing = self.session_store.get(platform_str, channel_id, thread_id)
         mode = existing.mode if existing else "execute"
+        tiny_fast_text_path = _should_use_text_only_fast_path(message)
 
         # Langfuse: session lookup span
         if _tracing:
@@ -363,6 +410,8 @@ class ConversationEngine:
         requested_model = os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6")
         piv_max_turns = self.max_turns
         piv_max_budget = self.max_budget_usd
+        if tiny_fast_text_path:
+            allowed_tools = []
 
         # PIV commands need more turns and budget for multi-step workflows
         if message.is_piv:
@@ -556,80 +605,90 @@ class ConversationEngine:
 
             # Unified recall via recall_service
             current_regions = self._build_frozen_regions() if _COGNITION_AVAILABLE else []
-            if not _RECALL_SERVICE_AVAILABLE and _trace_decisions is not None:
-                _trace_decisions["recall"] = {"skipped": True, "reason": "recall_service_unavailable"}
-                _trace_decisions["region_assembly"] = {"skipped": True, "reason": "recall_service_unavailable"}
-            try:
-                if _RECALL_SERVICE_AVAILABLE:
-                    recall_response = await recall_memory_service(
-                        query=message.text,
-                        memory_dir=self.project_root / "TheHomie" / "Memory",
-                        caller="chat",
-                        max_results=5,
-                        has_prefetched=bool(message.prefetched_context),
-                    )
-
-                    # Record recall tier decision on parent span
-                    if _trace_decisions is not None:
-                        recall_tier = getattr(recall_response.log, "tier", "unknown")
-                        _trace_decisions["recall"] = {
-                            "tier": recall_tier,
-                            "has_results": bool(recall_response.formatted_text),
-                        }
-                        if not recall_response.formatted_text:
-                            _trace_decisions["region_assembly"] = {
-                                "skipped": True, "reason": "no_recall_results",
-                            }
-
-                    _ra_span = None
-                    if _tracing:
-                        try:
-                            _ra_span = _lf.start_as_current_observation(
-                                as_type="span", name="region_assembly",
-                            )
-                            _ra_span.__enter__()
-                        except Exception:
-                            _ra_span = None
-
-                    if recall_response.formatted_text and _COGNITION_AVAILABLE and adjusted_budgets:
-                        regions = list(current_regions)
-                        cont_budget = adjusted_budgets["continuity"]
-                        continuity_text = ""
-                        if continuity_state:
-                            continuity_text = continuity_state.to_region_text()
-                        regions.append(PromptRegion(
-                            "continuity", continuity_text, cont_budget,
-                        ))
-                        rec_budget = adjusted_budgets["recalled_memory"]
-                        regions.append(PromptRegion(
-                            "recalled_memory", recall_response.formatted_text, rec_budget,
-                        ))
-                        system_prompt["append"] = (
-                            assemble_regions(regions) + chat_rules
+            if tiny_fast_text_path:
+                if current_regions:
+                    system_prompt["append"] = assemble_regions(list(current_regions)) + chat_rules
+                if _trace_decisions is not None:
+                    _trace_decisions["recall"] = {"skipped": True, "reason": "tiny_fast_text_path"}
+                    _trace_decisions["region_assembly"] = {
+                        "skipped": True,
+                        "reason": "tiny_fast_text_path",
+                    }
+            else:
+                if not _RECALL_SERVICE_AVAILABLE and _trace_decisions is not None:
+                    _trace_decisions["recall"] = {"skipped": True, "reason": "recall_service_unavailable"}
+                    _trace_decisions["region_assembly"] = {"skipped": True, "reason": "recall_service_unavailable"}
+                try:
+                    if _RECALL_SERVICE_AVAILABLE:
+                        recall_response = await recall_memory_service(
+                            query=message.text,
+                            memory_dir=self.project_root / "TheHomie" / "Memory",
+                            caller="chat",
+                            max_results=5,
+                            has_prefetched=bool(message.prefetched_context),
                         )
-                    elif recall_response.formatted_text:
-                        # Cognition unavailable but got keyword results
-                        system_prompt["append"] += recall_response.formatted_text
-                    elif current_regions:
-                        regions = list(current_regions)
-                        system_prompt["append"] = assemble_regions(regions) + chat_rules
 
-                    if _ra_span:
-                        try:
-                            _ra_span.update(output={
-                                "total_chars": len(system_prompt.get("append", "")),
-                            })
-                            _ra_span.__exit__(None, None, None)
-                        except Exception:
+                        # Record recall tier decision on parent span
+                        if _trace_decisions is not None:
+                            recall_tier = getattr(recall_response.log, "tier", "unknown")
+                            _trace_decisions["recall"] = {
+                                "tier": recall_tier,
+                                "has_results": bool(recall_response.formatted_text),
+                            }
+                            if not recall_response.formatted_text:
+                                _trace_decisions["region_assembly"] = {
+                                    "skipped": True, "reason": "no_recall_results",
+                                }
+
+                        _ra_span = None
+                        if _tracing:
                             try:
+                                _ra_span = _lf.start_as_current_observation(
+                                    as_type="span", name="region_assembly",
+                                )
+                                _ra_span.__enter__()
+                            except Exception:
+                                _ra_span = None
+
+                        if recall_response.formatted_text and _COGNITION_AVAILABLE and adjusted_budgets:
+                            regions = list(current_regions)
+                            cont_budget = adjusted_budgets["continuity"]
+                            continuity_text = ""
+                            if continuity_state:
+                                continuity_text = continuity_state.to_region_text()
+                            regions.append(PromptRegion(
+                                "continuity", continuity_text, cont_budget,
+                            ))
+                            rec_budget = adjusted_budgets["recalled_memory"]
+                            regions.append(PromptRegion(
+                                "recalled_memory", recall_response.formatted_text, rec_budget,
+                            ))
+                            system_prompt["append"] = (
+                                assemble_regions(regions) + chat_rules
+                            )
+                        elif recall_response.formatted_text:
+                            # Cognition unavailable but got keyword results
+                            system_prompt["append"] += recall_response.formatted_text
+                        elif current_regions:
+                            regions = list(current_regions)
+                            system_prompt["append"] = assemble_regions(regions) + chat_rules
+
+                        if _ra_span:
+                            try:
+                                _ra_span.update(output={
+                                    "total_chars": len(system_prompt.get("append", "")),
+                                })
                                 _ra_span.__exit__(None, None, None)
                             except Exception:
-                                pass
-            except Exception as e:
-                print(f"[{datetime.now()}] [Recall] Service failed (non-blocking): {e}")
-                if current_regions:
-                    regions = list(current_regions)
-                    system_prompt["append"] = assemble_regions(regions) + chat_rules
+                                try:
+                                    _ra_span.__exit__(None, None, None)
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    print(f"[{datetime.now()}] [Recall] Service failed (non-blocking): {e}")
+                    if current_regions:
+                        regions = list(current_regions)
+                        system_prompt["append"] = assemble_regions(regions) + chat_rules
 
         # Pre-fetched data from router — lightweight TEXT_REASONING pass
         if message.prefetched_context:
@@ -681,7 +740,7 @@ class ConversationEngine:
 
         # Run through runtime (propagate_attributes is at the outer scope)
         try:
-            result = await run_with_fallback(runtime_request)
+            result = await run_with_runtime_lanes(runtime_request)
         except RuntimeExecutionError as e:
             print(f"[{datetime.now()}] Runtime execution error: {e}")
             capability_hint = ""
@@ -713,12 +772,14 @@ class ConversationEngine:
         session_id_from_sdk = result.session_id
         cost_usd = result.cost_usd
         if progress is not None:
+            progress["runtime_lane"] = result.runtime_lane
             progress["runtime_provider"] = result.provider
             progress["runtime_profile_key"] = result.profile_key or ""
 
         # Enrich root trace with runtime summary
         if _trace_decisions is not None:
             _trace_decisions["runtime"] = {
+                "lane": result.runtime_lane,
                 "provider": result.provider,
                 "model": result.model,
                 "cost_usd": cost_usd,
@@ -849,6 +910,7 @@ class ConversationEngine:
         now = datetime.now()
         if existing:
             existing.runtime_session_id = persisted_runtime_session_id
+            existing.runtime_lane = result.runtime_lane
             existing.runtime_provider = result.provider
             existing.runtime_model = result.model or ""
             existing.runtime_profile_key = result.profile_key or ""
@@ -872,6 +934,7 @@ class ConversationEngine:
                 total_cost_usd=cost_usd or 0.0,
                 tool_call_count=result.tool_call_count or 0,
                 mode=mode,
+                runtime_lane=result.runtime_lane,
                 runtime_provider=result.provider,
                 runtime_model=result.model or "",
                 runtime_profile_key=result.profile_key or "",

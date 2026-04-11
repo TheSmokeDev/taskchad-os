@@ -301,15 +301,8 @@ async def _llm_rerank(
     )
 
     try:
-        from runtime.registry import run_with_fallback
-
         response = await asyncio.wait_for(
-            run_with_fallback(
-                prompt,
-                system="You are a search result ranker. Output only comma-separated numbers.",
-                model_hint="haiku",
-                max_tokens=100,
-            ),
+            _run_rerank_request(prompt),
             timeout=RECALL_RERANK_TIMEOUT_S,
         )
 
@@ -333,6 +326,29 @@ async def _llm_rerank(
         pass  # Timeout or any error — return original ranking
 
     return results[:return_n]
+
+
+async def _run_rerank_request(prompt: str) -> str:
+    """Run the cheap rerank request through the shared runtime lane facade."""
+
+    from runtime.base import RuntimeRequest
+    from runtime.capabilities import TEXT_REASONING
+    from runtime.lane_router import run_with_runtime_lanes
+
+    result = await run_with_runtime_lanes(
+        RuntimeRequest(
+            prompt=prompt,
+            cwd=Path.cwd(),
+            task_name="recall_rerank",
+            capability=TEXT_REASONING,
+            model="haiku",
+            max_turns=1,
+            max_budget_usd=0.10,
+            allowed_tools=[],
+            system_prompt="You are a search result ranker. Output only comma-separated numbers.",
+        )
+    )
+    return result.text
 
 
 def _merge_and_rank(

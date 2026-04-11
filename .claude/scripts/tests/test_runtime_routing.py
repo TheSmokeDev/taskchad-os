@@ -20,6 +20,8 @@ def _profile(provider: str, key_prefix: str = "primary") -> RuntimeProfile:
 def test_default_text_route_prefers_gemini_then_codex_then_openrouter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_FALLBACK_PROVIDER", raising=False)
     monkeypatch.setattr(
@@ -43,6 +45,8 @@ def test_default_text_route_prefers_gemini_then_codex_then_openrouter(
 
 
 def test_routing_skips_unhealthy_primary_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_FALLBACK_PROVIDER", raising=False)
     monkeypatch.setattr(
@@ -64,6 +68,8 @@ def test_routing_skips_unhealthy_primary_provider(monkeypatch: pytest.MonkeyPatc
 
 
 def test_chat_turn_text_only_prefers_text_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_FALLBACK_PROVIDER", raising=False)
     monkeypatch.setattr(
@@ -87,6 +93,8 @@ def test_chat_turn_text_only_prefers_text_route(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_chat_turn_tool_mode_uses_full_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_FALLBACK_PROVIDER", raising=False)
     monkeypatch.setattr(
@@ -112,6 +120,83 @@ def test_chat_turn_tool_mode_uses_full_chain(monkeypatch: pytest.MonkeyPatch) ->
         "gemini-cli",
         "openrouter",
         "openai-compatible",
+    ]
+
+
+def test_generic_text_route_prefers_api_profiles_before_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        routing,
+        "build_profile_for_provider",
+        lambda provider, *, key_prefix, request=None: _profile(provider, key_prefix),
+    )
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+
+    resolved = routing.resolve_generic_runtime_profiles(
+        RuntimeRequest(prompt="hi", cwd=".", task_name="memory_flush")
+    )
+
+    assert [profile.provider for profile in resolved] == [
+        "openai-compatible",
+        "openrouter",
+        "openai-codex",
+        "gemini-cli",
+    ]
+
+
+def test_generic_tool_route_uses_only_tool_capable_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        routing,
+        "build_profile_for_provider",
+        lambda provider, *, key_prefix, request=None: _profile(provider, key_prefix),
+    )
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+
+    resolved = routing.resolve_generic_runtime_profiles(
+        RuntimeRequest(
+            prompt="read file",
+            cwd=".",
+            task_name="chat_turn",
+            capability="tool_reasoning",
+            allowed_tools=["Read"],
+        )
+    )
+
+    assert [profile.provider for profile in resolved] == [
+        "openai-codex",
+        "gemini-cli",
+    ]
+
+
+def test_generic_route_ignores_legacy_claude_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_PROVIDER", "claude")
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        routing,
+        "build_profile_for_provider",
+        lambda provider, *, key_prefix, request=None: _profile(provider, key_prefix),
+    )
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+
+    resolved = routing.resolve_generic_runtime_profiles(
+        RuntimeRequest(prompt="hi", cwd=".", task_name="memory_flush")
+    )
+
+    assert [profile.provider for profile in resolved] == [
+        "openai-compatible",
+        "openrouter",
+        "openai-codex",
+        "gemini-cli",
     ]
 
 

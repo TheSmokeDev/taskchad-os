@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 from .auth_profiles import CodexAuthProfile, codex_auth_status
-from .base import RuntimeRequest, RuntimeResult, RuntimeToolCall
+from .base import RUNTIME_LANE_GENERIC, RuntimeRequest, RuntimeResult, RuntimeToolCall
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .errors import (
     RuntimeConfigError,
@@ -141,6 +141,7 @@ class OpenAICodexRuntime:
 
         return RuntimeResult(
             text=text,
+            runtime_lane=RUNTIME_LANE_GENERIC,
             provider=self.profile.provider,
             model=model,
             profile_key=self.profile.key,

@@ -28,7 +28,7 @@ from config import (
 )
 from runtime.base import RuntimeRequest
 from runtime.capabilities import TEXT_REASONING
-from runtime.registry import run_with_fallback
+from runtime.lane_router import run_with_runtime_lanes
 
 # Weeks to backfill
 WEEKLY_FILES = [
@@ -146,7 +146,7 @@ After updating, respond with a brief summary of what was added (section: count).
 """
 
     try:
-        result = await run_with_fallback(
+        result = await run_with_runtime_lanes(
             RuntimeRequest(
                 prompt=distill_prompt,
                 cwd=PROJECT_ROOT,

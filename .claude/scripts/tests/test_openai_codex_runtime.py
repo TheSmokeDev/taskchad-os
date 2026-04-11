@@ -8,7 +8,7 @@ import pytest
 import runtime.openai_codex as openai_codex
 import runtime.profiles as profiles
 from runtime.auth_profiles import AuthProfileStatus
-from runtime.base import RuntimeRequest
+from runtime.base import RUNTIME_LANE_GENERIC, RuntimeRequest
 from runtime.errors import RuntimeConfigError
 from runtime.profiles import RuntimeProfile
 
@@ -102,6 +102,7 @@ async def test_openai_codex_runtime_executes_via_codex_cli(
     result = await runtime.run(request)
 
     assert result.text == "Codex says hello"
+    assert result.runtime_lane == RUNTIME_LANE_GENERIC
     assert result.provider == "openai-codex"
     assert result.profile_key == "primary-openai-codex"
     assert "--json" in captured["args"]
@@ -149,6 +150,7 @@ async def test_openai_codex_runtime_skips_explicit_model_for_plan_default(
     result = await runtime.run(RuntimeRequest(prompt="hi", cwd=".", task_name="summary"))
 
     assert result.text == "ok"
+    assert result.runtime_lane == RUNTIME_LANE_GENERIC
     assert "--model" not in captured["args"]
 
 
@@ -189,6 +191,7 @@ async def test_openai_codex_runtime_extracts_command_execution_telemetry(
     )
 
     assert result.text == "TOKEN"
+    assert result.runtime_lane == RUNTIME_LANE_GENERIC
     assert result.tool_call_count == 1
     assert result.tool_names_used == ["command_execution"]
     assert len(result.tool_calls) == 1

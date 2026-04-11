@@ -30,6 +30,7 @@ class Session:
     tool_call_count: int = 0
     status: str = "active"
     mode: str = "execute"  # "plan" or "execute"
+    runtime_lane: str = "claude_native"
     runtime_provider: str = "claude"
     runtime_model: str = ""
     runtime_profile_key: str = ""
@@ -135,6 +136,7 @@ class SQLiteSessionStore:
                     total_cost_usd REAL DEFAULT 0.0,
                     status TEXT DEFAULT 'active',
                     mode TEXT DEFAULT 'execute',
+                    runtime_lane TEXT DEFAULT 'claude_native',
                     tool_call_count INTEGER DEFAULT 0,
                     runtime_tool_calls_json TEXT DEFAULT '[]'
                 );
@@ -194,6 +196,7 @@ class SQLiteSessionStore:
                 "ALTER TABLE chat_sessions ADD COLUMN runtime_provider TEXT DEFAULT 'claude'",
                 "ALTER TABLE chat_sessions ADD COLUMN runtime_model TEXT DEFAULT ''",
                 "ALTER TABLE chat_sessions ADD COLUMN runtime_profile_key TEXT DEFAULT ''",
+                "ALTER TABLE chat_sessions ADD COLUMN runtime_lane TEXT DEFAULT 'claude_native'",
                 "ALTER TABLE chat_sessions ADD COLUMN tool_call_count INTEGER DEFAULT 0",
                 "ALTER TABLE chat_sessions ADD COLUMN runtime_tool_calls_json TEXT DEFAULT '[]'",
                 "ALTER TABLE chat_messages ADD COLUMN tool_calls_json TEXT DEFAULT '[]'",
@@ -239,6 +242,7 @@ class SQLiteSessionStore:
             ),
             status=row["status"],
             mode=row["mode"] if "mode" in row.keys() else "execute",
+            runtime_lane=(row["runtime_lane"] if "runtime_lane" in row.keys() and row["runtime_lane"] else "claude_native"),
             runtime_provider=(
                 row["runtime_provider"]
                 if "runtime_provider" in row.keys() and row["runtime_provider"]
@@ -295,15 +299,16 @@ class SQLiteSessionStore:
         with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO chat_sessions
-                   (session_id, agent_session_id, runtime_session_id, runtime_provider,
+                   (session_id, agent_session_id, runtime_session_id, runtime_lane, runtime_provider,
                     runtime_model, runtime_profile_key, platform, channel_id, thread_id, user_id,
                     created_at, updated_at, message_count, total_cost_usd,
                     status, mode, tool_call_count, runtime_tool_calls_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session.session_id,
                     session.agent_session_id,
                     session.runtime_session_id,
+                    session.runtime_lane,
                     session.runtime_provider,
                     session.runtime_model,
                     session.runtime_profile_key,
@@ -327,13 +332,14 @@ class SQLiteSessionStore:
         with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.execute(
                 """UPDATE chat_sessions
-                   SET agent_session_id = ?, runtime_session_id = ?, runtime_provider = ?,
+                   SET agent_session_id = ?, runtime_session_id = ?, runtime_lane = ?, runtime_provider = ?,
                        runtime_model = ?, runtime_profile_key = ?, updated_at = ?, message_count = ?,
                        total_cost_usd = ?, tool_call_count = ?, status = ?, mode = ?, runtime_tool_calls_json = ?
                    WHERE session_id = ?""",
                 (
                     session.agent_session_id,
                     session.runtime_session_id,
+                    session.runtime_lane,
                     session.runtime_provider,
                     session.runtime_model,
                     session.runtime_profile_key,
@@ -526,6 +532,7 @@ class PostgresSessionStore:
                 total_cost_usd DOUBLE PRECISION DEFAULT 0.0,
                 status TEXT DEFAULT 'active',
                 mode TEXT DEFAULT 'execute',
+                runtime_lane TEXT DEFAULT 'claude_native',
                 tool_call_count INTEGER DEFAULT 0,
                 runtime_tool_calls_json TEXT DEFAULT '[]'
             )
@@ -552,6 +559,10 @@ class PostgresSessionStore:
             (
                 "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS "
                 "runtime_profile_key TEXT DEFAULT ''"
+            ),
+            (
+                "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS "
+                "runtime_lane TEXT DEFAULT 'claude_native'"
             ),
             (
                 "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS "
@@ -628,13 +639,14 @@ class PostgresSessionStore:
             ),
             message_count=row[13],
             total_cost_usd=float(row[14]),
-            tool_call_count=row[17] if len(row) > 17 else 0,
+            tool_call_count=row[18] if len(row) > 18 else 0,
             status=row[15],
             mode=row[16] if len(row) > 16 and row[16] else "execute",
+            runtime_lane=row[17] if len(row) > 17 and row[17] else "claude_native",
             runtime_provider=runtime_provider,
             runtime_model=runtime_model,
             runtime_profile_key=runtime_profile_key,
-            runtime_tool_calls=_parse_tool_calls(row[18] if len(row) > 18 else None),
+            runtime_tool_calls=_parse_tool_calls(row[19] if len(row) > 19 else None),
         )
 
     def get(self, platform: str, channel_id: str, thread_id: str) -> Session | None:
@@ -655,15 +667,16 @@ class PostgresSessionStore:
         cur = self._conn.cursor()
         cur.execute(
             """INSERT INTO chat_sessions
-               (session_id, agent_session_id, runtime_session_id, runtime_provider,
+               (session_id, agent_session_id, runtime_session_id, runtime_lane, runtime_provider,
                 runtime_model, runtime_profile_key, platform, channel_id, thread_id, user_id,
                 created_at, updated_at, message_count, total_cost_usd,
                 status, mode, tool_call_count, runtime_tool_calls_json)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 session.session_id,
                 session.agent_session_id,
                 session.runtime_session_id,
+                session.runtime_lane,
                 session.runtime_provider,
                 session.runtime_model,
                 session.runtime_profile_key,
@@ -687,13 +700,14 @@ class PostgresSessionStore:
         cur = self._conn.cursor()
         cur.execute(
             """UPDATE chat_sessions
-               SET agent_session_id = %s, runtime_session_id = %s, runtime_provider = %s,
+               SET agent_session_id = %s, runtime_session_id = %s, runtime_lane = %s, runtime_provider = %s,
                    runtime_model = %s, runtime_profile_key = %s, updated_at = %s, message_count = %s,
                    total_cost_usd = %s, tool_call_count = %s, status = %s, mode = %s, runtime_tool_calls_json = %s
                WHERE session_id = %s""",
             (
                 session.agent_session_id,
                 session.runtime_session_id,
+                session.runtime_lane,
                 session.runtime_provider,
                 session.runtime_model,
                 session.runtime_profile_key,

@@ -53,7 +53,7 @@ from config import (
 from notifications import send_console_notification, send_toast_notification
 from runtime.base import RuntimeRequest
 from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
-from runtime.registry import run_with_fallback
+from runtime.lane_router import run_with_runtime_lanes
 from shared import (
     append_to_daily_log,
     load_state,
@@ -1218,7 +1218,7 @@ Your final text response goes directly to {owner}'s phone. Keep it to just bulle
 
     # Run the agent - Claude reasons over pre-fetched data
     try:
-        result = await run_with_fallback(
+        result = await run_with_runtime_lanes(
             RuntimeRequest(
                 prompt=heartbeat_prompt,
                 cwd=PROJECT_ROOT,
@@ -1275,7 +1275,7 @@ Your final text response goes directly to {owner}'s phone. Keep it to just bulle
     if "HEARTBEAT_OK" not in response_text:
         try:
             print(f"[{now_local()}] Formatting alert with Haiku...")
-            formatted = await run_with_fallback(
+            formatted = await run_with_runtime_lanes(
                 RuntimeRequest(
                     prompt=(
                         "Extract the actionable information from the text below: "

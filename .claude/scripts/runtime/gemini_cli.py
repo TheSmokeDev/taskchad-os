@@ -13,7 +13,7 @@ import os
 import shutil
 
 from .auth_profiles import GeminiAuthProfile, gemini_auth_status
-from .base import RuntimeRequest, RuntimeResult
+from .base import RUNTIME_LANE_GENERIC, RuntimeRequest, RuntimeResult
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .errors import (
     RuntimeConfigError,
@@ -121,6 +121,7 @@ class GeminiCliRuntime:
             if text:
                 return RuntimeResult(
                     text=text,
+                    runtime_lane=RUNTIME_LANE_GENERIC,
                     provider=self.profile.provider,
                     model=model,
                     profile_key=self.profile.key,

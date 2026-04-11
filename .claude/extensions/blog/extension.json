@@ -1,0 +1,36 @@
+{
+  "id": "blog",
+  "name": "Blog Pipeline",
+  "version": "1.0.0",
+  "description": "Blog generation, publishing, and proactive scheduling via the blog-pipeline skill. Saves directly to Supabase blog_drafts.",
+
+  "commands": [
+    {
+      "name": "publish",
+      "description": "Publish a blog draft by ID — sets status to published in Supabase",
+      "type": "router",
+      "minRole": "admin",
+      "handler": "handlers:handle_publish"
+    },
+    {
+      "name": "blogstatus",
+      "description": "Show blog pipeline status — draft counts, recent articles, scores",
+      "type": "router",
+      "minRole": "operator",
+      "handler": "handlers:handle_blog_status"
+    }
+  ],
+
+  "dataIntents": [
+    {
+      "command": "blogstatus",
+      "keywords": ["blog", "blog status", "drafts", "blog pipeline", "articles", "content pipeline"],
+      "includedInBrief": false
+    }
+  ],
+
+  "envRequirements": [
+    {"name": "QM_SUPABASE_URL", "required": true},
+    {"name": "QM_SUPABASE_SERVICE_KEY", "required": true}
+  ]
+}

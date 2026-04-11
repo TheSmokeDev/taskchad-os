@@ -1,7 +1,8 @@
 """Langfuse observability integration for The Homie runtime layer.
 
-One-time initialization — call init_langfuse() at startup. All runtime calls
-through run_with_fallback() are then automatically traced with provider,
+One-time initialization - call init_langfuse() at startup. All runtime calls
+through run_with_runtime_lanes(), plus any legacy calls that still reach the
+run_with_fallback() compatibility shim, are automatically traced with provider,
 model, tokens, cost, and session context.
 
 Env vars (in .claude/scripts/.env):

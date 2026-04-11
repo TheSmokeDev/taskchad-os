@@ -29,7 +29,7 @@ from config import (
 )
 from runtime.base import RuntimeRequest
 from runtime.capabilities import TEXT_REASONING
-from runtime.registry import run_with_fallback
+from runtime.lane_router import run_with_runtime_lanes
 from shared import append_to_daily_log, file_lock, load_state, save_state
 
 FLUSH_STATE_FILE = STATE_DIR / "flush-state.json"
@@ -139,7 +139,7 @@ If nothing is worth saving, respond with exactly: FLUSH_OK
     print(f"[{now_local()}] Running memory flush (test={test_mode})...")
 
     try:
-        result = await run_with_fallback(
+        result = await run_with_runtime_lanes(
             RuntimeRequest(
                 prompt=flush_prompt,
                 cwd=PROJECT_ROOT,

@@ -17,6 +17,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE
+from runtime.routing import GENERIC_TEXT_ROUTE, GENERIC_TOOL_ROUTE
+from runtime.selection import (
+    apply_runtime_selection_choice,
+    describe_runtime_selection,
+    provider_display_name,
+    resolve_runtime_selection,
+)
 from session_keys import build_session_key, resolve_thread_id
 
 # ---------------------------------------------------------------------------
@@ -135,7 +143,32 @@ async def handle_diagnostics(adapter: Any, incoming: Any, args: str, *, collect_
     lines.append(f"  Embeddings: {report.memory_embedding_status}")
     lines.append("")
     lines.append("*Runtime*:")
-    lines.append(f"  Chain: {' → '.join(report.runtime_default_chain)}")
+    lines.append(f"  selected lane: {report.runtime_selected_lane}")
+    if report.runtime_selected_generic_provider:
+        lines.append(
+            "  generic preferred provider: "
+            f"{provider_display_name(report.runtime_selected_generic_provider)}"
+        )
+    else:
+        lines.append("  generic preferred provider: auto")
+    if report.runtime_generic_text_route:
+        lines.append(
+            "  generic text route: "
+            + " -> ".join(
+                provider_display_name(provider)
+                for provider in report.runtime_generic_text_route
+            )
+        )
+    if report.runtime_generic_tool_route:
+        lines.append(
+            "  generic tool route: "
+            + " -> ".join(
+                provider_display_name(provider)
+                for provider in report.runtime_generic_tool_route
+            )
+        )
+    for lane_name, lane_status in report.runtime_lanes.items():
+        lines.append(f"  lane:{lane_name}: {lane_status}")
     for name, status in report.runtime_providers.items():
         lines.append(f"  {name}: {status}")
     lines.append("")
@@ -616,8 +649,10 @@ async def handle_extensions(adapter: Any, incoming: Any, args: str, *, collect_o
 
 _PROVIDER_ALIASES = {
     "claude": "claude", "anthropic": "claude",
-    "codex": "openai_codex", "openai": "openai_codex", "chatgpt": "openai_codex", "gpt": "openai_codex",
+    "codex": "codex", "chatgpt": "codex", "gpt": "codex",
     "gemini": "gemini", "google": "gemini",
+    "openrouter": "openrouter",
+    "openai": "openai",
     "auto": "auto",
 }
 
@@ -628,7 +663,7 @@ _CLAUDE_MODEL_OVERRIDES = {
 
 
 def _get_provider_status() -> str:
-    """Build a formatted status report of all runtime providers."""
+    """Build a lane-first status report of runtime selection and provider health."""
     try:
         from runtime.auth_profiles import (
             CodexAuthProfile,
@@ -640,8 +675,34 @@ def _get_provider_status() -> str:
         from runtime.profiles import build_profile_for_provider
         from runtime.routing import DEFAULT_PROVIDER_CHAIN
 
+        selection = resolve_runtime_selection()
         lines = ["*Runtime Provider Status*\n"]
-        lines.append(f"Chain: {' → '.join(DEFAULT_PROVIDER_CHAIN)}\n")
+        lines.append("Selection:")
+        lines.append(f"  lane: {selection.lane or 'auto'}")
+        lines.append(f"  mode: {describe_runtime_selection(selection)}")
+        if selection.lane == RUNTIME_LANE_CLAUDE_NATIVE:
+            lines.append(
+                "  claude model: "
+                + os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6").strip()
+            )
+        else:
+            preferred = (
+                provider_display_name(selection.generic_provider)
+                if selection.generic_provider
+                else "auto"
+            )
+            lines.append(f"  generic preferred provider: {preferred}")
+        lines.append("")
+        lines.append(
+            "Generic text route: "
+            + " -> ".join(provider_display_name(provider) for provider in GENERIC_TEXT_ROUTE)
+        )
+        lines.append(
+            "Generic tool route: "
+            + " -> ".join(provider_display_name(provider) for provider in GENERIC_TOOL_ROUTE)
+        )
+        lines.append("")
+        lines.append("Provider health:")
 
         provider_checks = {
             "claude": lambda: ("Claude Agent SDK", "subscription", True),
@@ -677,10 +738,6 @@ def _get_provider_status() -> str:
             except Exception as e:
                 lines.append(f"  ERR *{provider}*: {e}")
 
-        pinned = os.getenv("SECOND_BRAIN_RUNTIME_PROVIDER", "").strip()
-        if pinned:
-            lines.append(f"\nPinned primary: {pinned}")
-
         return "\n".join(lines)
     except Exception as e:
         return f"Provider status check failed: {e}"
@@ -699,21 +756,40 @@ def _write_env_var(env_path: Path, key: str, value: str) -> None:
     env_path.write_text(content, encoding="utf-8")
 
 
+def _delete_env_var(env_path: Path, key: str) -> None:
+    """Delete a key=value pair from the .env file if present."""
+    import re
+
+    content = env_path.read_text(encoding="utf-8")
+    pattern = rf"^{re.escape(key)}=.*(?:\r?\n)?"
+    updated = re.sub(pattern, "", content, flags=re.MULTILINE)
+    env_path.write_text(updated.rstrip() + ("\n" if updated.strip() else ""), encoding="utf-8")
+
+
 def _switch_provider(choice: str) -> str:
-    """Switch the runtime provider or Claude model by updating .env."""
+    """Switch the runtime lane/provider or Claude model by updating .env."""
     if not choice:
-        current = os.getenv("SECOND_BRAIN_RUNTIME_PROVIDER", "auto").strip()
+        selection = resolve_runtime_selection()
         current_model = os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6").strip()
-        model_info = f" | Claude model: {current_model}" if current == "claude" else ""
+        model_info = ""
+        if selection.lane == RUNTIME_LANE_CLAUDE_NATIVE:
+            model_info = f" | Claude model: {current_model}"
+        elif selection.generic_provider:
+            model_info = (
+                " | Preferred generic provider: "
+                f"{provider_display_name(selection.generic_provider)}"
+            )
         return (
-            f"Current provider: {current}{model_info}\n\n"
-            "Usage: /model <provider|model>\n"
-            "  /model claude - Anthropic (subscription, keeps current model)\n"
+            f"Current selection: {describe_runtime_selection(selection)}{model_info}\n\n"
+            "Usage: /model <lane|provider|model>\n"
+            "  /model claude - Claude native lane\n"
             "  /model sonnet - Claude Sonnet 4.6\n"
             "  /model opus - Claude Opus 4.6\n"
-            "  /model codex - ChatGPT (subscription)\n"
-            "  /model gemini - Google (subscription)\n"
-            "  /model auto - use fallback chain"
+            "  /model codex - generic runtime lane via Codex\n"
+            "  /model gemini - generic runtime lane via Gemini\n"
+            "  /model openrouter - generic runtime lane via OpenRouter\n"
+            "  /model openai - generic runtime lane via OpenAI-compatible\n"
+            "  /model auto - automatic lane/provider routing"
         )
 
     if choice in _CLAUDE_MODEL_OVERRIDES:
@@ -722,34 +798,38 @@ def _switch_provider(choice: str) -> str:
             from config import reload_config
 
             env_path = Path(__file__).resolve().parent.parent / "scripts" / ".env"
-            _write_env_var(env_path, "SECOND_BRAIN_RUNTIME_PROVIDER", "claude")
+            apply_runtime_selection_choice(
+                "claude",
+                environ=os.environ,
+                write_key=lambda key, value: _write_env_var(env_path, key, value),
+                delete_key=lambda key: _delete_env_var(env_path, key),
+            )
             _write_env_var(env_path, "SECOND_BRAIN_CLAUDE_MODEL", model_name)
-            os.environ["SECOND_BRAIN_RUNTIME_PROVIDER"] = "claude"
             os.environ["SECOND_BRAIN_CLAUDE_MODEL"] = model_name
             reload_config()
-            return f"Switched to {model_name}. Next message uses this model."
+            return f"Switched to {model_name}. Next message uses the Claude native lane."
         except Exception as e:
             return f"Failed to switch model: {e}"
 
     normalized = _PROVIDER_ALIASES.get(choice, choice)
-    if normalized not in ("claude", "openai_codex", "gemini", "auto"):
-        return f"Unknown provider: {choice}. Use: claude, sonnet, opus, codex, gemini, or auto"
+    if normalized not in ("claude", "codex", "gemini", "openrouter", "openai", "auto"):
+        return (
+            "Unknown runtime selection: "
+            f"{choice}. Use: claude, sonnet, opus, codex, gemini, openrouter, openai, or auto"
+        )
 
     try:
         from config import reload_config
 
         env_path = Path(__file__).resolve().parent.parent / "scripts" / ".env"
-        _write_env_var(env_path, "SECOND_BRAIN_RUNTIME_PROVIDER", normalized)
-        os.environ["SECOND_BRAIN_RUNTIME_PROVIDER"] = normalized
+        selection = apply_runtime_selection_choice(
+            normalized,
+            environ=os.environ,
+            write_key=lambda key, value: _write_env_var(env_path, key, value),
+            delete_key=lambda key: _delete_env_var(env_path, key),
+        )
         reload_config()
-
-        label = {
-            "claude": "Claude (Anthropic sub)",
-            "openai_codex": "Codex (ChatGPT sub)",
-            "gemini": "Gemini (Google sub)",
-            "auto": "Auto (fallback chain)",
-        }.get(normalized, normalized)
-        return f"Switched to {label}. Next message uses this provider."
+        return f"Switched to {describe_runtime_selection(selection)}. Next message uses this runtime selection."
     except Exception as e:
         return f"Failed to switch provider: {e}"
 

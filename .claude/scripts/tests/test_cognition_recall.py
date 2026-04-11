@@ -127,17 +127,11 @@ async def test_rerank_short_list_passthrough():
 @pytest.mark.asyncio
 async def test_rerank_returns_capped(monkeypatch):
     """Re-ranking should return at most return_n results."""
-    # Mock run_with_fallback to return a valid ranking
-    async def mock_run(prompt, system="", model_hint="", max_tokens=100):
+    async def mock_run(prompt):
         return "3,1,5,2,4,6,7,8,9,10"
 
-    monkeypatch.setattr("cognition.recall.run_with_fallback", mock_run, raising=False)
-
-    try:
-        import cognition.recall
-        monkeypatch.setattr(cognition.recall, "run_with_fallback", mock_run, raising=False)
-    except Exception:
-        pass
+    import cognition.recall
+    monkeypatch.setattr(cognition.recall, "_run_rerank_request", mock_run, raising=False)
 
     results = _make_results(10)
     reranked = await _llm_rerank(results, "test query", top_n=10, return_n=5)
@@ -149,10 +143,12 @@ async def test_rerank_fallback_on_timeout(monkeypatch):
     """On timeout, return original results unchanged."""
     import asyncio
 
-    async def mock_run_slow(prompt, system="", model_hint="", max_tokens=100):
+    async def mock_run_slow(prompt):
         await asyncio.sleep(10)
         return "1,2,3"
 
+    import cognition.recall
+    monkeypatch.setattr(cognition.recall, "_run_rerank_request", mock_run_slow, raising=False)
     monkeypatch.setattr("config.RECALL_RERANK_TIMEOUT_S", 0.01)
 
     results = _make_results(10)
@@ -165,6 +161,5 @@ async def test_rerank_fallback_on_timeout(monkeypatch):
 async def test_rerank_fallback_on_import_error():
     """If runtime not available, return original results."""
     results = _make_results(10)
-    # _llm_rerank tries to import run_with_fallback — if it fails, returns originals
     reranked = await _llm_rerank(results, "test query", top_n=10, return_n=5)
     assert len(reranked) == 5

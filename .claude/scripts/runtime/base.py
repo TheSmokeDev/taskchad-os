@@ -8,6 +8,9 @@ from typing import Any
 
 from .capabilities import TEXT_REASONING
 
+RUNTIME_LANE_CLAUDE_NATIVE = "claude_native"
+RUNTIME_LANE_GENERIC = "generic_runtime"
+
 
 @dataclass(slots=True)
 class RuntimeRequest:
@@ -31,6 +34,7 @@ class RuntimeRequest:
     resume: str | None = None
     stderr: Any | None = None
     allow_fallback: bool = True
+    runtime_lane: str | None = None
 
 
 @dataclass(slots=True)
@@ -49,6 +53,7 @@ class RuntimeResult:
     """Normalized runtime result."""
 
     text: str
+    runtime_lane: str
     provider: str
     model: str
     profile_key: str | None = None

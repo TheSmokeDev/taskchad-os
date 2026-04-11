@@ -15,6 +15,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from config import CHAT_DB_PATH, DATABASE_PATH, STATE_DIR  # noqa: E402
+from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE, RUNTIME_LANE_GENERIC  # noqa: E402
 
 _START_TIME = time.monotonic()
 
@@ -40,8 +41,12 @@ class DiagnosticsReport:
     memory_embedding_status: str = "unknown"
 
     # Runtime
+    runtime_lanes: dict[str, str] = field(default_factory=dict)
     runtime_providers: dict[str, str] = field(default_factory=dict)
-    runtime_default_chain: list[str] = field(default_factory=list)
+    runtime_selected_lane: str = "auto"
+    runtime_selected_generic_provider: str | None = None
+    runtime_generic_text_route: list[str] = field(default_factory=list)
+    runtime_generic_tool_route: list[str] = field(default_factory=list)
 
     # Sessions
     sessions_active: int = 0
@@ -161,11 +166,33 @@ def _check_runtime(report: DiagnosticsReport) -> None:
     """Check runtime provider health and availability."""
     try:
         from runtime.health import is_profile_available
-        from runtime.profiles import build_profile_for_provider
-        from runtime.routing import DEFAULT_PROVIDER_CHAIN
+        from runtime.profiles import build_profile_for_provider, normalize_provider
+        from runtime.routing import GENERIC_TEXT_ROUTE, GENERIC_TOOL_ROUTE
+        from runtime.selection import resolve_runtime_selection
 
-        report.runtime_default_chain = list(DEFAULT_PROVIDER_CHAIN)
-        for provider in DEFAULT_PROVIDER_CHAIN:
+        selection = resolve_runtime_selection()
+        report.runtime_lanes = {
+            RUNTIME_LANE_CLAUDE_NATIVE: "ON" if build_profile_for_provider("claude", key_prefix="diagnostics") else "OFF",
+            RUNTIME_LANE_GENERIC: "ON",
+        }
+        report.runtime_selected_lane = selection.lane or "auto"
+        report.runtime_selected_generic_provider = selection.generic_provider
+        report.runtime_generic_text_route = [
+            normalize_provider(provider)
+            for provider in GENERIC_TEXT_ROUTE
+        ]
+        report.runtime_generic_tool_route = [
+            normalize_provider(provider)
+            for provider in GENERIC_TOOL_ROUTE
+        ]
+
+        providers_to_check: list[str] = []
+        for provider in ("claude", *GENERIC_TEXT_ROUTE, *GENERIC_TOOL_ROUTE):
+            normalized = normalize_provider(provider)
+            if normalized not in providers_to_check:
+                providers_to_check.append(normalized)
+
+        for provider in providers_to_check:
             try:
                 profile = build_profile_for_provider(
                     provider, key_prefix="diagnostics"

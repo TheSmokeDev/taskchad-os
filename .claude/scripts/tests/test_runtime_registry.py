@@ -4,10 +4,20 @@ import pytest
 
 import runtime.profiles as profiles
 import runtime.registry as registry
-from runtime.base import RuntimeRequest, RuntimeResult
+from runtime.base import (
+    RUNTIME_LANE_CLAUDE_NATIVE,
+    RUNTIME_LANE_GENERIC,
+    RuntimeRequest,
+    RuntimeResult,
+)
 from runtime.capabilities import TOOL_REASONING
-from runtime.errors import RuntimeConfigError, RuntimeRetryableError
-from runtime.profiles import RuntimeProfile
+
+
+def test_runtime_package_exports_lane_runner() -> None:
+    import runtime
+
+    assert hasattr(runtime, "run_with_runtime_lanes")
+    assert hasattr(runtime, "run_with_fallback")
 
 
 def test_resolve_runtime_profiles_adds_openai_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,37 +60,21 @@ async def test_run_with_fallback_uses_next_profile_on_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = RuntimeRequest(prompt="hi", cwd=".", task_name="memory_flush")
-    resolved = [
-        RuntimeProfile(key="primary", provider="claude", model="claude-sonnet-4-6"),
-        RuntimeProfile(
-            key="fallback",
+
+    async def fake_lane_runner(_request: RuntimeRequest) -> RuntimeResult:
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
             provider="openai-compatible",
             model="gpt-4.1-mini",
-            api_key="sk-test-key",
-        ),
-    ]
+        )
 
-    class RetryAdapter:
-        def supports(self, _request: RuntimeRequest) -> bool:
-            return True
-
-        async def run(self, _request: RuntimeRequest) -> RuntimeResult:
-            raise RuntimeRetryableError("429")
-
-    class SuccessAdapter:
-        def supports(self, _request: RuntimeRequest) -> bool:
-            return True
-
-        async def run(self, _request: RuntimeRequest) -> RuntimeResult:
-            return RuntimeResult(text="ok", provider="openai-compatible", model="gpt-4.1-mini")
-
-    adapters = iter([RetryAdapter(), SuccessAdapter()])
-    monkeypatch.setattr(registry, "resolve_runtime_profiles", lambda _request: resolved)
-    monkeypatch.setattr(registry, "_adapter_for", lambda _profile: next(adapters))
+    monkeypatch.setattr(registry, "run_with_runtime_lanes", fake_lane_runner)
 
     result = await registry.run_with_fallback(request)
 
     assert result.text == "ok"
+    assert result.runtime_lane == RUNTIME_LANE_GENERIC
     assert result.provider == "openai-compatible"
 
 
@@ -89,36 +83,46 @@ async def test_run_with_fallback_uses_next_profile_on_config_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = RuntimeRequest(prompt="hi", cwd=".", task_name="memory_flush")
-    resolved = [
-        RuntimeProfile(key="primary", provider="gemini-cli", model="gemini-3-flash-preview"),
-        RuntimeProfile(
-            key="fallback",
+
+    async def fake_lane_runner(_request: RuntimeRequest) -> RuntimeResult:
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
             provider="openai-codex",
             model="chatgpt-plan-default",
-            command="codex",
-        ),
-    ]
+        )
 
-    class ConfigErrorAdapter:
-        def supports(self, _request: RuntimeRequest) -> bool:
-            return True
+    monkeypatch.setattr(registry, "run_with_runtime_lanes", fake_lane_runner)
 
-        async def run(self, _request: RuntimeRequest) -> RuntimeResult:
-            raise RuntimeConfigError("403 forbidden")
+    result = await registry.run_with_fallback(request)
+
+    assert result.text == "ok"
+    assert result.runtime_lane == RUNTIME_LANE_GENERIC
+    assert result.provider == "openai-codex"
+
+
+@pytest.mark.asyncio
+async def test_run_with_fallback_marks_resume_requests_as_claude_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = RuntimeRequest(prompt="continue", cwd=".", task_name="chat_turn", resume="sess-123")
 
     class SuccessAdapter:
         def supports(self, _request: RuntimeRequest) -> bool:
             return True
 
         async def run(self, _request: RuntimeRequest) -> RuntimeResult:
-            return RuntimeResult(text="ok", provider="openai-codex", model="chatgpt-plan-default")
+            return RuntimeResult(
+                text="ok",
+                runtime_lane=RUNTIME_LANE_CLAUDE_NATIVE,
+                provider="claude",
+                model="claude-sonnet-4-6",
+                session_id="sess-123",
+            )
 
-    adapters = iter([ConfigErrorAdapter(), SuccessAdapter()])
-    monkeypatch.setattr(registry, "resolve_runtime_profiles", lambda _request: resolved)
-    monkeypatch.setattr(registry, "_adapter_for", lambda _profile: next(adapters))
-    monkeypatch.setattr(registry, "mark_profile_unavailable", lambda _profile, _error: None)
+    monkeypatch.setattr(registry, "run_with_runtime_lanes", SuccessAdapter().run)
 
     result = await registry.run_with_fallback(request)
 
-    assert result.text == "ok"
-    assert result.provider == "openai-codex"
+    assert result.runtime_lane == RUNTIME_LANE_CLAUDE_NATIVE
+    assert result.provider == "claude"

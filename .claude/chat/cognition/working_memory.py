@@ -155,7 +155,7 @@ class WorkingMemory:
         """Send memory to LLM processor, get response, return [new_wm, value].
 
         Delegates to runtime_bridge.render_runtime_request() +
-        runtime/registry.run_with_fallback() +
+        runtime/lane_router.run_with_runtime_lanes() +
         runtime_bridge.apply_runtime_result().
         """
         from cognition.runtime_bridge import apply_runtime_result, render_runtime_request
@@ -164,9 +164,9 @@ class WorkingMemory:
             self, instruction, processor, cwd=cwd, schema=schema,
         )
 
-        from runtime.registry import run_with_fallback
+        from runtime.lane_router import run_with_runtime_lanes
 
-        result = await run_with_fallback(request)
+        result = await run_with_runtime_lanes(request)
 
         return apply_runtime_result(self, result, instruction=instruction)
 

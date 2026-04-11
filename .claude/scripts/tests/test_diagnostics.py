@@ -10,7 +10,7 @@ if _CHAT_DIR not in sys.path:
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from diagnostics import DiagnosticsReport, check_environment, collect_diagnostics
+from diagnostics import DiagnosticsReport, check_environment, collect_diagnostics  # noqa: E402
 
 
 class TestDiagnosticsReport:
@@ -27,8 +27,12 @@ class TestDiagnosticsReport:
             memory_doc_count=42,
             memory_last_indexed=None,
             memory_embedding_status="ready",
+            runtime_lanes={"claude_native": "ON", "generic_runtime": "ON"},
             runtime_providers={"claude": "ON"},
-            runtime_default_chain=["claude"],
+            runtime_selected_lane="claude_native",
+            runtime_selected_generic_provider=None,
+            runtime_generic_text_route=["openai-compatible"],
+            runtime_generic_tool_route=["openai-codex"],
             sessions_active=1,
             sessions_total_messages=10,
             sessions_total_cost_usd=0.50,
@@ -36,12 +40,14 @@ class TestDiagnosticsReport:
         )
         assert report.memory_doc_count == 42
         assert report.cognition_available is True
+        assert not hasattr(report, "runtime_default_chain")
 
     def test_report_defaults(self):
         report = DiagnosticsReport(timestamp="now", uptime_seconds=0.0)
         assert report.cognition_available is False
         assert report.memory_doc_count == 0
         assert report.sessions_active == 0
+        assert report.runtime_lanes == {}
         assert report.adapters_connected == {}
 
     def test_collect_diagnostics_returns_report(self):
@@ -52,7 +58,35 @@ class TestDiagnosticsReport:
 
     def test_collect_diagnostics_runtime_providers(self):
         report = collect_diagnostics()
+        assert isinstance(report.runtime_lanes, dict)
         assert isinstance(report.runtime_providers, dict)
+
+    def test_collect_diagnostics_reports_lane_selection(self, monkeypatch):
+        import diagnostics as diagnostics_module
+        import runtime.profiles as profiles
+        import runtime.selection as selection
+
+        monkeypatch.setattr(
+            selection,
+            "resolve_runtime_selection",
+            lambda _env=None: selection.RuntimeSelection(
+                lane="generic_runtime",
+                generic_provider="openai-codex",
+            ),
+        )
+        monkeypatch.setattr(
+            profiles,
+            "build_profile_for_provider",
+            lambda provider, **_kwargs: object() if provider else None,
+        )
+        monkeypatch.setattr(diagnostics_module, "CHAT_DB_PATH", Path("missing.db"))
+
+        report = collect_diagnostics()
+
+        assert report.runtime_selected_lane == "generic_runtime"
+        assert report.runtime_selected_generic_provider == "openai-codex"
+        assert report.runtime_generic_text_route
+        assert report.runtime_generic_tool_route
 
     def test_collect_diagnostics_sessions(self):
         report = collect_diagnostics()

@@ -6,7 +6,6 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -18,7 +17,7 @@ if _CHAT_DIR not in sys.path:
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from cli import main as cli_main
+from cli import main as cli_main  # noqa: E402
 
 
 class TestCLIHelp:
@@ -70,6 +69,111 @@ class TestCLIHelp:
         assert result.exit_code == 0
         assert "1.0.0" in result.output
 
+    def test_chat_model_option_uses_runtime_selection_helper(self, monkeypatch):
+        from click.testing import CliRunner
+
+        import cli as cli_module
+        import core_handlers
+        import extension_manager
+
+        captured: dict[str, str] = {}
+
+        def fake_apply(choice, *, environ, write_key=None, delete_key=None):
+            captured["choice"] = choice
+            return None
+
+        class FakeAdapter:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            async def connect(self):
+                return None
+
+            async def disconnect(self):
+                return None
+
+            async def listen(self):
+                if False:
+                    yield None
+
+            def get_session_info(self):
+                return {"session_id": "cli-session"}
+
+            def format_final_output(self, _session_id, _session_info):
+                return '{"success": true}'
+
+        class FakeEngine:
+            def __init__(self, *_args, **_kwargs):
+                self.session_store = None
+
+        class FakeRouter:
+            def __init__(self, _engine, _manager):
+                self.adapters = {}
+
+            def register(self, _adapter):
+                return None
+
+            async def _handle(self, _adapter, _incoming):
+                return None
+
+        class FakeManager:
+            def register_core_commands(self, *_args, **_kwargs):
+                return None
+
+            def register_core_intents(self, *_args, **_kwargs):
+                return None
+
+        monkeypatch.setattr(cli_module, "apply_runtime_selection_choice", fake_apply)
+        monkeypatch.setattr("adapters.cli_adapter.CLIAdapter", FakeAdapter)
+        monkeypatch.setattr(cli_module, "ConversationEngine", FakeEngine)
+        monkeypatch.setattr(cli_module, "ChatRouter", FakeRouter)
+        monkeypatch.setattr(extension_manager, "ExtensionManager", FakeManager)
+        monkeypatch.setattr(extension_manager, "set_manager", lambda _manager: None)
+        monkeypatch.setattr(cli_module, "get_session_store", lambda _path: object())
+        monkeypatch.setattr(core_handlers, "set_context", lambda **_kwargs: None)
+        monkeypatch.setattr(cli_module, "EXTENSIONS_ENABLED", False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli_main, ["chat", "-q", "hello", "-Q", "-m", "claude"])
+
+        assert result.exit_code == 0
+        assert captured["choice"] == "claude"
+
+    def test_setup_wizard_uses_runtime_selection_helper(self, monkeypatch, tmp_path):
+        import cli as cli_module
+        import config
+
+        captured: dict[str, str] = {}
+        env_dir = tmp_path / "chat"
+        env_dir.mkdir()
+        (env_dir / ".env").write_text("", encoding="utf-8")
+        memory_dir = tmp_path / "Memory"
+        memory_dir.mkdir()
+
+        monkeypatch.setattr(cli_module, "_SCRIPTS_DIR", env_dir)
+        monkeypatch.setattr(cli_module, "_detect_providers", lambda _env: {
+            "claude": True,
+            "codex": True,
+            "gemini": False,
+            "openrouter": False,
+            "openai": False,
+        })
+        monkeypatch.setattr(
+            cli_module,
+            "apply_runtime_selection_choice",
+            lambda choice, *, environ, write_key, delete_key: captured.setdefault("choice", choice),
+        )
+        monkeypatch.setattr(cli_module.click, "confirm", lambda *args, **kwargs: False)
+        monkeypatch.setattr(config, "GOOGLE_CREDENTIALS_FILE", tmp_path / "google.json")
+        monkeypatch.setattr(config, "MEMORY_DIR", memory_dir)
+        monkeypatch.setattr(config, "MEMORY_FILE", memory_dir / "MEMORY.md")
+        monkeypatch.setattr(config, "SOUL_FILE", memory_dir / "SOUL.md")
+        monkeypatch.setattr(config, "USER_FILE", memory_dir / "USER.md")
+
+        cli_module._run_setup_wizard(False, False)
+
+        assert captured["choice"] == "claude"
+
 
 class TestCLIAdapter:
     """Unit tests for CLIAdapter."""
@@ -97,11 +201,12 @@ class TestCLIAdapter:
         adapter = CLIAdapter(query="test", quiet=True)
         output = adapter.format_final_output(
             "sess123",
-            {"provider": "claude", "model": "opus", "cost_usd": 0.01, "tool_calls": 2},
+            {"lane": "claude_native", "provider": "claude", "model": "opus", "cost_usd": 0.01, "tool_calls": 2},
         )
         data = json.loads(output)
         assert data["success"] is True
         assert data["session_id"] == "sess123"
+        assert data["lane"] == "claude_native"
         assert data["provider"] == "claude"
 
     def test_normal_output_format(self):
@@ -195,6 +300,7 @@ class TestCLIAdapter:
                 user_id="cli-user",
                 created_at=now,
                 updated_at=now,
+                runtime_lane="generic_runtime",
                 runtime_provider="openai-codex",
                 runtime_model="chatgpt-plan-default",
             )
@@ -204,6 +310,7 @@ class TestCLIAdapter:
         adapter._channel_id = channel_id
 
         session_info = adapter.get_session_info()
+        assert session_info["lane"] == "generic_runtime"
         assert session_info["provider"] == "openai-codex"
         assert session_info["model"] == "chatgpt-plan-default"
 

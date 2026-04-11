@@ -56,9 +56,9 @@ class QueryExpander(Protocol):
 
 @runtime_checkable
 class MemoryProcessor(Protocol):
-    """Processes a runtime request through the provider chain.
+    """Processes a runtime request through the runtime layer.
 
-    5a: run_with_fallback() satisfies this.
+    5a: run_with_runtime_lanes() satisfies this.
     5b: WorkingMemory.transform() wraps it via runtime_bridge.
     """
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import RuntimeRequest, RuntimeResult
+from .base import RUNTIME_LANE_GENERIC, RuntimeRequest, RuntimeResult
 from .capabilities import TEXT_REASONING
 from .errors import RuntimeConfigError, RuntimeRetryableError, RuntimeUnsupportedCapabilityError
 from .profiles import RuntimeProfile
@@ -69,6 +69,7 @@ class OpenAICompatibleRuntime:
 
         return RuntimeResult(
             text=text.strip(),
+            runtime_lane=RUNTIME_LANE_GENERIC,
             provider=self.profile.provider,
             model=model,
             profile_key=self.profile.key,

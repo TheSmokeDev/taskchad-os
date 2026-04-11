@@ -11,6 +11,7 @@ Usage:
     thehomie setup --check                # Verify environment
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -43,6 +44,12 @@ from config import (  # noqa: E402
     PROJECT_ROOT,
     ensure_directories,
 )
+from runtime.selection import (  # noqa: E402
+    apply_runtime_selection_choice,
+    provider_display_name,
+    resolve_runtime_selection,
+    runtime_selection_choice,
+)
 
 
 @click.group(invoke_without_command=True)
@@ -58,7 +65,7 @@ def main(ctx):
 @main.command()
 @click.option("-q", "--query", default=None, help="Single query (non-interactive)")
 @click.option("-Q", "--quiet", is_flag=True, help="Quiet/JSON output (for Paperclip)")
-@click.option("-m", "--model", default=None, help="Force provider (claude/codex/gemini/openrouter)")
+@click.option("-m", "--model", default=None, help="Select runtime lane/provider (claude/codex/gemini/openrouter/openai/auto)")
 @click.option("-t", "--toolsets", default=None, help="Filter tool access (reserved for future)")
 @click.option("--resume", "-r", "resume_id", default=None, help="Resume session by ID")
 @click.option("--continue", "-c", "continue_last", is_flag=True, help="Resume most recent session")
@@ -70,9 +77,9 @@ def chat(query, quiet, model, toolsets, resume_id, continue_last):
 
     from adapters.cli_adapter import CLIAdapter
 
-    # -m: Pin provider chain to user's choice via env var
+    # -m: Apply an in-process runtime selection override for this CLI session.
     if model:
-        os.environ["SECOND_BRAIN_RUNTIME_PROVIDER"] = model
+        apply_runtime_selection_choice(model.lower().strip(), environ=os.environ)
 
     # -t: Toolset filtering is NOT yet wired into the engine
     if toolsets and not quiet:
@@ -833,6 +840,34 @@ def _print_status_human(report):
         for move, active in report.cognition_moves.items():
             click.echo(f"  {move}: {'ON' if active else 'OFF'}")
 
+    click.echo("\nRuntime lanes:")
+    for name, status in report.runtime_lanes.items():
+        click.echo(f"  {name}: {status}")
+
+    click.echo(f"\nSelected lane: {report.runtime_selected_lane}")
+    preferred_generic = (
+        provider_display_name(report.runtime_selected_generic_provider)
+        if report.runtime_selected_generic_provider
+        else "auto"
+    )
+    click.echo(f"Generic preferred provider: {preferred_generic}")
+    if report.runtime_generic_text_route:
+        click.echo(
+            "Generic text route: "
+            + " -> ".join(
+                provider_display_name(provider)
+                for provider in report.runtime_generic_text_route
+            )
+        )
+    if report.runtime_generic_tool_route:
+        click.echo(
+            "Generic tool route: "
+            + " -> ".join(
+                provider_display_name(provider)
+                for provider in report.runtime_generic_tool_route
+            )
+        )
+
     click.echo("\nRuntime providers:")
     for name, status in report.runtime_providers.items():
         click.echo(f"  {name}: {status}")
@@ -872,28 +907,40 @@ def _run_setup_wizard(advanced: bool, headless_google: bool):
 
     click.echo("The Homie — Setup Wizard\n")
 
-    # Step 1: Runtime Provider
-    click.echo("Step 1/4: Runtime Provider\n")
+    # Step 1: Runtime Selection
+    click.echo("Step 1/4: Runtime Selection\n")
     providers_found = _detect_providers(env_values)
+    current_selection = resolve_runtime_selection(env_values)
 
     if any(providers_found.values()):
         for name, available in providers_found.items():
             icon = "OK" if available else "--"
             click.echo(f"  [{icon}] {name}")
 
-        default_primary = env_values.get("SECOND_BRAIN_RUNTIME_PROVIDER", "") or next(
-            (k for k, v in providers_found.items() if v), ""
-        )
+        default_primary = runtime_selection_choice(current_selection)
+        if default_primary == "auto":
+            default_primary = next((k for k, v in providers_found.items() if v), "auto")
+        available_choices = ["auto", *[k for k, v in providers_found.items() if v]]
         if advanced:
             primary = click.prompt(
-                "  Primary provider",
-                type=click.Choice([k for k, v in providers_found.items() if v]),
+                "  Runtime selection",
+                type=click.Choice(available_choices),
                 default=default_primary,
             )
-            _write_env_key("SECOND_BRAIN_RUNTIME_PROVIDER", primary)
+            apply_runtime_selection_choice(
+                primary,
+                environ=os.environ,
+                write_key=_write_env_key,
+                delete_key=_delete_env_key,
+            )
         else:
-            if not env_values.get("SECOND_BRAIN_RUNTIME_PROVIDER", ""):
-                _write_env_key("SECOND_BRAIN_RUNTIME_PROVIDER", default_primary)
+            if current_selection.is_auto:
+                apply_runtime_selection_choice(
+                    default_primary,
+                    environ=os.environ,
+                    write_key=_write_env_key,
+                    delete_key=_delete_env_key,
+                )
             click.echo(f"  Using: {default_primary} (auto-detected)")
     else:
         click.echo("  No runtime provider detected.\n")
@@ -1103,6 +1150,25 @@ def _write_env_key(key: str, value: str) -> None:
     if not wrote:
         new_lines.append(f"{key}={value}")
     env_path.write_text("\n".join(new_lines).rstrip() + "\n")
+
+
+def _delete_env_key(key: str) -> None:
+    """Remove a key=value pair from .env if it exists."""
+    env_path = _SCRIPTS_DIR / ".env"
+    if not env_path.exists():
+        return
+    lines = env_path.read_text().splitlines()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        candidate = stripped.lstrip("#").strip()
+        if candidate.startswith(f"{key}="):
+            continue
+        new_lines.append(line)
+    if new_lines:
+        env_path.write_text("\n".join(new_lines).rstrip() + "\n")
+    else:
+        env_path.write_text("")
 
 
 if __name__ == "__main__":

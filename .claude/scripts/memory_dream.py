@@ -283,7 +283,7 @@ def gather_signal(daily_logs: list[Path], days: int = 7) -> SignalResult:
 
 
 # =============================================================================
-# PHASE 3: CONSOLIDATE (LLM via run_with_fallback)
+# PHASE 3: CONSOLIDATE (LLM via run_with_runtime_lanes)
 # =============================================================================
 
 
@@ -298,7 +298,7 @@ async def consolidate(
 
     from runtime.base import RuntimeRequest
     from runtime.capabilities import TOOL_REASONING
-    from runtime.registry import run_with_fallback
+    from runtime.lane_router import run_with_runtime_lanes
     from shared import validate_bash_command
 
     # Load current file contents for context
@@ -366,7 +366,7 @@ Today is {today_str}. Consolidate the signal above into memory:
 If nothing in the signal warrants changes, respond with exactly: CONSOLIDATION_OK
 """
 
-    result = await run_with_fallback(
+    result = await run_with_runtime_lanes(
         RuntimeRequest(
             prompt=prompt,
             cwd=PROJECT_ROOT,
@@ -396,7 +396,7 @@ If nothing in the signal warrants changes, respond with exactly: CONSOLIDATION_O
 
 
 # =============================================================================
-# PHASE 4: PRUNE & REINDEX (LLM via run_with_fallback)
+# PHASE 4: PRUNE & REINDEX (LLM via run_with_runtime_lanes)
 # =============================================================================
 
 
@@ -406,7 +406,7 @@ async def prune(orientation: OrientResult, test_mode: bool = False) -> str:
 
     from runtime.base import RuntimeRequest
     from runtime.capabilities import TOOL_REASONING
-    from runtime.registry import run_with_fallback
+    from runtime.lane_router import run_with_runtime_lanes
     from shared import validate_bash_command
 
     memory_content = MEMORY_FILE.read_text(encoding="utf-8") if MEMORY_FILE.exists() else ""
@@ -447,7 +447,7 @@ Use the Edit tool to modify {MEMORY_FILE}.
 If MEMORY.md is already clean and under 200 lines, respond with exactly: PRUNE_OK
 """
 
-    result = await run_with_fallback(
+    result = await run_with_runtime_lanes(
         RuntimeRequest(
             prompt=prompt,
             cwd=PROJECT_ROOT,

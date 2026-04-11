@@ -2,9 +2,9 @@
 
 Wraps the runtime layer for cheap, single-turn LLM calls used by
 promotion distillation, continuity rollups, and future enrichment.
-No tools — TEXT_REASONING only.
+No tools - TEXT_REASONING only.
 
-Pattern: memory_reflect.py run_with_fallback() call.
+Pattern: memory_reflect.py run_with_runtime_lanes() call.
 """
 
 from __future__ import annotations
@@ -58,12 +58,12 @@ async def reasoning_step(
 ) -> ReasoningStepResult:
     """Run a single LLM reasoning operation. No tools, cheapest model.
 
-    CRITICAL: TEXT_REASONING only — never TOOL_REASONING for distillation.
-    Pattern: memory_reflect.py run_with_fallback() call.
+    CRITICAL: TEXT_REASONING only - never TOOL_REASONING for distillation.
+    Pattern: memory_reflect.py run_with_runtime_lanes() call.
     """
     from runtime.base import RuntimeRequest
     from runtime.capabilities import TEXT_REASONING
-    from runtime.registry import run_with_fallback
+    from runtime.lane_router import run_with_runtime_lanes
 
     start = time.monotonic()
 
@@ -78,7 +78,7 @@ async def reasoning_step(
         "append": context,
     } if context else None
 
-    result = await run_with_fallback(RuntimeRequest(
+    result = await run_with_runtime_lanes(RuntimeRequest(
         prompt=prompt,
         cwd=cwd or Path.cwd(),
         task_name="reasoning_step",

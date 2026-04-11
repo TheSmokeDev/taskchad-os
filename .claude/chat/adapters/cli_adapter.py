@@ -179,12 +179,13 @@ class CLIAdapter:
         if session:
             return {
                 "session_id": session.runtime_session_id or session.session_id,
+                "lane": session.runtime_lane,
                 "provider": session.runtime_provider,
                 "model": session.runtime_model,
                 "cost_usd": session.total_cost_usd,
                 "tool_calls": session.tool_call_count,
             }
-        return {"session_id": "", "provider": "", "model": "", "cost_usd": 0.0, "tool_calls": 0}
+        return {"session_id": "", "lane": "", "provider": "", "model": "", "cost_usd": 0.0, "tool_calls": 0}
 
     def format_final_output(self, session_id: str | None, result: dict) -> str:
         """Format the final output for Paperclip/MC control plane.
@@ -201,6 +202,7 @@ class CLIAdapter:
                 "success": not had_error,
                 "response": response_text if not had_error else "",
                 "session_id": session_id or "",
+                "lane": result.get("lane", ""),
                 "provider": result.get("provider", ""),
                 "model": result.get("model", ""),
                 "cost_usd": result.get("cost_usd", 0.0),
@@ -215,6 +217,7 @@ class CLIAdapter:
                 "",
                 "---",
                 f"session_id: {session_id or 'none'}",
+                f"lane: {result.get('lane', 'unknown')}",
                 f"provider: {result.get('provider', 'unknown')}",
                 f"model: {result.get('model', 'unknown')}",
                 f"cost_usd: {result.get('cost_usd', 0.0):.4f}",
