@@ -231,7 +231,8 @@ def test_goal_names_extraction() -> None:
 def test_memory_index_has_paths(tmp_path: Path) -> None:
     memory_dir, _ = _setup_memory_dir(tmp_path)
     index = _build_memory_index(memory_dir)
-    assert "vault/memory" in index  # repo-relative, not absolute
+    # Vault is outside PROJECT_ROOT in tests, so the absolute vault path is shown
+    assert memory_dir.as_posix() in index
     assert "BUDGET.md" in index
     assert "GOALS.md" in index
     assert "concepts/" in index  # concepts dir exists in fixture

@@ -15,13 +15,13 @@ import os
 import re
 from pathlib import Path
 
+from config import MEMORY_DIR
 from orchestration.observability import orchestration_span, update_observation
 
-# Canonical vault root — overridable via env for tests and alt installs
-_DEFAULT_VAULT_ROOT = Path(
-    os.getenv("VAULT_ROOT")
-    or str(Path(__file__).resolve().parents[3] / "TheHomie" / "Memory")
-)
+# Canonical vault root — overridable via env for tests and alt installs.
+# `VAULT_ROOT` is the legacy team-memory escape hatch (preserved for tests).
+# When unset, fall through to `config.MEMORY_DIR`, which respects HOMIE_VAULT_DIR.
+_DEFAULT_VAULT_ROOT = Path(os.getenv("VAULT_ROOT") or str(MEMORY_DIR))
 
 
 def _vault_root() -> Path:

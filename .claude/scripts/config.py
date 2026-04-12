@@ -19,7 +19,16 @@ load_dotenv(Path(__file__).parent / ".env", override=True)
 SCRIPTS_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPTS_DIR.parent.parent  # thehomie
 CLAUDE_DIR = PROJECT_ROOT / ".claude"
-MEMORY_DIR = PROJECT_ROOT / "TheHomie" / "Memory"
+
+# Vault location — override with HOMIE_VAULT_DIR. Accepts absolute paths,
+# ~-expandable paths, or relative paths (resolved against cwd, not repo root).
+# Default is the checked-in vault inside the repo.
+_vault_override = os.getenv("HOMIE_VAULT_DIR")
+MEMORY_DIR = (
+    Path(_vault_override).expanduser().resolve()
+    if _vault_override
+    else (PROJECT_ROOT / "TheHomie" / "Memory").resolve()
+)
 
 # Memory file paths
 SOUL_FILE = MEMORY_DIR / "SOUL.md"
@@ -76,9 +85,14 @@ RECALL_RERANK_TOP_N = int(os.getenv("RECALL_RERANK_TOP_N", "10"))
 RECALL_RERANK_TIMEOUT_S = float(os.getenv("RECALL_RERANK_TIMEOUT_S", "3.0"))
 
 # === Embedding Configuration ===
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIMENSIONS = 384
-EMBEDDING_CACHE_DIR = DATA_DIR / "models"
+# EmbeddingGemma-300m @ 512 Matryoshka dims (upgraded from MiniLM-L6-v2 2026-04-11).
+# Native output is 768-dim; sentence-transformers truncate_dim=512 slices + renormalizes
+# inside the model graph. Requires HF_TOKEN in .env (gated model, license accepted).
+EMBEDDING_MODEL = "google/embeddinggemma-300m"
+EMBEDDING_DIMENSIONS = 512
+# Cache redirected off C: drive (66 GB free) onto E: drive (662 GB free) to avoid
+# disk pressure from the ~600 MB model + tokenizer + intermediate files.
+EMBEDDING_CACHE_DIR = Path(os.getenv("EMBEDDING_CACHE_DIR", "E:/ai-models/embeddinggemma"))
 
 # === Integration Configuration (Phase 5) ===
 INTEGRATIONS_DIR = SCRIPTS_DIR / "integrations"

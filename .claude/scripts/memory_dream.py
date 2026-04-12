@@ -5,9 +5,9 @@ Dream Cycle — Memory Consolidation for The Homie.
 Phases 1-2 are pure Python (no LLM). Phase 2 exits with DREAM_SILENT if no
 signal found, skipping all LLM calls entirely.
 
-Inspired by Claude Code Auto-Dream but built at the FRAMEWORK level —
-provider-agnostic via run_with_fallback(). Works with Claude, Codex, Gemini,
-or any provider configured in the runtime.
+Inspired by Claude Code Auto-Dream but built at the FRAMEWORK level -
+provider-agnostic via the lane-first runtime router. Works with Claude, Codex,
+Gemini, or any provider configured in the runtime.
 
 Patterns borrowed from Hermes Agent cron scheduler:
 - [SILENT] suppression (no signal → no LLM call)
@@ -691,6 +691,30 @@ async def _run_dream_inner(
 
     append_to_daily_log("\n".join(summary_parts), "Dream Cycle")
     print(f"[{now_local()}] Dream cycle finished.")
+
+    # --- Vault log append (chronological wiki timeline, non-silent only) ---
+    if not test_mode:
+        try:
+            from entity_extractor import append_vault_log
+
+            bullets = [
+                f"signal score: {signal.signal_score}",
+                f"corrections: {len(signal.corrections)}, saves: {len(signal.saves)}, "
+                f"stalls: {len(signal.stalls)}, repeated: {len(signal.repeated_entities)}",
+            ]
+            if "CONSOLIDATION_OK" not in consolidation_result:
+                bullets.append("consolidation: merged signal into memory")
+            if "PRUNE_OK" not in (prune_result or ""):
+                bullets.append("pruning: cleaned MEMORY.md")
+
+            append_vault_log(
+                MEMORY_DIR,
+                "dream",
+                f"Dream cycle ({days} day scan)",
+                bullets=bullets,
+            )
+        except Exception as exc:
+            print(f"[{now_local()}] Vault log append failed (non-blocking): {exc}")
 
     return consolidation_result
 

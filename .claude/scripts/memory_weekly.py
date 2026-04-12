@@ -422,6 +422,23 @@ Only update a section if there is clear, new evidence. Do NOT duplicate existing
         except Exception as exc:
             print(f"[{now_local()}] Hermes Scout post-weekly failed (non-blocking): {exc}")
 
+    # --- Vault log append (chronological wiki timeline) ---
+    if not test_mode and "WEEKLY_OK" not in response_text:
+        try:
+            from entity_extractor import append_vault_log
+
+            append_vault_log(
+                MEMORY_DIR,
+                "weekly",
+                f"Weekly synthesis ({days} day lookback)",
+                bullets=[
+                    f"days reviewed: {days}",
+                    f"logs consumed: {len(logs)}",
+                ],
+            )
+        except Exception as exc:
+            print(f"[{now_local()}] Vault log append failed (non-blocking): {exc}")
+
     if "WEEKLY_OK" in response_text:
         return None
     return response_text

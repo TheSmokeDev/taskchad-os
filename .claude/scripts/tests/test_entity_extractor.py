@@ -815,3 +815,343 @@ class TestArchival:
         from entity_extractor import find_archivable
         archivable = find_archivable(vault, days_threshold=0)
         assert len(archivable) == 0
+
+
+# ---------------------------------------------------------------------------
+# Karpathy LLM Wiki port — preserve_raw, append_vault_log, generate_root_index,
+# _collect_concept_entries
+# ---------------------------------------------------------------------------
+
+
+class TestPreserveRaw:
+    """preserve_raw() — copy source into {vault}/raw/ with collision handling."""
+
+    def test_happy_path_name_preserved(self, tmp_path):
+        from entity_extractor import preserve_raw
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        src = tmp_path / "article.md"
+        src.write_text("original body", encoding="utf-8")
+
+        dest = preserve_raw(src, vault)
+
+        assert dest == vault / "raw" / "article.md"
+        assert dest.read_text(encoding="utf-8") == "original body"
+        # Raw directory was auto-created
+        assert (vault / "raw").is_dir()
+        # Original is untouched
+        assert src.read_text(encoding="utf-8") == "original body"
+
+    def test_collision_falls_back_to_date_prefix(self, tmp_path):
+        from entity_extractor import _today, preserve_raw
+
+        vault = tmp_path / "vault"
+        (vault / "raw").mkdir(parents=True)
+        src = tmp_path / "article.md"
+        src.write_text("second version", encoding="utf-8")
+        # Pre-existing file at target → collision
+        (vault / "raw" / "article.md").write_text("first version", encoding="utf-8")
+
+        dest = preserve_raw(src, vault)
+
+        assert dest.name == f"{_today()}-article.md"
+        assert dest.read_text(encoding="utf-8") == "second version"
+        # Original collision file untouched
+        assert (vault / "raw" / "article.md").read_text(encoding="utf-8") == "first version"
+
+    def test_always_date_prefix_true(self, tmp_path):
+        from entity_extractor import _today, preserve_raw
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        src = tmp_path / "statement.pdf"
+        src.write_text("bank data", encoding="utf-8")
+
+        dest = preserve_raw(src, vault, always_date_prefix=True)
+
+        # Even without collision, unconditional date prefix applies
+        assert dest.name == f"{_today()}-statement.pdf"
+        assert not (vault / "raw" / "statement.pdf").exists()
+
+    def test_preserves_file_metadata(self, tmp_path):
+        import os
+        import time
+
+        from entity_extractor import preserve_raw
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        src = tmp_path / "article.md"
+        src.write_text("body", encoding="utf-8")
+        # Set a deterministic mtime well in the past
+        past = time.time() - 86400  # 1 day ago
+        os.utime(src, (past, past))
+
+        dest = preserve_raw(src, vault)
+
+        # shutil.copy2 should preserve mtime (allow 1s tolerance for FS granularity)
+        assert abs(dest.stat().st_mtime - past) < 2
+
+
+class TestAppendVaultLog:
+    """append_vault_log() — LOG.md timeline, grep-friendly."""
+
+    def test_first_write_creates_file_with_frontmatter(self, tmp_path):
+        from entity_extractor import append_vault_log
+
+        vault = tmp_path / "vault"
+        log_path = append_vault_log(
+            vault, "ingest", "Test Source", bullets=["entities: 3 processed"]
+        )
+
+        assert log_path == vault / "LOG.md"
+        content = log_path.read_text(encoding="utf-8")
+        # Frontmatter with system tag
+        assert content.startswith("---")
+        assert "tags: [system]" in content
+        # Header exists
+        assert "# Vault Log" in content
+        # Entry header matches grep pattern "^## ["
+        assert "\n## [" in content
+        assert "] ingest | Test Source" in content
+        # Bullet rendered
+        assert "- entities: 3 processed" in content
+
+    def test_subsequent_writes_append(self, tmp_path):
+        from entity_extractor import append_vault_log
+
+        vault = tmp_path / "vault"
+        append_vault_log(vault, "reflect", "First entry")
+        append_vault_log(vault, "weekly", "Second entry", bullets=["days: 7"])
+
+        content = (vault / "LOG.md").read_text(encoding="utf-8")
+        assert "] reflect | First entry" in content
+        assert "] weekly | Second entry" in content
+        # Header only once (first-write check worked)
+        assert content.count("# Vault Log") == 1
+        assert content.count("tags: [system]") == 1
+
+    def test_grep_pattern_matches_each_entry(self, tmp_path):
+        """Karpathy's documented use case: grep '^## \\[' LOG.md | tail -5."""
+        import re
+
+        from entity_extractor import append_vault_log
+
+        vault = tmp_path / "vault"
+        for i in range(3):
+            append_vault_log(vault, "compile", f"Run {i}")
+
+        content = (vault / "LOG.md").read_text(encoding="utf-8")
+        matches = re.findall(r"^## \[", content, re.MULTILINE)
+        assert len(matches) == 3
+
+    def test_empty_bullets_still_renders_header(self, tmp_path):
+        from entity_extractor import append_vault_log
+
+        vault = tmp_path / "vault"
+        append_vault_log(vault, "archive", "Stale Concept", bullets=None)
+
+        content = (vault / "LOG.md").read_text(encoding="utf-8")
+        assert "] archive | Stale Concept" in content
+        # No phantom bullets
+        lines_after_header = content.split("] archive | Stale Concept", 1)[1]
+        assert "\n- " not in lines_after_header.split("\n\n", 1)[0]
+
+
+class TestCollectConceptEntries:
+    """_collect_concept_entries() — shared parsing helper for both indices."""
+
+    def _write_concept(
+        self,
+        concepts_dir: Path,
+        slug: str,
+        entity_type: str = "concept",
+        summary: str = "test summary",
+    ) -> None:
+        concepts_dir.mkdir(parents=True, exist_ok=True)
+        (concepts_dir / f"{slug}.md").write_text(
+            f"---\ntags: [concept, auto-compiled, {entity_type}]\n"
+            f'summary: "{summary}"\n---\n\n# {slug}\n',
+            encoding="utf-8",
+        )
+
+    def test_basic_grouping_by_entity_type(self, tmp_path):
+        from entity_extractor import _collect_concept_entries
+
+        concepts = tmp_path / "concepts"
+        self._write_concept(concepts, "ALPHA", entity_type="framework", summary="alpha sum")
+        self._write_concept(concepts, "BETA", entity_type="framework", summary="beta sum")
+        self._write_concept(concepts, "GAMMA", entity_type="tool", summary="gamma sum")
+
+        entries = _collect_concept_entries(concepts)
+
+        assert set(entries.keys()) == {"framework", "tool"}
+        assert ("ALPHA", "alpha sum") in entries["framework"]
+        assert ("BETA", "beta sum") in entries["framework"]
+        assert ("GAMMA", "gamma sum") in entries["tool"]
+
+    def test_skips_index_and_build_log(self, tmp_path):
+        from entity_extractor import _collect_concept_entries
+
+        concepts = tmp_path / "concepts"
+        self._write_concept(concepts, "REAL", entity_type="concept")
+        # Files that must be skipped
+        (concepts / "INDEX.md").write_text("# index\n", encoding="utf-8")
+        (concepts / "BUILD-LOG.md").write_text("# build log\n", encoding="utf-8")
+        (concepts / "BUILD-LOG-2026.md").write_text("# rotated\n", encoding="utf-8")
+
+        entries = _collect_concept_entries(concepts)
+
+        all_slugs = [slug for group in entries.values() for slug, _ in group]
+        assert all_slugs == ["REAL"]
+
+    def test_missing_concepts_dir_returns_empty(self, tmp_path):
+        from entity_extractor import _collect_concept_entries
+
+        entries = _collect_concept_entries(tmp_path / "does-not-exist")
+        assert entries == {}
+
+    def test_falls_back_to_concept_type_when_no_specific_tag(self, tmp_path):
+        from entity_extractor import _collect_concept_entries
+
+        concepts = tmp_path / "concepts"
+        concepts.mkdir()
+        # Only generic tags, no entity-type tag
+        (concepts / "VANILLA.md").write_text(
+            '---\ntags: [concept, auto-compiled]\nsummary: "plain"\n---\n',
+            encoding="utf-8",
+        )
+
+        entries = _collect_concept_entries(concepts)
+
+        assert "concept" in entries
+        assert ("VANILLA", "plain") in entries["concept"]
+
+
+class TestGenerateRootIndex:
+    """generate_root_index() — whole-wiki catalog at {vault}/INDEX.md."""
+
+    def test_empty_vault_produces_valid_file(self, tmp_path):
+        from entity_extractor import generate_root_index
+
+        vault = tmp_path / "vault"
+        idx = generate_root_index(vault)
+
+        assert idx == vault / "INDEX.md"
+        content = idx.read_text(encoding="utf-8")
+        # Proper frontmatter
+        assert "tags: [system, auto-compiled]" in content
+        assert "# Wiki Index" in content
+        # Zero counts
+        assert "**0 concepts | 0 canonical | 0 directories**" in content
+
+    def test_identity_files_included_when_present(self, tmp_path):
+        from entity_extractor import generate_root_index
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        # Only a subset — missing ones should be silently skipped (fail-open)
+        (vault / "SOUL.md").write_text(
+            '---\nsummary: "AI personality from file"\n---\n# SOUL\n', encoding="utf-8"
+        )
+        (vault / "MEMORY.md").write_text(
+            '---\nsummary: "long-term memory"\n---\n# MEMORY\n', encoding="utf-8"
+        )
+
+        content = generate_root_index(vault).read_text(encoding="utf-8")
+
+        assert "## Identity" in content
+        assert "[[SOUL]] — AI personality from file" in content
+        assert "[[MEMORY]] — long-term memory" in content
+        # Missing identity files don't appear
+        assert "[[USER]]" not in content
+        # canonical count = 2
+        assert "2 canonical" in content
+
+    def test_missing_identity_files_fail_open(self, tmp_path):
+        """No identity files at all → function still succeeds, no crash."""
+        from entity_extractor import generate_root_index
+
+        vault = tmp_path / "vault"
+        idx = generate_root_index(vault)
+
+        assert idx.exists()
+        # No Identity section if zero canonical
+        content = idx.read_text(encoding="utf-8")
+        assert "## Identity" not in content
+
+    def test_concepts_grouped_by_type_with_cap(self, tmp_path):
+        from entity_extractor import _ROOT_INDEX_MAX_PER_TYPE, generate_root_index
+
+        vault = tmp_path / "vault"
+        concepts = vault / "concepts"
+        concepts.mkdir(parents=True)
+
+        # Write enough to trip the overflow cap (>25 of a single type)
+        for i in range(_ROOT_INDEX_MAX_PER_TYPE + 5):
+            (concepts / f"CONCEPT-{i:03d}.md").write_text(
+                f"---\ntags: [concept, auto-compiled, framework]\n"
+                f'summary: "concept {i}"\n---\n',
+                encoding="utf-8",
+            )
+
+        content = generate_root_index(vault).read_text(encoding="utf-8")
+
+        assert "## Concepts by Type" in content
+        assert f"### Framework ({_ROOT_INDEX_MAX_PER_TYPE + 5})" in content
+        # Overflow pointer rendered
+        assert "(+5 more — see [[INDEX|concepts/INDEX]])" in content
+        # Total counter reflects full count, not capped
+        assert f"**{_ROOT_INDEX_MAX_PER_TYPE + 5} concepts" in content
+
+    def test_directories_excludes_private_and_concepts(self, tmp_path):
+        from entity_extractor import generate_root_index
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        # Public directories (should appear)
+        (vault / "daily").mkdir()
+        (vault / "drafts").mkdir()
+        # Concepts dir (covered separately — should NOT appear in Directories section)
+        (vault / "concepts").mkdir()
+        # Leading-underscore private dirs (should NOT appear)
+        (vault / "_archive").mkdir()
+        (vault / "_canvas").mkdir()
+        (vault / "_state").mkdir()
+        # Leading-dot hidden dir (should NOT appear)
+        (vault / ".obsidian").mkdir()
+
+        content = generate_root_index(vault).read_text(encoding="utf-8")
+
+        assert "## Directories" in content
+        assert "`daily/`" in content
+        assert "`drafts/`" in content
+        # Excluded
+        assert "`_archive/`" not in content
+        assert "`_canvas/`" not in content
+        assert "`.obsidian/`" not in content
+        # concepts has a dedicated section — not in directories list either
+        dirs_section = content.split("## Directories", 1)[1]
+        assert "`concepts/`" not in dirs_section
+
+    def test_moc_files_discovered_via_glob(self, tmp_path):
+        from entity_extractor import generate_root_index
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "MOC-operations.md").write_text(
+            '---\nsummary: "ops hub"\n---\n# MOC-operations\n', encoding="utf-8"
+        )
+        (vault / "MOC-thehomie.md").write_text(
+            '---\nsummary: "framework hub"\n---\n', encoding="utf-8"
+        )
+        # Non-MOC file at root — should NOT appear in MOC section
+        (vault / "RANDOM.md").write_text("# random\n", encoding="utf-8")
+
+        content = generate_root_index(vault).read_text(encoding="utf-8")
+
+        assert "## Maps of Content" in content
+        assert "[[MOC-operations]] — ops hub" in content
+        assert "[[MOC-thehomie]] — framework hub" in content
+        assert "[[RANDOM]]" not in content

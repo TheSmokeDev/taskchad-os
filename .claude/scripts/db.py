@@ -83,11 +83,22 @@ class SQLiteMemoryDB:
             import sqlite_vec
 
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(str(self._db_path))
+            # 30s lock wait — plenty for concurrent heartbeat/chat bot/recall
+            # readers during a reindex. Default would be 5s which is not enough
+            # when another process holds a rollback-journal exclusive lock.
+            self._conn = sqlite3.connect(str(self._db_path), timeout=30.0)
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)
             self._conn.enable_load_extension(False)
             self._conn.row_factory = sqlite3.Row
+            # WAL mode allows concurrent readers + single writer (no mutual
+            # exclusion between them). journal_mode persists in the DB header
+            # once set — safe to re-assert on every connection. synchronous
+            # NORMAL is the sweet spot with WAL (no durability regression vs
+            # rollback journal, ~2-3x faster writes).
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA synchronous = NORMAL")
+            self._conn.execute("PRAGMA busy_timeout = 30000")
         return self._conn
 
     def init_schema(self) -> None:
@@ -230,8 +241,18 @@ class SQLiteMemoryDB:
         )
 
     def bulk_clear(self) -> None:
+        # Drop + recreate vec_chunks so embedding dimension changes take effect.
+        # sqlite-vec bakes the dimension into the virtual table schema; plain
+        # DELETE leaves it at the old dim and new-dim inserts fail with a
+        # shape mismatch. This is the path a model swap takes (MiniLM 384 →
+        # EmbeddingGemma 512, etc.).
         conn = self._get_conn()
-        conn.execute("DELETE FROM vec_chunks")
+        conn.execute("DROP TABLE IF EXISTS vec_chunks")
+        conn.execute(f"""
+            CREATE VIRTUAL TABLE vec_chunks USING vec0(
+                embedding float[{EMBEDDING_DIMENSIONS}]
+            )
+        """)
         conn.execute("DELETE FROM chunks")
         conn.execute("DELETE FROM files")
         conn.commit()

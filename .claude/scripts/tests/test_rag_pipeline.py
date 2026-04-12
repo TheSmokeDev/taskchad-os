@@ -64,7 +64,7 @@ class TestExpandQueriesFallback:
         from cognition.recall import expand_queries
 
         # Should work without any mocking — the heuristic path handles it
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             expand_queries("what happened with the outreach campaigns")
         )
         assert len(result) >= 1
@@ -76,7 +76,7 @@ class TestExpandQueriesFallback:
 
         # Patch brainstorm to raise
         with patch("cognition.steps.brainstorm", side_effect=RuntimeError("LLM unavailable")):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 expand_queries("check the lead conversion rates")
             )
             assert len(result) >= 1
@@ -139,7 +139,7 @@ class TestRecallPipelineIntegration:
     def test_tier_0_returns_empty(self):
         from cognition.recall import RecallTier, run_recall_pipeline
 
-        results, log = asyncio.get_event_loop().run_until_complete(
+        results, log = asyncio.run(
             run_recall_pipeline("hi", RecallTier.TIER_0, Path("/nonexistent"))
         )
         assert results == []
@@ -148,7 +148,7 @@ class TestRecallPipelineIntegration:
     def test_skip_returns_empty(self):
         from cognition.recall import RecallTier, run_recall_pipeline
 
-        results, log = asyncio.get_event_loop().run_until_complete(
+        results, log = asyncio.run(
             run_recall_pipeline("/budget", RecallTier.SKIP, Path("/nonexistent"))
         )
         assert results == []

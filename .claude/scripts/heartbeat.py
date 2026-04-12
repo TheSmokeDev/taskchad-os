@@ -360,7 +360,7 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
                     query as sdk_query,
                 )
 
-                drafts_dir = PROJECT_ROOT / "TheHomie" / "Memory" / "drafts" / "active"
+                drafts_dir = DRAFTS_ACTIVE_DIR
                 drafts_dir.mkdir(parents=True, exist_ok=True)
                 today = now_local().strftime("%Y-%m-%d")
 

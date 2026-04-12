@@ -408,21 +408,21 @@ def _patch_dream(mock_memory_dir, tmp_path, threshold=1):
 
 
 # =============================================================================
-# PHASE 3-4 TESTS (mocked run_with_fallback)
+# PHASE 3-4 TESTS (mocked run_with_runtime_lanes — lane-first runtime)
 # =============================================================================
 
 
 class TestFullDream:
     @pytest.mark.asyncio
     async def test_full_dream_happy_path(self, tmp_path, mock_memory_dir, mock_daily_logs):
-        """All 4 phases run, state has result='consolidated', run_with_fallback called 2x."""
+        """All 4 phases run, state has result='consolidated', lane runtime called 2x."""
         mock_rwf = AsyncMock(side_effect=[
             _make_llm_result("Merged signal into MEMORY.md"),
             _make_llm_result("PRUNE_OK"),
         ])
 
         with _patch_dream(mock_memory_dir, tmp_path), \
-             patch("runtime.registry.run_with_fallback", mock_rwf), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
              patch("memory_dream._run_entity_compilation"), \
              patch("memory_dream._run_reindex"):
             from memory_dream import _run_dream_inner
@@ -445,7 +445,7 @@ class TestFullDream:
         mock_rwf = AsyncMock(side_effect=RuntimeError("LLM quota exceeded"))
 
         with _patch_dream(mock_memory_dir, tmp_path), \
-             patch("runtime.registry.run_with_fallback", mock_rwf):
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf):
             from memory_dream import _run_dream_inner
 
             with pytest.raises(RuntimeError, match="LLM quota exceeded"):
@@ -471,7 +471,7 @@ class TestFullDream:
         ])
 
         with _patch_dream(mock_memory_dir, tmp_path), \
-             patch("runtime.registry.run_with_fallback", mock_rwf):
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf):
             from memory_dream import _run_dream_inner
 
             with pytest.raises(RuntimeError, match="prune failed"):
@@ -493,7 +493,7 @@ class TestPostWeeklyFlag:
         ])
 
         with _patch_dream(mock_memory_dir, tmp_path), \
-             patch("runtime.registry.run_with_fallback", mock_rwf), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
              patch("memory_dream._run_entity_compilation"), \
              patch("memory_dream._run_reindex"):
             from memory_dream import _run_dream_inner

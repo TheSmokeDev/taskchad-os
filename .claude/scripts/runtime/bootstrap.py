@@ -6,7 +6,7 @@ import re
 from datetime import timedelta
 from pathlib import Path
 
-from config import DAILY_DIR, MEMORY_DIR, now_local
+from config import DAILY_DIR, MEMORY_DIR, PROJECT_ROOT, now_local
 
 MAX_DAILY_LOG_LINES = 30
 MAX_CONTEXT_CHARS = 20_000
@@ -198,9 +198,14 @@ def _extract_goal_names(goals: str) -> str:
 
 
 def _build_memory_index(memory_dir: Path) -> str:
-    """Build a topic → repo-relative path mapping for the memory index."""
-    # Use repo-relative paths so any provider can locate files
-    base = "vault/memory"
+    """Build a topic → path mapping for the memory index."""
+    # When the vault lives inside the repo, show repo-relative paths so any
+    # provider can locate files. When HOMIE_VAULT_DIR points outside the repo,
+    # fall back to the absolute vault path so the AI sees the real location.
+    try:
+        base = memory_dir.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError:
+        base = memory_dir.as_posix()
     entries = [
         f"- finance: {base}/finances/BUDGET.md",
         f"- lessons: {base}/MEMORY.md (## Lessons Learned)",
@@ -400,10 +405,13 @@ def build_session_start_context(
 
 # Function name kept as "second_brain" for backward compat
 def build_second_brain_identity_context(project_root: Path, *, source: str = "startup") -> str:
-    """Build the shared Homie system context for chat/runtime paths."""
+    """Build the shared Homie system context for chat/runtime paths.
 
-    memory_dir = project_root / "TheHomie" / "Memory"
-    daily_dir = memory_dir / "daily"
-    return build_session_start_context(source, memory_dir=memory_dir, daily_dir=daily_dir)
+    The ``project_root`` parameter is retained for backward compat but is no
+    longer used to locate the vault — ``config.MEMORY_DIR`` is the canonical
+    source and respects the ``HOMIE_VAULT_DIR`` env override.
+    """
+
+    return build_session_start_context(source, memory_dir=MEMORY_DIR, daily_dir=DAILY_DIR)
 
 

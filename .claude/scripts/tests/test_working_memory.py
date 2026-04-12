@@ -279,7 +279,7 @@ class TestIntegrator:
 
         wm = WorkingMemory(soul_name="test")
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             integrate_perception(wm, "Hello bot!")
         )
         assert result.length == 1
@@ -294,7 +294,7 @@ class TestIntegrator:
 
         wm = WorkingMemory(soul_name="test")
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             integrate_perception(wm, "Hi", continuity_text="Focus: SEO audit")
         )
         continuity = [m for m in result.memories if m.region == "continuity"]
@@ -311,7 +311,7 @@ class TestIntegrator:
             role="system", content="existing", region="prefetched_context", source="router",
         ))
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             integrate_perception(wm, "Hi", prefetched_context="new data")
         )
         prefetched = [m for m in result.memories if m.region == "prefetched_context"]

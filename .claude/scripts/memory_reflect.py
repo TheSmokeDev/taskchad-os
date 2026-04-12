@@ -501,6 +501,23 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
         except Exception as exc:
             print(f"[{now_local()}] Hermes Scout post-reflection failed (non-blocking): {exc}")
 
+    # --- Vault log append (chronological wiki timeline) ---
+    if not test_mode and "REFLECTION_OK" not in response_text:
+        try:
+            from entity_extractor import append_vault_log
+
+            append_vault_log(
+                MEMORY_DIR,
+                "reflect",
+                f"Daily reflection for last {days} day(s)",
+                bullets=[
+                    f"days reviewed: {days}",
+                    f"logs reviewed: {len(logs)}",
+                ],
+            )
+        except Exception as exc:
+            print(f"[{now_local()}] Vault log append failed (non-blocking): {exc}")
+
     if "REFLECTION_OK" in response_text:
         return None
     return response_text

@@ -109,8 +109,15 @@ uv run python entity_extractor.py sweep --vault-dir "vault/memory"
 # Check concept page for contradictions
 uv run python entity_extractor.py contradictions "vault/memory/concepts/HERMES-AGENT.md"
 
-# Generate/regenerate INDEX.md (grouped by entity type)
+# Generate/regenerate concepts/INDEX.md (grouped by entity type)
 uv run python entity_extractor.py index --vault-dir "vault/memory"
+
+# Generate/regenerate root INDEX.md (whole-wiki catalog: identity + MOCs + concepts + dirs)
+uv run python entity_extractor.py index-root --vault-dir "vault/memory"
+
+# Preserve a source into raw/ as an immutable archive (Karpathy raw/ pattern)
+uv run python entity_extractor.py preserve-raw "path/to/source.md" --vault-dir "vault/memory"
+uv run python entity_extractor.py preserve-raw "statement.pdf" --vault-dir "finance-vault" --date-prefix
 
 # Archive stale orphan concept pages to _archive/concepts/
 uv run python entity_extractor.py archive --vault-dir "vault/memory" --dry-run
@@ -122,6 +129,12 @@ uv run python vault_lint.py --vault-dir "vault/memory"
 uv run python vault_lint.py --vault-dir "vault/memory" --check broken_wikilinks --check orphan_pages
 uv run python vault_lint.py --vault-dir "vault/memory" --format json
 ```
+
+**Vault artifacts (Karpathy LLM Wiki port):**
+- `{vault}/INDEX.md` — whole-wiki catalog (auto-refreshed by `compile_entities()` + `index-root` CLI). Single first-read surface covering identity files, MOCs, concepts-by-type (capped at 25/type), and top-level directories.
+- `{vault}/concepts/INDEX.md` — concept-only drill-down catalog.
+- `{vault}/LOG.md` — append-only chronological timeline of wiki-evolution events (`ingest`, `compile`, `reflect`, `weekly`, `dream`, `archive`). Grep-friendly: `grep "^## \[" LOG.md | tail -5`. Heartbeat excluded (too noisy).
+- `{vault}/raw/` — immutable original sources. Never modified. Preserved via `preserve_raw()` helper, invoked by `/vault-ingest` Step 2.5 and `finance_ingest.py`.
 
 **Key design decisions:**
 - Concept pages live in flat `vault/memory/concepts/` folder with `tags: [concept, auto-compiled]`

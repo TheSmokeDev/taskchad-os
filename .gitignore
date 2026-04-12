@@ -48,3 +48,19 @@ __pycache__/
 
 # Windows artifacts
 NUL
+
+# Archon worktrees (embedded git repos for parallel agent work)
+/.worktrees/
+
+# Stray entity_extractor output if it ever lands at repo root again
+/concepts/
+/connections/
+
+# Runtime artifacts
+.claude/chat/bot.pid
+.claude/scripts/.omc/
+.claude/scripts/.omx/
+.omx/
+
+# Personal/branding assets
+smokemoto-icon.html

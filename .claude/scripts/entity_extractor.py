@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
@@ -335,6 +336,121 @@ def find_existing_concept(name: str, vault_dir: Path) -> Path | None:
 
 def _today() -> str:
     return date.today().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Vault-level helpers (Karpathy LLM Wiki pattern)
+# ---------------------------------------------------------------------------
+
+
+def preserve_raw(
+    source_path: Path,
+    vault_dir: Path,
+    always_date_prefix: bool = False,
+) -> Path:
+    """Copy a source file into {vault}/raw/ as an immutable archive.
+
+    Karpathy "LLM Wiki" raw/ preservation — keeps the original unmodified so
+    the wiki can be recompiled from source if extraction logic changes later.
+    Uses shutil.copy2 to preserve file metadata.
+
+    Collision semantics:
+      - Default (always_date_prefix=False): keep the original filename; on
+        collision with an existing raw file, fall back to `{YYYY-MM-DD}-{name}`.
+        This is the vault-ingest pattern — sources are ingested rarely and
+        usually have unique names.
+      - always_date_prefix=True: always prefix with today's date. This is the
+        finance_ingest pattern — bank statements cycle daily and share names.
+    """
+    raw_dir = vault_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    if always_date_prefix:
+        dest = raw_dir / f"{_today()}-{source_path.name}"
+    else:
+        dest = raw_dir / source_path.name
+        if dest.exists():
+            dest = raw_dir / f"{_today()}-{source_path.name}"
+    shutil.copy2(source_path, dest)
+    return dest
+
+
+def append_vault_log(
+    vault_dir: Path,
+    event_type: str,
+    title: str,
+    bullets: list[str] | None = None,
+) -> Path:
+    """Append an event entry to {vault}/LOG.md — the vault evolution timeline.
+
+    Karpathy "LLM Wiki" log.md pattern — an append-only, grep-able chronological
+    record of vault-level events (ingests, compiles, reflections, weekly
+    synthesis, dream cycles, archives). Daily/heartbeat events stay in daily/
+    logs; LOG.md is for wiki-evolution events only.
+
+    Format (grep-able via `grep "^## \\[" LOG.md | tail -5`):
+
+        ## [2026-04-11 14:32] ingest | Article Title
+        - source: [[SLUG]]
+        - pages: +3 created, ~2 updated
+
+    First write creates LOG.md with system frontmatter. Cross-platform locked
+    via `shared.file_lock` so concurrent pipelines (reflect + weekly + dream)
+    never corrupt the file.
+    """
+    log_path = vault_dir / "LOG.md"
+    vault_dir.mkdir(parents=True, exist_ok=True)
+
+    from datetime import datetime
+
+    from shared import file_lock
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [f"## [{now}] {event_type} | {title}"]
+    for bullet in bullets or []:
+        lines.append(f"- {bullet}")
+    lines.append("")  # trailing blank line separates entries
+    entry = "\n".join(lines) + "\n"
+
+    with file_lock(log_path, timeout=5.0):
+        if not log_path.exists():
+            header = (
+                "---\n"
+                "tags: [system]\n"
+                f"date: {_today()}\n"
+                'summary: "Append-only chronological record of vault-level events."\n'
+                "---\n\n"
+                "# Vault Log\n\n"
+                "> Grep pattern: `grep \"^## \\[\" LOG.md | tail -5` surfaces recent activity.\n\n"
+            )
+            log_path.write_text(header, encoding="utf-8")
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(entry)
+
+    return log_path
+
+
+def _read_summary(md_file: Path) -> str | None:
+    """Extract the `summary:` field from a markdown file's YAML frontmatter.
+
+    Returns None if the file has no frontmatter or no summary field.
+    Accepts both quoted (`summary: "..."`) and unquoted (`summary: ...`) forms.
+    """
+    try:
+        text = md_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    fm = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+    if not fm:
+        return None
+    fm_text = fm.group(1)
+    m = re.search(r'summary:\s*"([^"]*)"', fm_text)
+    if m:
+        return m.group(1)
+    m = re.search(r"summary:\s*(.+)$", fm_text, re.MULTILINE)
+    if m:
+        return m.group(1).strip().strip('"').strip("'")
+    return None
 
 
 def create_concept_page(
@@ -790,6 +906,55 @@ def _rotate_build_log_if_needed(vault_dir: Path, max_entries: int = 500) -> None
     )
 
 
+def _collect_concept_entries(concepts_dir: Path) -> dict[str, list[tuple[str, str]]]:
+    """Parse all concept pages in concepts_dir, grouping by entity type.
+
+    Returns a dict mapping entity_type -> list of (slug, summary) tuples,
+    sorted alphabetically (glob("*.md") yields sorted paths). Skips BUILD-LOG
+    variants and INDEX files.
+
+    Shared helper for both `generate_index()` (concepts-only catalog at
+    concepts/INDEX.md) and `generate_root_index()` (whole-wiki catalog at
+    vault-root INDEX.md).
+    """
+    entries: dict[str, list[tuple[str, str]]] = {}
+    if not concepts_dir.exists():
+        return entries
+
+    skip_names = {"BUILD-LOG", "INDEX"}
+    for md_file in sorted(concepts_dir.glob("*.md")):
+        if md_file.stem in skip_names or md_file.stem.startswith("BUILD-LOG"):
+            continue
+
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        fm = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+        if not fm:
+            continue
+
+        fm_text = fm.group(1)
+
+        summary_m = re.search(r'summary:\s*"([^"]*)"', fm_text)
+        summary = summary_m.group(1) if summary_m else md_file.stem.replace("-", " ").title()
+
+        # Extract entity_type from tags (skip concept/auto-compiled/build-log/connection)
+        tags_m = re.search(r"tags:\s*\[([^\]]+)\]", fm_text)
+        entity_type = "concept"
+        if tags_m:
+            tags = [t.strip() for t in tags_m.group(1).split(",")]
+            for t in tags:
+                if t not in ("concept", "auto-compiled", "build-log", "connection"):
+                    entity_type = t
+                    break
+
+        entries.setdefault(entity_type, []).append((md_file.stem, summary))
+
+    return entries
+
+
 def generate_index(vault_dir: Path) -> Path:
     """Generate concepts/INDEX.md — a static catalog of all concept pages.
 
@@ -803,42 +968,7 @@ def generate_index(vault_dir: Path) -> Path:
         index_path.write_text("# Concept Index\n\n**0 concepts** | Last updated: n/a\n", encoding="utf-8")
         return index_path
 
-    # Collect concept page metadata
-    entries: dict[str, list[tuple[str, str]]] = {}  # entity_type -> [(slug, summary)]
-    skip_names = {"BUILD-LOG", "INDEX"}
-
-    for md_file in sorted(concepts_dir.glob("*.md")):
-        if md_file.stem in skip_names or md_file.stem.startswith("BUILD-LOG"):
-            continue
-
-        try:
-            text = md_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-
-        # Parse frontmatter
-        fm = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
-        if not fm:
-            continue
-
-        fm_text = fm.group(1)
-
-        # Extract summary
-        summary_m = re.search(r'summary:\s*"([^"]*)"', fm_text)
-        summary = summary_m.group(1) if summary_m else md_file.stem.replace("-", " ").title()
-
-        # Extract entity_type from tags (third tag after concept, auto-compiled)
-        tags_m = re.search(r"tags:\s*\[([^\]]+)\]", fm_text)
-        entity_type = "concept"
-        if tags_m:
-            tags = [t.strip() for t in tags_m.group(1).split(",")]
-            # Find entity type tag (not concept, auto-compiled, or build-log)
-            for t in tags:
-                if t not in ("concept", "auto-compiled", "build-log", "connection"):
-                    entity_type = t
-                    break
-
-        entries.setdefault(entity_type, []).append((md_file.stem, summary))
+    entries = _collect_concept_entries(concepts_dir)
 
     # Build the index
     total = sum(len(v) for v in entries.values())
@@ -882,11 +1012,171 @@ def generate_index(vault_dir: Path) -> Path:
     return index_path
 
 
+# Root INDEX.md catalog shape — hard-coded canonical files at vault root.
+# Missing files are silently skipped (fail-open — vault evolves over time).
+_ROOT_IDENTITY_FILES: list[tuple[str, str]] = [
+    ("SOUL", "AI personality and behavioral rules"),
+    ("USER", "user profile, accounts, preferences"),
+    ("SELF", "self-model"),
+    ("MEMORY", "curated long-term memory"),
+    ("GOALS", "quarterly objectives"),
+    ("SCHEMA", "vault tag taxonomy and conventions"),
+    ("SAFETY", "safety rules"),
+    ("BACKLOG", "backlog"),
+    ("HEARTBEAT", "heartbeat checklist"),
+]
+
+_ROOT_DIRECTORY_DESCRIPTIONS: dict[str, str] = {
+    "daily": "session and heartbeat logs",
+    "weekly": "weekly synthesis",
+    "concepts": "auto-compiled entity pages (see concepts/INDEX.md)",
+    "connections": "cross-domain connection articles",
+    "drafts": "in-progress writing",
+    "research": "research notes",
+    "raw": "immutable original sources",
+    "teams": "team session memory",
+    "finances": "personal finance notes",
+    "docs": "reference documentation",
+    "hub": "hub/project pages",
+    "books": "book notes and summaries",
+    "playbooks": "operational playbooks",
+}
+
+# Max concept entries per type in root INDEX.md before falling back to
+# a "→ +N more in [[concepts/INDEX]]" pointer. Keeps the root file
+# scannable even as the vault grows past several hundred concepts.
+_ROOT_INDEX_MAX_PER_TYPE = 25
+
+
+def generate_root_index(vault_dir: Path) -> Path:
+    """Generate {vault_dir}/INDEX.md — whole-wiki catalog at the vault root.
+
+    Karpathy "LLM Wiki" root index pattern — a single first-read surface that
+    an LLM can glance at to understand the shape of the wiki in one pass.
+    Covers:
+      - Identity / canonical files (SOUL, USER, SELF, MEMORY, ...)
+      - Maps of Content (MOC-*.md at vault root)
+      - Concepts by Type (reuses _collect_concept_entries, capped per type)
+      - Top-level directories (excludes leading-underscore private dirs)
+
+    Complements concepts/INDEX.md (which is the concept-only drill-down).
+    """
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    index_path = vault_dir / "INDEX.md"
+
+    # --- Identity section (fail-open on missing files) ---
+    identity_lines: list[str] = []
+    canonical_count = 0
+    for stem, default_desc in _ROOT_IDENTITY_FILES:
+        md = vault_dir / f"{stem}.md"
+        if not md.exists():
+            continue
+        summary = _read_summary(md) or default_desc
+        identity_lines.append(f"- [[{stem}]] — {summary}")
+        canonical_count += 1
+
+    # --- Maps of Content section (glob MOC-*.md at vault root) ---
+    moc_lines: list[str] = []
+    for moc_file in sorted(vault_dir.glob("MOC-*.md")):
+        summary = _read_summary(moc_file) or moc_file.stem.replace("-", " ").title()
+        moc_lines.append(f"- [[{moc_file.stem}]] — {summary}")
+        canonical_count += 1
+
+    # --- Concepts by Type (reuse shared helper, cap per type) ---
+    concepts_dir = vault_dir / "concepts"
+    entries = _collect_concept_entries(concepts_dir)
+    total_concepts = sum(len(v) for v in entries.values())
+
+    concept_lines: list[str] = []
+    for etype in sorted(entries.keys()):
+        items = entries[etype]
+        concept_lines.append(f"### {etype.title()} ({len(items)})")
+        concept_lines.append("")
+        shown = items[:_ROOT_INDEX_MAX_PER_TYPE]
+        for slug, summary in shown:
+            # Bare [[SLUG]] — Obsidian resolves globally via shortest-path and
+            # the vault_lint resolver is filename-only. Concept slugs are
+            # globally unique so path qualification isn't needed.
+            concept_lines.append(f"- [[{slug}]] — {summary}")
+        overflow = len(items) - len(shown)
+        if overflow > 0:
+            concept_lines.append(
+                f"- *(+{overflow} more — see [[INDEX|concepts/INDEX]])*"
+            )
+        concept_lines.append("")
+
+    # --- Directories (enumerate top-level subdirs, skip private + concepts) ---
+    skip_dirs = {
+        "concepts",       # already covered above
+        "_archive", "_canvas", "_dashboards", "_state", "_templates",
+        "_ops", ".obsidian", ".conversations", ".conversations-archived",
+        ".nexus", ".workspaces", ".workspaces-archived", "archive",
+    }
+    dir_lines: list[str] = []
+    dir_count = 0
+    try:
+        subdirs = sorted(
+            p for p in vault_dir.iterdir()
+            if p.is_dir() and p.name not in skip_dirs and not p.name.startswith(".")
+        )
+    except OSError:
+        subdirs = []
+    for sub in subdirs:
+        desc = _ROOT_DIRECTORY_DESCRIPTIONS.get(sub.name, "")
+        if desc:
+            dir_lines.append(f"- `{sub.name}/` — {desc}")
+        else:
+            dir_lines.append(f"- `{sub.name}/`")
+        dir_count += 1
+
+    # --- Assemble ---
+    today = _today()
+    lines = [
+        "---",
+        "tags: [system, auto-compiled]",
+        f"date: {today}",
+        'summary: "Auto-generated root catalog — every page in the wiki, one link, one line."',
+        "---",
+        "",
+        "# Wiki Index",
+        "",
+        f"**{total_concepts} concepts | {canonical_count} canonical | {dir_count} directories** | Last updated: {today}",
+        "",
+    ]
+
+    if identity_lines:
+        lines.append("## Identity")
+        lines.append("")
+        lines.extend(identity_lines)
+        lines.append("")
+
+    if moc_lines:
+        lines.append("## Maps of Content")
+        lines.append("")
+        lines.extend(moc_lines)
+        lines.append("")
+
+    if concept_lines:
+        lines.append("## Concepts by Type")
+        lines.append("")
+        lines.extend(concept_lines)
+
+    if dir_lines:
+        lines.append("## Directories")
+        lines.append("")
+        lines.extend(dir_lines)
+        lines.append("")
+
+    index_path.write_text("\n".join(lines), encoding="utf-8")
+    return index_path
+
+
 def compile_entities(
     entities: list[ExtractedEntity],
     source_path: str,
     vault_dir: Path,
     memory_dir: Path | None = None,
+    event_type: str = "compile",
 ) -> CompilationReport:
     """Main compilation: for each entity, find or create concept page, check contradictions."""
     report = CompilationReport()
@@ -959,6 +1249,32 @@ def compile_entities(
             generate_index(vault_dir)
         except Exception:
             pass
+
+        # Regenerate root INDEX.md — whole-wiki catalog at vault root
+        try:
+            generate_root_index(vault_dir)
+        except Exception:
+            pass
+
+    # Append to vault log — chronological record of wiki-evolution events
+    if report.pages_created or report.pages_updated or report.connections_created:
+        try:
+            source_stem = Path(source_path).stem if source_path else "unknown"
+            bullets = [
+                f"source: [[{source_stem}]]",
+                f"entities: {report.entities_processed} processed, {report.entities_skipped} skipped",
+            ]
+            if report.pages_created:
+                bullets.append(f"pages: +{len(report.pages_created)} created")
+            if report.pages_updated:
+                bullets.append(f"pages: ~{len(report.pages_updated)} updated")
+            if report.connections_created:
+                bullets.append(f"connections: +{len(report.connections_created)}")
+            if report.contradictions_found:
+                bullets.append(f"contradictions: {len(report.contradictions_found)}")
+            append_vault_log(vault_dir, event_type, source_stem, bullets=bullets)
+        except Exception:
+            pass  # Vault log is best-effort
 
     return report
 
@@ -1251,6 +1567,27 @@ def main() -> None:
     p_reindex.add_argument("file", help="Path to file to reindex")
     p_reindex.add_argument("--memory-dir", required=True, help="Path to memory dir")
 
+    # index-root — whole-wiki catalog at vault root (Karpathy LLM Wiki pattern)
+    p_index_root = sub.add_parser(
+        "index-root",
+        help="Regenerate {vault}/INDEX.md — whole-wiki catalog (Karpathy root index)",
+    )
+    p_index_root.add_argument("--vault-dir", required=True, help="Path to vault root")
+
+    # preserve-raw — copy a source into {vault}/raw/ as immutable archive
+    p_preserve_raw = sub.add_parser(
+        "preserve-raw",
+        help="Copy source to {vault}/raw/ as immutable archive (Karpathy raw/ pattern)",
+    )
+    p_preserve_raw.add_argument("source", help="Path to source file to preserve")
+    p_preserve_raw.add_argument("--vault-dir", required=True, help="Path to vault root")
+    p_preserve_raw.add_argument(
+        "--date-prefix",
+        action="store_true",
+        help="Always prefix destination with today's date (finance_ingest pattern). "
+             "Default: collision-only prefix (vault-ingest pattern).",
+    )
+
     args = parser.parse_args()
 
     if args.command == "extract":
@@ -1384,6 +1721,20 @@ def main() -> None:
         memory_dir = Path(args.memory_dir)
         chunks = reindex_file(file_path, memory_dir)
         print(f"Reindexed {file_path.name}: {chunks} chunks")
+
+    elif args.command == "index-root":
+        vault_dir = Path(args.vault_dir)
+        idx = generate_root_index(vault_dir)
+        print(f"Root index generated: {idx}")
+
+    elif args.command == "preserve-raw":
+        source = Path(args.source)
+        if not source.exists():
+            print(f"Error: {source} not found", file=sys.stderr)
+            sys.exit(1)
+        vault_dir = Path(args.vault_dir)
+        dest = preserve_raw(source, vault_dir, always_date_prefix=args.date_prefix)
+        print(dest)
 
 
 if __name__ == "__main__":

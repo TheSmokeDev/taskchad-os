@@ -157,7 +157,7 @@ def check_broken_wikilinks(vault_dir: Path) -> list[LintIssue]:
 
         rel = str(md.relative_to(vault_dir))
         for m in _WIKILINK_RE.finditer(content):
-            target = m.group(1).strip()
+            target = m.group(1).strip().rstrip("\\")  # strip trailing \ from table-cell aliases
             if target not in all_stems:
                 issues.append(LintIssue(
                     check="broken_wikilinks", severity="error",

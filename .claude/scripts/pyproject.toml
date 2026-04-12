@@ -10,6 +10,9 @@ dependencies = [
     "setuptools<81; sys_platform == 'win32'",
     "tzdata>=2024.1",
     # Phase 3: Memory Search
+    # sentence-transformers drives EmbeddingGemma-300m (query/doc prompt asymmetry).
+    # fastembed retained as fallback for environments without torch.
+    "sentence-transformers>=5.0.0",
     "fastembed>=0.4.0",
     "sqlite-vec>=0.1.6",
     "numpy>=1.26.0",
@@ -50,6 +53,7 @@ dependencies = [
     "otel-instrumentation-claude-agent-sdk @ git+https://github.com/justinbarias/opentelemetry-instrumentation-claude-agent-sdk.git",
     # Observability: error tracking (GlitchTip/Sentry)
     "sentry-sdk>=2.0.0",
+    "pymupdf>=1.27.2.2",
 ]
 
 [project.scripts]
