@@ -31,6 +31,7 @@ from config import (  # noqa: E402
     DAILY_DIR,
     HEARTBEAT_FILE,
     HEARTBEAT_STATE_FILE,
+    MEMORY_DIR,
     MEMORY_FILE,
     REFLECTION_STATE_FILE,
     SOUL_FILE,
@@ -414,7 +415,6 @@ def get_memory(filename: str) -> dict[str, Any]:
 # Memory Graph endpoints (Phase 4)
 # ---------------------------------------------------------------------------
 
-MEMORY_DIR = Path(__file__).resolve().parents[2] / "TheHomie" / "Memory"
 CANVAS_DIR = MEMORY_DIR / "_canvas"
 GRAPH_JSON = MEMORY_DIR / ".obsidian" / "graph.json"
 

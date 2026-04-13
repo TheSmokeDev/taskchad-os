@@ -149,10 +149,10 @@ class ConversationEngine:
         if not _COGNITION_AVAILABLE:
             return []
 
-        from config import REGION_BUDGETS
+        from config import MEMORY_DIR, REGION_BUDGETS
         from runtime.bootstrap import read_file_safe
 
-        memory_dir = self.project_root / "TheHomie" / "Memory"
+        memory_dir = MEMORY_DIR
         regions: list[Any] = []
         budgets = REGION_BUDGETS
 
@@ -556,7 +556,7 @@ class ConversationEngine:
                     _proc_span = None
             if _COGNITION_AVAILABLE:
                 try:
-                    from config import REGION_BUDGETS
+                    from config import MEMORY_DIR, REGION_BUDGETS
 
                     if _PROCESSES_AVAILABLE:
                         session_key_proc = build_session_key(platform_str, channel_id, thread_id)
@@ -622,7 +622,7 @@ class ConversationEngine:
                     if _RECALL_SERVICE_AVAILABLE:
                         recall_response = await recall_memory_service(
                             query=message.text,
-                            memory_dir=self.project_root / "TheHomie" / "Memory",
+                            memory_dir=MEMORY_DIR,
                             caller="chat",
                             max_results=5,
                             has_prefetched=bool(message.prefetched_context),
