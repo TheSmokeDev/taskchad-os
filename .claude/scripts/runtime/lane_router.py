@@ -94,8 +94,9 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
             errors.append(f"{profile.key}: unavailable {exc}")
             continue
         except Exception as exc:
+            mark_profile_retryable_failure(profile, str(exc))
             errors.append(f"{profile.key}: {exc}")
-            break
+            continue
 
     joined = "; ".join(errors) if errors else "no runtime profiles resolved"
     message = (

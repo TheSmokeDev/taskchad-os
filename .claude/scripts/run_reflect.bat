@@ -1,11 +1,16 @@
 @echo off
 REM Reflection runner for Windows Task Scheduler
-REM This script runs the daily reflection via UV
+REM Runs daily reflection via UV, always logs a status line
 
 cd /d "%~dp0"
 
-REM Run reflection using UV
 uv run python memory_reflect.py
+set EXITCODE=%ERRORLEVEL%
 
-REM Log the run
-echo %date% %time% - Reflection completed >> reflection_runs.log
+if %EXITCODE% EQU 0 (
+    echo %date% %time% - Reflection completed >> reflection_runs.log
+) else (
+    echo %date% %time% - Reflection FAILED exit=%EXITCODE% >> reflection_runs.log
+)
+
+exit /b %EXITCODE%

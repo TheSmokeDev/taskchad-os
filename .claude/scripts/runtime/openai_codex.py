@@ -316,4 +316,12 @@ def _map_codex_error(message: str) -> Exception:
         return RuntimeConfigError(message)
     if any(token in text for token in ("rate limit", "quota", "429", "usage limit")):
         return RuntimeRetryableError(message)
+    # MCP transport failures are environmental (dying MCP subprocess, non-JSON
+    # stdout during init) — retryable so the lane router falls through to the
+    # next profile with a short cooldown instead of exhausting the profile.
+    if any(
+        token in text
+        for token in ("rmcp::", "mcp transport", "deserialize error", "worker quit with fatal")
+    ):
+        return RuntimeRetryableError(message)
     return RuntimeExecutionError(message)

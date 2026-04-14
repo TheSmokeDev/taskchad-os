@@ -55,12 +55,3 @@ NUL
 # Stray entity_extractor output if it ever lands at repo root again
 /concepts/
 /connections/
-
-# Runtime artifacts
-.claude/chat/bot.pid
-.claude/scripts/.omc/
-.claude/scripts/.omx/
-.omx/
-
-# Personal/branding assets
-smokemoto-icon.html

@@ -9,7 +9,16 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from models import Attachment, Channel, IncomingMessage, OutgoingMessage, Platform, Thread, User
+from models import (
+    Attachment,
+    Channel,
+    IncomingMessage,
+    MessageComponent,
+    OutgoingMessage,
+    Platform,
+    Thread,
+    User,
+)
 
 
 class TelegramAdapter:
@@ -39,6 +48,9 @@ class TelegramAdapter:
         self._app = ApplicationBuilder().token(bot_token).build()
         self._sent_messages: dict[str, int] = {}  # key -> message_id for updates
         self._bot_username: str | None = None
+        # Hashed callback_data → original custom_id. Telegram's callback_data
+        # limit is 64 bytes; longer IDs are hashed and resolved on tap.
+        self._callback_id_map: dict[str, str] = {}
 
         self.configure_voice(
             openai_api_key=openai_api_key,
@@ -83,7 +95,7 @@ class TelegramAdapter:
         """Start polling for updates."""
         from commands import get_telegram_bot_commands
         from telegram import BotCommand
-        from telegram.ext import MessageHandler, filters
+        from telegram.ext import CallbackQueryHandler, MessageHandler, filters
 
         # All text messages (including /commands) pass through — the router
         # decides what's a command vs. regular text. No more manual regex sync.
@@ -97,6 +109,9 @@ class TelegramAdapter:
 
         # Register handler for document uploads (xlsx cancellation reports)
         self._app.add_handler(MessageHandler(filters.Document.ALL, self._on_document))
+
+        # Register handler for inline button taps
+        self._app.add_handler(CallbackQueryHandler(self._on_callback))
 
         # Initialize and start polling
         await self._app.initialize()
@@ -210,13 +225,20 @@ class TelegramAdapter:
         chunks = self._split_message(text)
         first_id: str | None = None
 
-        for chunk in chunks:
+        # Buttons ride on the LAST chunk so they sit under the final content
+        # the user reads (matches Discord adapter behavior).
+        reply_markup = self._build_reply_markup(message.components) if message.components else None
+
+        for idx, chunk in enumerate(chunks):
+            is_last = idx == len(chunks) - 1
+            chunk_markup = reply_markup if is_last else None
             try:
                 sent = await self._app.bot.send_message(
                     chat_id=chat_id,
                     text=chunk,
                     reply_to_message_id=reply_to,
                     parse_mode="Markdown",
+                    reply_markup=chunk_markup,
                 )
                 if first_id is None:
                     first_id = str(sent.message_id)
@@ -228,6 +250,7 @@ class TelegramAdapter:
                         chat_id=chat_id,
                         text=chunk,
                         reply_to_message_id=reply_to,
+                        reply_markup=chunk_markup,
                     )
                     if first_id is None:
                         first_id = str(sent.message_id)
@@ -388,6 +411,109 @@ class TelegramAdapter:
     async def _on_document(self, update: Any, context: Any) -> None:
         """Handle document uploads. Currently a no-op — extensions can register handlers."""
         pass
+
+    # ── Inline buttons ─────────────────────────────────────────────
+
+    def _build_reply_markup(self, components: list[MessageComponent]) -> Any:
+        """Build an InlineKeyboardMarkup from MessageComponent list.
+
+        One button per row (matches the simple vertical stack Discord uses).
+        Telegram's `callback_data` is capped at 64 bytes — longer custom_ids
+        are hashed and the original is stored in `_callback_id_map` so taps
+        can be resolved back to the real id without collision risk.
+        """
+        import hashlib
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        rows: list[list[InlineKeyboardButton]] = []
+        for comp in components:
+            cid_bytes = comp.custom_id.encode("utf-8")
+            if len(cid_bytes) <= 64:
+                callback_data = comp.custom_id
+            else:
+                digest = hashlib.sha1(cid_bytes).hexdigest()[:16]
+                callback_data = f"h:{digest}"
+                self._callback_id_map[callback_data] = comp.custom_id
+            rows.append([InlineKeyboardButton(text=comp.label, callback_data=callback_data)])
+        return InlineKeyboardMarkup(rows)
+
+    async def _on_callback(self, update: Any, context: Any) -> None:
+        """Handle inline button taps — ACK, disable buttons, queue as __button:."""
+        query = update.callback_query
+        if not query:
+            return
+
+        user_id = query.from_user.id
+        if self.allowed_user_ids and user_id not in self.allowed_user_ids:
+            try:
+                await query.answer(text="Not authorized.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        # ACK within 3s to kill the loading spinner
+        try:
+            await query.answer()
+        except Exception as e:
+            print(f"[{datetime.now()}] Telegram callback ACK failed: {e}")
+
+        # Resolve hashed callback_data back to the real custom_id
+        raw = query.data or ""
+        custom_id = self._callback_id_map.get(raw, raw)
+
+        # Disable all buttons on the original message to prevent double-taps
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            original = query.message
+            if original and original.reply_markup:
+                disabled_rows = []
+                for row in original.reply_markup.inline_keyboard:
+                    disabled_rows.append(
+                        [
+                            InlineKeyboardButton(
+                                text=f"✓ {btn.text}" if btn.callback_data == raw else btn.text,
+                                callback_data="__disabled__",
+                            )
+                            for btn in row
+                        ]
+                    )
+                await original.edit_reply_markup(reply_markup=InlineKeyboardMarkup(disabled_rows))
+        except Exception as e:
+            # Non-fatal — double-taps will just route through again
+            print(f"[{datetime.now()}] Telegram disable buttons failed: {e}")
+
+        # Suppress taps on already-disabled buttons (defensive)
+        if custom_id == "__disabled__":
+            return
+
+        # Route through the same __button: pipeline the router already handles
+        chat_id = str(query.message.chat_id) if query.message else ""
+        user = User(
+            platform=Platform.TELEGRAM,
+            platform_id=str(user_id),
+            display_name=query.from_user.first_name,
+        )
+        channel = Channel(
+            platform=Platform.TELEGRAM,
+            platform_id=chat_id,
+            is_dm=(query.message.chat.type == "private") if query.message else True,
+        )
+        thread = Thread(thread_id=chat_id)
+
+        incoming = IncomingMessage(
+            text=f"__button:{custom_id}",
+            user=user,
+            channel=channel,
+            platform=Platform.TELEGRAM,
+            thread=thread,
+            raw_event={
+                "interaction_type": "button",
+                "custom_id": custom_id,
+                "callback_data": raw,
+            },
+        )
+        await self._queue.put(incoming)
 
     async def _on_photo(self, update: Any, context: Any) -> None:
         """Handle incoming photos — download and queue with image path for Claude."""

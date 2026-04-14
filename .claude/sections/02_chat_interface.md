@@ -34,7 +34,7 @@ cd .claude/scripts && uv run python ../chat/main.py --test
 | `run_chat.sh` | Shell wrapper — resolves real cpython (skips venv shim), kills old process, starts background |
 | `router.py` | Routes messages: slash commands handled instantly, natural language → engine |
 | `engine.py` | Runtime-backed conversations via Claude Agent SDK |
-| `adapters/telegram.py` | Telegram polling, voice/photo/document handlers, message formatting |
+| `adapters/telegram.py` | Telegram polling, voice/photo/document handlers, inline buttons (hash-mapped custom_ids for 64-byte callback_data limit), message formatting |
 | `adapters/cli_adapter.py` | CLI adapter — interactive REPL and single-query mode |
 | `adapters/web.py` | Web/relay adapter — WebSocket to Mission Control relay |
 | `adapters/slack.py` | Slack adapter |

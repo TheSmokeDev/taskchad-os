@@ -1389,4 +1389,16 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        from datetime import datetime
+        err_log = PROJECT_ROOT / ".claude" / "scripts" / "heartbeat_errors.log"
+        try:
+            with open(err_log, "a", encoding="utf-8") as f:
+                f.write(f"\n=== {datetime.now().isoformat()} ===\n")
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+        raise
