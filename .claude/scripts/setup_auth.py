@@ -18,6 +18,9 @@ from config import (
     ASANA_ACCESS_TOKEN,
     ASANA_WORKSPACE_ID,
     GOOGLE_CREDENTIALS_FILE,
+    PERSONAL_GMAIL_ACCOUNT,
+    PERSONAL_GMAIL_SCOPES,
+    PERSONAL_GMAIL_TOKEN_PATH,
     SLACK_BOT_TOKEN,
     ensure_directories,
 )
@@ -271,15 +274,105 @@ def check_slack(check_only: bool = False) -> bool:
         return False
 
 
+def setup_personal_gmail(headless: bool = False) -> bool:
+    """Authenticate personal Gmail (pedro6392mendoza@gmail.com) with gmail.readonly scope."""
+    from pathlib import Path
+
+    print_header(f"Personal Gmail (read-only) — {PERSONAL_GMAIL_ACCOUNT}")
+
+    token_path = Path(PERSONAL_GMAIL_TOKEN_PATH)
+
+    # Check if already authenticated
+    if token_path.exists():
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+
+            creds = Credentials.from_authorized_user_file(  # type: ignore[no-untyped-call]
+                str(token_path), PERSONAL_GMAIL_SCOPES
+            )
+            if creds.valid or creds.refresh_token:
+                if creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                    token_path.write_text(creds.to_json(), encoding="utf-8")  # type: ignore[no-untyped-call]
+
+                from googleapiclient.discovery import build  # type: ignore[import-untyped]
+
+                gmail = build("gmail", "v1", credentials=creds)
+                profile = gmail.users().getProfile(userId="me").execute()
+                connected_as = profile.get("emailAddress", "?")
+                print_status("Personal Gmail", True, f"Connected as {connected_as}")
+                return True
+        except Exception as e:
+            print_status("Personal Gmail", False, f"Token invalid: {e} — re-authenticating")
+
+    if not GOOGLE_CREDENTIALS_FILE.exists():
+        print_status("Personal Gmail", False, f"Missing credentials file: {GOOGLE_CREDENTIALS_FILE}")
+        print("  Use the same google_credentials.json as the AI account.")
+        print("  Download from Google Cloud Console → APIs & Services → Credentials")
+        return False
+
+    print(f"  Starting OAuth flow for {PERSONAL_GMAIL_ACCOUNT}...")
+    print("  IMPORTANT: When the browser opens, sign in as YOUR personal Google account,")
+    print(f"  not the AI service account. Expected: {PERSONAL_GMAIL_ACCOUNT}")
+    print()
+
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
+
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(GOOGLE_CREDENTIALS_FILE), PERSONAL_GMAIL_SCOPES
+        )
+
+        if headless:
+            flow.redirect_uri = "http://localhost:1"
+            auth_url, _ = flow.authorization_url(
+                prompt="consent", access_type="offline",
+                login_hint=PERSONAL_GMAIL_ACCOUNT,
+            )
+            print(f"\n1. Open this URL:\n\n{auth_url}\n")
+            print("2. Sign in as your personal Gmail account.")
+            print("3. After authorizing, copy the full redirect URL (starts with http://localhost:1/?...)")
+            redirect_response = input("4. Paste the full redirect URL here: ").strip()
+            flow.fetch_token(authorization_response=redirect_response)
+            creds = flow.credentials
+        else:
+            creds = flow.run_local_server(port=0, login_hint=PERSONAL_GMAIL_ACCOUNT)
+
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(creds.to_json(), encoding="utf-8")  # type: ignore[no-untyped-call]
+        print(f"\nToken saved to {token_path}")
+
+        from googleapiclient.discovery import build  # type: ignore[import-untyped]
+
+        gmail = build("gmail", "v1", credentials=creds)
+        profile = gmail.users().getProfile(userId="me").execute()
+        connected_as = profile.get("emailAddress", "?")
+        print_status("Personal Gmail", True, f"Authenticated as {connected_as}")
+        return True
+    except Exception as e:
+        print_status("Personal Gmail", False, str(e))
+        return False
+
+
 def main() -> None:
     """Run auth setup."""
     parser = argparse.ArgumentParser(description="Set up direct platform integrations")
     parser.add_argument("--check", action="store_true", help="Check status only (no auth flows)")
     parser.add_argument("--headless", action="store_true",
                         help="Use manual URL copy-paste flow (for remote/headless machines)")
+    parser.add_argument("--personal", action="store_true",
+                        help="Authenticate personal Gmail only (pedro6392mendoza@gmail.com, readonly)")
     args = parser.parse_args()
 
     ensure_directories()
+
+    # Personal Gmail only mode
+    if args.personal:
+        print_header("The Homie - Personal Gmail Auth")
+        print(f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        ok = setup_personal_gmail(headless=args.headless)
+        sys.exit(0 if ok else 1)
 
     print_header("The Homie - Direct Integrations Setup")
     print(f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -290,6 +383,9 @@ def main() -> None:
         "Google": check_google(check_only=args.check, headless=args.headless),
         "Asana": check_asana(check_only=args.check),
         "Slack": check_slack(check_only=args.check),
+        "Personal Gmail": setup_personal_gmail(headless=args.headless) if not args.check else (
+            Path(PERSONAL_GMAIL_TOKEN_PATH).exists()
+        ),
     }
 
     print_header("Summary")

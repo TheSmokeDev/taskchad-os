@@ -300,6 +300,44 @@ def cmd_docs(args: argparse.Namespace) -> None:
         print(f"Content length: ~{char_count} chars")
 
 
+def cmd_personal_gmail(args: argparse.Namespace) -> None:
+    """Handle personal Gmail commands (read-only)."""
+    from integrations.personal_gmail import (
+        format_personal_emails_for_context,
+        get_personal_email,
+        get_personal_unread_count,
+        is_personal_gmail_configured,
+        list_personal_emails,
+    )
+
+    if not is_personal_gmail_configured():
+        print("Personal Gmail not configured. Run: uv run python setup_auth.py --personal")
+        sys.exit(1)
+
+    if args.action == "list":
+        emails = list_personal_emails(max_results=args.max, query=args.query or "", hours_ago=args.hours)
+        print(format_personal_emails_for_context(emails))
+
+    elif args.action == "unread":
+        count = get_personal_unread_count()
+        print(f"Unread: {count}")
+        emails = list_personal_emails(max_results=args.max, unread_only=True)
+        print(format_personal_emails_for_context(emails))
+
+    elif args.action == "read":
+        if not args.message_id:
+            print("Error: message_id required for read command")
+            sys.exit(1)
+        email = get_personal_email(args.message_id)
+        if email:
+            print(f"Subject: {email.subject}")
+            print(f"From: {email.sender} <{email.sender_email}>")
+            print(f"Date: {email.date}")
+            print(f"\n{email.body or email.snippet}")
+        else:
+            print("Email not found")
+
+
 def cmd_circle(args: argparse.Namespace) -> None:
     """Handle Circle commands (read-only)."""
     from integrations.circle_api import (
@@ -528,6 +566,14 @@ def main() -> None:
     ga_parser.add_argument("--days", type=int, default=28)
     ga_parser.add_argument("--max", type=int, default=10)
 
+    # Personal Gmail (read-only)
+    pg_parser = subparsers.add_parser("personal-gmail", help="Personal Gmail read-only (pedro6392mendoza@gmail.com)")
+    pg_parser.add_argument("action", choices=["list", "unread", "read"])
+    pg_parser.add_argument("message_id", nargs="?", default=None)
+    pg_parser.add_argument("--max", type=int, default=10)
+    pg_parser.add_argument("--query", default=None)
+    pg_parser.add_argument("--hours", type=int, default=None)
+
     args = parser.parse_args()
 
     try:
@@ -551,6 +597,8 @@ def main() -> None:
             cmd_search_console(args)
         elif args.service == "analytics":
             cmd_analytics(args)
+        elif args.service == "personal-gmail":
+            cmd_personal_gmail(args)
     except Exception as e:
         print(json.dumps({"error": str(e), "type": "runtime"}, indent=2))
         sys.exit(1)

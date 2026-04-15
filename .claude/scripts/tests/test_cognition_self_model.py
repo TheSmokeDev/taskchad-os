@@ -161,6 +161,47 @@ def test_contradict_does_not_go_below_min(tmp_path):
     assert records[0].confidence >= 0.1
 
 
+def test_contradict_demotes_confirmed_when_confidence_drops_below_threshold(tmp_path):
+    """Confirmed at 0.8 → contradict → 0.65 → status becomes 'active'."""
+    tracker = InferenceTracker(tmp_path / "inf.json")
+    r = tracker.add_inference("user-belief", "obs", 0.8)
+    records = tracker.load()
+    records[0].status = "confirmed"
+    tracker.save(records)
+
+    assert tracker.contradict(r.id) is True
+    updated = tracker.load()[0]
+    assert abs(updated.confidence - 0.65) < 1e-9
+    assert updated.status == "active"
+
+
+def test_contradict_preserves_confirmed_when_confidence_stays_high(tmp_path):
+    """Confirmed at 1.0 → contradict → 0.85 → stays 'confirmed' (>= 0.7)."""
+    tracker = InferenceTracker(tmp_path / "inf.json")
+    r = tracker.add_inference("strong-belief", "obs", 1.0)
+    records = tracker.load()
+    records[0].status = "confirmed"
+    tracker.save(records)
+
+    assert tracker.contradict(r.id) is True
+    updated = tracker.load()[0]
+    assert abs(updated.confidence - 0.85) < 1e-9
+    assert updated.status == "confirmed"
+
+
+def test_contradict_does_not_promote_active_records(tmp_path):
+    """Active records stay active — contradict must never promote to confirmed."""
+    tracker = InferenceTracker(tmp_path / "inf.json")
+    r = tracker.add_inference("fresh-guess", "obs", 0.9)
+    # add_inference creates with status="active"; verify precondition
+    assert tracker.load()[0].status == "active"
+
+    assert tracker.contradict(r.id) is True
+    updated = tracker.load()[0]
+    assert updated.status == "active"
+    assert abs(updated.confidence - 0.75) < 1e-9
+
+
 # === get_active tests ===
 
 

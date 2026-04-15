@@ -53,6 +53,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("extensions", "Extension diagnostics — list, doctor, enable/disable", "router", "admin"),
     # -- Integrations (passed to engine as natural language) --
     ("email", "Check Gmail — list, unread, or urgent emails", "router", "admin"),
+    ("pemail", "Check personal Gmail (owner) — unread, list, read <id>", "router", "admin"),
     ("cleanup", "Inbox cleanup — dry run both inboxes, /cleanup go to execute", "router", "admin"),
     ("inbox", "Inbox briefing — prioritized TL;DR of what matters", "router", "admin"),
     ("accounts", "Show all social media accounts and connection status", "router", "admin"),
@@ -111,7 +112,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ),
     (
         "Integrations",
-        ["email", "inbox", "cleanup", "accounts", "post", "calendar", "tasks",
+        ["email", "pemail", "inbox", "cleanup", "accounts", "post", "calendar", "tasks",
          "slack", "sheets", "docs", "drive", "circle"],
     ),
     ("Analytics & Monitoring", ["gsc", "analytics"]),

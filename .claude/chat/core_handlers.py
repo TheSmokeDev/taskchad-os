@@ -438,6 +438,62 @@ async def handle_email(adapter: Any, incoming: Any, args: str, *, collect_only: 
         return f"Error fetching email: {e}"
 
 
+async def handle_personal_email(
+    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
+) -> str:
+    """Fetch personal Gmail (pedro6392mendoza@gmail.com) — read-only."""
+    try:
+        from integrations.personal_gmail import (
+            format_personal_emails_for_context,
+            get_personal_unread_count,
+            get_personal_email,
+            is_personal_gmail_configured,
+            list_personal_emails,
+        )
+
+        if not is_personal_gmail_configured():
+            return (
+                "*Personal Gmail* — not set up yet.\n"
+                "Run `uv run python setup_auth.py --personal` to authenticate."
+            )
+
+        sub = args.strip().lower() if args else ""
+
+        # /personal-email read <id>
+        if sub.startswith("read "):
+            msg_id = sub[5:].strip()
+            email = get_personal_email(msg_id)
+            if not email:
+                return f"Email `{msg_id}` not found."
+            from integrations.email_sanitizer import sanitize_external_text
+            safe_subject = sanitize_external_text(email.subject)
+            safe_sender = sanitize_external_text(email.sender)
+            safe_body = sanitize_external_text((email.body or "(no body)")[:3000])
+            return (
+                f"**{safe_subject}**\n"
+                f"From: {safe_sender} <{email.sender_email}>\n"
+                f"Date: {email.date.strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"{safe_body}"
+            )
+
+        unread = get_personal_unread_count()
+        header = f"*Personal Gmail* ({unread} unread)"
+
+        if sub == "unread":
+            emails = list_personal_emails(max_results=10, unread_only=True)
+        elif sub == "list":
+            emails = list_personal_emails(max_results=20)
+        elif sub:
+            emails = list_personal_emails(max_results=10, query=sub)
+        else:
+            # Default: unread count + last 5 subjects
+            emails = list_personal_emails(max_results=5)
+
+        return header + "\n\n" + format_personal_emails_for_context(emails, max_chars=2000)
+    except Exception as e:
+        return f"Error fetching personal email: {e}"
+
+
 async def handle_accounts(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Show social media account status."""
     try:
@@ -855,6 +911,8 @@ CORE_HANDLERS: dict[str, Any] = {
     "restart": handle_restart,
     "gsc": handle_gsc,
     "email": handle_email,
+    "personal-email": handle_personal_email,
+    "pemail": handle_personal_email,
     "accounts": handle_accounts,
     "inbox": handle_inbox,
     "cleanup": handle_cleanup,

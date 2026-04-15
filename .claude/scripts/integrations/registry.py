@@ -107,6 +107,13 @@ _REGISTRY: dict[str, IntegrationInfo] = {
         required_config=["GA4_PROPERTY_ID"],
         module_path="integrations.analytics_api",
     ),
+    "personal_gmail": IntegrationInfo(
+        name="personal_gmail",
+        display_name="Personal Gmail (read-only)",
+        auth_type="personal_gmail_token",
+        required_config=[],  # File-based (google_token_pedro.json)
+        module_path="integrations.personal_gmail",
+    ),
 }
 
 
@@ -114,6 +121,13 @@ def _has_google_token() -> bool:
     """Check if Google OAuth token file exists."""
     token_path = Path(__file__).parent / "google_token.json"
     return token_path.exists()
+
+
+def _has_personal_gmail_token() -> bool:
+    """Check if personal Gmail OAuth token file exists."""
+    import os
+    token_path = os.getenv("PERSONAL_GMAIL_TOKEN", str(Path(__file__).parent / "google_token_pedro.json"))
+    return Path(token_path).exists()
 
 
 def get_all() -> dict[str, IntegrationInfo]:
@@ -134,6 +148,9 @@ def get_enabled() -> dict[str, IntegrationInfo]:
             if info.required_config and not all(
                 os.getenv(var, "") for var in info.required_config
             ):
+                continue
+        elif info.auth_type == "personal_gmail_token":
+            if not _has_personal_gmail_token():
                 continue
         elif info.required_config:
             # Token-based integrations need their env vars set

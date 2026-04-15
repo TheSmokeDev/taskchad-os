@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +44,58 @@ def _parse_skill_frontmatter(text: str) -> dict[str, str]:
             key, _, value = line.partition(":")
             fields[key.strip()] = value.strip()
     return fields
+
+
+def _tokenize(name: str) -> frozenset[str]:
+    """Split skill name into a set of lowercase tokens."""
+    return frozenset(t for t in name.lower().replace("-", " ").split() if t)
+
+
+def _iter_existing_skills(skills_dir: Path) -> Iterator[str]:
+    """Yield names of every existing SKILL.md under skills_dir.
+
+    Walks rglob directly — no cap, no description requirement, no regex
+    re-parsing of rendered markdown. Names come from frontmatter `name`
+    field; falls back to parent directory name when frontmatter is missing
+    or malformed.
+    """
+    if not skills_dir.exists():
+        return
+    for skill_md in skills_dir.rglob("SKILL.md"):
+        try:
+            fm = _parse_skill_frontmatter(skill_md.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        name = fm.get("name") or skill_md.parent.name
+        if name:
+            yield name
+
+
+def _has_conflict(spec: SkillSpec, skills_dir: Path) -> bool:
+    """True when a proposed skill's token set overlaps an existing skill.
+
+    Uses token-set subset matching: `{quote}` is a subset of
+    `{turborater, quote}` → conflict (proposed would shadow existing).
+    `{email, inbox}` is NOT a subset of `{email, check}` → no conflict
+    (legit skill family, different jobs). Scans every SKILL.md under
+    skills_dir — no rendered-index cap that could hide skill #51.
+    Prevents the ITC-style collision where an auto-generated skill
+    shadows or duplicates a hand-authored one.
+    """
+    proposed = _tokenize(spec.name)
+    if not proposed:
+        return False
+    for existing_name in _iter_existing_skills(skills_dir):
+        existing = _tokenize(existing_name)
+        if not existing:
+            continue
+        if (
+            proposed == existing
+            or proposed.issubset(existing)
+            or existing.issubset(proposed)
+        ):
+            return True
+    return False
 
 
 def build_skill_index(skills_dir: Path, max_entries: int = 20) -> str:
@@ -120,6 +173,25 @@ async def propose_skill(
             spec.tools_used = tool_calls
             spec.source_session = session_summary[:100]
             spec.created_at = datetime.now(UTC).isoformat()
+            if _has_conflict(spec, skills_dir):
+                try:
+                    from cognition.observability import SkillLog, log_skill_event
+                except ImportError:
+                    pass
+                else:
+                    try:
+                        log_skill_event(SkillLog(
+                            action="conflict_skipped",
+                            skill_name=spec.name,
+                            category=spec.category,
+                            tool_count=len(tool_calls),
+                        ))
+                    except (TypeError, ValueError) as exc:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "SkillLog shape drift on conflict_skipped: %s", exc,
+                        )
+                return None
             return spec
     return None
 

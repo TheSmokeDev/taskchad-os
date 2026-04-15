@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import asdict
@@ -176,6 +177,55 @@ class ConversationEngine:
                 "user_model", user, budgets["user_model"],
                 frozen=True, source="USER.md",
             ))
+
+        # Move 6c: Active inferences (derived beliefs about the user)
+        # Kept separate from USER.md so curated truth and rolling
+        # hypotheses are visibly distinct in the assembled prompt.
+        try:
+            from cognition.self_model import InferenceTracker
+            from config import (
+                INFERENCE_PROMPT_CAP,
+                INFERENCE_PROMPT_MIN_CONFIDENCE,
+                INFERENCE_STATE_FILE,
+            )
+        except ImportError:
+            pass
+        else:
+            try:
+                tracker = InferenceTracker(INFERENCE_STATE_FILE)
+                active = tracker.get_active(
+                    min_confidence=INFERENCE_PROMPT_MIN_CONFIDENCE,
+                )
+                if active:
+                    # Stable three-pass sort (reverse priority order so the
+                    # primary key — confirmed-first — wins ties).
+                    active.sort(key=lambda r: r.last_updated or "", reverse=True)
+                    active.sort(key=lambda r: r.confidence, reverse=True)
+                    active.sort(key=lambda r: 0 if r.status == "confirmed" else 1)
+
+                    inference_lines = []
+                    for inf in active[:INFERENCE_PROMPT_CAP]:
+                        status_tag = (
+                            "confirmed" if inf.status == "confirmed"
+                            else f"conf={inf.confidence:.2f}"
+                        )
+                        inference_lines.append(f"- [{status_tag}] {inf.inference}")
+                    inference_text = (
+                        "## Active Beliefs About User\n"
+                        + "\n".join(inference_lines)
+                    )
+                    regions.append(PromptRegion(
+                        "user_inferences",
+                        inference_text,
+                        budgets["user_inferences"],
+                        frozen=True,
+                        source="inference-tracker",
+                    ))
+            except (OSError, json.JSONDecodeError) as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "user_inferences region skipped: %s", exc,
+                )
 
         memory = read_file_safe(memory_dir / "MEMORY.md")
         if memory:

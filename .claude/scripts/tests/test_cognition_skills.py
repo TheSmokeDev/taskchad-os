@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cognition.skills import SkillSpec, build_skill_index, patch_skill, write_skill
+from cognition.skills import (
+    SkillSpec,
+    _has_conflict,
+    build_skill_index,
+    patch_skill,
+    write_skill,
+)
 
 
 # === SkillSpec dataclass tests ===
@@ -180,3 +186,130 @@ def test_patch_skill_manual_rejected(tmp_path):
 def test_patch_skill_nonexistent(tmp_path):
     ok = patch_skill(tmp_path / "nope.md", {"version": "1.0"})
     assert ok is False
+
+
+# === _has_conflict tests ===
+
+
+def _write_manual_skill(skills_dir: Path, name: str, description: str) -> None:
+    skill_dir = skills_dir / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n",
+        encoding="utf-8",
+    )
+
+
+def test_conflict_exact_name_match(tmp_path):
+    _write_manual_skill(tmp_path, "turborater-quote", "ITC TurboRater quotes")
+    spec = SkillSpec(name="turborater-quote", description="auto gen", category="ops")
+    assert _has_conflict(spec, tmp_path) is True
+
+
+def test_conflict_substring_match(tmp_path):
+    _write_manual_skill(tmp_path, "email-check-inbox", "Check inbox")
+    # Proposed name is a substring of existing → conflict
+    spec = SkillSpec(name="email-check", description="auto gen", category="data")
+    assert _has_conflict(spec, tmp_path) is True
+
+
+def test_no_conflict_allows_generation(tmp_path):
+    _write_manual_skill(tmp_path, "email-check", "Check inbox")
+    spec = SkillSpec(name="calendar-sync", description="sync cal", category="data")
+    assert _has_conflict(spec, tmp_path) is False
+
+
+def test_no_conflict_on_empty_skills_dir(tmp_path):
+    spec = SkillSpec(name="whatever", description="d", category="c")
+    assert _has_conflict(spec, tmp_path) is False
+
+
+def test_no_conflict_on_empty_name(tmp_path):
+    _write_manual_skill(tmp_path, "any-skill", "x")
+    spec = SkillSpec(name="", description="d", category="c")
+    assert _has_conflict(spec, tmp_path) is False
+
+
+# === Token-set conflict regression tests (Codex P2 findings) ===
+
+
+def test_conflict_token_set_email_family_no_collision(tmp_path):
+    """{email, inbox} is not a subset of {email, check} — legit sibling skills."""
+    _write_manual_skill(tmp_path, "email-check", "Check inbox status")
+    spec = SkillSpec(name="email-inbox", description="List inbox", category="data")
+    assert _has_conflict(spec, tmp_path) is False
+
+
+def test_conflict_token_set_quote_shadows_turborater(tmp_path):
+    """{quote} IS a subset of {turborater, quote} — proposed would shadow."""
+    _write_manual_skill(tmp_path, "turborater-quote", "ITC TurboRater quotes")
+    spec = SkillSpec(name="quote", description="auto gen", category="ops")
+    assert _has_conflict(spec, tmp_path) is True
+
+
+def test_conflict_scans_beyond_50_skills(tmp_path):
+    """Guard must walk every SKILL.md — not a rendered-index cap."""
+    for i in range(60):
+        _write_manual_skill(tmp_path, f"manual-skill-{i:02d}", f"Skill {i}")
+    # Skill #55 matches proposed via token-set subset
+    spec = SkillSpec(
+        name="manual-skill-55", description="auto gen", category="ops",
+    )
+    assert _has_conflict(spec, tmp_path) is True
+
+
+def test_conflict_matches_skill_without_description(tmp_path):
+    """SKILL.md missing `description:` field must still block collisions."""
+    skill_dir = tmp_path / "legacy-skill"
+    skill_dir.mkdir()
+    # No description field at all — older manual skills sometimes omit it
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: legacy-skill\n---\n\n# Legacy\n",
+        encoding="utf-8",
+    )
+    spec = SkillSpec(name="legacy-skill", description="auto gen", category="ops")
+    assert _has_conflict(spec, tmp_path) is True
+
+
+def test_propose_skill_logs_conflict_skipped(tmp_path, monkeypatch):
+    """Colliding proposal returns None AND logs action=conflict_skipped."""
+    import asyncio
+
+    from cognition import observability, skills, steps
+    from cognition.skills import propose_skill
+
+    _write_manual_skill(tmp_path, "turborater-quote", "ITC TurboRater quotes")
+
+    class _FakeResult:
+        parsed = {
+            "name": "turborater",
+            "description": "auto gen",
+            "category": "ops",
+        }
+
+    async def _fake_reasoning_step(**_kwargs):
+        return _FakeResult()
+
+    logged: list[observability.SkillLog] = []
+
+    def _fake_log(event):
+        logged.append(event)
+
+    monkeypatch.setattr(steps, "reasoning_step", _fake_reasoning_step)
+    monkeypatch.setattr(observability, "log_skill_event", _fake_log)
+    # skills.py does `from cognition.steps import reasoning_step` inside fn;
+    # that lookup resolves at call time via sys.modules, so patching the
+    # module attribute is sufficient.
+    _ = skills  # silence unused-import warnings from linters
+
+    result = asyncio.run(propose_skill(
+        tool_calls=["Read", "Grep", "Bash", "Edit", "Write"],
+        session_summary="test session",
+        skills_dir=tmp_path,
+        cwd=tmp_path,
+    ))
+
+    assert result is None
+    assert len(logged) == 1
+    assert logged[0].action == "conflict_skipped"
+    assert logged[0].skill_name == "turborater"

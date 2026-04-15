@@ -37,7 +37,7 @@ __pycache__/
 
 # Phase 5: Integration credentials & tokens
 .claude/scripts/integrations/google_credentials.json
-.claude/scripts/integrations/google_token.json
+.claude/scripts/integrations/google_token*.json
 
 # Certificates and private keys
 *.pem

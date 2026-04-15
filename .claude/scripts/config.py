@@ -97,7 +97,7 @@ EMBEDDING_CACHE_DIR = Path(os.getenv("EMBEDDING_CACHE_DIR", "E:/ai-models/embedd
 # === Integration Configuration (Phase 5) ===
 INTEGRATIONS_DIR = SCRIPTS_DIR / "integrations"
 
-# Google OAuth
+# Google OAuth (AI account — your-calendar@gmail.com)
 GOOGLE_CREDENTIALS_FILE = INTEGRATIONS_DIR / "google_credentials.json"
 GOOGLE_TOKEN_FILE = INTEGRATIONS_DIR / "google_token.json"
 GOOGLE_SCOPES = [
@@ -109,6 +109,13 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/webmasters.readonly",
     "https://www.googleapis.com/auth/analytics.readonly",
 ]
+
+# Personal Gmail (pedro6392mendoza@gmail.com — read-only, separate token)
+PERSONAL_GMAIL_ACCOUNT = os.getenv("PERSONAL_GMAIL_ACCOUNT", "pedro6392mendoza@gmail.com")
+PERSONAL_GMAIL_TOKEN_PATH = os.getenv(
+    "PERSONAL_GMAIL_TOKEN", str(INTEGRATIONS_DIR / "google_token_pedro.json")
+)
+PERSONAL_GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 # Asana
 ASANA_ACCESS_TOKEN = os.getenv("ASANA_ACCESS_TOKEN", "")
@@ -211,6 +218,7 @@ REGION_BUDGETS = {
     "recalled_memory": int(os.getenv("REGION_BUDGET_RECALLED", "750")),
     "procedural_memory": int(os.getenv("REGION_BUDGET_PROCEDURAL", "500")),
     "prefetched_context": int(os.getenv("REGION_BUDGET_PREFETCHED", "3000")),
+    "user_inferences": int(os.getenv("REGION_BUDGET_USER_INFERENCES", "300")),
 }
 
 # Staging store
@@ -287,6 +295,8 @@ INFERENCE_DECAY_DAYS = int(os.getenv("INFERENCE_DECAY_DAYS", "14"))
 INFERENCE_CONFIRM_BOOST = float(os.getenv("INFERENCE_CONFIRM_BOOST", "0.1"))
 INFERENCE_DECAY_RATE = float(os.getenv("INFERENCE_DECAY_RATE", "0.05"))
 INFERENCE_MIN_CONFIDENCE = float(os.getenv("INFERENCE_MIN_CONFIDENCE", "0.3"))
+INFERENCE_PROMPT_MIN_CONFIDENCE = float(os.getenv("INFERENCE_PROMPT_MIN_CONFIDENCE", "0.5"))
+INFERENCE_PROMPT_CAP = int(os.getenv("INFERENCE_PROMPT_CAP", "10"))
 
 # === Authentication ===
 # Claude Agent SDK inherits auth from Claude Code CLI automatically.

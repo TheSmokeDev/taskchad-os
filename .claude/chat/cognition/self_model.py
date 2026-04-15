@@ -139,12 +139,14 @@ class InferenceTracker:
         return decayed
 
     def contradict(self, inference_id: str) -> bool:
-        """Record a contradiction. Lowers confidence."""
+        """Record a contradiction. Lowers confidence; demotes confirmed beliefs."""
         records = self.load()
         for r in records:
             if r.id == inference_id:
                 r.contradiction_count += 1
                 r.confidence = max(0.1, r.confidence - 0.15)
+                if r.status == "confirmed" and r.confidence < 0.7:
+                    r.status = "active"
                 r.last_updated = datetime.now(UTC).isoformat()
                 self.save(records)
                 return True
