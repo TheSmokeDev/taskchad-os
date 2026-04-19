@@ -47,6 +47,17 @@ Important:
 - voice STT/TTS stays separate from the main reasoning runtime
 - business behavior and slash-command semantics must not depend on one vendor-specific auth path
 
+**Claude Agent SDK + Max subscription — policy and why the lanes stay separate:**
+
+The `claude_native` lane runs through the Claude Agent SDK backed by a personal Max plan subscription (`~/.claude/.credentials.json`). Anthropic's policy (clarified February 2026, enforced April 2026) is:
+
+- **Allowed**: Personal/local development and experimentation with the Agent SDK using your own Max subscription. This is explicitly encouraged by Anthropic ("We want to encourage local development and experimentation with the Agent SDK and claude -p.").
+- **Not allowed**: Third-party harnesses (e.g. OpenClaw) using a subscriber's OAuth tokens — banned April 4, 2026. Also not allowed: building a product for others using the SDK backed by your own subscription.
+- **The Homie falls in the allowed bucket** — it is owner's personal agent, running on owner's own subscription, for owner's own use. Not a distributed product, not a third-party harness.
+
+Do not switch the `claude_native` lane to an API key path — that loses the Max plan compute budget and agentic tool access. Do not try to add API-key-based features (e.g. `cache_control` breakpoints) to the Agent SDK path — the SDK goes through `cli.js` and does not expose those knobs to the caller. Keep the two lanes clean and separate.
+
+
 ### Framework vs. Adapter Boundary
 
 The Homie is provider-agnostic. Claude Code, Codex, Gemini, Kimi, OpenRouter — they're interchangeable batteries. The framework doesn't care which one is running.

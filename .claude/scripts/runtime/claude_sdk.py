@@ -130,8 +130,8 @@ def _ensure_system_cli_patch() -> None:
                         version_parts = [int(x) for x in version.split(".")]
                         min_parts = [int(x) for x in MINIMUM_CLAUDE_CODE_VERSION.split(".")]
                         if version_parts < min_parts:
-                            import sys as _sys
                             import logging as _logging
+                            import sys as _sys
                             _logging.getLogger(__name__).warning(
                                 f"Claude Code {version} < minimum {MINIMUM_CLAUDE_CODE_VERSION}"
                             )

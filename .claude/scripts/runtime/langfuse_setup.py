@@ -44,9 +44,9 @@ def init_langfuse() -> bool:
     try:
         # Set OTEL service.name so traces show "thehomie" instead of "unknown_service"
         try:
+            from opentelemetry import trace as ot
             from opentelemetry.sdk.resources import Resource
             from opentelemetry.sdk.trace import TracerProvider
-            from opentelemetry import trace as ot
 
             if not isinstance(ot.get_tracer_provider(), TracerProvider):
                 resource = Resource.create({"service.name": "thehomie"})

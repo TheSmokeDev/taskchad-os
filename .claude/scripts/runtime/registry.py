@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from .base import RuntimeRequest, RuntimeResult
-from .langfuse_setup import is_langfuse_enabled
 from .lane_router import run_with_runtime_lanes
+from .langfuse_setup import is_langfuse_enabled
 
 
 async def run_with_fallback(request: RuntimeRequest) -> RuntimeResult:
@@ -13,8 +13,7 @@ async def run_with_fallback(request: RuntimeRequest) -> RuntimeResult:
     if not is_langfuse_enabled():
         return await run_with_runtime_lanes(request)
 
-    from langfuse import observe
-    from langfuse import get_client
+    from langfuse import get_client, observe
 
     # Keep the legacy span name while downstream traces still depend on it.
     traced = observe(name="run_with_fallback", as_type="span")(run_with_runtime_lanes)
