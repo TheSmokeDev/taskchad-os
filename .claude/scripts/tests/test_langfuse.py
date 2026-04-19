@@ -213,6 +213,42 @@ class TestSessionActionReporting:
             )
 
 
+class TestResumedSessionEmitsRealCognitionSpans:
+    """Path B regression: resumed sessions must produce real cognition spans, not 'skipped'."""
+
+    def test_no_resumed_session_skip_markers_in_source(self):
+        """The 'resumed_session' skip reason must be gone from the engine source."""
+        import inspect
+        from engine import ConversationEngine
+        source = inspect.getsource(ConversationEngine._handle_message_inner)
+        assert '"resumed_session"' not in source, (
+            "Path B removes the skip-on-resume branch — 'resumed_session' "
+            "must not appear as a skip reason in trace decisions"
+        )
+
+    def test_recent_conversation_trace_decision_is_set(self):
+        """Region_assembly output must include recent_conversation metadata."""
+        import inspect
+        from engine import ConversationEngine
+        source = inspect.getsource(ConversationEngine._handle_message_inner)
+        assert '_trace_decisions["recent_conversation"]' in source, (
+            "Path B injects recent_conversation region — its span metadata "
+            "must appear in _trace_decisions"
+        )
+
+    def test_region_assembly_not_marked_skipped_on_resume(self):
+        """region_assembly trace entry must carry real chars metric, not skipped=True."""
+        import inspect
+        from engine import ConversationEngine
+        source = inspect.getsource(ConversationEngine._handle_message_inner)
+        # The engine should set region_assembly with total_chars, not 'skipped: True, reason: resumed_session'
+        assert '_trace_decisions["region_assembly"] = {' in source
+        # Verify the real metric form is what's being set
+        assert '"total_chars": len(system_prompt.get("append", ""))' in source, (
+            "region_assembly must report total_chars, not a skipped reason"
+        )
+
+
 class TestSentryInit:
     """Tests for GlitchTip/Sentry initialization."""
 

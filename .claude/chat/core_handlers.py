@@ -17,15 +17,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from session_keys import build_session_key, resolve_thread_id
+
+from runtime import routing as runtime_routing
 from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE
-from runtime.routing import GENERIC_TEXT_ROUTE, GENERIC_TOOL_ROUTE
 from runtime.selection import (
     apply_runtime_selection_choice,
     describe_runtime_selection,
     provider_display_name,
     resolve_runtime_selection,
 )
-from session_keys import build_session_key, resolve_thread_id
 
 # ---------------------------------------------------------------------------
 # Shared context — set once by router at startup via set_context()
@@ -445,8 +446,8 @@ async def handle_personal_email(
     try:
         from integrations.personal_gmail import (
             format_personal_emails_for_context,
-            get_personal_unread_count,
             get_personal_email,
+            get_personal_unread_count,
             is_personal_gmail_configured,
             list_personal_emails,
         )
@@ -671,6 +672,76 @@ async def handle_brief(adapter: Any, incoming: Any, args: str, *, collect_only: 
     return "\n\n━━━━━━━━━━━━━━━\n\n".join(parts_brief)
 
 
+async def handle_working(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Show/edit WORKING.md — cross-session scratchpad (Living Mind Phase 1).
+
+    Subcommands:
+      /working                       — show all active sections
+      /working add "<text>"          — append to Open Threads with today's date
+      /working resolve <N>           — move item N (1-based) from Open Threads to Archived
+    """
+    from config import MEMORY_DIR
+    from living_memory import (
+        append_open_thread,
+        read_working_memory,
+        resolve_open_thread,
+    )
+
+    sub = args.strip() if args else ""
+
+    # --- add subcommand ---
+    if sub.lower().startswith("add "):
+        payload = sub[4:].strip().strip('"').strip("'")
+        if not payload:
+            return "Usage: `/working add \"<what you're working on>\"`"
+        written = append_open_thread(MEMORY_DIR, subject=payload, status="open")
+        if written:
+            return f"Added to Open Threads: {payload}"
+        return f"Already in Open Threads (deduped within {payload[:40]}...)"
+
+    # --- resolve subcommand ---
+    if sub.lower().startswith("resolve "):
+        tail = sub[8:].strip()
+        try:
+            index = int(tail)
+        except ValueError:
+            return "Usage: `/working resolve <N>` (N is the 1-based item number)"
+        ok, detail = resolve_open_thread(MEMORY_DIR, index)
+        return f"Resolved: {detail}" if ok else detail
+
+    # --- default: show active sections ---
+    data = read_working_memory(MEMORY_DIR)
+    if not data.exists:
+        return (
+            "*Working Memory*\nWORKING.md does not exist yet. "
+            "Add your first thread: `/working add \"<subject>\"`"
+        )
+
+    lines = ["*Working Memory*"]
+
+    def _render(label: str, bullets: list[str]) -> None:
+        if not bullets:
+            return
+        lines.append(f"\n*{label}*")
+        for i, bullet in enumerate(bullets, start=1):
+            clean = bullet.lstrip("- ").strip()
+            prefix = f"  {i}. " if label == "Open Threads" else "  • "
+            lines.append(f"{prefix}{clean}")
+
+    _render("Open Threads", data.open_threads)
+    _render("Active Hypotheses", data.active_hypotheses)
+    _render("Unresolved Questions", data.unresolved_questions)
+
+    if not (data.open_threads or data.active_hypotheses or data.unresolved_questions):
+        lines.append("\n(all sections empty — nothing tracked yet)")
+
+    arch_count = len(data.archived)
+    if arch_count:
+        lines.append(f"\n_Archive: {arch_count} cold item(s)_")
+
+    return "\n".join(lines)
+
+
 async def handle_extensions(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Show extension diagnostics or manage extensions."""
     from extension_manager import get_manager
@@ -751,11 +822,15 @@ def _get_provider_status() -> str:
         lines.append("")
         lines.append(
             "Generic text route: "
-            + " -> ".join(provider_display_name(provider) for provider in GENERIC_TEXT_ROUTE)
+            + " -> ".join(
+                provider_display_name(provider) for provider in runtime_routing.GENERIC_TEXT_ROUTE
+            )
         )
         lines.append(
             "Generic tool route: "
-            + " -> ".join(provider_display_name(provider) for provider in GENERIC_TOOL_ROUTE)
+            + " -> ".join(
+                provider_display_name(provider) for provider in runtime_routing.GENERIC_TOOL_ROUTE
+            )
         )
         lines.append("")
         lines.append("Provider health:")
@@ -920,5 +995,6 @@ CORE_HANDLERS: dict[str, Any] = {
     "budget": handle_budget,
     "send": handle_send,
     "brief": handle_brief,
+    "working": handle_working,
     "extensions": handle_extensions,
 }

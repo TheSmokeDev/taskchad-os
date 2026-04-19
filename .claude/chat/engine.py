@@ -234,6 +234,14 @@ class ConversationEngine:
                 frozen=True, source="MEMORY.md",
             ))
 
+        # Living Mind Phase 1: cross-session scratchpad
+        working = read_file_safe(memory_dir / "WORKING.md")
+        if working:
+            regions.append(PromptRegion(
+                "working_memory", working, budgets["working_memory"],
+                frozen=True, source="WORKING.md",
+            ))
+
         # Move 5a: Skill index in procedural_memory on ALL turns
         if _PROCESSES_AVAILABLE:
             try:
@@ -249,6 +257,42 @@ class ConversationEngine:
                 pass
 
         return regions
+
+    def _build_recent_conversation_region(
+        self, session_key: str, budget_tokens: int,
+    ) -> Any | None:
+        """Fetch the last N messages for this session and format as a PromptRegion.
+
+        Returns None if the session has no prior messages or session_store errors.
+        Fail-open: logging only, never raises.
+        """
+        if not _COGNITION_AVAILABLE:
+            return None
+        try:
+            from config import RECENT_CONVERSATION_COUNT
+            # SESSION_TURN_THRESHOLD caps rows; fetch full window then take tail.
+            all_messages = self.session_store.list_messages(session_key, limit=200)
+        except Exception as e:
+            print(
+                f"[{datetime.now()}] [RecentConv] list_messages failed: {e}",
+                flush=True,
+            )
+            return None
+        if not all_messages:
+            return None
+        messages = all_messages[-RECENT_CONVERSATION_COUNT:]
+        lines: list[str] = []
+        for msg in messages:
+            role = "User" if msg.role == "user" else "Assistant"
+            body = (msg.content or "").strip()
+            if len(body) > 400:
+                body = body[:400] + "…"
+            lines.append(f"**{role}**: {body}")
+        content = "\n\n".join(lines)
+        return PromptRegion(
+            "recent_conversation", content, budget_tokens,
+            frozen=False, source="session_store",
+        )
 
     def reload_soul_context(self) -> None:
         """Re-read the shared memory bootstrap context into the system prompt."""
@@ -567,19 +611,15 @@ class ConversationEngine:
         else:
             resume_session_id = existing.runtime_session_id if existing else ""
 
+        # Path B: full cognition runs on EVERY turn — new or resumed.
+        # resume_session_id remains an additive SDK hydration hint, not a gate.
         if resume_session_id:
             print(f"[{datetime.now()}] Resuming session {existing.session_id}")
-            # Emit skip metadata so traces explain why recall/process/region spans are absent
-            if _trace_decisions is not None:
-                _trace_decisions["process_detection"] = {"skipped": True, "reason": "resumed_session"}
-                _trace_decisions["recall"] = {"skipped": True, "reason": "resumed_session"}
-                _trace_decisions["region_assembly"] = {"skipped": True, "reason": "resumed_session"}
         else:
-            session_key = build_session_key(platform_str, channel_id, thread_id)
             agent_label = "The Homie"
             print(f"[{datetime.now()}] Starting new {agent_label} session for {session_key}")
 
-            # Check if this is a thread reply to a heartbeat notification
+            # Heartbeat-thread context injection is a new-session-only concern.
             hb_thread = self._get_heartbeat_context(channel_id, thread_id)
             if hb_thread:
                 message.text = (
@@ -589,156 +629,161 @@ class ConversationEngine:
                 )
                 print(f"[{datetime.now()}] Injected heartbeat context into session")
 
-            # Proactive memory recall for new conversations
-            # Move 5a: Process detection (engine concern — stays here)
-            active_process = MentalProcess.DEFAULT if _PROCESSES_AVAILABLE else None
-            adjusted_budgets = None
-            _proc_span = None
-            if not _COGNITION_AVAILABLE and _trace_decisions is not None:
-                _trace_decisions["process_detection"] = {"skipped": True, "reason": "cognition_unavailable"}
-            if _tracing and _COGNITION_AVAILABLE:
-                try:
-                    _proc_span = _lf.start_as_current_observation(
-                        as_type="span", name="process_detection",
+        # --- Full cognition pipeline (runs unconditionally) ---
+        active_process = MentalProcess.DEFAULT if _PROCESSES_AVAILABLE else None
+        adjusted_budgets = None
+        _proc_span = None
+        if not _COGNITION_AVAILABLE and _trace_decisions is not None:
+            _trace_decisions["process_detection"] = {
+                "skipped": True, "reason": "cognition_unavailable",
+            }
+        if _tracing and _COGNITION_AVAILABLE:
+            try:
+                _proc_span = _lf.start_as_current_observation(
+                    as_type="span", name="process_detection",
+                )
+                _proc_span.__enter__()
+            except Exception:
+                _proc_span = None
+        if _COGNITION_AVAILABLE:
+            try:
+                from config import MEMORY_DIR, REGION_BUDGETS
+
+                if _PROCESSES_AVAILABLE:
+                    current_process = self._session_processes.get(
+                        session_key, MentalProcess.DEFAULT
                     )
-                    _proc_span.__enter__()
-                except Exception:
-                    _proc_span = None
-            if _COGNITION_AVAILABLE:
-                try:
-                    from config import MEMORY_DIR, REGION_BUDGETS
+                    active_process, p_reason = detect_process(
+                        message.text, current_process
+                    )
+                    self._session_processes[session_key] = active_process
+                    if p_reason != "no_transition":
+                        try:
+                            from cognition.observability import (
+                                ProcessLog,
+                                log_process_event,
+                            )
+                            log_process_event(ProcessLog(
+                                previous_process=current_process.value,
+                                new_process=active_process.value,
+                                transition_reason=p_reason,
+                                message_text_preview=message.text[:60],
+                            ))
+                        except Exception:
+                            pass
 
-                    if _PROCESSES_AVAILABLE:
-                        session_key_proc = build_session_key(platform_str, channel_id, thread_id)
-                        current_process = self._session_processes.get(
-                            session_key_proc, MentalProcess.DEFAULT
-                        )
-                        active_process, p_reason = detect_process(
-                            message.text, current_process
-                        )
-                        self._session_processes[session_key_proc] = active_process
-                        if p_reason != "no_transition":
-                            try:
-                                from cognition.observability import (
-                                    ProcessLog,
-                                    log_process_event,
-                                )
-                                log_process_event(ProcessLog(
-                                    previous_process=current_process.value,
-                                    new_process=active_process.value,
-                                    transition_reason=p_reason,
-                                    message_text_preview=message.text[:60],
-                                ))
-                            except Exception:
-                                pass
-
-                    if _PROCESSES_AVAILABLE:
-                        weights = get_process_weights(active_process)
-                        adjusted_budgets = apply_process_weights(
-                            REGION_BUDGETS, weights,
-                        )
-                    else:
-                        adjusted_budgets = REGION_BUDGETS
-                except Exception as e:
-                    print(f"[{datetime.now()}] [Process] Detection failed: {e}")
-            if _proc_span:
+                if _PROCESSES_AVAILABLE:
+                    weights = get_process_weights(active_process)
+                    adjusted_budgets = apply_process_weights(
+                        REGION_BUDGETS, weights,
+                    )
+                else:
+                    adjusted_budgets = REGION_BUDGETS
+            except Exception as e:
+                print(f"[{datetime.now()}] [Process] Detection failed: {e}")
+        if _proc_span:
+            try:
+                _proc_span.update(output={
+                    "process": active_process.value if active_process else "default",
+                })
+                _proc_span.__exit__(None, None, None)
+            except Exception:
                 try:
-                    _proc_span.update(output={
-                        "process": active_process.value if active_process else "default",
-                    })
                     _proc_span.__exit__(None, None, None)
                 except Exception:
-                    try:
-                        _proc_span.__exit__(None, None, None)
-                    except Exception:
-                        pass
+                    pass
 
-            # Unified recall via recall_service
-            current_regions = self._build_frozen_regions() if _COGNITION_AVAILABLE else []
-            if tiny_fast_text_path:
-                if current_regions:
-                    system_prompt["append"] = assemble_regions(list(current_regions)) + chat_rules
+        # Recall — runs on every turn. recall_service does its own tier classification;
+        # TIER_0 short-circuits empty (~ms), TIER_1 runs the full pipeline.
+        current_regions = self._build_frozen_regions() if _COGNITION_AVAILABLE else []
+        recall_response = None
+        if not _RECALL_SERVICE_AVAILABLE and _trace_decisions is not None:
+            _trace_decisions["recall"] = {
+                "skipped": True, "reason": "recall_service_unavailable",
+            }
+        try:
+            if _RECALL_SERVICE_AVAILABLE:
+                from config import MEMORY_DIR  # noqa: F811 (re-import guards ImportError path)
+
+                recall_response = await recall_memory_service(
+                    query=message.text,
+                    memory_dir=MEMORY_DIR,
+                    caller="chat",
+                    max_results=5,
+                    has_prefetched=bool(message.prefetched_context),
+                )
                 if _trace_decisions is not None:
-                    _trace_decisions["recall"] = {"skipped": True, "reason": "tiny_fast_text_path"}
-                    _trace_decisions["region_assembly"] = {
-                        "skipped": True,
-                        "reason": "tiny_fast_text_path",
+                    recall_tier = getattr(recall_response.log, "tier", "unknown")
+                    _trace_decisions["recall"] = {
+                        "tier": recall_tier,
+                        "has_results": bool(recall_response.formatted_text),
                     }
-            else:
-                if not _RECALL_SERVICE_AVAILABLE and _trace_decisions is not None:
-                    _trace_decisions["recall"] = {"skipped": True, "reason": "recall_service_unavailable"}
-                    _trace_decisions["region_assembly"] = {"skipped": True, "reason": "recall_service_unavailable"}
+        except Exception as e:
+            print(f"[{datetime.now()}] [Recall] Service failed (non-blocking): {e}")
+
+        # Region assembly — unified list, resume-independent.
+        _ra_span = None
+        if _tracing and _COGNITION_AVAILABLE:
+            try:
+                _ra_span = _lf.start_as_current_observation(
+                    as_type="span", name="region_assembly",
+                )
+                _ra_span.__enter__()
+            except Exception:
+                _ra_span = None
+
+        recent_region_meta = {"messages": 0, "chars": 0}
+        if _COGNITION_AVAILABLE:
+            budgets = adjusted_budgets if adjusted_budgets else REGION_BUDGETS
+            regions = list(current_regions)
+            # Continuity — inject whenever state carries real content (was gated behind recall before).
+            if continuity_state:
+                continuity_text = continuity_state.to_region_text()
+                if continuity_text.strip():
+                    regions.append(PromptRegion(
+                        "continuity", continuity_text, budgets["continuity"],
+                    ))
+            # Recent conversation — the floor against SDK resume hydration drift.
+            recent_region = self._build_recent_conversation_region(
+                session_key, budgets.get("recent_conversation", 600),
+            )
+            if recent_region:
+                regions.append(recent_region)
+                recent_region_meta = {
+                    "messages": recent_region.content.count("\n\n") + 1
+                    if recent_region.content else 0,
+                    "chars": len(recent_region.content),
+                }
+            # Recalled memory — only when recall pipeline returned results.
+            if recall_response and recall_response.formatted_text:
+                regions.append(PromptRegion(
+                    "recalled_memory", recall_response.formatted_text,
+                    budgets["recalled_memory"],
+                ))
+            if regions:
+                system_prompt["append"] = assemble_regions(regions) + chat_rules
+        elif recall_response and recall_response.formatted_text:
+            # Cognition unavailable but got keyword results — append plainly.
+            system_prompt["append"] += recall_response.formatted_text
+
+        if _trace_decisions is not None:
+            _trace_decisions["recent_conversation"] = recent_region_meta
+            _trace_decisions["region_assembly"] = {
+                "total_chars": len(system_prompt.get("append", "")),
+            }
+
+        if _ra_span:
+            try:
+                _ra_span.update(output={
+                    "total_chars": len(system_prompt.get("append", "")),
+                    "recent_conversation": recent_region_meta,
+                })
+                _ra_span.__exit__(None, None, None)
+            except Exception:
                 try:
-                    if _RECALL_SERVICE_AVAILABLE:
-                        recall_response = await recall_memory_service(
-                            query=message.text,
-                            memory_dir=MEMORY_DIR,
-                            caller="chat",
-                            max_results=5,
-                            has_prefetched=bool(message.prefetched_context),
-                        )
-
-                        # Record recall tier decision on parent span
-                        if _trace_decisions is not None:
-                            recall_tier = getattr(recall_response.log, "tier", "unknown")
-                            _trace_decisions["recall"] = {
-                                "tier": recall_tier,
-                                "has_results": bool(recall_response.formatted_text),
-                            }
-                            if not recall_response.formatted_text:
-                                _trace_decisions["region_assembly"] = {
-                                    "skipped": True, "reason": "no_recall_results",
-                                }
-
-                        _ra_span = None
-                        if _tracing:
-                            try:
-                                _ra_span = _lf.start_as_current_observation(
-                                    as_type="span", name="region_assembly",
-                                )
-                                _ra_span.__enter__()
-                            except Exception:
-                                _ra_span = None
-
-                        if recall_response.formatted_text and _COGNITION_AVAILABLE and adjusted_budgets:
-                            regions = list(current_regions)
-                            cont_budget = adjusted_budgets["continuity"]
-                            continuity_text = ""
-                            if continuity_state:
-                                continuity_text = continuity_state.to_region_text()
-                            regions.append(PromptRegion(
-                                "continuity", continuity_text, cont_budget,
-                            ))
-                            rec_budget = adjusted_budgets["recalled_memory"]
-                            regions.append(PromptRegion(
-                                "recalled_memory", recall_response.formatted_text, rec_budget,
-                            ))
-                            system_prompt["append"] = (
-                                assemble_regions(regions) + chat_rules
-                            )
-                        elif recall_response.formatted_text:
-                            # Cognition unavailable but got keyword results
-                            system_prompt["append"] += recall_response.formatted_text
-                        elif current_regions:
-                            regions = list(current_regions)
-                            system_prompt["append"] = assemble_regions(regions) + chat_rules
-
-                        if _ra_span:
-                            try:
-                                _ra_span.update(output={
-                                    "total_chars": len(system_prompt.get("append", "")),
-                                })
-                                _ra_span.__exit__(None, None, None)
-                            except Exception:
-                                try:
-                                    _ra_span.__exit__(None, None, None)
-                                except Exception:
-                                    pass
-                except Exception as e:
-                    print(f"[{datetime.now()}] [Recall] Service failed (non-blocking): {e}")
-                    if current_regions:
-                        regions = list(current_regions)
-                        system_prompt["append"] = assemble_regions(regions) + chat_rules
+                    _ra_span.__exit__(None, None, None)
+                except Exception:
+                    pass
 
         # Pre-fetched data from router — lightweight TEXT_REASONING pass
         if message.prefetched_context:

@@ -22,7 +22,7 @@ from pathlib import Path
 _scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_scripts_dir))
 
-from config import SCRIPTS_DIR, STATE_DIR, ensure_directories  # noqa: E402
+from config import MEMORY_DIR, SCRIPTS_DIR, STATE_DIR, ensure_directories  # noqa: E402
 from shared import log_hook_execution  # noqa: E402
 
 # === Constants ===
@@ -202,6 +202,31 @@ def main() -> None:
     except Exception as e:
         print(f"[session-end-flush] Failed to spawn flush: {e}", file=sys.stderr)
         log_hook_execution("session-end-flush", source, "ERROR", _time.time() - _start, f"spawn: {e}")
+
+    # Living Mind Phase 1: append cross-session open threads to WORKING.md.
+    # Fast regex-only pass (no LLM) — runs inline so the scratchpad is updated
+    # even if the background memory_flush subprocess lags or fails.
+    try:
+        from living_memory import append_open_threads_from_flush  # noqa: WPS433
+
+        appended = append_open_threads_from_flush(MEMORY_DIR, context)
+        if appended:
+            log_hook_execution(
+                "session-end-flush",
+                source,
+                "OK",
+                _time.time() - _start,
+                f"living_memory appended {appended} threads",
+            )
+    except Exception as e:  # noqa: BLE001
+        # Non-fatal — WORKING.md write failure never breaks session end.
+        log_hook_execution(
+            "session-end-flush",
+            source,
+            "WARN",
+            _time.time() - _start,
+            f"living_memory: {e}",
+        )
 
 
 if __name__ == "__main__":

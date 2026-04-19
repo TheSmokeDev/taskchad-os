@@ -23,7 +23,7 @@ DEFAULT_REGION_BUDGETS: dict[str, int] = {
     "recalled_memory": 16000,   # ~4K tokens — tiered recall results
     "procedural_memory": 8000,  # ~2K tokens — skills index (stub Move 1)
     "prefetched_context": 24000,  # ~6K tokens — router pre-fetch
-    "recent_conversation": 0,   # Dynamic — managed by runtime SDK
+    "recent_conversation": 600,  # ~2.4K chars — last 4-6 turns, engine-injected
 }
 
 

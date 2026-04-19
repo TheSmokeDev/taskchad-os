@@ -7,40 +7,38 @@ from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 
 from .base import RUNTIME_LANE_CLAUDE_NATIVE, RUNTIME_LANE_GENERIC
-from .profiles import normalize_provider
+from .profiles import GENERIC_PROVIDER_REGISTRY, normalize_provider
 
 RUNTIME_LANE_ENV_KEY = "SECOND_BRAIN_RUNTIME_LANE"
 GENERIC_PROVIDER_ENV_KEY = "SECOND_BRAIN_GENERIC_PROVIDER"
 LEGACY_RUNTIME_PROVIDER_KEY = "SECOND_BRAIN_RUNTIME_PROVIDER"
 
-_GENERIC_PROVIDER_ALIASES = {
-    "codex": "openai-codex",
-    "openai_codex": "openai-codex",
-    "openai-codex": "openai-codex",
-    "chatgpt": "openai-codex",
-    "gpt": "openai-codex",
-    "gemini": "gemini-cli",
-    "gemini-cli": "gemini-cli",
-    "google": "gemini-cli",
-    "openrouter": "openrouter",
-    "openai": "openai-compatible",
-    "openai-compatible": "openai-compatible",
-}
 
-_LEGACY_PROVIDER_WRITE_VALUES = {
-    "openai-codex": "openai_codex",
-    "gemini-cli": "gemini",
-    "openrouter": "openrouter",
-    "openai-compatible": "openai",
-}
+def _build_generic_aliases() -> dict[str, str]:
+    return {
+        alias: canonical
+        for canonical, overlay in GENERIC_PROVIDER_REGISTRY.items()
+        for alias in overlay.aliases
+    }
 
-_PROVIDER_DISPLAY_NAMES = {
-    "claude": "Claude",
-    "openai-codex": "Codex",
-    "gemini-cli": "Gemini",
-    "openrouter": "OpenRouter",
-    "openai-compatible": "OpenAI-compatible",
-}
+
+def _build_legacy_write_values() -> dict[str, str]:
+    return {
+        canonical: overlay.legacy_write_key
+        for canonical, overlay in GENERIC_PROVIDER_REGISTRY.items()
+    }
+
+
+def _build_display_names() -> dict[str, str]:
+    names: dict[str, str] = {"claude": "Claude"}
+    for canonical, overlay in GENERIC_PROVIDER_REGISTRY.items():
+        names[canonical] = overlay.display_name
+    return names
+
+
+_GENERIC_PROVIDER_ALIASES = _build_generic_aliases()
+_LEGACY_PROVIDER_WRITE_VALUES = _build_legacy_write_values()
+_PROVIDER_DISPLAY_NAMES = _build_display_names()
 
 
 @dataclass(slots=True, eq=True)

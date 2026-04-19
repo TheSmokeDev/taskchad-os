@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import re
 import sys
 from collections import Counter
@@ -592,6 +593,24 @@ async def _run_dream_inner(
         f"{len(signal.stalls)} stalls, "
         f"{len(signal.repeated_entities)} repeated entities"
     )
+
+    # === PHASE 2.5: Age working memory (always — maintenance, not signal-gated) ===
+    # Living Mind Phase 1: move stale bullets from WORKING.md active sections to
+    # Archived (Cold). Insert-only — never deletes. Non-fatal on failure.
+    try:
+        from living_memory import archive_stale_working_items  # noqa: WPS433
+
+        _age_threshold = int(os.getenv("WORKING_MEMORY_AGE_DAYS", "7"))
+        _archive_report = archive_stale_working_items(MEMORY_DIR, days=_age_threshold)
+        if _archive_report.archived_count > 0:
+            print(
+                f"[{now_local()}]   Archived {_archive_report.archived_count} stale "
+                f"working-memory items (>{_archive_report.days}d old) "
+                f"across {len(_archive_report.sections_touched)} sections"
+            )
+    except Exception as _wm_exc:  # noqa: BLE001
+        # Dream cycle continues even if archiving fails.
+        print(f"[{now_local()}]   WARNING: working memory archive failed: {_wm_exc}")
 
     if not signal.found:
         print(f"[{now_local()}] No signal found — {DREAM_SILENT}")

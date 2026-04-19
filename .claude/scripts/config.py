@@ -219,7 +219,11 @@ REGION_BUDGETS = {
     "procedural_memory": int(os.getenv("REGION_BUDGET_PROCEDURAL", "500")),
     "prefetched_context": int(os.getenv("REGION_BUDGET_PREFETCHED", "3000")),
     "user_inferences": int(os.getenv("REGION_BUDGET_USER_INFERENCES", "300")),
+    "working_memory": int(os.getenv("REGION_BUDGET_WORKING_MEMORY", "600")),
+    "recent_conversation": int(os.getenv("REGION_BUDGET_RECENT_CONVERSATION", "600")),
 }
+
+RECENT_CONVERSATION_COUNT = int(os.getenv("RECENT_CONVERSATION_COUNT", "6"))
 
 # Staging store
 STAGING_STORE_PATH = STATE_DIR / "memory-candidates.jsonl"

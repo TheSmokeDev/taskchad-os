@@ -221,3 +221,39 @@ uv run python memory_dream.py --days 14    # Scan 14 days of logs
 
 **State:** `.claude/data/state/dream-state.json`
 **Trigger:** Post-step of weekly synthesis (Sunday 8 PM) + standalone CLI + `/vault-dream` skill (planned)
+
+### Working Memory (Living Mind Phase 1)
+
+Cross-session scratchpad — open threads, hypotheses, unresolved questions. Solves amnesia between sessions: a file-based curated middle tier between per-session continuity and long-term MEMORY.md. Gary Tan "LLM Memory Unsolved" thesis implementation.
+
+| File | Purpose |
+|------|---------|
+| `living_memory.py` | Read/write/age primitives — file_lock + atomic writes, regex section parsing, 3-day dedup, insert-only archive |
+| `vault/memory/WORKING.md` | Canonical scratchpad (5 fixed sections: Open Threads, Active Hypotheses, Unresolved Questions, Heartbeat Observations [reserved], Archived (Cold)) |
+| `runtime/bootstrap.py` | `_extract_working_memory()` — compact ~400-char briefing block between rules and active projects |
+| `chat/engine.py` | `working_memory` frozen region (600-token budget, full content, after `durable_memory`) |
+| `hooks/session-end-flush.py` | `append_open_threads_from_flush()` — 6 regex signals (TODO, waiting on, next up, need to verify, etc.), capped at 3/session, no LLM |
+| `memory_dream.py` | Phase 2.5 — `archive_stale_working_items()` moves items >`WORKING_MEMORY_AGE_DAYS` (default 7) |
+
+**Commands:**
+- `/working` — show active sections (Open Threads / Hypotheses / Questions)
+- `/working add "<text>"` — append to Open Threads with today's date
+- `/working resolve <N>` — move item N (1-based) to Archived with `[resolved YYYY-MM-DD]` prefix
+
+**Observability:** 3 Langfuse spans — `living_memory_read`, `living_memory_write`, `living_memory_archive`. Metadata includes `threads_count`, `bytes_read/written`, `archived_count`, `sections_touched`, `threads_skipped_dedup`. All spans fail-open (try/except wraps every Langfuse call).
+
+**Key design decisions:**
+- Insert-only archive — Gary Tan invariant, never hard-delete
+- Zero LLM in hot path — regex + date math only, <50ms per operation
+- Active section caps: Open Threads 10, others 5 (oldest age to archive when exceeded)
+- 3-day dedup window via subject prefix match (40 chars, case-insensitive)
+- Atomic writes via `tmp + os.replace()` under `shared.file_lock()` (cross-platform, 5s timeout)
+- Frontmatter `date:` field refreshed on every write
+- Non-goals: Phase 2 episodes/, Phase 3 heartbeat observation writes (section reserved empty), Phase 4 proactive brief generator
+
+**Env vars:**
+- `REGION_BUDGET_WORKING_MEMORY` (default 600) — token budget for the engine region
+- `WORKING_MEMORY_AGE_DAYS` (default 7) — age threshold for dream cycle archival
+
+**Tests:** 19 tests (13 behavior + 5 Langfuse spans + 1 resolve integration)
+**Commit:** `1de11c0`

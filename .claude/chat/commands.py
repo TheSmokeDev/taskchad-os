@@ -75,6 +75,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     # -- Memory & Search --
     ("search", "Search memory — keyword or semantic over notes", "engine", "admin"),
     ("file", "File the last answer as a vault note with entity compilation", "engine", "admin"),
+    ("working", "Show cross-session scratchpad — open threads, hypotheses, questions", "router", "admin"),
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
     ("quote", "Generate an insurance quote via TurboRater using the turborater-quote skill", "engine", "admin"),
@@ -118,7 +119,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ("Analytics & Monitoring", ["gsc", "analytics"]),
     ("Personal Finance", ["budget"]),
     ("Communication", ["send", "brief"]),
-    ("Memory", ["search", "file"]),
+    ("Memory", ["search", "file", "working"]),
     ("Content Creation", ["blog", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts"]),
     (
         "PIV Workflow",
@@ -136,6 +137,8 @@ CORE_INTENTS: list[tuple[list[str], str, bool]] = [
     (["social media accounts", "social accounts"], "accounts", False),
     (["budget", "bills", "finances", "paid", "paycheck", "loan status",
       "what do i owe", "transactions", "spending", "bank balance", "account balance"], "budget", True),
+    (["working memory", "open threads", "what was i working on",
+      "where did i leave off", "active hypotheses"], "working", True),
 ]
 
 

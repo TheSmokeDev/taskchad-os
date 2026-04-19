@@ -197,6 +197,27 @@ def _extract_goal_names(goals: str) -> str:
     return " | ".join(h.strip() for h in headings) if headings else ""
 
 
+def _extract_working_memory(memory_dir: Path) -> str:
+    """Build a compact `### Working Memory` block from WORKING.md.
+
+    Living Mind Phase 1: surfaces cross-session open threads, active hypotheses,
+    and unresolved questions. Returns empty string if WORKING.md is missing or
+    all active sections are empty. Fail-open: any error yields "" and the
+    briefing proceeds without the section.
+    """
+    try:
+        from living_memory import build_briefing_section  # noqa: WPS433
+
+        block = build_briefing_section(memory_dir)
+        if not block:
+            return ""
+        # build_briefing_section returns `## Working Memory\n...`; rewrite as H3
+        # so it nests under the briefing's H2 like the other sections.
+        return block.replace("## Working Memory", "### Working Memory", 1)
+    except Exception:
+        return ""
+
+
 def _build_memory_index(memory_dir: Path) -> str:
     """Build a topic → path mapping for the memory index."""
     # When the vault lives inside the repo, show repo-relative paths so any
@@ -289,6 +310,11 @@ def build_session_briefing(
         return _build_full_dump(memory_dir=memory_dir, daily_dir=daily_dir)
 
     # --- Optional sections (graceful degradation) ---
+
+    # 4.5. Working Memory (cross-session scratchpad — Living Mind Phase 1)
+    working_summary = _extract_working_memory(memory_dir)
+    if working_summary:
+        parts.append(working_summary)
 
     # 5. Active Projects (terse status)
     projects = _extract_project_status(memory) if memory else ""

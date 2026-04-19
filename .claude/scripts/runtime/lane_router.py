@@ -25,7 +25,11 @@ from .gemini_cli import GeminiCliRuntime
 from .health import mark_profile_retryable_failure, mark_profile_success, mark_profile_unavailable
 from .openai_codex import OpenAICodexRuntime
 from .openai_compatible import OpenAICompatibleRuntime
-from .profiles import RuntimeProfile, build_profile_for_provider
+from .profiles import (
+    GENERIC_PROVIDER_REGISTRY,
+    RuntimeProfile,
+    build_profile_for_provider,
+)
 from .routing import resolve_generic_runtime_profiles
 from .selection import resolve_runtime_selection
 
@@ -46,14 +50,18 @@ def resolve_runtime_lane(request: RuntimeRequest) -> str:
 def _adapter_for(profile: RuntimeProfile):
     if profile.provider == "claude":
         return ClaudeSdkRuntime(profile)
-    if profile.provider == "gemini-cli":
-        return GeminiCliRuntime(profile)
-    if profile.provider == "openai-codex":
-        return OpenAICodexRuntime(profile)
-    if profile.provider == "openrouter":
-        return OpenAICompatibleRuntime(profile)
-    if profile.provider == "openai-compatible":
-        return OpenAICompatibleRuntime(profile)
+    overlay = GENERIC_PROVIDER_REGISTRY.get(profile.provider)
+    if overlay is not None:
+        if overlay.transport == "subprocess_cli":
+            # subprocess_cli still dispatches by provider key because
+            # OpenAICodexRuntime and GeminiCliRuntime are distinct classes.
+            if profile.provider == "openai-codex":
+                return OpenAICodexRuntime(profile)
+            if profile.provider == "gemini-cli":
+                return GeminiCliRuntime(profile)
+        if overlay.transport == "openai_responses":
+            # openai_responses providers share one adapter class.
+            return OpenAICompatibleRuntime(profile)
     raise RuntimeExecutionError(f"Unsupported runtime provider: {profile.provider}")
 
 

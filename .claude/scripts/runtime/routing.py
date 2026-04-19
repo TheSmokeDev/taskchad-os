@@ -7,7 +7,12 @@ import os
 from .base import RuntimeRequest
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .health import is_profile_available
-from .profiles import RuntimeProfile, build_profile_for_provider, normalize_provider
+from .profiles import (
+    GENERIC_PROVIDER_REGISTRY,
+    RuntimeProfile,
+    build_profile_for_provider,
+    normalize_provider,
+)
 from .selection import resolve_runtime_selection
 
 # Compatibility/provider-status ordering kept for legacy shims and health checks
@@ -38,16 +43,28 @@ TASK_ROUTE_DEFAULTS = {
     "memory_weekly": DEFAULT_PROVIDER_CHAIN,
 }
 
-GENERIC_TOOL_ROUTE = (
-    "openai_codex",
-    "gemini",
+# Derived from GENERIC_PROVIDER_REGISTRY: tool_route_priority >= 0 means the
+# provider participates in the tool route, and the int is its ordering key.
+GENERIC_TOOL_ROUTE: tuple[str, ...] = tuple(
+    key
+    for key, _overlay in sorted(
+        (
+            (k, v)
+            for k, v in GENERIC_PROVIDER_REGISTRY.items()
+            if v.tool_route_priority >= 0
+        ),
+        key=lambda kv: kv[1].tool_route_priority,
+    )
 )
 
-GENERIC_TEXT_ROUTE = (
-    "openai",
-    "openrouter",
-    "openai_codex",
-    "gemini",
+# Derived from GENERIC_PROVIDER_REGISTRY: every entry participates in the
+# text route, ordered by text_route_priority.
+GENERIC_TEXT_ROUTE: tuple[str, ...] = tuple(
+    key
+    for key, _overlay in sorted(
+        GENERIC_PROVIDER_REGISTRY.items(),
+        key=lambda kv: kv[1].text_route_priority,
+    )
 )
 
 GENERIC_TASK_ROUTE_DEFAULTS = {
