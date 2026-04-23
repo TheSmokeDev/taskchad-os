@@ -10,9 +10,9 @@ dependencies = [
     "setuptools<81; sys_platform == 'win32'",
     "tzdata>=2024.1",
     # Phase 3: Memory Search
-    # sentence-transformers drives EmbeddingGemma-300m (query/doc prompt asymmetry).
-    # fastembed retained as fallback for environments without torch.
-    "sentence-transformers>=5.0.0",
+    # BGE-base-en-v1.5 via FastEmbed / ONNX Runtime — public Apache-2.0 model,
+    # no HF auth, no torch. Swapped from EmbeddingGemma+sentence-transformers
+    # on 2026-04-22.
     "fastembed>=0.4.0",
     "sqlite-vec>=0.1.6",
     "numpy>=1.26.0",

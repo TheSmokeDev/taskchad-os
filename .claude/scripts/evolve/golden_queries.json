@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "description": "Seed golden queries for the Evolve replay harness. Drawn from MEMORY.md active projects, recent daily logs, and framework internals so deltas reflect real usage patterns rather than synthetic benchmarks.",
+  "queries": [
+    {"query": "YourBusiness lead generation status", "domain": "project"},
+    {"query": "what bank accounts are connected to budget", "domain": "finance"},
+    {"query": "how does the heartbeat pipeline work", "domain": "framework"},
+    {"query": "evolve replay harness phase 2", "domain": "framework"},
+    {"query": "BGE embedding model swap", "domain": "memory"},
+    {"query": "langfuse observability trace shape", "domain": "framework"},
+    {"query": "convoy mailbox orchestration phases", "domain": "orchestration"},
+    {"query": "entity compilation engine karpathy wiki", "domain": "memory"},
+    {"query": "working memory WORKING.md scratchpad", "domain": "cognition"},
+    {"query": "dream consolidation cycle", "domain": "cognition"},
+    {"query": "telegram bot inline buttons", "domain": "chat"},
+    {"query": "teller mTLS bank sync capital one", "domain": "finance"},
+    {"query": "sanitize.py two-repo export rules", "domain": "framework"},
+    {"query": "claude agent sdk max subscription policy", "domain": "runtime"},
+    {"query": "archon workflow ralph-dag autonomous", "domain": "workflow"}
+  ]
+}

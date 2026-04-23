@@ -184,10 +184,18 @@ class TelegramAdapter:
             else:
                 # Long/technical — text only, voice would be painful
                 text = self._format_for_telegram(message.text)
-                await self._app.bot.send_message(
-                    chat_id=chat_id, text=text,
-                    parse_mode="HTML",
-                )
+                for chunk in self._split_message(text):
+                    try:
+                        await self._app.bot.send_message(
+                            chat_id=chat_id, text=chunk,
+                            parse_mode="Markdown",
+                        )
+                    except Exception as e:
+                        print(f"[{datetime.now()}] Voice-thread text send failed: {e}")
+                        try:
+                            await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+                        except Exception as e2:
+                            print(f"[{datetime.now()}] Voice-thread text fallback failed: {e2}")
             return None
 
         text = self._format_for_telegram(message.text)
@@ -200,16 +208,15 @@ class TelegramAdapter:
             except (ValueError, TypeError):
                 pass
 
-        # Update existing message
-        if message.is_update and message.update_message_id:
+        # Update existing message — only attempt edit if content fits in one message.
+        # If too long, fall through to chunked new-message send to avoid silent truncation.
+        if message.is_update and message.update_message_id and len(text) <= 4096:
             try:
                 msg_id = int(message.update_message_id)
-                # Telegram has 4096 char limit per message
-                truncated = text[:4096] if len(text) > 4096 else text
                 await self._app.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=msg_id,
-                    text=truncated,
+                    text=text,
                     parse_mode="Markdown",
                 )
                 return message.update_message_id

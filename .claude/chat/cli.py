@@ -1171,5 +1171,115 @@ def _delete_env_key(key: str) -> None:
         env_path.write_text("")
 
 
+# === evolve ===
+
+@main.group()
+def evolve():
+    """Replay recall queries under candidate configs to measure deltas."""
+
+
+def _coerce_override_value(raw: str) -> object:
+    """Best-effort coerce an override value. JSON first (handles numbers, bools,
+    null, arrays, objects), then fall back to raw string for model names and
+    other freeform values."""
+    import json as _json
+
+    raw = raw.strip()
+    try:
+        return _json.loads(raw)
+    except _json.JSONDecodeError:
+        return raw
+
+
+def _parse_override(override_str: str) -> tuple[str, object]:
+    """Parse KEY=VALUE override."""
+    if "=" not in override_str:
+        raise click.BadParameter(f"override must be KEY=VALUE, got: {override_str}")
+    key, raw = override_str.split("=", 1)
+    return key.strip(), _coerce_override_value(raw)
+
+
+@evolve.command("run")
+@click.option("--golden/--no-golden", default=True, help="Use built-in golden queries (default)")
+@click.option("--override", "-o", "overrides", multiple=True, metavar="KEY=VALUE",
+              help="Config override. Repeatable. Example: -o RECALL_MIN_SCORE=0.5")
+@click.option("--out", type=click.Path(), default=None, help="Report output directory")
+@click.option("--caller", default="replay", help="Caller tag for RecallLog")
+@click.option("--max-results", type=int, default=5, help="max_results passed to recall")
+def evolve_run(golden, overrides, out, caller, max_results):
+    """Run a replay against the current vault. Writes a ReplayReport JSON."""
+    from evolve import load_golden_queries, run_replay_sync, write_report
+
+    if not golden:
+        click.echo("--no-golden: reading queries from stdin, one per line")
+        queries = [line.strip() for line in click.get_text_stream("stdin") if line.strip()]
+        if not queries:
+            raise click.UsageError("No queries provided on stdin.")
+    else:
+        queries = load_golden_queries()
+
+    override_dict: dict[str, object] = {}
+    for o in overrides:
+        k, v = _parse_override(o)
+        override_dict[k] = v
+
+    click.echo(f"Replaying {len(queries)} queries with overrides={override_dict or '(none)'}")
+    report = run_replay_sync(
+        queries,
+        overrides=override_dict,
+        caller=caller,
+        max_results=max_results,
+    )
+
+    out_path = write_report(report, out_dir=out)
+    s = report.summary
+    click.echo("")
+    click.echo(f"Report: {out_path}")
+    click.echo(f"  experiment_id:   {report.experiment_id}")
+    click.echo(f"  hit_rate:        {s.hit_rate:.4f}  ({s.hit_count}/{s.query_count})")
+    click.echo(f"  avg_top_score:   {s.avg_top_score:.4f}")
+    click.echo(f"  p50/p90 latency: {s.p50_latency_ms:.1f} / {s.p90_latency_ms:.1f} ms")
+    click.echo(f"  tier distribution: {dict(s.tier_distribution)}")
+    if s.error_count:
+        click.echo(f"  errors:          {s.error_count}", err=True)
+
+
+@evolve.command("compare")
+@click.argument("baseline_report", type=click.Path(exists=True, dir_okay=False))
+@click.argument("candidate_report", type=click.Path(exists=True, dir_okay=False))
+def evolve_compare(baseline_report, candidate_report):
+    """Diff two ReplayReport JSONs and print the delta table."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from evolve import (
+        ReplayQueryResult,
+        ReplayReport,
+        ReplaySummary,
+        compare_reports,
+        format_delta_table,
+    )
+
+    def _load(path: str) -> ReplayReport:
+        raw = _json.loads(_Path(path).read_text(encoding="utf-8"))
+        summary = ReplaySummary(**raw.get("summary", {}))
+        per_query = [ReplayQueryResult(**q) for q in raw.get("per_query", [])]
+        return ReplayReport(
+            experiment_id=raw["experiment_id"],
+            timestamp_utc=raw.get("timestamp_utc", ""),
+            overrides=raw.get("overrides", {}),
+            config_snapshot=raw.get("config_snapshot", {}),
+            per_query=per_query,
+            summary=summary,
+            memory_dir=raw.get("memory_dir", ""),
+            caller=raw.get("caller", "replay"),
+        )
+
+    baseline = _load(baseline_report)
+    candidate = _load(candidate_report)
+    delta = compare_reports(baseline, candidate)
+    click.echo(format_delta_table(delta))
+
+
 if __name__ == "__main__":
     main()

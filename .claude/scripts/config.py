@@ -85,14 +85,18 @@ RECALL_RERANK_TOP_N = int(os.getenv("RECALL_RERANK_TOP_N", "10"))
 RECALL_RERANK_TIMEOUT_S = float(os.getenv("RECALL_RERANK_TIMEOUT_S", "3.0"))
 
 # === Embedding Configuration ===
-# EmbeddingGemma-300m @ 512 Matryoshka dims (upgraded from MiniLM-L6-v2 2026-04-11).
-# Native output is 768-dim; sentence-transformers truncate_dim=512 slices + renormalizes
-# inside the model graph. Requires HF_TOKEN in .env (gated model, license accepted).
-EMBEDDING_MODEL = "google/embeddinggemma-300m"
-EMBEDDING_DIMENSIONS = 512
-# Cache redirected off C: drive (66 GB free) onto E: drive (662 GB free) to avoid
-# disk pressure from the ~600 MB model + tokenizer + intermediate files.
-EMBEDDING_CACHE_DIR = Path(os.getenv("EMBEDDING_CACHE_DIR", "E:/ai-models/embeddinggemma"))
+# BGE-base-en-v1.5 via FastEmbed / ONNX (swapped from EmbeddingGemma-300m 2026-04-22).
+# Rationale: public Apache-2.0 model (no HF_TOKEN / gated license), ONNX-only runtime
+# (drops sentence-transformers + torch, ~1 GB install savings), deterministic across
+# platforms (load-bearing for the Evolve replay harness), MTEB retrieval parity with
+# EmbeddingGemma on English. Native 768-dim, no Matryoshka truncation needed.
+# Query side uses BGE's "Represent this sentence for searching..." prompt; passage
+# side is unprompted per BGE v1.5 spec. Handled inside embeddings.py.
+EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
+EMBEDDING_DIMENSIONS = 768
+# Cross-platform default — override via EMBEDDING_CACHE_DIR env var (e.g. a larger
+# drive on Windows). Matches the path documented in Section 03 of CLAUDE.md.
+EMBEDDING_CACHE_DIR = Path(os.getenv("EMBEDDING_CACHE_DIR", str(DATA_DIR / "models")))
 
 # === Integration Configuration (Phase 5) ===
 INTEGRATIONS_DIR = SCRIPTS_DIR / "integrations"

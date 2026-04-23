@@ -48,6 +48,8 @@ __pycache__/
 
 # Windows artifacts
 NUL
+# Stray HuggingFace cache written as literal "E:/" Windows path under Linux
+.claude/scripts/E:/
 
 # Archon worktrees (embedded git repos for parallel agent work)
 /.worktrees/
