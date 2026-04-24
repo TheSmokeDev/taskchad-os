@@ -165,6 +165,38 @@ async def test_short_casual_telegram_message_uses_text_reasoning(
     assert captured["allowed_tools"] == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["go ahead", "do it", "execute", "implement it", "get started"])
+async def test_short_execution_phrases_keep_tools_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    text: str,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["capability"] = request.capability
+        captured["allowed_tools"] = list(request.allowed_tools)
+        return RuntimeResult(
+            text="working",
+            runtime_lane="generic_runtime",
+            provider="gemini-cli",
+            model="gemini-3-flash-preview",
+            profile_key="primary-gemini-cli",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [out async for out in convo.handle_message(_make_message(text))]
+
+    assert outputs[-1].text == "working"
+    assert captured["capability"] == "tool_reasoning"
+    assert "Bash" in captured["allowed_tools"]
+
+
 def test_sqlite_session_store_adds_runtime_columns(tmp_path: Path) -> None:
     db_path = tmp_path / "chat.db"
     store = SQLiteSessionStore(db_path)
