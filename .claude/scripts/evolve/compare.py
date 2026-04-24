@@ -16,7 +16,6 @@ from typing import Any
 
 from evolve.models import ReplayQueryResult, ReplayReport
 
-
 # Absolute score delta below this is treated as "same" — debounces rounding jitter.
 SCORE_NOISE_FLOOR = 0.01
 # Absolute latency delta in ms below this is treated as "same".
@@ -28,7 +27,8 @@ class QueryDelta:
     """Per-query diff between baseline and candidate."""
 
     query: str
-    verdict: str  # "better" | "worse" | "same" | "new_hit" | "lost_hit" | "still_missing"
+    # better|worse|same|new_hit|lost_hit|still_missing|new_error|fixed_error|still_errored
+    verdict: str
     baseline_tier: str = ""
     candidate_tier: str = ""
     baseline_top_score: float = 0.0
@@ -39,6 +39,9 @@ class QueryDelta:
     latency_delta_ms: float = 0.0
     baseline_results_count: int = 0
     candidate_results_count: int = 0
+    baseline_error: str = ""
+    candidate_error: str = ""
+    error_count_delta: int = 0  # +1 new error, -1 fixed error, 0 no change
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -59,6 +62,7 @@ class ReportDelta:
     per_query: list[QueryDelta] = field(default_factory=list)
     baseline_overrides: dict[str, Any] = field(default_factory=dict)
     candidate_overrides: dict[str, Any] = field(default_factory=dict)
+    error_count_delta: int = 0  # +1 net new errors, -1 net fixed, 0 no change
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +77,7 @@ class ReportDelta:
             "baseline_overrides": self.baseline_overrides,
             "candidate_overrides": self.candidate_overrides,
             "per_query": [q.to_dict() for q in self.per_query],
+            "error_count_delta": self.error_count_delta,
         }
 
 
@@ -82,6 +87,18 @@ def _top_score(result: ReplayQueryResult) -> float:
 
 def _classify(baseline: ReplayQueryResult, candidate: ReplayQueryResult) -> str:
     """Turn a per-query pair into a verdict label."""
+    b_err = bool(baseline.error)
+    c_err = bool(candidate.error)
+
+    # Error verdicts take priority — a zero results_count caused by an error
+    # is not the same as a genuine miss and must not be labeled still_missing.
+    if b_err and c_err:
+        return "still_errored"
+    if not b_err and c_err:
+        return "new_error"
+    if b_err and not c_err:
+        return "fixed_error"
+
     b_hit = baseline.results_count > 0
     c_hit = candidate.results_count > 0
 
@@ -128,20 +145,37 @@ def compare_reports(baseline: ReplayReport, candidate: ReplayReport) -> ReportDe
         candidate_overrides=candidate.overrides,
     )
 
-    # Align per-query by index. If lengths differ, pad with empty results so
-    # the mismatch surfaces as `lost_hit` / `new_hit` rather than a crash.
-    max_len = max(len(baseline.per_query), len(candidate.per_query))
-    verdict_counts: dict[str, int] = {}
+    # Guard: query sets must be identical and in the same order.
+    b_queries = [r.query for r in baseline.per_query]
+    c_queries = [r.query for r in candidate.per_query]
+    if len(b_queries) != len(c_queries):
+        raise ValueError(
+            f"Query list length mismatch: baseline has {len(b_queries)} queries, "
+            f"candidate has {len(c_queries)}. Re-run both reports against the same query set."
+        )
+    mismatches = [(i, bq, cq) for i, (bq, cq) in enumerate(zip(b_queries, c_queries)) if bq != cq]
+    if mismatches:
+        first = mismatches[0]
+        raise ValueError(
+            f"Query identity mismatch at index {first[0]}: "
+            f"baseline={first[1]!r}, candidate={first[2]!r}. "
+            f"Ensure both reports use the same query set in the same order."
+        )
 
-    for i in range(max_len):
-        b = baseline.per_query[i] if i < len(baseline.per_query) else ReplayQueryResult(query="")
-        c = candidate.per_query[i] if i < len(candidate.per_query) else ReplayQueryResult(query="")
+    verdict_counts: dict[str, int] = {}
+    error_count_delta = 0
+
+    for b, c in zip(baseline.per_query, candidate.per_query):
         verdict = _classify(b, c)
         verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+        b_errored = 1 if b.error else 0
+        c_errored = 1 if c.error else 0
+        q_error_delta = c_errored - b_errored
+        error_count_delta += q_error_delta
 
         delta.per_query.append(
             QueryDelta(
-                query=c.query or b.query,
+                query=b.query,
                 verdict=verdict,
                 baseline_tier=b.tier,
                 candidate_tier=c.tier,
@@ -153,10 +187,14 @@ def compare_reports(baseline: ReplayReport, candidate: ReplayReport) -> ReportDe
                 latency_delta_ms=round(c.latency_ms - b.latency_ms, 2),
                 baseline_results_count=b.results_count,
                 candidate_results_count=c.results_count,
+                baseline_error=b.error,
+                candidate_error=c.error,
+                error_count_delta=q_error_delta,
             )
         )
 
     delta.verdict_counts = verdict_counts
+    delta.error_count_delta = error_count_delta
     return delta
 
 
@@ -171,10 +209,22 @@ def format_delta_table(delta: ReportDelta) -> str:
         f"  avg_top_score: {delta.avg_top_score_delta:+.4f}",
         f"  p50_latency:   {delta.p50_latency_delta_ms:+.2f} ms",
         f"  p90_latency:   {delta.p90_latency_delta_ms:+.2f} ms",
-        "",
-        "Verdicts:",
     ]
-    for verdict in ("better", "worse", "same", "new_hit", "lost_hit", "still_missing"):
+    if delta.error_count_delta != 0:
+        lines.append(f"  error_count:   {delta.error_count_delta:+d}")
+    lines.append("")
+    lines.append("Verdicts:")
+    for verdict in (
+        "better",
+        "worse",
+        "same",
+        "new_hit",
+        "lost_hit",
+        "still_missing",
+        "new_error",
+        "fixed_error",
+        "still_errored",
+    ):
         count = delta.verdict_counts.get(verdict, 0)
         if count:
             lines.append(f"  {verdict:<14} {count}")
@@ -196,8 +246,12 @@ def format_delta_table(delta: ReportDelta) -> str:
             "new_hit": "+",
             "lost_hit": "-",
             "still_missing": ".",
+            "new_error": "!",
+            "fixed_error": "~",
+            "still_errored": "x",
         }.get(q.verdict, "?")
         lines.append(
-            f"  {arrow} [{q.verdict:<13}] {q.score_delta:+.4f}  {q.latency_delta_ms:+6.1f}ms  {q.query[:60]}"
+            f"  {arrow} [{q.verdict:<13}] {q.score_delta:+.4f}  "
+            f"{q.latency_delta_ms:+6.1f}ms  {q.query[:60]}"
         )
     return "\n".join(lines)

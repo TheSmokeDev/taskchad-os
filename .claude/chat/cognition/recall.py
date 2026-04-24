@@ -122,11 +122,18 @@ def classify_tier(
     else:
         tier = RecallTier.TIER_1
 
-    try:
-        from langfuse import get_client
-        get_client().update_current_span(output={"tier": tier.value})
-    except Exception:
-        pass
+    # Check the enabled flag OUTSIDE the try/except — if langfuse_setup itself
+    # is broken (import error, flag check raises), we want that to surface as a
+    # real traceback, not masquerade as intentionally disabled tracing.
+    from runtime.langfuse_setup import is_langfuse_enabled
+    if is_langfuse_enabled():
+        # The client update itself is best-effort — swallow only this optional
+        # side effect, not the setup check.
+        try:
+            from langfuse import get_client
+            get_client().update_current_span(metadata={"tier": tier.value})
+        except Exception:
+            pass
     return tier
 
 

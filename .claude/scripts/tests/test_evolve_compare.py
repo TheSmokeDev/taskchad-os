@@ -1,0 +1,225 @@
+"""Regression tests for evolve.compare -- query-identity guard and error verdicts.
+
+Tests guard against the three bugs fixed in this PR:
+1. Index-based pairing (now raises on reorder/length mismatch)
+2. Error field ignored (now produces new_error/fixed_error/still_errored)
+3. error_count_delta not surfaced (now present on ReportDelta and QueryDelta)
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+_CHAT_DIR = _SCRIPTS_DIR.parent / "chat"
+for _p in (_SCRIPTS_DIR, _CHAT_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+from evolve.compare import _classify, compare_reports, format_delta_table  # noqa: E402
+from evolve.models import ReplayQueryResult, ReplayReport, ReplaySummary  # noqa: E402
+
+
+def _make_report(queries: list[ReplayQueryResult], exp_id: str = "test") -> ReplayReport:
+    return ReplayReport(
+        experiment_id=exp_id,
+        timestamp_utc="2026-01-01T00:00:00Z",
+        overrides={},
+        config_snapshot={},
+        per_query=queries,
+        summary=ReplaySummary(query_count=len(queries)),
+    )
+
+
+def _result(query: str, *, results: int = 1, error: str = "") -> ReplayQueryResult:
+    return ReplayQueryResult(
+        query=query,
+        results_count=results,
+        top_scores=[0.9] if results > 0 else [],
+        error=error,
+    )
+
+
+# --- Query identity guard ---
+
+
+def test_reordered_queries_raise():
+    """Swapped query order must raise ValueError, not produce a silent verdict table."""
+    baseline = _make_report([_result("A"), _result("B"), _result("C")])
+    candidate = _make_report([_result("C"), _result("B"), _result("A")])
+    with pytest.raises(ValueError, match="mismatch"):
+        compare_reports(baseline, candidate)
+
+
+def test_length_mismatch_raises():
+    """Baseline with 3 queries vs candidate with 2 must raise, not pad silently."""
+    baseline = _make_report([_result("A"), _result("B"), _result("C")])
+    candidate = _make_report([_result("A"), _result("B")])
+    with pytest.raises(ValueError, match="length mismatch"):
+        compare_reports(baseline, candidate)
+
+
+def test_identical_queries_do_not_raise():
+    """Same query set in same order must not raise."""
+    baseline = _make_report([_result("A"), _result("B")])
+    candidate = _make_report([_result("A"), _result("B")])
+    delta = compare_reports(baseline, candidate)
+    assert len(delta.per_query) == 2
+
+
+# --- Error verdicts ---
+
+
+def test_classify_new_error():
+    """Candidate errors, baseline was fine -> new_error."""
+    b = _result("Q", results=3)
+    c = _result("Q", results=0, error="timeout")
+    assert _classify(b, c) == "new_error"
+
+
+def test_classify_fixed_error():
+    """Baseline errored, candidate is fine -> fixed_error."""
+    b = _result("Q", results=0, error="timeout")
+    c = _result("Q", results=3)
+    assert _classify(b, c) == "fixed_error"
+
+
+def test_classify_still_errored():
+    """Both baseline and candidate error -> still_errored, not still_missing."""
+    b = _result("Q", results=0, error="timeout")
+    c = _result("Q", results=0, error="index error")
+    assert _classify(b, c) == "still_errored"
+
+
+def test_classify_still_missing_requires_no_error():
+    """Zero results with no error is still_missing, not still_errored."""
+    b = _result("Q", results=0, error="")
+    c = _result("Q", results=0, error="")
+    assert _classify(b, c) == "still_missing"
+
+
+# --- error_count_delta ---
+
+
+def test_error_count_delta_new_error():
+    """One new error in candidate -> error_count_delta == +1."""
+    baseline = _make_report([_result("A"), _result("B")])
+    candidate = _make_report([_result("A"), _result("B", results=0, error="fail")])
+    delta = compare_reports(baseline, candidate)
+    assert delta.error_count_delta == 1
+    q_b = next(q for q in delta.per_query if q.query == "B")
+    assert q_b.error_count_delta == 1
+    assert q_b.verdict == "new_error"
+
+
+def test_error_count_delta_fixed_error():
+    """One fixed error -> error_count_delta == -1."""
+    baseline = _make_report([_result("A", results=0, error="old fail"), _result("B")])
+    candidate = _make_report([_result("A"), _result("B")])
+    delta = compare_reports(baseline, candidate)
+    assert delta.error_count_delta == -1
+
+
+def test_error_count_delta_zero_no_errors():
+    """No errors in either report -> error_count_delta == 0."""
+    baseline = _make_report([_result("A"), _result("B")])
+    candidate = _make_report([_result("A"), _result("B")])
+    delta = compare_reports(baseline, candidate)
+    assert delta.error_count_delta == 0
+
+
+def test_error_count_delta_in_to_dict():
+    """error_count_delta must appear in ReportDelta.to_dict()."""
+    baseline = _make_report([_result("A")])
+    candidate = _make_report([_result("A", results=0, error="fail")])
+    delta = compare_reports(baseline, candidate)
+    d = delta.to_dict()
+    assert "error_count_delta" in d
+    assert d["error_count_delta"] == 1
+
+
+# --- format_delta_table() error paths ---
+
+
+def test_format_delta_table_shows_fixed_error_arrow():
+    """fixed_error verdict must use ~ arrow in per-query table."""
+    baseline = _make_report([_result("Q", results=0, error="timeout")])
+    candidate = _make_report([_result("Q", results=3)])
+    delta = compare_reports(baseline, candidate)
+    assert "~ [fixed_error  ]" in format_delta_table(delta)
+
+
+def test_format_delta_table_shows_error_count_when_nonzero():
+    """error_count line must appear when error_count_delta != 0."""
+    baseline = _make_report([_result("Q")])
+    candidate = _make_report([_result("Q", results=0, error="fail")])
+    delta = compare_reports(baseline, candidate)
+    assert "error_count:" in format_delta_table(delta)
+
+
+def test_format_delta_table_hides_error_count_when_zero():
+    """error_count line must be absent when error_count_delta == 0."""
+    baseline = _make_report([_result("Q")])
+    candidate = _make_report([_result("Q")])
+    delta = compare_reports(baseline, candidate)
+    assert "error_count:" not in format_delta_table(delta)
+
+
+# --- baseline_error / candidate_error field assignment ---
+
+
+def test_query_delta_error_fields_on_correct_side():
+    """baseline_error and candidate_error must not be swapped on QueryDelta."""
+    baseline = _make_report([_result("Q", results=0, error="baseline-err")])
+    candidate = _make_report([_result("Q", results=0, error="candidate-err")])
+    delta = compare_reports(baseline, candidate)
+    assert delta.per_query[0].baseline_error == "baseline-err"
+    assert delta.per_query[0].candidate_error == "candidate-err"
+
+
+# --- Pre-existing _classify() hit/miss verdicts ---
+
+
+def test_classify_new_hit():
+    """Baseline had no results; candidate returns results -> new_hit."""
+    b = _result("Q", results=0)
+    c = _result("Q", results=3)
+    assert _classify(b, c) == "new_hit"
+
+
+def test_classify_lost_hit():
+    """Baseline returned results; candidate returns nothing -> lost_hit."""
+    b = _result("Q", results=3)
+    c = _result("Q", results=0)
+    assert _classify(b, c) == "lost_hit"
+
+
+def test_classify_same_within_noise_floor():
+    """Score delta below SCORE_NOISE_FLOOR stays same."""
+    from evolve.compare import SCORE_NOISE_FLOOR
+    from evolve.models import ReplayQueryResult
+
+    b = ReplayQueryResult(query="Q", results_count=1, top_scores=[0.900])
+    c = ReplayQueryResult(query="Q", results_count=1, top_scores=[0.900 + SCORE_NOISE_FLOOR / 2])
+    assert _classify(b, c) == "same"
+
+
+def test_classify_better():
+    """Score delta above noise floor and positive -> better."""
+    from evolve.models import ReplayQueryResult
+
+    b = ReplayQueryResult(query="Q", results_count=1, top_scores=[0.7])
+    c = ReplayQueryResult(query="Q", results_count=1, top_scores=[0.9])
+    assert _classify(b, c) == "better"
+
+
+def test_classify_worse():
+    """Score delta above noise floor and negative -> worse."""
+    from evolve.models import ReplayQueryResult
+
+    b = ReplayQueryResult(query="Q", results_count=1, top_scores=[0.9])
+    c = ReplayQueryResult(query="Q", results_count=1, top_scores=[0.7])
+    assert _classify(b, c) == "worse"

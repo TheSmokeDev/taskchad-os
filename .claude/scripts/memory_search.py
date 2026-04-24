@@ -17,12 +17,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
-from config import (
-    SEARCH_DEFAULT_LIMIT,
-    SEARCH_KEYWORD_WEIGHT,
-    SEARCH_MIN_SCORE,
-    SEARCH_VECTOR_WEIGHT,
-)
+import config as _cfg
 from db import get_memory_db
 
 
@@ -41,10 +36,12 @@ class SearchResult:
 
 def search_keyword(
     query: str,
-    limit: int = SEARCH_DEFAULT_LIMIT,
+    limit: int | None = None,
     path_prefix: str = "",
 ) -> list[SearchResult]:
     """Keyword search (FTS5 for SQLite, tsvector for Postgres)."""
+    if limit is None:
+        limit = _cfg.SEARCH_DEFAULT_LIMIT
     if not query.strip():
         return []
 
@@ -69,11 +66,15 @@ def search_keyword(
 
 def search_semantic(
     query: str,
-    limit: int = SEARCH_DEFAULT_LIMIT,
-    min_score: float = SEARCH_MIN_SCORE,
+    limit: int | None = None,
+    min_score: float | None = None,
     path_prefix: str = "",
 ) -> list[SearchResult]:
     """Semantic search using vector similarity."""
+    if limit is None:
+        limit = _cfg.SEARCH_DEFAULT_LIMIT
+    if min_score is None:
+        min_score = _cfg.SEARCH_MIN_SCORE
     if not query.strip():
         return []
 
@@ -103,14 +104,22 @@ def search_semantic(
 
 def search_hybrid(
     query: str,
-    limit: int = SEARCH_DEFAULT_LIMIT,
-    min_score: float = SEARCH_MIN_SCORE,
-    vector_weight: float = SEARCH_VECTOR_WEIGHT,
-    keyword_weight: float = SEARCH_KEYWORD_WEIGHT,
+    limit: int | None = None,
+    min_score: float | None = None,
+    vector_weight: float | None = None,
+    keyword_weight: float | None = None,
     path_prefix: str = "",
     graph_scores: dict[str, float] | None = None,
 ) -> list[SearchResult]:
     """Hybrid search combining keyword and semantic with weighted scoring."""
+    if limit is None:
+        limit = _cfg.SEARCH_DEFAULT_LIMIT
+    if min_score is None:
+        min_score = _cfg.SEARCH_MIN_SCORE
+    if vector_weight is None:
+        vector_weight = _cfg.SEARCH_VECTOR_WEIGHT
+    if keyword_weight is None:
+        keyword_weight = _cfg.SEARCH_KEYWORD_WEIGHT
     if not query.strip():
         return []
 
@@ -178,11 +187,13 @@ def search_hybrid(
 def search(
     query: str,
     mode: str = "hybrid",
-    limit: int = SEARCH_DEFAULT_LIMIT,
-    min_score: float = SEARCH_MIN_SCORE,
+    limit: int | None = None,
+    min_score: float | None = None,
     path_prefix: str = "",
 ) -> list[SearchResult]:
     """Main search entry point. Dispatches to mode function."""
+    if limit is None:
+        limit = _cfg.SEARCH_DEFAULT_LIMIT
     if mode == "keyword":
         return search_keyword(query, limit, path_prefix=path_prefix)
     elif mode == "semantic":
@@ -247,8 +258,8 @@ def main() -> None:
         default="hybrid",
         help="Search mode (default: hybrid)",
     )
-    parser.add_argument("--limit", type=int, default=SEARCH_DEFAULT_LIMIT, help="Max results")
-    parser.add_argument("--min-score", type=float, default=SEARCH_MIN_SCORE, help="Min score")
+    parser.add_argument("--limit", type=int, default=_cfg.SEARCH_DEFAULT_LIMIT, help="Max results")
+    parser.add_argument("--min-score", type=float, default=_cfg.SEARCH_MIN_SCORE, help="Min score")
     parser.add_argument("--path-prefix", default="", help="Filter results to files under this path prefix (e.g. 'drafts/sent')")
     parser.add_argument("--test", action="store_true", help="Run test queries")
     args = parser.parse_args()

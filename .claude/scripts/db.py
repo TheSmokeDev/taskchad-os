@@ -26,6 +26,7 @@ class MemoryDB(Protocol):
     def close(self) -> None: ...
     def upsert_meta(self, key: str, value: str) -> None: ...
     def get_meta(self, key: str) -> str | None: ...
+    def get_actual_embedding_dim(self) -> int | None: ...
     def upsert_file(self, path: str, content_hash: str, mtime_ns: int, size_bytes: int, epoch: int) -> None: ...
     def get_file_hash(self, path: str) -> str | None: ...
     def get_all_file_paths(self) -> list[str]: ...
@@ -176,6 +177,20 @@ class SQLiteMemoryDB:
             "SELECT value FROM meta WHERE key = ?", (key,)
         ).fetchone()
         return row[0] if row else None
+
+    def get_actual_embedding_dim(self) -> int | None:
+        """Read the vector dimension from the vec_chunks virtual table DDL.
+        Returns None if the table doesn't exist yet. Truth source for dim-drift
+        detection -- meta can lie if the DB was copied or partially rebuilt."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_chunks'"
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        import re
+        m = re.search(r"float\[(\d+)\]", row[0])
+        return int(m.group(1)) if m else None
 
     def upsert_file(
         self, path: str, content_hash: str, mtime_ns: int, size_bytes: int, epoch: int
@@ -465,6 +480,25 @@ class PostgresMemoryDB:
         row = cur.fetchone()
         return row[0] if row else None
 
+    def get_actual_embedding_dim(self) -> int | None:
+        """Read the vector dimension from chunks.embedding column type.
+        atttypmod on pgvector columns encodes the dimension (+ 4 for padding).
+        Returns None if the table or column doesn't exist yet.
+        Truth source for dim-drift detection -- meta can lie if DB was copied."""
+        cur = self._get_conn().cursor()
+        try:
+            cur.execute(
+                """SELECT atttypmod FROM pg_attribute
+                WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'
+                """
+            )
+            row = cur.fetchone()
+            if not row or row[0] is None or row[0] < 4:
+                return None
+            return int(row[0]) - 4  # pgvector encodes dim + 4
+        except Exception:
+            return None  # Table doesn't exist yet
+
     def upsert_file(
         self, path: str, content_hash: str, mtime_ns: int, size_bytes: int, epoch: int
     ) -> None:
@@ -538,9 +572,27 @@ class PostgresMemoryDB:
         )
 
     def bulk_clear(self) -> None:
+        # Drop + recreate the embedding column so dimension changes take effect.
+        # pgvector bakes the dimension into the column type (`vector(N)`), so a
+        # stale vector(512) column would reject 768-d inserts with a shape error.
+        # Mirrors SQLite's bulk_clear DROP+CREATE on vec_chunks.
         conn = self._get_conn()
-        conn.cursor().execute("DELETE FROM chunks")
-        conn.cursor().execute("DELETE FROM files")
+        cur = conn.cursor()
+        # Drop HNSW index first -- it depends on the embedding column type.
+        cur.execute("DROP INDEX IF EXISTS idx_chunks_embedding")
+        # Drop + re-add column at current EMBEDDING_DIMENSIONS.
+        cur.execute("ALTER TABLE chunks DROP COLUMN IF EXISTS embedding")
+        cur.execute(f"ALTER TABLE chunks ADD COLUMN embedding vector({EMBEDDING_DIMENSIONS})")
+        # Re-register pgvector types -- the driver caches OIDs and the column
+        # was just re-created, so the cache may point at the old relation.
+        self._register_vector()
+        # Recreate the HNSW index at the new dimension.
+        cur.execute(
+            "CREATE INDEX idx_chunks_embedding ON chunks "
+            "USING hnsw(embedding vector_l2_ops) WHERE embedding IS NOT NULL"
+        )
+        cur.execute("DELETE FROM chunks")
+        cur.execute("DELETE FROM files")
         conn.commit()
 
     def keyword_search(self, query: str, limit: int, path_prefix: str = "") -> list[dict[str, Any]]:

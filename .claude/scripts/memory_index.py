@@ -226,31 +226,30 @@ def sync_index(
     """
     db = get_memory_db()
 
-    # Read stored model/dim BEFORE init_schema — init_schema unconditionally
-    # upserts the meta rows to current config values, which would hide any
-    # drift. Wrap in try/except because on a fresh db the meta table doesn't
-    # exist yet and get_meta would raise.
+    # Check physical schema BEFORE init_schema -- init_schema would create
+    # tables at current config and mask any existing drift. Schema introspection
+    # is the truth source: meta rows can lie if the DB was copied, partially
+    # rebuilt, or corrupted. Falls back to meta-based model name check for
+    # same-dim-different-model swaps (which schema inspection can't detect).
+    actual_dim = db.get_actual_embedding_dim()
+
     stored_model: str | None = None
-    stored_dim: str | None = None
     try:
         stored_model = db.get_meta("embedding_model")
-        stored_dim = db.get_meta("embedding_dimensions")
     except Exception:
         pass
 
     db.init_schema()
 
-    # Check for model change requiring rebuild
-    if not force_rebuild and stored_model and stored_model != EMBEDDING_MODEL:
-        print(f"Model changed ({stored_model} -> {EMBEDDING_MODEL}), forcing rebuild...")
+    if not force_rebuild and actual_dim is not None and actual_dim != EMBEDDING_DIMENSIONS:
+        print(
+            f"Embedding dim mismatch (vec schema={actual_dim} vs config={EMBEDDING_DIMENSIONS}), "
+            "forcing rebuild..."
+        )
         force_rebuild = True
 
-    # Dim-drift guard: catches same-model-different-dim swaps (e.g. Matryoshka
-    # slice change) that the model-name check above misses. The vec_chunks
-    # virtual table bakes the dim into its DDL, so a silent mismatch here would
-    # fail inserts at runtime with a shape error.
-    if not force_rebuild and stored_dim and stored_dim != str(EMBEDDING_DIMENSIONS):
-        print(f"Embedding dim changed ({stored_dim} -> {EMBEDDING_DIMENSIONS}), forcing rebuild...")
+    if not force_rebuild and stored_model and stored_model != EMBEDDING_MODEL:
+        print(f"Model changed ({stored_model} -> {EMBEDDING_MODEL}), forcing rebuild...")
         force_rebuild = True
 
     if force_rebuild:
