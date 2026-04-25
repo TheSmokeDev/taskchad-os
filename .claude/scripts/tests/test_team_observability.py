@@ -104,7 +104,7 @@ class TestOrchestrationSpanEnabled:
         fake_mod, mock_client, _ = _mock_langfuse_client()
 
         with (
-            patch("orchestration.observability.is_langfuse_enabled", return_value=True),
+            patch("runtime.langfuse_setup.is_langfuse_enabled", return_value=True),
             patch("orchestration.observability.init_langfuse"),
             patch.dict("sys.modules", {"langfuse": fake_mod}),
         ):
@@ -118,7 +118,7 @@ class TestOrchestrationSpanEnabled:
         fake_mod, mock_client, _ = _mock_langfuse_client()
 
         with (
-            patch("orchestration.observability.is_langfuse_enabled", return_value=True),
+            patch("runtime.langfuse_setup.is_langfuse_enabled", return_value=True),
             patch("orchestration.observability.init_langfuse"),
             patch.dict("sys.modules", {"langfuse": fake_mod}),
         ):
@@ -137,7 +137,7 @@ class TestOrchestrationSpanEnabled:
         fake_mod, mock_client, _ = _mock_langfuse_client()
 
         with (
-            patch("orchestration.observability.is_langfuse_enabled", return_value=True),
+            patch("runtime.langfuse_setup.is_langfuse_enabled", return_value=True),
             patch("orchestration.observability.init_langfuse"),
             patch.dict("sys.modules", {"langfuse": fake_mod}),
         ):
@@ -168,7 +168,7 @@ class TestUpdateObservation:
         fake_mod, mock_client, _ = _mock_langfuse_client()
 
         with (
-            patch("orchestration.observability.is_langfuse_enabled", return_value=True),
+            patch("runtime.langfuse_setup.is_langfuse_enabled", return_value=True),
             patch.dict("sys.modules", {"langfuse": fake_mod}),
         ):
             from orchestration.observability import update_observation
@@ -187,7 +187,7 @@ class TestLangfuseImportFailure:
         fake_langfuse.get_client.side_effect = RuntimeError("broken")
 
         with (
-            patch("orchestration.observability.is_langfuse_enabled", return_value=True),
+            patch("runtime.langfuse_setup.is_langfuse_enabled", return_value=True),
             patch("orchestration.observability.init_langfuse"),
             patch.dict("sys.modules", {"langfuse": fake_langfuse}),
         ):

@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -23,6 +24,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Literal
 
 # Add scripts dir for config, memory_index, etc.
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -347,6 +349,7 @@ def preserve_raw(
     source_path: Path,
     vault_dir: Path,
     always_date_prefix: bool = False,
+    on_collision: Literal["raise", "skip", "overwrite"] = "raise",
 ) -> Path:
     """Copy a source file into {vault}/raw/ as an immutable archive.
 
@@ -361,6 +364,16 @@ def preserve_raw(
         usually have unique names.
       - always_date_prefix=True: always prefix with today's date. This is the
         finance_ingest pattern — bank statements cycle daily and share names.
+
+    on_collision (only applies once the chosen destination already exists):
+      - "raise"     (default): fail loudly with FileExistsError; raw/ is
+                    immutable and unexpected collisions deserve investigation.
+      - "skip"      : BYTE-AWARE idempotent — if existing archive bytes match
+                    the incoming source (sha256 compare), return the existing
+                    path unchanged. If bytes DIFFER, raise FileExistsError to
+                    protect provenance (a raw archive must always be the
+                    source that produced downstream artifacts).
+      - "overwrite" : explicit opt-in to legacy silent-overwrite behavior.
     """
     raw_dir = vault_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -370,6 +383,47 @@ def preserve_raw(
         dest = raw_dir / source_path.name
         if dest.exists():
             dest = raw_dir / f"{_today()}-{source_path.name}"
+
+    # Immutable raw/ contract - see .claude/sections/03_memory_pipelines.md:133-137.
+    # If the chosen destination (default OR date-prefixed fallback) already
+    # exists, on_collision dictates behavior:
+    #   - "raise"     (default): fail loudly, FileExistsError. Caller investigates.
+    #   - "skip"      : BYTE-AWARE idempotent — if existing archive bytes match
+    #                   the incoming source (sha256 compare), return the existing
+    #                   path unchanged. If bytes DIFFER, raise FileExistsError.
+    #                   This preserves provenance: a raw archive must always be
+    #                   the source that produced downstream artifacts. Silent
+    #                   skip on differing bytes would break that contract (R3).
+    #   - "overwrite" : explicit opt-in to legacy silent-overwrite behavior.
+    if dest.exists():
+        if on_collision == "skip":
+            # Byte-aware skip — only safe if existing archive matches incoming source
+            src_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            dst_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
+            if src_hash == dst_hash:
+                return dest
+            raise FileExistsError(
+                f"preserve_raw refusing skip-on-divergent-bytes: {dest} exists "
+                f"with sha256 {dst_hash[:12]}, but incoming source has sha256 "
+                f"{src_hash[:12]}. raw/ archive is the source-of-truth for "
+                f"downstream artifacts; silent skip would break provenance. "
+                f"Remove the existing target or investigate the source change."
+            )
+        if on_collision == "raise":
+            if always_date_prefix:
+                msg = (
+                    f"preserve_raw refusing to overwrite existing archive: {dest}. "
+                    f"raw/ is immutable; remove the existing date-prefixed target "
+                    f"or wait until tomorrow's date prefix changes the destination."
+                )
+            else:
+                msg = (
+                    f"preserve_raw refusing to overwrite existing archive: {dest}. "
+                    f"raw/ is immutable; rename source or remove the existing target."
+                )
+            raise FileExistsError(msg)
+        # on_collision == "overwrite": fall through to shutil.copy2 below.
+
     shutil.copy2(source_path, dest)
     return dest
 
@@ -1587,6 +1641,15 @@ def main() -> None:
         help="Always prefix destination with today's date (finance_ingest pattern). "
              "Default: collision-only prefix (vault-ingest pattern).",
     )
+    p_preserve_raw.add_argument(
+        "--on-collision",
+        choices=["raise", "skip", "overwrite"],
+        default="raise",
+        help="What to do if the destination already exists: "
+             "'raise' (default) fails loudly per the immutable-raw/ contract; "
+             "'skip' returns the existing path unchanged (idempotent re-run); "
+             "'overwrite' replaces the existing archive (legacy escape hatch).",
+    )
 
     args = parser.parse_args()
 
@@ -1733,7 +1796,12 @@ def main() -> None:
             print(f"Error: {source} not found", file=sys.stderr)
             sys.exit(1)
         vault_dir = Path(args.vault_dir)
-        dest = preserve_raw(source, vault_dir, always_date_prefix=args.date_prefix)
+        dest = preserve_raw(
+            source,
+            vault_dir,
+            always_date_prefix=args.date_prefix,
+            on_collision=args.on_collision,
+        )
         print(dest)
 
 

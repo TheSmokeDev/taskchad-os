@@ -43,7 +43,7 @@ class TestEnabledHappyPath:
     def test_yields_trace_ids(self):
         fake_mod, _, _ = _make_mock_client()
         with (
-            patch("orchestration.observability.is_langfuse_enabled", return_value=True),
+            patch("runtime.langfuse_setup.is_langfuse_enabled", return_value=True),
             patch("orchestration.observability.init_langfuse"),
             patch.dict("sys.modules", {"langfuse": fake_mod}),
         ):
@@ -58,7 +58,7 @@ class TestEnabledExpectedException:
     def test_preserves_trace_ids_on_expected_error(self):
         fake_mod, _, _ = _make_mock_client()
         with (
-            patch("orchestration.observability.is_langfuse_enabled", return_value=True),
+            patch("runtime.langfuse_setup.is_langfuse_enabled", return_value=True),
             patch("orchestration.observability.init_langfuse"),
             patch.dict("sys.modules", {"langfuse": fake_mod}),
         ):
@@ -73,7 +73,7 @@ class TestEnabledUnexpectedException:
     def test_preserves_trace_ids_and_captures_sentry(self):
         fake_mod, _, _ = _make_mock_client()
         with (
-            patch("orchestration.observability.is_langfuse_enabled", return_value=True),
+            patch("runtime.langfuse_setup.is_langfuse_enabled", return_value=True),
             patch("orchestration.observability.init_langfuse"),
             patch.dict("sys.modules", {"langfuse": fake_mod}),
         ):
@@ -119,7 +119,7 @@ class TestImportFailure:
         fake_langfuse = MagicMock()
         fake_langfuse.get_client.side_effect = RuntimeError("broken")
         with (
-            patch("orchestration.observability.is_langfuse_enabled", return_value=True),
+            patch("runtime.langfuse_setup.is_langfuse_enabled", return_value=True),
             patch("orchestration.observability.init_langfuse"),
             patch.dict("sys.modules", {"langfuse": fake_langfuse}),
         ):

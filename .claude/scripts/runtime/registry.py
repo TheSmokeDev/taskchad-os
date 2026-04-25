@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from . import langfuse_setup
 from .base import RuntimeRequest, RuntimeResult
 from .lane_router import run_with_runtime_lanes
-from .langfuse_setup import is_langfuse_enabled
 
 
 async def run_with_fallback(request: RuntimeRequest) -> RuntimeResult:
     """Deprecated compatibility shim for the old provider-first runtime facade."""
 
-    if not is_langfuse_enabled():
+    # Module-attribute lookup so monkey-patches on
+    # `runtime.langfuse_setup.is_langfuse_enabled` (e.g. in `isolate_langfuse()`)
+    # actually reach this call site. A top-level
+    # `from .langfuse_setup import is_langfuse_enabled` would cache the original.
+    if not langfuse_setup.is_langfuse_enabled():
         return await run_with_runtime_lanes(request)
 
     from langfuse import get_client, observe

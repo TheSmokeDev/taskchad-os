@@ -44,6 +44,11 @@
             "type": "command",
             "command": "cd \"$CLAUDE_PROJECT_DIR/.claude/scripts\" && PATH=\"$PATH:/root/.local/bin\" uv run python \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-context.py\"",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR/.claude/scripts\" && PATH=\"$PATH:/root/.local/bin\" uv run python \"$CLAUDE_PROJECT_DIR/.claude/hooks/sync-skills.py\"",
+            "timeout": 10
           }
         ]
       }

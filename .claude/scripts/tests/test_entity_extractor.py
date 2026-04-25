@@ -893,6 +893,134 @@ class TestPreserveRaw:
         # shutil.copy2 should preserve mtime (allow 1s tolerance for FS granularity)
         assert abs(dest.stat().st_mtime - past) < 2
 
+    def test_date_prefixed_target_already_exists_raises(self, tmp_path):
+        """Same-day rerun where BOTH {name} and {YYYY-MM-DD}-{name} exist must raise.
+
+        Pre-Fix-B: shutil.copy2 silently overwrites the date-prefixed file.
+        Post-Fix-B: FileExistsError, original archive untouched.
+        """
+        from entity_extractor import _today, preserve_raw
+
+        vault = tmp_path / "vault"
+        (vault / "raw").mkdir(parents=True)
+        original_at_name = vault / "raw" / "article.md"
+        original_at_name.write_text("FIRST archived version", encoding="utf-8")
+        original_at_date = vault / "raw" / f"{_today()}-article.md"
+        original_at_date.write_text("SECOND archived version (also locked)",
+                                    encoding="utf-8")
+
+        src = tmp_path / "article.md"
+        src.write_text("THIRD version - must NOT land", encoding="utf-8")
+
+        with pytest.raises(FileExistsError) as excinfo:
+            preserve_raw(src, vault)
+        assert "raw/ is immutable" in str(excinfo.value)
+
+        assert original_at_name.read_text(encoding="utf-8") == "FIRST archived version"
+        assert original_at_date.read_text(encoding="utf-8") == \
+            "SECOND archived version (also locked)"
+
+    def test_always_date_prefix_collision_also_raises(self, tmp_path):
+        """always_date_prefix=True path with existing date-prefixed file must raise.
+
+        Tailored message branch - the operator can't fix this by renaming the
+        source (dest depends only on date + source.name).
+        """
+        from entity_extractor import _today, preserve_raw
+
+        vault = tmp_path / "vault"
+        (vault / "raw").mkdir(parents=True)
+        existing = vault / "raw" / f"{_today()}-statement.pdf"
+        existing.write_text("today's statement, already archived", encoding="utf-8")
+
+        src = tmp_path / "statement.pdf"
+        src.write_text("re-run attempt - must NOT overwrite", encoding="utf-8")
+
+        with pytest.raises(FileExistsError) as excinfo:
+            preserve_raw(src, vault, always_date_prefix=True)
+        # Message is tailored for the always_date_prefix path
+        assert "wait until tomorrow" in str(excinfo.value) or \
+               "remove the existing date-prefixed target" in str(excinfo.value)
+
+        assert existing.read_text(encoding="utf-8") == \
+            "today's statement, already archived"
+
+    def test_on_collision_skip_identical_bytes_returns_existing(self, tmp_path):
+        """R3-fix: on_collision='skip' is byte-aware — identical bytes are a true idempotent skip."""
+        from entity_extractor import _today, preserve_raw
+
+        vault = tmp_path / "vault"
+        (vault / "raw").mkdir(parents=True)
+        existing = vault / "raw" / f"{_today()}-statement.pdf"
+        existing.write_text("identical content", encoding="utf-8")
+
+        src = tmp_path / "statement.pdf"
+        src.write_text("identical content", encoding="utf-8")
+
+        dest = preserve_raw(src, vault, always_date_prefix=True, on_collision="skip")
+
+        assert dest == existing
+        assert dest.read_text(encoding="utf-8") == "identical content"
+
+    def test_on_collision_skip_divergent_bytes_raises(self, tmp_path):
+        """R3-fix: on_collision='skip' RAISES when bytes differ — protects provenance.
+
+        This is the critical case Codex caught at R3: the prior iteration would
+        silently keep the old archive while finance_ingest processed new source
+        bytes, breaking the raw-archive-is-source-of-truth contract.
+        """
+        from entity_extractor import _today, preserve_raw
+
+        vault = tmp_path / "vault"
+        (vault / "raw").mkdir(parents=True)
+        existing = vault / "raw" / f"{_today()}-statement.pdf"
+        existing.write_text("ORIGINAL bytes", encoding="utf-8")
+
+        src = tmp_path / "statement.pdf"
+        src.write_text("DIVERGENT bytes — must raise, must NOT skip", encoding="utf-8")
+
+        with pytest.raises(FileExistsError) as excinfo:
+            preserve_raw(src, vault, always_date_prefix=True, on_collision="skip")
+        assert "skip-on-divergent-bytes" in str(excinfo.value) or \
+               "break provenance" in str(excinfo.value)
+
+        # Existing archive untouched — provenance preserved
+        assert existing.read_text(encoding="utf-8") == "ORIGINAL bytes"
+
+    def test_on_collision_overwrite_replaces_existing(self, tmp_path):
+        """on_collision='overwrite' replicates legacy silent-overwrite behavior (escape hatch)."""
+        from entity_extractor import _today, preserve_raw
+
+        vault = tmp_path / "vault"
+        (vault / "raw").mkdir(parents=True)
+        existing = vault / "raw" / f"{_today()}-statement.pdf"
+        existing.write_text("OLD content", encoding="utf-8")
+
+        src = tmp_path / "statement.pdf"
+        src.write_text("NEW content", encoding="utf-8")
+
+        dest = preserve_raw(src, vault, always_date_prefix=True, on_collision="overwrite")
+
+        assert dest == existing
+        assert dest.read_text(encoding="utf-8") == "NEW content"
+
+    def test_on_collision_raise_with_finance_path_message(self, tmp_path):
+        """Bug B regression - message must NOT say 'rename source' when always_date_prefix=True."""
+        from entity_extractor import _today, preserve_raw
+
+        vault = tmp_path / "vault"
+        (vault / "raw").mkdir(parents=True)
+        (vault / "raw" / f"{_today()}-statement.pdf").write_text("blocker", encoding="utf-8")
+
+        src = tmp_path / "statement.pdf"
+        src.write_text("attempt", encoding="utf-8")
+
+        with pytest.raises(FileExistsError) as excinfo:
+            preserve_raw(src, vault, always_date_prefix=True, on_collision="raise")
+        # The finance-path message must NOT advise renaming the source -
+        # rename doesn't change the {today}-{name} dest.
+        assert "rename source" not in str(excinfo.value)
+
 
 class TestAppendVaultLog:
     """append_vault_log() — LOG.md timeline, grep-friendly."""

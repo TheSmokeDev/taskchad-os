@@ -16,7 +16,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from runtime.langfuse_setup import init_langfuse, is_langfuse_enabled
+from runtime import langfuse_setup
+from runtime.langfuse_setup import init_langfuse
+
+# `init_langfuse` is called once at module init and is not test-isolated, so a
+# direct import is fine. `is_langfuse_enabled` is accessed via `langfuse_setup`
+# so test monkey-patches (e.g. `isolate_langfuse()` in evolve.config_override)
+# actually flow through to call sites here.
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +124,7 @@ def update_observation(
 ) -> dict[str, Any]:
     """Best-effort update of current Langfuse span/trace; returns IDs if any."""
     ids: dict[str, Any] = {"trace_id": None, "observation_id": None}
-    if not is_langfuse_enabled():
+    if not langfuse_setup.is_langfuse_enabled():
         return ids
     try:
         from langfuse import get_client
@@ -168,7 +174,7 @@ def orchestration_span(
         "name": name,
     }
 
-    if not is_langfuse_enabled():
+    if not langfuse_setup.is_langfuse_enabled():
         try:
             yield state
             _append_observation_log(
