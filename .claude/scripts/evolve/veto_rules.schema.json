@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thehomie.local/schemas/veto-rules.json",
+  "title": "VetoRuleset",
+  "description": "Schema for evolve veto rulesets. Validated by veto.py at load time. Editor-time validation: add `\"$schema\": \"./veto_rules.schema.json\"` to your custom ruleset JSON for IDE support.",
+  "type": "object",
+  "required": ["rules"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable ruleset name; defaults to 'custom' when omitted.",
+      "default": "custom"
+    },
+    "rules": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/VetoRule" },
+      "minItems": 0
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "VetoRule": {
+      "type": "object",
+      "required": ["name", "metric", "op", "threshold", "severity"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Stable identifier for the rule; surfaced in CLI verdict tables."
+        },
+        "metric": {
+          "type": "string",
+          "description": "Which delta metric this rule evaluates.",
+          "enum": [
+            "hit_rate_delta",
+            "avg_top_score_delta",
+            "p50_latency_delta_ms",
+            "p90_latency_delta_ms",
+            "error_count_delta",
+            "worst_query_score_delta",
+            "new_error_count",
+            "lost_hit_count"
+          ]
+        },
+        "op": {
+          "type": "string",
+          "description": "Failure operator: `lt -0.05` fails when value < -0.05; `abs_gt` triggers on |value| exceeding threshold.",
+          "enum": ["lt", "gt", "eq", "abs_gt"]
+        },
+        "threshold": {
+          "type": "number",
+          "description": "The numeric boundary the operator compares against."
+        },
+        "severity": {
+          "type": "string",
+          "description": "`hard` blocks adoption (exit code 1). `soft` requires human review (exit code 2).",
+          "enum": ["hard", "soft"]
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable failure message. Supports `{value}` and `{threshold}` template tokens.",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

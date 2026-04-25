@@ -1281,5 +1281,267 @@ def evolve_compare(baseline_report, candidate_report):
     click.echo(format_delta_table(delta))
 
 
+# ── evolve helpers (shared by veto + propose) ──────────────────────────────
+
+
+def _evolve_load_replay_report(path):
+    """Reconstruct a ReplayReport from JSON. Mirrors the inline loader in evolve_compare."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from evolve import ReplayQueryResult, ReplayReport, ReplaySummary
+
+    raw = _json.loads(_Path(path).read_text(encoding="utf-8"))
+    summary = ReplaySummary(**raw.get("summary", {}))
+    per_query = [ReplayQueryResult(**q) for q in raw.get("per_query", [])]
+    return ReplayReport(
+        experiment_id=raw["experiment_id"],
+        timestamp_utc=raw.get("timestamp_utc", ""),
+        overrides=raw.get("overrides", {}),
+        config_snapshot=raw.get("config_snapshot", {}),
+        per_query=per_query,
+        summary=summary,
+        memory_dir=raw.get("memory_dir", ""),
+        caller=raw.get("caller", "replay"),
+    )
+
+
+def _evolve_load_report_delta(path):
+    """Reconstruct a ReportDelta from JSON written by ReportDelta.to_dict()."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from evolve.compare import QueryDelta, ReportDelta
+
+    raw = _json.loads(_Path(path).read_text(encoding="utf-8"))
+    per_query = [QueryDelta(**q) for q in raw.get("per_query", [])]
+    return ReportDelta(
+        baseline_experiment_id=raw["baseline_experiment_id"],
+        candidate_experiment_id=raw["candidate_experiment_id"],
+        hit_rate_delta=raw.get("hit_rate_delta", 0.0),
+        avg_top_score_delta=raw.get("avg_top_score_delta", 0.0),
+        p50_latency_delta_ms=raw.get("p50_latency_delta_ms", 0.0),
+        p90_latency_delta_ms=raw.get("p90_latency_delta_ms", 0.0),
+        tier_distribution_delta=raw.get("tier_distribution_delta", {}),
+        verdict_counts=raw.get("verdict_counts", {}),
+        per_query=per_query,
+        baseline_overrides=raw.get("baseline_overrides", {}),
+        candidate_overrides=raw.get("candidate_overrides", {}),
+        error_count_delta=raw.get("error_count_delta", 0),
+    )
+
+
+def _evolve_compute_exit_code(verdict, force):
+    """Thin CLI wrapper around evolve.veto.compute_exit_code (returns plain int)."""
+    from evolve import compute_exit_code
+
+    return int(compute_exit_code(verdict, force=force))
+
+
+@evolve.command("veto")
+@click.argument("delta_path", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--ruleset",
+    type=click.Choice(["default", "strict", "permissive"]),
+    default=None,
+    help="Named preset (default/strict/permissive)",
+)
+@click.option(
+    "--veto-rules",
+    "veto_rules_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Custom ruleset JSON path",
+)
+@click.option("--force", is_flag=True, help="Override soft veto (still logs the failure)")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def evolve_veto(delta_path, ruleset, veto_rules_path, force, json_mode):
+    """Evaluate veto rules against a saved ReportDelta JSON.
+
+    Exit codes: 0 adopt, 1 hard veto, 2 soft veto, 3 input/harness error.
+    """
+    from evolve import (
+        ExitCode,
+        evaluate_veto,
+        format_delta_table,
+        format_verdict_table,
+        load_ruleset,
+    )
+
+    try:
+        delta = _evolve_load_report_delta(delta_path)
+    except (KeyError, ValueError) as exc:
+        click.echo(f"Error loading delta: {exc}", err=True)
+        sys.exit(int(ExitCode.ERROR))
+
+    try:
+        rs = load_ruleset(veto_rules_path or ruleset)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error loading ruleset: {exc}", err=True)
+        sys.exit(int(ExitCode.ERROR))
+
+    verdict = evaluate_veto(delta, rs)
+
+    if json_mode:
+        print(
+            json_mod.dumps(
+                {
+                    "ruleset": rs.name,
+                    "verdict": verdict.to_dict(),
+                    "delta": delta.to_dict(),
+                    "force": force,
+                },
+                indent=2,
+            )
+        )
+    else:
+        click.echo(format_delta_table(delta))
+        click.echo(format_verdict_table(verdict, ruleset_name=rs.name))
+        if force and verdict.soft and not verdict.accepted:
+            click.echo("\n[--force] Overriding soft veto for adoption.", err=True)
+
+    sys.exit(_evolve_compute_exit_code(verdict, force))
+
+
+@evolve.command("propose")
+@click.option(
+    "--overrides",
+    "overrides_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help='JSON file with config override dict (e.g. {"RECALL_MIN_SCORE": 0.5})',
+)
+@click.option(
+    "--baseline",
+    "baseline_path",
+    type=click.Path(exists=True, dir_okay=False),
+    required=True,
+    help="Existing baseline ReplayReport JSON",
+)
+@click.option(
+    "--candidate",
+    "candidate_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Pre-built candidate ReplayReport (skips fresh replay; mainly for tests)",
+)
+@click.option(
+    "--ruleset",
+    type=click.Choice(["default", "strict", "permissive"]),
+    default=None,
+)
+@click.option(
+    "--veto-rules",
+    "veto_rules_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+)
+@click.option("--force", is_flag=True, help="Override soft veto (still logs the failure)")
+@click.option("--out", type=click.Path(), default=None, help="Candidate report output dir")
+@click.option("--max-results", type=int, default=5)
+@click.option("--caller", default="propose", help="Caller tag for RecallLog")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def evolve_propose(
+    overrides_path,
+    baseline_path,
+    candidate_path,
+    ruleset,
+    veto_rules_path,
+    force,
+    out,
+    max_results,
+    caller,
+    json_mode,
+):
+    """Run replay + compare + veto in one shot — the autonomous adoption path.
+
+    Either supply --overrides (and optionally --out) to run a fresh replay,
+    or --candidate to evaluate a pre-built report. Exit codes match `evolve veto`.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from evolve import (
+        ExitCode,
+        compare_reports,
+        evaluate_veto,
+        format_delta_table,
+        format_verdict_table,
+        load_ruleset,
+        run_replay_sync,
+        write_report,
+    )
+
+    try:
+        baseline = _evolve_load_replay_report(baseline_path)
+    except (KeyError, ValueError) as exc:
+        click.echo(f"Error loading baseline: {exc}", err=True)
+        sys.exit(int(ExitCode.ERROR))
+
+    if candidate_path:
+        try:
+            candidate = _evolve_load_replay_report(candidate_path)
+        except (KeyError, ValueError) as exc:
+            click.echo(f"Error loading candidate: {exc}", err=True)
+            sys.exit(int(ExitCode.ERROR))
+    else:
+        if overrides_path is None:
+            click.echo("Error: --overrides or --candidate is required", err=True)
+            sys.exit(int(ExitCode.ERROR))
+        try:
+            overrides = _json.loads(_Path(overrides_path).read_text(encoding="utf-8"))
+        except _json.JSONDecodeError as exc:
+            click.echo(f"Error parsing overrides JSON: {exc}", err=True)
+            sys.exit(int(ExitCode.ERROR))
+        queries = [r.query for r in baseline.per_query]
+        if not json_mode:
+            click.echo(
+                f"Replaying {len(queries)} queries with overrides={overrides or '(none)'}"
+            )
+        candidate = run_replay_sync(
+            queries, overrides=overrides, caller=caller, max_results=max_results
+        )
+        if out:
+            out_path = write_report(candidate, out_dir=out)
+            if not json_mode:
+                click.echo(f"Wrote candidate report: {out_path}")
+
+    try:
+        delta = compare_reports(baseline, candidate)
+    except ValueError as exc:
+        click.echo(f"Error comparing reports: {exc}", err=True)
+        sys.exit(int(ExitCode.ERROR))
+
+    try:
+        rs = load_ruleset(veto_rules_path or ruleset)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error loading ruleset: {exc}", err=True)
+        sys.exit(int(ExitCode.ERROR))
+
+    verdict = evaluate_veto(delta, rs)
+
+    if json_mode:
+        print(
+            json_mod.dumps(
+                {
+                    "ruleset": rs.name,
+                    "delta": delta.to_dict(),
+                    "verdict": verdict.to_dict(),
+                    "force": force,
+                    "baseline_experiment_id": baseline.experiment_id,
+                    "candidate_experiment_id": candidate.experiment_id,
+                },
+                indent=2,
+            )
+        )
+    else:
+        click.echo(format_delta_table(delta))
+        click.echo(format_verdict_table(verdict, ruleset_name=rs.name))
+        if force and verdict.soft and not verdict.accepted:
+            click.echo("\n[--force] Overriding soft veto for adoption.", err=True)
+
+    sys.exit(_evolve_compute_exit_code(verdict, force))
+
+
 if __name__ == "__main__":
     main()

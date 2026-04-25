@@ -36,6 +36,23 @@ from evolve.models import (  # noqa: E402
     ReplaySummary,
 )
 from evolve.replay import run_replay, run_replay_sync, write_report  # noqa: E402
+from evolve.veto import (  # noqa: E402
+    DEFAULT_VETO_RULESET,
+    PERMISSIVE_VETO_RULESET,
+    PRESETS,
+    STRICT_VETO_RULESET,
+    ExitCode,
+    VetoRule,
+    VetoRuleResult,
+    VetoRuleset,
+    VetoVerdict,
+    compute_exit_code,
+    evaluate_veto,
+    format_verdict_table,
+    load_ruleset,
+    load_ruleset_from_dict,
+    load_ruleset_from_path,
+)
 
 __all__ = [
     "override_config",
@@ -51,4 +68,19 @@ __all__ = [
     "format_delta_table",
     "load_golden_queries",
     "load_goldens_metadata",
+    "ExitCode",
+    "VetoRule",
+    "VetoRuleset",
+    "VetoVerdict",
+    "VetoRuleResult",
+    "DEFAULT_VETO_RULESET",
+    "STRICT_VETO_RULESET",
+    "PERMISSIVE_VETO_RULESET",
+    "PRESETS",
+    "compute_exit_code",
+    "evaluate_veto",
+    "load_ruleset",
+    "load_ruleset_from_dict",
+    "load_ruleset_from_path",
+    "format_verdict_table",
 ]
