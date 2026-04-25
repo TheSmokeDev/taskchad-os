@@ -56,6 +56,11 @@ class ReplayReport:
     summary: ReplaySummary = field(default_factory=ReplaySummary)
     memory_dir: str = ""
     caller: str = "replay"
+    # Phase 2.4: populated when the replay opted into Langfuse tracing
+    # (`disable_tracing=False`). None when the replay ran untraced (default)
+    # or when Langfuse is disabled / unconfigured.
+    langfuse_trace_url: str | None = None
+    langfuse_session_url: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,4 +72,6 @@ class ReplayReport:
             "caller": self.caller,
             "summary": self.summary.to_dict(),
             "per_query": [r.to_dict() for r in self.per_query],
+            "langfuse_trace_url": self.langfuse_trace_url,
+            "langfuse_session_url": self.langfuse_session_url,
         }

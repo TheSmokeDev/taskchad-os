@@ -84,6 +84,13 @@ RECALL_RERANK_ENABLED = os.getenv("RECALL_RERANK_ENABLED", "true").lower() == "t
 RECALL_RERANK_TOP_N = int(os.getenv("RECALL_RERANK_TOP_N", "10"))
 RECALL_RERANK_TIMEOUT_S = float(os.getenv("RECALL_RERANK_TIMEOUT_S", "3.0"))
 
+# === Evolve (Self-Improvement Loop) ===
+# Phase 2.4: when true, `evolve run` and `evolve propose` default to emitting
+# Langfuse-tagged spans under user_id="evolve-replay" so experimental traces
+# can be filtered out of production cost reports. Override per-invocation
+# with --trace / --no-trace.
+EVOLVE_TRACE_REPLAYS = os.getenv("EVOLVE_TRACE_REPLAYS", "false").lower() == "true"
+
 # === Embedding Configuration ===
 # BGE-base-en-v1.5 via FastEmbed / ONNX (swapped from EmbeddingGemma-300m 2026-04-22).
 # Rationale: public Apache-2.0 model (no HF_TOKEN / gated license), ONNX-only runtime

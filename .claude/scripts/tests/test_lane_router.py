@@ -59,7 +59,10 @@ def test_resolve_runtime_lane_honors_env_lane_override(
 def test_resolve_runtime_lane_maps_legacy_claude_pin_to_native_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # `.env` has SECOND_BRAIN_GENERIC_PROVIDER=openai-codex which short-circuits
+    # selection before legacy_provider="claude" can map to claude_native. Must clear.
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.setenv("SECOND_BRAIN_RUNTIME_PROVIDER", "claude")
 
     lane = lane_router.resolve_runtime_lane(

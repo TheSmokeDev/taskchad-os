@@ -21,6 +21,11 @@ def test_runtime_package_exports_lane_runner() -> None:
 
 
 def test_resolve_runtime_profiles_adds_openai_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Clear .env-loaded canonical selection so the legacy provider pin actually wins.
+    # config.py does load_dotenv(override=True) at import time, so SECOND_BRAIN_GENERIC_PROVIDER
+    # and SECOND_BRAIN_RUNTIME_LANE leak into os.environ even when not set in the shell.
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
     monkeypatch.setattr(profiles, "OPENAI_API_KEY", "sk-test-key")
     monkeypatch.setenv("SECOND_BRAIN_RUNTIME_PROVIDER", "claude")
     monkeypatch.setenv("SECOND_BRAIN_ENABLE_OPENAI_FALLBACK", "true")

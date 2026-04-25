@@ -56,6 +56,51 @@ def _backdate(bullet_template: str, days_ago: int) -> str:
     return bullet_template.format(d=d)
 
 
+def _fresh_sample_wm() -> str:
+    """Same shape as SAMPLE_WM but with bullet dates relative to today.
+
+    SAMPLE_WM hardcodes 2026-04-15..17 — once "today" is more than 7 days past
+    the latest of those, archive(days=7) sees every bullet as stale and the
+    "no items archived" assertions in test_archive_idempotent and
+    test_archive_emits_span_with_correct_counts break. Use this helper for
+    any test that reasons about bullet age; SAMPLE_WM stays static for tests
+    that only care about structural parsing.
+    """
+    today = date.today()
+    d1 = (today - timedelta(days=1)).isoformat()
+    d2 = (today - timedelta(days=2)).isoformat()
+    d3 = (today - timedelta(days=3)).isoformat()
+    return f"""---
+tags: [system, memory, working]
+status: current
+date: {today.isoformat()}
+summary: "test"
+priority: P1
+---
+
+# WORKING.md
+
+## Open Threads
+
+<!-- format comment -->
+
+- [{d2}] thread alpha — pending review
+- [{d1}] thread beta — in progress
+
+## Active Hypotheses
+
+- [{d3}] suspect lane router regression — evidence: [[DAILY-{d3}]]
+
+## Unresolved Questions
+
+- [{d1}] what is the plaid ETA?
+
+## Heartbeat Observations
+
+## Archived (Cold)
+"""
+
+
 # =============================================================================
 # TestReadWorkingMemory — behavior #1
 # =============================================================================
@@ -205,8 +250,10 @@ class TestArchiveStale:
         from living_memory import archive_stale_working_items
 
         path = tmp_path / "WORKING.md"
-        # All bullets are fresh → nothing to archive
-        path.write_text(SAMPLE_WM, encoding="utf-8")
+        # Use today-relative dates so all bullets are < 7 days old regardless
+        # of when this test runs. SAMPLE_WM hardcodes 2026-04-15..17 which
+        # decay into stale territory and break the "no items archived" claim.
+        path.write_text(_fresh_sample_wm(), encoding="utf-8")
 
         report1 = archive_stale_working_items(tmp_path, days=7)
         content_after_first = path.read_text(encoding="utf-8")
@@ -396,17 +443,22 @@ class TestLangfuseSpans:
     def test_archive_emits_span_with_correct_counts(self, tmp_path):
         """#16 seed stale items, run archive, assert archived_count, sections_touched, days_threshold."""
         path = tmp_path / "WORKING.md"
-        # Build a file with 3 stale items across 2 sections
+        # Build a file with 3 stale items across 2 sections. The base file uses
+        # today-relative fresh dates so the only stale bullets are the ones we
+        # explicitly inject \u2014 keeps archived_count=3 stable as time advances.
+        today = date.today()
+        d2 = (today - timedelta(days=2)).isoformat()
+        d3 = (today - timedelta(days=3)).isoformat()
         stale_ot = _backdate("- [{d}] stale thread A", 14)
         stale_hp = _backdate("- [{d}] stale hypothesis B \u2014 evidence: [[X]]", 14)
         stale_hp2 = _backdate("- [{d}] stale hypothesis C \u2014 evidence: [[Y]]", 20)
-        content = SAMPLE_WM
+        content = _fresh_sample_wm()
         content = content.replace(
-            "- [2026-04-16] thread alpha \u2014 pending review",
+            f"- [{d2}] thread alpha \u2014 pending review",
             stale_ot,
         )
         content = content.replace(
-            "- [2026-04-15] suspect lane router regression \u2014 evidence: [[DAILY-2026-04-15]]",
+            f"- [{d3}] suspect lane router regression \u2014 evidence: [[DAILY-{d3}]]",
             f"{stale_hp}\n{stale_hp2}",
         )
         path.write_text(content, encoding="utf-8")

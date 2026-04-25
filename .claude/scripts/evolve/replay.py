@@ -139,6 +139,7 @@ async def run_replay(
     memory_dir: Path | str | None = None,
     *,
     experiment_id: str | None = None,
+    baseline_experiment_id: str | None = None,
     caller: str = "replay",
     max_results: int = 5,
     isolate: bool = True,
@@ -150,26 +151,65 @@ async def run_replay(
     a snapshot of the config values that were actually in effect during the run.
 
     `disable_tracing` defaults to True so replays don't pollute the live
-    Langfuse project with experimental traces. Set False in Phase 2.4 when
-    replay-tagged spans are the goal.
+    Langfuse project with experimental traces. Set False (Phase 2.4) when
+    replay-tagged spans are the goal — `run_replay` auto-builds the
+    experiment tag from `experiment_id`, `overrides`, and
+    `baseline_experiment_id`, populates `langfuse_trace_url` /
+    `langfuse_session_url` on the report, and flushes pending spans on exit
+    so short-lived CLI processes don't lose the trace.
     """
     overrides = dict(overrides or {})
     experiment_id = experiment_id or _generate_experiment_id("exp")
     resolved_memory_dir = _resolve_memory_dir(memory_dir)
 
+    # Phase 2.4: build the experiment tag once and pass through replay_context.
+    # When disable_tracing=False, replay_context wraps the block in a tagged
+    # Langfuse root span via replay_tracing.replay_root_span.
+    experiment_tag: dict[str, Any] | None = None
+    trace_url: str | None = None
+    session_url: str | None = None
+    if not disable_tracing:
+        from evolve.replay_tracing import (
+            build_experiment_tag,
+            langfuse_session_url,
+            langfuse_trace_url,
+        )
+        experiment_tag = build_experiment_tag(
+            experiment_id, overrides, baseline_experiment_id
+        )
+        trace_url = langfuse_trace_url(experiment_id)
+        session_url = langfuse_session_url(experiment_id)
+
     per_query: list[ReplayQueryResult] = []
     config_snapshot: dict[str, Any] = {}
 
-    with replay_context(overrides, isolate=isolate, disable_tracing=disable_tracing):
-        config_snapshot = snapshot_config(RECALL_CONFIG_KEYS)
-        for query in queries:
-            result = await _replay_one(
-                query,
-                memory_dir=resolved_memory_dir,
-                caller=caller,
-                max_results=max_results,
-            )
-            per_query.append(result)
+    try:
+        with replay_context(
+            overrides,
+            isolate=isolate,
+            disable_tracing=disable_tracing,
+            experiment_tag=experiment_tag,
+        ):
+            config_snapshot = snapshot_config(RECALL_CONFIG_KEYS)
+            for query in queries:
+                result = await _replay_one(
+                    query,
+                    memory_dir=resolved_memory_dir,
+                    caller=caller,
+                    max_results=max_results,
+                )
+                per_query.append(result)
+    finally:
+        # Short-lived process safety: explicitly flush pending Langfuse spans
+        # so the trace lands before the CLI returns. The SDK's background
+        # flusher can miss spans when the process exits immediately after
+        # `run_replay_sync` resolves.
+        if not disable_tracing:
+            try:
+                from runtime.langfuse_setup import flush_langfuse
+                flush_langfuse()
+            except Exception:
+                pass
 
     report = ReplayReport(
         experiment_id=experiment_id,
@@ -180,6 +220,8 @@ async def run_replay(
         summary=_summarize(per_query),
         memory_dir=str(resolved_memory_dir),
         caller=caller,
+        langfuse_trace_url=trace_url,
+        langfuse_session_url=session_url,
     )
     return report
 

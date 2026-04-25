@@ -1206,9 +1206,22 @@ def _parse_override(override_str: str) -> tuple[str, object]:
 @click.option("--out", type=click.Path(), default=None, help="Report output directory")
 @click.option("--caller", default="replay", help="Caller tag for RecallLog")
 @click.option("--max-results", type=int, default=5, help="max_results passed to recall")
-def evolve_run(golden, overrides, out, caller, max_results):
+@click.option(
+    "--trace/--no-trace",
+    default=None,
+    help=(
+        "Phase 2.4: emit Langfuse-tagged spans under user_id=evolve-replay. "
+        "Default: EVOLVE_TRACE_REPLAYS env var (false)."
+    ),
+)
+def evolve_run(golden, overrides, out, caller, max_results, trace):
     """Run a replay against the current vault. Writes a ReplayReport JSON."""
     from evolve import load_golden_queries, run_replay_sync, write_report
+
+    # Resolve --trace from env when the flag is not explicitly set on the CLI.
+    if trace is None:
+        from config import EVOLVE_TRACE_REPLAYS
+        trace = EVOLVE_TRACE_REPLAYS
 
     if not golden:
         click.echo("--no-golden: reading queries from stdin, one per line")
@@ -1223,12 +1236,17 @@ def evolve_run(golden, overrides, out, caller, max_results):
         k, v = _parse_override(o)
         override_dict[k] = v
 
-    click.echo(f"Replaying {len(queries)} queries with overrides={override_dict or '(none)'}")
+    trace_label = "traced" if trace else "untraced"
+    click.echo(
+        f"Replaying {len(queries)} queries ({trace_label}) with "
+        f"overrides={override_dict or '(none)'}"
+    )
     report = run_replay_sync(
         queries,
         overrides=override_dict,
         caller=caller,
         max_results=max_results,
+        disable_tracing=not trace,
     )
 
     out_path = write_report(report, out_dir=out)
@@ -1240,6 +1258,8 @@ def evolve_run(golden, overrides, out, caller, max_results):
     click.echo(f"  avg_top_score:   {s.avg_top_score:.4f}")
     click.echo(f"  p50/p90 latency: {s.p50_latency_ms:.1f} / {s.p90_latency_ms:.1f} ms")
     click.echo(f"  tier distribution: {dict(s.tier_distribution)}")
+    if report.langfuse_trace_url:
+        click.echo(f"  langfuse trace:  {report.langfuse_trace_url}")
     if s.error_count:
         click.echo(f"  errors:          {s.error_count}", err=True)
 
@@ -1273,6 +1293,8 @@ def evolve_compare(baseline_report, candidate_report):
             summary=summary,
             memory_dir=raw.get("memory_dir", ""),
             caller=raw.get("caller", "replay"),
+            langfuse_trace_url=raw.get("langfuse_trace_url"),
+            langfuse_session_url=raw.get("langfuse_session_url"),
         )
 
     baseline = _load(baseline_report)
@@ -1303,6 +1325,8 @@ def _evolve_load_replay_report(path):
         summary=summary,
         memory_dir=raw.get("memory_dir", ""),
         caller=raw.get("caller", "replay"),
+        langfuse_trace_url=raw.get("langfuse_trace_url"),
+        langfuse_session_url=raw.get("langfuse_session_url"),
     )
 
 
@@ -1428,6 +1452,16 @@ def evolve_veto(delta_path, ruleset, veto_rules_path, force, json_mode):
 @click.option("--max-results", type=int, default=5)
 @click.option("--caller", default="propose", help="Caller tag for RecallLog")
 @click.option("--json", "json_mode", is_flag=True, help="JSON output")
+@click.option(
+    "--trace/--no-trace",
+    default=None,
+    help=(
+        "Phase 2.4: emit Langfuse-tagged spans for the candidate replay "
+        "under user_id=evolve-replay; trace URL is recorded on the decision "
+        "artifact. Default: EVOLVE_TRACE_REPLAYS env var (false). Ignored "
+        "when --candidate is supplied (no fresh replay runs)."
+    ),
+)
 def evolve_propose(
     overrides_path,
     baseline_path,
@@ -1439,6 +1473,7 @@ def evolve_propose(
     max_results,
     caller,
     json_mode,
+    trace,
 ):
     """Run replay + compare + veto in one shot — the autonomous adoption path.
 
@@ -1472,6 +1507,11 @@ def evolve_propose(
         )
         sys.exit(int(ExitCode.ERROR))
 
+    # Resolve --trace from env when the flag is not explicitly set on the CLI.
+    if trace is None:
+        from config import EVOLVE_TRACE_REPLAYS
+        trace = EVOLVE_TRACE_REPLAYS
+
     try:
         baseline = _evolve_load_replay_report(baseline_path)
     except (KeyError, ValueError) as exc:
@@ -1499,15 +1539,18 @@ def evolve_propose(
             sys.exit(int(ExitCode.ERROR))
         queries = [r.query for r in baseline.per_query]
         if not json_mode:
+            trace_label = "traced" if trace else "untraced"
             click.echo(
-                f"Replaying {len(queries)} queries with overrides="
-                f"{overrides_used or '(none)'}"
+                f"Replaying {len(queries)} queries ({trace_label}) with "
+                f"overrides={overrides_used or '(none)'}"
             )
         candidate = run_replay_sync(
             queries,
             overrides=overrides_used,
             caller=caller,
             max_results=max_results,
+            baseline_experiment_id=baseline.experiment_id,
+            disable_tracing=not trace,
         )
         if out:
             out_path = write_report(candidate, out_dir=out)
@@ -1533,7 +1576,9 @@ def evolve_propose(
     # Codex review (2026-04-25) Finding 5: when --out is set, persist the
     # decision artifact so the audit trail survives without stdout capture.
     # Especially important when --force flips a soft veto to ADOPT — the
-    # override is recorded on disk, not just printed.
+    # override is recorded on disk, not just printed. Phase 2.4: also
+    # records the candidate's Langfuse trace URL when the replay opted in,
+    # so a reviewer can click straight to the per-query span tree.
     if out:
         decision_path = write_decision_artifact(
             out,
@@ -1545,9 +1590,12 @@ def evolve_propose(
             force=force,
             exit_code=exit_code,
             overrides=overrides_used,
+            langfuse_trace_url=candidate.langfuse_trace_url,
         )
         if not json_mode:
             click.echo(f"Wrote decision: {decision_path}")
+            if candidate.langfuse_trace_url:
+                click.echo(f"Langfuse trace: {candidate.langfuse_trace_url}")
 
     if json_mode:
         print(
@@ -1560,6 +1608,7 @@ def evolve_propose(
                     "effective_exit_code": exit_code,
                     "baseline_experiment_id": baseline.experiment_id,
                     "candidate_experiment_id": candidate.experiment_id,
+                    "langfuse_trace_url": candidate.langfuse_trace_url,
                 },
                 indent=2,
             )

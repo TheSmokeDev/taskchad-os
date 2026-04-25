@@ -107,6 +107,7 @@ def write_decision_artifact(
     force: bool,
     exit_code: int,
     overrides: dict[str, Any] | None = None,
+    langfuse_trace_url: str | None = None,
 ) -> Path:
     """Persist a veto decision JSON alongside the candidate report.
 
@@ -115,10 +116,12 @@ def write_decision_artifact(
     The decision artifact records the full context needed to audit any
     autonomous adoption: which ruleset was applied, what the delta said,
     what the verdict was, whether ``--force`` overrode a soft veto, what
-    exit code the process actually returned, and which overrides drove the
-    candidate. This closes the audit-trail gap when ``--force`` flips a
-    soft veto to ADOPT — the override is recorded on disk, not just
-    stdout.
+    exit code the process actually returned, which overrides drove the
+    candidate, and (Phase 2.4) the Langfuse trace URL when the candidate
+    replay opted into tracing. This closes the audit-trail gap when
+    ``--force`` flips a soft veto to ADOPT — the override is recorded on
+    disk, not just stdout — and lets a reviewer click straight from the
+    decision JSON to the per-query span tree that produced it.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -135,6 +138,7 @@ def write_decision_artifact(
                 "force": force,
                 "effective_exit_code": int(exit_code),
                 "overrides": overrides,
+                "langfuse_trace_url": langfuse_trace_url,
             },
             indent=2,
         ),

@@ -28,6 +28,11 @@ def _gemini_profile(
 
 
 def test_resolve_primary_gemini_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `.env` has canonical selection vars (SECOND_BRAIN_RUNTIME_LANE, SECOND_BRAIN_GENERIC_PROVIDER)
+    # which short-circuit selection BEFORE legacy SECOND_BRAIN_RUNTIME_PROVIDER is read.
+    # config.py's load_dotenv(override=True) means we have to clear them in-test, not in shell.
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.setenv("SECOND_BRAIN_RUNTIME_PROVIDER", "gemini")
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_MODEL", raising=False)
     monkeypatch.setattr(
@@ -49,6 +54,10 @@ def test_resolve_primary_gemini_profile(monkeypatch: pytest.MonkeyPatch) -> None
 def test_resolve_runtime_profiles_prefers_gemini_auto_fallback_when_codex_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # See note on test_resolve_primary_gemini_profile — `.env` selection vars
+    # must be cleared before the legacy provider pin can take effect.
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.setenv("SECOND_BRAIN_RUNTIME_PROVIDER", "claude")
     monkeypatch.delenv("SECOND_BRAIN_FALLBACK_PROVIDER", raising=False)
     monkeypatch.setattr(profiles, "OPENAI_API_KEY", "")

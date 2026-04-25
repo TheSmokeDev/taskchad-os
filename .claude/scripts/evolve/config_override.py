@@ -105,8 +105,9 @@ def replay_context(
     *,
     isolate: bool = True,
     disable_tracing: bool = True,
+    experiment_tag: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Combined context: config override + side-effect isolation + tracing off.
+    """Combined context: config override + side-effect isolation + tracing.
 
     This is the default entry point the replay harness uses. Keeps all three
     concerns in one `with` block so no replay path can forget any of them.
@@ -118,14 +119,48 @@ def replay_context(
         disable_tracing: if True (default), stub `is_langfuse_enabled` to
             disable Langfuse `@observe` spans for the replay. Set False only
             when the replay itself needs to emit tagged spans (Phase 2.4).
+        experiment_tag: required when ``disable_tracing=False``. Built via
+            `evolve.replay_tracing.build_experiment_tag(...)`. Routes the
+            traced replay under `user_id="evolve-replay"` and tags spans
+            with `experiment_id` + `override_fingerprint`. Must include an
+            `experiment_id` key.
+
+    Raises:
+        ValueError: when ``disable_tracing=False`` AND ``experiment_tag`` is
+            None or missing ``experiment_id``. Fails loud at the boundary so
+            no untagged replay spans can leak into the production Langfuse
+            project (PRD Phase 2.4 AC#5).
     """
     overrides = overrides or {}
+
+    if not disable_tracing:
+        if experiment_tag is None:
+            raise ValueError(
+                "replay_context with disable_tracing=False requires experiment_tag "
+                "(prevents untagged replay spans polluting prod). Build via "
+                "evolve.replay_tracing.build_experiment_tag(experiment_id, "
+                "overrides, baseline_experiment_id) — or call run_replay() "
+                "which auto-builds it."
+            )
+        if not experiment_tag.get("experiment_id"):
+            raise ValueError(
+                "experiment_tag must include 'experiment_id' "
+                "(use build_experiment_tag())"
+            )
 
     from contextlib import ExitStack
 
     with ExitStack() as stack:
         if disable_tracing:
             stack.enter_context(isolate_langfuse())
+        else:
+            # Phase 2.4: route the traced replay under user_id="evolve-replay"
+            # with a tagged root span; existing @observe-decorated children
+            # auto-nest via OTEL context propagation.
+            from evolve.replay_tracing import replay_root_span
+            stack.enter_context(
+                replay_root_span(experiment_tag["experiment_id"], experiment_tag)
+            )
         if isolate:
             stack.enter_context(isolate_recall_side_effects())
         applied = stack.enter_context(override_config(**overrides))

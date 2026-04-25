@@ -116,13 +116,21 @@ def test_replay_context_composes_all_three():
 
 
 def test_replay_context_disable_tracing_false_keeps_langfuse_live():
-    """Phase 2.4 needs to opt IN to tracing — confirm the flag is respected."""
+    """Phase 2.4 needs to opt IN to tracing — confirm the flag is respected.
+
+    Note: when this assertion holds AND Langfuse is configured, a real
+    `replay_run` span gets emitted under user_id="evolve-replay" — that's
+    the production behavior Phase 2.4 enables. The new tag-required guard
+    is asserted separately in test_evolve_tracing.py.
+    """
     from evolve.config_override import replay_context
+    from evolve.replay_tracing import build_experiment_tag
     from runtime import langfuse_setup
 
     baseline = langfuse_setup.is_langfuse_enabled()
+    tag = build_experiment_tag("exp-test-isolation", {}, None)
 
-    with replay_context({}, disable_tracing=False):
+    with replay_context({}, disable_tracing=False, experiment_tag=tag):
         # Pass-through — should equal the baseline, not be forced False.
         assert langfuse_setup.is_langfuse_enabled() is baseline
 

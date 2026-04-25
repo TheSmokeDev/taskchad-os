@@ -37,6 +37,13 @@ from evolve.models import (  # noqa: E402
 )
 from evolve.io import load_report_delta, write_decision_artifact  # noqa: E402
 from evolve.replay import run_replay, run_replay_sync, write_report  # noqa: E402
+from evolve.replay_tracing import (  # noqa: E402
+    build_experiment_tag,
+    langfuse_session_url,
+    langfuse_trace_url,
+    override_fingerprint,
+    replay_root_span,
+)
 from evolve.veto import (  # noqa: E402
     DEFAULT_VETO_RULESET,
     PERMISSIVE_VETO_RULESET,
@@ -86,4 +93,10 @@ __all__ = [
     "load_ruleset_from_dict",
     "load_ruleset_from_path",
     "format_verdict_table",
+    # Phase 2.4 — Langfuse replay-tagged spans
+    "build_experiment_tag",
+    "langfuse_session_url",
+    "langfuse_trace_url",
+    "override_fingerprint",
+    "replay_root_span",
 ]
