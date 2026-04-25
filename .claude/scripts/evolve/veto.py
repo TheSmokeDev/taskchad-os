@@ -26,6 +26,7 @@ stub code, just a forward-compatible signature.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass, field, replace
 from enum import IntEnum
@@ -96,6 +97,14 @@ class VetoRule:
         if self.severity not in VALID_SEVERITIES:
             raise ValueError(
                 f"unknown severity {self.severity!r}; must be one of {VALID_SEVERITIES}"
+            )
+        # Non-finite thresholds turn the gate into a no-op: NaN comparisons
+        # always return False, so `not (value < NaN)` is always True (passes).
+        # Reject at construction so neither programmatic nor JSON paths can
+        # inject a dead rule. Codex review (2026-04-25) Finding 3.
+        if not math.isfinite(self.threshold):
+            raise ValueError(
+                f"threshold must be a finite number, got {self.threshold!r}"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -258,15 +267,21 @@ def evaluate_veto(
     delta: ReportDelta,
     ruleset: VetoRuleset,
     *,
-    regression_summary: Any | None = None,  # Phase 2.6 seam — see module docstring
+    regression_summary: Any | None = None,  # Phase 2.6 seam — fail-loud until wired
 ) -> VetoVerdict:
     """Evaluate every rule in `ruleset` against `delta`. Pure function.
 
     No I/O, no clock reads, no randomness. Same input → same verdict. The
-    `regression_summary` kwarg is documented for Phase 2.6: when the
-    regression corpus ships, an extra hard rule will check it without any
-    signature change here.
+    `regression_summary` kwarg is reserved for Phase 2.6; passing a non-None
+    value today raises `NotImplementedError` so the seam fails LOUD instead
+    of silently ignoring regression-corpus failures (Codex review Finding 4).
+    Phase 2.6 will replace the guard with the actual hard-rule check.
     """
+    if regression_summary is not None:
+        raise NotImplementedError(
+            "regression_summary is reserved for Phase 2.6 and not yet enforced; "
+            "passing a value would silently fail-open on regression-corpus failures"
+        )
     hard_failures: list[VetoRuleResult] = []
     soft_failures: list[VetoRuleResult] = []
     passed: list[VetoRuleResult] = []
@@ -406,6 +421,14 @@ def _validate_ruleset_dict(data: Any) -> None:
         raise ValueError(
             f"ruleset.rules must be a JSON array, got {type(rules).__name__}"
         )
+    # An empty ruleset is a fail-open: evaluate_veto returns accepted=True for
+    # any delta. Reject so a custom rules file can never disable the gate.
+    # Codex review (2026-04-25) Finding 3.
+    if len(rules) == 0:
+        raise ValueError(
+            "ruleset.rules must contain at least one rule; "
+            "an empty ruleset would silently disable the gate"
+        )
     for i, r in enumerate(rules):
         if not isinstance(r, dict):
             raise ValueError(
@@ -414,6 +437,20 @@ def _validate_ruleset_dict(data: Any) -> None:
         for required in ("name", "metric", "op", "threshold", "severity"):
             if required not in r:
                 raise ValueError(f"rules[{i}] missing required key {required!r}")
+
+
+def _reject_nonfinite_json_constant(constant: str) -> float:
+    """parse_constant hook for json.loads — rejects NaN/Infinity tokens.
+
+    Python's json module accepts non-standard JSON `NaN`/`Infinity` by default.
+    Combined with `not (value < NaN)` always being True, that lets a custom
+    rules file disable the gate. We refuse them at parse time.
+    Codex review (2026-04-25) Finding 3.
+    """
+    raise ValueError(
+        f"non-finite JSON value {constant!r} is not allowed in rulesets; "
+        f"thresholds must be finite numbers"
+    )
 
 
 def load_ruleset_from_dict(data: dict[str, Any]) -> VetoRuleset:
@@ -439,12 +476,20 @@ def load_ruleset_from_dict(data: dict[str, Any]) -> VetoRuleset:
 
 
 def load_ruleset_from_path(path: Path | str) -> VetoRuleset:
-    """Load a VetoRuleset from a JSON file with line-numbered parse errors."""
+    """Load a VetoRuleset from a JSON file with line-numbered parse errors.
+
+    `parse_constant` rejects NaN / Infinity tokens before they can reach
+    VetoRule (defense in depth — VetoRule.__post_init__ also rejects
+    non-finite thresholds, so both paths are blocked).
+    """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"ruleset file not found: {p}")
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(
+            p.read_text(encoding="utf-8"),
+            parse_constant=_reject_nonfinite_json_constant,
+        )
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"invalid JSON in {p} at line {exc.lineno} col {exc.colno}: {exc.msg}"

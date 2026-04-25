@@ -116,6 +116,20 @@ class TestVetoRule:
         assert d["message"] == "hello {value}"
         assert d["severity"] == "hard"
 
+    # --- 2.3.1 hardening (Codex Finding 3): non-finite thresholds disable the gate
+
+    def test_nan_threshold_rejected(self):
+        with pytest.raises(ValueError, match="finite"):
+            _rule(threshold=float("nan"))
+
+    def test_positive_inf_threshold_rejected(self):
+        with pytest.raises(ValueError, match="finite"):
+            _rule(threshold=float("inf"))
+
+    def test_negative_inf_threshold_rejected(self):
+        with pytest.raises(ValueError, match="finite"):
+            _rule(threshold=float("-inf"))
+
 
 # ── TestEvaluateVeto ───────────────────────────────────────────────────────
 
@@ -190,11 +204,22 @@ class TestEvaluateVeto:
         v2 = evaluate_veto(delta, DEFAULT_VETO_RULESET)
         assert v1.to_dict() == v2.to_dict()
 
-    def test_regression_summary_kwarg_accepted(self):
+    def test_regression_summary_fails_loud(self):
+        """2.3.1 (Codex Finding 4): regression_summary is reserved for 2.6.
+
+        Passing a non-None value used to be a silent no-op — now it raises
+        NotImplementedError so the seam fails loud instead of fail-open.
+        """
         delta = _make_delta()
-        v = evaluate_veto(
-            delta, DEFAULT_VETO_RULESET, regression_summary={"shape": "for-2.6"}
-        )
+        with pytest.raises(NotImplementedError, match="Phase 2.6"):
+            evaluate_veto(
+                delta, DEFAULT_VETO_RULESET, regression_summary={"shape": "for-2.6"}
+            )
+
+    def test_regression_summary_none_still_accepted(self):
+        """The default kwarg path must remain pure — None means "not invoked"."""
+        delta = _make_delta()
+        v = evaluate_veto(delta, DEFAULT_VETO_RULESET, regression_summary=None)
         assert v.accepted
 
     def test_to_dict_serializes(self):
@@ -369,7 +394,24 @@ class TestRulesetLoader:
 
     def test_env_path_overrides_env_preset(self, tmp_path):
         custom = tmp_path / "custom.json"
-        custom.write_text(json.dumps({"name": "from_path", "rules": []}))
+        # 2.3.1: empty rulesets are now rejected; use a one-rule ruleset
+        # to verify env-path precedence without tripping the empty guard.
+        custom.write_text(
+            json.dumps(
+                {
+                    "name": "from_path",
+                    "rules": [
+                        {
+                            "name": "marker",
+                            "metric": "hit_rate_delta",
+                            "op": "lt",
+                            "threshold": -0.99,
+                            "severity": "soft",
+                        }
+                    ],
+                }
+            )
+        )
         rs = load_ruleset(
             env={
                 "EVOLVE_VETO_RULES_PATH": str(custom),
@@ -435,6 +477,38 @@ class TestRulesetLoader:
         assert len(rebuilt.rules) == len(original.rules)
         for a, b in zip(rebuilt.rules, original.rules):
             assert a == b
+
+    # --- 2.3.1 hardening (Codex Finding 3): empty rulesets disable the gate
+
+    def test_empty_ruleset_rejected(self):
+        with pytest.raises(ValueError, match="at least one rule"):
+            load_ruleset_from_dict({"rules": []})
+
+    def test_empty_ruleset_via_path_rejected(self, tmp_path):
+        bad = tmp_path / "empty.json"
+        bad.write_text(json.dumps({"name": "empty", "rules": []}))
+        with pytest.raises(ValueError, match="at least one rule"):
+            load_ruleset_from_path(bad)
+
+    # --- 2.3.1 hardening (Codex Finding 3): JSON NaN / Infinity rejected
+
+    def test_json_nan_rejected_by_path_loader(self, tmp_path):
+        bad = tmp_path / "nan.json"
+        bad.write_text(
+            '{"name":"x","rules":[{"name":"r","metric":"hit_rate_delta",'
+            '"op":"lt","threshold":NaN,"severity":"hard"}]}'
+        )
+        with pytest.raises(ValueError, match="non-finite"):
+            load_ruleset_from_path(bad)
+
+    def test_json_infinity_rejected_by_path_loader(self, tmp_path):
+        bad = tmp_path / "inf.json"
+        bad.write_text(
+            '{"name":"x","rules":[{"name":"r","metric":"p90_latency_delta_ms",'
+            '"op":"gt","threshold":Infinity,"severity":"hard"}]}'
+        )
+        with pytest.raises(ValueError, match="non-finite"):
+            load_ruleset_from_path(bad)
 
 
 # ── TestExitCodePolicy ─────────────────────────────────────────────────────

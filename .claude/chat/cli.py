@@ -1307,28 +1307,15 @@ def _evolve_load_replay_report(path):
 
 
 def _evolve_load_report_delta(path):
-    """Reconstruct a ReportDelta from JSON written by ReportDelta.to_dict()."""
-    import json as _json
-    from pathlib import Path as _Path
+    """Thin wrapper around evolve.io.load_report_delta.
 
-    from evolve.compare import QueryDelta, ReportDelta
+    The shared loader fail-fasts on missing required aggregates and
+    recomputes verdict_counts + error_count_delta from per_query so a stale
+    or hand-edited delta cache cannot fail open. See evolve/io.py.
+    """
+    from evolve import load_report_delta
 
-    raw = _json.loads(_Path(path).read_text(encoding="utf-8"))
-    per_query = [QueryDelta(**q) for q in raw.get("per_query", [])]
-    return ReportDelta(
-        baseline_experiment_id=raw["baseline_experiment_id"],
-        candidate_experiment_id=raw["candidate_experiment_id"],
-        hit_rate_delta=raw.get("hit_rate_delta", 0.0),
-        avg_top_score_delta=raw.get("avg_top_score_delta", 0.0),
-        p50_latency_delta_ms=raw.get("p50_latency_delta_ms", 0.0),
-        p90_latency_delta_ms=raw.get("p90_latency_delta_ms", 0.0),
-        tier_distribution_delta=raw.get("tier_distribution_delta", {}),
-        verdict_counts=raw.get("verdict_counts", {}),
-        per_query=per_query,
-        baseline_overrides=raw.get("baseline_overrides", {}),
-        candidate_overrides=raw.get("candidate_overrides", {}),
-        error_count_delta=raw.get("error_count_delta", 0),
-    )
+    return load_report_delta(path)
 
 
 def _evolve_compute_exit_code(verdict, force):
@@ -1469,8 +1456,21 @@ def evolve_propose(
         format_verdict_table,
         load_ruleset,
         run_replay_sync,
+        write_decision_artifact,
         write_report,
     )
+
+    # Codex review (2026-04-25) Finding 1: --candidate and --overrides are
+    # alternative input modes; passing both is ambiguous and historically
+    # silently used --candidate while ignoring --overrides — a footgun where
+    # automation could adopt a config that was never replayed.
+    if candidate_path and overrides_path:
+        click.echo(
+            "Error: --candidate and --overrides are mutually exclusive "
+            "(pass one or the other; --candidate skips fresh replay).",
+            err=True,
+        )
+        sys.exit(int(ExitCode.ERROR))
 
     try:
         baseline = _evolve_load_replay_report(baseline_path)
@@ -1478,28 +1478,36 @@ def evolve_propose(
         click.echo(f"Error loading baseline: {exc}", err=True)
         sys.exit(int(ExitCode.ERROR))
 
+    overrides_used: dict | None = None
     if candidate_path:
         try:
             candidate = _evolve_load_replay_report(candidate_path)
         except (KeyError, ValueError) as exc:
             click.echo(f"Error loading candidate: {exc}", err=True)
             sys.exit(int(ExitCode.ERROR))
+        overrides_used = candidate.overrides
     else:
         if overrides_path is None:
             click.echo("Error: --overrides or --candidate is required", err=True)
             sys.exit(int(ExitCode.ERROR))
         try:
-            overrides = _json.loads(_Path(overrides_path).read_text(encoding="utf-8"))
+            overrides_used = _json.loads(
+                _Path(overrides_path).read_text(encoding="utf-8")
+            )
         except _json.JSONDecodeError as exc:
             click.echo(f"Error parsing overrides JSON: {exc}", err=True)
             sys.exit(int(ExitCode.ERROR))
         queries = [r.query for r in baseline.per_query]
         if not json_mode:
             click.echo(
-                f"Replaying {len(queries)} queries with overrides={overrides or '(none)'}"
+                f"Replaying {len(queries)} queries with overrides="
+                f"{overrides_used or '(none)'}"
             )
         candidate = run_replay_sync(
-            queries, overrides=overrides, caller=caller, max_results=max_results
+            queries,
+            overrides=overrides_used,
+            caller=caller,
+            max_results=max_results,
         )
         if out:
             out_path = write_report(candidate, out_dir=out)
@@ -1520,6 +1528,27 @@ def evolve_propose(
 
     verdict = evaluate_veto(delta, rs)
 
+    exit_code = _evolve_compute_exit_code(verdict, force)
+
+    # Codex review (2026-04-25) Finding 5: when --out is set, persist the
+    # decision artifact so the audit trail survives without stdout capture.
+    # Especially important when --force flips a soft veto to ADOPT — the
+    # override is recorded on disk, not just printed.
+    if out:
+        decision_path = write_decision_artifact(
+            out,
+            baseline_experiment_id=baseline.experiment_id,
+            candidate_experiment_id=candidate.experiment_id,
+            ruleset_name=rs.name,
+            delta=delta,
+            verdict=verdict,
+            force=force,
+            exit_code=exit_code,
+            overrides=overrides_used,
+        )
+        if not json_mode:
+            click.echo(f"Wrote decision: {decision_path}")
+
     if json_mode:
         print(
             json_mod.dumps(
@@ -1528,6 +1557,7 @@ def evolve_propose(
                     "delta": delta.to_dict(),
                     "verdict": verdict.to_dict(),
                     "force": force,
+                    "effective_exit_code": exit_code,
                     "baseline_experiment_id": baseline.experiment_id,
                     "candidate_experiment_id": candidate.experiment_id,
                 },
@@ -1540,7 +1570,7 @@ def evolve_propose(
         if force and verdict.soft and not verdict.accepted:
             click.echo("\n[--force] Overriding soft veto for adoption.", err=True)
 
-    sys.exit(_evolve_compute_exit_code(verdict, force))
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

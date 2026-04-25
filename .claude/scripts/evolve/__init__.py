@@ -35,6 +35,7 @@ from evolve.models import (  # noqa: E402
     ReplayReport,
     ReplaySummary,
 )
+from evolve.io import load_report_delta, write_decision_artifact  # noqa: E402
 from evolve.replay import run_replay, run_replay_sync, write_report  # noqa: E402
 from evolve.veto import (  # noqa: E402
     DEFAULT_VETO_RULESET,
@@ -68,6 +69,8 @@ __all__ = [
     "format_delta_table",
     "load_golden_queries",
     "load_goldens_metadata",
+    "load_report_delta",
+    "write_decision_artifact",
     "ExitCode",
     "VetoRule",
     "VetoRuleset",
