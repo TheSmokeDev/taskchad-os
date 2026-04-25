@@ -162,6 +162,34 @@ _SKIP_NAMES = {
     "action items", "decisions made", "sessions", "panel", "heartbeats",
     "memory maintenance", "pre-compaction flush", "finance report",
     "daily log", "flush context", "session flush", "compaction recovery",
+    # Gap-2 cleanup (2026-04-24): generic doc-section headings that became
+    # noise concept pages from heuristic extraction. Each entry blocks one
+    # archived noise page from regenerating. NOTE: only blocks exact-match
+    # lowercased headings — multi-word entity names that contain these
+    # tokens (e.g. "Memory Architecture") are unaffected.
+    "file:", "files", "files:", "fix:", "fix",
+    "server", "location", "history", "gotchas", "scope",
+    "components", "architecture", "tech stack",
+    "the math", "the pipeline", "the monorepo (turborepo+pnpm)",
+    "key files", "key stats", "key commands",
+    "core patterns", "design rules", "build/dev/test commands",
+    "build dev test commands", "trace shape",
+    "how it works", "why this matters",
+    "what done looks like", "what changed for you as the builder",
+    "what each city page contains",
+    "what makes this different from competitors",
+    "what happened (2026-03-24)", "what moved forward",
+    "when to use archon", "when to use which workflow",
+    "from an idea", "from an existing prd file",
+    "active hypotheses", "active projects",
+    "archived (cold)", "archived (done)", "archived cold", "archived done",
+    "all concepts", "current blockers",
+    "concept a", "concept b",
+    "correct behavior", "recurring patterns", "source note",
+    "custom workflows (this repo)", "custom workflows this repo",
+    "relationship to convoy/mailbox",
+    "by the numbers", "backlog", "backlogmd",
+    "auto-generated tags (set by compilation engine — never add manually)",
 }
 
 # Patterns that match operational/temporal names (not domain knowledge)
@@ -171,6 +199,14 @@ _SKIP_PATTERNS = [
     re.compile(r"^(pre-compaction|flush|daily-log|session-flush)-", re.IGNORECASE),
     re.compile(r"^finance-report-\d+$", re.IGNORECASE),        # finance snapshots
     re.compile(r"^heartbeat", re.IGNORECASE),                   # heartbeat entries
+    # Gap-2 cleanup (2026-04-24): structural patterns from heuristic noise.
+    re.compile(r"^[─━—-].*[─━—-]\s*$"),  # dash/em-dash bordered (e.g. "── X ──")
+    re.compile(r"^-.*-$"),                # leading + trailing hyphen (broken slugs)
+    re.compile(r"^\d{4}-\d{2}-\d{2}-\d{4}-compile-"),  # compile artifacts
+    re.compile(r"^(what|when|how|why|where|who)-(done|changed|moved|happened|each|makes|to|it|this|that)-", re.IGNORECASE),
+    re.compile(r"^key-(files|stats|commands|points|takeaways)$", re.IGNORECASE),
+    re.compile(r"^the-(math|pipeline|monorepo|stack|flow|system)$", re.IGNORECASE),
+    re.compile(r"^from-(an?|the)-", re.IGNORECASE),
 ]
 
 # Minimum confidence threshold for compilation
