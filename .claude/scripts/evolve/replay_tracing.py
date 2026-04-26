@@ -88,6 +88,39 @@ def _is_enabled() -> bool:
         return False
 
 
+def _propagation_metadata(experiment_tag: dict[str, Any]) -> dict[str, str]:
+    """Coerce tag values to strings for OTEL baggage propagation.
+
+    Langfuse's ``propagate_attributes`` wraps OTEL baggage, which only
+    accepts string values — ``None`` AND ``bool`` AND non-primitives all
+    trigger an SDK warning ("Propagated attribute 'X' value is not a
+    string. Dropping value.") and get silently dropped. Coerce primitives
+    to str at the boundary so the warning never fires.
+
+    Conversion rules:
+      - ``None`` → dropped (no point propagating absence)
+      - ``bool`` → ``"true"`` / ``"false"`` (lowercase, JSON convention)
+      - ``int`` / ``float`` / ``str`` → ``str(v)``
+      - dict / list / other → dropped (OTEL baggage doesn't take them)
+
+    The tag dict passed to ``start_as_current_observation`` (span
+    metadata) keeps the full shape, including ``None`` and ``bool``,
+    since span metadata serializes to JSON and tolerates both.
+    """
+    out: dict[str, str] = {}
+    for k, v in experiment_tag.items():
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            # bool MUST be checked before int (bool is an int subclass).
+            out[k] = "true" if v else "false"
+        elif isinstance(v, (int, float, str)):
+            out[k] = str(v)
+        # Drop dict / list / set / anything non-primitive — OTEL won't
+        # propagate them anyway, no signal lost by silencing the warning.
+    return out
+
+
 def langfuse_trace_url(experiment_id: str) -> str | None:
     """Filter URL pointing at the session for this experiment.
 
@@ -161,7 +194,7 @@ def replay_root_span(
             session_id=session_id,
             user_id=_REPLAY_USER_ID,
             tags=list(_REPLAY_TAGS),
-            metadata=dict(experiment_tag),
+            metadata=_propagation_metadata(experiment_tag),
         )
         _prop_ctx.__enter__()
     except Exception:

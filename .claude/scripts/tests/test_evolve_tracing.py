@@ -269,7 +269,74 @@ class TestReplayReportFields:
         assert d["langfuse_session_url"] is None
 
 
-# ── 7. Rule 3 module-attribute lookup ───────────────────────────────────────
+# ── 7. 2.4 follow-up — filter None from propagated metadata ────────────────
+
+
+class TestPropagationMetadataFilter:
+    """OTEL baggage requires string values. Without this filter the SDK
+    warns 'Propagated attribute X value is not a string. Dropping value.'
+    for None AND bool AND non-primitives. The helper coerces all primitives
+    to str and drops the rest, so the warning never fires; the tag dict
+    on the span itself keeps the full shape for audit context."""
+
+    def test_strips_none_values(self):
+        from evolve.replay_tracing import _propagation_metadata
+
+        result = _propagation_metadata({
+            "experiment_id": "exp-x",
+            "override_fingerprint": "abc123def456",
+            "baseline_experiment_id": None,
+        })
+        assert "baseline_experiment_id" not in result
+        assert result["experiment_id"] == "exp-x"
+        assert result["override_fingerprint"] == "abc123def456"
+
+    def test_coerces_bool_to_lowercase_string(self):
+        """bool is an int subclass; OTEL baggage rejects both. Lowercase
+        ``"true"``/``"false"`` matches JSON convention so the trace stays
+        machine-queryable."""
+        from evolve.replay_tracing import _propagation_metadata
+
+        result = _propagation_metadata({"replay": True, "draft": False})
+        assert result["replay"] == "true"
+        assert result["draft"] == "false"
+        # Sanity: not Python's "True"/"False" capitalization.
+        assert "True" not in result.values()
+        assert "False" not in result.values()
+
+    def test_coerces_int_and_float_to_string(self):
+        from evolve.replay_tracing import _propagation_metadata
+
+        result = _propagation_metadata({"count": 42, "score": 0.85})
+        assert result["count"] == "42"
+        assert result["score"] == "0.85"
+
+    def test_drops_non_primitives(self):
+        """dict / list / set don't survive OTEL baggage anyway — better to
+        drop than emit a warning per attribute."""
+        from evolve.replay_tracing import _propagation_metadata
+
+        result = _propagation_metadata({
+            "ok": "fine",
+            "list_attr": [1, 2, 3],
+            "dict_attr": {"nested": "value"},
+            "set_attr": {1, 2, 3},
+        })
+        assert result == {"ok": "fine"}
+
+    def test_preserves_full_tag_outside_propagation(self):
+        """build_experiment_tag still returns None for absent baseline —
+        the test contract from TestBuildExperimentTag::test_baseline_optional
+        must hold. Only the propagation step strips."""
+        from evolve.replay_tracing import build_experiment_tag, _propagation_metadata
+
+        tag = build_experiment_tag("exp-x", {}, None)
+        assert tag["baseline_experiment_id"] is None  # full tag unchanged
+        assert tag["replay"] is True  # bool preserved in tag
+
+        propagated = _propagation_metadata(tag)
+        assert "baseline_experiment_id" not in propagated  # None dropped
+        assert propagated["replay"] == "true"  # bool coerced
 
 
 # ── 8. 2.4.1 hardening — gate URL stamping on confirmed trace emission ─────
@@ -377,7 +444,7 @@ class TestUrlsGatedOnConfirmedTrace:
         assert "evolve:" in report.langfuse_trace_url
 
 
-# ── 9. Rule 3 module-attribute lookup ───────────────────────────────────────
+# ── 9. Rule 3 module-attribute lookup (first scheduled application) ────────
 
 
 class TestRule3ModuleAttributeLookup:
