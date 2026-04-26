@@ -223,3 +223,56 @@ def test_classify_worse():
     b = ReplayQueryResult(query="Q", results_count=1, top_scores=[0.9])
     c = ReplayQueryResult(query="Q", results_count=1, top_scores=[0.7])
     assert _classify(b, c) == "worse"
+
+
+# ── Phase 2.6 — bootstrap CI bands on compare_reports ──────────────────────
+
+
+class TestWithCi:
+    """Phase 2.6: compare_reports(with_ci=True) populates hit_rate_ci_95 and
+    avg_top_score_ci_95 via paired bootstrap; format_delta_table renders
+    [95% CI: lo, hi] suffix when present."""
+
+    def test_default_with_ci_false_leaves_fields_none(self):
+        baseline = _make_report([_result("A"), _result("B")])
+        candidate = _make_report([_result("A"), _result("B")])
+
+        delta = compare_reports(baseline, candidate)
+        assert delta.hit_rate_ci_95 is None
+        assert delta.avg_top_score_ci_95 is None
+
+        d = delta.to_dict()
+        assert d["hit_rate_ci_95"] is None
+        assert d["avg_top_score_ci_95"] is None
+
+    def test_with_ci_true_populates_fields(self):
+        """No-op replay (baseline == candidate) should produce CIs that
+        bracket 0 with negligible width."""
+        baseline = _make_report([_result("A"), _result("B"), _result("C")])
+        candidate = _make_report([_result("A"), _result("B"), _result("C")])
+
+        delta = compare_reports(baseline, candidate, with_ci=True, ci_seed=42)
+
+        assert delta.hit_rate_ci_95 is not None
+        assert delta.avg_top_score_ci_95 is not None
+        # No-op deltas → both bounds are 0.0
+        assert delta.hit_rate_ci_95 == (0.0, 0.0)
+        assert delta.avg_top_score_ci_95 == (0.0, 0.0)
+
+    def test_format_table_renders_ci_bands(self):
+        """format_delta_table must include [95% CI: ...] suffix when CIs
+        are populated, omit it otherwise."""
+        baseline = _make_report([_result("A"), _result("B")])
+        candidate = _make_report([_result("A"), _result("B")])
+
+        # Without CI
+        plain = format_delta_table(compare_reports(baseline, candidate))
+        assert "95% CI" not in plain
+
+        # With CI
+        with_ci = format_delta_table(
+            compare_reports(baseline, candidate, with_ci=True, ci_seed=42)
+        )
+        assert "95% CI" in with_ci
+        # Both metric lines should have the suffix
+        assert with_ci.count("[95% CI:") == 2  # hit_rate + avg_top_score

@@ -204,23 +204,64 @@ class TestEvaluateVeto:
         v2 = evaluate_veto(delta, DEFAULT_VETO_RULESET)
         assert v1.to_dict() == v2.to_dict()
 
-    def test_regression_summary_fails_loud(self):
-        """2.3.1 (Codex Finding 4): regression_summary is reserved for 2.6.
+    def test_regression_summary_with_no_failures_still_accepts(self):
+        """Phase 2.6: passing a clean regression_summary (no failures) leaves
+        the verdict unchanged. The `Failed list empty -> no impact` invariant
+        is what makes the regression check additive rather than blocking by
+        default."""
+        from evolve.regression import RegressionSummary
 
-        Passing a non-None value used to be a silent no-op — now it raises
-        NotImplementedError so the seam fails loud instead of fail-open.
-        """
         delta = _make_delta()
-        with pytest.raises(NotImplementedError, match="Phase 2.6"):
-            evaluate_veto(
-                delta, DEFAULT_VETO_RULESET, regression_summary={"shape": "for-2.6"}
-            )
+        clean = RegressionSummary(total=5, passed=5, failed=[])
+        v = evaluate_veto(delta, DEFAULT_VETO_RULESET, regression_summary=clean)
+        assert v.accepted
+        assert v.regression_failures == []
+
+    def test_regression_summary_with_failures_forces_hard_veto(self):
+        """Phase 2.6: any RegressionFailure in `failed` becomes a hard veto.
+        Even a perfectly clean delta cannot be adopted if a known-fixed bug
+        regressed. --force does NOT flip this — verified separately by
+        compute_exit_code's HARD_VETO branch."""
+        from evolve.regression import (
+            RegressionEntry,
+            RegressionFailure,
+            RegressionSummary,
+        )
+
+        delta = _make_delta()  # Clean delta — would be ADOPT without regressions
+        entry = RegressionEntry(
+            query="evolve replay harness phase 2",
+            fixed_in="PR #21 — None-sentinel defaults",
+            expected_top_path="vault/memory/MEMORY.md",
+            min_top_score=0.45,
+        )
+        summary = RegressionSummary(
+            total=1,
+            passed=0,
+            failed=[
+                RegressionFailure(
+                    entry=entry,
+                    observed_top_score=0.30,
+                    observed_top_path="vault/memory/MEMORY.md",
+                    reason="below_min_score",
+                )
+            ],
+        )
+        v = evaluate_veto(delta, DEFAULT_VETO_RULESET, regression_summary=summary)
+
+        assert not v.accepted
+        # Critical: regression failures disqualify the SOFT path too —
+        # `--force` cannot rescue a candidate that re-introduces a known bug.
+        assert not v.soft
+        assert len(v.regression_failures) == 1
+        assert v.regression_failures[0].reason == "below_min_score"
 
     def test_regression_summary_none_still_accepted(self):
         """The default kwarg path must remain pure — None means "not invoked"."""
         delta = _make_delta()
         v = evaluate_veto(delta, DEFAULT_VETO_RULESET, regression_summary=None)
         assert v.accepted
+        assert v.regression_failures == []
 
     def test_to_dict_serializes(self):
         delta = _make_delta(hit_rate_delta=-0.10)

@@ -146,13 +146,17 @@ class VetoRuleResult:
 class VetoVerdict:
     """Three-state verdict.
 
-    ``accepted=True`` only when every rule passes (regardless of severity).
-    ``accepted=False, soft=False`` is hard veto (blocker).
+    ``accepted=True`` only when every rule passes AND no regression-corpus
+    failures occurred (Phase 2.6).
+    ``accepted=False, soft=False`` is hard veto (blocker — rule hard-failures
+    or regression-corpus failures present).
     ``accepted=False, soft=True`` is soft veto (review required).
     The CLI maps these to exit codes 0/1/2 respectively.
 
     --force is a CLI policy and does NOT mutate this verdict — the truth
     record stays honest even when an operator overrides the gate.
+    Regression-corpus failures are NEVER softenable: --force does not
+    flip them; ``compute_exit_code`` only flips soft vetoes.
     """
 
     accepted: bool
@@ -160,6 +164,12 @@ class VetoVerdict:
     hard_failures: list[VetoRuleResult] = field(default_factory=list)
     soft_failures: list[VetoRuleResult] = field(default_factory=list)
     passed: list[VetoRuleResult] = field(default_factory=list)
+    # Phase 2.6: regression-corpus failures live alongside rule failures.
+    # Keeping them in a separate field (not synthesized into VetoRuleResult)
+    # avoids polluting VALID_METRICS with a pseudo-metric and preserves
+    # the full RegressionFailure context (entry, observed_top_path, reason)
+    # for the audit artifact.
+    regression_failures: list[Any] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -168,6 +178,10 @@ class VetoVerdict:
             "hard_failures": [r.to_dict() for r in self.hard_failures],
             "soft_failures": [r.to_dict() for r in self.soft_failures],
             "passed": [r.to_dict() for r in self.passed],
+            "regression_failures": [
+                f.to_dict() if hasattr(f, "to_dict") else f
+                for f in self.regression_failures
+            ],
         }
 
 
@@ -267,21 +281,20 @@ def evaluate_veto(
     delta: ReportDelta,
     ruleset: VetoRuleset,
     *,
-    regression_summary: Any | None = None,  # Phase 2.6 seam — fail-loud until wired
+    regression_summary: Any | None = None,
 ) -> VetoVerdict:
     """Evaluate every rule in `ruleset` against `delta`. Pure function.
 
-    No I/O, no clock reads, no randomness. Same input → same verdict. The
-    `regression_summary` kwarg is reserved for Phase 2.6; passing a non-None
-    value today raises `NotImplementedError` so the seam fails LOUD instead
-    of silently ignoring regression-corpus failures (Codex review Finding 4).
-    Phase 2.6 will replace the guard with the actual hard-rule check.
+    No I/O, no clock reads, no randomness. Same input → same verdict.
+
+    Phase 2.6: ``regression_summary`` (an ``evolve.regression.RegressionSummary``)
+    carries per-query verdicts from the regression corpus. Any entry in
+    ``regression_summary.failed`` becomes a hard failure on the verdict;
+    regression failures are NEVER softenable (no ``severity="soft"`` path)
+    — the regression corpus is the structural floor that --force cannot
+    override. Replaces the Phase 2.3 NotImplementedError stub at this
+    line in commit 22be531 (Codex review Finding 4 sealed the seam).
     """
-    if regression_summary is not None:
-        raise NotImplementedError(
-            "regression_summary is reserved for Phase 2.6 and not yet enforced; "
-            "passing a value would silently fail-open on regression-corpus failures"
-        )
     hard_failures: list[VetoRuleResult] = []
     soft_failures: list[VetoRuleResult] = []
     passed: list[VetoRuleResult] = []
@@ -295,14 +308,30 @@ def evaluate_veto(
         else:
             soft_failures.append(result)
 
-    accepted = not hard_failures and not soft_failures
-    soft = bool(soft_failures) and not hard_failures
+    regression_failures: list[Any] = []
+    if regression_summary is not None and getattr(regression_summary, "failed", None):
+        regression_failures = list(regression_summary.failed)
+
+    # Regression failures are always hard. They poison ``accepted`` AND
+    # disqualify the soft path — a candidate that breaks a known-fixed
+    # bug cannot be approved through review either.
+    accepted = (
+        not hard_failures
+        and not soft_failures
+        and not regression_failures
+    )
+    soft = (
+        bool(soft_failures)
+        and not hard_failures
+        and not regression_failures
+    )
     return VetoVerdict(
         accepted=accepted,
         soft=soft,
         hard_failures=hard_failures,
         soft_failures=soft_failures,
         passed=passed,
+        regression_failures=regression_failures,
     )
 
 
@@ -573,6 +602,16 @@ def format_verdict_table(
         lines.append("Hard failures:")
         for r in verdict.hard_failures:
             lines.append(_format_rule_line(r))
+    if verdict.regression_failures:
+        lines.append("")
+        lines.append("Regression-corpus failures (always hard, --force cannot override):")
+        for f in verdict.regression_failures:
+            entry = f.entry
+            lines.append(
+                f"  X [hard] {entry.fixed_in:<40} "
+                f"{f.reason} — top_score={f.observed_top_score:.3f} "
+                f"(min {entry.min_top_score:.3f}) for {entry.query!r}"
+            )
     if verdict.soft_failures:
         lines.append("")
         lines.append("Soft failures (review):")

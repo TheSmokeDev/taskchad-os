@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -19,6 +20,15 @@ from models import (
     Thread,
     User,
 )
+
+
+@dataclass(frozen=True)
+class _TelegramMediaRef:
+    """A local file or remote URL that should be sent as Telegram media."""
+
+    source: str
+    mimetype: str | None = None
+    filename: str | None = None
 
 
 class TelegramAdapter:
@@ -151,6 +161,8 @@ class TelegramAdapter:
         """Send a message to Telegram. Returns message_id as string for updates."""
         chat_id = int(message.channel.platform_id)
         thread_id = message.thread.thread_id if message.thread else message.channel.platform_id
+        raw_text, directive_media = self._extract_media_directives(message.text)
+        media_refs = self._collect_media_refs(message.attachments, directive_media)
 
         # Voice reply: when the engine's final response arrives for a voice thread,
         # delete the "Thinking..." placeholder and send a voice bubble instead.
@@ -198,7 +210,7 @@ class TelegramAdapter:
                             print(f"[{datetime.now()}] Voice-thread text fallback failed: {e2}")
             return None
 
-        text = self._format_for_telegram(message.text)
+        text = self._format_for_telegram(raw_text)
 
         # Reply to specific message if in a thread
         reply_to = None
@@ -210,7 +222,12 @@ class TelegramAdapter:
 
         # Update existing message — only attempt edit if content fits in one message.
         # If too long, fall through to chunked new-message send to avoid silent truncation.
-        if message.is_update and message.update_message_id and len(text) <= 4096:
+        if (
+            message.is_update
+            and message.update_message_id
+            and len(text) <= 4096
+            and not media_refs
+        ):
             try:
                 msg_id = int(message.update_message_id)
                 await self._app.bot.edit_message_text(
@@ -227,6 +244,17 @@ class TelegramAdapter:
                     return message.update_message_id
                 # Other edit failures — fall through to send new message
                 print(f"[{datetime.now()}] Edit failed, sending new: {e}")
+
+        # Send media natively when the runtime provides attachments or a Hermes-style
+        # MEDIA:/path/to/file.png directive. This avoids echoing local paths into chat.
+        if media_refs:
+            return await self._send_media_reply(
+                chat_id=chat_id,
+                text=text,
+                media_refs=media_refs,
+                reply_to=reply_to,
+                components=message.components,
+            )
 
         # Send new message(s) — split if over 4096 chars
         chunks = self._split_message(text)
@@ -265,6 +293,153 @@ class TelegramAdapter:
                     print(f"[{datetime.now()}] Send failed: {e2}")
 
         return first_id
+
+    async def _send_media_reply(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        media_refs: list[_TelegramMediaRef],
+        reply_to: int | None,
+        components: list[MessageComponent],
+    ) -> str | None:
+        """Send one or more media refs, using text as a caption when practical."""
+
+        first_id: str | None = None
+        reply_markup = self._build_reply_markup(components) if components else None
+        caption = text.strip()
+
+        # Telegram photo/document captions are capped at 1024 chars. For longer
+        # responses, send the text first and attach media afterward.
+        if caption and len(caption) > 1024:
+            for chunk in self._split_message(caption):
+                try:
+                    sent = await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        reply_to_message_id=reply_to,
+                        parse_mode="Markdown",
+                    )
+                    if first_id is None:
+                        first_id = str(sent.message_id)
+                except Exception as e:
+                    print(f"[{datetime.now()}] Media preface send failed: {e}")
+                    sent = await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        reply_to_message_id=reply_to,
+                    )
+                    if first_id is None:
+                        first_id = str(sent.message_id)
+            caption = ""
+
+        for idx, media in enumerate(media_refs):
+            media_caption = caption if idx == 0 and caption else None
+            media_markup = reply_markup if idx == len(media_refs) - 1 else None
+            try:
+                sent = await self._send_one_media(
+                    chat_id=chat_id,
+                    media=media,
+                    caption=media_caption,
+                    reply_to=reply_to if first_id is None else None,
+                    reply_markup=media_markup,
+                )
+                if first_id is None:
+                    first_id = str(sent.message_id)
+            except Exception as e:
+                print(f"[{datetime.now()}] Telegram media send failed: {e}")
+                fallback = f"Could not send media: {media.filename or media.source}"
+                sent = await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=fallback,
+                    reply_to_message_id=reply_to if first_id is None else None,
+                    reply_markup=media_markup,
+                )
+                if first_id is None:
+                    first_id = str(sent.message_id)
+
+        return first_id
+
+    async def _send_one_media(
+        self,
+        *,
+        chat_id: int,
+        media: _TelegramMediaRef,
+        caption: str | None,
+        reply_to: int | None,
+        reply_markup: Any,
+    ) -> Any:
+        """Send a single media item as photo when image-like, else document."""
+
+        source = media.source
+        is_image = self._is_image_media(media)
+        kwargs: dict[str, Any] = {
+            "chat_id": chat_id,
+            "caption": caption,
+            "reply_to_message_id": reply_to,
+            "reply_markup": reply_markup,
+        }
+
+        if self._is_remote_url(source):
+            if is_image:
+                return await self._app.bot.send_photo(photo=source, **kwargs)
+            return await self._app.bot.send_document(document=source, **kwargs)
+
+        path = Path(source).expanduser()
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"Local media file not found: {path}")
+
+        with path.open("rb") as handle:
+            if is_image:
+                return await self._app.bot.send_photo(photo=handle, **kwargs)
+            return await self._app.bot.send_document(document=handle, **kwargs)
+
+    @staticmethod
+    def _extract_media_directives(text: str) -> tuple[str, list[_TelegramMediaRef]]:
+        """Parse Hermes-style MEDIA:/path directives out of assistant text."""
+
+        media: list[_TelegramMediaRef] = []
+        kept_lines: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            upper = stripped.upper()
+            if upper.startswith("MEDIA:") or upper.startswith("IMAGE:"):
+                _, value = stripped.split(":", 1)
+                source = value.strip().strip("<>").strip()
+                if source:
+                    media.append(_TelegramMediaRef(source=source))
+                continue
+            kept_lines.append(line)
+        return "\n".join(kept_lines).strip(), media
+
+    @staticmethod
+    def _collect_media_refs(
+        attachments: list[Attachment],
+        directive_media: list[_TelegramMediaRef],
+    ) -> list[_TelegramMediaRef]:
+        media_refs = list(directive_media)
+        for attachment in attachments:
+            if not attachment.url:
+                continue
+            media_refs.append(
+                _TelegramMediaRef(
+                    source=attachment.url,
+                    mimetype=attachment.mimetype,
+                    filename=attachment.filename,
+                )
+            )
+        return media_refs
+
+    @staticmethod
+    def _is_remote_url(source: str) -> bool:
+        return source.startswith(("http://", "https://"))
+
+    @staticmethod
+    def _is_image_media(media: _TelegramMediaRef) -> bool:
+        if media.mimetype and media.mimetype.startswith("image/"):
+            return True
+        path = media.source.split("?", 1)[0].lower()
+        return path.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"))
 
     async def update(self, message: OutgoingMessage) -> None:
         """Edit an existing message."""

@@ -1267,7 +1267,23 @@ def evolve_run(golden, overrides, out, caller, max_results, trace):
 @evolve.command("compare")
 @click.argument("baseline_report", type=click.Path(exists=True, dir_okay=False))
 @click.argument("candidate_report", type=click.Path(exists=True, dir_okay=False))
-def evolve_compare(baseline_report, candidate_report):
+@click.option(
+    "--ci",
+    "with_ci",
+    is_flag=True,
+    help=(
+        "Phase 2.6: compute paired-bootstrap 95% CI bands on hit_rate_delta "
+        "and avg_top_score_delta. Adds [95% CI: lo, hi] suffix to each "
+        "metric line so reviewers can distinguish real movement from noise."
+    ),
+)
+@click.option(
+    "--ci-seed",
+    type=int,
+    default=None,
+    help="Optional seed for deterministic bootstrap (testing only).",
+)
+def evolve_compare(baseline_report, candidate_report, with_ci, ci_seed):
     """Diff two ReplayReport JSONs and print the delta table."""
     import json as _json
     from pathlib import Path as _Path
@@ -1299,8 +1315,100 @@ def evolve_compare(baseline_report, candidate_report):
 
     baseline = _load(baseline_report)
     candidate = _load(candidate_report)
-    delta = compare_reports(baseline, candidate)
+    delta = compare_reports(baseline, candidate, with_ci=with_ci, ci_seed=ci_seed)
     click.echo(format_delta_table(delta))
+
+
+@evolve.command("audit-goldens")
+@click.option(
+    "--out",
+    type=click.Path(),
+    default=None,
+    help="Optional report output dir (replay JSON) — defaults to data/evolve/reports.",
+)
+@click.option(
+    "--max-results",
+    type=int,
+    default=5,
+    help="max_results passed to recall during the audit replay.",
+)
+@click.option("--json", "json_mode", is_flag=True, help="Emit JSON drift report instead of table.")
+def evolve_audit_goldens(out, max_results, json_mode):
+    """Audit the golden corpus for drift. Phase 2.6.
+
+    Re-runs every golden query through recall and flags entries where the
+    observed runtime tier no longer matches `tier_expected`, where a
+    happy-path query returned zero results, or where a non-error-inducing
+    query produced a runtime error. Emits stratification warnings as a
+    side effect via the loader.
+
+    Exit codes: 0 = no drift, 1 = drifts present.
+    """
+    import json as _json
+
+    from evolve import (
+        audit_goldens_drift,
+        load_golden_queries_full,
+        run_replay_sync,
+        validate_stratification,
+        write_report,
+    )
+
+    try:
+        entries = load_golden_queries_full(validate=False)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error loading goldens: {exc}", err=True)
+        sys.exit(3)
+
+    # Run validation explicitly so we can capture the warning list for
+    # JSON output (the loader's auto-validation only logs).
+    stratification_warnings = validate_stratification(entries)
+
+    queries = [e["query"] for e in entries]
+    if not json_mode:
+        click.echo(f"Auditing {len(queries)} golden queries...")
+    report = run_replay_sync(
+        queries,
+        overrides={},
+        caller="audit-goldens",
+        max_results=max_results,
+    )
+
+    if out:
+        out_path = write_report(report, out_dir=out)
+        if not json_mode:
+            click.echo(f"Audit replay saved: {out_path}")
+
+    drifts = audit_goldens_drift(report.per_query, entries)
+
+    if json_mode:
+        print(
+            json_mod.dumps(
+                {
+                    "audit_experiment_id": report.experiment_id,
+                    "total_queries": len(queries),
+                    "drift_count": len(drifts),
+                    "stratification_warnings": stratification_warnings,
+                    "drifts": drifts,
+                },
+                indent=2,
+            )
+        )
+    else:
+        if stratification_warnings:
+            click.echo("")
+            click.echo("Stratification warnings (PRD ±10% tolerance):")
+            for w in stratification_warnings:
+                click.echo(f"  - {w}")
+        click.echo("")
+        click.echo(f"Drifts: {len(drifts)} of {len(queries)}")
+        for d in drifts:
+            reasons = "; ".join(d["reasons"])
+            click.echo(f"  X {d['query'][:60]:<60} {reasons}")
+        if not drifts:
+            click.echo("  (no drift detected)")
+
+    sys.exit(0 if not drifts else 1)
 
 
 # ── evolve helpers (shared by veto + propose) ──────────────────────────────
@@ -1569,7 +1677,49 @@ def evolve_propose(
         click.echo(f"Error loading ruleset: {exc}", err=True)
         sys.exit(int(ExitCode.ERROR))
 
-    verdict = evaluate_veto(delta, rs)
+    # Phase 2.6: run regression corpus against candidate config and surface
+    # any failed entries as hard vetoes via evaluate_veto. Regression queries
+    # historically passed under the candidate's CONFIG (the bug fix held);
+    # if any drops below min_top_score now, a known-fixed bug regressed.
+    regression_summary = None
+    try:
+        from evolve import (
+            evaluate_regression_corpus,
+            load_regression_entries,
+            load_regression_queries,
+        )
+        regression_raw = load_regression_queries()
+        regression_set = load_regression_entries(regression_raw)
+        if regression_set:
+            regression_overrides = candidate.overrides if candidate_path else (
+                overrides_used or {}
+            )
+            regression_queries_strs = [e.query for e in regression_set]
+            if not json_mode:
+                click.echo(
+                    f"Running {len(regression_queries_strs)} regression queries "
+                    f"with candidate config..."
+                )
+            regression_report = run_replay_sync(
+                regression_queries_strs,
+                overrides=regression_overrides,
+                caller="regression",
+                max_results=max_results,
+            )
+            regression_summary = evaluate_regression_corpus(
+                regression_report.per_query, regression_set
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        # Defensive: missing or malformed regression file should NOT crash
+        # propose. Warn and continue without regression enforcement.
+        if not json_mode:
+            click.echo(
+                f"Warning: regression corpus unavailable ({exc}); "
+                f"proceeding without regression hard-veto enforcement.",
+                err=True,
+            )
+
+    verdict = evaluate_veto(delta, rs, regression_summary=regression_summary)
 
     exit_code = _evolve_compute_exit_code(verdict, force)
 

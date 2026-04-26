@@ -1,21 +1,556 @@
 {
-  "version": 1,
-  "description": "Seed golden queries for the Evolve replay harness. Drawn from MEMORY.md active projects, recent daily logs, and framework internals so deltas reflect real usage patterns rather than synthetic benchmarks.",
+  "version": 2,
+  "description": "Stratified golden queries for the Evolve replay harness. Phase 2.6: 55 queries across tier (40/40/20), length (30/50/20), and path flavor (70/10/5/15) so deltas reflect real recall paths instead of happy-path bias. Each entry carries full metadata for stratification validation and audit-goldens drift detection.",
   "queries": [
-    {"query": "YourBusiness lead generation status", "domain": "project"},
-    {"query": "what bank accounts are connected to budget", "domain": "finance"},
-    {"query": "how does the heartbeat pipeline work", "domain": "framework"},
-    {"query": "evolve replay harness phase 2", "domain": "framework"},
-    {"query": "BGE embedding model swap", "domain": "memory"},
-    {"query": "langfuse observability trace shape", "domain": "framework"},
-    {"query": "convoy mailbox orchestration phases", "domain": "orchestration"},
-    {"query": "entity compilation engine karpathy wiki", "domain": "memory"},
-    {"query": "working memory WORKING.md scratchpad", "domain": "cognition"},
-    {"query": "dream consolidation cycle", "domain": "cognition"},
-    {"query": "telegram bot inline buttons", "domain": "chat"},
-    {"query": "teller mTLS bank sync capital one", "domain": "finance"},
-    {"query": "sanitize.py two-repo export rules", "domain": "framework"},
-    {"query": "claude agent sdk max subscription policy", "domain": "runtime"},
-    {"query": "archon workflow ralph-dag autonomous", "domain": "workflow"}
+    {
+      "query": "YourBusiness lead generation status",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Active project state; hits MEMORY.md Active Projects section",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "what bank accounts are connected to budget",
+      "tier_expected": "tier_2",
+      "domain": "finances/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Your Bank Teller integration; hits BUDGET.md or finances/",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "how does the heartbeat pipeline work",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Framework architecture; HEARTBEAT.md + Important Facts",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "evolve replay harness phase 2",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Self-evolution pipeline; Recent Decisions",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "BGE embedding model swap",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "EmbeddingGemma -> BGE; Recent Decisions + Important Facts",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "langfuse observability trace shape",
+      "tier_expected": "tier_2",
+      "domain": "concepts/",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Section 08; concepts/ may have a LANGFUSE concept page",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "convoy mailbox orchestration phases",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Phase 0-7 orchestration; Important Facts + Section 07",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "entity compilation engine karpathy wiki",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "V3 ship; Recent Decisions + Section 03",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "working memory WORKING.md scratchpad",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Living Mind Phase 1; living_memory.py",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "dream consolidation cycle",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "memory_dream.py 4-phase; Section 03 + Recent Decisions",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "telegram bot inline buttons",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "MessageComponent end-to-end; Implementation Status",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "teller mTLS bank sync capital one",
+      "tier_expected": "tier_2",
+      "domain": "finances/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Phase 2 finance; bank_sync.py",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "sanitize.py two-repo export rules",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Public/private export contract; CLAUDE.md + Important Facts",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "claude agent sdk max subscription policy",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Anthropic OAuth April 2026 policy; Important Facts",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "archon workflow ralph-dag autonomous",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Coding workflow engine; Section 'Archon'",
+      "added_at": "2026-04-23",
+      "added_in": "2.2"
+    },
+    {
+      "query": "what shipped on 2026-04-25",
+      "tier_expected": "tier_1",
+      "domain": "daily/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Episodic recall of today; daily/2026-04-25.md",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "yesterday's heartbeat findings",
+      "tier_expected": "tier_1",
+      "domain": "daily/",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Date-bound; daily/2026-04-24.md heartbeats section",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "what changes did I commit today",
+      "tier_expected": "tier_1",
+      "domain": "daily/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Today's commit log; daily/ + git context",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "last sunday's weekly synthesis summary",
+      "tier_expected": "tier_1",
+      "domain": "weekly/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Episodic week recall; weekly/YYYY-WNN.md",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "what was decided about evolve phase 2.4 on April 25 2026 specifically the langfuse tag shape",
+      "tier_expected": "tier_1",
+      "domain": "daily/",
+      "length_bucket": "long",
+      "path_flavor": "happy",
+      "notes": "Long episodic + topic narrowing; daily + Recent Decisions",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "T-Mobile bill amount due April 19 2026",
+      "tier_expected": "tier_1",
+      "domain": "finances/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Date-bound finance recall; UPCOMING-EVENTS",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "loan_provider loan due dates and amounts",
+      "tier_expected": "tier_1",
+      "domain": "finances/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "BTC loan tracking; UPCOMING-EVENTS + finance docs",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "when did the briefing engine ship and what was the size reduction in kilobytes",
+      "tier_expected": "tier_1",
+      "domain": "memory-root",
+      "length_bucket": "long",
+      "path_flavor": "happy",
+      "notes": "Long episodic with specific metric (14.2KB->5.9KB)",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "what was my augusta rule deduction amount in 2024",
+      "tier_expected": "tier_1",
+      "domain": "memory-root",
+      "length_bucket": "long",
+      "path_flavor": "happy",
+      "notes": "Tax fact recall; Recent Decisions ($6800)",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "cox bill past due status",
+      "tier_expected": "tier_1",
+      "domain": "finances/",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Bill state; UPCOMING-EVENTS PAST-DUE",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "evolve 2.3.1 hardening five fail-open paths Codex review found",
+      "tier_expected": "tier_1",
+      "domain": "memory-root",
+      "length_bucket": "long",
+      "path_flavor": "happy",
+      "notes": "Specific hardening commit context; Recent Decisions",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "living mind phase 1 ship date",
+      "tier_expected": "tier_1",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Date+commit recall; Important Facts (1de11c0)",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "running test suite count after living mind phase 1 ship",
+      "tier_expected": "tier_1",
+      "domain": "memory-root",
+      "length_bucket": "long",
+      "path_flavor": "happy",
+      "notes": "Specific number recall (1369 tests); Important Facts",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "evolve 2.4 langfuse trace tagging shipped commit",
+      "tier_expected": "tier_1",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Recent ship; Recent Decisions (1981443)",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "plaid setup status april 2026",
+      "tier_expected": "tier_1",
+      "domain": "finances/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Integration status; project_plaid_setup",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "draft to insurance@YourBusiness",
+      "tier_expected": "tier_1",
+      "domain": "drafts/",
+      "length_bucket": "short",
+      "path_flavor": "happy",
+      "notes": "Draft retrieval; drafts/ folder",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "teller mtls auth certificate setup",
+      "tier_expected": "tier_1",
+      "domain": "finances/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Setup recall; finance docs",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "weekly synthesis April 19 to April 25 highlights",
+      "tier_expected": "tier_1",
+      "domain": "weekly/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Date-range weekly summary",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "discord nitro bill past due 2026-04-16",
+      "tier_expected": "tier_1",
+      "domain": "finances/",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Specific date+bill; UPCOMING-EVENTS",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "what did I work on this week from monday to thursday",
+      "tier_expected": "tier_1",
+      "domain": "weekly/",
+      "length_bucket": "long",
+      "path_flavor": "happy",
+      "notes": "Date-range episodic; weekly/ + daily/",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "phase 6 self-evolution PRP status",
+      "tier_expected": "tier_1",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "PRP queue state; project_phase6_self_evolution",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "BGE embedding swap commit hash and rationale",
+      "tier_expected": "tier_1",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "happy",
+      "notes": "Specific commit (c06c1d3); Recent Decisions",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "all evolve phases shipped so far this year and their commit hashes",
+      "tier_expected": "tier_3",
+      "domain": "memory-root",
+      "length_bucket": "long",
+      "path_flavor": "rare-path",
+      "notes": "Multi-phase enumeration; graph traversal across Recent Decisions",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "complete history of phase 2 evolve work",
+      "tier_expected": "tier_3",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "rare-path",
+      "notes": "Multi-hop entity traversal",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "all integrations and their auth methods",
+      "tier_expected": "tier_3",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "rare-path",
+      "notes": "Graph: integrations table -> auth columns",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "every PR that touched the search hybrid path including hardening",
+      "tier_expected": "tier_3",
+      "domain": "memory-root",
+      "length_bucket": "long",
+      "path_flavor": "rare-path",
+      "notes": "Multi-PR aggregation; #11/#21/#23",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "all bills and loans currently past due",
+      "tier_expected": "tier_3",
+      "domain": "finances/",
+      "length_bucket": "medium",
+      "path_flavor": "rare-path",
+      "notes": "Aggregation across UPCOMING-EVENTS + PAST-DUE",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "all hardening PRs and what they fixed in evolve",
+      "tier_expected": "tier_3",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "rare-path",
+      "notes": "Multi-PR enumeration; PR #16-#27",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "complete list of code review patterns and global rules",
+      "tier_expected": "tier_3",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "rare-path",
+      "notes": "Global Rules + Code Review Patterns; CLAUDE.md",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "everything related to langfuse observability across the codebase",
+      "tier_expected": "tier_3",
+      "domain": "concepts/",
+      "length_bucket": "medium",
+      "path_flavor": "rare-path",
+      "notes": "Hub-graph traversal from LANGFUSE concept page",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "all concept pages connected to the recall pipeline",
+      "tier_expected": "tier_3",
+      "domain": "concepts/",
+      "length_bucket": "medium",
+      "path_flavor": "rare-path",
+      "notes": "concepts/ neighbor traversal",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "all decisions about the framework runtime architecture made this year",
+      "tier_expected": "tier_3",
+      "domain": "memory-root",
+      "length_bucket": "long",
+      "path_flavor": "rare-path",
+      "notes": "Multi-decision aggregation across Recent Decisions",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "compare evolve 2.3 versus 2.4 implementation surface",
+      "tier_expected": "tier_3",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "rare-path",
+      "notes": "Cross-phase comparison; multi-hop",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "quantum cryptography orchestrator",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "zero-result",
+      "notes": "Topic does not exist in vault; tests zero-result handling",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "blockchain consensus algorithm comparison",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "zero-result",
+      "notes": "Off-domain query; expect zero matches",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "what is the ackerman function recursive value",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "medium",
+      "path_flavor": "zero-result",
+      "notes": "CS theory query; not in personal vault",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "did i write a research paper about transformers in 2019",
+      "tier_expected": "tier_1",
+      "domain": "memory-root",
+      "length_bucket": "long",
+      "path_flavor": "zero-result",
+      "notes": "Date-bound zero-result; expect empty",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "ancient rome trade routes",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "zero-result",
+      "notes": "Completely off-domain; expect empty",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "!@#$%^&*()_+{}|:<>?",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "short",
+      "path_flavor": "error-inducing",
+      "notes": "Special chars only; tests tokenizer / sanitizer robustness",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    },
+    {
+      "query": "a deliberately verbose query intended to test how the recall pipeline handles extremely long inputs that exceed normal length boundaries with many redundant tokens forcing tier classification to make decisions about handling unusually long user input where the meaningful signal is buried inside padding text that does not change the underlying intent which remains a recall question about the framework",
+      "tier_expected": "tier_2",
+      "domain": "memory-root",
+      "length_bucket": "long",
+      "path_flavor": "error-inducing",
+      "notes": "Boundary-stress; very long input ~60 words",
+      "added_at": "2026-04-25",
+      "added_in": "2.6"
+    }
   ]
 }

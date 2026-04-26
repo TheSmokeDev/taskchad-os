@@ -29,13 +29,27 @@ from evolve.compare import (  # noqa: E402
     format_delta_table,
 )
 from evolve.config_override import override_config  # noqa: E402
-from evolve.goldens import load_golden_queries, load_goldens_metadata  # noqa: E402
+from evolve.goldens import (  # noqa: E402
+    audit_goldens_drift,
+    load_golden_queries,
+    load_golden_queries_full,
+    load_goldens_metadata,
+    load_regression_queries,
+    validate_stratification,
+)
 from evolve.models import (  # noqa: E402
     ReplayQueryResult,
     ReplayReport,
     ReplaySummary,
 )
 from evolve.io import load_report_delta, write_decision_artifact  # noqa: E402
+from evolve.regression import (  # noqa: E402
+    RegressionEntry,
+    RegressionFailure,
+    RegressionSummary,
+    evaluate_regression_corpus,
+    load_regression_entries,
+)
 from evolve.replay import run_replay, run_replay_sync, write_report  # noqa: E402
 from evolve.replay_tracing import (  # noqa: E402
     build_experiment_tag,
@@ -43,6 +57,10 @@ from evolve.replay_tracing import (  # noqa: E402
     langfuse_trace_url,
     override_fingerprint,
     replay_root_span,
+)
+from evolve.statistics import (  # noqa: E402
+    bootstrap_delta_ci,
+    bootstrap_hit_rate_ci,
 )
 from evolve.veto import (  # noqa: E402
     DEFAULT_VETO_RULESET,
@@ -99,4 +117,16 @@ __all__ = [
     "langfuse_trace_url",
     "override_fingerprint",
     "replay_root_span",
+    # Phase 2.6 — broad goldens + bootstrap CIs + regression corpus
+    "load_golden_queries_full",
+    "load_regression_queries",
+    "validate_stratification",
+    "audit_goldens_drift",
+    "bootstrap_hit_rate_ci",
+    "bootstrap_delta_ci",
+    "RegressionEntry",
+    "RegressionFailure",
+    "RegressionSummary",
+    "load_regression_entries",
+    "evaluate_regression_corpus",
 ]

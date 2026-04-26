@@ -63,6 +63,11 @@ class ReportDelta:
     baseline_overrides: dict[str, Any] = field(default_factory=dict)
     candidate_overrides: dict[str, Any] = field(default_factory=dict)
     error_count_delta: int = 0  # +1 net new errors, -1 net fixed, 0 no change
+    # Phase 2.6: paired-bootstrap CI bounds (lower, upper) on the delta of
+    # each metric. Populated only when compare_reports(..., with_ci=True);
+    # None for backward-compat with v1 reports + the default fast path.
+    hit_rate_ci_95: tuple[float, float] | None = None
+    avg_top_score_ci_95: tuple[float, float] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +83,12 @@ class ReportDelta:
             "candidate_overrides": self.candidate_overrides,
             "per_query": [q.to_dict() for q in self.per_query],
             "error_count_delta": self.error_count_delta,
+            "hit_rate_ci_95": list(self.hit_rate_ci_95) if self.hit_rate_ci_95 else None,
+            "avg_top_score_ci_95": (
+                list(self.avg_top_score_ci_95)
+                if self.avg_top_score_ci_95
+                else None
+            ),
         }
 
 
@@ -123,8 +134,25 @@ def _diff_tier_distribution(
     return {k: candidate_dist.get(k, 0) - baseline_dist.get(k, 0) for k in sorted(keys)}
 
 
-def compare_reports(baseline: ReplayReport, candidate: ReplayReport) -> ReportDelta:
-    """Diff two replay reports. Queries must be in the same order."""
+def compare_reports(
+    baseline: ReplayReport,
+    candidate: ReplayReport,
+    *,
+    with_ci: bool = False,
+    ci_iterations: int = 1000,
+    ci_seed: int | None = None,
+) -> ReportDelta:
+    """Diff two replay reports. Queries must be in the same order.
+
+    When ``with_ci=True`` (Phase 2.6), populates ``hit_rate_ci_95`` and
+    ``avg_top_score_ci_95`` on the returned ``ReportDelta`` via a paired
+    percentile bootstrap (B=ci_iterations, default 1000; pure stdlib via
+    ``evolve.statistics``). The CI brackets the *delta* metric, not the
+    absolute metric.
+
+    ``ci_seed`` is forwarded to the bootstrap RNG for deterministic CIs
+    in tests; production runs leave it None for natural variance.
+    """
     delta = ReportDelta(
         baseline_experiment_id=baseline.experiment_id,
         candidate_experiment_id=candidate.experiment_id,
@@ -195,18 +223,56 @@ def compare_reports(baseline: ReplayReport, candidate: ReplayReport) -> ReportDe
 
     delta.verdict_counts = verdict_counts
     delta.error_count_delta = error_count_delta
+
+    if with_ci:
+        # Lazy import keeps `compare.py` cheap when the bootstrap path is
+        # unused; statistics.py is pure stdlib so the import itself has
+        # zero cost beyond the module load.
+        from evolve.statistics import bootstrap_delta_ci
+
+        delta.hit_rate_ci_95 = bootstrap_delta_ci(
+            baseline.per_query,
+            candidate.per_query,
+            metric="hit_rate",
+            confidence=0.95,
+            iterations=ci_iterations,
+            seed=ci_seed,
+        )
+        delta.avg_top_score_ci_95 = bootstrap_delta_ci(
+            baseline.per_query,
+            candidate.per_query,
+            metric="avg_top_score",
+            confidence=0.95,
+            iterations=ci_iterations,
+            seed=ci_seed,
+        )
+
     return delta
 
 
+def _format_ci_band(ci: tuple[float, float] | None) -> str:
+    """Render a 95% CI band suffix or empty string when CI is absent."""
+    if ci is None:
+        return ""
+    lo, hi = ci
+    return f"  [95% CI: {lo:+.4f}, {hi:+.4f}]"
+
+
 def format_delta_table(delta: ReportDelta) -> str:
-    """Human-readable summary for CLI output."""
+    """Human-readable summary for CLI output.
+
+    When ``hit_rate_ci_95`` / ``avg_top_score_ci_95`` are populated (Phase
+    2.6 ``compare_reports(with_ci=True)``), each metric line gets a
+    ``[95% CI: lo, hi]`` band suffix so reviewers can distinguish real
+    movement from sampling noise.
+    """
     lines = [
         f"baseline:  {delta.baseline_experiment_id}",
         f"candidate: {delta.candidate_experiment_id}",
         "",
         "Aggregate:",
-        f"  hit_rate:      {delta.hit_rate_delta:+.4f}",
-        f"  avg_top_score: {delta.avg_top_score_delta:+.4f}",
+        f"  hit_rate:      {delta.hit_rate_delta:+.4f}{_format_ci_band(delta.hit_rate_ci_95)}",
+        f"  avg_top_score: {delta.avg_top_score_delta:+.4f}{_format_ci_band(delta.avg_top_score_ci_95)}",
         f"  p50_latency:   {delta.p50_latency_delta_ms:+.2f} ms",
         f"  p90_latency:   {delta.p90_latency_delta_ms:+.2f} ms",
     ]
