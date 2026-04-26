@@ -51,14 +51,23 @@ class WebAdapter:
         correlation, while thread_id holds the durable conversation_id
         for session persistence. Falls back to thread_id for backward
         compat with non-web callers.
+
+        Footer (gap-6 concept draft hint) is appended with a "\\n\\n--\\n"
+        separator per the §I8 contract. HTML styling is deferred — the
+        relay-rendered web client treats this as plain text.
         """
         request_id = ""
         if message.thread:
             request_id = message.thread.parent_message_id or message.thread.thread_id or ""
 
+        text = message.text
+        footer = getattr(message, "footer", None)
+        if footer:
+            text = f"{text}\n\n--\n{footer}"
+
         await self.ws_client.send_response(
             request_id=request_id,
-            text=message.text,
+            text=text,
             is_update=message.is_update,
             is_done=False,
         )

@@ -143,13 +143,19 @@ class CLIAdapter:
 
         In quiet mode, capture the final response text and error flag.
         In normal mode, print everything as it arrives.
+        Footer (gap-6 concept draft hint) is appended below the body with
+        a blank line separator. Only rendered in non-quiet mode so the
+        Paperclip JSON contract stays clean.
         """
+        footer = getattr(message, "footer", None)
         if self._quiet:
             self._final_response = message.text
             if getattr(message, "is_error", False):
                 self._got_error = True
         else:
             print(message.text, flush=True)
+            if footer:
+                print(f"\n{footer}", flush=True)
         self._responses.append(message)
         return None
 
@@ -159,8 +165,11 @@ class CLIAdapter:
         In quiet mode, do NOT capture updates as the final response.
         In normal mode, print the update for streaming-like experience.
         """
+        footer = getattr(message, "footer", None)
         if not self._quiet:
             print(message.text, flush=True)
+            if footer:
+                print(f"\n{footer}", flush=True)
 
     async def send_typing(self, channel: Channel) -> None:
         pass

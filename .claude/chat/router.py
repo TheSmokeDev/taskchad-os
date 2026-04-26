@@ -190,8 +190,28 @@ class ChatRouter:
                         self._persist_router_turn(incoming, combined)
                     return
 
-        # --- Single command: /email -> handle directly ---
+        # --- /file accept|diff <id> — gap-6 conversational compounding ---
+        # Intercept here so the engine never sees these subcommands. The
+        # base /file slash command remains routed through the engine /
+        # extension system; only accept|diff are deterministic Python.
         parsed = self._parse_command(text)
+        if parsed and parsed[0] == "file":
+            args = parsed[1]
+            if args.startswith("accept ") or args.startswith("diff "):
+                sub, _, sub_args = args.partition(" ")
+                auto_id = sub_args.strip().split()[0] if sub_args else ""
+                reply = await self._handle_file_subcommand(sub, auto_id)
+                await adapter.send(
+                    OutgoingMessage(
+                        text=reply,
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                    )
+                )
+                self._persist_router_turn(incoming, reply)
+                return
+
+        # --- Single command: /email -> handle directly ---
         if parsed:
             command, args = parsed
             if command in router_commands:
@@ -342,10 +362,19 @@ class ChatRouter:
 
         final_text = ""
         final_is_error = False
+        final_footer: str | None = None
+        final_components: list[Any] = []
         try:
             async for outgoing in self.engine.handle_message(incoming, progress=progress):
                 final_text = outgoing.text
                 final_is_error = getattr(outgoing, "is_error", False)
+                # gap-6: capture engine-side footer + components (concept draft).
+                # Persistence (_persist_router_turn) keeps using final_text only —
+                # footer never enters chat_history.
+                final_footer = getattr(outgoing, "footer", None)
+                yielded_components = getattr(outgoing, "components", None) or []
+                if yielded_components:
+                    final_components = list(yielded_components)
         except Exception as e:
             print(f"[{datetime.now()}] Engine error: {e}")
             final_text = f"Sorry, something went wrong: {e}"
@@ -360,6 +389,10 @@ class ChatRouter:
 
         # Parse <<BLOG_RESULTS>> marker — attach Publish/Skip buttons
         components = self._extract_result_buttons(final_text)
+        # If the engine attached components (e.g. concept draft Accept/Diff),
+        # carry them into the outgoing message alongside any blog buttons.
+        if final_components:
+            components = list(components) + list(final_components)
 
         try:
             if placeholder_id:
@@ -371,16 +404,18 @@ class ChatRouter:
                         is_update=True,
                         update_message_id=placeholder_id,
                         is_error=final_is_error,
+                        footer=final_footer,
                     )
                 )
                 # Buttons can't be added to edits — send as follow-up
                 if components:
                     await adapter.send(
                         OutgoingMessage(
-                            text="Ready to publish?",
+                            text="Ready to publish?" if not final_components else "",
                             channel=incoming.channel,
                             thread=incoming.thread,
                             components=components,
+                            footer=final_footer if final_components else None,
                         )
                     )
             else:
@@ -391,10 +426,69 @@ class ChatRouter:
                         thread=incoming.thread,
                         is_error=final_is_error,
                         components=components,
+                        footer=final_footer,
                     )
                 )
         except Exception as e:
             print(f"[{datetime.now()}] Failed to send response: {e}")
+
+    async def _handle_file_subcommand(self, sub: str, auto_id: str) -> str:
+        """Dispatch /file accept|diff <id> to the concept_drafter module.
+
+        gap-6 — deterministic Python path; no engine round-trip.
+        Returns a user-facing reply string. Never raises — surfaces errors
+        as text replies so the user sees what went wrong.
+        """
+        if not auto_id:
+            return f"Usage: `/file {sub} <draft-id>` (8-char prefix or full UUID)."
+        try:
+            from concept_drafter import (
+                DraftAmbiguityError,
+                accept_draft,
+                diff_draft,
+            )
+            from config import MEMORY_DIR
+        except Exception as e:  # noqa: BLE001
+            return f"Drafter unavailable: {e}"
+
+        try:
+            if sub == "accept":
+                result = accept_draft(auto_id, MEMORY_DIR)
+            elif sub == "diff":
+                result = diff_draft(auto_id, MEMORY_DIR)
+            else:
+                return f"Unknown subcommand `/file {sub}`."
+        except DraftAmbiguityError as e:
+            slugs = []
+            for p in e.candidates:
+                stem = getattr(p, "stem", str(p))
+                slugs.append(f"`{stem}`")
+            joined = ", ".join(slugs[:5])
+            return (
+                f"Multiple drafts match `{auto_id}`. Be more specific. "
+                f"Candidates: {joined}"
+            )
+        except Exception as e:  # noqa: BLE001
+            return f"Couldn't {sub} draft `{auto_id}`: {e}"
+
+        status = result.get("status", "")
+        if status == "not_found":
+            return f"No draft matched `{auto_id}`. It may have been swept."
+        if status == "error":
+            return f"Failed to {sub} draft `{auto_id}`: {result.get('error', 'unknown error')}"
+        if sub == "accept":
+            path = result.get("path", "")
+            connections = result.get("connections", []) or []
+            contradictions = result.get("contradictions", []) or []
+            lines = [f"Filed draft to `{path}`."]
+            if connections:
+                lines.append(f"Connections: {len(connections)}")
+            if contradictions:
+                lines.append(f"Contradictions flagged: {len(contradictions)}")
+            return "\n".join(lines)
+        # diff
+        preview = result.get("preview", "")
+        return f"Draft preview (`{auto_id}`):\n\n{preview}"
 
     def _extract_result_buttons(self, text: str) -> list[Any]:
         """Parse <<BLOG_RESULTS>> or <<QUOTE_RESULTS>> markers and return action buttons.
@@ -469,6 +563,34 @@ class ChatRouter:
             await adapter.send(
                 OutgoingMessage(
                     text="Quote cancelled.",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                )
+            )
+        elif custom_id.startswith("concept_accept:"):
+            auto_id = custom_id.split(":", 1)[1]
+            reply = await self._handle_file_subcommand("accept", auto_id)
+            await adapter.send(
+                OutgoingMessage(
+                    text=reply,
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                )
+            )
+        elif custom_id.startswith("concept_diff:"):
+            auto_id = custom_id.split(":", 1)[1]
+            reply = await self._handle_file_subcommand("diff", auto_id)
+            await adapter.send(
+                OutgoingMessage(
+                    text=reply,
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                )
+            )
+        elif custom_id.startswith("concept_ignore:"):
+            await adapter.send(
+                OutgoingMessage(
+                    text="Skipped. Draft will sweep itself in 24h.",
                     channel=incoming.channel,
                     thread=incoming.thread,
                 )

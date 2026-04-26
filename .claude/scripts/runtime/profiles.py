@@ -87,7 +87,7 @@ GENERIC_PROVIDER_REGISTRY: dict[str, GenericProviderOverlay] = {
         auth_type="codex",
         display_name="Codex",
         model_env_var="SECOND_BRAIN_CODEX_MODEL",
-        default_model="gpt-5.5",
+        default_model="chatgpt-plan-default",
         text_route_priority=2,
         tool_route_priority=0,
         aliases=("codex", "openai_codex", "openai-codex", "chatgpt", "gpt"),
@@ -166,7 +166,7 @@ def _primary_model_for_provider(provider: str) -> str:
             return explicit_gemini
         return _gemini_model_ladder()[0]
     if provider == "openai-codex":
-        return _model_from_env("SECOND_BRAIN_CODEX_MODEL", "gpt-5.5")
+        return _model_from_env("SECOND_BRAIN_CODEX_MODEL", "chatgpt-plan-default")
     if provider == "openai-compatible":
         return _model_from_env("SECOND_BRAIN_OPENAI_MODEL", "gpt-4.1-mini")
     if provider == "openrouter":

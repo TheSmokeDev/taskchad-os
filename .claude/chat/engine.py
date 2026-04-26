@@ -150,6 +150,10 @@ class ConversationEngine:
             self._frozen_regions: list[Any] = []
         # Move 5a: Track mental process state per session
         self._session_processes: dict[str, Any] = {}  # session_key -> MentalProcess
+        # gap-6 conversational compounding: per-session set of slugs already
+        # drafted this process lifetime. Keyed by session_key, values are
+        # mutable slug sets owned by concept_drafter.create_draft.
+        self._drafted_slugs: dict[str, set[str]] = {}
 
     def _build_frozen_regions(self) -> list[Any]:
         """Read identity files fresh. Called once per turn before prompt assembly."""
@@ -901,10 +905,33 @@ class ConversationEngine:
             flush=True,
         )
 
+        # gap-6 conversational compounding loop: silently draft long
+        # analytical answers + return a structured footer + components.
+        # NEVER fuse footer into response_text — persistence layer must see
+        # only the assistant answer. Fail-soft: any error → no footer.
+        draft_footer: str = ""
+        draft_components: list[Any] = []
+        try:
+            from concept_drafter import maybe_draft_and_footer
+            from config import MEMORY_DIR
+
+            draft_footer, draft_components = maybe_draft_and_footer(
+                message.text,
+                response_text,
+                vault_dir=MEMORY_DIR,
+                session_id=session_key,
+                turn_id=str(message.platform_message_id or thread_id),
+                drafted_slugs=self._drafted_slugs.setdefault(session_key, set()),
+            )
+        except Exception as e:
+            print(f"[{datetime.now()}] [Drafter] Failed (non-blocking): {e}", flush=True)
+
         yield OutgoingMessage(
-            text=response_text,
+            text=response_text,                 # answer ONLY — no footer fusion
             channel=message.channel,
             thread=message.thread,
+            footer=draft_footer or None,
+            components=draft_components or [],
         )
 
         # Langfuse: post-response span (capture + continuity + session persist)

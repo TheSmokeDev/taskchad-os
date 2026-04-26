@@ -127,3 +127,6 @@ class OutgoingMessage:
     attachments: list[Attachment] = field(default_factory=list)
     components: list[MessageComponent] = field(default_factory=list)
     embed: MessageEmbed | None = None
+    # Per-adapter rendered hint (e.g. concept-draft footer). Never persisted to
+    # chat_history — adapters render it appropriate to the medium.
+    footer: str | None = None

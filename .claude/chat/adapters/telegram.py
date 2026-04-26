@@ -158,10 +158,20 @@ class TelegramAdapter:
             yield message
 
     async def send(self, message: OutgoingMessage) -> str | None:
-        """Send a message to Telegram. Returns message_id as string for updates."""
+        """Send a message to Telegram. Returns message_id as string for updates.
+
+        Footer (gap-6 concept draft hint) is appended below the message
+        body with a blank-line separator. Inline-keyboard buttons still
+        ride on the last chunk so the footer sits above the buttons,
+        matching the §I8 contract for Telegram.
+        """
         chat_id = int(message.channel.platform_id)
         thread_id = message.thread.thread_id if message.thread else message.channel.platform_id
-        raw_text, directive_media = self._extract_media_directives(message.text)
+        body_text = message.text
+        footer = getattr(message, "footer", None)
+        if footer:
+            body_text = f"{body_text}\n\n{footer}" if body_text else footer
+        raw_text, directive_media = self._extract_media_directives(body_text)
         media_refs = self._collect_media_refs(message.attachments, directive_media)
 
         # Voice reply: when the engine's final response arrives for a voice thread,
