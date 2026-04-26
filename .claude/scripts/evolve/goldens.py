@@ -342,7 +342,13 @@ def audit_goldens_drift(
             and not observed_error
         ):
             reasons.append("unexpected_zero_results")
-        if flavor == "happy" and observed_error:
+        # 2.6.1 hardening (Codex review 2026-04-26 finding 3): only
+        # ``error-inducing`` queries are allowed to error. Anything else
+        # — happy, zero-result, rare-path — that produces a runtime
+        # error is degraded recall and must drift. Previously we only
+        # checked ``flavor == "happy"`` which let rare-path / zero-result
+        # errors pass the audit.
+        if flavor != "error-inducing" and observed_error:
             reasons.append(f"unexpected_error: {observed_error[:80]}")
 
         if reasons:

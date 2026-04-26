@@ -273,3 +273,64 @@ class TestAuditGoldensDrift:
 
         with pytest.raises(ValueError, match="length mismatch"):
             audit_goldens_drift([], [_v2_entry()])
+
+
+# ── 2.6.1 hardening — Codex review 2026-04-26 finding 3 ───────────────────
+
+
+class TestAuditErrorDetectionAcrossFlavors:
+    """Codex finding 3: only ``error-inducing`` queries are allowed to
+    error. Previously the audit only flagged errors when
+    flavor=="happy" — letting rare-path / zero-result queries that
+    error pass the audit even though they shouldn't."""
+
+    def test_rare_path_with_error_flagged(self):
+        """A graph-traversal query that crashes is degraded recall and
+        must drift, even though its flavor isn't ``happy``."""
+        from evolve.goldens import audit_goldens_drift
+        from evolve.models import ReplayQueryResult
+
+        entries = [_v2_entry(
+            query="all-related-X", path_flavor="rare-path",
+            tier_expected="tier_3",
+        )]
+        per_query = [ReplayQueryResult(
+            query="all-related-X", tier="tier_3",
+            results_count=0, error="graph_traversal_failed: cycle detected",
+        )]
+        drifts = audit_goldens_drift(per_query, entries)
+        assert len(drifts) == 1
+        assert any("unexpected_error" in r for r in drifts[0]["reasons"])
+
+    def test_zero_result_with_error_flagged(self):
+        """A zero-result query producing 0 results is EXPECTED, but it
+        producing an ERROR is not — recall should fail closed (return [])
+        not throw."""
+        from evolve.goldens import audit_goldens_drift
+        from evolve.models import ReplayQueryResult
+
+        entries = [_v2_entry(query="off-topic", path_flavor="zero-result")]
+        per_query = [ReplayQueryResult(
+            query="off-topic", tier="tier_2",
+            results_count=0, error="recall_pipeline_crashed",
+        )]
+        drifts = audit_goldens_drift(per_query, entries)
+        assert len(drifts) == 1
+        assert any("unexpected_error" in r for r in drifts[0]["reasons"])
+
+    def test_error_inducing_with_error_does_not_drift(self):
+        """The ONE flavor that's allowed to error: error-inducing queries
+        producing errors is the EXPECTED behavior, not drift."""
+        from evolve.goldens import audit_goldens_drift
+        from evolve.models import ReplayQueryResult
+
+        entries = [_v2_entry(
+            query="!@#$%^&*()", path_flavor="error-inducing",
+        )]
+        per_query = [ReplayQueryResult(
+            query="!@#$%^&*()", tier="tier_2",
+            results_count=0, error="tokenizer_rejected_input",
+        )]
+        drifts = audit_goldens_drift(per_query, entries)
+        # Error-inducing + error = expected → no drift
+        assert drifts == []

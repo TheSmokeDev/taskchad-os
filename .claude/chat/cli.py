@@ -1570,6 +1570,19 @@ def evolve_veto(delta_path, ruleset, veto_rules_path, force, json_mode):
         "when --candidate is supplied (no fresh replay runs)."
     ),
 )
+@click.option(
+    "--no-regression",
+    is_flag=True,
+    default=False,
+    help=(
+        "Phase 2.6.1 (Codex review 2026-04-26 finding 2): explicitly skip "
+        "the regression corpus check. Without this flag, a missing or "
+        "malformed regression_queries.json is a HARD ERROR (exit 3) — "
+        "the regression hard-veto floor must be either enforced or "
+        "explicitly opted-out. Use with care; --no-regression disables "
+        "structural protection against re-introducing known-fixed bugs."
+    ),
+)
 def evolve_propose(
     overrides_path,
     baseline_path,
@@ -1582,6 +1595,7 @@ def evolve_propose(
     caller,
     json_mode,
     trace,
+    no_regression,
 ):
     """Run replay + compare + veto in one shot — the autonomous adoption path.
 
@@ -1681,25 +1695,55 @@ def evolve_propose(
     # any failed entries as hard vetoes via evaluate_veto. Regression queries
     # historically passed under the candidate's CONFIG (the bug fix held);
     # if any drops below min_top_score now, a known-fixed bug regressed.
+    #
+    # 2.6.1 hardening (Codex review 2026-04-26 finding 2): a missing /
+    # malformed / empty regression corpus is a HARD ERROR. Previous
+    # behavior caught FileNotFoundError + ValueError and continued with
+    # regression_summary=None — silently disabled the hard-veto floor.
+    # Opt-out via --no-regression is the only way to skip enforcement.
     regression_summary = None
-    try:
-        from evolve import (
-            evaluate_regression_corpus,
-            load_regression_entries,
-            load_regression_queries,
-        )
-        regression_raw = load_regression_queries()
-        regression_set = load_regression_entries(regression_raw)
-        if regression_set:
-            regression_overrides = candidate.overrides if candidate_path else (
-                overrides_used or {}
+    if not no_regression:
+        try:
+            from evolve import (
+                evaluate_regression_corpus,
+                load_regression_entries,
+                load_regression_queries,
             )
-            regression_queries_strs = [e.query for e in regression_set]
-            if not json_mode:
-                click.echo(
-                    f"Running {len(regression_queries_strs)} regression queries "
-                    f"with candidate config..."
+            regression_raw = load_regression_queries()
+            regression_set = load_regression_entries(regression_raw)
+        except (FileNotFoundError, ValueError) as exc:
+            err_msg = (
+                f"Regression corpus load failed: {exc}. "
+                f"Pass --no-regression to skip enforcement (not recommended), "
+                f"or fix regression_queries.json."
+            )
+            if json_mode:
+                print(
+                    json_mod.dumps(
+                        {
+                            "error": "regression_corpus_load_failed",
+                            "detail": str(exc),
+                            "baseline_experiment_id": baseline.experiment_id,
+                            "candidate_experiment_id": candidate.experiment_id,
+                            "force": force,
+                        },
+                        indent=2,
+                    )
                 )
+            else:
+                click.echo(err_msg, err=True)
+            sys.exit(int(ExitCode.ERROR))
+
+        regression_overrides = candidate.overrides if candidate_path else (
+            overrides_used or {}
+        )
+        regression_queries_strs = [e.query for e in regression_set]
+        if not json_mode:
+            click.echo(
+                f"Running {len(regression_queries_strs)} regression queries "
+                f"with candidate config..."
+            )
+        try:
             regression_report = run_replay_sync(
                 regression_queries_strs,
                 overrides=regression_overrides,
@@ -1709,15 +1753,34 @@ def evolve_propose(
             regression_summary = evaluate_regression_corpus(
                 regression_report.per_query, regression_set
             )
-    except (FileNotFoundError, ValueError) as exc:
-        # Defensive: missing or malformed regression file should NOT crash
-        # propose. Warn and continue without regression enforcement.
-        if not json_mode:
-            click.echo(
-                f"Warning: regression corpus unavailable ({exc}); "
-                f"proceeding without regression hard-veto enforcement.",
-                err=True,
+        except (ValueError, RuntimeError) as exc:
+            err_msg = (
+                f"Regression replay/evaluation failed: {exc}. "
+                f"Pass --no-regression to skip enforcement (not recommended)."
             )
+            if json_mode:
+                print(
+                    json_mod.dumps(
+                        {
+                            "error": "regression_replay_failed",
+                            "detail": str(exc),
+                            "baseline_experiment_id": baseline.experiment_id,
+                            "candidate_experiment_id": candidate.experiment_id,
+                            "force": force,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                click.echo(err_msg, err=True)
+            sys.exit(int(ExitCode.ERROR))
+    elif not json_mode:
+        click.echo(
+            "Note: --no-regression set; regression hard-veto floor disabled "
+            "for this propose. Known-fixed bugs are NOT structurally "
+            "protected this run.",
+            err=True,
+        )
 
     verdict = evaluate_veto(delta, rs, regression_summary=regression_summary)
 

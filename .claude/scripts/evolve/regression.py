@@ -118,6 +118,30 @@ def _top_path(result: ReplayQueryResult) -> str:
     return result.result_paths[0] if result.result_paths else ""
 
 
+def _normalize_path(path: str) -> str:
+    """Reduce a result path to its memory-relative form for comparison.
+
+    ``ReplayQueryResult.result_paths`` records paths in whatever form
+    ``memory_search`` produced — typically vault-relative (``MEMORY.md``,
+    ``concepts/HERMES.md``) but historically also seen as repo-relative
+    (``vault/memory/MEMORY.md``) or absolute
+    (``C:\\Users\\YourUser\\thehomie\\TheHomie\\Memory\\MEMORY.md``).
+    ``regression_queries.json`` is curated by humans who naturally write
+    repo-relative paths. Normalize both sides to the memory-relative
+    tail (everything after the last ``Memory/``) so equality holds across
+    formats. Codex review 2026-04-26 finding 1: without this, every
+    regression query hard-vetoed even on healthy candidates because
+    ``vault/memory/MEMORY.md != MEMORY.md`` was treated as
+    ``wrong_top_path``.
+    """
+    if not path:
+        return ""
+    p = path.replace("\\", "/")
+    if "Memory/" in p:
+        return p.split("Memory/")[-1]
+    return p
+
+
 def _classify_failure(
     entry: RegressionEntry, candidate: ReplayQueryResult
 ) -> RegressionFailure | None:
@@ -139,7 +163,10 @@ def _classify_failure(
     observed_score = _top_score(candidate)
     observed_path = _top_path(candidate)
 
-    if observed_path != entry.expected_top_path:
+    # Normalize both sides to memory-relative form before comparison —
+    # repo-relative regression entries vs vault-relative replay paths
+    # would otherwise produce false wrong_top_path verdicts.
+    if _normalize_path(observed_path) != _normalize_path(entry.expected_top_path):
         return RegressionFailure(
             entry=entry,
             observed_top_score=observed_score,

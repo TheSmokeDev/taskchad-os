@@ -178,6 +178,96 @@ class TestLoaderSchema:
         assert entries[0].min_top_score == 0.5  # coerced to float
 
 
+# ── 2.6.1 hardening — Codex review 2026-04-26 ─────────────────────────────
+
+
+class TestPathNormalization:
+    """Codex finding 1: replay reports record memory-relative paths
+    (`MEMORY.md`, `concepts/X.md`) but a human-curated regression corpus
+    naturally writes repo-relative (`vault/memory/MEMORY.md`). Without
+    normalization, every regression entry classifies as wrong_top_path
+    even on healthy candidates, hard-vetoing all adoptions."""
+
+    def test_repo_relative_matches_memory_relative(self):
+        """`vault/memory/MEMORY.md` (corpus) vs `MEMORY.md` (replay)
+        must compare EQUAL after normalization, NOT trip wrong_top_path."""
+        from evolve.regression import evaluate_regression_corpus
+
+        entry = _make_entry(
+            query="A",
+            expected_top_path="vault/memory/MEMORY.md",
+            min_top_score=0.30,
+        )
+        # Replay produces the memory-relative form
+        per_query = [_make_replay_result("A", top_score=0.55, top_path="MEMORY.md")]
+        summary = evaluate_regression_corpus(per_query, [entry])
+        assert summary.passed == 1
+        assert summary.failed == []
+
+    def test_concept_path_normalizes_correctly(self):
+        """`concepts/HERMES-AGENT.md` (replay) vs
+        `vault/memory/concepts/HERMES-AGENT.md` (corpus) must match."""
+        from evolve.regression import evaluate_regression_corpus
+
+        entry = _make_entry(
+            query="A",
+            expected_top_path="vault/memory/concepts/HERMES-AGENT.md",
+            min_top_score=0.30,
+        )
+        per_query = [_make_replay_result(
+            "A", top_score=0.55, top_path="concepts/HERMES-AGENT.md",
+        )]
+        summary = evaluate_regression_corpus(per_query, [entry])
+        assert summary.passed == 1
+
+    def test_truly_different_path_still_drifts(self):
+        """Sanity: normalization must not over-collapse. SOUL.md vs MEMORY.md
+        is a real wrong_top_path even after normalization."""
+        from evolve.regression import evaluate_regression_corpus
+
+        entry = _make_entry(
+            query="A",
+            expected_top_path="MEMORY.md",
+            min_top_score=0.30,
+        )
+        per_query = [_make_replay_result("A", top_score=0.55, top_path="SOUL.md")]
+        summary = evaluate_regression_corpus(per_query, [entry])
+        assert summary.failed[0].reason == "wrong_top_path"
+
+    def test_normalize_path_handles_windows_separators(self):
+        """Codex finding 1 explicitly mentions abs-path scenarios. Windows
+        backslashes must normalize to forward-slashes."""
+        from evolve.regression import _normalize_path
+
+        win_abs = "C:\\Users\\YourUser\\thehomie\\TheHomie\\Memory\\MEMORY.md"
+        repo_rel = "vault/memory/MEMORY.md"
+        memory_rel = "MEMORY.md"
+        assert (
+            _normalize_path(win_abs)
+            == _normalize_path(repo_rel)
+            == _normalize_path(memory_rel)
+            == "MEMORY.md"
+        )
+
+
+class TestPropagationDoesNotMaskNoResult:
+    """Codex finding 1 second-order: path normalization should NOT swallow
+    no_results into a wrong_top_path verdict — the ordering in
+    _classify_failure (no_results > wrong_top_path > below_min_score)
+    must hold."""
+
+    def test_no_results_takes_priority_over_wrong_path(self):
+        from evolve.regression import evaluate_regression_corpus
+
+        entry = _make_entry(query="A", expected_top_path="MEMORY.md")
+        per_query = [_make_replay_result(
+            "A", top_score=0.0, results_count=0,
+        )]
+        summary = evaluate_regression_corpus(per_query, [entry])
+        # Empty results → no_results, not wrong_top_path
+        assert summary.failed[0].reason == "no_results"
+
+
 # ── TestVetoIntegration ─────────────────────────────────────────────────
 
 

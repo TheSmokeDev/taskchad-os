@@ -5,35 +5,35 @@
     {
       "query": "BGE embedding model swap",
       "fixed_in": "PR #16 — classify_tier Langfuse span isolation",
-      "expected_top_path": "vault/memory/MEMORY.md",
+      "expected_top_path": "MEMORY.md",
       "min_top_score": 0.40,
       "notes": "Tier-1 classification path. PR #16 fixed leak where classify_tier called get_client().update_current_span() without is_langfuse_enabled() guard, polluting ambient traces during replay. Regression check: tier-1 query still returns a valid top result; recall path remains intact under isolation."
     },
     {
       "query": "convoy mailbox orchestration phases",
       "fixed_in": "PR #18 — compare_reports query-identity guard + error verdicts",
-      "expected_top_path": "vault/memory/MEMORY.md",
+      "expected_top_path": "MEMORY.md",
       "min_top_score": 0.40,
       "notes": "Hybrid-search path with stable top result. PR #18 fixed compare_reports silently pairing baseline/candidate by index even when query lists drifted, AND _classify ignoring .error so new errors masqueraded as still_missing. Regression check: query returns the SAME top path it has historically, score above threshold; relies on stable per-query alignment."
     },
     {
       "query": "evolve replay harness phase 2",
       "fixed_in": "PR #21 — search_hybrid None-sentinel default args",
-      "expected_top_path": "vault/memory/MEMORY.md",
+      "expected_top_path": "MEMORY.md",
       "min_top_score": 0.45,
       "notes": "Hybrid-search scoring path. PR #21 fixed search_hybrid/_semantic/_keyword caching SEARCH_VECTOR_WEIGHT etc. as default args at def time, freezing config_override() out. Regression check: query returns expected top path with strong score; if a future change re-introduces baked defaults, candidate replays under override_config() will silently revert to baseline behavior — query score won't drop, but other regression queries with overrides would. This entry is the structural baseline."
     },
     {
       "query": "entity compilation engine karpathy wiki",
       "fixed_in": "PR #22 — PostgresMemoryDB.bulk_clear vector dim migration",
-      "expected_top_path": "vault/memory/MEMORY.md",
+      "expected_top_path": "MEMORY.md",
       "min_top_score": 0.40,
       "notes": "Vector-search path post-dim-migration. PR #22 fixed bulk_clear only deleting rows but not migrating the vector column when EMBEDDING_DIMENSIONS changed; pgvector bakes dim into column type so stale vector(512) would reject 768-d inserts. Regression check: vector search returns valid top result, proving the embedding column matches current EMBEDDING_DIMENSIONS."
     },
     {
       "query": "langfuse observability trace shape",
       "fixed_in": "PR #23 — sync_index physical-schema dim-drift detection",
-      "expected_top_path": "vault/memory/MEMORY.md",
+      "expected_top_path": "MEMORY.md",
       "min_top_score": 0.35,
       "notes": "Vector-search path post-rebuild. PR #23 fixed sync_index trusting meta.embedding_dimensions to decide rebuild instead of reading sqlite_master DDL or pg_attribute. Stale meta could let the guard pass while actual schema diverged from config, producing shape errors at insert. Regression check: vector search returns valid top result, proving the physical schema matches current EMBEDDING_DIMENSIONS regardless of meta state."
     }
