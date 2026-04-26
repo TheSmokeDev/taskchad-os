@@ -160,16 +160,18 @@ class TestReplayContextValidation:
 
 class TestLangfuseDisabledNoOp:
     def test_root_span_silent_when_disabled(self):
-        """replay_root_span yields the tag without exception when Langfuse
-        is disabled. This is the fail-open contract — observability must
-        never break the replay."""
+        """replay_root_span yields a state dict without exception when
+        Langfuse is disabled. This is the fail-open contract — observability
+        must never break the replay. 2.4.1: the state dict reports
+        ``traced=False`` so callers don't claim a trace exists."""
         from evolve.config_override import isolate_langfuse
         from evolve.replay_tracing import build_experiment_tag, replay_root_span
 
         tag = build_experiment_tag("exp-test", {}, None)
         with isolate_langfuse():
-            with replay_root_span("exp-test", tag) as yielded:
-                assert yielded == tag
+            with replay_root_span("exp-test", tag) as state:
+                assert state["tag"] == tag
+                assert state["traced"] is False
 
     def test_url_builders_return_none_when_disabled(self):
         from evolve.config_override import isolate_langfuse
@@ -268,6 +270,114 @@ class TestReplayReportFields:
 
 
 # ── 7. Rule 3 module-attribute lookup ───────────────────────────────────────
+
+
+# ── 8. 2.4.1 hardening — gate URL stamping on confirmed trace emission ─────
+
+
+class TestUrlsGatedOnConfirmedTrace:
+    """Codex review 2026-04-25 finding 1: a stamped trace URL with no real
+    span behind it is a lie. ``run_replay`` must verify three things before
+    claiming a trace URL on the report — Langfuse SDK initialized, the root
+    span actually entered OTEL context, and the URL builder produced
+    something. Each test below proves one failure mode keeps URLs at None.
+    """
+
+    def test_urls_none_when_init_langfuse_returns_false(
+        self, monkeypatch, tmp_path
+    ):
+        """If init_langfuse() returns False (auth fails / no keys / SDK
+        broken), no trace can possibly land — URLs must stay None even
+        when LANGFUSE_BASE_URL is set."""
+        from evolve.replay import run_replay_sync
+        from runtime import langfuse_setup
+
+        monkeypatch.setenv("LANGFUSE_BASE_URL", "https://lf.example.com")
+        monkeypatch.setattr(langfuse_setup, "init_langfuse", lambda: False)
+        # Even if is_langfuse_enabled() says yes, init_langfuse=False is the
+        # source-of-truth signal that the SDK isn't actually wired up.
+        monkeypatch.setattr(langfuse_setup, "is_langfuse_enabled", lambda: True)
+
+        report = run_replay_sync(
+            queries=[],
+            overrides={},
+            memory_dir=tmp_path,
+            disable_tracing=False,
+        )
+
+        assert report.langfuse_trace_url is None
+        assert report.langfuse_session_url is None
+
+    def test_urls_none_when_root_span_fails_to_enter(
+        self, monkeypatch, tmp_path
+    ):
+        """init_langfuse=True + LANGFUSE_BASE_URL set, but the root span
+        context-manager raises on enter (SDK bug, OTEL provider missing,
+        etc.). replay_root_span swallows the failure and yields
+        traced=False — URLs must NOT be stamped."""
+        from contextlib import contextmanager
+
+        from evolve import replay_tracing as rt
+        from evolve.replay import run_replay_sync
+        from runtime import langfuse_setup
+
+        monkeypatch.setenv("LANGFUSE_BASE_URL", "https://lf.example.com")
+        monkeypatch.setattr(langfuse_setup, "init_langfuse", lambda: True)
+        monkeypatch.setattr(langfuse_setup, "is_langfuse_enabled", lambda: True)
+
+        @contextmanager
+        def _failed_span(experiment_id, experiment_tag):
+            # Simulate the partial-entry failure: yields traced=False
+            # because something inside (prop_ctx or root_ctx) raised.
+            yield {"tag": dict(experiment_tag), "traced": False}
+
+        monkeypatch.setattr(rt, "replay_root_span", _failed_span)
+
+        report = run_replay_sync(
+            queries=[],
+            overrides={},
+            memory_dir=tmp_path,
+            disable_tracing=False,
+        )
+
+        assert report.langfuse_trace_url is None
+        assert report.langfuse_session_url is None
+
+    def test_urls_set_when_init_succeeds_and_span_traced(
+        self, monkeypatch, tmp_path
+    ):
+        """Happy path: init_langfuse=True, LANGFUSE_BASE_URL set, and
+        replay_root_span reports traced=True. URLs MUST be stamped or
+        traced replays would never produce audit links — defeats Phase 2.4."""
+        from contextlib import contextmanager
+
+        from evolve import replay_tracing as rt
+        from evolve.replay import run_replay_sync
+        from runtime import langfuse_setup
+
+        monkeypatch.setenv("LANGFUSE_BASE_URL", "https://lf.example.com")
+        monkeypatch.setattr(langfuse_setup, "init_langfuse", lambda: True)
+        monkeypatch.setattr(langfuse_setup, "is_langfuse_enabled", lambda: True)
+
+        @contextmanager
+        def _successful_span(experiment_id, experiment_tag):
+            yield {"tag": dict(experiment_tag), "traced": True}
+
+        monkeypatch.setattr(rt, "replay_root_span", _successful_span)
+
+        report = run_replay_sync(
+            queries=[],
+            overrides={},
+            memory_dir=tmp_path,
+            disable_tracing=False,
+        )
+
+        assert report.langfuse_trace_url is not None
+        assert report.langfuse_session_url is not None
+        assert "evolve:" in report.langfuse_trace_url
+
+
+# ── 9. Rule 3 module-attribute lookup ───────────────────────────────────────
 
 
 class TestRule3ModuleAttributeLookup:

@@ -115,17 +115,31 @@ def test_replay_context_composes_all_three():
     assert langfuse_setup.is_langfuse_enabled is orig_enabled
 
 
-def test_replay_context_disable_tracing_false_keeps_langfuse_live():
+def test_replay_context_disable_tracing_false_keeps_langfuse_live(monkeypatch):
     """Phase 2.4 needs to opt IN to tracing — confirm the flag is respected.
 
-    Note: when this assertion holds AND Langfuse is configured, a real
-    `replay_run` span gets emitted under user_id="evolve-replay" — that's
-    the production behavior Phase 2.4 enables. The new tag-required guard
-    is asserted separately in test_evolve_tracing.py.
+    2.4.1 hardening (Codex review 2026-04-25 finding 2): we monkey-patch
+    `replay_root_span` to a no-op stub so this test never contacts the real
+    Langfuse project even when LANGFUSE_PUBLIC_KEY is set. Previously this
+    test could emit `exp-test-isolation` spans into prod observability,
+    polluting cost reports and making the suite depend on an external
+    service.
     """
+    from contextlib import contextmanager
+
+    from evolve import replay_tracing as rt
     from evolve.config_override import replay_context
     from evolve.replay_tracing import build_experiment_tag
     from runtime import langfuse_setup
+
+    @contextmanager
+    def _stub_root_span(experiment_id, experiment_tag):
+        # Yields the same shape replay_root_span yields, but never reaches
+        # the Langfuse SDK. ``traced=False`` is fine — this test asserts on
+        # langfuse_setup.is_langfuse_enabled, not on the trace state.
+        yield {"tag": dict(experiment_tag), "traced": False}
+
+    monkeypatch.setattr(rt, "replay_root_span", _stub_root_span)
 
     baseline = langfuse_setup.is_langfuse_enabled()
     tag = build_experiment_tag("exp-test-isolation", {}, None)

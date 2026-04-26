@@ -106,6 +106,7 @@ def replay_context(
     isolate: bool = True,
     disable_tracing: bool = True,
     experiment_tag: dict[str, Any] | None = None,
+    span_status: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Combined context: config override + side-effect isolation + tracing.
 
@@ -124,6 +125,13 @@ def replay_context(
             traced replay under `user_id="evolve-replay"` and tags spans
             with `experiment_id` + `override_fingerprint`. Must include an
             `experiment_id` key.
+        span_status: optional out parameter. When passed in (typically by
+            ``run_replay``), the dict is mutated to mirror the inner
+            ``replay_root_span`` state — ``span_status["traced"]`` is True
+            only when the root span actually entered. Callers gate audit
+            artifacts (``langfuse_trace_url``, decision JSON URLs) on this
+            flag — Codex review 2026-04-25 finding 1: a stamped URL with
+            no real trace behind it is a lie, not an audit trail.
 
     Raises:
         ValueError: when ``disable_tracing=False`` AND ``experiment_tag`` is
@@ -158,9 +166,13 @@ def replay_context(
             # with a tagged root span; existing @observe-decorated children
             # auto-nest via OTEL context propagation.
             from evolve.replay_tracing import replay_root_span
-            stack.enter_context(
+            inner_state = stack.enter_context(
                 replay_root_span(experiment_tag["experiment_id"], experiment_tag)
             )
+            if span_status is not None:
+                # 2.4.1 hardening: mirror confirmed-traced state into the
+                # caller's dict so URL stamping can be gated on it.
+                span_status["traced"] = bool(inner_state.get("traced"))
         if isolate:
             stack.enter_context(isolate_recall_side_effects())
         applied = stack.enter_context(override_config(**overrides))

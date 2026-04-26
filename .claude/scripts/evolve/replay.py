@@ -165,20 +165,33 @@ async def run_replay(
     # Phase 2.4: build the experiment tag once and pass through replay_context.
     # When disable_tracing=False, replay_context wraps the block in a tagged
     # Langfuse root span via replay_tracing.replay_root_span.
+    #
+    # 2.4.1 hardening (Codex review 2026-04-25 finding 1): URLs are stamped
+    # only AFTER three things confirm the trace actually exists —
+    #   1. init_langfuse() returns True (SDK auth + OTEL provider live)
+    #   2. span_status["traced"] is True (root span actually entered)
+    #   3. langfuse_*_url() returns non-None (env wired up)
+    # A dead audit link is worse than no link — silently broken evidence.
     experiment_tag: dict[str, Any] | None = None
     trace_url: str | None = None
     session_url: str | None = None
+    tracing_initialized = False
+    span_status: dict[str, Any] = {"traced": False}
+
     if not disable_tracing:
-        from evolve.replay_tracing import (
-            build_experiment_tag,
-            langfuse_session_url,
-            langfuse_trace_url,
-        )
+        from evolve.replay_tracing import build_experiment_tag
         experiment_tag = build_experiment_tag(
             experiment_id, overrides, baseline_experiment_id
         )
-        trace_url = langfuse_trace_url(experiment_id)
-        session_url = langfuse_session_url(experiment_id)
+        # The chat path bootstraps Langfuse at startup; evolve replays are
+        # short-lived processes that never went through that bootstrap, so
+        # do it explicitly here. init_langfuse() is idempotent — safe to
+        # call when chat already ran it.
+        try:
+            from runtime.langfuse_setup import init_langfuse
+            tracing_initialized = init_langfuse()
+        except Exception:
+            tracing_initialized = False
 
     per_query: list[ReplayQueryResult] = []
     config_snapshot: dict[str, Any] = {}
@@ -189,6 +202,7 @@ async def run_replay(
             isolate=isolate,
             disable_tracing=disable_tracing,
             experiment_tag=experiment_tag,
+            span_status=span_status if not disable_tracing else None,
         ):
             config_snapshot = snapshot_config(RECALL_CONFIG_KEYS)
             for query in queries:
@@ -201,15 +215,23 @@ async def run_replay(
                 per_query.append(result)
     finally:
         # Short-lived process safety: explicitly flush pending Langfuse spans
-        # so the trace lands before the CLI returns. The SDK's background
-        # flusher can miss spans when the process exits immediately after
-        # `run_replay_sync` resolves.
-        if not disable_tracing:
+        # so the trace lands before the CLI returns. flush_langfuse()'s
+        # `_initialized` guard would no-op if init_langfuse() never ran —
+        # we run it above when traced, so the flush actually fires.
+        if not disable_tracing and tracing_initialized:
             try:
                 from runtime.langfuse_setup import flush_langfuse
                 flush_langfuse()
             except Exception:
                 pass
+
+    # 2.4.1: only claim a trace URL when SDK init succeeded AND the root
+    # span actually entered. Either failure → URL stays None and the
+    # report tells the truth: "no trace was emitted for this replay."
+    if not disable_tracing and tracing_initialized and span_status.get("traced"):
+        from evolve.replay_tracing import langfuse_session_url, langfuse_trace_url
+        trace_url = langfuse_trace_url(experiment_id)
+        session_url = langfuse_session_url(experiment_id)
 
     report = ReplayReport(
         experiment_id=experiment_id,

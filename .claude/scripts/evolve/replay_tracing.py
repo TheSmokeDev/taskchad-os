@@ -123,22 +123,31 @@ def replay_root_span(
     via OTEL context propagation — no instrumentation changes needed inside
     cognition/.
 
-    Yields the experiment tag dict so callers can record the same metadata
-    on their report. Fails open silently when Langfuse is disabled or the
-    SDK is missing — the replay still runs, just without span emission.
+    Yields a state dict ``{"tag": <experiment_tag>, "traced": <bool>}``.
+    ``traced`` is True only when **both** ``propagate_attributes`` and
+    ``start_as_current_observation`` successfully entered — i.e. a real
+    span exists in OTEL context. False when Langfuse is disabled, the SDK
+    is missing, or either context-manager raised on enter. Callers gate
+    audit-trail claims (``langfuse_trace_url`` etc.) on ``traced`` —
+    Codex review 2026-04-25 finding 1: a dead URL is worse than no URL.
+
+    Fails open silently when Langfuse is disabled or the SDK is missing —
+    the replay still runs, just without span emission.
 
     Exception propagation: an exception raised inside the ``with`` block
     flows through to the wrapped span's ``__exit__`` so Langfuse marks the
     span as failed (mirrors ``engine.py:407-417``).
     """
+    state: dict[str, Any] = {"tag": dict(experiment_tag), "traced": False}
+
     if not _is_enabled():
-        yield experiment_tag
+        yield state
         return
 
     try:
         from langfuse import get_client, propagate_attributes
     except Exception:
-        yield experiment_tag
+        yield state
         return
 
     session_id = f"{_REPLAY_SESSION_PREFIX}{experiment_id}"
@@ -170,8 +179,13 @@ def replay_root_span(
     except Exception:
         _root_ctx = None
 
+    # Both contexts must be live for the trace to actually exist downstream.
+    # If either fell back to None, the span is fiction — don't claim it.
+    if _prop_ctx is not None and _root_ctx is not None:
+        state["traced"] = True
+
     try:
-        yield experiment_tag
+        yield state
     except BaseException:
         _exc_info = sys.exc_info()
         raise
