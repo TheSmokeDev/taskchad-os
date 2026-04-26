@@ -4,7 +4,7 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)
 ![Version](https://img.shields.io/badge/version-1.1.0-blue?style=flat-square)
-![Tests: 1180+](https://img.shields.io/badge/Tests-1180%2B%20passing-brightgreen?style=flat-square)
+![Tests: 1620+](https://img.shields.io/badge/Tests-1620%2B%20passing-brightgreen?style=flat-square)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Channels: 6](https://img.shields.io/badge/Channels-Telegram%20%C2%B7%20Slack%20%C2%B7%20Discord%20%C2%B7%20WhatsApp%20%C2%B7%20Web%20%C2%B7%20CLI-4A154B?style=flat-square)
 
@@ -16,40 +16,79 @@ It's not your second brain. It's your homie - a partner with its own soul, its o
 
 ---
 
+## What This Feels Like
+
+It's 6:30am. You open a session.
+
+Instead of *"Hi, how can I help you today?"* — you get:
+
+> *"Morning. While you were out — your business had 3 new leads overnight, the loan you flagged is 5 days from maturity, and there's an inbound email from a backlink partner worth reviewing. Yesterday you were mid-decision on the routing refactor. Pick that up, or hit the leads first?"*
+
+You didn't set up a notification. You didn't write a morning brief. The Homie was watching. Its memory isn't a static file you load — it's a living record tended between sessions. Its identity isn't a document you edit — it's a self that amends when the evidence is strong enough.
+
+That's the target. Most of the load-bearing walls are already up: vault, recall, daily reflection, weekly synthesis, dream consolidation, working-memory scratchpad, and the self-evolution replay loop ship today. Ambient monitoring is the last layer — heartbeat is live, reliability hardening is in flight.
+
+---
+
 ## What You Get
 
 <table>
 <tr><td><b>Monitors your world proactively</b></td><td>Heartbeat every 30 min checks your email, calendar, tasks, and metrics. Daily reflection at 8 AM promotes decisions to long-term memory. Weekly synthesis every Sunday detects patterns and updates goals — all running whether you're talking to it or not.</td></tr>
-<tr><td><b>Remembers across every session</b></td><td>Local-first Obsidian vault (SOUL.md, USER.md, MEMORY.md, daily + weekly logs). Hybrid search — FTS5 keyword + FastEmbed ONNX vector (384-dim) + LLM re-ranking (haiku, Tier 1). Memory graph with PageRank + betweenness centrality. Proactive recall injected on every message.</td></tr>
+<tr><td><b>Remembers across every session</b></td><td>Local-first Obsidian-compatible vault (SOUL.md, USER.md, MEMORY.md, daily + weekly logs). Hybrid search — FTS5 keyword + FastEmbed ONNX vector (BGE-base-en-v1.5, 768-dim) + LLM re-ranking (haiku, Tier 1). Memory graph with PageRank + betweenness centrality. Proactive recall injected on every message. WORKING.md scratchpad carries open threads across sessions.</td></tr>
 <tr><td><b>Compiles knowledge like code</b></td><td>Entity compilation engine (Karpathy LLM Wiki port): ingest a source → extract entities → create/update concept pages → detect connections → flag contradictions. Concept pages in <code>concepts/</code> accumulate claims from multiple sources. Connection articles in <code>connections/</code> link related concepts. Q&A answers filed via <code>/file</code> persist in <code>qa/</code>. Raw sources preserved immutably in <code>raw/</code>. Build log tracks every compilation. 8 entry points — fires automatically during ingest, daily reflection, weekly synthesis, and on-demand via <code>/file</code> or CLI.</td></tr>
 <tr><td><b>Gets smarter from experience</b></td><td>Per-turn auto-capture (6 regex triggers) → staging store → batch promotion in daily reflection. Auto-skill generation after 5+ tool calls. InferenceTracker with confidence decay and contradiction detection. Theory of mind built on USER.md.</td></tr>
 <tr><td><b>One brain, six channels</b></td><td>Telegram, Slack, Discord, WhatsApp, Web relay, CLI — all enter through a single canonical ingress. One session model, one recall service, one runtime. Transport identity is separated from conversation identity so sessions survive reconnects.</td></tr>
-<tr><td><b>Any model, no lock-in</b></td><td>Claude SDK, OpenAI Codex, Gemini CLI, OpenRouter, OpenAI-compatible — with health-aware fallback, per-task routing (text tasks route cheaper-first), cost tracking, and automatic retry.</td></tr>
+<tr><td><b>Any model, no lock-in</b></td><td>Claude SDK, OpenAI Codex, Gemini CLI, OpenRouter, OpenAI-compatible — with health-aware fallback, manual <code>/provider</code> + <code>/model</code> control, lane-first runtime (<code>selection.py</code>, <code>lane_router.py</code>), cost tracking, and automatic retry on transient failures.</td></tr>
 <tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs for multi-subtask dependency tracking. Typed mailbox for agent-to-agent messaging. Team sessions with typed roles, backend fallback, and shared memory. All exposed via a local API on port 4322.</td></tr>
 <tr><td><b>Full observability</b></td><td>Every message → single nested Langfuse trace with 9 spans: session lookup → process detection → recall (tier + pipeline) → region assembly → runtime (auto-instrumented) → post-response. Cost, provider, model, and tool calls per trace.</td></tr>
 </table>
 
 ---
 
+## The Vault — Brain Substrate, Not Storage
+
+The vault is where The Homie's mind actually lives. Not a notes folder it writes to — the substrate it thinks on. Every recall, every reflection, every promotion reads and writes here. When you edit `SOUL.md`, you're editing the agent's personality. When `concepts/YourBusiness.md` accumulates a new section, the agent learned something.
+
+| Layer | What's in it |
+|-------|--------------|
+| **Identity** | `SOUL.md` (personality, values, tone), `SELF.md` (self-model — capabilities, failure modes), `USER.md` (you — projects, accounts, preferences) |
+| **Memory** | `MEMORY.md` (long-term decisions/lessons), `GOALS.md` (objectives + metrics), `daily/YYYY-MM-DD.md`, `weekly/YYYY-WNN.md`, `WORKING.md` (cross-session scratchpad) |
+| **Knowledge graph** | `concepts/` (auto-compiled entity pages), `connections/` (cross-domain insight articles), `qa/` (filed Q&A from `/file`), `raw/` (immutable original sources) |
+| **Indexes & log** | `INDEX.md` (whole-wiki catalog, auto-refreshed), `concepts/INDEX.md` (concept drill-down), `LOG.md` (append-only compilation timeline) |
+| **Structure** | wikilinks (`[[YourBusiness]]`), backlinks, MOCs, dashboards, Dataview queries, canvases, graph view |
+| **Tooling** | `vault_lint.py` (8 health checks, zero LLM cost), `entity_extractor.py` (extract / compile / contradictions / backfill / sweep / index / preserve-raw / archive), automatic raw-source preservation |
+| **Pipelines** | daily reflection (8 AM), weekly synthesis (Sunday 8 PM), dream consolidation (post-weekly + on-demand) |
+| **Sync state** | `_state/` — memory candidates, self-model inferences, sync manifest. Optional Obsidian Sync via `_state/` exclusion patterns. |
+
+**Is Obsidian required?** No. The vault is plain Markdown — edit it with anything. Obsidian is the *recommended* editor because the wikilinks, backlinks, graph view, Dataview, and canvas all light up natively. The Homie itself only needs the files.
+
+**Where does the vault live?** Default `vault/memory/`, override with `HOMIE_VAULT_DIR=/path/to/your/vault` (env var honored across runtime, bootstrap, heartbeat, team memory, finance, sanitizer).
+
+### Framework vs. adapter
+
+The Homie is provider-agnostic. Claude SDK, Codex, Gemini, OpenRouter, OpenAI-compatible — interchangeable batteries. The framework runs the same regardless. Editor adapters (Claude Code's `CLAUDE.md`, hooks, MCP bridges) are integration surfaces *layered on top of* the framework, not part of it. When the heartbeat runs through Codex or Gemini fallback, nothing in `CLAUDE.md` is touched.
+
+---
+
 ## Quick Install
 
 ```bash
-git clone https://github.com/thehomie-framework/thehomie.git
-cd thehomie/.claude/scripts
+git clone https://github.com/your-github-user/thehomie-framework.git
+cd thehomie-framework/.claude/scripts
 uv sync
-cp .env.example .env        # Add your API keys
-uv run thehomie setup       # Interactive onboarding wizard
-uv run thehomie chat        # Start talking
+cp .env.example .env                  # Add your API keys
+uv run python setup_wizard.py         # Interactive onboarding wizard
+uv run thehomie chat                  # Start talking
 ```
 
 Or use the install script:
 
 ```bash
 # Linux/macOS/WSL
-curl -sSL https://raw.githubusercontent.com/thehomie-framework/thehomie/master/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/your-github-user/thehomie-framework/master/install.sh | bash
 
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/thehomie-framework/thehomie/master/install.ps1 | iex
+irm https://raw.githubusercontent.com/your-github-user/thehomie-framework/master/install.ps1 | iex
 ```
 
 ---
@@ -63,7 +102,21 @@ thehomie chat -q "hello"         # Single query, stdout response
 thehomie chat -q "hello" -Q      # JSON output (machine/API contract)
 thehomie chat --resume <id>      # Resume session by ID
 thehomie chat -c                 # Resume most recent session
-thehomie chat -m claude          # Force a specific provider
+thehomie chat -m claude          # Force a specific provider/lane
+
+# In-chat commands (any channel)
+/working                         # Show open threads / hypotheses / questions
+/working add "text"              # Append to scratchpad
+/working resolve <N>             # Move item N to archived
+/file                            # File the last bot answer as a vault note (with entity cascade)
+
+# Budget (personal finance, optional)
+/budget                          # Snapshot — balances, bills, loans, allocations
+/budget transactions             # Last 20 bank transactions
+/budget spending                 # Spending by category (current month)
+/budget accounts                 # Connected bank accounts
+/budget connect                  # Connect new bank (Teller / Plaid)
+/forecast                        # Forecast cash flow + bill timing
 
 # System
 thehomie setup                   # Interactive onboarding wizard
@@ -102,37 +155,50 @@ thehomie team close <id>         # Force-close team session
 ## Architecture
 
 ```
-CHANNELS                          COGNITIVE ENGINE                    RUNTIME
-──────────                        ────────────────                    ───────
-Telegram ─┐                       ChatRouter._handle_inner()          Claude SDK
-Slack ────┤                            │                              Codex CLI
-Discord ──┤  IncomingMessage      ConversationEngine                  Gemini CLI
-WhatsApp ─┤  ──────────────→          ├─ Tier Gate (rules, no LLM)    OpenRouter
-Web/MC ───┤                           ├─ Recall (dual search+graph)   OpenAI-compat
-CLI ──────┘                           ├─ 9-Region Assembly            ─────────────
-                                      ├─ Mental Process Detection     Health-aware
-                                      ├─ Runtime dispatch             fallback with
-                                      └─ Post-response learning       cost tracking
+CHANNELS                          COGNITIVE ENGINE                    RUNTIME (lane-first)
+──────────                        ────────────────                    ─────────────────────
+Telegram ─┐                       ChatRouter._handle_inner()          selection.py
+Slack ────┤                            │                              lane_router.py
+Discord ──┤  IncomingMessage      ConversationEngine                       │
+WhatsApp ─┤  ──────────────→          ├─ Tier Gate (rules, no LLM)         ├─ Claude SDK (Max sub)
+Web/MC ───┤                           ├─ Recall (dual search+graph)        ├─ Codex CLI (ChatGPT sub)
+CLI ──────┘                           ├─ Region Assembly (frozen)          └─ openai-compatible
+                                      │   identity · self · user · durable    (Gemini · OpenRouter ·
+                                      │   working · recent_conversation       OpenAI · local)
+                                      │   + dynamic regions
+                                      ├─ Mental Process Detection
+                                      ├─ Runtime dispatch              Health-aware fallback,
+                                      └─ Post-response learning        manual /provider control,
+                                                                       cost tracking, retry
 
-MEMORY SUBSTRATE                  BACKGROUND JOBS                 ORCHESTRATION
-────────────────                  ───────────────                 ─────────────
-Obsidian vault (canonical)        Heartbeat ─── every 30 min     Convoy DAGs
-  SOUL · SELF · USER · MEMORY     Reflection ── 8 AM daily       Typed mailbox
-  daily/ · weekly/ · GOALS        Weekly ────── Sunday 8 PM      Team sessions
-  concepts/ · connections/ · qa/  All via recall_service.recall() Local API :4322
-Hybrid search (FTS5 + vector)
-Memory graph (PageRank, BFS)    COMPILATION ENGINE
-LLM re-ranking (haiku, Tier 1)  ──────────────────
-                                entity_extractor.py (pure Python)
-                                Ingest → extract → compile → connect
-                                → contradict → reindex → build log
+MEMORY SUBSTRATE (the vault)      BACKGROUND PIPELINES               ORCHESTRATION
+────────────────                  ────────────────────               ─────────────
+Obsidian-compatible Markdown      Heartbeat ───── every 30 min       Convoy DAGs
+  SOUL · SELF · USER · MEMORY     Reflection ──── 8 AM daily         Typed mailbox
+  GOALS · WORKING · HEARTBEAT     Weekly ──────── Sunday 8 PM        Team sessions
+  daily/ · weekly/                Dream ───────── post-weekly +      Backend fallback
+  concepts/ · connections/                          on-demand          (auto → paperclip
+  qa/ · raw/ · _state/            All via recall_service.recall()      → workflow → local)
+  INDEX.md · LOG.md · MOCs        (sole entrypoint, Invariant I-3)   Local API :4322
+Hybrid search (FTS5 + 768-dim
+  BGE vector + LLM re-rank)       COMPILATION ENGINE
+Memory graph (PageRank, BFS)      ──────────────────
+                                  entity_extractor.py (pure Python heuristic)
+                                  Ingest → extract → compile → connect
+                                  → contradict → reindex → log → archive
+                                  Fires automatically on ingest, /file,
+                                  daily reflection, weekly synthesis (8 entry points)
 ```
 
 ### The 9-Layer Cognitive Stack
 
 ```
-L9  SELF-EVOLUTION    Confirmed inferences → proposed identity amendments    [planned]
-L8  CONTINUITY        Session persistence, compaction flush, open-loop tracking
+L9  SELF-EVOLUTION    Replay-veto self-amendment loop                          [partial]
+                      InferenceTracker + Evolve subsystem live (Tasks 1+2);
+                      SOUL/USER auto-amendments unlock 2026-04-28
+L8  CONTINUITY        Session persistence, full cognition on resume (no skip),
+                      recent_conversation region (600 tok), compaction flush,
+                      open-loop tracking
 L7  THINKING          WorkingMemory (immutable), MentalProcess state machine
 L6  LEARNING          Auto-capture → staging → promotion → skills → inference
 L5  RECALL            3-tier gate, dual search, graph traversal, hub boosting
@@ -144,6 +210,18 @@ L0  FOUNDATION        Obsidian vault graph + MOCs + autolink
 ```
 
 18 cognition modules in `.claude/chat/cognition/`. See [docs/architecture.md](docs/architecture.md) for the full breakdown.
+
+### The 5 Dimensions of The Homie
+
+L0–L9 is the engineering view. The product story has five dimensions — every shipped feature, every PRD, every PRP maps to one of them. The canonical narrative lives in `vault/memory/docs/THE-HOMIE-VISION.md`.
+
+| Dimension | The question it answers | Status |
+|-----------|-------------------------|--------|
+| **1. Identity** | Who am I, and how do I know? | ✅ SOUL/SELF/USER + briefing engine; ⏳ self-amendment unlocks 2026-04-28 |
+| **2. Memory** | What do I know, and how do I find it cheaply? | ✅ Vault + FTS5 + 768-dim BGE vector + graph + LLM re-rank + briefing compression |
+| **3. Continuity** | Do I remember yesterday, and can I pick up mid-thought? | ✅ WORKING.md scratchpad + full cognition on resume + dream consolidation |
+| **4. Ambient Awareness** | Am I watching when you're not here? | 🔄 Heartbeat live; reliability hardening + ambient monitor tasks in flight |
+| **5. Self-Evolution** | Can I grow without manual edits? | 🔄 InferenceTracker + Evolve replay-veto live; SOUL/USER amendments gated on trace clock |
 
 ### Framework Invariants
 
@@ -184,29 +262,35 @@ uv run python memory_index.py --rebuild   # ~80MB ONNX model, one-time download
 uv run python ../chat/main.py             # Foreground
 bash ../chat/run_chat.sh                  # Background (writes bot.log, bot.pid)
 
-# 6. Schedule background jobs (Windows)
-& ".claude\scripts\setup_scheduler.ps1"  # Run as Admin — creates Task Scheduler jobs
+# 6. Schedule background jobs (Windows — Task Scheduler)
+#    Creates: heartbeat (30 min), daily reflection (8 AM),
+#             weekly synthesis (Sun 8 PM), dream consolidation (post-weekly + on-demand)
+powershell -ExecutionPolicy Bypass -File .claude/scripts/setup_scheduler.ps1   # Run as Admin
 ```
 
 ### Memory Files
 
-Your agent's persistent memory lives in `Memory/` (your Obsidian vault). Auto-loaded at session start.
+Your agent's persistent memory lives in `vault/memory/` by default — override with `HOMIE_VAULT_DIR=/path/to/your/vault`. Auto-loaded at session start (provider-agnostic — works for Claude SDK, Codex, Gemini, OpenRouter).
 
 | File | What It Holds |
 |------|---------------|
 | `SOUL.md` | Personality, values, communication style, behavioral rules |
+| `SELF.md` | Self-model — capabilities, patterns, failure modes |
 | `USER.md` | Your profile — projects, accounts, integrations, preferences |
 | `MEMORY.md` | Long-term memory — decisions, lessons, important facts |
 | `GOALS.md` | Quarterly objectives, key metrics, active projects |
 | `HEARTBEAT.md` | What to check and surface each heartbeat run |
+| `WORKING.md` | Cross-session scratchpad — open threads, hypotheses, unresolved questions |
 | `daily/YYYY-MM-DD.md` | Session logs, heartbeat entries, daily context |
 | `weekly/YYYY-WNN.md` | Weekly summaries — patterns, progress, decisions |
+| `concepts/`, `connections/`, `qa/`, `raw/` | Auto-compiled knowledge graph (see [Knowledge Compilation](#knowledge-compilation)) |
 
 ### Key Config (`.env`)
 
 | Variable | Description |
 |----------|-------------|
 | `OWNER_NAME` | Your name — used in heartbeat prompts and memory |
+| `HOMIE_VAULT_DIR` | Absolute path to your vault (default `vault/memory/`) |
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
 | `TELEGRAM_ALLOWED_USER_IDS` | Comma-separated user IDs allowed to chat |
 | `HEARTBEAT_TIMEZONE` | IANA timezone (e.g. `America/Chicago`) |
@@ -258,6 +342,12 @@ uv run python entity_extractor.py contradictions "vault/memory/concepts/LANGFUSE
 
 # Generate/regenerate concepts/INDEX.md (grouped by entity type)
 uv run python entity_extractor.py index --vault-dir "vault/memory"
+
+# Generate/regenerate root INDEX.md (whole-wiki catalog: identity + MOCs + concepts + dirs)
+uv run python entity_extractor.py index-root --vault-dir "vault/memory"
+
+# Preserve a source into raw/ as an immutable archive (Karpathy raw/ pattern)
+uv run python entity_extractor.py preserve-raw "path/to/source.md" --vault-dir "vault/memory"
 
 # Archive stale orphan concept pages
 uv run python entity_extractor.py archive --vault-dir "vault/memory" --dry-run
@@ -318,6 +408,32 @@ Set `LANGFUSE_ENABLED=true` in `.env` and point `LANGFUSE_BASE_URL` at your inst
 
 ---
 
+## Self-Evolution & Replay Safety
+
+Identity files (`SOUL.md`, `USER.md`) don't update by hand. The self-evolution loop captures behavior corrections, accumulates evidence, proposes amendments — and **never auto-applies**. Every proposed amendment is replayed against a stratified golden corpus and rejected if it regresses.
+
+| Component | Where | What it does |
+|-----------|-------|--------------|
+| **InferenceTracker** | `cognition/self_model.py` | Captures confirmed observations, decays old inferences, surfaces high-confidence beliefs |
+| **Skills conflict guard** | `skills.py` | Prevents duplicate skill registration during auto-generation |
+| **`evolve` subsystem** | `.claude/scripts/evolve/` | Replay engine for proposed identity / config deltas |
+| └─ `replay.py` | | Runs candidate overrides against `golden_queries.json` |
+| └─ `replay_tracing.py` | | Tags replay runs into a dedicated `evolve-replay` Langfuse namespace (opt-in via `--trace`, isolated from production cost data) |
+| └─ `regression.py` | | Bootstrap CIs + hard-veto on regression against `regression_queries.json` |
+| └─ `goldens.py` | | Stratified golden-query management |
+| └─ `veto.py` | | Configurable veto rules (schema in `veto_rules.schema.json`) |
+| └─ `compare.py` / `statistics.py` | | Side-by-side replay comparison with confidence intervals |
+
+**Status (as of 2026-04-25):**
+- ✅ Tasks 1+2 shipped: skills conflict guard + InferenceTracker wired into engine
+- ✅ Phase 2.4: opt-in Langfuse replay tracing (default off, `EVOLVE_TRACE_REPLAYS` env var)
+- ✅ Phase 2.6: stratified goldens + bootstrap CIs + regression hard-veto
+- ⏳ Tasks 3–5 (SOUL/USER auto-amendments): unlock 2026-04-28 after 2-week trace-accumulation clock
+
+**Two-phase ship rhythm:** every Evolve increment goes through ship → adversarial Codex review → harden → claim done. This pattern caught five class-of-bug fixes in one week that unit tests missed (codified in `CLAUDE.md` → Code Review Patterns).
+
+---
+
 ## How It Compares
 
 | | OpenClaw | Hermes Agent | The Homie |
@@ -336,7 +452,7 @@ Set `LANGFUSE_ENABLED=true` in `.env` and point `LANGFUSE_BASE_URL` at your inst
 
 ```bash
 cd .claude/scripts
-uv run pytest tests/ -v          # 1180+ tests
+uv run pytest tests/ -v          # 1620+ tests
 uv run ruff check .              # Lint
 uv run ruff format .             # Format
 uv run thehomie --help           # Verify CLI
