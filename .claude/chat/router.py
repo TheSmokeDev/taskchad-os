@@ -18,6 +18,14 @@ from models import OutgoingMessage, Platform
 from session import Session
 from session_keys import build_session_key, resolve_thread_id
 
+# gap-4 URL ingest — raw-regex match on the original message text BEFORE any
+# command parsing. Routing on parsed[0] == "vault-ingest" would NOT fire because
+# vault-ingest is a Skill (not in the router_commands registry); this regex is
+# the only path that triggers URL ingest from chat surface.
+_VAULT_INGEST_URL_RE = re.compile(
+    r"^/vault-ingest\s+(https?://\S+)\s*$", re.IGNORECASE
+)
+
 
 class ChatRouter:
     """Routes messages between platform adapters and the conversation engine.
@@ -155,6 +163,19 @@ class ChatRouter:
         # --- Button clicks: __button:{custom_id} ---
         if text.startswith("__button:"):
             await self._handle_button(adapter, incoming, text[len("__button:"):])
+            return
+
+        # --- gap-4 URL ingest: /vault-ingest <url> short-circuits to deterministic
+        # router-side fetch + archive + compile. Raw-regex match on the message
+        # text — does NOT route through _parse_command (vault-ingest is a Skill,
+        # not a router command, so parsed[0] would never reach the router_commands
+        # registry). Plain text fall-through preserves the existing skill flow
+        # for file-path inputs.
+        stripped_text = text.strip()
+        m = _VAULT_INGEST_URL_RE.match(stripped_text)
+        if m:
+            url = m.group(1)
+            await self._handle_vault_ingest_url(adapter, incoming, url)
             return
 
         router_commands = self.manager.get_router_commands()
@@ -489,6 +510,82 @@ class ChatRouter:
         # diff
         preview = result.get("preview", "")
         return f"Draft preview (`{auto_id}`):\n\n{preview}"
+
+    async def _handle_vault_ingest_url(
+        self, adapter: Any, incoming: Any, url: str
+    ) -> None:
+        """Router-side URL ingest (gap-4).
+
+        Fetch + archive html+md to ``{vault}/raw/clipped/`` then run the entity
+        compilation cascade. Reply with concept/connection/contradiction counts.
+        Never reaches the engine — fully deterministic.
+        """
+        try:
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Fetching {url}...",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                )
+            )
+        except Exception:
+            # Placeholder send is best-effort; if it fails we still try to fetch.
+            pass
+
+        try:
+            html_path, md_path, content, report = await asyncio.to_thread(
+                self._url_ingest_pipeline, url
+            )
+        except Exception as e:
+            await adapter.send(
+                OutgoingMessage(
+                    text=(
+                        f"Couldn't fetch {url}: {type(e).__name__}: {e}. "
+                        "Try saving the page as a file and ingesting that instead."
+                    ),
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        title = content.title or md_path.stem
+        n_concepts = len(report.pages_created) + len(report.pages_updated)
+        n_connections = len(report.connections_created)
+        n_contradictions = len(report.contradictions_found)
+        reply = (
+            f"Ingested '{title}'. "
+            f"{n_concepts} concepts, {n_connections} connections, "
+            f"{n_contradictions} contradictions. "
+            f"Raw: `{html_path.name}`, `{md_path.name}`."
+        )
+        await adapter.send(
+            OutgoingMessage(
+                text=reply,
+                channel=incoming.channel,
+                thread=incoming.thread,
+            )
+        )
+        self._persist_router_turn(incoming, reply)
+
+    @staticmethod
+    def _url_ingest_pipeline(url: str):
+        """Synchronous fetch + archive + compile pipeline.
+
+        Runs off the event loop (called via ``asyncio.to_thread`` from the
+        async handler). Returns ``(html_path, md_path, content, report)``.
+        """
+        from url_fetch import fetch_and_archive
+        from entity_extractor import compile_entities, extract_entities_heuristic
+        from config import MEMORY_DIR
+
+        vault_dir = MEMORY_DIR
+        html_path, md_path, content = fetch_and_archive(url, vault_dir)
+        md_text = md_path.read_text(encoding="utf-8")
+        ents = extract_entities_heuristic(md_text, str(md_path))
+        report = compile_entities(ents, str(md_path), vault_dir, MEMORY_DIR)
+        return html_path, md_path, content, report
 
     def _extract_result_buttons(self, text: str) -> list[Any]:
         """Parse <<BLOG_RESULTS>> or <<QUOTE_RESULTS>> markers and return action buttons.

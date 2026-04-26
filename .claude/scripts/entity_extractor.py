@@ -386,6 +386,8 @@ def preserve_raw(
     vault_dir: Path,
     always_date_prefix: bool = False,
     on_collision: Literal["raise", "skip", "overwrite"] = "raise",
+    *,
+    subdir: str | None = None,
 ) -> Path:
     """Copy a source file into {vault}/raw/ as an immutable archive.
 
@@ -410,8 +412,15 @@ def preserve_raw(
                     protect provenance (a raw archive must always be the
                     source that produced downstream artifacts).
       - "overwrite" : explicit opt-in to legacy silent-overwrite behavior.
+
+    subdir (keyword-only, optional): if provided, archive is placed under
+        ``{vault}/raw/{subdir}/`` instead of the top-level ``{vault}/raw/``.
+        Used by URL ingest (gap-4) to land web clips in ``raw/clipped/`` while
+        keeping all other raw collision/idempotency semantics identical.
     """
     raw_dir = vault_dir / "raw"
+    if subdir:
+        raw_dir = raw_dir / subdir
     raw_dir.mkdir(parents=True, exist_ok=True)
     if always_date_prefix:
         dest = raw_dir / f"{_today()}-{source_path.name}"
@@ -1687,6 +1696,20 @@ def main() -> None:
              "'overwrite' replaces the existing archive (legacy escape hatch).",
     )
 
+    # fetch-url — gap-4 URL ingest: fetch + archive html+md to raw/clipped/, then compile
+    p_fetch_url = sub.add_parser(
+        "fetch-url",
+        help="Fetch a URL, archive html+md to raw/clipped/, then compile entities",
+    )
+    p_fetch_url.add_argument("url", help="URL to fetch (https://...)")
+    p_fetch_url.add_argument("--vault-dir", required=True, help="Path to vault root")
+    p_fetch_url.add_argument("--memory-dir", help="Path to memory dir (defaults to vault-dir)")
+    p_fetch_url.add_argument(
+        "--no-compile",
+        action="store_true",
+        help="Archive only — skip the entity compilation step.",
+    )
+
     args = parser.parse_args()
 
     if args.command == "extract":
@@ -1839,6 +1862,30 @@ def main() -> None:
             on_collision=args.on_collision,
         )
         print(dest)
+
+    elif args.command == "fetch-url":
+        from url_fetch import fetch_and_archive
+
+        vault_dir = Path(args.vault_dir)
+        try:
+            html_path, md_path, content = fetch_and_archive(args.url, vault_dir)
+        except Exception as e:
+            print(f"Error fetching {args.url}: {type(e).__name__}: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Archived: {html_path}")
+        print(f"Archived: {md_path}")
+        if not args.no_compile:
+            memory_dir = Path(args.memory_dir) if args.memory_dir else vault_dir
+            md_text = md_path.read_text(encoding="utf-8")
+            ents = extract_entities_heuristic(md_text, str(md_path))
+            report = compile_entities(ents, str(md_path), vault_dir, memory_dir)
+            print(
+                f"Compiled '{content.title or md_path.stem}': "
+                f"{len(report.pages_created)} created, "
+                f"{len(report.pages_updated)} updated, "
+                f"{len(report.connections_created)} connections, "
+                f"{len(report.contradictions_found)} contradictions."
+            )
 
 
 if __name__ == "__main__":

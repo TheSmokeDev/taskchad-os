@@ -1021,6 +1021,28 @@ class TestPreserveRaw:
         # rename doesn't change the {today}-{name} dest.
         assert "rename source" not in str(excinfo.value)
 
+    def test_preserve_raw_with_subdir_lands_in_clipped(self, tmp_path):
+        """subdir parameter routes archive into {vault}/raw/{subdir}/ (gap-4 URL ingest).
+
+        Used by url_fetch.fetch_and_archive() to land web clips in raw/clipped/
+        while keeping all collision/idempotency semantics identical to top-level raw/.
+        """
+        from entity_extractor import preserve_raw
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        src = tmp_path / "page.md"
+        src.write_text("clipped content", encoding="utf-8")
+
+        dest = preserve_raw(src, vault, subdir="clipped")
+
+        assert dest == vault / "raw" / "clipped" / "page.md"
+        assert dest.read_text(encoding="utf-8") == "clipped content"
+        # Subdir auto-created
+        assert (vault / "raw" / "clipped").is_dir()
+        # Top-level raw/ does NOT contain a stray copy
+        assert not (vault / "raw" / "page.md").exists()
+
 
 class TestAppendVaultLog:
     """append_vault_log() — LOG.md timeline, grep-friendly."""

@@ -54,6 +54,9 @@ dependencies = [
     # Observability: error tracking (GlitchTip/Sentry)
     "sentry-sdk>=2.0.0",
     "pymupdf>=1.27.2.2",
+    # gap-4 URL ingest — sync HTTP + boilerplate-stripping HTML extraction
+    "requests>=2.32.0",
+    "trafilatura>=1.12.0",
 ]
 
 [project.scripts]
