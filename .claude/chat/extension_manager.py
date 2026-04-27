@@ -390,6 +390,10 @@ class ExtensionManager:
         """Return set of router-handled command names."""
         return {n for n, s in self._commands.items() if s.type == "router"}
 
+    def get_all_extensions(self) -> list[ExtensionMeta]:
+        """Return all registered extensions. Public API for capability aggregator."""
+        return list(self._extensions.values())
+
     def get_engine_command_description(self, name: str) -> str | None:
         """Return description for an engine command, or None."""
         spec = self._commands.get(name)

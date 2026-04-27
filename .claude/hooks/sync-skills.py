@@ -10,9 +10,8 @@ Why this exists: project-level vs user-level skill drift was the root cause of
 gap-5 raw-pipeline-audit (the user-level vault-ingest SKILL.md was missing
 Step 2.5 - preserve_raw - for two weeks).
 
-This hook is idempotent: it only writes when the project-level skill directory
-differs from the user-level content (SHA-256 tree compare). Logged via
-shared.log_hook_execution.
+This hook is idempotent: it only writes when the project-level content differs
+from the user-level content (SHA-256 compare). Logged via shared.log_hook_execution.
 """
 
 from __future__ import annotations
@@ -34,72 +33,43 @@ from shared import log_hook_execution  # noqa: E402
 # (some user-level skills are genuinely per-machine, e.g. private credentials).
 # Add to this list when a project-level skill needs to be the source-of-truth.
 SKILLS_TO_SYNC = [
-    "vault",
-    "vault-audit",
-    "vault-autolink",
-    "vault-build",
-    "vault-daily-review",
-    "vault-de-ai-ify",
-    "vault-discover",
-    "vault-health-fix",
     "vault-ingest",
-    "vault-ops",
-    "vault-research-assistant",
-    "vault-sync",
-    "vault-tasks",
-    "vault-thinking-partner",
-    "vault-weekly-synthesis",
 ]
 
 
-def _tree_digest(path: Path) -> str:
-    """Hash a file or directory, including relative file names for directories."""
-    h = hashlib.sha256()
-    if path.is_file():
-        h.update(path.name.encode("utf-8"))
-        h.update(b"\0")
-        h.update(path.read_bytes())
-        return h.hexdigest()
-
-    for child in sorted(p for p in path.rglob("*") if p.is_file()):
-        rel = child.relative_to(path).as_posix()
-        h.update(rel.encode("utf-8"))
-        h.update(b"\0")
-        h.update(child.read_bytes())
-        h.update(b"\0")
-    return h.hexdigest()
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _sync_one(project_skill: Path, user_skill: Path) -> str:
     """Returns one of: 'copied', 'in-sync', 'project-missing'.
 
-    Copies the whole skill directory, not just SKILL.md. This matters for skills
-    with scripts, references, or evals.
+    Atomic write (R3-fix): writes to a temp file in the same target directory
+    then os.replace(temp, dest). Prevents partial/truncated writes if the copy
+    is interrupted (disk-full, permission flap, antivirus quarantine mid-copy).
     """
-    if not project_skill.is_dir():
+    if not project_skill.is_file():
         return "project-missing"
     user_skill.parent.mkdir(parents=True, exist_ok=True)
-    if user_skill.is_dir() and _tree_digest(user_skill) == _tree_digest(project_skill):
+    if user_skill.is_file() and _sha256(user_skill) == _sha256(project_skill):
         return "in-sync"
-
+    # Atomic replace: write to temp in same dir, then os.replace
+    import os
     import tempfile
-
-    tmp_path = tempfile.mkdtemp(
+    fd, tmp_path = tempfile.mkstemp(
         prefix=f".{user_skill.name}.", suffix=".tmp",
         dir=str(user_skill.parent),
     )
+    os.close(fd)
     tmp = Path(tmp_path)
     try:
-        shutil.rmtree(tmp)
-        shutil.copytree(project_skill, tmp)
-        if user_skill.exists():
-            shutil.rmtree(user_skill)
-        tmp.replace(user_skill)
+        shutil.copy2(project_skill, tmp)
+        os.replace(tmp, user_skill)  # atomic on same filesystem
     except Exception:
         # Clean up temp on failure; don't leak debris
         if tmp.exists():
             try:
-                shutil.rmtree(tmp)
+                tmp.unlink()
             except OSError:
                 pass
         raise
@@ -130,10 +100,10 @@ def main() -> None:
     error_summary = ""
     try:
         for skill_name in SKILLS_TO_SYNC:
-            project_skill = project_skills_root / skill_name
-            user_skill = user_skills_root / skill_name
+            project_md = project_skills_root / skill_name / "SKILL.md"
+            user_md = user_skills_root / skill_name / "SKILL.md"
             try:
-                outcome = _sync_one(project_skill, user_skill)
+                outcome = _sync_one(project_md, user_md)
             except Exception as e:  # noqa: BLE001 - fail-soft per R3
                 outcome = f"error:{type(e).__name__}"
                 if not error_summary:
