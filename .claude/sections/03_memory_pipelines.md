@@ -23,7 +23,7 @@ Hybrid search (keyword + semantic) over all memory files. Fully local — no API
 
 1. Markdown files chunked into ~400-token overlapping segments
 2. FTS5 keyword + sqlite-vec/pgvector semantic search
-3. Embeddings via FastEmbed (ONNX, all-MiniLM-L6-v2, 384-dim)
+3. Embeddings via FastEmbed (ONNX, BAAI/bge-base-en-v1.5, 768-dim native)
 4. Hybrid search: vector similarity (0.7) + keyword score (0.3)
 
 | File | Purpose |

@@ -152,6 +152,76 @@ _RELATED_RE = re.compile(r'^\s*-\s*"\[\[([^\]]+)\]\]"', re.MULTILINE)
 # Frontmatter tags
 _TAGS_RE = re.compile(r"^tags:\s*\[([^\]]+)\]", re.MULTILINE)
 
+# Code fence + inline code (stripped during preprocess so bold inside code blocks
+# is not extracted as a concept). Triple-backtick fences first, then inline code.
+_CODE_FENCE_RE = re.compile(r"```[\s\S]*?```")
+_INLINE_CODE_RE = re.compile(r"`[^`]+`")
+
+# --- Name-quality filter (Change 2 in fix-it-the-correct-atomic-acorn plan) ---
+
+# Punctuation chars stripped from the start/end of a candidate concept name.
+_NAME_PUNCT_STRIP = ".,;:!?\"'`…“”‘’()[]"
+
+# Articles dropped from the FRONT of the name when counting tokens for the
+# 6-word cap. Keeps "The Wiki" (1 substantive token) under the cap as a
+# single-word concept name.
+_LEADING_ARTICLES = ("a", "an", "the")
+
+# Finite verbs that mark a sentence-shaped fragment when preceded by an
+# article/pronoun + intervening word. Intentionally narrow — verbs not in
+# this list slip through (acceptable per known-limitation in plan).
+_FINITE_VERBS = (
+    # to-be
+    "is", "are", "was", "were", "be", "been", "being", "am",
+    # modal
+    "can", "could", "should", "would", "will", "may", "might", "must",
+    # general
+    "has", "have", "had", "do", "does", "did",
+    "make", "makes", "made", "need", "needs", "want", "wants",
+    "lets", "helps", "means", "shows", "tells", "gives", "takes",
+    "becomes", "gets", "keeps", "runs", "works", "seems", "looks",
+    "builds", "maintains", "creates", "provides", "uses", "allows",
+    "updates", "adds", "removes", "deletes", "enables",
+    "contains", "includes", "requires", "returns", "sets",
+)
+# Anchored at name-start so titles like "How The System Works" (start with
+# interrogative "How", not an article) are NOT rejected. Pattern is
+# (article|pronoun) WORD finite-verb.
+_SENTENCE_FRAGMENT_RE = re.compile(
+    r"^\s*(?:a|an|the|it|he|she|they|this|that|these|those|we|i|you)\s+\w+\s+(?:"
+    + "|".join(re.escape(v) for v in _FINITE_VERBS)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+# --- Bold-with-definition pattern detection (Change 1 in plan) ---
+
+# Sentence-end punctuation that signals a clause boundary (Karpathy line 23
+# packs `time.**Research**:` etc. inline within one paragraph; the period
+# before `**` is what makes the bold structurally definitional).
+_LEADING_PARAGRAPH_BREAK_RE = re.compile(r"\n\s*\n\s*$")
+_LEADING_LINE_START_RE = re.compile(r"(?:^|\n)\s*(?:[-*>]|\d+\.)?\s*$")
+_LEADING_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?][\s\)\]\>\"\']*$")
+
+# Definition-marker peek (after the closing `**`):
+#   em-dash:    ` — ` (U+2014)
+#   en-dash:    ` – ` (U+2013)
+#   double-dash: ` -- `
+# Each requires a single trailing space before content, matched against
+# at most 8 chars of peek window.
+_BOLD_DEF_DASH_RE = re.compile(r"^\s*(?:—|–|--)\s+\S")
+# Colon marker requires 4+ chars of content (any chars) within the 32-char
+# peek so `**X**:` empty bombs do not qualify. The 4+ chars-of-content rule
+# accepts `**Business/team**: an internal...` ("an internal..." is 11 chars
+# total) — the previous `\S{4,}` form falsely rejected this because the
+# first word ("an") was only 2 chars.
+_BOLD_DEF_COLON_RE = re.compile(r"^:\s+\S.{3,}")
+# Period-inside-bold: bold content ends with `.` and Title-cased single
+# alphabetic word; trailing context is `\s+[A-Z]` (sentence-following).
+# Karpathy uses this for `**Ingest.**`, `**Query.**`, `**Lint.**`.
+_TITLE_CASE_PERIOD_NAME_RE = re.compile(r"^[A-Z][a-zA-Z]*\.?$")
+_BOLD_DEF_PERIOD_TRAILING_RE = re.compile(r"^\s+[A-Z]")
+
 # Noise words to skip
 _SKIP_NAMES = {
     "overview", "summary", "introduction", "conclusion", "references",
@@ -190,6 +260,19 @@ _SKIP_NAMES = {
     "relationship to convoy/mailbox",
     "by the numbers", "backlog", "backlogmd",
     "auto-generated tags (set by compilation engine — never add manually)",
+    # v3 (2026-04-26): documentation meta-markers. Merged into _SKIP_NAMES
+    # rather than a separate _BOLD_META_MARKERS set so they are rejected
+    # OUTRIGHT across all extraction paths (heading/bold/wikilink), and so
+    # repeated meta-markers cannot be lifted past the threshold by dedup.
+    # Some entries (`note`, `tip`) overlap existing entries above — set
+    # dedup makes that harmless. Internal punctuation in the candidate is
+    # normalized to spaces before lookup so `TL;DR` matches `tl dr`.
+    "note", "tip", "pro-tip", "pro-tips", "protip", "protips",
+    "warning", "warnings", "caution", "cautions",
+    "important", "example", "examples", "todos", "fixme",
+    "nb", "n.b.", "aside", "asides", "side note", "note that",
+    "see", "see also", "tl dr", "tldr", "caveat", "caveats",
+    "rule of thumb", "rules of thumb", "disclaimer", "disclaimers",
 }
 
 # Patterns that match operational/temporal names (not domain knowledge)
@@ -230,6 +313,108 @@ def _matches_skip_pattern(name: str) -> bool:
     return any(pat.search(name) for pat in _SKIP_PATTERNS)
 
 
+def _clean_concept_name(raw: str) -> str:
+    """Strip leading/trailing whitespace and punctuation from a candidate name.
+
+    The CLEANED name is what gets stored on the entity and used for slugging.
+    Internal whitespace is collapsed (so multi-line wraps in source markdown
+    do not survive into the concept page title).
+    """
+    cleaned = raw.strip().strip(_NAME_PUNCT_STRIP).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
+
+def _normalize_for_filter(name: str) -> str:
+    """Lowercase + collapse internal punctuation for SKIP_NAMES matching.
+
+    Lets `TL;DR` match the `tl dr` skip-name entry and `Pro-Tip` match
+    `pro-tip` — internal punct is replaced with a single space and the
+    result is lowercased and collapsed.
+    """
+    s = re.sub(r"[;,!?]+", " ", name.lower())
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _is_valid_concept_name(name: str) -> bool:
+    """Reject sentence-fragment / over-long candidate concept names.
+
+    Applied to BOLD and HEADING extraction paths. Wikilinks and frontmatter
+    `related:` are author-strong signals and exempted.
+
+    Three rules (plan v3 Change 2):
+      1. After cleaning, length >= 2.
+      2. Token count <= 6 after stripping leading articles (a/an/the).
+      3. Anchored sentence-fragment regex does NOT match — only finite verbs
+         preceded by an article/pronoun + intervening word at name-start
+         trigger rejection. "How The System Works" keeps (starts with
+         interrogative); "the wiki is persistent" rejects.
+    """
+    if len(name) < 2:
+        return False
+    tokens = name.split()
+    if not tokens:
+        return False
+    # Drop leading articles only for the token-count check
+    if tokens[0].lower() in _LEADING_ARTICLES:
+        substantive = tokens[1:]
+    else:
+        substantive = tokens
+    if len(substantive) > 6:
+        return False
+    if _SENTENCE_FRAGMENT_RE.match(name):
+        return False
+    return True
+
+
+def _is_leading_bold(content: str, match_start: int) -> bool:
+    """True if the `**` at *match_start* is structurally positioned for a definition.
+
+    Four leading-position conditions (plan v3 Change 1):
+      1. Document start (match_start == 0)
+      2. Paragraph break: `\\n\\n` + optional whitespace before `**`
+      3. Line start with optional list/quote marker:
+         `\\n` + optional whitespace + optional `-`/`*`/`>`/`<digit>.` + whitespace
+      4. Sentence boundary: previous non-whitespace char is `.` `!` `?` followed
+         by zero or more closers/whitespace. Catches Karpathy line 23 inline
+         chain `time.**Research**:` while rejecting mid-sentence `He said
+         **really** —`.
+    """
+    if match_start == 0:
+        return True
+    prev = content[max(0, match_start - 80):match_start]
+    if _LEADING_PARAGRAPH_BREAK_RE.search(prev):
+        return True
+    if _LEADING_LINE_START_RE.search(prev):
+        return True
+    if _LEADING_SENTENCE_BOUNDARY_RE.search(prev):
+        return True
+    return False
+
+
+def _score_bold_def(content: str, bold_text: str, match_end: int) -> bool:
+    """True if a bold-with-definition marker follows the closing `**`.
+
+    Examines up to 32 chars after match_end. Returns True for em-dash,
+    en-dash, double-hyphen, or colon-with-substantive-content. Also returns
+    True for the period-inside-bold pattern (Karpathy `**Ingest.**`) when
+    the bold content is a Title-cased word and a capital-letter sentence
+    follows. Plain bold (inline emphasis) returns False.
+    """
+    peek = content[match_end:match_end + 32]
+    if _BOLD_DEF_DASH_RE.match(peek[:8]):
+        return True
+    if _BOLD_DEF_COLON_RE.match(peek):
+        return True
+    # Period-inside-bold: e.g. **Ingest.** You drop a new source...
+    if bold_text.endswith("."):
+        inner = bold_text[:-1]
+        if _TITLE_CASE_PERIOD_NAME_RE.match(inner) and _BOLD_DEF_PERIOD_TRAILING_RE.match(peek[:8]):
+            return True
+    return False
+
+
 def extract_entities_heuristic(
     content: str,
     source_path: str = "",
@@ -246,6 +431,10 @@ def extract_entities_heuristic(
     entities: dict[str, ExtractedEntity] = {}
     source_stem = Path(source_path).stem if source_path else ""
 
+    # Normalize line endings (CRLF/CR -> LF) so the leading-bold algorithm's
+    # paragraph-break / sentence-boundary regexes work uniformly.
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+
     # Strip frontmatter for body analysis
     body = content
     fm_match = re.match(r"^---\n(.*?)\n---\n?", content, re.DOTALL)
@@ -254,35 +443,61 @@ def extract_entities_heuristic(
         frontmatter_text = fm_match.group(1)
         body = content[fm_match.end():]
 
+    # Preprocess: strip code fences and inline code so bold-inside-code is
+    # not extracted (e.g. `# **Cache Key** -- comment` in a python block).
+    body = _CODE_FENCE_RE.sub("", body)
+    body = _INLINE_CODE_RE.sub("", body)
+
     # 1. Headings (H1-H3) — high confidence
     for m in _HEADING_RE.finditer(body):
-        name = m.group(1).strip().rstrip("#").strip()
-        if len(name) < 3 or len(name) > 80:
+        raw = m.group(1).strip().rstrip("#").strip()
+        cleaned = _clean_concept_name(raw)
+        if len(cleaned) < 3 or len(cleaned) > 80:
             continue
-        key = name.lower()
-        if key in _SKIP_NAMES or _matches_skip_pattern(key) or key == source_stem.lower().replace("-", " "):
+        key = cleaned.lower()
+        normalized = _normalize_for_filter(cleaned)
+        if (
+            key in _SKIP_NAMES
+            or normalized in _SKIP_NAMES
+            or _matches_skip_pattern(key)
+            or key == source_stem.lower().replace("-", " ")
+        ):
+            continue
+        if not _is_valid_concept_name(cleaned):
             continue
         if key not in entities:
             entities[key] = ExtractedEntity(
-                name=name, entity_type="concept", confidence=0.7,
+                name=cleaned, entity_type="concept", confidence=0.7,
             )
         else:
             entities[key].confidence = min(1.0, entities[key].confidence + 0.1)
 
-    # 2. Bold text — medium confidence
+    # 2. Bold text — base 0.5, boosted to 0.75 for structural definition
+    #    contexts (em-dash / colon-content / period-inside-bold).
     for m in _BOLD_RE.finditer(body):
-        name = m.group(1).strip()
-        if len(name) < 3 or len(name) > 60:
+        raw = m.group(1).strip()
+        cleaned = _clean_concept_name(raw)
+        if len(cleaned) < 3 or len(cleaned) > 60:
             continue
-        key = name.lower()
-        if key in _SKIP_NAMES or _matches_skip_pattern(key):
+        key = cleaned.lower()
+        normalized = _normalize_for_filter(cleaned)
+        if key in _SKIP_NAMES or normalized in _SKIP_NAMES or _matches_skip_pattern(key):
             continue
+        if not _is_valid_concept_name(cleaned):
+            continue
+        # Score: 0.75 if structurally-leading AND followed by a definition
+        # marker; 0.5 otherwise.
+        confidence = 0.5
+        if _is_leading_bold(body, m.start()) and _score_bold_def(body, raw, m.end()):
+            confidence = 0.75
         if key not in entities:
             entities[key] = ExtractedEntity(
-                name=name, entity_type="concept", confidence=0.5,
+                name=cleaned, entity_type="concept", confidence=confidence,
             )
         else:
-            entities[key].confidence = min(1.0, entities[key].confidence + 0.1)
+            # Existing entry (e.g. heading already created it) — only raise
+            # confidence; never lower it.
+            entities[key].confidence = min(1.0, max(entities[key].confidence, confidence) + 0.1)
 
     # 3. Wiki-links — high confidence (author explicitly linked)
     for m in _WIKILINK_RE.finditer(body):

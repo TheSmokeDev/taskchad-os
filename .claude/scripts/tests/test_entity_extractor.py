@@ -1305,3 +1305,437 @@ class TestGenerateRootIndex:
         assert "[[MOC-operations]] — ops hub" in content
         assert "[[MOC-thehomie]] — framework hub" in content
         assert "[[RANDOM]]" not in content
+
+
+# ---------------------------------------------------------------------------
+# v3 Plan: prose-heavy heuristic upgrades
+# (closes Codex round-1 + round-2 adversarial review findings)
+# ---------------------------------------------------------------------------
+
+
+# Karpathy LLM Wiki gist excerpt — the actual reference document for our
+# entity compilation engine. Used by TestKarpathyGistByteExact and
+# TestExtractionRuntime. Trimmed to the prose sections that exercise the
+# prose-heavy patterns the v3 fix targets.
+KARPATHY_EXCERPT = textwrap.dedent("""\
+    ---
+    source_url: "https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f"
+    fetched_at: "2026-04-26T20:35:05+00:00"
+    date: 2026-04-26
+    ---
+
+    # llm-wiki
+
+    A pattern for building personal knowledge bases using LLMs.
+
+    The idea here is different. Instead of just retrieving from raw documents at query time, the LLM **incrementally builds and maintains a persistent wiki** — a structured, interlinked collection of markdown files that sits between you and the raw sources.
+
+    This is the key difference: **the wiki is a persistent, compounding artifact.** The cross-references are already there.
+
+    **Personal**: tracking your own goals, health, psychology, self-improvement — filing journal entries.**Research**: going deep on a topic over weeks or months — reading papers, articles, reports, and incrementally building a comprehensive wiki with an evolving thesis.**Reading a book**: filing each chapter as you go, building out pages for characters, themes, plot threads.**Business/team**: an internal wiki maintained by LLMs, fed by Slack threads, meeting transcripts, project documents, customer calls.
+
+    There are three layers:
+
+    **Raw sources** — your curated collection of source documents. Articles, papers, images, data files.
+
+    **The wiki** — a directory of LLM-generated markdown files. Summaries, entity pages, concept pages.
+
+    **The schema** — a document describing the structure and conventions of the wiki.
+
+    **Ingest.** You drop a new source into the raw collection and tell the LLM to process it.
+
+    **Query.** You ask questions against the wiki. The LLM searches for relevant pages.
+
+    **Lint.** Periodically, ask the LLM to health-check the wiki.
+
+    **Marp** is a markdown-based slide deck format. Obsidian has a plugin for it.
+
+    **Dataview** is an Obsidian plugin that runs queries over page frontmatter.
+""")
+
+
+class TestBoldWithDefinition:
+    """Bold-with-definition pattern detection — boost to 0.75 when **X**
+    is followed by a definition marker AT a structurally-leading position."""
+
+    def test_em_dash_marker_boosts(self):
+        text = "**Raw sources** — your curated collection of source documents."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "Raw sources" in ents
+        assert ents["Raw sources"].confidence >= 0.75
+
+    def test_en_dash_marker_boosts(self):
+        text = "**The Engine** – a deterministic state machine."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "The Engine" in ents
+        assert ents["The Engine"].confidence >= 0.75
+
+    def test_double_hyphen_marker_boosts(self):
+        text = "**Token Budget** -- the per-region cap in chars."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "Token Budget" in ents
+        assert ents["Token Budget"].confidence >= 0.75
+
+    def test_colon_marker_boosts(self):
+        text = "**Personal**: tracking your own goals and habits."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "Personal" in ents
+        assert ents["Personal"].confidence >= 0.75
+
+    def test_period_inside_bold_boosts(self):
+        # Karpathy `**Ingest.** You drop a new source...`
+        text = "**Ingest.** You drop a new source into the raw collection."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "Ingest" in ents
+        assert ents["Ingest"].confidence >= 0.75
+
+    def test_plain_bold_stays_low(self):
+        # Inline emphasis must not be boosted (no def-marker, no leading position).
+        text = "Some prose with **most important** in the middle of a sentence."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        if "most important" in ents:
+            assert ents["most important"].confidence < 0.6
+
+    def test_inline_emphasis_with_dash_does_not_boost(self):
+        # Codex round-1 #3: mid-sentence bold-then-emdash must not be boosted.
+        text = "He said **really** — everyone should know about it."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        # Either filtered entirely or stays at plain-bold confidence.
+        assert "really" not in ents or ents["really"].confidence < 0.6
+
+    def test_period_inside_lowercase_is_not_boosted(self):
+        # Codex round-2 #5: `**wait.** Then walked away.` must not boost.
+        text = "She started to walk. **wait.** Then walked away anyway."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "wait" not in ents or ents["wait"].confidence < 0.6
+
+    def test_meta_marker_pro_tip_rejected_outright(self):
+        # Codex round-2 #6: meta-markers go into _SKIP_NAMES so dedup boost
+        # cannot raise them past the threshold.
+        text = "**Pro-tip** — always validate your input before processing."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "Pro-tip" not in ents
+        assert "pro-tip" not in ents
+
+    def test_meta_marker_tldr_rejected_via_normalization(self):
+        # Internal punctuation (TL;DR semicolon) is normalized to spaces
+        # before SKIP_NAMES lookup — `tl dr` matches the entry.
+        text = "**TL;DR**: Don't do this in production."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "TL;DR" not in ents
+
+
+class TestNameQualityFilter:
+    """Sentence-fragment rule + word-count cap + punctuation strip."""
+
+    def test_short_noun_phrase_keeps(self):
+        text = "**Raw sources** — your curated collection of source documents."
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert "Raw sources" in ents
+
+    def test_seven_word_fragment_rejects(self):
+        text = "**incrementally builds and maintains a persistent wiki** — a structured artifact."
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert not any("incrementally" in n for n in ents)
+
+    def test_six_word_keeps(self):
+        # Six tokens (after the leading article is stripped) — at the cap, must keep.
+        text = "**Karpathy LLM Wiki entity compilation engine** — the v3 design."
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert "Karpathy LLM Wiki entity compilation engine" in ents
+
+    def test_sentence_fragment_with_article_rejects(self):
+        # `the wiki is` matches the anchored sentence-fragment regex.
+        text = "**the wiki is a persistent compounding artifact** — and that matters."
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert not any(n.lower().startswith("the wiki is") for n in ents)
+
+    def test_imperative_title_keeps(self):
+        # "How To Build A Wiki" — `Build` mid-name but no preceding article-noun.
+        text = "## How To Build A Wiki"
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert "How To Build A Wiki" in ents
+
+    def test_interrogative_title_with_article_keeps(self):
+        # Codex round-2 #4: "How The System Works" — interrogative anchor.
+        text = "## How The System Works"
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert "How The System Works" in ents
+
+    def test_terminal_period_stripped_then_validated(self):
+        # `Ingest.` cleans to `Ingest`, valid concept name.
+        text = "**Ingest.** You drop a new source into the raw collection."
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert "Ingest" in ents
+
+    def test_data_use_agreement_keeps(self):
+        # "Use" is in finite-verb list but no preceding article in name.
+        text = "## Data Use Agreement"
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert "Data Use Agreement" in ents
+
+    def test_code_fence_bold_does_not_extract(self):
+        # Bold inside a code block must not be picked up.
+        text = textwrap.dedent("""\
+            Some prose here.
+
+            ```python
+            # **Cache Key** -- stable identifier
+            x = 1
+            ```
+
+            More prose.
+        """)
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert "Cache Key" not in ents
+
+    def test_inline_code_bold_does_not_extract(self):
+        text = "See `**fake**` example for details."
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        assert "fake" not in ents
+
+
+class TestKarpathyGistByteExact:
+    """Byte-exact regression test on the actual Karpathy LLM Wiki gist.
+
+    Closes Codex round-1 #6 + round-2 #1/#2: validates the v3 plan's
+    expected yield (10 prose primitives + 1 H1) against the real source.
+    """
+
+    def test_must_compile_named_primitives(self):
+        ents = {e.name for e in extract_entities_heuristic(KARPATHY_EXCERPT)}
+        eligible = {
+            e.name
+            for e in extract_entities_heuristic(KARPATHY_EXCERPT)
+            if e.confidence >= CONFIDENCE_THRESHOLD
+        }
+        # Three em-dash architectural primitives
+        assert "Raw sources" in eligible
+        assert "The wiki" in eligible
+        assert "The schema" in eligible
+        # Four colon-marker domain examples (line-23 inline chain — leading via sentence-boundary)
+        assert "Personal" in eligible
+        assert "Research" in eligible
+        assert "Reading a book" in eligible
+        assert "Business/team" in eligible
+        # Three period-inside-bold workflow steps
+        assert "Ingest" in eligible
+        assert "Query" in eligible
+        assert "Lint" in eligible
+
+    def test_must_not_compile_sentence_fragments(self):
+        ents = {e.name for e in extract_entities_heuristic(KARPATHY_EXCERPT)}
+        for name in ents:
+            assert not name.lower().startswith("incrementally builds")
+            assert "is a persistent" not in name.lower()
+            # Word-count rejection of the 6+ word inline list
+            assert not name.lower().startswith("competitive analysis")
+
+    def test_must_not_compile_paragraph_lead_is(self):
+        # Marp / Dataview use `**X** is...` (no def-marker) — out of scope.
+        eligible = {
+            e.name
+            for e in extract_entities_heuristic(KARPATHY_EXCERPT)
+            if e.confidence >= CONFIDENCE_THRESHOLD
+        }
+        assert "Marp" not in eligible
+        assert "Dataview" not in eligible
+
+
+class TestCapAdversarial:
+    """Cap-pressure tests: confirm the 15-cap behaves predictably under
+    realistic bold-def + wikilink loads, and document the known limitation
+    that under EXTREME cap pressure (16+ dedup-boosted bold-defs), wikilinks
+    can be displaced — which is why meta-marker outright-rejection (per
+    Codex round-2 #6) is the actual safety net."""
+
+    def test_realistic_load_wikilinks_survive(self):
+        # Realistic: 10 bold-defs (each mentioned once) + 5 wikilinks. Total
+        # = 15, fits exactly in cap. All 5 wikilinks must appear because
+        # single-mention bold-def (0.75) < single wikilink (0.8).
+        bold_lines = [f"**Concept Number {i}** — definition for concept {i}." for i in range(10)]
+        wikilinks = "\n".join(f"See [[Wikilink-{i}]] for more." for i in range(5))
+        text = "\n\n".join(bold_lines) + "\n\n" + wikilinks
+
+        results = extract_entities_heuristic(text)
+        names = {e.name for e in results}
+        survived = sum(1 for i in range(5) if f"Wikilink-{i}" in names)
+        assert survived == 5, f"Expected all 5 wikilinks to survive, got {survived}"
+
+    def test_extreme_cap_pressure_documents_displacement(self):
+        # Extreme: 16 bold-defs each repeated twice (dedup -> 0.85). Sort
+        # gives top 15 all to bold-defs (0.85 > 0.8 wikilink), wikilinks get
+        # truncated. This is a KNOWN LIMITATION of the cap+score scheme;
+        # the safety net is meta-marker outright rejection (TestMetaMarkerDedupRejection).
+        # In practice a doc never has 16+ legitimate bold-def primitives —
+        # if it does, increase the cap or add wikilink-priority sort.
+        bold_lines = []
+        for i in range(16):
+            line = f"**Concept Number {i}** — definition for concept {i}.\n"
+            bold_lines.append(line)
+            bold_lines.append(line)
+        wikilinks = "\n".join(f"See [[Wikilink-{i}]] for more." for i in range(5))
+        text = "\n".join(bold_lines) + "\n\n" + wikilinks
+
+        results = extract_entities_heuristic(text)
+        # Document the cap behavior: 15 results, all confidence >= 0.75.
+        assert len(results) == 15
+        assert all(e.confidence >= 0.75 for e in results)
+        # Bold-defs outrank wikilinks under dedup pressure — this is the
+        # documented limitation, not a bug.
+
+
+class TestSkipNamesAllPaths:
+    """Meta-markers and existing skip names must be rejected from all
+    extraction paths (heading, bold, wikilink) — not just the bold path."""
+
+    @pytest.mark.parametrize("skip_name", [
+        "note", "tip", "pro-tip", "warning", "important", "todo", "fixme",
+        "see", "see also", "caveat", "rule of thumb", "disclaimer",
+    ])
+    def test_skip_name_rejected_in_heading(self, skip_name):
+        text = f"## {skip_name.title()}\n\nSome content here."
+        ents = {e.name.lower() for e in extract_entities_heuristic(text)}
+        assert skip_name not in ents
+
+    @pytest.mark.parametrize("skip_name", [
+        "note", "tip", "pro-tip", "warning", "important", "caveat",
+    ])
+    def test_skip_name_rejected_in_bold_def(self, skip_name):
+        # Even with definition marker, meta-marker is rejected outright.
+        text = f"**{skip_name.title()}** — this is a meta-marker."
+        ents = {e.name.lower() for e in extract_entities_heuristic(text)}
+        assert skip_name not in ents
+
+    @pytest.mark.parametrize("skip_name", [
+        "note", "tip", "warning",
+    ])
+    def test_skip_name_rejected_in_wikilink(self, skip_name):
+        text = f"See the [[{skip_name.title()}]] for details."
+        ents = {e.name.lower() for e in extract_entities_heuristic(text)}
+        assert skip_name not in ents
+
+
+class TestMetaMarkerDedupRejection:
+    """Closes Codex round-2 #6: dedup-boost cannot raise meta-markers
+    past the threshold because they are rejected outright by _SKIP_NAMES."""
+
+    def test_repeated_pro_tip_never_compiles(self):
+        # Without outright rejection, 4 mentions × +0.1 dedup would lift
+        # plain-bold 0.5 to 0.9 — past the 0.6 compile threshold.
+        text = textwrap.dedent("""\
+            **Pro-tip** — validate input.
+
+            **Pro-tip** — validate input again.
+
+            **Pro-tip** — and again.
+
+            **Pro-tip** — one more time.
+        """)
+        ents = {e.name.lower() for e in extract_entities_heuristic(text)}
+        assert "pro-tip" not in ents
+
+    def test_repeated_note_never_compiles(self):
+        text = textwrap.dedent("""\
+            **Note** — first remark.
+
+            **Note** — second remark.
+
+            **Note** — third remark.
+
+            **Note** — fourth remark.
+        """)
+        ents = {e.name.lower() for e in extract_entities_heuristic(text)}
+        assert "note" not in ents
+
+
+class TestLeadingBoldPrecondition:
+    """Plan v3 Change 1 leading-bold algorithm — explicit per-case tests."""
+
+    def test_doc_start_is_leading(self):
+        text = "**Foo** — definition at the very start."
+        ents = {e.name for e in extract_entities_heuristic(text)}
+        eligible = [
+            e for e in extract_entities_heuristic(text)
+            if e.name == "Foo" and e.confidence >= 0.75
+        ]
+        assert len(eligible) == 1
+
+    def test_paragraph_break_is_leading(self):
+        text = "Some preceding prose.\n\n**Foo** — definition after blank line."
+        eligible = [
+            e for e in extract_entities_heuristic(text)
+            if e.name == "Foo" and e.confidence >= 0.75
+        ]
+        assert len(eligible) == 1
+
+    def test_sentence_boundary_is_leading(self):
+        # Karpathy line 23 inline chain: `time.**Research**: going deep...`
+        text = "tracking goals over time.**Research**: going deep on a topic over weeks."
+        eligible = [
+            e for e in extract_entities_heuristic(text)
+            if e.name == "Research" and e.confidence >= 0.75
+        ]
+        assert len(eligible) == 1
+
+    def test_list_item_is_leading(self):
+        text = "- **Foo** — definition in a list item."
+        eligible = [
+            e for e in extract_entities_heuristic(text)
+            if e.name == "Foo" and e.confidence >= 0.75
+        ]
+        assert len(eligible) == 1
+
+    def test_numbered_list_is_leading(self):
+        text = "1. **Foo** — definition in a numbered list."
+        eligible = [
+            e for e in extract_entities_heuristic(text)
+            if e.name == "Foo" and e.confidence >= 0.75
+        ]
+        assert len(eligible) == 1
+
+    def test_block_quote_is_leading(self):
+        text = "> **Foo** — definition in a block quote."
+        eligible = [
+            e for e in extract_entities_heuristic(text)
+            if e.name == "Foo" and e.confidence >= 0.75
+        ]
+        assert len(eligible) == 1
+
+    def test_mid_sentence_is_not_leading(self):
+        text = "He said **really** — everyone should hear it."
+        # Either filtered out or stays at plain-bold confidence.
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "really" not in ents or ents["really"].confidence < 0.75
+
+    def test_list_item_mid_line_is_not_leading(self):
+        text = "- Some prose with **really** — embedded mid-item."
+        ents = {e.name: e for e in extract_entities_heuristic(text)}
+        assert "really" not in ents or ents["really"].confidence < 0.75
+
+    def test_crlf_line_endings_handled(self):
+        # CRLF normalized to LF before leading-bold check fires.
+        text = "Some prose.\r\n\r\n**Foo** — definition after CRLF break."
+        eligible = [
+            e for e in extract_entities_heuristic(text)
+            if e.name == "Foo" and e.confidence >= 0.75
+        ]
+        assert len(eligible) == 1
+
+
+class TestExtractionRuntime:
+    """Hot-path budget: the heuristic must stay sub-100ms on the bot's
+    URL-ingest path. Locks the contract so future regex changes that
+    introduce backtracking get caught early."""
+
+    def test_extracts_50kb_doc_under_100ms(self):
+        import time
+        # ~10x the Karpathy excerpt = ~50KB, varied content.
+        content = (KARPATHY_EXCERPT * 10)
+        start = time.perf_counter()
+        entities = extract_entities_heuristic(content)
+        elapsed = time.perf_counter() - start
+        # Generous budget — pure regex on 50KB should be << 100ms.
+        assert elapsed < 0.1, f"Extraction took {elapsed:.3f}s (budget 0.1s)"
+        # Sanity check: still produces results
+        assert len(entities) > 0

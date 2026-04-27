@@ -3,7 +3,7 @@
 The Homie is one framework with two implementation surfaces:
 
 - `thehomie` = runtime, memory, CLI, adapters, hooks, and cognition
-- `mission-control` = official GUI / control-plane surface at `C:\Users\YourUser\mission-control`
+- `mission-control` = optional consumer surface at `C:\Users\YourUser\mission-control` (not part of the framework — one consumer of `thehomie`'s runtime, memory, and orchestration APIs)
 
 Within that framework, behavior is organized as vertical slices. Group behavior by the owning surface and the owning slice instead of collapsing everything into one shared horizontal utility layer.
 
