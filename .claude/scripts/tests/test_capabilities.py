@@ -976,3 +976,213 @@ class TestStarterToolsets:
 
         assert "integration.search_console" in ids
         assert "integration.search-console" not in ids
+
+
+# ---------------------------------------------------------------------------
+# PRP-1c: runtime overlays aggregator
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cleanup_overlays_aggregator():
+    """Restore canonical _AGGREGATORS["runtime_overlays"] after the test.
+
+    Same sys.modules / _AGGREGATORS mismatch concern as cleanup_aggregator
+    in PRP-1b. importlib.reload() forces module-bottom register_aggregator()
+    to re-fire so production wiring is intact for downstream tests.
+    """
+    yield
+
+    import importlib
+    from runtime import capabilities
+    import runtime.overlays as ov
+
+    capabilities._AGGREGATORS.pop("runtime_overlays", None)
+    importlib.reload(ov)
+    # Post-condition: production wiring restored for downstream tests.
+    assert "runtime_overlays" in capabilities._AGGREGATORS
+
+
+class TestRuntimeOverlaysAggregator:
+    def test_aggregate_runtime_overlays_returns_capabilities(
+        self, cleanup_overlays_aggregator,
+    ):
+        """Call ``_aggregate_runtime_overlays()`` directly. Assert return
+        value is a non-empty list of ``Capability`` objects with
+        ``source == 'runtime_overlay'``."""
+        from runtime.capabilities import Capability
+        from runtime.overlays import _aggregate_runtime_overlays
+
+        caps = _aggregate_runtime_overlays()
+
+        assert isinstance(caps, list)
+        assert len(caps) > 0
+        for c in caps:
+            assert isinstance(c, Capability)
+            assert c.source == "runtime_overlay"
+
+    def test_aggregate_runtime_overlays_count_matches_registry(
+        self, cleanup_overlays_aggregator,
+    ):
+        """Lock the count contract: claude-native (+1) plus every entry
+        in GENERIC_PROVIDER_REGISTRY. Registry extension auto-expands."""
+        from runtime import profiles
+        from runtime.overlays import _aggregate_runtime_overlays
+
+        caps = _aggregate_runtime_overlays()
+
+        assert len(caps) == len(profiles.GENERIC_PROVIDER_REGISTRY) + 1
+
+    def test_aggregate_runtime_overlays_id_format(
+        self, cleanup_overlays_aggregator,
+    ):
+        """All ids start with ``runtime.overlay.``; ``runtime.overlay.claude``
+        is present; canonical hyphenated ids preserved (no underscore
+        conversion) per Data Model §M5 exception."""
+        from runtime import profiles
+        from runtime.overlays import _aggregate_runtime_overlays
+
+        caps = _aggregate_runtime_overlays()
+        ids = {c.id for c in caps}
+
+        for cap_id in ids:
+            assert cap_id.startswith("runtime.overlay."), (
+                f"id {cap_id!r} does not match runtime.overlay.* format"
+            )
+
+        assert "runtime.overlay.claude" in ids
+
+        # Every canonical key in the registry produces an id with the
+        # hyphen preserved.
+        for canonical in profiles.GENERIC_PROVIDER_REGISTRY:
+            assert f"runtime.overlay.{canonical}" in ids
+
+    def test_aggregate_runtime_overlays_claude_always_enabled(
+        self, cleanup_overlays_aggregator, monkeypatch,
+    ):
+        """``runtime.overlay.claude`` always reports ``enabled=True`` -- the
+        SDK lane is the unconditional fallback. Even when every env var is
+        cleared, claude stays enabled (no env-var derivation)."""
+        # Clear common provider env vars to prove claude doesn't depend on them.
+        for var in (
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        from runtime.overlays import _aggregate_runtime_overlays
+
+        caps = _aggregate_runtime_overlays()
+        claude_caps = [c for c in caps if c.id == "runtime.overlay.claude"]
+
+        assert len(claude_caps) == 1
+        assert claude_caps[0].enabled is True
+
+    def test_aggregate_runtime_overlays_env_derived_enablement(
+        self, cleanup_overlays_aggregator, monkeypatch,
+    ):
+        """Lock the ``api_key`` branch: setting OPENAI_API_KEY enables
+        ``runtime.overlay.openai-compatible``; clearing it disables. Same
+        contract for OPENROUTER_API_KEY against ``runtime.overlay.openrouter``."""
+        from runtime.overlays import _aggregate_runtime_overlays
+
+        # First: both keys empty, both should be disabled.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+        caps = _aggregate_runtime_overlays()
+        by_id = {c.id: c.enabled for c in caps}
+
+        assert by_id["runtime.overlay.openai-compatible"] is False
+        assert by_id["runtime.overlay.openrouter"] is False
+
+        # Now set OPENAI_API_KEY only -- only openai-compatible flips on.
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-value")
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+        caps = _aggregate_runtime_overlays()
+        by_id = {c.id: c.enabled for c in caps}
+
+        assert by_id["runtime.overlay.openai-compatible"] is True
+        assert by_id["runtime.overlay.openrouter"] is False
+
+    def test_codex_enabled_via_cli_exists(
+        self, cleanup_overlays_aggregator, monkeypatch,
+    ):
+        """Production codex ``enabled`` derivation uses ``codex_cli_exists()``
+        (fast PATH check), NOT ``codex_auth_available()`` (15s subprocess).
+        Lock the snapshot semantic so a regression that swaps in the slow
+        path is caught loudly.
+
+        Verified: ``codex_auth_available`` is not imported into
+        ``runtime/overlays.py`` (only ``codex_cli_exists``,
+        ``gemini_auth_available``, ``resolve_codex_auth_profile``). If a
+        future refactor adds ``codex_auth_available`` to the imports AND
+        wires it into the codex branch, this test catches it via the
+        ``cli_exists_calls`` counter — that branch would no longer call
+        ``codex_cli_exists`` and the assertion fails.
+        """
+        import runtime.overlays as ov
+
+        cli_exists_calls: list = []
+
+        def _fake_cli_exists(cmd):
+            cli_exists_calls.append(cmd)
+            return True
+
+        monkeypatch.setattr(ov, "codex_cli_exists", _fake_cli_exists)
+
+        caps = ov._aggregate_runtime_overlays()
+        codex_caps = [c for c in caps if c.id == "runtime.overlay.openai-codex"]
+
+        assert len(codex_caps) == 1, (
+            f"expected exactly one runtime.overlay.openai-codex capability, "
+            f"got {len(codex_caps)}"
+        )
+        assert codex_caps[0].enabled is True, (
+            "codex capability should reflect codex_cli_exists() return value"
+        )
+        assert len(cli_exists_calls) >= 1, (
+            "codex_cli_exists must be called at least once during aggregation; "
+            "if call count is 0, the codex branch was removed or replaced"
+        )
+
+    def test_register_aggregator_runtime_overlays_wired(self, request):
+        """Module-level ``register_aggregator()`` call in
+        ``runtime.overlays`` fires on import -- proves the dispatch wiring
+        works end-to-end without manual wiring inside ``capabilities.py``.
+
+        Mirrors PRP-1b's ``test_register_aggregator_integrations_wired``:
+        does NOT use the cleanup fixture (which asserts the registration is
+        present); instead snapshots prior state and restores via
+        ``request.addfinalizer`` so adjacent tests stay clean.
+
+        Uses ``importlib.reload`` to force re-execution of the module body
+        even when ``sys.modules`` already caches the module.
+        """
+        import importlib
+
+        from runtime import capabilities
+
+        # Snapshot prior state so we can restore it after assertion.
+        prior_fn = capabilities._AGGREGATORS.get("runtime_overlays")
+
+        def _restore():
+            if prior_fn is None:
+                capabilities._AGGREGATORS.pop("runtime_overlays", None)
+            else:
+                capabilities._AGGREGATORS["runtime_overlays"] = prior_fn
+
+        request.addfinalizer(_restore)
+
+        # Pop to force the wiring contract: only the module-bottom
+        # register_aggregator() call should restore it.
+        capabilities._AGGREGATORS.pop("runtime_overlays", None)
+
+        import runtime.overlays as ov  # noqa: F401
+        importlib.reload(ov)
+
+        assert "runtime_overlays" in capabilities._AGGREGATORS

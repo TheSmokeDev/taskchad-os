@@ -258,6 +258,24 @@ Only update a section if there is clear, new evidence. Do NOT duplicate existing
 
 1-2 sentences per entry. If nothing new, skip this step entirely.
 
+### 6. Cross-Domain Aha Moments
+Add a `## Aha Moments` section to the weekly file (after `## Key Decisions`, before `## Lessons Learned`).
+
+This is the most important section. Step back from the week's activity and ask:
+- Where is **effort concentrated** vs. where is **risk concentrated**? Are they aligned?
+- What decision made in one domain (coding, business, finance, personal) creates **unrecognized risk or opportunity** in another?
+- What has been **silent for too long** that now has new context from this week?
+- What **pattern is accelerating** that nobody named yet?
+- What would a smart outside observer say owner is missing by looking at all of this together?
+
+Write 3-5 specific, evidence-backed aha moments. Each one must:
+- Name the **two or more domains it spans** (e.g., "YourBusiness × Finance", "Framework build × YourBusiness dark")
+- State the insight in 2-3 sentences
+- Cite a specific date, event, commit, or log entry as evidence
+- Avoid generic observations — only include things that are non-obvious from looking at one domain in isolation
+
+If there is no real cross-domain signal this week, write: `No cross-domain signal detected this week.`
+
 **Rules:**
 - Use the Edit tool to update existing files, Write tool only for the new weekly file
 - Do NOT duplicate items already present in MEMORY.md

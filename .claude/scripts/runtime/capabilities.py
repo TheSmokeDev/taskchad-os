@@ -155,7 +155,7 @@ def _aggregate_chat_extensions() -> list[Capability]:
 
 # Module-level dispatch dict. PRP-1a registers ``chat_extensions`` here.
 # PRP-1b registers ``"integrations"`` from ``integrations/registry.py``.
-# PRP-1c registers ``"runtime_overlays"`` from ``runtime/profiles.py``.
+# PRP-1c registers ``"runtime_overlays"`` from ``runtime/overlays.py``.
 # Each follow-on slice calls ``register_aggregator()`` from its own module so
 # this file does not need to be re-touched.
 _AGGREGATORS: dict[str, Callable[[], list[Capability]]] = {

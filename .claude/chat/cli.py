@@ -881,6 +881,29 @@ def _print_status_human(report):
         for name, connected in report.adapters_connected.items():
             click.echo(f"  {name}: {'connected' if connected else 'disconnected'}")
 
+    if report.capabilities:
+        click.echo("\nCapabilities:")
+        click.echo(f"  | {'id':<40} | {'display_name':<22} | {'enabled':<7} | {'source':<16} |")
+        click.echo(f"  |{'-'*42}|{'-'*24}|{'-'*9}|{'-'*18}|")
+        for cap in sorted(report.capabilities, key=lambda c: (c["source"], c["id"])):
+            cap_id = cap["id"][:40]
+            cap_name = cap["display_name"][:22]
+            cap_enabled = "yes" if cap["enabled"] else "no"
+            cap_source = cap["source"][:16]
+            click.echo(f"  | {cap_id:<40} | {cap_name:<22} | {cap_enabled:<7} | {cap_source:<16} |")
+
+    if report.toolsets:
+        click.echo("\nToolsets:")
+        click.echo(f"  | {'toolset':<20} | {'count':>5} | {'ids (first 3)...':<30} |")
+        click.echo(f"  |{'-'*22}|{'-'*7}|{'-'*32}|")
+        for name in sorted(report.toolsets):
+            ids = report.toolsets[name]
+            count = len(ids)
+            preview = ", ".join(ids[:3])
+            if count > 3:
+                preview += ", ..."
+            click.echo(f"  | {name:<20} | {count:>5} | {preview[:30]:<30} |")
+
 
 def _run_setup_wizard(advanced: bool, headless_google: bool):
     """Interactive onboarding wizard — Hermes/OpenClaw style.

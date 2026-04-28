@@ -307,6 +307,12 @@ class ChatRouter:
                     except Exception as e:
                         data_parts.append(f"## /{cmd}\nError: {e}")
 
+                # Drop pure-error results — let them fall through to the engine
+                data_parts = [
+                    p for p in data_parts
+                    if not p.split("\n", 1)[-1].strip().startswith("Error ")
+                ]
+
                 if data_parts:
                     if self.manager.wants_analysis(text):
                         incoming.prefetched_context = "\n\n".join(data_parts)

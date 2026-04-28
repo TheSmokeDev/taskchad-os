@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 _CHAT_DIR = str(Path(__file__).parent.parent.parent / "chat")
 _SCRIPTS_DIR = str(Path(__file__).parent.parent)
 if _CHAT_DIR not in sys.path:
@@ -11,6 +13,51 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from diagnostics import DiagnosticsReport, check_environment, collect_diagnostics  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Cleanup fixtures shared with test_capabilities.py -- both aggregators are
+# triggered by collect_diagnostics() -> _check_capabilities(), so envelope
+# tests need the same teardown contract to avoid sys.modules / _AGGREGATORS
+# mismatch leaking into downstream tests.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cleanup_aggregator():
+    """Restore canonical _AGGREGATORS["integrations"] after the test.
+
+    Mirrors test_capabilities.py's fixture of the same name. ``importlib.reload``
+    forces module-bottom ``register_aggregator()`` to re-fire so production
+    wiring is intact for downstream tests.
+    """
+    yield
+
+    import importlib
+    from runtime import capabilities
+    import integrations.registry as reg
+
+    capabilities._AGGREGATORS.pop("integrations", None)
+    importlib.reload(reg)
+    assert "integrations" in capabilities._AGGREGATORS
+
+
+@pytest.fixture
+def cleanup_overlays_aggregator():
+    """Restore canonical _AGGREGATORS["runtime_overlays"] after the test.
+
+    Mirrors test_capabilities.py's fixture of the same name. PRP-1c teardown
+    contract: pop, reload, assert restored.
+    """
+    yield
+
+    import importlib
+    from runtime import capabilities
+    import runtime.overlays as ov
+
+    capabilities._AGGREGATORS.pop("runtime_overlays", None)
+    importlib.reload(ov)
+    assert "runtime_overlays" in capabilities._AGGREGATORS
 
 
 class TestDiagnosticsReport:
@@ -274,3 +321,44 @@ class TestCapabilitiesEnvelope:
             tid.startswith("integration.")
             for tid in report.toolsets["integrations"]
         ), f"Toolset has non-integration ids: {report.toolsets['integrations']}"
+
+    def test_diagnostics_envelope_contains_runtime_overlays(
+        self, cleanup_aggregator, cleanup_overlays_aggregator,
+    ):
+        """PRP-1c production contract: collect_diagnostics() surfaces ALL
+        runtime overlay capabilities via the runtime_overlays aggregator.
+
+        Count-based assertion locks the actual content. Imports BOTH
+        cleanup fixtures because collect_diagnostics() triggers
+        ``import integrations.registry`` AND ``import runtime.overlays``;
+        without both fixtures, sys.modules / _AGGREGATORS mismatch can
+        break downstream tests. LIFO teardown order is fine -- both
+        fixtures are idempotent.
+        """
+        from runtime import profiles
+
+        report = collect_diagnostics()
+
+        overlay_caps = [
+            c for c in report.capabilities
+            if c["source"] == "runtime_overlay"
+        ]
+        # +1 for hardcoded claude-native lane.
+        expected_count = len(profiles.GENERIC_PROVIDER_REGISTRY) + 1
+
+        assert len(overlay_caps) == expected_count, (
+            f"Diagnostics envelope missing runtime overlays: expected "
+            f"{expected_count} runtime_overlay caps, got "
+            f"{len(overlay_caps)}: {[c['id'] for c in overlay_caps]}"
+        )
+
+        # All ids match the runtime.overlay.* namespace.
+        assert all(
+            c["id"].startswith("runtime.overlay.")
+            for c in overlay_caps
+        ), f"Capability has non-overlay id: {[c['id'] for c in overlay_caps]}"
+
+        # Claude is among them.
+        assert any(c["id"] == "runtime.overlay.claude" for c in overlay_caps), (
+            f"Missing runtime.overlay.claude in: {[c['id'] for c in overlay_caps]}"
+        )

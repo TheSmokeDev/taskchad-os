@@ -236,10 +236,12 @@ def _check_capabilities(report: DiagnosticsReport) -> None:
         # M6 fix: ensure integrations source is registered before list_capabilities runs.
         # Importing the module fires register_aggregator("integrations", ...) at module bottom.
         import integrations.registry  # noqa: F401
+        # PRP-1c: same pattern for runtime overlays -- fires register_aggregator("runtime_overlays", ...)
+        import runtime.overlays  # noqa: F401
         from runtime.capabilities import list_capabilities, resolve_toolset
         from runtime.toolsets import TOOLSETS
 
-        caps = list_capabilities(sources=["chat_extensions", "integrations"])
+        caps = list_capabilities(sources=["chat_extensions", "integrations", "runtime_overlays"])
         _caps_local = [
             {
                 "id": c.id,
