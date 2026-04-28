@@ -165,3 +165,44 @@ def get_enabled() -> dict[str, IntegrationInfo]:
 def is_enabled(name: str) -> bool:
     """Check if a specific integration is enabled."""
     return name in get_enabled()
+
+
+def _aggregate_integrations() -> "list[Capability]":
+    """Aggregate integrations inner registry into Capability rows.
+
+    Snapshot semantics: ``Capability.enabled`` reflects the integration's
+    enabled state at the moment this function is called. It is not a live
+    view. See the ``Capability`` docstring for the full snapshot contract.
+
+    Efficiency: calls ``get_enabled()`` once and stores the result as a
+    ``set[str]`` to avoid calling ``is_enabled()`` per-item (which would
+    invoke ``get_enabled()`` 11 times — 22 stat calls vs. 2).
+    """
+    try:
+        from runtime.capabilities import Capability
+    except ImportError:
+        return []
+
+    enabled_set: set[str] = set(get_enabled().keys())
+    caps: list[Capability] = []
+    for name, info in _REGISTRY.items():
+        caps.append(
+            Capability(
+                id=f"integration.{name}",
+                display_name=info.display_name,
+                enabled=name in enabled_set,
+                source="integration",
+                extension_id=None,
+                description="",  # B2 fix: don't overload description with auth taxonomy
+            )
+        )
+    return caps
+
+
+# ---------------------------------------------------------------------------
+# PRP-1b: register this aggregator into the capabilities dispatch dict.
+# Late import after _aggregate_integrations() is defined so the function
+# reference is valid. This must remain the LAST module-level statement.
+# ---------------------------------------------------------------------------
+from runtime.capabilities import register_aggregator  # noqa: E402
+register_aggregator("integrations", _aggregate_integrations)

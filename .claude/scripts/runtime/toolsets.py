@@ -73,4 +73,11 @@ TOOLSETS: dict[str, Toolset] = {
         # ``capabilities.resolve_toolset`` for the resolver implementation.
         "includes": ["chat_commands", "chat_intents"],
     },
+    "integrations": {
+        "description": "All registered integrations (auto-discovered from integrations registry)",
+        "tools": [],
+        "includes": [],
+        "live_source": "integrations",
+        "live_filter": "integration.",
+    },
 }

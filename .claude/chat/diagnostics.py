@@ -56,6 +56,10 @@ class DiagnosticsReport:
     # Adapters (only populated when called from inside the bot)
     adapters_connected: dict[str, bool] = field(default_factory=dict)
 
+    # Capability/toolset registry (PRP-1b)
+    capabilities: list[dict] = field(default_factory=list)
+    toolsets: dict[str, list[str]] = field(default_factory=dict)
+
 
 def collect_diagnostics() -> DiagnosticsReport:
     """Collect full system diagnostics."""
@@ -71,6 +75,7 @@ def collect_diagnostics() -> DiagnosticsReport:
     _check_memory_db(report)
     _check_runtime(report)
     _check_sessions(report)
+    _check_capabilities(report)
 
     return report
 
@@ -218,6 +223,42 @@ def _check_sessions(report: DiagnosticsReport) -> None:
         report.sessions_total_messages = sum(s.message_count for s in sessions)
         report.sessions_total_cost_usd = sum(s.total_cost_usd for s in sessions)
     except Exception:
+        pass
+
+
+def _check_capabilities(report: DiagnosticsReport) -> None:
+    """Populate capabilities and toolsets from the capability registry.
+
+    Atomic: either both fields are populated or both stay at defaults.
+    Partial state would mislead diagnostic consumers.
+    """
+    try:
+        # M6 fix: ensure integrations source is registered before list_capabilities runs.
+        # Importing the module fires register_aggregator("integrations", ...) at module bottom.
+        import integrations.registry  # noqa: F401
+        from runtime.capabilities import list_capabilities, resolve_toolset
+        from runtime.toolsets import TOOLSETS
+
+        caps = list_capabilities(sources=["chat_extensions", "integrations"])
+        _caps_local = [
+            {
+                "id": c.id,
+                "display_name": c.display_name,
+                "enabled": c.enabled,
+                "source": c.source,
+            }
+            for c in caps
+        ]
+        _toolsets_local = {
+            name: resolve_toolset(name, registry=TOOLSETS)
+            for name in TOOLSETS
+        }
+        # Atomic assignment: only mutate the report after both locals built successfully.
+        report.capabilities = _caps_local
+        report.toolsets = _toolsets_local
+    except Exception:
+        # Fail-open: leave capabilities=[] and toolsets={} at defaults.
+        # No partial state — both fields move together.
         pass
 
 

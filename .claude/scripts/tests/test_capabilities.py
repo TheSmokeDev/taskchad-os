@@ -661,3 +661,318 @@ class TestImportFailure:
         ids = {c.id for c in caps}
         assert "chat.command.ping" in ids
         assert "chat.command.status" in ids
+
+
+# ---------------------------------------------------------------------------
+# PRP-1b: integrations aggregator + starter toolsets
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cleanup_aggregator():
+    """Restore canonical _AGGREGATORS["integrations"] after the test.
+
+    Tests in this class patch _AGGREGATORS to inject fakes. A plain
+    pop on teardown creates a sys.modules / _AGGREGATORS mismatch:
+    integrations.registry stays cached, so the next plain
+    ``import integrations.registry`` is a no-op (cache hit, body
+    skipped) and the module-bottom register_aggregator() call never
+    re-fires. Production never sees this state — no production code
+    path pops _AGGREGATORS.
+
+    importlib.reload() forces module-body re-execution, which fires
+    register_aggregator() again. Same pattern as
+    test_register_aggregator_integrations_wired below.
+    """
+    yield
+
+    import importlib
+    from runtime import capabilities
+    import integrations.registry as reg
+
+    capabilities._AGGREGATORS.pop("integrations", None)
+    importlib.reload(reg)
+    # Post-condition: production wiring restored for downstream tests.
+    assert "integrations" in capabilities._AGGREGATORS
+
+
+class TestIntegrationsAggregator:
+    def test_list_capabilities_reads_integrations(self, cleanup_aggregator):
+        """Patch ``_AGGREGATORS["integrations"]`` with a fake returning 3
+        Capabilities (2 enabled, 1 disabled). Call
+        ``list_capabilities(sources=["integrations"])``. Assert 3
+        Capabilities, ``integration.*`` ids, correct enabled flags."""
+        from runtime import capabilities as caps_mod
+        from runtime.capabilities import Capability, list_capabilities
+
+        fake_caps = [
+            Capability(
+                id="integration.gmail",
+                display_name="Gmail",
+                enabled=True,
+                source="integration",
+            ),
+            Capability(
+                id="integration.slack",
+                display_name="Slack",
+                enabled=True,
+                source="integration",
+            ),
+            Capability(
+                id="integration.asana",
+                display_name="Asana",
+                enabled=False,
+                source="integration",
+            ),
+        ]
+        caps_mod._AGGREGATORS["integrations"] = lambda: fake_caps
+
+        caps = list_capabilities(sources=["integrations"])
+
+        assert len(caps) == 3
+        ids = {c.id for c in caps}
+        assert ids == {
+            "integration.gmail",
+            "integration.slack",
+            "integration.asana",
+        }
+        # All ids start with integration.
+        assert all(c.id.startswith("integration.") for c in caps)
+        # Enabled flags pass through correctly.
+        enabled = {c.id: c.enabled for c in caps}
+        assert enabled == {
+            "integration.gmail": True,
+            "integration.slack": True,
+            "integration.asana": False,
+        }
+
+    def test_integrations_aggregator_uses_get_enabled_once(
+        self, cleanup_aggregator,
+    ):
+        """Lock the efficiency contract — ``get_enabled()`` is called exactly
+        once per ``_aggregate_integrations()`` invocation regardless of
+        ``_REGISTRY`` size. No per-item ``is_enabled()`` loop (which would
+        invoke ``get_enabled()`` 11 times = 22 stat calls instead of 2)."""
+        # Import the module to register the aggregator.
+        import integrations.registry as reg
+
+        with patch.object(reg, "get_enabled", wraps=reg.get_enabled) as spy:
+            caps = reg._aggregate_integrations()
+
+        # Exactly one call regardless of how many _REGISTRY entries exist.
+        assert spy.call_count == 1
+        # And the function still produces all 11 capabilities.
+        assert len(caps) == 11
+
+    def test_list_capabilities_graceful_on_integrations_import_failure(
+        self, cleanup_aggregator,
+    ):
+        """If the late import of ``Capability`` inside
+        ``_aggregate_integrations`` fails, the function returns ``[]``
+        without raising — preserving the runtime contract per the PRP."""
+        import integrations.registry as reg
+
+        # Patch the late import inside _aggregate_integrations to raise.
+        # We do this by intercepting builtins.__import__ for the specific
+        # target module path.
+        import builtins
+        real_import = builtins.__import__
+
+        def _failing_import(name, globals=None, locals=None, fromlist=(),
+                             level=0):
+            if name == "runtime.capabilities" and fromlist and "Capability" in fromlist:
+                raise ImportError("simulated Capability import failure")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", side_effect=_failing_import):
+            caps = reg._aggregate_integrations()
+
+        assert caps == []
+
+    def test_legacy_integrations_api_remain_importable(self):
+        """Future-proofing: the 4 documented public-API symbols in
+        ``registry.py`` (``get_all``, ``get_enabled``, ``is_enabled``,
+        ``IntegrationInfo``) must remain importable. Locks against
+        accidental removal during refactors."""
+        from integrations.registry import (
+            IntegrationInfo,
+            get_all,
+            get_enabled,
+            is_enabled,
+        )
+
+        # get_all returns a populated dict.
+        all_integrations = get_all()
+        assert isinstance(all_integrations, dict)
+        assert len(all_integrations) >= 1
+        # IntegrationInfo is a dataclass.
+        import dataclasses
+        assert dataclasses.is_dataclass(IntegrationInfo)
+        # get_enabled and is_enabled remain callable.
+        assert callable(get_enabled)
+        assert callable(is_enabled)
+
+    def test_register_aggregator_integrations_wired(self, request):
+        """Module-level ``register_aggregator()`` call in
+        ``integrations.registry`` fires on import — proves the dispatch
+        wiring works end-to-end without manual wiring inside
+        ``capabilities.py``.
+
+        Note: this test does NOT use the ``cleanup_aggregator`` fixture
+        because it ASSERTS the registration is present. It restores state
+        via ``addfinalizer`` after the assertion to avoid leaking a stale
+        function reference into adjacent tests.
+
+        Uses ``importlib.reload`` to force re-execution of the module body
+        — adjacent tests pop ``"integrations"`` from ``_AGGREGATORS`` via
+        the ``cleanup_aggregator`` fixture, and a plain ``import`` is a
+        no-op because ``sys.modules`` already caches the module. Reload
+        forces the ``register_aggregator()`` call at module bottom to fire
+        again, proving the wiring actually exists in the module body.
+        """
+        import importlib
+
+        from runtime import capabilities
+
+        # Snapshot the prior state so we can restore it after the test —
+        # the wiring must remain intact for downstream consumers.
+        prior_fn = capabilities._AGGREGATORS.get("integrations")
+
+        def _restore():
+            if prior_fn is None:
+                capabilities._AGGREGATORS.pop("integrations", None)
+            else:
+                capabilities._AGGREGATORS["integrations"] = prior_fn
+
+        request.addfinalizer(_restore)
+
+        # Reload forces the module body to re-execute, firing the
+        # ``register_aggregator()`` call at module bottom regardless of
+        # adjacent-test pollution that may have popped the entry.
+        import integrations.registry as reg  # noqa: F401
+        importlib.reload(reg)
+
+        assert "integrations" in capabilities._AGGREGATORS
+
+    def test_span_emitted_on_integrations_list_capabilities(
+        self, cleanup_aggregator,
+    ):
+        """M8: span fixture covers a MIX of enabled and disabled
+        integrations. The fixture must satisfy ``enabled_count < total`` so
+        a regression that writes ``total`` for both fields would FAIL the
+        assertion (silent passes are the bug we're guarding against).
+
+        Mirror of PRP-1a TestEnabledHappyPath. Reuse ``_make_mock_client``
+        helper from existing test file."""
+        fake_mod, client, _ = _make_mock_langfuse_module()
+
+        # Build a fake _aggregate_integrations that returns 4 enabled + 3
+        # disabled = 7 total. enabled_count (4) < total (7).
+        from runtime.capabilities import Capability
+
+        fake_caps = [
+            Capability(id="integration.gmail", display_name="Gmail",
+                       enabled=True, source="integration"),
+            Capability(id="integration.calendar",
+                       display_name="Google Calendar",
+                       enabled=True, source="integration"),
+            Capability(id="integration.sheets",
+                       display_name="Google Sheets",
+                       enabled=True, source="integration"),
+            Capability(id="integration.docs",
+                       display_name="Google Docs",
+                       enabled=True, source="integration"),
+            Capability(id="integration.slack", display_name="Slack",
+                       enabled=False, source="integration"),
+            Capability(id="integration.asana", display_name="Asana",
+                       enabled=False, source="integration"),
+            Capability(id="integration.circle", display_name="Circle",
+                       enabled=False, source="integration"),
+        ]
+
+        from runtime import capabilities as caps_mod
+        caps_mod._AGGREGATORS["integrations"] = lambda: fake_caps
+
+        with (
+            patch("runtime.langfuse_setup.is_langfuse_enabled",
+                  return_value=True),
+            patch("orchestration.observability.init_langfuse"),
+            patch.dict("sys.modules", {"langfuse": fake_mod}),
+        ):
+            from runtime.capabilities import list_capabilities
+            caps = list_capabilities(sources=["integrations"])
+
+        # 4 enabled + 3 disabled = 7 total, enabled_count = 4.
+        assert len(caps) == 7
+        enabled_count = sum(1 for c in caps if c.enabled)
+        assert enabled_count == 4
+        # Critical: a buggy implementation that writes total for both would
+        # fail because enabled_count (4) < total (7).
+        assert enabled_count < len(caps)
+
+        # Span was opened.
+        assert client.start_as_current_observation.called
+
+        # Pull the metadata kwargs from update_current_span calls.
+        assert client.update_current_span.called
+        metadata_payloads = [
+            kwargs.get("metadata")
+            for _args, kwargs in client.update_current_span.call_args_list
+            if kwargs.get("metadata")
+        ]
+        # At least one payload must report total=7 and enabled_count=4 —
+        # NOT total=7 and enabled_count=7 (the silent-pass regression).
+        matched = [
+            md for md in metadata_payloads
+            if isinstance(md, dict) and md.get("total") == 7
+            and md.get("enabled_count") == 4
+        ]
+        assert matched, (
+            f"Expected metadata with total=7 and enabled_count=4, "
+            f"got: {metadata_payloads!r}"
+        )
+
+
+class TestStarterToolsets:
+    def test_resolve_toolset_integrations_auto_discovers(
+        self, cleanup_aggregator,
+    ):
+        """The starter ``integrations`` toolset uses PRP-1a's
+        ``live_source``/``live_filter`` auto-discovery extension. Mock the
+        aggregator with mixed-prefix capabilities and assert the resolver
+        filters by the ``integration.`` prefix and returns sorted ids."""
+        from runtime import capabilities as caps_mod
+        from runtime.capabilities import Capability, resolve_toolset
+        from runtime.toolsets import TOOLSETS
+
+        # Mixed prefixes — only the integration.* ones should survive the
+        # ``live_filter="integration."`` filter.
+        fake_caps = [
+            Capability(id="integration.gmail", display_name="Gmail",
+                       enabled=True, source="integration"),
+            Capability(id="integration.calendar",
+                       display_name="Google Calendar",
+                       enabled=True, source="integration"),
+            # Off-prefix — the live_filter must exclude this one.
+            Capability(id="chat.command.x", display_name="x",
+                       enabled=True, source="chat_extension"),
+        ]
+        caps_mod._AGGREGATORS["integrations"] = lambda: fake_caps
+
+        ids = resolve_toolset("integrations", registry=TOOLSETS)
+
+        # Only the two integration.* ids survive the filter, sorted.
+        assert ids == ["integration.calendar", "integration.gmail"]
+
+    def test_search_console_capability_id_uses_underscore(self):
+        """N4 fix — assert ``_aggregate_integrations()`` produces
+        ``integration.search_console`` (underscore matching ``_REGISTRY``
+        dict key) and NOT ``integration.search-console`` (hyphenated CLI
+        slug). Locks the slug-vs-CLI-name divergence."""
+        import integrations.registry as reg
+
+        caps = reg._aggregate_integrations()
+        ids = {c.id for c in caps}
+
+        assert "integration.search_console" in ids
+        assert "integration.search-console" not in ids

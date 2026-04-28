@@ -123,3 +123,154 @@ class TestEnvironmentCheck:
         issues = check_environment()
         python_errors = [i for i in issues if "Python" in i[1] and i[0] == "error"]
         assert len(python_errors) == 0
+
+
+# ---------------------------------------------------------------------------
+# PRP-1b: capabilities + toolsets envelope tests
+# ---------------------------------------------------------------------------
+
+
+class TestCapabilitiesEnvelope:
+    def test_status_json_includes_capabilities_and_toolsets_keys(self):
+        """``thehomie status --json`` must surface ``capabilities`` (list,
+        possibly empty) and ``toolsets`` (dict, possibly empty) at the top
+        level as siblings of the existing keys."""
+        import dataclasses
+
+        report = collect_diagnostics()
+        data = dataclasses.asdict(report)
+
+        assert "capabilities" in data
+        assert isinstance(data["capabilities"], list)
+        assert "toolsets" in data
+        assert isinstance(data["toolsets"], dict)
+
+    def test_status_json_existing_21_keys_unchanged(self):
+        """Regression: lock the envelope against accidental key removal.
+        All 21 pre-PRP-1b ``DiagnosticsReport`` field names must remain."""
+        import dataclasses
+
+        report = collect_diagnostics()
+        data = dataclasses.asdict(report)
+
+        expected_keys = {
+            "timestamp",
+            "uptime_seconds",
+            "cognition_available",
+            "cognition_moves",
+            "recall_last_query",
+            "recall_last_tier",
+            "recall_last_count",
+            "recall_last_latency_ms",
+            "memory_doc_count",
+            "memory_last_indexed",
+            "memory_embedding_status",
+            "runtime_lanes",
+            "runtime_providers",
+            "runtime_selected_lane",
+            "runtime_selected_generic_provider",
+            "runtime_generic_text_route",
+            "runtime_generic_tool_route",
+            "sessions_active",
+            "sessions_total_messages",
+            "sessions_total_cost_usd",
+            "adapters_connected",
+        }
+        for key in expected_keys:
+            assert key in data, f"Missing pre-PRP-1b key: {key!r}"
+
+    def test_status_json_capabilities_default_empty_on_import_failure(self):
+        """B4 atomic-build: if ``runtime.capabilities`` import inside
+        ``_check_capabilities`` fails, BOTH ``capabilities`` and
+        ``toolsets`` stay at dataclass defaults (``[]`` and ``{}``).
+        No partial state."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _failing_import(name, globals=None, locals=None, fromlist=(),
+                             level=0):
+            # Force the late ``from runtime.capabilities import ...`` inside
+            # _check_capabilities to raise.
+            if name == "runtime.capabilities" and fromlist:
+                if "list_capabilities" in fromlist or "resolve_toolset" in fromlist:
+                    raise ImportError("simulated runtime.capabilities import failure")
+            return real_import(name, globals, locals, fromlist, level)
+
+        from unittest.mock import patch
+
+        with patch("builtins.__import__", side_effect=_failing_import):
+            report = collect_diagnostics()
+
+        # Atomic build: both fields move together or neither moves.
+        assert report.capabilities == []
+        assert report.toolsets == {}
+
+    def test_status_json_capabilities_default_empty_on_toolsets_import_failure(self):
+        """M4 fix — separate failure path: if ``runtime.toolsets`` import
+        fails inside ``_check_capabilities`` (even though
+        ``runtime.capabilities`` imports cleanly), BOTH ``capabilities``
+        and ``toolsets`` stay at dataclass defaults due to atomic build."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _failing_import(name, globals=None, locals=None, fromlist=(),
+                             level=0):
+            # Let runtime.capabilities import succeed but make
+            # runtime.toolsets fail.
+            if name == "runtime.toolsets" and fromlist and "TOOLSETS" in fromlist:
+                raise ImportError("simulated runtime.toolsets import failure")
+            return real_import(name, globals, locals, fromlist, level)
+
+        from unittest.mock import patch
+
+        with patch("builtins.__import__", side_effect=_failing_import):
+            report = collect_diagnostics()
+
+        # Atomic build per B4: even if list_capabilities succeeded, the
+        # toolset comprehension never ran, so neither field is mutated.
+        assert report.capabilities == []
+        assert report.toolsets == {}
+
+    def test_diagnostics_envelope_contains_integrations(self):
+        """PRP-1b production contract: collect_diagnostics() surfaces ALL
+        integration capabilities via the integrations aggregator, and the
+        integrations toolset auto-resolves to those same ids via live_source.
+
+        Existing envelope tests only check top-level keys; this one locks
+        the actual content. Catches regressions like the cached-sys.modules
+        / popped-_AGGREGATORS mismatch surfaced by Codex Stage 9 review —
+        a regression where register_aggregator() doesn't fire would silently
+        pass the other envelope tests but FAIL this one (0 caps != 11).
+        """
+        from integrations.registry import _REGISTRY
+
+        report = collect_diagnostics()
+
+        integration_caps = [
+            c for c in report.capabilities
+            if c["id"].startswith("integration.")
+        ]
+        expected_count = len(_REGISTRY)
+
+        assert len(integration_caps) == expected_count, (
+            f"Diagnostics envelope missing integrations: expected "
+            f"{expected_count} integration.* caps, got "
+            f"{len(integration_caps)}: {[c['id'] for c in integration_caps]}"
+        )
+
+        assert "integrations" in report.toolsets, (
+            "Integrations toolset not in diagnostics envelope — "
+            "TOOLSETS or resolve_toolset() wiring broken"
+        )
+        assert len(report.toolsets["integrations"]) == expected_count, (
+            f"Integrations toolset auto-discovery broken: expected "
+            f"{expected_count} ids, got "
+            f"{len(report.toolsets['integrations'])}: "
+            f"{report.toolsets['integrations']}"
+        )
+        assert all(
+            tid.startswith("integration.")
+            for tid in report.toolsets["integrations"]
+        ), f"Toolset has non-integration ids: {report.toolsets['integrations']}"
