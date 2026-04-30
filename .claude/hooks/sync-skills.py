@@ -28,6 +28,11 @@ from pathlib import Path
 _scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_scripts_dir))
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 from shared import log_hook_execution  # noqa: E402
 
 # Skills to keep in sync. Conservative allow-list - do NOT auto-sync everything
@@ -49,6 +54,9 @@ SKILLS_TO_SYNC = [
     "vault-tasks",
     "vault-thinking-partner",
     "vault-weekly-synthesis",
+    # CLUTCH v3 — added 2026-04-29 alongside adversarial-review reference + templates.
+    # Project-level clutch is the source of truth; user-level is the cache Claude Code loads.
+    "clutch",
 ]
 
 

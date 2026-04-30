@@ -14,7 +14,12 @@ import argparse
 import sys
 from datetime import datetime
 
-from config import (
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+from config import (  # noqa: E402
     ASANA_ACCESS_TOKEN,
     ASANA_WORKSPACE_ID,
     GOOGLE_CREDENTIALS_FILE,

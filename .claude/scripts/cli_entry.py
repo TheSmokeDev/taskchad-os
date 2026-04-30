@@ -9,6 +9,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "chat"))
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 from cli import main  # noqa: E402
 
 if __name__ == "__main__":

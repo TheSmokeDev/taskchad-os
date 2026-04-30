@@ -24,6 +24,11 @@ import sys
 import argparse
 from pathlib import Path
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
 DEFAULT_VAULT = Path(r"C:\Users\YourUser\finance-vault")
 
 # ---------------------------------------------------------------------------

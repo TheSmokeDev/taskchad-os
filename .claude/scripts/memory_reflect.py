@@ -19,7 +19,12 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
-from config import (
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+from config import (  # noqa: E402
     DAILY_DIR,
     GOALS_FILE,
     MEMORY_DIR,
@@ -34,10 +39,10 @@ from config import (
     get_today_log_path,
     now_local,
 )
-from runtime.base import RuntimeRequest
-from runtime.capabilities import TOOL_REASONING
-from runtime.lane_router import run_with_runtime_lanes
-from shared import append_to_daily_log, file_lock, load_state, save_state, validate_bash_command
+from runtime.base import RuntimeRequest  # noqa: E402
+from runtime.capabilities import TOOL_REASONING  # noqa: E402
+from runtime.lane_router import run_with_runtime_lanes  # noqa: E402
+from shared import append_to_daily_log, file_lock, load_state, save_state, validate_bash_command  # noqa: E402
 
 # =============================================================================
 # LOG HELPERS

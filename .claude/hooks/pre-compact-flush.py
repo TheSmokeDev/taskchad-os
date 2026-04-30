@@ -21,6 +21,11 @@ from pathlib import Path
 _scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_scripts_dir))
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 from config import SCRIPTS_DIR, STATE_DIR, ensure_directories  # noqa: E402
 from shared import log_hook_execution  # noqa: E402
 

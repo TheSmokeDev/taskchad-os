@@ -30,11 +30,17 @@ if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 if sys.stderr.encoding != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-from datetime import datetime
-from pathlib import Path
-from typing import Any
 
-from config import (
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
+from datetime import datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+
+from config import (  # noqa: E402
     DRAFT_EXPIRY_HOURS,
     DRAFTS_ACTIVE_DIR,
     DRAFTS_EXPIRED_DIR,

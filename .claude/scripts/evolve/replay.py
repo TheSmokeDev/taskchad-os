@@ -250,7 +250,15 @@ async def run_replay(
 
 def write_report(report: ReplayReport, out_dir: Path | str | None = None) -> Path:
     """Persist a report to `.claude/data/evolve/reports/<experiment_id>.json`."""
-    out_dir = Path(out_dir) if out_dir else (_SCRIPTS_DIR.parent / "data" / "evolve" / "reports")
+    if out_dir:
+        out_dir = Path(out_dir)
+    else:
+        # PRP-7a R1 M2 — route through the persona resolver instead of binding
+        # to the install dir at import time. Local import keeps this module
+        # import-safe even when config has not been loaded yet.
+        from config import DATA_DIR
+
+        out_dir = DATA_DIR / "evolve" / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{report.experiment_id}.json"
     path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")

@@ -33,7 +33,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from config import (
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
+from config import (  # noqa: E402
     DAILY_DIR,
     DREAM_MIN_INTERVAL_HOURS,
     DREAM_SIGNAL_THRESHOLD,

@@ -14,7 +14,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from config import CHAT_DB_PATH, DATABASE_PATH, STATE_DIR  # noqa: E402
+from config import CHAT_DB_PATH, DATABASE_PATH, ENV_FILE, STATE_DIR  # noqa: E402
 from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE, RUNTIME_LANE_GENERIC  # noqa: E402
 
 _START_TIME = time.monotonic()
@@ -283,7 +283,7 @@ def check_environment() -> list[tuple[str, str, str]]:
         ))
 
     # .env file exists
-    env_path = _SCRIPTS_DIR / ".env"
+    env_path = ENV_FILE
     if not env_path.exists():
         issues.append(("error", "No .env file found", f"Copy .env.example to {env_path}"))
 

@@ -7,14 +7,26 @@ Requires: GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET, GRAPH_TENANT_ID, GRAPH_USER_EMAI
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+# Add parent dir for config imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
+# Importing config triggers persona-aware load_dotenv from config.ENV_FILE.
+# Replaces the prior bare ``load_dotenv()`` call, which always loaded the
+# install-dir .env regardless of HOMIE_HOME.
+import config  # noqa: E402, F401
 
 GRAPH_CLIENT_ID = os.getenv("GRAPH_CLIENT_ID", "")
 GRAPH_CLIENT_SECRET = os.getenv("GRAPH_CLIENT_SECRET", "")

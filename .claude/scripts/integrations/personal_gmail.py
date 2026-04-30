@@ -25,6 +25,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 from config import (  # noqa: E402
     INTEGRATIONS_DIR,
     LOCAL_TZ,

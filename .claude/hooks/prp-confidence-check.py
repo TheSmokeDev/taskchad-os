@@ -16,6 +16,16 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Add scripts directory to path so personas / framework modules import.
+_scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 # Pattern: PRPs/PRP-*.md (works with both / and \ separators)
 PRP_PATTERN = re.compile(r"PRPs[/\\]PRP-.*\.md$")
 CONFIDENCE_PATTERN = re.compile(r"##\s*Confidence\s+Score:\s*(\d+\.?\d*)\s*/\s*10", re.IGNORECASE)

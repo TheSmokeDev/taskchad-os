@@ -17,8 +17,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
-import config as _cfg
-from db import get_memory_db
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+import config as _cfg  # noqa: E402
+from db import get_memory_db  # noqa: E402
 
 
 @dataclass

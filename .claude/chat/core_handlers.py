@@ -926,9 +926,9 @@ def _switch_provider(choice: str) -> str:
     if choice in _CLAUDE_MODEL_OVERRIDES:
         model_name = _CLAUDE_MODEL_OVERRIDES[choice]
         try:
+            from config import ENV_FILE as env_path
             from config import reload_config
 
-            env_path = Path(__file__).resolve().parent.parent / "scripts" / ".env"
             apply_runtime_selection_choice(
                 "claude",
                 environ=os.environ,
@@ -950,9 +950,9 @@ def _switch_provider(choice: str) -> str:
         )
 
     try:
+        from config import ENV_FILE as env_path
         from config import reload_config
 
-        env_path = Path(__file__).resolve().parent.parent / "scripts" / ".env"
         selection = apply_runtime_selection_choice(
             normalized,
             environ=os.environ,

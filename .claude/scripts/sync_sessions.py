@@ -19,17 +19,23 @@ import sys
 import time
 from pathlib import Path
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+from config import ENV_FILE  # noqa: E402
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 CLAUDE_HOME = Path(os.environ.get("MC_CLAUDE_HOME", Path.home() / ".claude"))
 PROJECTS_DIR = CLAUDE_HOME / "projects"
 
 # ── Supabase config (from .env) ─────────────────────────────────────────────
 def load_env():
-    env_path = Path(__file__).parent / ".env"
-    if not env_path.exists():
+    if not ENV_FILE.exists():
         return {}
     env = {}
-    for line in env_path.read_text().splitlines():
+    for line in ENV_FILE.read_text().splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, _, val = line.partition("=")

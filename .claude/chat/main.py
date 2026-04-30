@@ -28,6 +28,11 @@ _SCRIPTS_DIR = _CHAT_DIR.parent / "scripts"
 sys.path.insert(0, str(_CHAT_DIR))
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 from engine import ConversationEngine  # noqa: E402
 from router import ChatRouter  # noqa: E402
 from session import get_session_store  # noqa: E402

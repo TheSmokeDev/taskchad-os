@@ -7,12 +7,24 @@ a "not configured" message with setup instructions. No browser automation.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+# Add parent dir for config imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
+# Importing config triggers persona-aware load_dotenv from config.ENV_FILE.
+# Replaces the prior bare ``load_dotenv()`` call, which always loaded the
+# install-dir .env regardless of HOMIE_HOME.
+import config  # noqa: E402, F401
 
 
 @dataclass

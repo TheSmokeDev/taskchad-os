@@ -1,14 +1,14 @@
 ---
 name: clutch
-description: "CLUTCH v2 — Claude Layered Unified Team Coordination Hub. Resilient multi-phase orchestration with fail-fast guards, context budgeting, structured checkpoints, and workstream completion enforcement. Parallel execution with Agent Teams when appropriate, sequential fallback when not. Triggers on: clutch, parallel execution, team execution, multi-agent."
+description: "CLUTCH v3 — Claude Layered Unified Team Coordination Hub. Resilient multi-phase orchestration with fail-fast guards, context budgeting, structured checkpoints, workstream completion enforcement, AND pre-build + post-build Codex adversarial review gates. Parallel execution with Agent Teams when appropriate, sequential fallback when not. Triggers on: clutch, parallel execution, team execution, multi-agent."
 disable-model-invocation: false
 allowed-tools: Task, TaskCreate, TaskUpdate, TaskList, TeamCreate, TeamDelete, SendMessage, Read, Write, Bash, Glob, Grep
-argument-hint: "[PRD_PATH|PROJECT_PATH] [START_PHASE] [END_PHASE]"
+argument-hint: "[PRD_PATH|PROJECT_PATH] [START_PHASE] [END_PHASE] [--adversarial=yes|no|aggressive]"
 ---
 
-# CLUTCH v2 Orchestrator
+# CLUTCH v3 Orchestrator
 
-> Claude Layered Unified Team Coordination Hub — Resilient Multi-Phase Orchestration
+> Claude Layered Unified Team Coordination Hub — Resilient Multi-Phase Orchestration with Pre/Post-Build Adversarial Review
 
 ## Arguments: $ARGUMENTS
 
@@ -47,6 +47,18 @@ Else:
   PRD_NAME = discovered PRD basename
 ```
 
+### Adversarial Mode (v3)
+
+CLUTCH v3 adds an `--adversarial` flag with three values:
+
+| Mode | Pre-build (Step 1c) | Post-build (Step 5a) | Use case |
+|---|---|---|---|
+| `--adversarial=no` | skip | skip | Trivial phases (legacy v2 behavior) |
+| `--adversarial=yes` (default) | R1 + revise + R2 + greenlight gate | one round of diff review | Standard phases |
+| `--adversarial=aggressive` | R1 + revise + R2; if REJECT, R3 + revise + R4 | up to 2 fix-loop rounds | High-stakes (security, schema migrations, framework foundations) |
+
+If `command -v codex` returns non-zero, CLUTCH falls back to `--adversarial=no` for the affected phase with a warning.
+
 ### Mode Detection
 
 After parsing arguments:
@@ -83,6 +95,7 @@ Verify: `CLUTCH_DIR/skills/clutch/assets/prp_base.md` should exist.
 | Discovery (no PRD) | Read references/piv-discovery.md |
 | PRD Creation | Read references/create-prd.md |
 | PRP Generation | Read references/generate-prp.md |
+| Pre/Post-Build Adversarial Review (v3) | Read references/adversarial-review.md |
 | Team Orchestration | Read references/team-orchestration.md |
 | Executor | Read references/execute-prp.md |
 
@@ -217,6 +230,57 @@ own exclusive files. Aim for 2-4 workstreams. See the template for format.
 - Write checkpoint to WORKFLOW.md with resume instructions
 - Inform user: "Context budget insufficient for Phase N. Start fresh: `/clutch {PRD_PATH} {N}`"
 - **STOP execution.** Always err on the side of checkpointing early.
+
+### Step 1c: Pre-Build Adversarial Review (v3 — skip if `--adversarial=no`)
+
+**Read references/adversarial-review.md before this step.**
+
+Construct prompts from `{CLUTCH_DIR}/skills/clutch/assets/r1-adversarial-template.md`, `revise-template.md`, and `r2-adversarial-template.md` by substituting `{PRD_PATH}`, `{PRP_PATH}`, `{R1_PATH}`, `{PHASE_N}`, `{PROJECT_PATH}`, `{PRD_NAME}`. Adversarial artifacts live at `{PROJECT_PATH}/PRPs/planning/{PRD_NAME}-phase-{N}-adversarial-{r1,r2,post-build}.md`.
+
+#### Step 1c.i — R1 Adversarial
+
+```bash
+# Verify codex available
+if ! command -v codex >/dev/null 2>&1; then
+  echo "WARN: codex CLI not available; skipping adversarial review for Phase $N"
+  # Continue to Step 2
+fi
+
+# Substitute template placeholders, pipe to codex
+sed -e "s|{PRP_PATH}|$PRP_PATH|g; s|{PRD_PATH}|$PRD_PATH|g; s|{PHASE_N}|$N|g; s|{PROJECT_PATH}|$PROJECT_PATH|g; s|{PRD_NAME}|$PRD_NAME|g" \
+  "$CLUTCH_DIR/skills/clutch/assets/r1-adversarial-template.md" \
+  > /tmp/clutch-r1-prompt-$N.txt
+
+codex exec --skip-git-repo-check < /tmp/clutch-r1-prompt-$N.txt \
+  > "$PROJECT_PATH/PRPs/planning/$PRD_NAME-phase-$N-adversarial-r1.md" 2>&1
+```
+
+Parse R1 verdict from the artifact. If `ADOPT` (rare on first pass), skip to Step 2. Else proceed to 1c.ii.
+
+#### Step 1c.ii — Revise Per R1
+
+Spawn fresh `general-purpose` sub-agent via Task tool with substituted `revise-template.md`. The sub-agent edits the PRP in place, stamps `Revised:`, appends `## R1 Disposition`. Wait for completion. Verify shape:
+
+```bash
+grep -q "^Revised:" "$PRP_PATH" && grep -q "## R1 Disposition" "$PRP_PATH" \
+  || (echo "REVISION SHAPE GATE FAILED" && escalate to user)
+```
+
+#### Step 1c.iii — R2 Adversarial
+
+Same shape as 1c.i but with `r2-adversarial-template.md`. Output to `{PRD_NAME}-phase-{N}-adversarial-r2.md`.
+
+#### Step 1c.iv — Greenlight Gate
+
+| R2 Verdict | Action |
+|---|---|
+| `ADOPT` | Auto-proceed to Step 2 |
+| `ADOPT-WITH-FIXES` | List majors as informational; auto-proceed unless user interrupts |
+| `REJECT` (`--adversarial=yes`) | **Escalate to user.** Present R1 + R2 summary. User picks: revise-again / split-phase / accept-with-explicit-debt |
+| `REJECT` (`--adversarial=aggressive`) | Auto-proceed to R3 cycle (1c.v through 1c.viii); if R4 still REJECT, escalate |
+
+If user picks `split-phase`, archive current PRP, ask user to update PRD with sub-phases, restart Step 1.
+If user picks `accept-with-explicit-debt`, document unresolved blockers in PRP `## R3 Disposition: deferred` and proceed.
 
 ### Step 2: Choose Execution Strategy (v2 Decision Model)
 
@@ -458,6 +522,57 @@ After fixes:
 - If GAPS_FOUND again → debug again (up to 3 total)
 - After 3 iterations → escalate to user
 
+### Step 5a: Post-Build Adversarial Review (v3 — skip if `--adversarial=no`)
+
+**Read references/adversarial-review.md before this step.**
+
+Runs AFTER debug loop converges (Step 5 returned PASS) and BEFORE team shutdown.
+
+#### Step 5a.i — Capture Diff and Fire Codex
+
+```bash
+# Capture phase diff
+PHASE_BASE=$(git rev-parse HEAD~$WORKSTREAM_COUNT 2>/dev/null || echo "$(git merge-base HEAD master)")
+git diff $PHASE_BASE..HEAD > /tmp/clutch-phase-$N-diff.patch
+
+# Substitute template placeholders
+sed -e "s|{PRP_PATH}|$PRP_PATH|g; s|{PRD_PATH}|$PRD_PATH|g; s|{PHASE_N}|$N|g; s|{PROJECT_PATH}|$PROJECT_PATH|g; s|{PRD_NAME}|$PRD_NAME|g; s|{DIFF_PATH}|/tmp/clutch-phase-$N-diff.patch|g; s|{COMMIT_RANGE}|$PHASE_BASE..HEAD|g" \
+  "$CLUTCH_DIR/skills/clutch/assets/post-build-adversarial-template.md" \
+  > /tmp/clutch-post-build-prompt-$N.txt
+
+codex exec --skip-git-repo-check < /tmp/clutch-post-build-prompt-$N.txt \
+  > "$PROJECT_PATH/PRPs/planning/$PRD_NAME-phase-$N-adversarial-post-build.md" 2>&1
+```
+
+Parse verdict from artifact:
+
+| Verdict | Action |
+|---|---|
+| `PASS` | Proceed to Step 6 (shutdown), Step 7 (workstream enforcement), Step 8 (commit) |
+| `FIX-REQUIRED` | Run fix loop (Step 5a.ii); max 2 iterations; if still FIX-REQUIRED after 2 iterations, escalate |
+| `BLOCKER` | Escalate to user; do NOT commit |
+
+#### Step 5a.ii — Fix Loop (FIX-REQUIRED only)
+
+Spawn `piv-debugger` sub-agent with the post-build review as input:
+
+```
+POST-BUILD FIX MISSION — Phase {N}
+PRP Path: {PRP_PATH}
+Post-build adversarial review: {POST_BUILD_PATH}
+
+Apply every fix the review demands. Re-run validator after fixes.
+Output FIX REPORT with status, files changed, tests added.
+```
+
+After fixes, re-run Step 5a.i. Max 2 iterations.
+
+#### Step 5a.iii — Final Gate
+
+If `BLOCKER` (or 2 fix iterations didn't reach PASS): escalate to user. The diff has a fundamental problem the fix loop can't address. User picks: revert phase, split into smaller phase, accept with explicit debt list.
+
+If `PASS` (or initial PASS): proceed to Step 6.
+
 ### Step 6: Shutdown Team (Team mode only)
 
 1. Send `shutdown_request` to each teammate via SendMessage
@@ -525,6 +640,10 @@ Increment phase counter. If more phases remain, loop back to Step 1 (including B
 | Validator HUMAN_NEEDED | Ask user for guidance |
 | 3 debug cycles exhausted | Escalate to user with all context |
 | Teammate timeout/failure | Check partial work → reassign → if multiple fail, go sequential |
+| Codex CLI not available (v3) | Warn user; fall back to `--adversarial=no` for affected phase |
+| R1 verdict REJECT after revision (v3) | Escalate to user (or auto-R3 in `--adversarial=aggressive`) |
+| Post-build BLOCKER (v3) | Escalate to user; do NOT commit |
+| Post-build FIX-REQUIRED, 2 iterations exhausted (v3) | Escalate to user with full context |
 
 ---
 
@@ -558,15 +677,16 @@ WORKFLOW.md checkpoint is current — any future session can continue from here.
 
 ---
 
-## Visual Workflow (v2)
+## Visual Workflow (v3)
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                  CLUTCH v2 ORCHESTRATOR                           │
+│                  CLUTCH v3 ORCHESTRATOR                           │
 │   Claude Layered Unified Team Coordination Hub                   │
-│   Resilient Multi-Phase Orchestration                            │
+│   Resilient Multi-Phase Orchestration + Adversarial Review       │
 ├──────────────────────────────────────────────────────────────────┤
 │ SESSION STATE: team_failed=false, context_used=15%, phases=0     │
+│ ADVERSARIAL MODE: yes (default) | no | aggressive                 │
 │                                                                  │
 │ IF NO PRD FOUND:                                                 │
 │   a. Ask discovery questions (piv-discovery.md)                  │
@@ -578,6 +698,15 @@ WORKFLOW.md checkpoint is current — any future session can continue from here.
 │   1b. BUDGET GATE: Can we afford this phase?                     │
 │       NO  → checkpoint + STOP                                    │
 │       YES → continue                                             │
+│   1c. PRE-BUILD ADVERSARIAL (v3, skip if --adversarial=no):       │
+│       i.   Codex R1 review of generated PRP                      │
+│       ii.  Revise per R1 (fresh sub-agent)                       │
+│       iii. Codex R2 review of revised PRP                        │
+│       iv.  Greenlight gate:                                       │
+│            ADOPT             → proceed                            │
+│            ADOPT-WITH-FIXES  → list majors, proceed              │
+│            REJECT (yes)      → escalate to user                  │
+│            REJECT (aggressive) → R3 + revise + R4                │
 │   2.  DECISION MODEL: Choose strategy                            │
 │       1 workstream        → Solo (2a)                            │
 │       2+ no deps, no fail → Team with fail-fast (2c)             │
@@ -587,6 +716,10 @@ WORKFLOW.md checkpoint is current — any future session can continue from here.
 │       After 2 turns: git diff → files? continue : kill → seq     │
 │   4.  Spawn VALIDATOR → PASS / GAPS_FOUND / HUMAN_NEEDED         │
 │   5.  If GAPS_FOUND → debug loop (max 3x)                        │
+│   5a. POST-BUILD ADVERSARIAL (v3, skip if --adversarial=no):      │
+│       i.   Codex review of git diff against PRP                  │
+│       ii.  If FIX-REQUIRED: piv-debugger fix loop (max 2x)       │
+│       iii. PASS → proceed; BLOCKER → escalate, don't commit      │
 │   6.  Shutdown team (if team mode)                                │
 │   7.  WORKSTREAM ENFORCEMENT: verify ALL workstreams have output  │
 │       Missing? → execute or mark deferred (NEVER silent drop)    │

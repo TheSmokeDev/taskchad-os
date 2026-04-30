@@ -23,6 +23,11 @@ for p in [str(_CHAT_DIR), str(_SCRIPTS_DIR)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 import asyncio  # noqa: E402
 import json as json_mod  # noqa: E402
 from datetime import datetime  # noqa: E402
@@ -37,6 +42,7 @@ from config import (  # noqa: E402
     CHAT_DB_PATH,
     CHAT_MAX_BUDGET_USD,
     CHAT_MAX_TURNS,
+    ENV_FILE,
     EXTENSIONS_ALLOW,
     EXTENSIONS_BUNDLED_PATH,
     EXTENSIONS_DENY,
@@ -914,7 +920,7 @@ def _run_setup_wizard(advanced: bool, headless_google: bool):
 
     from config import GOOGLE_CREDENTIALS_FILE, MEMORY_DIR, MEMORY_FILE, SOUL_FILE, USER_FILE
 
-    env_path = _SCRIPTS_DIR / ".env"
+    env_path = ENV_FILE
 
     # Ensure .env exists
     if not env_path.exists():
@@ -1136,10 +1142,9 @@ def _read_env_map() -> dict[str, str]:
     """Read effective .env values."""
     from dotenv import dotenv_values
 
-    env_path = _SCRIPTS_DIR / ".env"
-    if not env_path.exists():
+    if not ENV_FILE.exists():
         return {}
-    return {k: (v or "") for k, v in dotenv_values(env_path).items()}
+    return {k: (v or "") for k, v in dotenv_values(ENV_FILE).items()}
 
 
 def _detect_providers(env_values: dict[str, str]) -> dict[str, bool]:
@@ -1157,8 +1162,7 @@ def _detect_providers(env_values: dict[str, str]) -> dict[str, bool]:
 
 def _write_env_key(key: str, value: str) -> None:
     """Upsert a key=value pair in .env file, deduplicating existing entries."""
-    env_path = _SCRIPTS_DIR / ".env"
-    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    lines = ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []
     new_lines = []
     wrote = False
     for line in lines:
@@ -1172,15 +1176,14 @@ def _write_env_key(key: str, value: str) -> None:
         new_lines.append(line)
     if not wrote:
         new_lines.append(f"{key}={value}")
-    env_path.write_text("\n".join(new_lines).rstrip() + "\n")
+    ENV_FILE.write_text("\n".join(new_lines).rstrip() + "\n")
 
 
 def _delete_env_key(key: str) -> None:
     """Remove a key=value pair from .env if it exists."""
-    env_path = _SCRIPTS_DIR / ".env"
-    if not env_path.exists():
+    if not ENV_FILE.exists():
         return
-    lines = env_path.read_text().splitlines()
+    lines = ENV_FILE.read_text().splitlines()
     new_lines = []
     for line in lines:
         stripped = line.strip()
@@ -1189,9 +1192,9 @@ def _delete_env_key(key: str) -> None:
             continue
         new_lines.append(line)
     if new_lines:
-        env_path.write_text("\n".join(new_lines).rstrip() + "\n")
+        ENV_FILE.write_text("\n".join(new_lines).rstrip() + "\n")
     else:
-        env_path.write_text("")
+        ENV_FILE.write_text("")
 
 
 # === evolve ===

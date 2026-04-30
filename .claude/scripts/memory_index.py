@@ -21,7 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from config import (
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+from config import (  # noqa: E402
     EMBEDDING_DIMENSIONS,
     EMBEDDING_MODEL,
     MEMORY_DIR,
@@ -29,7 +34,7 @@ from config import (
     SEARCH_CHUNK_OVERLAP_TOKENS,
     ensure_directories,
 )
-from db import MemoryDB, get_memory_db
+from db import MemoryDB, get_memory_db  # noqa: E402
 
 SCHEMA_VERSION = 1
 

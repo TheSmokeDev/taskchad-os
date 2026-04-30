@@ -11,7 +11,12 @@ Usage:
 import sys
 from pathlib import Path
 
-import fitz  # PyMuPDF
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+import fitz  # PyMuPDF  # noqa: E402
 
 
 def pdf_to_markdown(pdf_path: Path, output_path: Path | None = None) -> Path:

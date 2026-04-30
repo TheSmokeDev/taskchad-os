@@ -20,6 +20,11 @@ from typing import Any
 # Add parent dir for config imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 from config import GOOGLE_CALENDAR_ID, LOCAL_TZ  # noqa: E402
 from shared import with_retry  # noqa: E402
 

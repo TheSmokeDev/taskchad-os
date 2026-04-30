@@ -33,6 +33,13 @@ import sys
 import time
 from pathlib import Path
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+from config import ENV_FILE  # noqa: E402
+
 # ── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -43,10 +50,9 @@ log = logging.getLogger("gateway")
 
 # ── Env ──────────────────────────────────────────────────────────────────────
 def load_env() -> dict[str, str]:
-    env_path = Path(__file__).parent / ".env"
     env: dict[str, str] = {}
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, _, v = line.partition("=")

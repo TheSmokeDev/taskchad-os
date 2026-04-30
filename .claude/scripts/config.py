@@ -1,5 +1,22 @@
 """
 Configuration for The Homie heartbeat system.
+
+Path constants are resolved through the personas resolver
+(``personas.get_persona_paths(personas.get_active_profile_name())``) so the
+default profile keeps its install-dir layout while named/custom profiles
+land under ``~/.homie/profiles/<name>/`` or ``HOMIE_HOME`` respectively.
+
+PRP-7a Workstream 2 (config-refactor):
+    - Default profile (HOMIE_HOME unset) returns the legacy install-dir paths
+      via ``personas.get_default_paths()``. ``HOMIE_VAULT_DIR`` env override is
+      preserved on ``MEMORY_DIR`` (PRP-7a R1 B5).
+    - ``ENV_FILE`` is now a public module-level constant. WS3 entry points
+      will consume ``from config import ENV_FILE`` to replace bare
+      ``load_dotenv()`` and parent-path ``.env`` math.
+    - ``BOT_PID_FILE`` / ``BOT_LOCK_FILE`` are pre-stubbed to the default
+      install-dir layout (Phase 3 / PRP-7c owns the full consolidation).
+    - Anti-pattern Rule 1 enforcement: ``personas.X`` values are read at
+      import time only; nothing is bound as a function default arg.
 """
 
 from __future__ import annotations
@@ -12,23 +29,35 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-# Load environment variables from .env in scripts directory
-load_dotenv(Path(__file__).parent / ".env", override=True)
+import personas
 
-# === Paths ===
+# === Persona-resolved paths (PRP-7a Workstream 2) ===
+# Resolve once at import time. Default profile ("default") returns the legacy
+# install-dir paths via ``personas.get_default_paths()`` — HOMIE_VAULT_DIR
+# override on MEMORY_DIR is preserved (PRP-7a R1 B5). Named/custom profiles
+# land under ``~/.homie/profiles/<name>/`` or ``HOMIE_HOME`` respectively.
+_paths = personas.get_persona_paths(personas.get_active_profile_name())
+
+# === Path constants ===
+# ENV_FILE is the canonical .env path for the active profile. WS3 entry points
+# import this to replace bare ``load_dotenv()`` and ``Path(...) / ".env"`` math.
+ENV_FILE: Path = _paths["env_file"]
+
+# Load environment variables from the active profile's .env file.
+load_dotenv(ENV_FILE, override=True)
+
+# Repo / install-dir locations — kept for back-compat (``runtime/bootstrap.py``,
+# hooks, etc. import ``PROJECT_ROOT`` and ``SCRIPTS_DIR`` from config).
 SCRIPTS_DIR = Path(__file__).parent
-PROJECT_ROOT = SCRIPTS_DIR.parent.parent  # thehomie
+PROJECT_ROOT = SCRIPTS_DIR.parent.parent
 CLAUDE_DIR = PROJECT_ROOT / ".claude"
 
-# Vault location — override with HOMIE_VAULT_DIR. Accepts absolute paths,
-# ~-expandable paths, or relative paths (resolved against cwd, not repo root).
-# Default is the checked-in vault inside the repo.
-_vault_override = os.getenv("HOMIE_VAULT_DIR")
-MEMORY_DIR = (
-    Path(_vault_override).expanduser().resolve()
-    if _vault_override
-    else (PROJECT_ROOT / "TheHomie" / "Memory").resolve()
-)
+# Vault location — override with HOMIE_VAULT_DIR. The personas resolver
+# (``personas.get_default_paths()``) reads this env var on every call and
+# applies it to the ``memory`` key for the default profile (PRP-7a R1 B5).
+# For named/custom profiles, the override is ignored — ``memory`` lives under
+# the profile root.
+MEMORY_DIR = _paths["memory"]
 
 # Memory file paths
 SOUL_FILE = MEMORY_DIR / "SOUL.md"
@@ -43,13 +72,18 @@ WEEKLY_DIR = MEMORY_DIR / "weekly"
 OWNER_NAME = os.getenv("OWNER_NAME", "")
 
 # === Data Directory (databases, model caches) ===
-DATA_DIR = CLAUDE_DIR / "data"
+DATA_DIR = _paths["data"]
 DATABASE_PATH = DATA_DIR / "memory.db"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # State files — per-machine operational data, NOT synced via Obsidian
-STATE_DIR = DATA_DIR / "state"
+STATE_DIR = _paths["state"]
 HEARTBEAT_STATE_FILE = STATE_DIR / "heartbeat-state.json"
+
+# Bot lifecycle paths (PRP-7c will own the full consolidation; Phase 1 stubs
+# them to ``_paths["run"]`` which equals STATE_DIR for the default profile).
+BOT_PID_FILE: Path = _paths["run"] / "bot.pid"
+BOT_LOCK_FILE: Path = _paths["run"] / "bot.lock"
 
 # === Reflection Configuration ===
 REFLECTION_STATE_FILE = STATE_DIR / "reflection-state.json"
@@ -106,7 +140,7 @@ EMBEDDING_DIMENSIONS = 768
 EMBEDDING_CACHE_DIR = Path(os.getenv("EMBEDDING_CACHE_DIR", str(DATA_DIR / "models")))
 
 # === Integration Configuration (Phase 5) ===
-INTEGRATIONS_DIR = SCRIPTS_DIR / "integrations"
+INTEGRATIONS_DIR = _paths["credentials"]
 
 # Google OAuth (AI account — your-calendar@gmail.com)
 GOOGLE_CREDENTIALS_FILE = INTEGRATIONS_DIR / "google_credentials.json"
@@ -377,8 +411,10 @@ def reload_config() -> dict[str, tuple[str, str]]:
     module = sys.modules[__name__]
     old_values = {k: getattr(module, k, None) for k in reloadable_keys}
 
-    # Re-read .env
-    load_dotenv(Path(__file__).parent / ".env", override=True)
+    # Re-read .env from the persona-resolved path. Routing through ENV_FILE
+    # (rather than recomputing ``Path(__file__).parent / ".env"``) keeps the
+    # reload path aligned with the active profile (PRP-7a Workstream 2).
+    load_dotenv(ENV_FILE, override=True)
 
     # Re-evaluate from env
     changes: dict[str, tuple[str, str]] = {}

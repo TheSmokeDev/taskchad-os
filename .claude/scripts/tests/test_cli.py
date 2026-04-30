@@ -146,11 +146,16 @@ class TestCLIHelp:
         captured: dict[str, str] = {}
         env_dir = tmp_path / "chat"
         env_dir.mkdir()
-        (env_dir / ".env").write_text("", encoding="utf-8")
+        env_path = env_dir / ".env"
+        env_path.write_text("", encoding="utf-8")
         memory_dir = tmp_path / "Memory"
         memory_dir.mkdir()
 
-        monkeypatch.setattr(cli_module, "_SCRIPTS_DIR", env_dir)
+        # PRP-7a WS3 — env-writer call sites now resolve via config.ENV_FILE
+        # instead of cli_module._SCRIPTS_DIR / ".env". Patch the module-level
+        # ENV_FILE re-export so the wizard writes into tmp.
+        monkeypatch.setattr(cli_module, "ENV_FILE", env_path)
+        monkeypatch.setattr(config, "ENV_FILE", env_path)
         monkeypatch.setattr(cli_module, "_detect_providers", lambda _env: {
             "claude": True,
             "codex": True,

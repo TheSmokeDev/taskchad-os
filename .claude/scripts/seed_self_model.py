@@ -18,7 +18,12 @@ import re
 import sys
 from pathlib import Path
 
-from config import (
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+from config import (  # noqa: E402
     MEMORY_DIR,
     PROJECT_ROOT,
     SELF_FILE,
@@ -26,9 +31,9 @@ from config import (
     ensure_directories,
     now_local,
 )
-from runtime.base import RuntimeRequest
-from runtime.capabilities import TEXT_REASONING
-from runtime.lane_router import run_with_runtime_lanes
+from runtime.base import RuntimeRequest  # noqa: E402
+from runtime.capabilities import TEXT_REASONING  # noqa: E402
+from runtime.lane_router import run_with_runtime_lanes  # noqa: E402
 
 # Weeks to backfill
 WEEKLY_FILES = [

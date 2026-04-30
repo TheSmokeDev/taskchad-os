@@ -191,15 +191,30 @@ def log_inference_event(log: InferenceLog) -> None:
 
 # === Recall Log Persistence (Phase 4: Memory Graph) ===
 
-_DEFAULT_LOG_PATH = Path(__file__).resolve().parents[2] / "data" / "state" / "recall-log.json"
 _MAX_EVENTS = 50
+
+
+def _default_log_path() -> Path:
+    """Resolve the recall-log path through the persona resolver.
+
+    PRP-7a R1 M2 — local import keeps this module import-safe even before
+    config has been loaded. Anti-pattern Rule 1: ``None`` sentinel pattern
+    in ``RecallLogStore.__init__`` means the path resolves on every
+    instantiation, NOT once at module load.
+    """
+    from config import STATE_DIR
+
+    return STATE_DIR / "recall-log.json"
 
 
 class RecallLogStore:
     """Ring buffer of recent recall events, persisted to JSON file."""
 
-    def __init__(self, path: Path = _DEFAULT_LOG_PATH):
-        self._path = path
+    def __init__(self, path: Path | None = None):
+        # PRP-7a R1 M2 + Rule 1 — resolve the persona-routed default at call
+        # time so monkeypatching ``config.STATE_DIR`` (e.g. via ``HOMIE_HOME``)
+        # in tests propagates through to the store.
+        self._path = path if path is not None else _default_log_path()
         self._lock = threading.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
 

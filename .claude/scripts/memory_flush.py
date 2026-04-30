@@ -20,17 +20,22 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 
-from config import (
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+from config import (  # noqa: E402
     LOCAL_TZ,
     PROJECT_ROOT,
     STATE_DIR,
     ensure_directories,
     now_local,
 )
-from runtime.base import RuntimeRequest
-from runtime.capabilities import TEXT_REASONING
-from runtime.lane_router import run_with_runtime_lanes
-from shared import append_to_daily_log, file_lock, load_state, save_state
+from runtime.base import RuntimeRequest  # noqa: E402
+from runtime.capabilities import TEXT_REASONING  # noqa: E402
+from runtime.lane_router import run_with_runtime_lanes  # noqa: E402
+from shared import append_to_daily_log, file_lock, load_state, save_state  # noqa: E402
 
 FLUSH_STATE_FILE = STATE_DIR / "flush-state.json"
 

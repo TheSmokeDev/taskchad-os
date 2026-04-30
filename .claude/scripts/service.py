@@ -30,6 +30,11 @@ STOP_FILE = SCRIPTS_DIR.parent / "data" / "state" / "service-stop"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 from shared import append_to_daily_log  # noqa: E402
 
 try:

@@ -12,8 +12,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override
+
+apply_persona_override()
+
+from config import ENV_FILE  # noqa: E402
+
 SCRIPTS_DIR = Path(__file__).parent
-ENV_FILE = SCRIPTS_DIR / ".env"
 ENV_TEMPLATE = SCRIPTS_DIR.parent.parent / "deploy" / "env.template"
 
 

@@ -19,8 +19,13 @@ if sys.stdout.encoding != "utf-8":
 if sys.stderr.encoding != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-from config import MEMORY_DIR
-from concept_drafter import sweep_expired
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
+from config import MEMORY_DIR  # noqa: E402
+from concept_drafter import sweep_expired  # noqa: E402
 
 
 def main() -> int:

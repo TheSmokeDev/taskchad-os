@@ -13,8 +13,23 @@ import json
 import sys
 from pathlib import Path
 
+# Add scripts directory to path so personas / framework modules import.
+_scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+
+# Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 BASE_DIR = Path(__file__).resolve().parent.parent
-STATE_DIR = BASE_DIR / "data" / "state"
+# PRP-7a R1 M2 — route STATE_DIR through the persona resolver instead of
+# binding the install-dir layout at hook import time. ``config.STATE_DIR``
+# already runs through ``personas.get_persona_paths(...)["state"]`` and
+# honors HOMIE_HOME / HOMIE_VAULT_DIR overrides.
+from config import STATE_DIR  # noqa: E402
+
 CHAT_FILE = BASE_DIR / "discussions" / "live-chat.jsonl"
 
 
