@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +12,12 @@ import pytest
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR.parent / "chat"))
+
+# PRP-7b WS4: exclude `_holders/` from pytest collection (subprocess helpers,
+# NOT test modules). Each helper file declares an ``if __name__ == "__main__":``
+# block that pytest would not invoke anyway, but keeping them out of
+# collection keeps `pytest tests/` output clean.
+collect_ignore_glob = ["_holders/*"]
 
 
 @pytest.fixture
@@ -205,3 +212,118 @@ def legacy_install_paths() -> dict[str, str]:
             ).resolve(strict=False)
         ),
     }
+
+
+# === PRP-7b Phase 2 — Lifecycle / clone / live-pid fixtures ===
+# Added by Workstream 4 (tests). Three fixtures support Phase 2 lifecycle
+# tests. Existing `tmp_homie_home`, `default_profile_install`,
+# `legacy_install_paths` STAY UNCHANGED so Phase 1 tests keep passing.
+#
+# Fixture-split contract (R1 B5 — load-bearing):
+#   - `tmp_homie_home` — pre-seeds a `sales` profile. Use ONLY for tests
+#     that need the profile to already exist (delete, use, list, show).
+#   - `empty_homie_root` — NO profiles seeded. Use for ALL `create_profile`
+#     lifecycle tests AND clone tests (via `source_profile_with_secrets`).
+#     `create_profile("sales")` on `empty_homie_root` MUST succeed.
+#   - `source_profile_with_secrets` — builds on `empty_homie_root` with a
+#     `source` profile containing fake `.env` secrets + memory files.
+#     Used by clone tests so the source-seed is the only profile in the root.
+
+
+@pytest.fixture
+def empty_homie_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """R1 B5 — truly empty ``<tmp>/.homie/`` root.
+
+    NO profiles seeded, NO ``.env`` file, NO ``active_profile`` written,
+    only the bare ``<tmp>/.homie/`` directory exists. Sets ``HOMIE_HOME``
+    to the root itself (not to a profile path) so the persona resolver
+    treats the root as the homie home.
+
+    Used by ALL tests that exercise ``create_profile`` so the test starts
+    from a truly empty root and the create succeeds.
+    """
+    homie = tmp_path / ".homie"
+    homie.mkdir()
+    monkeypatch.setenv("HOMIE_HOME", str(homie))
+    # Ensure HOMIE_VAULT_DIR doesn't bleed across tests.
+    monkeypatch.delenv("HOMIE_VAULT_DIR", raising=False)
+    # R-post-build F4: route wrapper creation into the test tmp tree so
+    # CLI clone tests (which now go through create_profile and trigger a
+    # real wrapper write) don't pollute ~/.local/bin or the user's
+    # AppData\Local\Programs\thehomie\bin\ on Windows. Tests that need
+    # to override (test_persona_wrapper_generation.py) still call
+    # ``monkeypatch.setenv("HOMIE_BIN_DIR", ...)`` themselves.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOMIE_BIN_DIR", str(bin_dir))
+    return homie
+
+
+@pytest.fixture
+def source_profile_with_secrets(
+    empty_homie_root: Path,
+) -> Path:
+    """Pre-seed ``<empty_homie_root>/profiles/source/`` with fake secrets.
+
+    Layout:
+        <empty_homie_root>/
+            profiles/
+                source/
+                    .env                (fake secrets)
+                    memory/
+                        SOUL.md
+                        MEMORY.md
+                        USER.md
+
+    Returns the source profile dir path. Used by clone tests so the source
+    profile is the only profile in the root (clone-tests assume create
+    will succeed for the destination).
+    """
+    profiles = empty_homie_root / "profiles"
+    profiles.mkdir(exist_ok=True)
+    src = profiles / "source"
+    src.mkdir()
+    (src / ".env").write_text(
+        "TELEGRAM_BOT_TOKEN=BOT123\n"
+        "OPENAI_API_KEY=sk-test\n"
+        "# comment line\n"
+        "\n"
+        "EMPTY_KEY=\n",
+        encoding="utf-8",
+    )
+    mem = src / "memory"
+    mem.mkdir()
+    (mem / "SOUL.md").write_text("source soul\n", encoding="utf-8")
+    (mem / "MEMORY.md").write_text("source memory\n", encoding="utf-8")
+    (mem / "USER.md").write_text("source user\n", encoding="utf-8")
+    return src
+
+
+@pytest.fixture
+def live_pid_fixture():
+    """Spawn a real ``subprocess.Popen`` running ``time.sleep(60)``.
+
+    Yields ``(pid, popen)``. Tests use the pid to write a live `bot.pid`
+    file and exercise the alive-PID path of `quiesce_profile`. Teardown
+    terminates the subprocess so the test never leaves a stray child.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        yield proc.pid, proc
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass

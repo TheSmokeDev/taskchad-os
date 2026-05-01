@@ -12,7 +12,7 @@
 | Phase | Status | Commit | Workstreams | Mode | Debug Cycles |
 |-------|--------|--------|-------------|------|-------------|
 | 1 (7a) | completed | a799f37 | 5/5 | sequential | 0 |
-| 2 (7b) | pending | - | - | - | - |
+| 2 (7b) | completed | 86fa289 | 4/4 | sequential (contract-first) | 0 (validator) + 2 (post-build) |
 | 3 (7c) | pending | - | - | - | - |
 | 4 (7d) | pending | - | - | - | - |
 | 5 (7e) | pending | - | - | - | - |
@@ -78,4 +78,82 @@ After each phase commit, append a checkpoint block above. Cold-start sessions re
 
 -->
 
-*Updated by CLUTCH v3 orchestrator after each phase commit. Last update: 2026-04-29 (Phase 1 commit).*
+---
+
+## Phase 2 (7b): Lifecycle — COMPLETED
+
+- **Status**: completed
+- **Commit**: `86fa289` — `feat(framework): PRD-7 Phase 2 (7b) — profile lifecycle commands + adversarial polish`. Mid-phase checkpoint commit `a1dc3bb` covered WS1 + adversarial trajectory; final commit `86fa289` lands WS2 + WS3 + WS4 + 3 codex post-build rounds + 2 fix iterations.
+- **Execution Mode**: sequential (contract-first) — same as Phase 1 (4 workstreams with data dependencies trigger Decision Matrix Condition 4; also context-budget Condition 6 since orchestrator burned ~60% on adversarial loop).
+- **Adversarial Mode**: yes (default) — escalated to user-driven multi-round revise after R2 REJECT (owner's "sharpen the axe" preference; same trajectory as Phase 1's aggressive 4-round flow).
+- **Adversarial Trajectory**:
+  - R1 REJECT (5 blockers, 6 majors, 6 minors)
+  - revise pass 1 → 5/5 + 6/6 + 5/6 addressed; PRP 1729 → 2287 lines
+  - R2 REJECT (1 R1 blocker unfixed [B1 lock-contract] + 1 new blocker [NB1 same root cause] + 5 new majors)
+  - revise pass 2 → all addressed; verified `shared.file_lock()` primitive directly first; PRP 2287 → 2797 lines
+  - R3 REJECT (B1/NB1 partial — Windows byte-0 vs EOF probe mismatch; 1 new blocker [NNB2 subprocess sys.path] + 2 R2 partials [NM2 wrapper escape, NM4 state-machine table contradiction] + 3 new majors)
+  - revise pass 3 → all addressed; introduced `LifecycleError(RuntimeError)` for narrow operator-vs-bug catch; PRP 2797 → 3116 lines
+  - R4 ADOPT-WITH-FIXES (0 new blockers, 2 new majors [NNNM1 byte-0 test gap, NNNM2 state-machine table os.kill mention], 2 new minors)
+  - orchestrator polish applied directly (NNNM1 → new `hold_byte0_winlock.py` helper; NNNM2 → table step 6 wording; minors → docstring + disposition prose). PRP 3116 → 3138 lines (final).
+- **Workstream status**:
+  - **WS1 lifecycle-core**: COMPLETED (mid-checkpoint `a1dc3bb`). Files: `personas/atomic.py` (407 LOC pre-fix → 422 LOC post F1), `personas/lifecycle.py` (549 LOC pre-fix → 615 LOC post F5). Public symbols: `LifecycleError`, `ProfileInfo`, `create_profile / list_profiles / show_profile / delete_profile / use_profile / init_archon`, `is_pid_alive`, `_acquire_delete_lock`, `_try_acquire_state_lock`, `_check_state_file_lockholders`, `quiesce_profile`.
+  - **WS3 clone-and-archive**: COMPLETED. Files: `personas/clone.py` (945 LOC), `personas/wrappers.py` (710 LOC), `personas/migrate.py` (382 LOC). Public surface: `clone_profile`, `export_profile`, `import_profile`, `_safe_extract_profile_archive`, `create_wrapper_alias(name, profile_root, *, install_launchd, install_systemd, bin_dir)`, `remove_wrapper_alias`, per-OS install/uninstall helpers, `migrate_default_dry_run / migrate_default_apply` (Phase 2 stub).
+  - **WS2 cli-commands**: COMPLETED. File: `chat/cli.py` (+301 LOC including post-build F4 routing through `create_profile` + `--best-effort-alias` flag). 11 subcommands: create, list, show, delete, use, clone, clone-all, init-archon, export, import, migrate-default. Click handler catches ONLY `(LifecycleError, ValueError, FileExistsError, FileNotFoundError)` per R3 NNM3.
+  - **WS4 tests**: COMPLETED. 10 new test files (4 003 LOC), 3 holder files (`_holders/__init__.py`, `hold_state_lock.py`, `hold_byte0_winlock.py`), and conftest.py +122 LOC (3 new fixtures). 309 passed, 3 skipped on the 16-file persona suite (skips are platform-conditional).
+- **Files Changed (final commit `86fa289`)**: 26 files, +31 877 / −38 LOC (production + tests + 6 post-build adversarial review artifacts including codex stdout logs).
+- **Validation**: piv-validator returned GAPS_FOUND in 1 cycle (1 narrow gap closed: `--best-effort-alias` Click flag wiring + companion CliRunner test). Codex post-build adversarial:
+  - **R1 FIX-REQUIRED** — 5 findings (F1 state-machine ordering, F2 export-default secret leak, F3 secret-strip fail-open, F4 CLI bypass of lifecycle inventory, F5 default-source memory mapping).
+  - **Iteration 1**: piv-debugger fixed F1-F5 cleanly; new regression tests added per finding.
+  - **R2 FIX-REQUIRED** — F1-F5 confirmed clean; 1 new finding NF1 (clone-all-from-default still recursive-copies install repo with same secret-leak class).
+  - **Iteration 2**: piv-debugger fixed NF1 by reusing `_stage_default_export_tree` for clone-all-from-default path; named-profile clone-all unchanged.
+  - **R3 PASS** — F1-F5 + NF1 all fixed cleanly, no new findings, anti-pattern compliance tight.
+- **Context Budget**: orchestrator burned ~60% in the prior session through R1-R4 pre-build adversarial; this fresh session burned ~70% through WS3 + WS2 + WS4 + validator + 3 post-build codex rounds + 2 fix iterations + commit. Phase 3 (services — bot pid/lock/mutex helpers + service.py STOP_FILE consolidation) should start fresh.
+
+### Phase 2 Next-Phase Instructions (cold-start)
+
+A fresh session can start Phase 3 with:
+
+```
+/clutch PRDs/active/PRD-7-native-multi-persona-profiles-with-archon-spine.md 3 3
+```
+
+Phase 3 (7c) scope per PRD §7.3:
+- Service helpers: `get_bot_pid_path`, `get_bot_lock_path`, `get_bot_mutex_name`, `allocate_port`
+- `service.py` STOP_FILE consolidation (currently narrowly whitelisted in `tests/test_no_install_dir_paths.py::_DEFERRED_VIOLATIONS` per Phase 1 R1 M2 fix)
+- `chat/main.py` lines 88, 117-160 (bot pid + Windows mutex) — refactor through profile-aware helpers
+- `chat/run_chat.sh`, `run_chat.bat`, `bot-status.sh` — profile-aware lifecycle scripts
+- `shared.py:329` (`BOT_PID_FILE`) — route through `get_bot_pid_path()`
+
+Phase 2 closed all profile-creation/lifecycle/clone/wrapper concerns; Phase 3 owns the long-running bot lifecycle slice.
+
+### Phase 2 Adversarial Review Artifacts (for reference)
+
+Pre-build (before WS1 land):
+- `PRPs/planning/PRD-7-phase-2-analysis.md` — codebase analysis (559 lines)
+- `PRPs/planning/PRD-7-phase-2-adversarial-r1.md` — R1 REJECT, 5B/6M/6m
+- `PRPs/planning/PRD-7-phase-2-adversarial-r2.md` — R2 REJECT, 1 R1B unaddressed + 1NB + 5NM
+- `PRPs/planning/PRD-7-phase-2-adversarial-r3.md` — R3 REJECT, 2 NNB + 2 R2 partials + 3 NNM
+- `PRPs/planning/PRD-7-phase-2-adversarial-r4.md` — R4 ADOPT-WITH-FIXES, 0 NNNB + 2 NNNM + 2 minors (orchestrator polished directly)
+
+Post-build (after WS3+WS2+WS4 land — this session):
+- `PRPs/planning/PRD-7-phase-2-adversarial-post-build.md` — R1 FIX-REQUIRED, 5 findings (F1-F5)
+- `PRPs/planning/PRD-7-phase-2-adversarial-post-build-r2.md` — R2 FIX-REQUIRED, 1 finding (NF1)
+- `PRPs/planning/PRD-7-phase-2-adversarial-post-build-r3.md` — R3 PASS, 0 findings, 3 🟡 follow-ups
+
+### Phase 2 Key Architectural Decisions
+
+1. **`LifecycleError(RuntimeError)`** — operator-facing exception subclass. Subclassing `RuntimeError` keeps existing `except RuntimeError:` catches matching, but the framework convention is: operator-visible failures use `LifecycleError`; bare `RuntimeError` indicates a bug and should propagate. Click handler narrows catch to `(LifecycleError, ValueError, FileExistsError, FileNotFoundError)`. R3 NNM3.
+2. **`_try_acquire_state_lock` mirrors `shared.file_lock` byte-0 semantics** — opens with `"r+"` (no truncate, FP=0); on Windows `msvcrt.locking(fd, LK_NBLCK, 1)` locks byte 0; on POSIX `fcntl.flock(fd, LOCK_EX | LOCK_NB)` whole-file. Pass-2 had this wrong with `"a"` mode (FP=EOF) producing false-free readings on Windows. R3 NNB1.
+3. **Subprocess holder `sys.path` insertion** — `tests/_holders/hold_state_lock.py` does `sys.path.insert(0, str(Path(__file__).resolve().parents[2]))` BEFORE `import shared` because the child Python process does not execute pytest's `conftest.py`. R3 NNB2. Plus a separate `hold_byte0_winlock.py` helper for the byte-0 trap regression (uses `msvcrt` directly without `import shared`, so it doesn't truncate the lock file). R4 NNNM1.
+4. **Containment + symlink check FIRST** — `delete_profile()` resolves `_profile_root(name)`, validates containment via `is_relative_to(_profiles_root().resolve())`, and checks `not is_symlink()` BEFORE entering `_acquire_delete_lock` context. R2 NM4.
+5. **Wrapper template path quoting/escaping** — `shlex.quote` for POSIX shell; `_cmd_escape` returns unquoted value (cmd template uses `set "HOMIE_HOME=<escaped>"` — quote wraps whole assignment); `_ps_single_quote` for PowerShell; `plistlib.dumps()` for launchd (NOT hand-built XML); systemd quotes BOTH `Environment=` AND `WorkingDirectory=`. R3 NNM2.
+6. **`_acquire_delete_lock` is sentinel-file mutex, not advisory OS lock** — uses `open(path, 'x')` (O_EXCL); the FILE'S EXISTENCE is the guard, fd closed immediately. Distinguished from `_try_acquire_state_lock` which IS advisory-OS-lock-based. R4 minor.
+7. **State-lock probe runs FIRST in `quiesce_profile`** (post-build F1) — if any process holds a state lock, raise `LifecycleError` BEFORE bot kill or unit uninstall. Prior order (lock check after side effects) could leave a half-quiesced profile when the bot was SIGTERM'd and launchd/systemd disabled, then deletion refused. State-machine table in PRP §1955-2007 is now canonical.
+8. **`export_profile("default")` stages from `get_default_paths()` keys** (post-build F2) — does NOT recursively `copytree()` the install repo. `_stage_default_export_tree()` maps SAFE keys (`memory`, `state`, `logs`, `run`, `archon`, `home`, `cron`, `sessions`, `skills`) into a profile-shaped staging tree; `env_file`, `credentials`, `workspace`, `data`, `integrations`, `.git` are explicitly excluded. Post-stage `_assert_no_secrets_in_staged_tree()` walks and raises if any secret-shaped path survived (defense in depth + fail closed).
+9. **Secret stripping fails CLOSED** (post-build F3) — `_copytree_with_strip` raises if `.env` rewrite fails when `carry_secrets=False`. Export uses pre-stage ignore filter + post-stage scan instead of best-effort post-unlinks. On Windows readonly attributes/ACLs that previously left secrets in the archive now raise instead.
+10. **Public clone CLI routes through `create_profile`** (post-build F4) — `profile clone` and `profile clone-all` Click handlers call `create_profile(dst, clone=True/clone_all=True, clone_from=src, ...)` rather than `clone_profile()` directly. This means clone destinations get the full `_REQUIRED_PROFILE_DIRS` / `_REQUIRED_MEMORY_DIRS` / `_REQUIRED_IDENTITY_FILES` backfill AND a wrapper alias. Library `clone_profile()` helper still exists with bare-helper semantics; zero production callers per `rg`; not exported in `personas.__all__`.
+11. **`source_memory_dir` adapter for `clone_from="default"`** (post-build F5 + NF1) — when source is `"default"`, `create_profile` resolves source memory from `get_default_paths()["memory"]` (the actual `<install>/vault/memory/` location) rather than expecting `<source_root>/memory/`. Light-clone passes `source_memory_dir` through to `_clone_config_files` / `_clone_subdir_files`; full-clone routes through `_stage_default_export_tree` + `_assert_no_secrets_in_staged_tree` (same shape as F2 export). Detection sentinel: `source_memory_dir is not None`. Named-profile clone-all unchanged.
+
+---
+
+*Updated by CLUTCH v3 orchestrator. Phase 2 final checkpoint: 2026-04-30 (after WS3+WS2+WS4 land + 3 codex post-build rounds + 2 fix iterations).*

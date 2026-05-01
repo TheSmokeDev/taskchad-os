@@ -1861,5 +1861,306 @@ def evolve_propose(
     sys.exit(exit_code)
 
 
+# ── Profile commands (PRD-7 Phase 2) ───────────────────────────────────────
+
+
+@main.group()
+def profile():
+    """Manage persona profiles — create, list, clone, export, import, delete."""
+    pass
+
+
+def _profile_info_to_dict(info) -> dict:
+    """Serialize a ProfileInfo dataclass for --json output."""
+    import dataclasses
+    d = dataclasses.asdict(info)
+    # Path fields are not JSON-serializable; coerce to str.
+    for k, v in list(d.items()):
+        if isinstance(v, Path):
+            d[k] = str(v)
+    return d
+
+
+@profile.command("create")
+@click.argument("name")
+@click.option("--clone", is_flag=True, default=False, help="Light-clone from --from (or default)")
+@click.option("--clone-all", is_flag=True, default=False, help="Full-clone from --from (or default)")
+@click.option("--from", "clone_from", default=None, help="Source profile name to clone from")
+@click.option("--install-launchd", is_flag=True, default=False, help="Install macOS launchd auto-start (darwin only)")
+@click.option("--install-systemd", is_flag=True, default=False, help="Install Linux systemd user unit (linux only)")
+@click.option("--no-alias", is_flag=True, default=False, help="Skip wrapper alias creation")
+@click.option(
+    "--best-effort-alias",
+    is_flag=True,
+    default=False,
+    help="If wrapper creation fails, warn and keep the profile (R1 B4 opt-in).",
+)
+def profile_create(
+    name,
+    clone,
+    clone_all,
+    clone_from,
+    install_launchd,
+    install_systemd,
+    no_alias,
+    best_effort_alias,
+):
+    """Create a new persona profile."""
+    try:
+        from personas.lifecycle import LifecycleError, create_profile
+        # Lazy import of cli_root for R1 M2 collision check (must be inside body).
+        from cli import main as cli_root
+
+        registered = frozenset(cli_root.commands.keys())
+        info = create_profile(
+            name,
+            clone=clone,
+            clone_all=clone_all,
+            clone_from=clone_from,
+            install_launchd=install_launchd,
+            install_systemd=install_systemd,
+            no_alias=no_alias,
+            best_effort_alias=best_effort_alias,
+            registered_subcommands=registered,
+        )
+        # create_profile returns ProfileInfo; print path for the operator.
+        click.echo(f"Created profile '{name}' at {info.path}")
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("list")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_list(json_mode):
+    """List all known persona profiles."""
+    try:
+        from personas.lifecycle import LifecycleError, list_profiles
+
+        infos = list_profiles()
+        if json_mode:
+            print(json_mod.dumps([_profile_info_to_dict(i) for i in infos], indent=2))
+        else:
+            if not infos:
+                click.echo("No profiles found.")
+                return
+            for i in infos:
+                marker = "*" if i.is_default else " "
+                bot = "running" if i.bot_running else "idle"
+                click.echo(
+                    f"  {marker} {i.name:<16} [{bot}]  {i.path}  "
+                    f"skills={i.skill_count} env={'yes' if i.has_env else 'no'}"
+                )
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("show")
+@click.argument("name")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_show(name, json_mode):
+    """Show details for a single profile."""
+    try:
+        from personas.lifecycle import LifecycleError, show_profile
+
+        info = show_profile(name)
+        if json_mode:
+            print(json_mod.dumps(_profile_info_to_dict(info), indent=2))
+        else:
+            click.echo(f"Profile: {info.name}")
+            click.echo(f"  Path:        {info.path}")
+            click.echo(f"  Default:     {info.is_default}")
+            click.echo(f"  Bot running: {info.bot_running}")
+            click.echo(f"  Has .env:    {info.has_env}")
+            click.echo(f"  Skills:      {info.skill_count}")
+            if info.alias_path is not None:
+                click.echo(f"  Alias:       {info.alias_path}")
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("delete")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt")
+def profile_delete(name, yes):
+    """Delete a profile (quiesce -> unlink wrapper -> rmtree)."""
+    try:
+        from personas.lifecycle import LifecycleError, delete_profile
+
+        path = delete_profile(name, yes=yes)
+        click.echo(f"Deleted profile '{name}' (was at {path})")
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("use")
+@click.argument("name")
+def profile_use(name):
+    """Set the sticky active profile to <name>."""
+    try:
+        from personas.lifecycle import LifecycleError, use_profile
+
+        use_profile(name)
+        click.echo(f"Active profile set to '{name}'")
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("clone")
+@click.argument("src")
+@click.argument("dst")
+@click.option("--carry-secrets", is_flag=True, default=False, help="Copy .env tokens verbatim (Hermes-faithful)")
+@click.option("--no-alias", is_flag=True, default=False, help="Skip wrapper alias creation")
+@click.option(
+    "--best-effort-alias",
+    is_flag=True,
+    default=False,
+    help="If wrapper creation fails, warn and keep the cloned profile.",
+)
+def profile_clone(src, dst, carry_secrets, no_alias, best_effort_alias):
+    """Light-clone profile <src> into a new profile <dst>.
+
+    R-post-build F4 — routes through ``create_profile(... clone=True,
+    clone_from=src, ...)`` so the destination gets the full PRP-7b
+    inventory backfill (every ``_REQUIRED_PROFILE_DIRS``,
+    ``_REQUIRED_MEMORY_DIRS``, and ``_REQUIRED_IDENTITY_FILES`` entry)
+    AND a wrapper alias. The previous direct ``clone_profile()`` call
+    bypassed both.
+    """
+    try:
+        from personas.lifecycle import LifecycleError, create_profile
+        # Lazy import of cli_root for R1 M2 collision check (must be inside body).
+        from cli import main as cli_root
+
+        registered = frozenset(cli_root.commands.keys())
+        info = create_profile(
+            dst,
+            clone=True,
+            clone_from=src,
+            clone_secrets=carry_secrets,
+            no_alias=no_alias,
+            best_effort_alias=best_effort_alias,
+            registered_subcommands=registered,
+        )
+        click.echo(f"Cloned '{src}' -> '{dst}' at {info.path}")
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("clone-all")
+@click.argument("src")
+@click.argument("dst")
+@click.option("--carry-secrets", is_flag=True, default=False, help="Copy .env tokens verbatim (Hermes-faithful)")
+@click.option("--no-alias", is_flag=True, default=False, help="Skip wrapper alias creation")
+@click.option(
+    "--best-effort-alias",
+    is_flag=True,
+    default=False,
+    help="If wrapper creation fails, warn and keep the cloned profile.",
+)
+def profile_clone_all(src, dst, carry_secrets, no_alias, best_effort_alias):
+    """Full-clone profile <src> into <dst> (everything including caches).
+
+    R-post-build F4 — routes through ``create_profile(... clone_all=True,
+    clone_from=src, ...)`` so the destination gets the full PRP-7b
+    inventory backfill AND a wrapper alias.
+    """
+    try:
+        from personas.lifecycle import LifecycleError, create_profile
+        from cli import main as cli_root
+
+        registered = frozenset(cli_root.commands.keys())
+        info = create_profile(
+            dst,
+            clone_all=True,
+            clone_from=src,
+            clone_secrets=carry_secrets,
+            no_alias=no_alias,
+            best_effort_alias=best_effort_alias,
+            registered_subcommands=registered,
+        )
+        click.echo(f"Full-cloned '{src}' -> '{dst}' at {info.path}")
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("init-archon")
+@click.argument("name")
+def profile_init_archon(name):
+    """Initialize the Archon spine layout for a profile."""
+    try:
+        from personas.lifecycle import LifecycleError, init_archon
+
+        init_archon(name)
+        click.echo(f"Initialized Archon spine for profile '{name}'")
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("export")
+@click.argument("name")
+@click.option("--output", "-o", default=None, help="Output archive path (default: ~/.homie/exports/<name>-<ts>.tar.gz)")
+def profile_export(name, output):
+    """Export profile <name> as a .tar.gz archive."""
+    try:
+        from personas.clone import export_profile
+        from personas.lifecycle import LifecycleError
+
+        path = export_profile(name, output_path=output)
+        click.echo(f"Exported profile '{name}' to {path}")
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("import")
+@click.argument("archive")
+@click.option("--as", "as_name", default=None, help="Override imported profile name")
+@click.option("--force", is_flag=True, default=False, help="Overwrite existing profile dir")
+def profile_import(archive, as_name, force):
+    """Import a profile archive (.tar.gz)."""
+    try:
+        from personas.clone import import_profile
+        from personas.lifecycle import LifecycleError
+
+        path = import_profile(archive, as_name=as_name, force=force)
+        click.echo(f"Imported profile to {path}")
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile.command("migrate-default")
+@click.option("--dry-run/--apply", "dry_run", default=True, help="Dry-run prints op list (default); --apply writes journal stub")
+def profile_migrate_default(dry_run):
+    """Inventory or apply the install-dir -> ~/.homie/profiles/default migration."""
+    try:
+        from personas.lifecycle import LifecycleError
+        from personas.migrate import migrate_default_apply, migrate_default_dry_run
+
+        if dry_run:
+            ops = migrate_default_dry_run()
+            if not ops:
+                click.echo("No migration operations needed.")
+                return
+            click.echo(f"Would perform {len(ops)} operation(s):")
+            for op in ops:
+                click.echo(f"  [{op.op_type}] {op.source} -> {op.destination}")
+        else:
+            # migrate_default_apply prints its own stub message and never raises.
+            migrate_default_apply()
+            sys.exit(0)
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()
