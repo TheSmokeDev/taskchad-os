@@ -8,6 +8,7 @@ continuity tracking, and graph intelligence.
 from __future__ import annotations
 
 from cognition.capture import auto_capture_from_turn
+from cognition.identity_payload import build_identity_payload
 from cognition.injection import sanitize_recalled_content
 from cognition.observability import (
     CompactionEvent,
@@ -65,6 +66,8 @@ __all__ = [
     "sanitize_recalled_content",
     "RecallLog",
     "log_recall_event",
+    # PRD-8 Phase 2 — identity payload shim (WS2)
+    "build_identity_payload",
     # Move 2 — observability
     "CompactionEvent",
     "log_compaction_event",

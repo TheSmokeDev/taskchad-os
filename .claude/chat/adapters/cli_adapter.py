@@ -14,6 +14,78 @@ from datetime import datetime
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, User
 
 
+def _resolve_active_profile_name() -> str:
+    """Read the active profile name; fail-open to ``"unknown"`` on resolver error.
+
+    PRP-7d Task 14 / R3 NNM1: the fallback is ``"unknown"`` (NOT ``"default"``)
+    so a persona-resolution failure is not silently misfiled under the actual
+    default profile. Downstream consumers (Paperclip, Mission Control) need to
+    distinguish "we could not resolve" from "the default profile was active".
+
+    The ``from personas import get_active_profile_name`` happens INSIDE the
+    function body so module-attribute lookup applies — tests that monkeypatch
+    ``personas.activity.get_active_profile_name`` (or
+    ``personas.get_active_profile_name``) propagate to this helper. A top-level
+    import would cache the function object at import time and break that.
+    """
+    try:
+        from personas import get_active_profile_name
+
+        return get_active_profile_name() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def build_quiet_error_envelope(
+    exc: BaseException,
+    *,
+    source: str = "interactive",
+) -> str:
+    """Build the 12-field locked-order JSON envelope for CLI-level pre-adapter
+    exceptions (PRP-7d Task 15 / R1 B6).
+
+    Used by ``chat/cli.py`` when an exception is raised BEFORE
+    ``CLIAdapter.format_final_output`` would normally be called (e.g. bad
+    config, persona-resolution failure post-parse, engine init failure).
+
+    The 12-field locked order matches ``format_final_output``'s adapter-error
+    sub-path so consumers don't need two parsers. ``error`` is ALWAYS last.
+    Defaults are JSON-clean fixed-type values (empty strings, ``0`` /
+    ``0.0`` for numerics) — no ``null`` for ``cost_usd`` etc.
+
+    ``profile`` calls ``_resolve_active_profile_name()`` which itself
+    fails-open to ``"unknown"`` — defends against recursive failures.
+
+    ``source`` is the echo of the parsed ``--source`` flag value so a
+    Paperclip-style ``thehomie chat --source tool -q "x" -Q`` that fails
+    during engine/config setup is NOT silently misclassified as
+    ``"interactive"``. The value is run through ``normalize_source`` (fail-OPEN
+    to ``"interactive"`` for unknown values) so a typo or malicious caller
+    cannot pollute the envelope.
+    """
+    import json as json_mod
+
+    # Local import — avoids a top-level import cycle (chat.session imports from
+    # chat.* at parse time; this module is also imported by chat.cli at parse).
+    from session import normalize_source
+
+    payload = {
+        "success": False,
+        "response": "",
+        "session_id": "",
+        "lane": "",
+        "provider": "",
+        "model": "",
+        "cost_usd": 0.0,
+        "tool_calls": 0,
+        "execution_time_ms": 0,
+        "profile": _resolve_active_profile_name(),
+        "source": normalize_source(source),
+        "error": str(exc),
+    }
+    return json_mod.dumps(payload)
+
+
 class CLIAdapter:
     """CLI adapter — stdin/stdout for single-query and interactive modes."""
 
@@ -26,6 +98,7 @@ class CLIAdapter:
         toolsets: str | None = None,
         resume_session: str | None = None,
         continue_last: bool = False,
+        source: str = "interactive",
     ):
         self._query = query
         self._quiet = quiet
@@ -33,6 +106,10 @@ class CLIAdapter:
         self._toolsets = toolsets
         self._resume = resume_session
         self._continue_last = continue_last
+        # PRD-7 §7.10 / Phase 4 (PRP-7d): session source tag, propagated into
+        # every IncomingMessage this adapter yields and surfaced via
+        # get_session_info() for the quiet JSON envelope (WS4).
+        self.source: str = source
         self._responses: list[OutgoingMessage] = []
         self._final_response: str = ""
         self._got_error: bool = False
@@ -111,6 +188,7 @@ class CLIAdapter:
                 channel=channel,
                 platform=Platform.CLI,
                 timestamp=datetime.now(),
+                source=self.source,
             )
         else:
             # Interactive mode — readline loop
@@ -134,6 +212,7 @@ class CLIAdapter:
                         channel=channel,
                         platform=Platform.CLI,
                         timestamp=datetime.now(),
+                        source=self.source,
                     )
             except (EOFError, KeyboardInterrupt):
                 pass
@@ -193,14 +272,33 @@ class CLIAdapter:
                 "model": session.runtime_model,
                 "cost_usd": session.total_cost_usd,
                 "tool_calls": session.tool_call_count,
+                "source": session.source,
             }
-        return {"session_id": "", "lane": "", "provider": "", "model": "", "cost_usd": 0.0, "tool_calls": 0}
+        return {
+            "session_id": "",
+            "lane": "",
+            "provider": "",
+            "model": "",
+            "cost_usd": 0.0,
+            "tool_calls": 0,
+            "source": "interactive",
+        }
 
     def format_final_output(self, session_id: str | None, result: dict) -> str:
         """Format the final output for Paperclip/MC control plane.
 
         Quiet mode: deterministic JSON with success flag from is_error.
         Normal mode: human-readable footer with session metadata.
+
+        PRP-7d Task 14: success path emits 11 always-present fields in the
+        locked order; adapter-error sub-path appends ``error`` as the 12th
+        (always last). Locked order:
+
+            success, response, session_id, lane, provider, model, cost_usd,
+            tool_calls, execution_time_ms, profile, source [, error]
+
+        Tests assert ``list(payload.keys()) == [...]`` verbatim against this
+        order. Insertion order is the contract — do NOT reorder.
         """
         if self._quiet:
             import json as json_mod
@@ -217,6 +315,11 @@ class CLIAdapter:
                 "cost_usd": result.get("cost_usd", 0.0),
                 "tool_calls": result.get("tool_calls", 0),
                 "execution_time_ms": int((time.monotonic() - self._start_time) * 1000),
+                # PRP-7d Task 14 — `profile` + `source` always present, in this
+                # order, BEFORE the conditional `error` field.
+                "profile": _resolve_active_profile_name(),
+                "source": result.get("source", getattr(self, "source", "interactive"))
+                or "interactive",
             }
             if had_error:
                 payload["error"] = response_text

@@ -726,6 +726,9 @@ class ChatRouter:
             existing.updated_at = now
             store.update(existing)
         else:
+            # PRP-7d R1 B2: read source from incoming; set-once on create
+            # (the `if existing:` UPDATE branch above MUST NOT touch source).
+            message_source = getattr(incoming, "source", "interactive")
             store.create(
                 Session(
                     session_id=session_id,
@@ -737,6 +740,7 @@ class ChatRouter:
                     created_at=now,
                     updated_at=now,
                     message_count=1,
+                    source=message_source,
                 )
             )
 

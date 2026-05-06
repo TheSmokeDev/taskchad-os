@@ -1,0 +1,33 @@
+name: profile-isolation-smoke
+description: |
+  Smoke test that proves Archon runs against the active profile by writing
+  marker files keyed on the active HOMIE_NAME / HOMIE_HOME env vars.
+
+  Required env (caller MUST set):
+    HOMIE_HOME - profile root (boot.py rank-1/2/3/4 export)
+    HOMIE_NAME - profile name (boot.py exports - Phase 5)
+
+  Strict shell expansion: ${VAR:?...} fails the node loudly if VAR is missing -
+  defends against R1 B6 (silent profile=unknown markers).
+
+  R4 design: per-profile state isolation lives at <profile>/.archon/ via
+  ARCHON_HOME env var (set by the wrapper). Archon manages worktrees inside
+  ARCHON_HOME or under cwd as it chooses. The smoke YAML does NOT shell out
+  to `git worktree add` directly - that responsibility is Archon's.
+
+nodes:
+  - id: write-marker
+    bash: |
+      set -euo pipefail
+      : "${HOMIE_HOME:?HOMIE_HOME must be set}"
+      : "${HOMIE_NAME:?HOMIE_NAME must be set - boot.py must export this}"
+      mkdir -p "$HOMIE_HOME/.archon/artifacts"
+      mkdir -p "$HOMIE_HOME/.archon/ralph/profile-isolation-smoke"
+      printf 'profile=%s\nhomie_home=%s\n' "$HOMIE_NAME" "$HOMIE_HOME" > "$HOMIE_HOME/.archon/artifacts/profile-marker.txt"
+
+  - id: write-ralph-state
+    depends_on: [write-marker]
+    bash: |
+      set -euo pipefail
+      RALPH_DIR="$HOMIE_HOME/.archon/ralph/profile-isolation-smoke"
+      printf '{"profile": "%s"}\n' "$HOMIE_NAME" > "$RALPH_DIR/state.txt"

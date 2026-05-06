@@ -57,6 +57,16 @@ dependencies = [
     # gap-4 URL ingest — sync HTTP + boilerplate-stripping HTML extraction
     "requests>=2.32.0",
     "trafilatura>=1.12.0",
+    # PRP-7c Phase 3 — profile-aware bot cleanup uses psutil to read other
+    # processes' HOMIE_HOME env var so the cleanup never crosses profile
+    # boundaries. The ImportError fallback in shared._process_belongs_to_profile
+    # is belt-and-suspenders; psutil is the primary contract.
+    "psutil>=5.9.0",
+    # PRD-8 Phase 2 / WS1 — explicit pyyaml dep (M1 lock 2026-05-04).
+    # Currently transitively present at 6.0.3 via langfuse; making the
+    # contract explicit so personas.services.load_persona_config can rely
+    # on it without depending on the transitive resolution staying stable.
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
@@ -82,6 +92,9 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "httpx>=0.27.0",
+    # PRD-8 Phase 2 / WS1 — type stubs for the explicit pyyaml dep so
+    # `mypy --strict personas/services.py` is clean.
+    "types-PyYAML>=6.0",
 ]
 
 [tool.ruff]
@@ -94,3 +107,11 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+[tool.pytest.ini_options]
+# PRP-7c Phase 3 / R3 NM1 — register custom marker so future ``--strict-markers``
+# enforcement does not silently drop the marker. ``pytest -m live_chat_acceptance``
+# runs the cross-repo live-chat lock acceptance gate.
+markers = [
+    "live_chat_acceptance: cross-repo live-chat lock fix acceptance gate",
+]

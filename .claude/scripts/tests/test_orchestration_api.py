@@ -502,6 +502,11 @@ def test_api_thin_no_business_logic():
         "from orchestration.",
         "import config",
         "import importlib",
+        # PRP-7c Phase 3 (WS2 lifecycle-surfaces): API_PORT delegates through
+        # personas.services for profile-aware port resolution. This is a
+        # path-resolution helper, not business logic — same category as
+        # ``import config``.
+        "from personas.services",
     )
     for line in import_lines:
         assert any(line.startswith(p) for p in allowed_prefixes), (

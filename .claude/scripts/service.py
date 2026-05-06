@@ -19,12 +19,12 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # Paths
 SCRIPTS_DIR = Path(__file__).resolve().parent
 CHAT_DIR = SCRIPTS_DIR.parent / "chat"
 BOT_SCRIPT = CHAT_DIR / "main.py"
-STOP_FILE = SCRIPTS_DIR.parent / "data" / "state" / "service-stop"
 
 # Ensure scripts dir is on path for shared/notifications imports
 if str(SCRIPTS_DIR) not in sys.path:
@@ -36,6 +36,34 @@ from personas import apply_persona_override  # noqa: E402
 apply_persona_override()
 
 from shared import append_to_daily_log  # noqa: E402
+
+
+def _resolve_stop_file() -> Path:
+    """PRP-7c Phase 3: resolve the profile-aware service-stop sentinel path.
+
+    Default profile keeps the legacy ``<install>/data/state/service-stop``
+    location (matches PRD §8.2 — default profile preserves install-dir
+    paths). Named/custom profiles get ``<profile_root>/state/service-stop``.
+
+    Resolves on every call (Anti-pattern Rule 1 — never bind at def time
+    to ``personas.X`` because tests / live-profile-swap would not see the
+    swap. The PRP-7a deferred ``_DEFERRED_VIOLATIONS`` entry is removed by
+    this refactor.).
+    """
+    from personas import get_persona_paths
+    from personas.activity import get_active_profile_name
+    paths = get_persona_paths(get_active_profile_name())
+    return paths["state"] / "service-stop"
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 lazy lookup so existing ``from service import STOP_FILE`` /
+    ``service.STOP_FILE`` callers keep working — resolution happens at
+    attribute access time and follows the active profile.
+    """
+    if name == "STOP_FILE":
+        return _resolve_stop_file()
+    raise AttributeError(f"module 'service' has no attribute {name!r}")
 
 try:
     from notifications import send_notification  # noqa: E402
@@ -50,8 +78,9 @@ MAX_BACKOFF_SECONDS = 120
 
 def run_service(dry_run: bool = False) -> None:
     # Clear any stale stop file from previous session
-    if STOP_FILE.exists():
-        STOP_FILE.unlink()
+    stop_file = _resolve_stop_file()
+    if stop_file.exists():
+        stop_file.unlink()
 
     restart_times: deque[float] = deque()  # timestamps of recent restarts
     backoff = BASE_BACKOFF_SECONDS
@@ -129,8 +158,8 @@ def run_service(dry_run: bool = False) -> None:
             return
 
         # Check for intentional stop signal
-        if STOP_FILE.exists():
-            STOP_FILE.unlink()
+        if stop_file.exists():
+            stop_file.unlink()
             print(f"[{datetime.now()}] Stop file detected — intentional stop. Not restarting.")
             try:
                 append_to_daily_log("Bot stopped intentionally (stop file).", "Bot Lifecycle")
@@ -164,9 +193,10 @@ def run_service(dry_run: bool = False) -> None:
 
 def stop_service() -> None:
     """Create stop file so the service wrapper exits after the bot dies."""
-    STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STOP_FILE.write_text(str(datetime.now()))
-    print(f"Stop file created at {STOP_FILE}")
+    stop_file = _resolve_stop_file()
+    stop_file.parent.mkdir(parents=True, exist_ok=True)
+    stop_file.write_text(str(datetime.now()))
+    print(f"Stop file created at {stop_file}")
     print("Now kill the bot process — the service wrapper will NOT restart it.")
 
 

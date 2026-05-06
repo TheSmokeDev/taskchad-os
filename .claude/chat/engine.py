@@ -31,6 +31,7 @@ try:
         RecallTier,
         assemble_regions,
         auto_capture_from_turn,
+        build_identity_payload,
         classify_tier,
         log_recall_event,
     )
@@ -156,32 +157,45 @@ class ConversationEngine:
         self._drafted_slugs: dict[str, set[str]] = {}
 
     def _build_frozen_regions(self) -> list[Any]:
-        """Read identity files fresh. Called once per turn before prompt assembly."""
+        """Read identity files fresh. Called once per turn before prompt assembly.
+
+        PRD-8 Phase 2 (WS4): identity-file reads consolidated through
+        ``cognition.identity_payload.build_identity_payload`` so chat engine
+        and cron pipelines (memory_reflect, memory_weekly, memory_dream) share
+        a single canonical reader. PromptRegion construction + interleaved
+        ``user_inferences`` (between user and durable_memory) and
+        ``procedural_memory`` (after working_memory) regions stay verbatim —
+        the shim only hands back raw identity content keyed by uppercase
+        name. ``REGION_BUDGETS`` resolution remains env-overridable.
+        """
         if not _COGNITION_AVAILABLE:
             return []
 
         from config import MEMORY_DIR, REGION_BUDGETS
-        from runtime.bootstrap import read_file_safe
 
         memory_dir = MEMORY_DIR
         regions: list[Any] = []
         budgets = REGION_BUDGETS
 
-        soul = read_file_safe(memory_dir / "SOUL.md")
+        # WS4: single canonical identity-file read. Missing files surface as
+        # absent keys — preserved fail-open semantics from read_file_safe.
+        payload = build_identity_payload(memory_dir)
+
+        soul = payload.get("SOUL", "")
         if soul:
             regions.append(PromptRegion(
                 "identity", soul, budgets["identity"],
                 frozen=True, source="SOUL.md",
             ))
 
-        self_model = read_file_safe(memory_dir / "SELF.md")
+        self_model = payload.get("SELF", "")
         if self_model:
             regions.append(PromptRegion(
                 "self_model", self_model, budgets["self_model"],
                 frozen=True, source="SELF.md",
             ))
 
-        user = read_file_safe(memory_dir / "USER.md")
+        user = payload.get("USER", "")
         if user:
             regions.append(PromptRegion(
                 "user_model", user, budgets["user_model"],
@@ -237,7 +251,7 @@ class ConversationEngine:
                     "user_inferences region skipped: %s", exc,
                 )
 
-        memory = read_file_safe(memory_dir / "MEMORY.md")
+        memory = payload.get("MEMORY", "")
         if memory:
             regions.append(PromptRegion(
                 "durable_memory", memory, budgets["durable_memory"],
@@ -245,7 +259,7 @@ class ConversationEngine:
             ))
 
         # Living Mind Phase 1: cross-session scratchpad
-        working = read_file_safe(memory_dir / "WORKING.md")
+        working = payload.get("WORKING", "")
         if working:
             regions.append(PromptRegion(
                 "working_memory", working, budgets["working_memory"],
@@ -1049,6 +1063,9 @@ class ConversationEngine:
             existing.updated_at = now
             self.session_store.update(existing)
         else:
+            # PRP-7d R1 B2: read source from incoming message; set-once on create
+            # (the `if existing:` UPDATE branch above MUST NOT touch source).
+            message_source = getattr(message, "source", "interactive")
             session = Session(
                 session_id=session_key,
                 agent_session_id=persisted_runtime_session_id,
@@ -1067,6 +1084,7 @@ class ConversationEngine:
                 runtime_model=result.model or "",
                 runtime_profile_key=result.profile_key or "",
                 runtime_tool_calls=normalized_tool_calls,
+                source=message_source,
             )
             self.session_store.create(session)
 

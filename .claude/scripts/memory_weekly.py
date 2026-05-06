@@ -24,6 +24,15 @@ from personas import apply_persona_override
 
 apply_persona_override()
 
+# M4 import-order pattern (PRD-8 Phase 2 WS3): inject .claude/chat onto sys.path
+# AFTER apply_persona_override() boot-shim and BEFORE importing the new shim.
+# Symmetrical with memory_reflect.py + memory_dream.py.
+_CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
+if str(_CHAT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CHAT_DIR))
+
+from cognition.identity_payload import build_identity_payload  # noqa: E402
+
 from config import (  # noqa: E402
     DAILY_DIR,
     GOALS_FILE,
@@ -31,8 +40,6 @@ from config import (  # noqa: E402
     MEMORY_FILE,
     PROJECT_ROOT,
     SELF_FILE,
-    SOUL_FILE,
-    USER_FILE,
     WEEKLY_DIR,
     WEEKLY_STATE_FILE,
     ensure_directories,
@@ -99,6 +106,49 @@ def get_previous_weekly(n: int = 1) -> str:
         parts.append(f"### {f.stem}\n\n{content}")
 
     return "\n\n---\n\n".join(parts)
+
+
+# =============================================================================
+# IDENTITY SECTION ASSEMBLY (PRD-8 Phase 2 WS3 — F2 post-build fix)
+# =============================================================================
+
+
+def _assemble_weekly_identity_section(memory_dir: Path) -> str:
+    """Assemble the weekly-synthesis identity section using the shim.
+
+    Single source of truth for the prompt's identity prologue — production
+    code (``_run_weekly_inner``) and parity tests both consume this helper,
+    so any drift in headers or ordering breaks both at once.
+
+    Order MEMORY/GOALS/USER/SOUL/SELF and ``## Current X.md`` headers are
+    contract-locked by ``tests/test_memory_weekly.py``.
+    """
+    payload = build_identity_payload(memory_dir)
+    current_memory = payload.get("MEMORY", "")
+    current_goals = payload.get("GOALS", "")
+    current_user = payload.get("USER", "")
+    current_soul = payload.get("SOUL", "")
+    current_self = payload.get("SELF", "")
+
+    return f"""## Current MEMORY.md
+
+{current_memory}
+
+## Current GOALS.md
+
+{current_goals}
+
+## Current USER.md
+
+{current_user}
+
+## Current SOUL.md
+
+{current_soul}
+
+## Current SELF.md
+
+{current_self}"""
 
 
 # =============================================================================
@@ -175,12 +225,10 @@ async def _run_weekly_inner(test_mode: bool = False, days: int = 7) -> str | Non
     except Exception as e:
         print(f"[{now_local()}] Recall for weekly failed (non-blocking): {e}")
 
-    # Load current files
-    current_memory = load_file_safe(MEMORY_FILE)
-    current_goals = load_file_safe(GOALS_FILE)
-    current_soul = load_file_safe(SOUL_FILE)
-    current_user = load_file_safe(USER_FILE)
-    current_self = load_self_file()
+    # PRD-8 Phase 2 WS3: assemble identity section via the extracted helper.
+    # Order MEMORY/GOALS/USER/SOUL/SELF + headers locked by parity tests in
+    # tests/test_memory_weekly.py — production helper is the test target.
+    identity_section = _assemble_weekly_identity_section(MEMORY_DIR)
     previous_weekly = get_previous_weekly(n=1)
 
     # Determine the week number for the output file
@@ -198,25 +246,7 @@ async def _run_weekly_inner(test_mode: bool = False, days: int = 7) -> str | Non
     synthesis_prompt = f"""Weekly memory synthesis. Review the past {days} days of daily logs \
 and produce a weekly summary.
 {dry_run_note}
-## Current MEMORY.md
-
-{current_memory}
-
-## Current GOALS.md
-
-{current_goals}
-
-## Current USER.md
-
-{current_user}
-
-## Current SOUL.md
-
-{current_soul}
-
-## Current SELF.md
-
-{current_self}
+{identity_section}
 
 ## Previous Weekly Review (for continuity)
 

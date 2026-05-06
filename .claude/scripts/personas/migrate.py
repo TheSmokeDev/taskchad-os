@@ -145,19 +145,25 @@ def _directory_ops(
     """
     ops: list[MigrationOp] = []
     # Top-level dirs that map 1:1 onto the per-profile layout.
+    # PRP-7e R3 cascade: dst literal is ``.archon`` (dotted) but the
+    # source lookup must still hit ``install_paths["archon"]`` (the
+    # dict KEY is preserved for back-compat). _ARCHON_ALIAS_KEY maps
+    # the dotted destination key back to the bare source key for
+    # ``install_paths.get()``.
     keys = (
         "data",
         "state",
         "logs",
         "run",
-        "archon",
+        ".archon",
         "home",
         "cron",
         "sessions",
         "skills",
     )
     for key in keys:
-        src = install_paths.get(key)
+        src_key = "archon" if key == ".archon" else key
+        src = install_paths.get(src_key)
         if src is None:
             continue
         if not src.exists():

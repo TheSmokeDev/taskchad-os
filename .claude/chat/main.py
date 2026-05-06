@@ -89,8 +89,15 @@ except Exception:
 
 
 def _is_bot_process_alive() -> bool:
-    """Check if any bot process is actually running (not just a stale mutex)."""
-    pid_file = _CHAT_DIR / "bot.pid"
+    """Check if any bot process is actually running (not just a stale mutex).
+
+    PRP-7c Phase 3: routes through ``personas.services.get_bot_pid_path()``
+    so the pid path follows the active profile. Liveness check delegates to
+    ``shared.is_pid_alive()`` (canonical cross-platform helper).
+    """
+    from personas import services as _services
+    from shared import is_pid_alive
+    pid_file = _services.get_bot_pid_path()
     if not pid_file.exists():
         return False
     try:
@@ -99,24 +106,7 @@ def _is_bot_process_alive() -> bool:
         return False
     if old_pid == os.getpid():
         return False
-    if sys.platform == "win32":
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, old_pid)
-        if not h:
-            return False  # Process doesn't exist
-        exit_code = ctypes.c_ulong()
-        kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code))
-        kernel32.CloseHandle(h)
-        STILL_ACTIVE = 259
-        return exit_code.value == STILL_ACTIVE
-    else:
-        try:
-            os.kill(old_pid, 0)
-            return True
-        except OSError:
-            return False
+    return is_pid_alive(old_pid)
 
 
 def _acquire_instance_lock() -> bool:
@@ -129,13 +119,20 @@ def _acquire_instance_lock() -> bool:
 
     If the mutex is held but no bot process is alive, force-release it
     (handles orphaned mutexes from crashes).
+
+    PRP-7c Phase 3: mutex name and lock path are profile-scoped via
+    ``personas.services.get_bot_mutex_name()`` / ``get_bot_lock_path()`` so
+    two profiles can run their bots simultaneously without colliding.
     """
+    from personas import services as _services
     try:
         if sys.platform == "win32":
             import ctypes
             kernel32 = ctypes.windll.kernel32
-            # Legacy mutex name — do not rename (breaks running instance lock)
-            mutex_name = "Global\\SecondBrainTelegramBot"
+            # Profile-scoped mutex (default profile preserves the legacy
+            # ``Global\\SecondBrainTelegramBot`` name; named profiles get
+            # a hashed-stable variant).
+            mutex_name = _services.get_bot_mutex_name()
             handle = kernel32.CreateMutexW(None, True, mutex_name)
             ERROR_ALREADY_EXISTS = 183
             if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
@@ -162,7 +159,8 @@ def _acquire_instance_lock() -> bool:
             return True
         else:
             import fcntl
-            lock_path = _CHAT_DIR / "bot.lock"
+            lock_path = _services.get_bot_lock_path()
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
             _lock_fh = open(lock_path, "w")
             try:
                 fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -215,9 +213,46 @@ def _flush_telegram_session(token: str) -> None:
                 print(f"Warning: could not flush Telegram session: {e}")
 
 
+def _run_test_hold(unlock_path: Path) -> None:
+    """F3 — test-only "hold open" mode for the two-bot integration test.
+
+    Enters the SAME instance-lock + write_pid + cleanup_all_bot_processes path
+    as production startup, then BLOCKS on a sentinel file (or SIGTERM) instead
+    of polling Telegram. This lets ``test_two_bots_run_simultaneously_on_windows``
+    actually observe two bots holding their locks simultaneously — the
+    previous ``--test`` mode exited before adapter polling, which would pass
+    even if the second bot's startup killed the first.
+
+    Block condition: poll for ``unlock_path`` once per 200ms. The test creates
+    the file when it's done with the bot. SIGTERM/SIGINT triggers
+    ``_shutdown_handler`` which calls ``sys.exit(0)`` — atexit removes the
+    pid file. Keep it dead-simple — no async, no engine, no adapters.
+    """
+    print(f"[{datetime.now()}] --test-hold mode: holding lock + pid file. "
+          f"Waiting for unlock sentinel: {unlock_path}", flush=True)
+    while True:
+        if unlock_path.exists():
+            print(f"[{datetime.now()}] --test-hold: sentinel detected, exiting cleanly.",
+                  flush=True)
+            return
+        time.sleep(0.2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="The Homie Chat Interface")
     parser.add_argument("--test", action="store_true", help="Dry run — print config and exit")
+    parser.add_argument(
+        "--test-hold",
+        metavar="UNLOCK_PATH",
+        default=None,
+        # Rec 1 (R2) — hide from production --help output. This flag is
+        # exclusively used by ``test_two_bots_run_simultaneously_on_windows``
+        # to acquire the instance lock + pid file then block on a sentinel.
+        # Operators have no reason to invoke it; surfacing it in --help just
+        # invites confusion ("what does --test-hold do?"). The test still
+        # passes the flag explicitly, so SUPPRESS only affects help rendering.
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--telegram", action="store_true", help="Start Telegram adapter only")
     parser.add_argument("--slack", action="store_true", help="Start Slack adapter only")
     parser.add_argument("--relay", action="store_true", help="Start relay WebSocket client only")
@@ -239,6 +274,17 @@ def main() -> None:
         # handles stale updates. If old sessions linger, they expire in ~30s.
     write_pid()
     atexit.register(remove_pid)
+
+    # F3 — --test-hold short-circuits AFTER the lock + write_pid + cleanup
+    # path so the integration test exercises the real lifecycle contract.
+    # Register signal handlers FIRST so SIGTERM cleanup works during hold.
+    if args.test_hold:
+        signal.signal(signal.SIGTERM, _shutdown_handler)
+        if sys.platform != "win32":
+            signal.signal(signal.SIGINT, _shutdown_handler)
+        unlock_path = Path(args.test_hold)
+        _run_test_hold(unlock_path)
+        return
 
     # Move 5a: Restore cognitive state from vault on startup
     try:
@@ -262,6 +308,27 @@ def main() -> None:
     has_telegram = bool(TELEGRAM_BOT_TOKEN)
     has_discord = bool(DISCORD_BOT_TOKEN)
     has_whatsapp = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID)
+
+    # PRP-7c R1 B2 — refuse to start when another profile is configured with
+    # the SAME Telegram bot token. Telegram allows ONE polling process per
+    # token; the second bot would crash with HTTP 409 Conflict. Detect at
+    # startup so the operator gets a clear error instead of a confusing 409.
+    if has_telegram and (start_all or args.telegram):
+        from personas import services as _services
+        collision = _services.detect_telegram_token_collision(TELEGRAM_BOT_TOKEN)
+        if collision:
+            print(
+                f"ERROR: Telegram bot token collision detected — profile '{collision}' "
+                f"is configured with the same TELEGRAM_BOT_TOKEN as the active profile. "
+                f"Telegram only allows ONE polling process per token. Refusing to start.",
+                file=sys.stderr,
+            )
+            print(
+                f"Fix: edit '{collision}'/.env or this profile's .env so each profile "
+                f"uses a distinct TELEGRAM_BOT_TOKEN.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     # Relay config -- read from env
     relay_ws_url = os.getenv("RELAY_WS_URL", "")

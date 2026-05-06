@@ -211,6 +211,9 @@ async def handle_plan(adapter: Any, incoming: Any, args: str, *, collect_only: b
         store.update(existing)
     else:
         now = datetime.now()
+        # PRP-7d R1 B2: read source from incoming; set-once on create
+        # (the `if existing:` UPDATE branch above MUST NOT touch source).
+        message_source = getattr(incoming, "source", "interactive")
         store.create(
             Session(
                 session_id=build_session_key(platform_str, channel_id, thread_id),
@@ -222,6 +225,7 @@ async def handle_plan(adapter: Any, incoming: Any, args: str, *, collect_only: b
                 created_at=now,
                 updated_at=now,
                 mode="plan",
+                source=message_source,
             )
         )
     return "Plan mode enabled. I'll research and propose — no file changes until you say /go."

@@ -247,7 +247,10 @@ def get_persona_paths(name: str) -> dict[str, Path]:
         "credentials": profile_root / "credentials",
         "logs": profile_root / "logs",
         "run": profile_root / "run",
-        "archon": profile_root / "archon",
+        # PRP-7e R3 cascade fix: dotted ``.archon`` per Archon's discovery
+        # convention. Dict KEY ``archon`` is preserved for back-compat with
+        # consumers (``personas/lifecycle.py:904``, ``personas/archon.py``).
+        "archon": profile_root / ".archon",
         "home": profile_root / "home",
         "cron": profile_root / "cron",
         "sessions": profile_root / "sessions",

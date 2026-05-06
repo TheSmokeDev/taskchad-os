@@ -498,11 +498,22 @@ def test_profile_clone_all_from_default_does_not_copy_install_repo(
 # ---------------------------------------------------------------------------
 
 
-def test_profile_init_archon_creates_skeleton(tmp_homie_home):
+def test_profile_init_archon_creates_skeleton(tmp_homie_home, monkeypatch):
+    """PRP-7e R3 cascade: directory is now ``.archon`` (dotted).
+
+    PRP-7e R1 M1 fix: Phase 5 ``init_archon`` calls ``detect_archon_binary``
+    pre-flight. Monkeypatch the detector so this test stays green without
+    requiring the archon binary on PATH.
+    """
+    from pathlib import Path
+    monkeypatch.setattr(
+        "personas.archon.detect_archon_binary",
+        lambda **_kw: (Path("/fake/archon"), "0.3.10"),
+    )
     runner = CliRunner()
     result = runner.invoke(main, ["profile", "init-archon", "sales"])
     assert result.exit_code == 0, result.output
-    archon = tmp_homie_home / "archon"
+    archon = tmp_homie_home / ".archon"
     assert archon.is_dir()
     assert (archon / "config.yaml").exists()
 

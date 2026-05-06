@@ -193,6 +193,10 @@ class RelayWSClient:
             agent_type=agent_type,
             user_role=user_role,
             raw_event={"request_id": request_id},
+            # PRP-7d R1 B7: web relay default + propagate. Relay frame may carry
+            # a "source" field; absent → IncomingMessage default ("interactive").
+            # `normalize_source` at the store layer will coerce malformed values.
+            source=data.get("source", "interactive"),
         )
 
         return request_id, incoming

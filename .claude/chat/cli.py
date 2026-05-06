@@ -36,7 +36,8 @@ import click  # noqa: E402
 from engine import ConversationEngine  # noqa: E402
 from models import Platform  # noqa: E402, F401
 from router import ChatRouter  # noqa: E402
-from session import get_session_store  # noqa: E402
+from session import SOURCE_VALUES, get_session_store  # noqa: E402
+from cli_session import session as session_group  # noqa: E402
 
 from config import (  # noqa: E402
     CHAT_DB_PATH,
@@ -68,6 +69,9 @@ def main(ctx):
         click.echo(ctx.get_help())
 
 
+main.add_command(session_group)
+
+
 @main.command()
 @click.option("-q", "--query", default=None, help="Single query (non-interactive)")
 @click.option("-Q", "--quiet", is_flag=True, help="Quiet/JSON output (for Paperclip)")
@@ -75,7 +79,19 @@ def main(ctx):
 @click.option("-t", "--toolsets", default=None, help="Filter tool access (reserved for future)")
 @click.option("--resume", "-r", "resume_id", default=None, help="Resume session by ID")
 @click.option("--continue", "-c", "continue_last", is_flag=True, help="Resume most recent session")
-def chat(query, quiet, model, toolsets, resume_id, continue_last):
+@click.option(
+    "--source",
+    type=click.Choice(SOURCE_VALUES, case_sensitive=True),
+    default="interactive",
+    show_default=True,
+    help=(
+        "Session source tag (one of: interactive, tool, cron, hook). "
+        "'tool' and 'hook' are hidden from `thehomie session list` by default. "
+        "Note: --source on a --resume'd session is ignored (source is set once at create). "
+        "Values are case-sensitive (lowercase only)."
+    ),
+)
+def chat(query, quiet, model, toolsets, resume_id, continue_last, source):
     """Chat with The Homie. Interactive REPL or single query (-q)."""
     ensure_directories()
 
@@ -104,6 +120,7 @@ def chat(query, quiet, model, toolsets, resume_id, continue_last):
         toolsets=toolsets,
         resume_session=resume_id,
         continue_last=continue_last,
+        source=source,
     )
 
     store = get_session_store(CHAT_DB_PATH)
@@ -171,12 +188,70 @@ def chat(query, quiet, model, toolsets, resume_id, continue_last):
         pass
     except Exception as exc:
         if quiet:
+            # PRP-7d Task 15 / R1 B6 — emit the 12-field locked-order error
+            # envelope so consumers (Paperclip, Mission Control) see the same
+            # schema on the pre-adapter exception path as on the success path.
+            # Pass ``source=source`` so a Paperclip-style
+            # ``thehomie chat --source tool -q "x" -Q`` that fails during
+            # engine/config setup keeps the operator's --source echo (R1 B6
+            # post-build fix F1) instead of being silently downgraded to
+            # ``"interactive"``.
+            from adapters.cli_adapter import build_quiet_error_envelope
+
             sys.stdout = real_stdout
-            print(json_mod.dumps({"success": False, "error": str(exc)}), flush=True)
+            print(build_quiet_error_envelope(exc, source=source), flush=True)
             sys.exit(1)
         else:
             click.echo(f"Error: {exc}", err=True)
             sys.exit(1)
+
+
+def _collect_profile_lifecycle_contract() -> dict:
+    """F5 — return the per-profile lifecycle contract for the ``status`` command.
+
+    Operators running ``thehomie -p sales status`` need to see WHICH paths /
+    mutex / ports the active profile is using. Without this, profile
+    isolation is invisible from the operator surface (the PRP names this
+    command explicitly as the place to expose the contract).
+
+    Returns a dict with stable keys for both human and JSON output:
+
+      * ``active_profile``             - resolved profile name
+      * ``bot_pid_path``               - get_bot_pid_path()
+      * ``bot_lock_path``              - get_bot_lock_path()
+      * ``bot_mutex_name``             - get_bot_mutex_name() (or ``None`` on POSIX)
+      * ``orchestration_api_port``     - get_orchestration_api_port()
+      * ``health_check_port``          - get_health_check_port()
+      * ``whatsapp_webhook_port``      - get_whatsapp_webhook_port()
+
+    Each call goes through the same Phase 3 service helpers that
+    chat/main.py uses at startup, so the values printed here are
+    guaranteed to match the values the bot will actually use.
+
+    Errors are caught per-field and replaced with a stringified exception
+    so a single broken helper does not blank the entire status output.
+    """
+    from personas import activity as _activity
+    from personas import services as _services
+
+    contract: dict = {}
+
+    def _safe(fn):
+        try:
+            return fn()
+        except Exception as exc:  # pragma: no cover — exercised by F5 test
+            return f"<error: {exc}>"
+
+    contract["active_profile"] = _safe(_activity.get_active_profile_name)
+    contract["bot_pid_path"] = str(_safe(_services.get_bot_pid_path))
+    contract["bot_lock_path"] = str(_safe(_services.get_bot_lock_path))
+    contract["bot_mutex_name"] = (
+        _safe(_services.get_bot_mutex_name) if sys.platform == "win32" else None
+    )
+    contract["orchestration_api_port"] = _safe(_services.get_orchestration_api_port)
+    contract["health_check_port"] = _safe(_services.get_health_check_port)
+    contract["whatsapp_webhook_port"] = _safe(_services.get_whatsapp_webhook_port)
+    return contract
 
 
 @main.command()
@@ -187,12 +262,38 @@ def status(json_mode):
     from diagnostics import collect_diagnostics
 
     report = collect_diagnostics()
+    # F5 — expose the per-profile lifecycle contract (pid path, lock path,
+    # mutex name, ports). Operators running ``thehomie -p sales status``
+    # need to see which paths/ports the active profile is using.
+    lifecycle = _collect_profile_lifecycle_contract()
     if json_mode:
         import dataclasses
 
-        print(json_mod.dumps(dataclasses.asdict(report), indent=2))
+        payload = dataclasses.asdict(report)
+        # Merge the lifecycle contract under a stable key. Keeping it as a
+        # nested dict preserves backwards compatibility for any consumer
+        # that already parses the diagnostics fields.
+        payload["profile_lifecycle"] = lifecycle
+        print(json_mod.dumps(payload, indent=2))
     else:
         _print_status_human(report)
+        _print_profile_lifecycle_contract(lifecycle)
+
+
+def _print_profile_lifecycle_contract(contract: dict) -> None:
+    """Human-readable rendering of the F5 lifecycle contract block."""
+    click.echo("\nProfile lifecycle:")
+    click.echo(f"  Active profile:           {contract.get('active_profile')}")
+    click.echo(f"  Bot PID path:             {contract.get('bot_pid_path')}")
+    click.echo(f"  Bot lock path:            {contract.get('bot_lock_path')}")
+    mutex = contract.get("bot_mutex_name")
+    if mutex is None:
+        click.echo("  Bot mutex:                <hidden — Windows only>")
+    else:
+        click.echo(f"  Bot mutex:                {mutex}")
+    click.echo(f"  Orchestration API port:   {contract.get('orchestration_api_port')}")
+    click.echo(f"  Health check port:        {contract.get('health_check_port')}")
+    click.echo(f"  WhatsApp webhook port:    {contract.get('whatsapp_webhook_port')}")
 
 
 @main.command()
@@ -2092,14 +2193,87 @@ def profile_clone_all(src, dst, carry_secrets, no_alias, best_effort_alias):
 
 @profile.command("init-archon")
 @click.argument("name")
-def profile_init_archon(name):
-    """Initialize the Archon spine layout for a profile."""
-    try:
-        from personas.lifecycle import LifecycleError, init_archon
+@click.option(
+    "--archon-version",
+    "archon_version",
+    default=None,
+    help="Pin a specific Archon version (default: detect from installed binary)",
+)
+@click.option(
+    "--strict-version",
+    is_flag=True,
+    default=False,
+    help="Fail on installed-vs-pinned version drift (default: warn-only)",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite existing config + re-seed smoke workflow",
+)
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+@click.option("-Q", "--quiet", is_flag=True, help="Quiet output (no echo on success)")
+def profile_init_archon(name, archon_version, strict_version, force, json_mode, quiet):
+    """Initialize the Archon spine layout for a profile (PRP-7e Phase 5).
 
-        init_archon(name)
-        click.echo(f"Initialized Archon spine for profile '{name}'")
-    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+    Exit codes:
+      0 - success
+      1 - generic error (LifecycleError / ValueError / FileExistsError / FileNotFoundError /
+          ArchonConfigShapeError)
+      4 - archon binary not installed (ArchonNotInstalledError)
+      7 - version mismatch (ArchonVersionMismatchError) - PRD §12.3 / Q3
+    """
+    # Subclass-first import + catch order. ArchonNotInstalledError /
+    # ArchonVersionMismatchError must be caught BEFORE ArchonError /
+    # LifecycleError, otherwise the broader catch swallows the specific
+    # exit-code mapping.
+    from personas.archon import (
+        ArchonError,
+        ArchonNotInstalledError,
+        ArchonVersionMismatchError,
+        init_archon,
+    )
+    from personas.lifecycle import LifecycleError
+
+    try:
+        archon_root = init_archon(
+            name,
+            archon_version=archon_version,
+            strict_version=strict_version,
+            force=force,
+        )
+        smoke_path = archon_root / "workflows" / "profile-isolation-smoke.yaml"
+        if json_mode:
+            payload = {
+                "profile": name,
+                "archon_root": str(archon_root),
+                "config_path": str(archon_root / "config.yaml"),
+                "smoke_workflow": str(smoke_path),
+                "smoke_seeded": smoke_path.is_file(),
+                "force": force,
+                "strict_version": strict_version,
+                "archon_version_pinned": archon_version,
+            }
+            print(json_mod.dumps(payload, indent=2))
+        elif not quiet:
+            click.echo(
+                f"Initialized Archon spine for profile '{name}' at {archon_root}"
+            )
+            if smoke_path.is_file():
+                click.echo("  workflows/profile-isolation-smoke.yaml seeded")
+    except ArchonNotInstalledError as exc:
+        click.echo(f"Error: Archon not installed: {exc}", err=True)
+        sys.exit(4)
+    except ArchonVersionMismatchError as exc:
+        click.echo(f"Error: Archon version mismatch: {exc}", err=True)
+        sys.exit(7)
+    except (
+        ArchonError,
+        LifecycleError,
+        ValueError,
+        FileExistsError,
+        FileNotFoundError,
+    ) as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
@@ -2160,6 +2334,329 @@ def profile_migrate_default(dry_run):
     except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
+
+
+# ── Archon runner subgroup (PRP-7e Phase 5 — R4 ARCHON_HOME pivot) ───────────
+#
+# `thehomie archon list/run/status` is the operator surface for invoking
+# Archon workflows scoped to the active profile (resolved by Phase 1's
+# `apply_persona_override`). The subgroup is a thin wrapper over the `archon`
+# binary — it does NOT re-implement workflow discovery or execution.
+#
+# R4 pivot: per-profile state lives at <profile>/.archon/ via ARCHON_HOME env
+# var (state isolation). --cwd is passed for Archon's git-probe (which fails
+# on non-git dirs) — set to `git rev-parse --show-toplevel` of the operator's
+# CWD. NO ARCHON_SOURCE_REPO env (R4 dropped).
+#
+# Profile-aware via existing `-p/--profile` precedence — already pre-parsed
+# by `apply_persona_override` at module import (cli.py:27-29). Click's `main`
+# group declares no `-p` option.
+
+
+@main.group()
+def archon():
+    """Run profile-scoped Archon workflows (list/run/status)."""
+    pass
+
+
+def _resolve_archon_home_for_runner(profile_name: str) -> str:
+    """Compute the ARCHON_HOME value (= <profile>/.archon).
+
+    For named profiles: returns <profile_root>/.archon.
+    For default: returns <install_root>/.archon.
+    """
+    from personas import get_default_paths, get_persona_paths
+
+    if profile_name == "default":
+        paths = get_default_paths()
+    else:
+        paths = get_persona_paths(profile_name)
+    # paths["archon"] resolves to <profile>/.archon (R3 cascade — Q1)
+    return str(paths["archon"])
+
+
+def _resolve_homie_home_for_runner(profile_name: str) -> str:
+    """Compute the HOMIE_HOME value the Archon subprocess actually runs under.
+
+    Phase 5 post-build F2 fix: never returns an empty string. Resolves to a
+    concrete path so the shipped smoke YAML's strict
+    ``${HOMIE_HOME:?HOMIE_HOME must be set}`` expansion succeeds.
+
+    Resolution rules:
+        - default profile  → install repo root (parent of
+                              ``get_default_paths()["archon"]``). This is the
+                              install-dir that hosts ``.claude/``, ``.archon/``,
+                              ``vault/memory/``, etc.
+        - named profile    → ``~/.homie/profiles/<name>/`` (the profile dir
+                              itself; same value boot.py rank-3 publishes).
+
+    The default-profile choice intentionally aligns with the shape the
+    smoke workflow expects: it does ``mkdir -p $HOMIE_HOME/.archon/...`` and
+    writes markers under there, which lands at ``<install>/.archon/...`` —
+    the same dir ``ARCHON_HOME`` already points at.
+    """
+    from personas import get_default_paths, get_persona_paths
+
+    if profile_name == "default":
+        # Install repo root = parent of <install>/.archon. ``get_default_paths``
+        # already resolves the install root via ``Path(__file__).parent.parent``
+        # so this stays portable across clones / Windows / WSL.
+        archon_root = get_default_paths()["archon"]
+        return str(archon_root.parent)
+    # Named profile: use the profile dir itself (same value boot.py
+    # rank-1 / rank-3 sets HOMIE_HOME to). ``paths["archon"]`` is
+    # ``<profile>/.archon`` so its parent is ``<profile>``.
+    paths = get_persona_paths(profile_name)
+    return str(paths["archon"].parent)
+
+
+def _resolve_git_repo_for_runner():
+    """Compute the --cwd value: operator's git repo root, or None if not in repo."""
+    import subprocess as _subprocess
+
+    try:
+        toplevel = _subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            text=True,
+            stderr=_subprocess.DEVNULL,
+        ).strip()
+        return toplevel or None
+    except (_subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+
+
+@archon.command("list")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output (passes through to archon)")
+def archon_list(json_mode):
+    """List Archon workflows discoverable for the active profile."""
+    import subprocess as _subprocess
+
+    from personas import get_active_profile_name, get_subprocess_env
+    from personas.archon import (
+        ArchonNotInstalledError,
+        detect_archon_binary,
+        is_archon_initialized,
+    )
+
+    try:
+        detect_archon_binary()  # raises ArchonNotInstalledError (exit 4)
+        profile_name = get_active_profile_name()
+        if not is_archon_initialized(profile_name):
+            click.echo(
+                f"Error: Archon not initialized for profile '{profile_name}'.\n"
+                f"  Run: thehomie profile init-archon {profile_name}",
+                err=True,
+            )
+            sys.exit(1)
+
+        git_repo = _resolve_git_repo_for_runner()
+        if git_repo is None:
+            click.echo(
+                "Error: thehomie archon list must be invoked from inside a git repo "
+                "(Archon's --cwd flag triggers a git-repo-root probe).",
+                err=True,
+            )
+            sys.exit(1)
+
+        archon_home = _resolve_archon_home_for_runner(profile_name)
+        # F2 post-build fix: resolve a concrete HOMIE_HOME — never empty.
+        # The shipped smoke YAML uses strict ``${HOMIE_HOME:?...}`` expansion
+        # which would hard-fail on an empty value. boot.py also calls
+        # ``os.environ.pop("HOMIE_HOME")`` for the explicit ``-p default``
+        # sentinel, so falling back to ``os.environ.get("HOMIE_HOME", "")``
+        # produces an empty string for that path (real bug, not theoretical).
+        existing_home = os.environ.get("HOMIE_HOME", "").strip()
+        homie_home = existing_home or _resolve_homie_home_for_runner(profile_name)
+        env_extra = {
+            "ARCHON_HOME": archon_home,  # R4 pivot
+            "ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING": "1",
+            "HOMIE_HOME": homie_home,
+            "HOMIE_NAME": os.environ.get("HOMIE_NAME", profile_name),
+        }
+        cmd = ["archon", "workflow", "list", "--cwd", git_repo]
+        if json_mode:
+            cmd.append("--json")
+        result = _subprocess.run(
+            cmd,
+            env=get_subprocess_env(env_extra),
+            check=False,
+        )
+        sys.exit(result.returncode)
+    except ArchonNotInstalledError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(4)
+
+
+@archon.command("run", context_settings={"ignore_unknown_options": True})
+@click.argument("workflow")
+@click.argument("workflow_args", nargs=-1, type=click.UNPROCESSED)
+def archon_run(workflow, workflow_args):
+    """Run an Archon workflow under the active profile."""
+    import subprocess as _subprocess
+
+    from personas import get_active_profile_name, get_subprocess_env
+    from personas.archon import (
+        ArchonNotInstalledError,
+        detect_archon_binary,
+        is_archon_initialized,
+    )
+
+    try:
+        detect_archon_binary()
+        profile_name = get_active_profile_name()
+        if not is_archon_initialized(profile_name):
+            click.echo(
+                f"Error: Archon not initialized for profile '{profile_name}'.\n"
+                f"  Run: thehomie profile init-archon {profile_name}",
+                err=True,
+            )
+            sys.exit(1)
+
+        # R4 ARCHON_HOME pivot: per-profile state isolation via env var,
+        # --cwd points at a git repo to satisfy Archon's git-probe. Resolve
+        # git repo from operator's CWD at invocation time.
+        git_repo = _resolve_git_repo_for_runner()
+        if git_repo is None:
+            click.echo(
+                "Error: thehomie archon run must be invoked from inside a git repo "
+                "(Archon's --cwd flag triggers a git-repo-root probe that fails "
+                "on non-git directories).",
+                err=True,
+            )
+            sys.exit(1)
+
+        archon_home = _resolve_archon_home_for_runner(profile_name)
+        # F2 post-build fix: resolve a concrete HOMIE_HOME — never empty.
+        # See ``archon list`` handler for the full rationale; the same env
+        # contract applies to ``archon run``.
+        existing_home = os.environ.get("HOMIE_HOME", "").strip()
+        homie_home = existing_home or _resolve_homie_home_for_runner(profile_name)
+        env_extra = {
+            "ARCHON_HOME": archon_home,  # R4 pivot
+            "ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING": "1",
+            # boot.py already set HOMIE_HOME and HOMIE_NAME for named
+            # profiles; be defensive AND fill in the default-profile case.
+            "HOMIE_HOME": homie_home,
+            "HOMIE_NAME": os.environ.get("HOMIE_NAME", profile_name),
+        }
+        # R4: --cwd is the operator's git repo (any git repo will do — only
+        # used to satisfy Archon's git-probe). State + workflow discovery
+        # come from <ARCHON_HOME>/workflows/ via the env var.
+        cmd = ["archon", "workflow", "run", workflow, "--cwd", git_repo]
+        cmd.extend(workflow_args)
+        result = _subprocess.run(
+            cmd,
+            env=get_subprocess_env(env_extra),
+            check=False,
+        )
+        sys.exit(result.returncode)
+    except ArchonNotInstalledError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(4)
+
+
+@archon.command("status")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def archon_status(json_mode):
+    """Show Archon binary + version-lock + config status for the active profile.
+
+    DIAGNOSTIC-ONLY (R3 NM-minor): always exits 0. The body explains the
+    state. This makes `thehomie archon status` a useful first-look tool
+    even when Archon isn't installed or the profile isn't initialized.
+    For gating CI/CD on Archon health, parse the output OR call
+    `thehomie archon list` (which exits 4 / 1 on real failures).
+    """
+    from personas import get_active_profile_name
+    from personas.archon import (
+        ArchonNotInstalledError,
+        detect_archon_binary,
+        get_actual_config_shape,
+        get_archon_config_path,
+        is_archon_initialized,
+    )
+
+    profile_name = get_active_profile_name()
+    homie_home = os.environ.get("HOMIE_HOME", "<not set>")
+    archon_home = _resolve_archon_home_for_runner(profile_name)
+
+    # --- Detection ---
+    binary_path: str | None = None
+    installed_version: str | None = None
+    detection_error: str | None = None
+    try:
+        bp, installed_version = detect_archon_binary()
+        binary_path = str(bp)
+    except ArchonNotInstalledError as exc:
+        detection_error = str(exc)
+        # R3 NM-minor: status is diagnostic. Do NOT exit 4 here.
+
+    # --- Config shape ---
+    config_path = get_archon_config_path(profile_name)
+    config_state: str  # one of: "OK", "STALE", "MISSING"
+    locked_version: str | None = None
+    if not config_path.is_file():
+        config_state = "MISSING"
+    else:
+        shape = get_actual_config_shape(profile_name)
+        if not is_archon_initialized(profile_name):
+            config_state = "STALE"
+        else:
+            config_state = "OK"
+        if shape is not None:
+            try:
+                locked_version = shape["capabilities"]["archon"].get("archon_version")
+            except (KeyError, TypeError, AttributeError):
+                locked_version = None
+
+    # --- JSON path ---
+    if json_mode:
+        version_match: bool | None
+        if installed_version is None or locked_version is None:
+            version_match = None
+        else:
+            version_match = installed_version == locked_version
+        payload = {
+            "profile": profile_name,
+            "homie_home": homie_home,
+            "archon_home": archon_home,
+            "archon_binary": binary_path,
+            "installed_version": installed_version,
+            "binary_error": detection_error,
+            "config_path": str(config_path),
+            "config_state": config_state,
+            "locked_version": locked_version,
+            "version_match": version_match,
+            "initialized": config_state == "OK",
+        }
+        print(json_mod.dumps(payload, indent=2))
+        return  # exit 0 (diagnostic)
+
+    # --- Human-readable path ---
+    click.echo(f"Profile: {profile_name} (HOMIE_HOME={homie_home})")
+    click.echo(f"  ARCHON_HOME:  {archon_home}")
+    if binary_path is not None:
+        click.echo(f"  archon binary: {binary_path} (v{installed_version})")
+    else:
+        click.echo(f"  archon binary: NOT INSTALLED ({detection_error})")
+    if config_state == "MISSING":
+        click.echo(f"  config:        {config_path} - MISSING")
+        click.echo(f"                 Run: thehomie profile init-archon {profile_name}")
+        return  # exit 0 (diagnostic)
+    if config_state == "STALE":
+        click.echo(
+            f"  config:        {config_path} - STALE (missing required PRD §11.1 fields)"
+        )
+        click.echo(f"                 Run: thehomie profile init-archon {profile_name}")
+        return  # exit 0 (diagnostic)
+    click.echo(f"  config:        {config_path} - OK (PRD §11.1 shape)")
+    if installed_version is not None and locked_version is not None:
+        if locked_version == installed_version:
+            click.echo(f"  version-lock:  {locked_version} (matches)")
+        else:
+            click.echo(
+                f"  version-lock:  {locked_version} (installed: {installed_version}) - MISMATCH"
+            )
+            # R3 NM-minor: status is diagnostic. Do NOT exit 1 here.
 
 
 if __name__ == "__main__":

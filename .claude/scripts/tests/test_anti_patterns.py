@@ -1,0 +1,197 @@
+"""Cross-file AST anti-pattern enforcement — PRD-8 Phase 2 / criterion 9 + 16.
+
+Mandatory acceptance test (per PRP §criterion 9: "Mandatory acceptance
+criterion, not optional polish (per R1 M3)"). The localized AST checks
+inside ``test_identity_payload.py`` only cover one file; this file covers
+the full Phase 2 surface — all 6 files touched by the agent identity
+reconciliation refactor.
+
+Rule 1: no FunctionDef has a default arg whose unparsed expression is a
+single uppercase identifier (the canonical "binds tunable config at def
+time" trap). Use ``param=None`` sentinel + body-side resolution instead.
+
+Rule 2: no module-level ``.read_text()`` / ``.read_bytes()`` / ``open()``
+calls. File I/O happens inside function bodies, so reads are repeatable
+and respect runtime state — not cached at import time.
+
+The 6 files covered:
+- ``.claude/chat/cognition/identity_payload.py``
+- ``.claude/chat/engine.py``
+- ``.claude/scripts/memory_reflect.py``
+- ``.claude/scripts/memory_weekly.py``
+- ``.claude/scripts/memory_dream.py``
+- ``.claude/scripts/personas/services.py``
+"""
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# File set under audit (resolved relative to repo layout, not cwd)
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_CHAT_DIR = _REPO_ROOT / ".claude" / "chat"
+_SCRIPTS_DIR = _REPO_ROOT / ".claude" / "scripts"
+
+AUDITED_FILES: list[Path] = [
+    _CHAT_DIR / "cognition" / "identity_payload.py",
+    _CHAT_DIR / "engine.py",
+    _SCRIPTS_DIR / "memory_reflect.py",
+    _SCRIPTS_DIR / "memory_weekly.py",
+    _SCRIPTS_DIR / "memory_dream.py",
+    _SCRIPTS_DIR / "personas" / "services.py",
+]
+
+# Stable parametrize ids — relative to repo for legible failure output.
+AUDITED_IDS: list[str] = [
+    str(p.relative_to(_REPO_ROOT)).replace("\\", "/") for p in AUDITED_FILES
+]
+
+_UPPERCASE_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _parse(path: Path) -> ast.Module:
+    """Parse *path* into an AST module — fails the test if file missing."""
+    assert path.is_file(), f"Phase 2 audit file missing: {path}"
+    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def _is_main_guard(test: ast.expr) -> bool:
+    """Return True iff *test* is the canonical ``__name__ == "__main__"`` check.
+
+    Code inside such a guard body never runs at import time, so module-level
+    file reads there are Rule-2-safe (no caching of state into module).
+    """
+    if not isinstance(test, ast.Compare):
+        return False
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    if len(test.comparators) != 1:
+        return False
+    left = test.left
+    right = test.comparators[0]
+    # Either side may hold the Name vs the Constant.
+    name_node, const_node = (None, None)
+    if isinstance(left, ast.Name) and isinstance(right, ast.Constant):
+        name_node, const_node = left, right
+    elif isinstance(right, ast.Name) and isinstance(left, ast.Constant):
+        name_node, const_node = right, left
+    else:
+        return False
+    return name_node.id == "__name__" and const_node.value == "__main__"
+
+
+# ---------------------------------------------------------------------------
+# Rule 1 — no default arg binds an UPPERCASE module-level constant
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", AUDITED_FILES, ids=AUDITED_IDS)
+def test_rule1_no_default_arg_bind_config(path: Path) -> None:
+    """Rule 1: function defaults must not unparse to a bare uppercase name.
+
+    e.g. ``def f(x=DEFAULT_INCLUDE)`` would silently cache the value at
+    ``def`` time — runtime overrides via monkeypatch / config reload would
+    be ignored. The canonical fix is ``def f(x=None)`` then resolve in the
+    body. AST-walks every FunctionDef/AsyncFunctionDef in *path*.
+    """
+    tree = _parse(path)
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        defaults = list(node.args.defaults) + list(node.args.kw_defaults)
+        for default in defaults:
+            if default is None:
+                continue
+            try:
+                src = ast.unparse(default).strip()
+            except Exception:
+                continue
+            if _UPPERCASE_NAME.match(src):
+                offenders.append(
+                    f"{path.name}:{node.lineno} — def {node.name}(... ={src})"
+                )
+
+    assert not offenders, (
+        f"Rule 1 violation — default arg binds UPPERCASE constant: {offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rule 2 — no module-level file reads
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", AUDITED_FILES, ids=AUDITED_IDS)
+def test_rule2_no_module_level_file_reads(path: Path) -> None:
+    """Rule 2: no ``.read_text()`` / ``.read_bytes()`` / ``open()`` at module top level.
+
+    Reads at module top run once at import time and cache content into
+    module state — making subsequent runtime changes invisible. All file
+    I/O for these 6 files must happen inside function bodies. ``Path(...)``
+    construction at module top is fine (no I/O); the rule targets
+    actual call sites.
+    """
+    tree = _parse(path)
+
+    forbidden_attrs = {"read_text", "read_bytes"}
+    forbidden_funcs = {"open"}
+
+    offenders: list[str] = []
+    # Iterate only TOP-LEVEL statements; skip into FunctionDef/AsyncFunctionDef
+    # /ClassDef bodies because reads inside those are allowed. Also skip
+    # ``if __name__ == "__main__":`` guard bodies — those run only on script
+    # invocation, never at import time, so they don't cache module state.
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.If) and _is_main_guard(node.test):
+            continue
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            func = sub.func
+            if isinstance(func, ast.Attribute) and func.attr in forbidden_attrs:
+                offenders.append(
+                    f"{path.name}:{sub.lineno} — .{func.attr}() at module level"
+                )
+            elif isinstance(func, ast.Name) and func.id in forbidden_funcs:
+                offenders.append(
+                    f"{path.name}:{sub.lineno} — {func.id}() at module level"
+                )
+
+    assert not offenders, (
+        f"Rule 2 violation — module-level file reads: {offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Coverage sanity — the parametrize set isn't accidentally trimmed
+# ---------------------------------------------------------------------------
+
+
+def test_audit_covers_six_files() -> None:
+    """The PRP locks 6 files into the Phase 2 audit surface — guard against drift."""
+    assert len(AUDITED_FILES) == 6, (
+        f"Phase 2 anti-pattern audit must cover exactly 6 files; got {len(AUDITED_FILES)}"
+    )
+    expected_names = {
+        "identity_payload.py",
+        "engine.py",
+        "memory_reflect.py",
+        "memory_weekly.py",
+        "memory_dream.py",
+        "services.py",
+    }
+    actual_names = {p.name for p in AUDITED_FILES}
+    assert actual_names == expected_names, (
+        f"Audit file set drifted; expected {expected_names}, got {actual_names}"
+    )

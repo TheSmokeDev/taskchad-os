@@ -38,6 +38,15 @@ from personas import apply_persona_override  # noqa: E402
 
 apply_persona_override()
 
+# M4 import-order pattern (PRD-8 Phase 2 WS3): inject .claude/chat onto sys.path
+# AFTER apply_persona_override() boot-shim and BEFORE importing the new shim.
+# Symmetrical with memory_reflect.py + memory_weekly.py.
+_CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
+if str(_CHAT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CHAT_DIR))
+
+from cognition.identity_payload import build_identity_payload  # noqa: E402
+
 from config import (  # noqa: E402
     DAILY_DIR,
     DREAM_MIN_INTERVAL_HOURS,
@@ -114,6 +123,57 @@ class SignalResult:
     repeated_entities: list[str] = field(default_factory=list)
     files_scanned: int = 0
     signal_score: int = 0
+
+
+# =============================================================================
+# IDENTITY SECTION ASSEMBLY (PRD-8 Phase 2 WS3 — F2 post-build fix)
+# =============================================================================
+
+
+def _assemble_consolidate_identity_section(
+    memory_dir: Path, memory_lines: int
+) -> str:
+    """Assemble the dream-consolidate identity section using the shim.
+
+    Single source of truth for the consolidate-phase identity prologue —
+    production code (``consolidate``) and parity tests both consume this
+    helper, so any drift in headers or ordering breaks both at once.
+
+    Order MEMORY/SELF/GOALS and the ``({N} lines)`` MEMORY-header annotation
+    are contract-locked by ``tests/test_memory_dream.py``.
+    """
+    payload = build_identity_payload(memory_dir)
+    memory_content = payload.get("MEMORY", "")
+    self_content = payload.get("SELF", "")
+    goals_content = payload.get("GOALS", "")
+
+    return f"""## Current MEMORY.md ({memory_lines} lines)
+
+{memory_content}
+
+## Current SELF.md
+
+{self_content}
+
+## Current GOALS.md (read-only — reference only, do NOT edit)
+
+{goals_content}"""
+
+
+def _assemble_prune_memory_section(memory_dir: Path) -> str:
+    """Assemble the dream-prune MEMORY-only section using the shim.
+
+    Prune reads MEMORY only — the ``include=("MEMORY",)`` scoping is part
+    of the contract. Header annotation ``({N} lines)`` is computed from the
+    fetched content so the line count matches the rendered prompt body.
+    """
+    payload = build_identity_payload(memory_dir, include=("MEMORY",))
+    memory_content = payload.get("MEMORY", "")
+    memory_lines = len(memory_content.splitlines())
+
+    return f"""## Current MEMORY.md ({memory_lines} lines)
+
+{memory_content}"""
 
 
 # =============================================================================
@@ -307,10 +367,12 @@ async def consolidate(
     from runtime.lane_router import run_with_runtime_lanes
     from shared import validate_bash_command
 
-    # Load current file contents for context
-    memory_content = MEMORY_FILE.read_text(encoding="utf-8") if MEMORY_FILE.exists() else ""
-    self_content = SELF_FILE.read_text(encoding="utf-8") if SELF_FILE.exists() else ""
-    goals_content = GOALS_FILE.read_text(encoding="utf-8") if GOALS_FILE.exists() else ""
+    # PRD-8 Phase 2 WS3: assemble identity section via the extracted helper.
+    # Order MEMORY/SELF/GOALS + headers locked by parity tests in
+    # tests/test_memory_dream.py — production helper is the test target.
+    identity_section = _assemble_consolidate_identity_section(
+        MEMORY_DIR, orientation.memory_lines
+    )
 
     today_str = now_local().strftime("%Y-%m-%d")
 
@@ -336,17 +398,7 @@ async def consolidate(
 
 {signal.digest}
 
-## Current MEMORY.md ({orientation.memory_lines} lines)
-
-{memory_content}
-
-## Current SELF.md
-
-{self_content}
-
-## Current GOALS.md (read-only — reference only, do NOT edit)
-
-{goals_content}
+{identity_section}
 {post_weekly_note}
 ## Instructions
 
@@ -415,8 +467,13 @@ async def prune(orientation: OrientResult, test_mode: bool = False) -> str:
     from runtime.lane_router import run_with_runtime_lanes
     from shared import validate_bash_command
 
-    memory_content = MEMORY_FILE.read_text(encoding="utf-8") if MEMORY_FILE.exists() else ""
-    memory_lines = len(memory_content.splitlines())
+    # PRD-8 Phase 2 WS3: assemble MEMORY section via the extracted helper.
+    # Header + content locked by parity tests in tests/test_memory_dream.py.
+    memory_section = _assemble_prune_memory_section(MEMORY_DIR)
+    # Instruction #2 below references the line count separately; derive it
+    # via the same shim so the count and the rendered body never drift.
+    _payload = build_identity_payload(MEMORY_DIR, include=("MEMORY",))
+    memory_lines = len(_payload.get("MEMORY", "").splitlines())
 
     dry_run_note = (
         "\n\nDRY RUN: Do NOT edit any files. Describe what you would change.\n"
@@ -426,9 +483,7 @@ async def prune(orientation: OrientResult, test_mode: bool = False) -> str:
 
     prompt = f"""Memory dream pruning. Clean up and optimize MEMORY.md.
 {dry_run_note}
-## Current MEMORY.md ({memory_lines} lines)
-
-{memory_content}
+{memory_section}
 
 ## Instructions
 

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 from .activity import read_active_profile
 from .core import (
@@ -48,6 +49,35 @@ from .core import (
     get_homie_home,
     validate_persona_name,
 )
+
+
+def _name_from_homie_home(home: str) -> str:
+    """Derive the profile name from a HOMIE_HOME path string.
+
+    PRP-7e R3 NM2 fix: for ``<root>/profiles/<name>/``, the profile name
+    is the LAST path segment (``Path.name``), NOT the second-to-last.
+    The earlier R3 spec used ``Path(...).parts[-2]`` semantics which
+    would extract ``profiles`` (the parent dir name) instead.
+
+    Handles trailing slashes uniformly on POSIX and Windows because
+    ``Path(...).resolve(strict=False)`` strips trailing separators.
+
+    Returns:
+        - ``<name>``   when the path is shaped like ``<root>/profiles/<name>``
+        - ``"custom"`` when HOMIE_HOME points somewhere bespoke (operator
+                       override layout — aligns with ``get_persona_paths("custom")``
+                       semantics, PRP-7a R1 B1)
+        - ``"default"`` when *home* is empty / unparseable
+    """
+    if not home:
+        return "default"
+    try:
+        path = Path(home).expanduser().resolve(strict=False)
+    except (OSError, ValueError):
+        return "default"
+    if path.parent.name == "profiles":
+        return path.name
+    return "custom"
 
 
 def resolve_persona_env(name: str) -> str:
@@ -142,6 +172,15 @@ def apply_persona_override() -> None:
                     f"using raw env value as-is",
                     file=sys.stderr,
                 )
+            # PRP-7e R1 B6 / Operator Decision 2: derive HOMIE_NAME from the
+            # already-set HOMIE_HOME path so downstream tooling (smoke
+            # workflows using ``${HOMIE_NAME:?...}``, archon runners) has
+            # an identity to key on. ``setdefault`` so a parent process
+            # that already set HOMIE_NAME wins.
+            os.environ.setdefault(
+                "HOMIE_NAME",
+                _name_from_homie_home(os.environ.get("HOMIE_HOME", "")),
+            )
             return  # rank 2 wins — do NOT read sticky meta
 
     # Rank 3: sticky ``~/.homie/active_profile`` meta file.
@@ -156,6 +195,42 @@ def apply_persona_override() -> None:
     profile_name = explicit_name if explicit_name is not None else sticky_name
     if profile_name is None:
         # Rank 4: no profile selected — fall through to physical default.
+        # PRP-7e R1 B6: still publish HOMIE_NAME=default so downstream
+        # tooling has an identity to key on. ``setdefault`` so a parent
+        # that already set it wins.
+        os.environ.setdefault("HOMIE_NAME", "default")
+        return
+
+    # PRP-7c Phase 3 R3 — explicit ``default`` / ``-`` from rank-1 (CLI) is a
+    # force-default sentinel, NOT a profile name. ``validate_persona_name``
+    # rejects ``default`` as reserved (correct — no one should be allowed to
+    # CREATE a profile named "default"), but operators STILL need a way to
+    # type ``--profile default`` to override a sticky ``active_profile`` and
+    # force the install-dir back-compat path. Treat the sentinel as "clear any
+    # inherited HOMIE_HOME and let rank-4 win", strip the flag from argv, and
+    # return BEFORE the validation call below would have hard-failed.
+    #
+    # Sticky-meta ``default`` was already filtered to ``None`` by
+    # ``read_active_profile`` (line 82), so this branch only fires for an
+    # explicit CLI selection.
+    if explicit_name is not None and explicit_name in ("default", "-"):
+        os.environ.pop("HOMIE_HOME", None)
+        # PRP-7e R1 B6: explicit force-default sentinel publishes
+        # HOMIE_NAME="default". Use direct assignment (not setdefault)
+        # because the operator typing ``--profile default`` is an explicit
+        # force — they want the install-dir back-compat path even if a
+        # stale HOMIE_NAME was set by a parent.
+        os.environ["HOMIE_NAME"] = "default"
+        if consume > 0:
+            for i, arg in enumerate(argv):
+                if arg in ("--profile", "-p"):
+                    start = i + 1
+                    sys.argv = sys.argv[:start] + sys.argv[start + consume:]
+                    break
+                if arg.startswith("--profile="):
+                    start = i + 1
+                    sys.argv = sys.argv[:start] + sys.argv[start + 1:]
+                    break
         return
 
     try:
@@ -198,6 +273,11 @@ def apply_persona_override() -> None:
         return
 
     os.environ["HOMIE_HOME"] = homie_home
+    # PRP-7e R1 B6 / Operator Decision 2: rank-1 (CLI) and rank-3 (sticky)
+    # both publish HOMIE_NAME alongside HOMIE_HOME. Direct assignment (not
+    # setdefault) — the resolved profile_name is the new authority; any
+    # stale HOMIE_NAME from a parent process must be replaced.
+    os.environ["HOMIE_NAME"] = profile_name
 
     # Strip --profile / -p from sys.argv so Click / argparse don't choke.
     if consume > 0:

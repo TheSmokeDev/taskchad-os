@@ -562,3 +562,147 @@ class TestSignalThreshold:
             # Total should be well above 4
             assert result.found is True
             assert result.signal_score >= 4
+
+
+# =============================================================================
+# PRD-8 PHASE 2 WS3 — IDENTITY-PAYLOAD SHIM PARITY TESTS
+# =============================================================================
+#
+# Two tests prove that the consolidate (Phase 3) and prune (Phase 4) phases
+# preserve identity-section assembly behavior after refactoring inline file
+# reads to use ``cognition.identity_payload.build_identity_payload``.
+#
+# Per PRP §Workstream 3 Task6:
+#   - tests/test_memory_dream.py::test_consolidate_prompt_parity_with_shim
+#   - tests/test_memory_dream.py::test_prune_prompt_parity_with_shim
+#
+# Pattern matches the canonical ``mock_memory_dir`` fixture above. Each test
+# captures the pre-refactor inline reads as a private helper, runs both paths
+# against the same ``tmp_path / "TheHomie" / "Memory"`` fixture, asserts byte
+# equality of the assembled identity section.
+
+
+def _legacy_consolidate_identity_section(
+    memory_file: Path, self_file: Path, goals_file: Path, memory_lines: int
+) -> str:
+    """Pre-refactor consolidate-phase identity-section assembly.
+
+    Mirrors memory_dream.py:311-313 + the prompt body at :339-349 verbatim.
+    Order: MEMORY/SELF/GOALS, with the ``memory_lines`` annotation in the
+    MEMORY header and the read-only annotation on the GOALS header.
+    """
+    memory_content = memory_file.read_text(encoding="utf-8") if memory_file.exists() else ""
+    self_content = self_file.read_text(encoding="utf-8") if self_file.exists() else ""
+    goals_content = goals_file.read_text(encoding="utf-8") if goals_file.exists() else ""
+
+    return f"""## Current MEMORY.md ({memory_lines} lines)
+
+{memory_content}
+
+## Current SELF.md
+
+{self_content}
+
+## Current GOALS.md (read-only — reference only, do NOT edit)
+
+{goals_content}"""
+
+
+# F2 post-build fix: production helpers ARE the test target.
+from memory_dream import (
+    _assemble_consolidate_identity_section as _new_consolidate_identity_section,
+    _assemble_prune_memory_section as _new_prune_identity_section,
+)
+
+
+def _legacy_prune_identity_section(memory_file: Path) -> str:
+    """Pre-refactor prune-phase identity-section assembly.
+
+    Mirrors memory_dream.py:418-431 verbatim. Prune reads MEMORY only.
+    Returns (assembled_section, memory_lines) so callers can assert the
+    derived line count too — the line count drives the truncation rule
+    in production.
+    """
+    memory_content = memory_file.read_text(encoding="utf-8") if memory_file.exists() else ""
+    memory_lines = len(memory_content.splitlines())
+
+    return f"""## Current MEMORY.md ({memory_lines} lines)
+
+{memory_content}"""
+
+
+def test_consolidate_prompt_parity_with_shim(mock_memory_dir):
+    """Consolidate-phase identity section is byte-identical pre/post refactor.
+
+    WS3 acceptance criterion ``memory_dream_refactor_parity_preserved``
+    (consolidate half).
+    """
+    memory_file = mock_memory_dir / "MEMORY.md"
+    self_file = mock_memory_dir / "SELF.md"
+    goals_file = mock_memory_dir / "GOALS.md"
+    # Production derives memory_lines from the OrientResult; we replicate by
+    # counting from the file directly so both legacy + shim see the same value.
+    memory_lines = (
+        len(memory_file.read_text(encoding="utf-8").splitlines())
+        if memory_file.exists()
+        else 0
+    )
+
+    legacy = _legacy_consolidate_identity_section(
+        memory_file, self_file, goals_file, memory_lines
+    )
+    new = _new_consolidate_identity_section(mock_memory_dir, memory_lines)
+
+    assert legacy == new, (
+        "Consolidate identity-section parity broken between legacy reads + shim. "
+        f"Diff first 200 chars:\n  legacy[:200]={legacy[:200]!r}\n  new[:200]={new[:200]!r}"
+    )
+
+
+def test_consolidate_prompt_parity_with_shim_missing_files(tmp_path):
+    """Missing identity files in consolidate phase preserves parity (fail-open)."""
+    empty_dir = tmp_path / "TheHomie" / "Memory"
+    empty_dir.mkdir(parents=True)
+
+    memory_file = empty_dir / "MEMORY.md"
+    self_file = empty_dir / "SELF.md"
+    goals_file = empty_dir / "GOALS.md"
+
+    legacy = _legacy_consolidate_identity_section(
+        memory_file, self_file, goals_file, memory_lines=0
+    )
+    new = _new_consolidate_identity_section(empty_dir, memory_lines=0)
+
+    assert legacy == new
+    assert "## Current MEMORY.md (0 lines)" in new
+
+
+def test_prune_prompt_parity_with_shim(mock_memory_dir):
+    """Prune-phase identity section is byte-identical pre/post refactor.
+
+    WS3 acceptance criterion ``memory_dream_refactor_parity_preserved``
+    (prune half).
+    """
+    memory_file = mock_memory_dir / "MEMORY.md"
+
+    legacy = _legacy_prune_identity_section(memory_file)
+    new = _new_prune_identity_section(mock_memory_dir)
+
+    assert legacy == new, (
+        "Prune identity-section parity broken between legacy reads + shim. "
+        f"Diff first 200 chars:\n  legacy[:200]={legacy[:200]!r}\n  new[:200]={new[:200]!r}"
+    )
+
+
+def test_prune_prompt_parity_with_shim_missing_memory(tmp_path):
+    """Missing MEMORY.md in prune phase preserves parity (fail-open)."""
+    empty_dir = tmp_path / "TheHomie" / "Memory"
+    empty_dir.mkdir(parents=True)
+
+    memory_file = empty_dir / "MEMORY.md"
+
+    legacy = _legacy_prune_identity_section(memory_file)
+    new = _new_prune_identity_section(empty_dir)
+
+    assert legacy == new
+    assert "## Current MEMORY.md (0 lines)" in new

@@ -80,10 +80,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 STATE_DIR = _paths["state"]
 HEARTBEAT_STATE_FILE = STATE_DIR / "heartbeat-state.json"
 
-# Bot lifecycle paths (PRP-7c will own the full consolidation; Phase 1 stubs
-# them to ``_paths["run"]`` which equals STATE_DIR for the default profile).
-BOT_PID_FILE: Path = _paths["run"] / "bot.pid"
-BOT_LOCK_FILE: Path = _paths["run"] / "bot.lock"
+# Bot lifecycle paths (PRP-7c Phase 3 / R2 NB1): delegated to
+# ``personas.services`` via the module-level ``__getattr__`` at the bottom
+# of this file. ``BOT_PID_FILE`` / ``BOT_LOCK_FILE`` resolve at attribute
+# access time so a profile swap mid-process takes effect immediately and
+# the resolver stays the single source of truth.
 
 # === Reflection Configuration ===
 REFLECTION_STATE_FILE = STATE_DIR / "reflection-state.json"
@@ -333,10 +334,9 @@ DISCORD_ALLOWED_USERS: list[str] = [
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
-WHATSAPP_WEBHOOK_PORT = int(os.getenv("WHATSAPP_WEBHOOK_PORT", "8443"))
-
-# Health check
-HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", "8787"))
+# WHATSAPP_WEBHOOK_PORT and HEALTH_CHECK_PORT are profile-aware and resolved
+# lazily through ``personas.services`` via the module-level ``__getattr__``
+# at the bottom of this file (PRP-7c Phase 3 / R2 NB1).
 
 # Self-model inference tracking
 INFERENCE_STATE_FILE = STATE_DIR / "self-model-inferences.json"
@@ -443,3 +443,43 @@ def reload_config() -> dict[str, tuple[str, str]]:
                 changes[key] = (str(old_val), str(new_val))
 
     return changes
+
+
+# === PRP-7c Phase 3 — profile-aware delegated attributes ===
+#
+# ``BOT_PID_FILE``, ``BOT_LOCK_FILE``, ``HEALTH_CHECK_PORT``, and
+# ``WHATSAPP_WEBHOOK_PORT`` are resolved on every attribute access via
+# ``personas.services``. Resolution is intentionally lazy:
+#
+#   * Avoids the circular-import trap. ``personas.services`` imports from
+#     ``personas.core`` (stdlib-only); it does NOT need ``config``. So
+#     ``import config`` then ``import personas.services`` works, and the
+#     reverse order works too.
+#   * Mid-process profile swaps (tests, ``HOMIE_HOME`` rebinding) take
+#     effect immediately because resolution happens at attribute access
+#     time, not at module import time.
+#   * Existing ``from config import HEALTH_CHECK_PORT`` consumers still
+#     work because PEP 562 ``__getattr__`` handles the lookup transparently.
+#
+# Local ``Any`` import for the ``__getattr__`` annotation (kept near the
+# bottom so the rest of the module's import-time behavior stays unchanged).
+from typing import Any  # noqa: E402, I001
+
+# Anti-pattern Rule 1: no def-time bind to ``personas.services`` — the
+# import lives inside the helper so a test can monkey-patch the resolver
+# and the next access sees the patched value.
+def __getattr__(name: str) -> Any:
+    """Delegate profile-aware constants to ``personas.services``."""
+    if name == "BOT_PID_FILE":
+        from personas.services import get_bot_pid_path
+        return get_bot_pid_path()
+    if name == "BOT_LOCK_FILE":
+        from personas.services import get_bot_lock_path
+        return get_bot_lock_path()
+    if name == "HEALTH_CHECK_PORT":
+        from personas.services import get_health_check_port
+        return get_health_check_port()
+    if name == "WHATSAPP_WEBHOOK_PORT":
+        from personas.services import get_whatsapp_webhook_port
+        return get_whatsapp_webhook_port()
+    raise AttributeError(f"module 'config' has no attribute {name!r}")

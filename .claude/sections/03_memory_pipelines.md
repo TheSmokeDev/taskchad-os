@@ -61,6 +61,31 @@ RECALL_MIN_MSG_LEN=20        # Skip short messages ("hi", "thanks")
 | `recall_service.py` | Canonical recall interface — `recall(query, context)` → ranked snippets |
 | `cognition/recall.py` | Core recall logic — tier classification, dual search, graph traversal, hub boosting |
 
+### Identity Payload Consolidation
+
+`cognition/identity_payload.py` is the canonical reader for identity-file context (SOUL / SELF / USER / MEMORY / GOALS / WORKING). The chat hot path and the cron memory pipelines share this single shim instead of duplicating `read_file_safe()` calls — preventing the "two parallel readers" drift class-of-bug when a new identity file gets added (e.g., a future HABITS.md only needs to be added to `DEFAULT_INCLUDE` and every consumer picks it up). PRD-8 Phase 2 (WS2 + WS3 + WS4).
+
+```python
+def build_identity_payload(
+    memory_dir: Path,
+    *,
+    include: tuple[str, ...] | None = None,
+) -> dict[str, str]:
+    """Returns dict keyed by uppercase name. Missing files → key ABSENT."""
+```
+
+Fail-open contract (matches `read_file_safe`): missing files surface as absent keys (not empty string, not `None`); empty `memory_dir` → `{}`; OS errors swallowed by `read_file_safe` and never escape. Consumers keep their own prompt assembly, ordering, and headers — the shim only hands back raw content. No file-content caching at module scope (Rule 2); `include` is a `None` sentinel resolved inside the body (Rule 1).
+
+| Consumer | Call site | What it consumes |
+|----------|-----------|------------------|
+| `engine.py:182` | `_build_frozen_regions()` | SOUL / SELF / USER / MEMORY / WORKING — wired into `PromptRegion`s with `config.REGION_BUDGETS` (env-overridable, UNCHANGED). Interleaved `user_inferences` (between user_model and durable_memory) and `procedural_memory` (after working_memory) regions stay verbatim — the shim does NOT touch them. |
+| `memory_reflect.py:202` | Daily reflection prompt prologue | MEMORY + USER + SOUL |
+| `memory_weekly.py:188` | Weekly synthesis prompt prologue | MEMORY + USER + SOUL + GOALS |
+| `memory_dream.py:321` | Dream consolidate phase | MEMORY + SELF + GOALS |
+| `memory_dream.py:431` | Dream prune phase | MEMORY |
+
+Parity tests prove byte-equality with the pre-refactor inline-read path: `tests/test_chat_runtime_engine.py::test_frozen_regions_parity_with_shim`, `tests/test_memory_reflect.py::test_prompt_parity_with_shim`, `tests/test_memory_weekly.py::test_prompt_parity_with_shim`, `tests/test_memory_dream.py::test_consolidate_prompt_parity_with_shim` + `::test_prune_prompt_parity_with_shim`.
+
 ### Entity Compilation Engine (Karpathy Port)
 
 When a document is ingested, the compilation engine extracts key entities/concepts and creates or updates dedicated concept pages in `vault/memory/concepts/`. This turns the vault from a filing system into a deeply interlinked knowledge graph — ported from Karpathy's LLM Wiki pattern.

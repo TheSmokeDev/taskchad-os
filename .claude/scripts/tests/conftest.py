@@ -301,6 +301,67 @@ def source_profile_with_secrets(
     return src
 
 
+# === PRP-7c Phase 3 — Multi-profile fixture ===
+# Used by test_persona_bot_lifecycle, test_persona_bot_lock_isolation,
+# test_persona_lock_isolation, test_persona_port_allocation, and
+# test_persona_token_collision so each test exercises a real two-profile
+# layout under ``<tmp>/.homie/profiles/sales`` + ``.../engineering``.
+
+
+@pytest.fixture
+def multi_profile_fixture(
+    empty_homie_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Path]:
+    """Build ``<empty_homie_root>/profiles/{sales,engineering}/`` profile pair.
+
+    Each profile gets the directory inventory matching Phase 1's
+    ``_REQUIRED_PROFILE_DIRS`` (mirroring what ``personas.lifecycle.create_profile``
+    seeds) plus a minimal `.env` file so tests can override token values
+    without re-creating the file.
+
+    Yields::
+
+        {"sales": <empty_homie_root>/profiles/sales,
+         "engineering": <empty_homie_root>/profiles/engineering}
+
+    HOMIE_HOME is left set to the empty root (from ``empty_homie_root``);
+    individual tests flip it to a profile root via ``monkeypatch.setenv``.
+    """
+    required_dirs = (
+        "memory",
+        "data",
+        "state",
+        "credentials",
+        "logs",
+        "run",
+        # PRP-7e R3 cascade fix: dotted ``.archon`` (Archon's discovery
+        # convention). ``personas.get_persona_paths(name)["archon"]`` keeps
+        # the bare-string KEY but resolves to ``<profile>/.archon``.
+        ".archon",
+        "home",
+        "cron",
+        "sessions",
+        "skills",
+        "workspace",
+    )
+    profiles_root = empty_homie_root / "profiles"
+    profiles_root.mkdir(exist_ok=True)
+    out: dict[str, Path] = {}
+    for name in ("sales", "engineering"):
+        profile_dir = profiles_root / name
+        profile_dir.mkdir()
+        for sub in required_dirs:
+            (profile_dir / sub).mkdir(parents=True, exist_ok=True)
+        # Minimal .env — empty TELEGRAM_BOT_TOKEN by default; tests overwrite.
+        (profile_dir / ".env").write_text(
+            "# fake profile env (multi_profile_fixture)\n"
+            "TELEGRAM_BOT_TOKEN=\n",
+            encoding="utf-8",
+        )
+        out[name] = profile_dir
+    return out
+
+
 @pytest.fixture
 def live_pid_fixture():
     """Spawn a real ``subprocess.Popen`` running ``time.sleep(60)``.

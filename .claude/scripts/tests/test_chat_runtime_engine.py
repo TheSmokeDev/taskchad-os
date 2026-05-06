@@ -484,3 +484,262 @@ def test_build_voice_provider_set_keeps_stt_tts_separate() -> None:
     )
     assert edge_only.stt is None
     assert type(edge_only.tts).__name__ == "EdgeTtsProvider"
+
+
+# =============================================================================
+# PRD-8 Phase 2 (WS4) — engine._build_frozen_regions parity with shim
+# =============================================================================
+# Refactor target: engine._build_frozen_regions consolidates the SOUL / SELF /
+# USER / MEMORY / WORKING reads through cognition.identity_payload.build_identity_payload.
+# The interleaved user_inferences (between user_model and durable_memory) and
+# procedural_memory (after working_memory) regions stay verbatim.
+#
+# Parity contract (criterion `engine_refactor_parity_preserved`):
+#   same region count, same names, same source attributions, per-region
+#   byte-equal content, same max_tokens (from config.REGION_BUDGETS,
+#   env-overridable — UNCHANGED), same frozen flags.
+
+
+def _legacy_build_frozen_regions(
+    memory_dir: Path,
+    project_root: Path,
+    budgets: dict[str, int],
+) -> list[object]:
+    """Pre-refactor reference implementation of `_build_frozen_regions`.
+
+    Mirrors the inline ``read_file_safe()`` reads at engine.py:170/177/184/240/248
+    (PRE-WS4) plus the interleaved user_inferences and procedural_memory
+    regions. Used by the parity test to prove the post-refactor (shim-backed)
+    path produces an identical region list.
+
+    The interleaved blocks (user_inferences via ``InferenceTracker``,
+    procedural_memory via ``build_skill_index``) are conditional and depend on
+    cognition optional submodules + filesystem state. The parity test seeds
+    ``memory_dir`` and ``project_root`` so BOTH the legacy and post-refactor
+    paths take the same branches (both add or both skip), keeping parity
+    deterministic.
+    """
+    import json as _json
+
+    from cognition.regions import PromptRegion as _PromptRegion
+    from runtime.bootstrap import read_file_safe as _read_file_safe
+
+    regions: list[object] = []
+
+    soul = _read_file_safe(memory_dir / "SOUL.md")
+    if soul:
+        regions.append(_PromptRegion(
+            "identity", soul, budgets["identity"],
+            frozen=True, source="SOUL.md",
+        ))
+
+    self_model = _read_file_safe(memory_dir / "SELF.md")
+    if self_model:
+        regions.append(_PromptRegion(
+            "self_model", self_model, budgets["self_model"],
+            frozen=True, source="SELF.md",
+        ))
+
+    user = _read_file_safe(memory_dir / "USER.md")
+    if user:
+        regions.append(_PromptRegion(
+            "user_model", user, budgets["user_model"],
+            frozen=True, source="USER.md",
+        ))
+
+    # Interleaved user_inferences region (verbatim from engine.py:191-238 PRE-WS4).
+    try:
+        from cognition.self_model import InferenceTracker as _InferenceTracker
+        from config import (
+            INFERENCE_PROMPT_CAP as _INFERENCE_PROMPT_CAP,
+            INFERENCE_PROMPT_MIN_CONFIDENCE as _INFERENCE_PROMPT_MIN_CONFIDENCE,
+            INFERENCE_STATE_FILE as _INFERENCE_STATE_FILE,
+        )
+    except ImportError:
+        pass
+    else:
+        try:
+            tracker = _InferenceTracker(_INFERENCE_STATE_FILE)
+            active = tracker.get_active(
+                min_confidence=_INFERENCE_PROMPT_MIN_CONFIDENCE,
+            )
+            if active:
+                active.sort(key=lambda r: r.last_updated or "", reverse=True)
+                active.sort(key=lambda r: r.confidence, reverse=True)
+                active.sort(key=lambda r: 0 if r.status == "confirmed" else 1)
+
+                inference_lines = []
+                for inf in active[:_INFERENCE_PROMPT_CAP]:
+                    status_tag = (
+                        "confirmed" if inf.status == "confirmed"
+                        else f"conf={inf.confidence:.2f}"
+                    )
+                    inference_lines.append(f"- [{status_tag}] {inf.inference}")
+                inference_text = (
+                    "## Active Beliefs About User\n"
+                    + "\n".join(inference_lines)
+                )
+                regions.append(_PromptRegion(
+                    "user_inferences",
+                    inference_text,
+                    budgets["user_inferences"],
+                    frozen=True,
+                    source="inference-tracker",
+                ))
+        except (OSError, _json.JSONDecodeError):
+            pass
+
+    memory = _read_file_safe(memory_dir / "MEMORY.md")
+    if memory:
+        regions.append(_PromptRegion(
+            "durable_memory", memory, budgets["durable_memory"],
+            frozen=True, source="MEMORY.md",
+        ))
+
+    working = _read_file_safe(memory_dir / "WORKING.md")
+    if working:
+        regions.append(_PromptRegion(
+            "working_memory", working, budgets["working_memory"],
+            frozen=True, source="WORKING.md",
+        ))
+
+    # Interleaved procedural_memory region (verbatim from engine.py:255-267 PRE-WS4).
+    try:
+        from cognition.skills import build_skill_index as _build_skill_index
+        try:
+            skill_text = _build_skill_index(
+                project_root / ".claude" / "skills",
+            )
+            if skill_text:
+                regions.append(_PromptRegion(
+                    "procedural_memory", skill_text, budgets["procedural_memory"],
+                    frozen=True, source="skills/",
+                ))
+        except Exception:
+            pass
+    except ImportError:
+        pass
+
+    return regions
+
+
+def _seed_identity_files(memory_dir: Path) -> None:
+    """Seed the canonical 5 identity files the engine reads.
+
+    Per R2 NM2 the parity test fixtures live under
+    ``tmp_path / 'TheHomie' / 'Memory'`` — NEVER touch the real
+    ``vault/memory/`` (sanitizer-denied + non-reproducible).
+    """
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "SOUL.md").write_text(
+        "# SOUL\nFixture: identity, behavioral rules.\n",
+        encoding="utf-8",
+    )
+    (memory_dir / "SELF.md").write_text(
+        "# SELF\nFixture: agent self-model patterns.\n",
+        encoding="utf-8",
+    )
+    (memory_dir / "USER.md").write_text(
+        "# USER\nFixture: user profile + integrations.\n",
+        encoding="utf-8",
+    )
+    (memory_dir / "MEMORY.md").write_text(
+        "# MEMORY\nFixture: durable decisions + lessons.\n",
+        encoding="utf-8",
+    )
+    (memory_dir / "WORKING.md").write_text(
+        "# WORKING\nFixture: open threads scratchpad.\n",
+        encoding="utf-8",
+    )
+
+
+def test_frozen_regions_parity_with_shim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """WS4 parity gate: post-refactor `_build_frozen_regions` (which reads via
+    ``cognition.identity_payload.build_identity_payload``) produces a region
+    list that is byte-identical PER REGION to the pre-refactor reference
+    implementation captured in ``_legacy_build_frozen_regions`` above.
+
+    Per criterion ``engine_refactor_parity_preserved`` the comparison covers:
+    same count, same ordering, same names, same source attributions, same
+    content (per-region byte-equal), same max_tokens (from
+    ``config.REGION_BUDGETS`` — env-overridable, UNCHANGED), same frozen flags.
+    """
+    import config as config_module
+
+    # 1. Seed canonical identity fixtures under tmp_path/vault/memory.
+    memory_dir = tmp_path / "TheHomie" / "Memory"
+    _seed_identity_files(memory_dir)
+
+    # 2. Repoint config.MEMORY_DIR at the fixture so `_build_frozen_regions`'s
+    #    `from config import MEMORY_DIR, REGION_BUDGETS` resolves to test data.
+    monkeypatch.setattr(config_module, "MEMORY_DIR", memory_dir)
+
+    budgets = config_module.REGION_BUDGETS
+
+    # 3. Use a project_root with no skills/ dir so the procedural_memory
+    #    branch returns the same empty result on both paths (parity-preserving).
+    project_root = tmp_path / "project"
+    (project_root / ".claude" / "skills").mkdir(parents=True)
+
+    # 4. Build legacy reference regions (pre-refactor logic, verbatim).
+    legacy_regions = _legacy_build_frozen_regions(
+        memory_dir=memory_dir,
+        project_root=project_root,
+        budgets=budgets,
+    )
+
+    # 5. Build post-refactor regions via the actual ConversationEngine
+    #    (its __init__ calls the shim-backed `_build_frozen_regions`).
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, project_root)
+    new_regions = convo._frozen_regions
+
+    # 6. Per-region parity assertions.
+    assert len(new_regions) == len(legacy_regions), (
+        f"Region count drift: legacy={len(legacy_regions)} "
+        f"new={len(new_regions)}\n"
+        f"legacy names={[r.name for r in legacy_regions]}\n"
+        f"new names={[r.name for r in new_regions]}"
+    )
+
+    for idx, (legacy, new) in enumerate(zip(legacy_regions, new_regions)):
+        assert legacy.name == new.name, (
+            f"Region {idx} name drift: legacy={legacy.name!r} new={new.name!r}"
+        )
+        assert legacy.source == new.source, (
+            f"Region {idx} ({new.name}) source drift: "
+            f"legacy={legacy.source!r} new={new.source!r}"
+        )
+        assert legacy.content == new.content, (
+            f"Region {idx} ({new.name}) content drift\n"
+            f"legacy={legacy.content!r}\nnew={new.content!r}"
+        )
+        assert legacy.max_tokens == new.max_tokens, (
+            f"Region {idx} ({new.name}) max_tokens drift: "
+            f"legacy={legacy.max_tokens} new={new.max_tokens}"
+        )
+        assert legacy.frozen == new.frozen, (
+            f"Region {idx} ({new.name}) frozen drift: "
+            f"legacy={legacy.frozen} new={new.frozen}"
+        )
+
+    # 7. Sanity: verify the canonical 5 identity regions are present in the
+    #    expected order. user_inferences and procedural_memory are conditional
+    #    and not asserted here (the per-region equality above already covers
+    #    them — both paths take the same branches against the same fixtures).
+    names = [r.name for r in new_regions]
+    expected_identity_order = [
+        "identity",
+        "self_model",
+        "user_model",
+        "durable_memory",
+        "working_memory",
+    ]
+    identity_present = [n for n in names if n in expected_identity_order]
+    assert identity_present == expected_identity_order, (
+        f"Identity region ordering drift: got {identity_present}, "
+        f"expected {expected_identity_order}"
+    )

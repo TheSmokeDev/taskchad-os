@@ -90,6 +90,7 @@ class IncomingMessage:
     agent_type: str = "thehomie"
     user_role: str = "admin"          # "admin", "operator", or "viewer"
     raw_event: dict[str, Any] = field(default_factory=dict)
+    source: str = "interactive"       # PRD-7 §7.10 / Phase 4 (PRP-7d): "interactive"|"tool"|"cron"|"hook"
 
 
 @dataclass

@@ -5,12 +5,187 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from session_keys import build_session_key
+
+# === PRD-7 §7.10 / Phase 4 (PRP-7d) — source tagging ===
+# Single source of truth for session-source values + default-hidden set.
+# Click `Choice`, `session list` filter, tests, and any future writer all
+# import from here.
+SOURCE_VALUES: tuple[str, ...] = ("interactive", "tool", "cron", "hook")
+SOURCE_HIDDEN_BY_DEFAULT: tuple[str, ...] = ("tool", "hook")
+
+
+def normalize_source(value: str | None) -> str:
+    """Coerce arbitrary value to a known SOURCE_VALUES entry.
+
+    Fail-OPEN: unknown or None values become "interactive". Non-Click writers
+    (relay, internal callers) cannot bypass the enum, but a relay frame with a
+    typo also won't crash the engine.
+    """
+
+    if not isinstance(value, str):
+        return "interactive"
+    v = value.strip()
+    if v in SOURCE_VALUES:
+        return v
+    return "interactive"
+
+
+def _assert_source_column_shape(
+    cursor: Any,
+    *,
+    backend: Literal["sqlite", "postgres"],
+) -> None:
+    """Assert chat_sessions.source matches PRD §7.10 + §14.23 physical shape.
+
+    SQLite PRAGMA row layout: name=r[1], type=r[2], notnull=r[3], dflt_value=r[4].
+        Required: type.upper() == "TEXT", notnull == 1,
+                  str(dflt_value) contains 'interactive'.
+    Postgres information_schema row layout: data_type=r[0], is_nullable=r[1],
+                  column_default=r[2]. Required: data_type == 'text',
+                  is_nullable == 'NO', column_default contains 'interactive'.
+        MUST filter by table_schema = current_schema() (multi-schema search_path
+        drift defense).
+    Both backends: SELECT COUNT(*) WHERE source IS NULL OR source = '' must be 0.
+    On any mismatch, raise RuntimeError with manual-repair guidance. Do NOT
+    auto-update existing data — operator repairs, then re-runs.
+    """
+
+    repair = (
+        " — manual repair required (see PRD §7.10 + §14.23); then re-run migration"
+    )
+    if backend == "sqlite":
+        rows = cursor.execute("PRAGMA table_info(chat_sessions)").fetchall()
+        cols = {r[1]: r for r in rows}
+        if "source" not in cols:
+            raise RuntimeError("source column missing" + repair)
+        r = cols["source"]
+        col_type = (r[2] or "")
+        if col_type.upper() != "TEXT":
+            raise RuntimeError(
+                f"source type expected 'TEXT', got {col_type!r}" + repair
+            )
+        if r[3] != 1:
+            raise RuntimeError("source is not NOT NULL" + repair)
+        if "interactive" not in str(r[4] or ""):
+            raise RuntimeError(
+                f"source default missing 'interactive', got {r[4]!r}" + repair
+            )
+        bad = cursor.execute(
+            "SELECT COUNT(*) FROM chat_sessions WHERE source IS NULL OR source = ''"
+        ).fetchone()[0]
+        if bad:
+            raise RuntimeError(
+                f"chat_sessions has {bad} NULL/empty source rows" + repair
+            )
+    elif backend == "postgres":
+        cursor.execute(
+            "SELECT data_type, is_nullable, column_default "
+            "FROM information_schema.columns "
+            "WHERE table_name = 'chat_sessions' "
+            "  AND column_name = 'source' "
+            "  AND table_schema = current_schema()"
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("source column missing in current_schema()" + repair)
+        if row[0] != "text":
+            raise RuntimeError(
+                f"source data_type expected 'text', got {row[0]!r}" + repair
+            )
+        if row[1] != "NO":
+            raise RuntimeError("source is_nullable expected 'NO'" + repair)
+        if "interactive" not in (row[2] or ""):
+            raise RuntimeError(
+                f"source column_default missing 'interactive', got {row[2]!r}" + repair
+            )
+        cursor.execute(
+            "SELECT COUNT(*) FROM chat_sessions WHERE source IS NULL OR source = ''"
+        )
+        bad = cursor.fetchone()[0]
+        if bad:
+            raise RuntimeError(
+                f"chat_sessions has {bad} NULL/empty source rows" + repair
+            )
+    else:
+        raise ValueError(f"unsupported backend: {backend!r}")
+
+
+def _is_duplicate_source_column_error(exc: sqlite3.OperationalError) -> bool:
+    """Classify an ``OperationalError`` as a benign duplicate-column race.
+
+    SQLite versions / forks emit several different wordings for the same
+    "another connection won the ALTER" race condition:
+
+      * ``"duplicate column name: source"``        (mainline)
+      * ``"DUPLICATE COLUMN: source"``             (case-insensitive)
+      * ``"column already exists: source"``        (alternate phrasing)
+      * ``"column 'source' already exists"``       (variant phrasing)
+
+    All four indicate the same benign race: the loser process saw the column
+    was added by the winner between our PRE-CHECK and our ALTER. The
+    unconditional post-check ``_assert_source_column_shape`` then validates
+    the final shape regardless of which path took us there — so the catch
+    here only needs to filter out genuinely-benign race wordings.
+
+    Anything else (``"database is locked"``, ``"syntax error"``,
+    ``"no such table"``, ``"unable to open database file"``) MUST propagate —
+    those are real failures, NOT races.
+    """
+
+    msg = str(exc).lower()
+    if "duplicate column" in msg:
+        return True
+    if "already exists" in msg and ("source" in msg or "column" in msg):
+        return True
+    return False
+
+
+def _run_source_migration(
+    cursor: Any,
+    *,
+    _alter_executor: Callable[[str], None] | None = None,
+) -> None:
+    """Run the SQLite chat_sessions.source ALTER with race tolerance.
+
+    Pure-Python seam (R3 NNM2): production callers pass `_alter_executor=None`,
+    which resolves to `cursor.execute`. Tests inject a callable that raises
+    `sqlite3.OperationalError("duplicate column name: source")` to simulate the
+    concurrent-first-boot race without monkeypatching `sqlite3.Connection.execute`
+    (which became an immutable type attribute in Python 3.14).
+
+    Race semantics:
+        - PRE-CHECK reads PRAGMA table_info(chat_sessions).
+        - If `source` is missing, run the ALTER. Catch ONLY OperationalErrors
+          whose message matches ``_is_duplicate_source_column_error`` — which
+          covers ``"duplicate column"`` plus the ``"column already exists"``
+          variants emitted by some SQLite forks for the same benign race.
+          Any other sqlite3.Error MUST propagate (locked DB, malformed
+          statement, wrong table, permission denied).
+        - The shape post-check (`_assert_source_column_shape`) is the caller's
+          responsibility — this helper is the ALTER seam only.
+    """
+
+    alter = _alter_executor if _alter_executor is not None else cursor.execute
+    cols = {r[1]: r for r in cursor.execute("PRAGMA table_info(chat_sessions)").fetchall()}
+    if "source" in cols:
+        return
+    try:
+        alter(
+            "ALTER TABLE chat_sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'interactive'"
+        )
+    except sqlite3.OperationalError as exc:
+        if not _is_duplicate_source_column_error(exc):
+            raise
+        # Race accepted: another process won the ALTER between our pre-check
+        # and our ALTER call. Caller's post-check will validate the shape.
+        return
 
 
 @dataclass
@@ -35,6 +210,7 @@ class Session:
     runtime_model: str = ""
     runtime_profile_key: str = ""
     runtime_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    source: str = "interactive"  # PRD-7 §7.10 / Phase 4 (PRP-7d)
 
     @property
     def runtime_session_id(self) -> str:
@@ -45,6 +221,26 @@ class Session:
     @runtime_session_id.setter
     def runtime_session_id(self, value: str) -> None:
         self.agent_session_id = value
+
+
+@dataclass
+class SessionSummary:
+    """Lightweight row summary for `thehomie session list` (PRP-7d R1 B3).
+
+    Separates ergonomics (`internal_id` for table display) from PRD contract
+    (`session_id` is the stable composite/runtime identifier `show`/`resume`
+    accept). `runtime_session_id` is the exact value `session resume` re-execs
+    with — kept distinct from `session_id` so a future split between the
+    composite key and the runtime UUID is non-breaking.
+    """
+
+    internal_id: int
+    session_id: str
+    platform: str
+    source: str
+    message_count: int
+    updated_at: datetime
+    runtime_session_id: str
 
 
 @dataclass
@@ -217,6 +413,28 @@ class SQLiteSessionStore:
             except sqlite3.OperationalError:
                 pass
 
+            # === PRD-7 §7.10 / Phase 4 (PRP-7d) — chat_sessions.source migration ===
+            # Dedicated, physical-state-checked block. Do NOT append to the broad
+            # OperationalError-swallow loop above — that pattern would mask
+            # wrong-table / locked-DB / malformed-statement errors as
+            # "column already exists" (Rule 2 + R1 B1 + R2 NB2 + R3 NNB1).
+            #
+            # Shape:
+            #   1. PRE-CHECK + race-tolerant ALTER via _run_source_migration
+            #      (pure-Python seam — production passes _alter_executor=None).
+            #   2. Unconditional shared post-check via _assert_source_column_shape
+            #      (runs whether the column was missing, just-added, or hit the
+            #      duplicate-column race). Any shape mismatch raises with a
+            #      manual-repair message — never auto-update existing data.
+            #   3. Composite index on (source, updated_at DESC) to back
+            #      `thehomie session list` (PRP-7d R2 NM1).
+            _run_source_migration(conn)
+            _assert_source_column_shape(conn, backend="sqlite")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chat_sessions_source_updated "
+                "ON chat_sessions(source, updated_at DESC)"
+            )
+
     def _row_to_session(self, row: sqlite3.Row) -> Session:
         """Convert a database row to a Session object."""
         runtime_session_id = (
@@ -263,6 +481,11 @@ class SQLiteSessionStore:
                 if "runtime_tool_calls_json" in row.keys()
                 else []
             ),
+            source=(
+                normalize_source(row["source"])
+                if "source" in row.keys()
+                else "interactive"
+            ),
         )
 
     def _row_to_chat_message(self, row: sqlite3.Row) -> ChatMessage:
@@ -295,15 +518,20 @@ class SQLiteSessionStore:
             return self._row_to_session(row)
 
     def create(self, session: Session) -> None:
-        """Insert a new session."""
+        """Insert a new session.
+
+        Writes ``normalize_source(session.source)`` so non-Click writers cannot
+        bypass the four-value enum (PRP-7d R1 M4). Set-once invariant: ``update``
+        deliberately does NOT touch ``source``.
+        """
         with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO chat_sessions
                    (session_id, agent_session_id, runtime_session_id, runtime_lane, runtime_provider,
                     runtime_model, runtime_profile_key, platform, channel_id, thread_id, user_id,
                     created_at, updated_at, message_count, total_cost_usd,
-                    status, mode, tool_call_count, runtime_tool_calls_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    status, mode, tool_call_count, runtime_tool_calls_json, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session.session_id,
                     session.agent_session_id,
@@ -324,6 +552,7 @@ class SQLiteSessionStore:
                     session.mode,
                     session.tool_call_count,
                     _serialize_tool_calls(session.runtime_tool_calls),
+                    normalize_source(session.source),
                 ),
             )
 
@@ -368,21 +597,141 @@ class SQLiteSessionStore:
             )
             return cursor.rowcount > 0
 
-    def list_active(self, platform: str | None = None) -> list[Session]:
-        """List active sessions, optionally filtered by platform."""
+    def list_active(
+        self,
+        platform: str | None = None,
+        source: str | None = None,
+        sources: list[str] | None = None,
+    ) -> list[Session]:
+        """List active sessions, optionally filtered by platform and/or source.
+
+        ``source`` is exact-match; ``sources`` is an ``IN (...)`` filter. Both
+        are bound via ``?`` placeholders — never f-string interpolated. Existing
+        callers that pass only ``platform`` (or nothing) keep working unchanged.
+        """
+        where_clauses: list[str] = ["status = 'active'"]
+        params: list[Any] = []
+        if platform:
+            where_clauses.append("platform = ?")
+            params.append(platform)
+        if source:
+            where_clauses.append("source = ?")
+            params.append(source)
+        elif sources:
+            placeholders = ",".join("?" * len(sources))
+            where_clauses.append(f"source IN ({placeholders})")
+            params.extend(sources)
+        sql = (
+            "SELECT * FROM chat_sessions WHERE "
+            + " AND ".join(where_clauses)
+            + " ORDER BY updated_at DESC"
+        )
         with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.row_factory = sqlite3.Row
-            if platform:
-                rows = conn.execute(
-                    "SELECT * FROM chat_sessions WHERE status = 'active' AND platform = ? "
-                    "ORDER BY updated_at DESC",
-                    (platform,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM chat_sessions WHERE status = 'active' ORDER BY updated_at DESC"
-                ).fetchall()
+            rows = conn.execute(sql, tuple(params)).fetchall()
             return [self._row_to_session(row) for row in rows]
+
+    def list_recent(
+        self,
+        *,
+        platform: str | None = None,
+        source: str | None = None,
+        sources: list[str] | None = None,
+        hidden: tuple[str, ...] | None = None,
+        limit: int = 20,
+        all_sources: bool = False,
+    ) -> list[SessionSummary]:
+        """List recent sessions for ``thehomie session list`` (PRP-7d R2 NM4).
+
+        Always returns ``list[SessionSummary]`` — the lightweight DTO carrying
+        ``internal_id`` (table display) plus ``session_id`` (PRD §7.10
+        identifier) plus ``runtime_session_id`` (resume target). Operators that
+        need the full ``Session`` call ``get_by_session_id`` instead.
+
+        ``hidden`` uses the **None sentinel** pattern (Rule 1 / R1 B5): the
+        default is resolved from ``SOURCE_HIDDEN_BY_DEFAULT`` inside the body so
+        monkeypatching the module-level constant in tests is observed at
+        runtime.
+
+        When ``all_sources=True`` the ``hidden`` set is ignored (operator
+        explicitly asked for everything). Filter precedence: ``source`` (exact)
+        > ``sources`` (IN) > ``hidden`` exclusion. All values bind via ``?``;
+        f-strings are used only to assemble placeholder slots.
+        """
+
+        if hidden is None:
+            hidden = SOURCE_HIDDEN_BY_DEFAULT
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        if platform:
+            where_clauses.append("platform = ?")
+            params.append(platform)
+        if source:
+            where_clauses.append("source = ?")
+            params.append(source)
+        elif sources:
+            placeholders = ",".join("?" * len(sources))
+            where_clauses.append(f"source IN ({placeholders})")
+            params.extend(sources)
+        elif not all_sources and hidden:
+            placeholders = ",".join("?" * len(hidden))
+            where_clauses.append(f"source NOT IN ({placeholders})")
+            params.extend(hidden)
+        where_sql = (
+            (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        )
+        sql = (
+            "SELECT id, session_id, platform, source, message_count, "
+            "updated_at, runtime_session_id, agent_session_id "
+            "FROM chat_sessions"
+            + where_sql
+            + " ORDER BY updated_at DESC LIMIT ?"
+        )
+        params.append(limit)
+        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            summaries: list[SessionSummary] = []
+            for row in rows:
+                runtime_id = (
+                    row["runtime_session_id"]
+                    if "runtime_session_id" in row.keys() and row["runtime_session_id"]
+                    else (row["agent_session_id"] or row["session_id"])
+                )
+                summaries.append(
+                    SessionSummary(
+                        internal_id=row["id"],
+                        session_id=row["session_id"],
+                        platform=row["platform"],
+                        source=normalize_source(row["source"]),
+                        message_count=row["message_count"],
+                        updated_at=datetime.fromisoformat(row["updated_at"]),
+                        runtime_session_id=runtime_id,
+                    )
+                )
+            return summaries
+
+    def get_by_session_id(self, session_id: str) -> Session | None:
+        """Look up a session by composite session_id OR runtime_session_id.
+
+        PRD §7.10 contract (PRP-7d R1 B3): the argument is the stable string
+        identifier (composite ``platform:channel:thread`` OR runtime UUID), NOT
+        the SQLite autoincrement primary key. Tries ``session_id`` first, then
+        falls back to ``runtime_session_id`` so operators can paste either form
+        from quiet-JSON output.
+        """
+
+        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM chat_sessions "
+                "WHERE session_id = ? OR runtime_session_id = ? "
+                "LIMIT 1",
+                (session_id, session_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_session(row)
 
     def add_message(
         self,
@@ -582,6 +931,50 @@ class PostgresSessionStore:
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON chat_sessions(user_id)")
+
+        # === PRD-7 §7.10 / Phase 4 (PRP-7d) — chat_sessions.source migration ===
+        # Postgres mirror of the SQLite block. Do NOT extend the for-loop above
+        # (that loop uses ADD COLUMN IF NOT EXISTS which silently masks a
+        # malformed pre-existing column). Strict pattern below per Rule 2 +
+        # R1 B1 + R2 NB2 + R2 NB3 + R3 NNB1.
+        #
+        # Shape (mirrors SQLite):
+        #   1. PRE-CHECK information_schema.columns scoped to current_schema()
+        #      so a same-named column in another schema cannot silently match.
+        #   2. ALTER wrapped to catch ONLY psycopg.errors.DuplicateColumn (race
+        #      window between the pre-check and the ALTER). Any other psycopg
+        #      error (OperationalError, InsufficientPrivilege, SyntaxError, etc.)
+        #      MUST propagate.
+        #   3. Unconditional shared post-check via _assert_source_column_shape.
+        #   4. Composite index (source, updated_at DESC) backing
+        #      `thehomie session list` (PRP-7d R2 NM1).
+        import psycopg  # local import — same lazy pattern as __init__
+
+        cur.execute(
+            "SELECT data_type, is_nullable, column_default "
+            "FROM information_schema.columns "
+            "WHERE table_name = 'chat_sessions' "
+            "  AND column_name = 'source' "
+            "  AND table_schema = current_schema()"
+        )
+        existing_source = cur.fetchone()
+        if existing_source is None:
+            try:
+                cur.execute(
+                    "ALTER TABLE chat_sessions "
+                    "ADD COLUMN source TEXT NOT NULL DEFAULT 'interactive'"
+                )
+            except psycopg.errors.DuplicateColumn:
+                # Concurrent first-boot race: another connection added the
+                # column between our pre-check and our ALTER. Accept the race
+                # and fall through to the unconditional post-check.
+                pass
+        _assert_source_column_shape(cur, backend="postgres")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_sessions_source_updated "
+            "ON chat_sessions(source, updated_at DESC)"
+        )
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS heartbeat_threads (
                 id SERIAL PRIMARY KEY,
@@ -647,6 +1040,14 @@ class PostgresSessionStore:
             runtime_model=runtime_model,
             runtime_profile_key=runtime_profile_key,
             runtime_tool_calls=_parse_tool_calls(row[19] if len(row) > 19 else None),
+            # PRP-7d Postgres positional row index — source is column 20
+            # (after id, session_id, agent_session_id, runtime_session_id,
+            # runtime_provider, runtime_model, runtime_profile_key, platform,
+            # channel_id, thread_id, user_id, created_at, updated_at,
+            # message_count, total_cost_usd, status, mode, runtime_lane,
+            # tool_call_count, runtime_tool_calls_json — count = 20, so source
+            # is at index 20 = row[20]).
+            source=normalize_source(row[20]) if len(row) > 20 else "interactive",
         )
 
     def get(self, platform: str, channel_id: str, thread_id: str) -> Session | None:
@@ -663,15 +1064,20 @@ class PostgresSessionStore:
         return self._row_to_session(row)
 
     def create(self, session: Session) -> None:
-        """Insert a new session."""
+        """Insert a new session.
+
+        Writes ``normalize_source(session.source)`` so non-Click writers cannot
+        bypass the four-value enum (PRP-7d R1 M4). Set-once invariant: ``update``
+        deliberately does NOT touch ``source``.
+        """
         cur = self._conn.cursor()
         cur.execute(
             """INSERT INTO chat_sessions
                (session_id, agent_session_id, runtime_session_id, runtime_lane, runtime_provider,
                 runtime_model, runtime_profile_key, platform, channel_id, thread_id, user_id,
                 created_at, updated_at, message_count, total_cost_usd,
-                status, mode, tool_call_count, runtime_tool_calls_json)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                status, mode, tool_call_count, runtime_tool_calls_json, source)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 session.session_id,
                 session.agent_session_id,
@@ -692,6 +1098,7 @@ class PostgresSessionStore:
                 session.mode,
                 session.tool_call_count,
                 _serialize_tool_calls(session.runtime_tool_calls),
+                normalize_source(session.source),
             ),
         )
 
@@ -736,20 +1143,130 @@ class PostgresSessionStore:
         )
         return cur.rowcount > 0
 
-    def list_active(self, platform: str | None = None) -> list[Session]:
-        """List active sessions, optionally filtered by platform."""
-        cur = self._conn.cursor()
+    def list_active(
+        self,
+        platform: str | None = None,
+        source: str | None = None,
+        sources: list[str] | None = None,
+    ) -> list[Session]:
+        """List active sessions, optionally filtered by platform and/or source.
+
+        ``source`` is exact-match; ``sources`` is an ``IN (...)`` filter. Both
+        bind via ``%s`` placeholders. Existing callers that pass only
+        ``platform`` (or nothing) keep working unchanged.
+        """
+        where_clauses: list[str] = ["status = 'active'"]
+        params: list[Any] = []
         if platform:
-            cur.execute(
-                "SELECT * FROM chat_sessions WHERE status = 'active' AND platform = %s "
-                "ORDER BY updated_at DESC",
-                (platform,),
-            )
-        else:
-            cur.execute(
-                "SELECT * FROM chat_sessions WHERE status = 'active' ORDER BY updated_at DESC"
-            )
+            where_clauses.append("platform = %s")
+            params.append(platform)
+        if source:
+            where_clauses.append("source = %s")
+            params.append(source)
+        elif sources:
+            placeholders = ",".join(["%s"] * len(sources))
+            where_clauses.append(f"source IN ({placeholders})")
+            params.extend(sources)
+        sql = (
+            "SELECT * FROM chat_sessions WHERE "
+            + " AND ".join(where_clauses)
+            + " ORDER BY updated_at DESC"
+        )
+        cur = self._conn.cursor()
+        cur.execute(sql, tuple(params))
         return [self._row_to_session(row) for row in cur.fetchall()]
+
+    def list_recent(
+        self,
+        *,
+        platform: str | None = None,
+        source: str | None = None,
+        sources: list[str] | None = None,
+        hidden: tuple[str, ...] | None = None,
+        limit: int = 20,
+        all_sources: bool = False,
+    ) -> list[SessionSummary]:
+        """List recent sessions for ``thehomie session list`` (PRP-7d R2 NM4).
+
+        Postgres mirror of ``SQLiteSessionStore.list_recent`` — see that
+        method's docstring for the full contract. Always returns
+        ``list[SessionSummary]``; ``hidden`` uses the None-sentinel pattern.
+        """
+
+        if hidden is None:
+            hidden = SOURCE_HIDDEN_BY_DEFAULT
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        if platform:
+            where_clauses.append("platform = %s")
+            params.append(platform)
+        if source:
+            where_clauses.append("source = %s")
+            params.append(source)
+        elif sources:
+            placeholders = ",".join(["%s"] * len(sources))
+            where_clauses.append(f"source IN ({placeholders})")
+            params.extend(sources)
+        elif not all_sources and hidden:
+            placeholders = ",".join(["%s"] * len(hidden))
+            where_clauses.append(f"source NOT IN ({placeholders})")
+            params.extend(hidden)
+        where_sql = (
+            (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        )
+        sql = (
+            "SELECT id, session_id, platform, source, message_count, "
+            "updated_at, runtime_session_id, agent_session_id "
+            "FROM chat_sessions"
+            + where_sql
+            + " ORDER BY updated_at DESC LIMIT %s"
+        )
+        params.append(limit)
+        cur = self._conn.cursor()
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+        summaries: list[SessionSummary] = []
+        for row in rows:
+            updated_at = (
+                row[5]
+                if isinstance(row[5], datetime)
+                else datetime.fromisoformat(str(row[5]))
+            )
+            runtime_id = row[6] if len(row) > 6 and row[6] else (
+                row[7] if len(row) > 7 and row[7] else row[1]
+            )
+            summaries.append(
+                SessionSummary(
+                    internal_id=row[0],
+                    session_id=row[1],
+                    platform=row[2],
+                    source=normalize_source(row[3]),
+                    message_count=row[4],
+                    updated_at=updated_at,
+                    runtime_session_id=runtime_id,
+                )
+            )
+        return summaries
+
+    def get_by_session_id(self, session_id: str) -> Session | None:
+        """Look up a session by composite session_id OR runtime_session_id.
+
+        PRD §7.10 contract (PRP-7d R1 B3): the argument is the stable string
+        identifier (composite ``platform:channel:thread`` OR runtime UUID), NOT
+        the SERIAL primary key.
+        """
+
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT * FROM chat_sessions "
+            "WHERE session_id = %s OR runtime_session_id = %s "
+            "LIMIT 1",
+            (session_id, session_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_session(row)
 
     def get_by_user(self, user_id: str) -> list[Session]:
         """Look up all sessions for a user across all platforms."""

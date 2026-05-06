@@ -45,7 +45,11 @@ def _operator_surface(request: Request | None) -> str:
 # ── Config ────────────────────────────────────────────────────────────────
 
 API_HOST: str = os.getenv("ORCHESTRATION_API_HOST", "127.0.0.1")
-API_PORT: int = int(os.getenv("ORCHESTRATION_API_PORT", "4322"))
+# ``API_PORT`` is profile-aware (PRP-7c Phase 3 / R2 NB1): resolution happens
+# lazily at attribute access via the module-level ``__getattr__`` below. This
+# keeps ``from orchestration.api import API_PORT`` consumers working while
+# deferring resolution until AFTER ``apply_persona_override()`` has run in
+# ``run_api.py:14`` (i.e., the right profile's ``HOMIE_HOME`` is active).
 ALLOW_NON_LOOPBACK: bool = os.getenv(
     "ORCHESTRATION_API_ALLOW_NON_LOOPBACK", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -73,6 +77,22 @@ if API_HOST not in _LOOPBACK_ADDRS and ORCHESTRATION_API_TOKEN is None:
         "Remote access without authentication is a security risk. "
         "Set ORCHESTRATION_API_TOKEN=<secret> or revert to loopback."
     )
+
+
+def __getattr__(name: str) -> Any:
+    """PRP-7c Phase 3: lazy ``API_PORT`` resolver.
+
+    Routes through ``personas.services.get_orchestration_api_port()`` so the
+    port follows the active profile (default profile keeps the legacy 4322;
+    named profiles get a deterministic offset, env overrides win at every
+    rank). Resolution happens at attribute access time, AFTER
+    ``apply_persona_override()`` has run in ``run_api.py:14``.
+    """
+    if name == "API_PORT":
+        from personas.services import get_orchestration_api_port
+        return get_orchestration_api_port()
+    raise AttributeError(f"module 'orchestration.api' has no attribute {name!r}")
+
 
 # ── Service singletons ───────────────────────────────────────────────────
 

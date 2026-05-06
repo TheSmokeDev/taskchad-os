@@ -501,10 +501,23 @@ def test_use_profile_nonexistent_raises_file_not_found(empty_homie_root):
         use_profile("nonexistent")
 
 
-def test_init_archon_creates_skeleton(tmp_homie_home):
-    """init_archon creates archon/ + 5 subdirs + stub config.yaml."""
+def test_init_archon_creates_skeleton(tmp_homie_home, monkeypatch):
+    """init_archon creates ``.archon/`` + 5 subdirs + config.yaml.
+
+    PRP-7e R3 cascade fix: directory is now ``.archon`` (dotted) per Archon's
+    discovery convention.
+
+    PRP-7e R1 M1 fix: Phase 5 ``init_archon`` calls ``detect_archon_binary``
+    pre-flight. To keep this Phase 2-era test green without requiring the
+    archon binary on PATH, monkeypatch the detector to return a fake.
+    """
+    from pathlib import Path
+    monkeypatch.setattr(
+        "personas.archon.detect_archon_binary",
+        lambda **_kw: (Path("/fake/archon"), "0.3.10"),
+    )
     init_archon("sales")
-    archon = tmp_homie_home / "archon"
+    archon = tmp_homie_home / ".archon"
     assert archon.is_dir()
     for sub in ("workflows", "commands", "artifacts", "ralph", "worktrees"):
         assert (archon / sub).is_dir()

@@ -132,7 +132,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
 # Core data intents: (keywords, command, included_in_brief)
 CORE_INTENTS: list[tuple[list[str], str, bool]] = [
     (["email", "inbox", "mail", "outlook", "gmail"], "email", True),
-    (["analytics", "traffic", "ga4", "pageviews"], "analytics", False),
+    (["analytics", "traffic", "ga4", "sessions", "pageviews"], "analytics", False),
     (["gsc", "search console", "seo ranking", "queries", "impressions"], "gsc", False),
     (["social media accounts", "social accounts"], "accounts", False),
     (["budget", "bills", "finances", "paid", "paycheck", "loan status",

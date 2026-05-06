@@ -126,14 +126,11 @@ _WHITELIST_DIR_SEGMENTS: frozenset[str] = frozenset({
 # ``<abs_path>:<line> <message>`` which contains a Windows drive letter
 # colon, so a naive ``split(":", 1)`` would corrupt the message).
 _DEFERRED_VIOLATIONS: dict[str, frozenset[str]] = {
-    # PRP-7a §"Out-of-Scope" — Bot pid/lock/mutex consolidation deferred to
-    # PRP-7c (Phase 3). STOP_FILE = SCRIPTS_DIR.parent / "data" / "state" /
-    # "service-stop". Phase 3 reroutes via personas.get_persona_paths(...).
-    # The audit flags the "/ data" and "/ state" subdir joins as identical
-    # messages; frozenset dedupes the duplicate to a single expected entry.
-    ".claude/scripts/service.py": frozenset({
-        "27 forbidden install-dir subdir join (use personas.get_persona_paths)",
-    }),
+    # PRP-7c Phase 3 (Workstream 2) landed the service.py STOP_FILE
+    # consolidation — ``service.py`` now resolves the path through
+    # ``personas.get_persona_paths(...)``. The pre-Phase-3 deferral is no
+    # longer needed; the empty dict still satisfies the regression test
+    # (``unscanned_deferred`` set difference is empty).
 }
 
 

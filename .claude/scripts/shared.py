@@ -325,18 +325,77 @@ def file_lock(lock_path: Path, timeout: float = 30.0) -> Iterator[None]:
 # =============================================================================
 # PID FILE MANAGEMENT
 # =============================================================================
+#
+# PRP-7c Phase 3 (lifecycle-surfaces workstream): the bot pid file path is now
+# profile-aware via ``personas.services.get_bot_pid_path()``. The legacy module
+# constant ``BOT_PID_FILE`` is preserved as a lazy ``__getattr__`` resolver so
+# external callers that historically did ``from shared import BOT_PID_FILE``
+# keep working — the lookup happens AT ATTRIBUTE ACCESS TIME, not at import
+# time, so monkeypatching ``personas.services.get_bot_pid_path`` (or swapping
+# ``HOMIE_HOME`` between profiles in the same process) takes effect
+# immediately.
+#
+# All consumer functions below use the ``None`` sentinel pattern (Anti-pattern
+# Rule 1 — never bind a tunable config value as a function default arg). Tests
+# enforce this via an AST scan (``test_persona_port_allocation.py``).
 
-BOT_PID_FILE = STATE_DIR / "bot.pid"
+# Rule 3 / monkeypatch propagation: import the module so tests that patch
+# ``personas.services.X`` propagate. Direct ``from .services import X``
+# would cache the function object and short-circuit the patch.
+from personas import services as _services  # noqa: E402
 
 
-def write_pid(pid_file: Path = BOT_PID_FILE) -> None:
-    """Write current process PID to file."""
+def __getattr__(name: str) -> Any:
+    """Lazy module-level attribute resolver (PEP 562).
+
+    Routes the legacy ``BOT_PID_FILE`` name through the profile-aware
+    ``personas.services.get_bot_pid_path()`` resolver. Resolution happens
+    at every attribute access (no def-time bind), so a profile swap mid-
+    process or a monkeypatch in tests takes effect immediately.
+    """
+    if name == "BOT_PID_FILE":
+        return _services.get_bot_pid_path()
+    raise AttributeError(f"module 'shared' has no attribute {name!r}")
+
+
+def write_pid(pid_file: Path | None = None) -> None:
+    """Write current process PID to file.
+
+    Writes the canonical pid path FIRST (atomic via tempfile + os.replace),
+    then best-effort writes the historical compat-shadow pid path
+    (``<install>/.claude/chat/bot.pid``) — but ONLY when the active profile
+    is the default profile. Named profiles never write the shadow because
+    doing so would corrupt the default's compat file.
+
+    The shadow write is wrapped in try/except — bot startup must not be
+    blocked by a shadow write failure (R4-NM1: shadow is best-effort,
+    fail-open).
+    """
+    if pid_file is None:
+        pid_file = _services.get_bot_pid_path()
     pid_file.parent.mkdir(parents=True, exist_ok=True)
-    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    pid_text = str(os.getpid())
+    # Canonical write — atomic.
+    _services._atomic_write_text(pid_file, pid_text)
+    # Best-effort compatibility shadow write (default profile only).
+    if _services._should_write_compat_shadow():
+        try:
+            shadow = _services._compat_shadow_pid_path()
+            shadow.parent.mkdir(parents=True, exist_ok=True)
+            _services._atomic_write_text(shadow, pid_text)
+        except Exception:
+            # R4-NM1: never block bot startup on shadow write failure.
+            pass
 
 
-def read_pid(pid_file: Path = BOT_PID_FILE) -> int | None:
-    """Read PID from file, return None if missing/invalid."""
+def read_pid(pid_file: Path | None = None) -> int | None:
+    """Read PID from file, return None if missing/invalid.
+
+    Reads the CANONICAL pid path only — the compat shadow is write-only and
+    must never be a read source.
+    """
+    if pid_file is None:
+        pid_file = _services.get_bot_pid_path()
     if not pid_file.exists():
         return None
     try:
@@ -376,11 +435,31 @@ def is_pid_alive(pid: int) -> bool:
             return False
 
 
-def cleanup_stale_pid(pid_file: Path = BOT_PID_FILE) -> int | None:
+def _remove_compat_shadow_if_default() -> None:
+    """R4-NM2: single-source compat-shadow removal helper.
+
+    Removes ``<install>/.claude/chat/bot.pid`` when (and only when) the
+    active profile is the default profile. Called by ``remove_pid``,
+    ``cleanup_stale_pid``, AND ``cleanup_all_bot_processes`` so all three
+    paths share one removal site.
+    """
+    if not _services._should_write_compat_shadow():
+        return
+    try:
+        shadow = _services._compat_shadow_pid_path()
+        shadow.unlink(missing_ok=True)
+    except Exception:
+        # Best-effort — never block on compat-shadow removal.
+        pass
+
+
+def cleanup_stale_pid(pid_file: Path | None = None) -> int | None:
     """Check PID file, kill stale process if alive, remove PID file.
 
     Returns the stale PID if one was found and killed, else None.
     """
+    if pid_file is None:
+        pid_file = _services.get_bot_pid_path()
     pid = read_pid(pid_file)
     if pid is None:
         return None
@@ -399,38 +478,202 @@ def cleanup_stale_pid(pid_file: Path = BOT_PID_FILE) -> int | None:
         except Exception:
             pass
         pid_file.unlink(missing_ok=True)
+        _remove_compat_shadow_if_default()
         return pid
     # PID file exists but process is dead — clean up
     pid_file.unlink(missing_ok=True)
+    _remove_compat_shadow_if_default()
     return None
 
 
-def cleanup_all_bot_processes(pid_file: Path = BOT_PID_FILE) -> list[int]:
-    """Kill ALL bot-related processes — service.py wrappers and chat/main.py instances.
+def cleanup_all_bot_processes(pid_file: Path | None = None) -> list[int]:
+    """Kill bot-related processes belonging to THIS profile.
 
-    Unlike cleanup_stale_pid (which only kills the PID in bot.pid), this scans
-    all running Python processes by command line to catch service.py wrappers
-    that would respawn the bot after a simple PID kill.
+    Unlike ``cleanup_stale_pid`` (which only kills the PID in bot.pid), this
+    scans all running Python processes by command line to catch ``service.py``
+    wrappers that would respawn the bot after a simple PID kill.
+
+    R1 B1 — profile-aware filtering: only processes whose ``HOMIE_HOME`` env
+    var matches the current profile's ``HOMIE_HOME`` (or where neither is set,
+    indicating both are default-profile) are killed. This prevents one
+    profile's startup from killing another profile's running bot.
+
+    Uses ``psutil.Process(pid).environ()`` to read the target's HOMIE_HOME.
+    psutil is a hard dependency declared in ``pyproject.toml``. The
+    ``ImportError`` fallback is belt-and-suspenders only — if psutil is
+    somehow unavailable, the cmdline-fallback path REFUSES to kill any
+    process (safer than killing across profiles).
+
+    For the legacy "kill all repo bots" behavior used by the operator-driven
+    ``bot-status.sh --kill-all-homies`` flag, see
+    ``cleanup_all_homie_bots_in_repo()``.
 
     Returns list of killed PIDs.
     """
+    if pid_file is None:
+        pid_file = _services.get_bot_pid_path()
     my_pid = os.getpid()
     my_ppid = os.getppid()
-    killed: list[int] = []
+    my_homie_home = os.environ.get("HOMIE_HOME", "").strip()
 
     if sys.platform == "win32":
-        killed = _scan_and_kill_windows(my_pid, my_ppid)
+        killed = _scan_and_kill_windows(
+            my_pid, my_ppid, my_homie_home, profile_aware=True
+        )
     else:
-        killed = _scan_and_kill_unix(my_pid, my_ppid)
+        killed = _scan_and_kill_unix(
+            my_pid, my_ppid, my_homie_home, profile_aware=True
+        )
 
     # Clean up PID file regardless
     pid_file.unlink(missing_ok=True)
+    _remove_compat_shadow_if_default()
 
     return killed
 
 
-def _scan_and_kill_windows(my_pid: int, my_ppid: int) -> list[int]:
-    """Scan and kill bot processes on Windows using wmic."""
+def cleanup_all_homie_bots_in_repo() -> list[int]:
+    """Legacy "kill all Homie bots in this repo" behavior.
+
+    Used ONLY by ``bot-status.sh --kill-all-homies`` (operator-driven, opt-in).
+    Performs the OLD non-profile-aware cmdline scan that kills every
+    ``chat/main.py``/``service.py`` Python process matching this repo's path,
+    regardless of which profile spawned it.
+
+    DO NOT call this from automatic bot startup — it will kill bots from
+    other profiles. ``cleanup_all_bot_processes()`` is the profile-aware
+    automatic path.
+    """
+    my_pid = os.getpid()
+    my_ppid = os.getppid()
+    if sys.platform == "win32":
+        return _scan_and_kill_windows(my_pid, my_ppid, "", profile_aware=False)
+    return _scan_and_kill_unix(my_pid, my_ppid, "", profile_aware=False)
+
+
+def list_bot_pids_in_active_profile() -> list[int]:
+    """Return PIDs of bot processes that belong to the ACTIVE profile.
+
+    Phase 3 F1 fix — replaces the cmdline-only repo-path scan in ``run_chat.sh``
+    and ``bot-status.sh`` with a Python helper that uses ``psutil.environ()`` to
+    read each candidate process's ``HOMIE_HOME`` and filters by exact match
+    against the active profile's ``HOMIE_HOME``. This is the same ownership
+    check ``cleanup_all_bot_processes()`` uses (Rule 2 — physical state, not
+    sidecar registry).
+
+    FAIL-CLOSED: when ownership cannot be proven (psutil missing, environ
+    unreadable, or the process exits between scan and read), the helper
+    EXCLUDES the PID from the returned list. The shell scripts treat this as
+    "no matching bot" rather than "kill the unknown PID" — killing across
+    profiles is the larger evil.
+
+    Returns the list of PIDs (current process and its parent are filtered
+    out so the caller never sees its own PID).
+    """
+    my_pid = os.getpid()
+    my_ppid = os.getppid()
+    my_homie_home = os.environ.get("HOMIE_HOME", "").strip()
+
+    candidate_pids = _enumerate_bot_candidate_pids()
+    matching: list[int] = []
+    for pid in candidate_pids:
+        if pid in (my_pid, my_ppid):
+            continue
+        # Rule 2 — verify ownership by reading the target's HOMIE_HOME via
+        # psutil. _process_belongs_to_profile() is the canonical helper and
+        # already fails closed on psutil ImportError / AccessDenied.
+        if _process_belongs_to_profile(pid, my_homie_home):
+            matching.append(pid)
+    return matching
+
+
+def _enumerate_bot_candidate_pids() -> list[int]:
+    """Return PIDs of every python process running this repo's ``chat/main.py``.
+
+    Used by ``list_bot_pids_in_active_profile()`` to gather the candidate set
+    BEFORE filtering by HOMIE_HOME ownership. Also deduplicates the venv
+    shim+child pair on Windows (parent_pids in cmdline output) so one logical
+    bot is reported once, not twice.
+
+    psutil-only path (no shell-out, no powershell.exe): keeps the helper
+    importable from any context the bash scripts spawn it in.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return []
+    # Resolve this repo's chat/main.py absolute path so a sibling repo's bot
+    # never lands in the candidate set.
+    chat_main = (Path(__file__).resolve().parent.parent / "chat" / "main.py").resolve()
+    chat_main_str = str(chat_main)
+    chat_main_alt = chat_main_str.replace("\\", "/")
+    pids: list[int] = []
+    parent_pids: set[int] = set()
+    try:
+        procs = list(psutil.process_iter(["pid", "ppid", "name", "cmdline"]))
+    except Exception:
+        return []
+    for proc in procs:
+        try:
+            info = proc.info
+            cmdline_list = info.get("cmdline") or []
+            if not cmdline_list:
+                continue
+            cmdline = " ".join(cmdline_list)
+            # Match either separator style (Windows shows backslashes; Git Bash
+            # shows forward slashes); compare against the resolved absolute path
+            # so cross-repo bots are excluded.
+            if chat_main_str not in cmdline and chat_main_alt not in cmdline:
+                continue
+            name = (info.get("name") or "").lower()
+            if not name.startswith("python"):
+                continue
+            pids.append(int(info["pid"]))
+            ppid = info.get("ppid")
+            if isinstance(ppid, int):
+                parent_pids.add(ppid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+            continue
+    # Windows venv shim spawns a child python.exe — both have chat/main.py in
+    # cmdline. Deduplicate by removing PIDs that are parents of another match
+    # in the set (the child is the real bot; the shim is the parent).
+    deduped = [pid for pid in pids if pid not in parent_pids]
+    return deduped
+
+
+def _process_belongs_to_profile(pid: int, my_homie_home: str) -> bool:
+    """Return True iff *pid*'s ``HOMIE_HOME`` matches *my_homie_home*.
+
+    Uses psutil to read the target process's environment. Belt-and-suspenders
+    fallback: if psutil cannot import or the environment cannot be read,
+    REFUSES the kill (returns False) — safer than killing across profiles.
+    """
+    try:
+        import psutil
+    except ImportError:
+        # Belt-and-suspenders: refuse to kill when we cannot verify ownership.
+        return False
+    try:
+        env = psutil.Process(pid).environ()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+        return False
+    other_home = (env.get("HOMIE_HOME") or "").strip()
+    return other_home == my_homie_home
+
+
+def _scan_and_kill_windows(
+    my_pid: int,
+    my_ppid: int,
+    my_homie_home: str,
+    *,
+    profile_aware: bool,
+) -> list[int]:
+    """Scan and kill bot processes on Windows using wmic.
+
+    When *profile_aware* is True (automatic startup path), only kills processes
+    whose ``HOMIE_HOME`` env var matches *my_homie_home*. When False (legacy
+    ``--kill-all-homies`` path), kills every match regardless of profile.
+    """
     import subprocess as _sp
 
     killed: list[int] = []
@@ -455,6 +698,10 @@ def _scan_and_kill_windows(my_pid: int, my_ppid: int) -> list[int]:
             except (ValueError, IndexError):
                 continue
             if pid in (my_pid, my_ppid):
+                continue
+            # R1 B1: profile-aware filter — only kill processes belonging to
+            # the same profile (same HOMIE_HOME).
+            if profile_aware and not _process_belongs_to_profile(pid, my_homie_home):
                 continue
             # Kill it — service.py first (it's the parent), but order doesn't
             # matter much since we force-kill after 5s anyway
@@ -481,8 +728,18 @@ def _scan_and_kill_windows(my_pid: int, my_ppid: int) -> list[int]:
     return killed
 
 
-def _scan_and_kill_unix(my_pid: int, my_ppid: int) -> list[int]:
-    """Scan and kill bot processes on Unix using ps."""
+def _scan_and_kill_unix(
+    my_pid: int,
+    my_ppid: int,
+    my_homie_home: str,
+    *,
+    profile_aware: bool,
+) -> list[int]:
+    """Scan and kill bot processes on Unix using ps.
+
+    When *profile_aware* is True, only kills processes whose ``HOMIE_HOME``
+    env matches *my_homie_home*. See ``_scan_and_kill_windows`` docstring.
+    """
     import subprocess as _sp
 
     killed: list[int] = []
@@ -502,6 +759,9 @@ def _scan_and_kill_unix(my_pid: int, my_ppid: int) -> list[int]:
                 continue
             if pid in (my_pid, my_ppid):
                 continue
+            # R1 B1: profile-aware filter.
+            if profile_aware and not _process_belongs_to_profile(pid, my_homie_home):
+                continue
             try:
                 os.kill(pid, signal.SIGINT)
                 # Wait up to 5s for graceful exit
@@ -519,6 +779,9 @@ def _scan_and_kill_unix(my_pid: int, my_ppid: int) -> list[int]:
     return killed
 
 
-def remove_pid(pid_file: Path = BOT_PID_FILE) -> None:
+def remove_pid(pid_file: Path | None = None) -> None:
     """Remove PID file (called on clean shutdown)."""
+    if pid_file is None:
+        pid_file = _services.get_bot_pid_path()
     pid_file.unlink(missing_ok=True)
+    _remove_compat_shadow_if_default()

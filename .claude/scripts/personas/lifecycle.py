@@ -22,7 +22,8 @@ Module exports (consumed by ``chat/cli.py`` Click handlers + tests):
     show_profile(name)          — single-profile lookup
     delete_profile(name, ...)   — quiesce + rmtree (delete-lock wrapped)
     use_profile(name)           — set sticky active_profile
-    init_archon(name)           — Phase 2 stub for archon spine
+    init_archon(name, **kw)     — thin re-export to ``personas.archon.init_archon``
+                                  (Phase 5 / PRP-7e replaced the Phase 2 stub)
 
 Anti-pattern compliance:
     - Rule 1: ``registered_subcommands=None`` resolved in ``create_profile``
@@ -172,7 +173,11 @@ _REQUIRED_PROFILE_DIRS: tuple[str, ...] = (
     "credentials",
     "logs",
     "run",
-    "archon",
+    # PRP-7e R3 cascade fix: dotted ``.archon`` (Archon's discovery convention).
+    # The dict KEY ``"archon"`` in ``get_persona_paths()`` / ``get_default_paths()``
+    # stays unchanged for back-compat; only the literal directory name on disk
+    # gets the dot.
+    ".archon",
     "home",
     "cron",
     "sessions",
@@ -882,45 +887,26 @@ def use_profile(name: str) -> None:
 # =============================================================================
 
 
-def init_archon(name: str) -> None:
-    """Initialize the Archon spine for a profile (Phase 2 stub).
+def init_archon(name: str, **kwargs) -> Path:
+    """Initialize the Archon spine for a profile (Phase 5 thin re-export).
 
-    Creates ``<profile_root>/archon/`` with the standard subdirectories
-    and a stub ``config.yaml``. Phase 5 will replace this with the real
-    Archon orchestrator config; Phase 2 ships the layout so downstream
-    work can target the canonical paths.
+    PRP-7e Phase 5 replaced the Phase 2 stub body with the real capability-
+    config + version-lock + smoke-workflow implementation. This thin
+    re-export is preserved so existing import paths continue to work
+    without churn:
 
-    Subdirectories created:
-        - workflows/   — workflow definitions (.archon/workflows/)
-        - commands/    — command shortcuts (.archon/commands/)
-        - artifacts/   — workflow artifacts (.archon/artifacts/)
-        - ralph/       — Ralph DAG state per feature
-        - worktrees/   — Archon-spawned worktrees
+        from personas.lifecycle import init_archon  # still works
 
-    Raises ``FileNotFoundError`` if the profile root does not exist.
+    The real implementation lives in ``personas.archon.init_archon``.
+    ``**kwargs`` forwards Phase 5's new flags (``force``,
+    ``archon_version``, ``strict_version``, ``install_smoke``) to the
+    real implementation.
+
+    Phase 2's signature was ``init_archon(name) -> None``; Phase 5 widens
+    the return type to ``Path`` (the absolute archon root path written).
+    Existing callers that discard the return value (e.g.
+    ``chat/cli.py:profile_init_archon``) continue to work.
     """
-    if name == "default":
-        # Default profile uses the install-dir .archon/.
-        archon_dir = get_default_paths()["archon"]
-    else:
-        validate_persona_name(name)
-        profile_dir = _profile_root(name)
-        if not profile_dir.is_dir():
-            raise FileNotFoundError(
-                f"Profile '{name}' does not exist at {profile_dir}"
-            )
-        archon_dir = profile_dir / "archon"
+    from .archon import init_archon as _init_archon
 
-    archon_dir.mkdir(parents=True, exist_ok=True)
-    for sub in ("workflows", "commands", "artifacts", "ralph", "worktrees"):
-        (archon_dir / sub).mkdir(parents=True, exist_ok=True)
-
-    config_path = archon_dir / "config.yaml"
-    if not config_path.exists():
-        # Phase 2 stub. Phase 5 owns the real spine.
-        config_path.write_text(
-            'archon:\n'
-            '  enabled: true\n'
-            '  version: "stub"\n',
-            encoding="utf-8",
-        )
+    return _init_archon(name, **kwargs)

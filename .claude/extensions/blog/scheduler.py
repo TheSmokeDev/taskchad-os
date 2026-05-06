@@ -209,6 +209,10 @@ class BlogAutoScheduler:
         from models import Channel, IncomingMessage, Platform, Thread, User
 
         # Create a synthetic message as if owner typed /blog <topic>
+        # PRP-7d R2 NB1: tag scheduler-fired synthetic engine calls as "cron"
+        # so the blog scheduler doesn't clutter `thehomie session list` (which
+        # hides "tool"/"hook" by default) while remaining distinguishable from
+        # human-driven "interactive" sessions.
         incoming = IncomingMessage(
             text=f"Use the Skill tool to invoke the 'blog-pipeline' skill with arguments: {topic}",
             user=User(Platform.DISCORD, "scheduler", "BlogScheduler"),
@@ -221,6 +225,7 @@ class BlogAutoScheduler:
             thread=Thread(thread_id="blog-scheduler"),
             is_piv=True,
             piv_command="blog",
+            source="cron",
         )
 
         # Run through engine

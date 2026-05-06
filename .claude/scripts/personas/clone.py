@@ -700,7 +700,7 @@ def _stage_default_export_tree(staged: Path) -> None:
         - ``state``    -> staged/state
         - ``logs``     -> staged/logs
         - ``run``      -> staged/run
-        - ``archon``   -> staged/archon
+        - ``archon``   -> staged/.archon  (R3 cascade: dotted on disk)
         - ``home``     -> staged/home
         - ``cron``     -> staged/cron
         - ``sessions`` -> staged/sessions
@@ -717,12 +717,16 @@ def _stage_default_export_tree(staged: Path) -> None:
     default_paths = get_default_paths()
     # Keys we map directly — these are dirs that align cleanly with the
     # named-profile layout.
+    # PRP-7e R3 cascade: dst literal is ``.archon`` (dotted) but the
+    # source lookup must still hit ``default_paths["archon"]`` (the
+    # dict KEY is preserved for back-compat). Map the dotted destination
+    # key back to the bare source key for ``default_paths.get()``.
     safe_keys = (
         "memory",
         "state",
         "logs",
         "run",
-        "archon",
+        ".archon",
         "home",
         "cron",
         "sessions",
@@ -730,7 +734,8 @@ def _stage_default_export_tree(staged: Path) -> None:
     )
     staged.mkdir(parents=True, exist_ok=True)
     for key in safe_keys:
-        src = default_paths.get(key)
+        src_key = "archon" if key == ".archon" else key
+        src = default_paths.get(src_key)
         if src is None or not src.is_dir():
             # Source missing — skip (the staged tree just won't contain
             # this subdir; downstream import will treat it as empty).

@@ -25,31 +25,36 @@ The ban is the contract; the whitelist is the documented contract carve-out.
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import pytest
 
 import personas
 
-# === API Surface (FROZEN — PRP-7a R1 M6) ===
+# === API Surface (FROZEN — PRP-7a R1 M6 + PRD-8 Phase 2 / WS1 expansion) ===
 # This tuple MUST match `personas.__all__` verbatim (same order, same names,
 # same length). It also matches the "API Surface" table in PRP-7a §
-# "Implementation Blueprint > API Surface". Any change here is a contract
-# break — bump the PRP and ship via the standard PRP review cycle.
+# "Implementation Blueprint > API Surface" (PRP-7a 12-helper baseline) plus
+# the two new helpers added by PRD-8 Phase 2 / WS1
+# (`load_persona_config` + `ConfigShapeError`, alphabetically sorted).
+# Any change here is a contract break — bump the PRP and ship via the
+# standard PRP review cycle.
 EXPECTED_PUBLIC_API: tuple[str, ...] = (
+    "ConfigShapeError",
     "apply_persona_override",
-    "resolve_persona_env",
-    "get_subprocess_env",
-    "validate_persona_name",
-    "get_homie_home",
-    "get_default_paths",
-    "get_persona_paths",
-    "get_active_profile_path",
-    "read_active_profile",
-    "set_active_profile",
     "get_active_profile_name",
+    "get_active_profile_path",
+    "get_default_paths",
+    "get_homie_home",
+    "get_persona_paths",
+    "get_subprocess_env",
     "is_default_profile",
+    "load_persona_config",
+    "read_active_profile",
+    "resolve_persona_env",
+    "set_active_profile",
+    "validate_persona_name",
 )
 
 # === Private-import whitelist (PRP-7a R2 NM3) ===
@@ -82,9 +87,15 @@ def test_all_attribute_matches_api_surface_verbatim() -> None:
     assert tuple(personas.__all__) == EXPECTED_PUBLIC_API
 
 
-def test_all_has_exactly_twelve_helpers() -> None:
-    """`personas.__all__` is exactly 12 entries (R1 M6 + R2 M6)."""
-    assert len(personas.__all__) == 12
+def test_all_size_matches_expected_api() -> None:
+    """`personas.__all__` size matches `EXPECTED_PUBLIC_API` (PRD-8 Phase 2 R2 NM1).
+
+    Tied to the list, NOT a magic number. Future API additions only require
+    updating ``EXPECTED_PUBLIC_API`` in one place — this assertion follows
+    automatically. Pre-PRD-8 Phase 2 the assertion was ``== 12``; after
+    WS1 expansion it is ``== len(EXPECTED_PUBLIC_API)`` (14 today).
+    """
+    assert len(personas.__all__) == len(EXPECTED_PUBLIC_API)
 
 
 def test_every_public_name_resolves_to_callable() -> None:
