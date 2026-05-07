@@ -953,3 +953,107 @@ def _validate_voice_section(value: Any, config_path: Path) -> None:
                     f"{', '.join(sorted(_KNOWN_VOICE_PROVIDERS))}) "
                     f"in {config_path}"
                 )
+
+
+# ── PRD-8 Phase 3 / WS2 (R1 B4) — validation helpers ─────────────────────
+#
+# Public schema validators for ``<profile>/config.yaml`` content.
+# Consumed by ``dashboard_api.py`` PATCH handler so the dashboard slice
+# NEVER imports ``yaml`` directly (Q5 lock — single YAML parser surface).
+#
+# These re-use the internal ``_validate_*_section`` helpers above; they do
+# NOT duplicate validation logic. ``personas.__all__`` grows from 14 → 16
+# in WS2 with explicit personas-owner sign-off.
+#
+# Anti-pattern compliance:
+#  * Rule 1: no def-time bind to module-level constants — both helpers take
+#    raw ``data`` / ``text`` and return / raise. No optional args.
+#  * Rule 2: zero file I/O — the YAML PATCH path stages content in memory
+#    before atomic write at the call site. These helpers never read or
+#    cache from disk.
+
+
+# Sentinel ``Path`` reused so the section validators (which require a path
+# for error messages) get a stable, message-friendly value when no file
+# context exists. Defined as a ``Path`` rather than ``str`` so the
+# ``f-string`` formatting at the validators stays type-uniform.
+_DICT_VALIDATION_PATH: Path = Path("<config-dict>")
+
+
+def validate_config_dict(data: dict) -> None:
+    """Validate a parsed ``config.yaml`` dict against the section schema.
+
+    PRD-8 Phase 3 / WS2 (R1 B4) — public schema-only validator. Reuses the
+    private ``_validate_*_section`` helpers above so dashboard PATCH paths
+    pick up future schema additions automatically.
+
+    Behavior:
+      * Top-level must be a ``dict`` (not list, not None, not scalar).
+      * Each known section (``ports``, ``persona``, ``model``, ``mcp``,
+        ``cabinet``, ``voice``) is validated when present. Missing sections
+        are accepted silently — operators may author partial configs.
+      * Unknown keys at the top level are accepted (forward-compat).
+
+    Raises ``ConfigShapeError`` on shape violation. The error message
+    includes the offending field path; the path string is a literal
+    sentinel ``<config-dict>`` so callers know the validation ran on
+    in-memory data, not on a file.
+    """
+    if not isinstance(data, dict):
+        raise ConfigShapeError(
+            f"shape: top-level must be mapping, got {type(data).__name__} "
+            f"in {_DICT_VALIDATION_PATH}"
+        )
+
+    if "ports" in data:
+        _validate_ports_section(data["ports"], _DICT_VALIDATION_PATH)
+    if "persona" in data:
+        _validate_persona_section(data["persona"], _DICT_VALIDATION_PATH)
+    if "model" in data:
+        _validate_model_section(data["model"], _DICT_VALIDATION_PATH)
+    if "mcp" in data:
+        _validate_mcp_section(data["mcp"], _DICT_VALIDATION_PATH)
+    if "cabinet" in data:
+        _validate_cabinet_section(data["cabinet"], _DICT_VALIDATION_PATH)
+    if "voice" in data:
+        _validate_voice_section(data["voice"], _DICT_VALIDATION_PATH)
+
+
+def validate_config_yaml_text(text: str) -> dict:
+    """Parse + validate raw YAML text, returning the parsed dict on success.
+
+    PRD-8 Phase 3 / WS2 (R1 B4) — single entry point for the dashboard
+    PATCH /api/agents/{id}/files/config.yaml endpoint. Operator-authored
+    YAML text comes in; validated dict goes out. The dashboard slice
+    NEVER calls ``yaml.safe_load`` directly — it round-trips through this
+    helper so any parser swap (PyYAML → ruamel, etc.) happens in ONE
+    place.
+
+    Behavior:
+      * Empty text or ``null`` YAML → parsed as ``{}`` (empty config is
+        legal — operator may scaffold then save).
+      * YAML parse error → raises ``ConfigShapeError`` with prefix
+        ``yaml: <config-text>: <yaml-error-detail>``.
+      * Schema error → raises ``ConfigShapeError`` from the section
+        validator (message includes the field path).
+      * Top-level non-dict (e.g. text is just a list) → raises
+        ``ConfigShapeError(shape: ...)``.
+
+    Returns the validated dict on success.
+    """
+    try:
+        raw = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigShapeError(f"yaml: <config-text>: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise ConfigShapeError(
+            f"shape: top-level must be mapping, got {type(raw).__name__} "
+            f"in <config-text>"
+        )
+
+    # Re-use the dict validator so the two helpers share one validation
+    # path. ``validate_config_dict`` raises ``ConfigShapeError`` directly;
+    # we let it propagate untouched.
+    validate_config_dict(raw)
+    return raw

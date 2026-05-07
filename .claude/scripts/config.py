@@ -188,6 +188,21 @@ SLACK_OWNER_USER_ID = os.getenv("SLACK_OWNER_USER_ID", "")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
 CHAT_DB_PATH = DATA_DIR / "chat.db"
 ORCHESTRATION_DB_PATH = DATA_DIR / "orchestration.db"
+# Dashboard (PRD-8 Phase 3 / WS1) — operator-facing dashboard slice.
+# DASHBOARD_DB_PATH env-overridable so tests can point at a tmp file without
+# re-rooting HOMIE_HOME. Default mirrors CHAT_DB_PATH / ORCHESTRATION_DB_PATH
+# (DATA_DIR / 'dashboard.db' = .claude/data/dashboard.db on the default
+# profile). R1 B6 lock — DATA_DIR-rooted, NOT HOMIE_HOME-rooted.
+DASHBOARD_DB_PATH = Path(
+    os.getenv("DASHBOARD_DB_PATH", str(DATA_DIR / "dashboard.db"))
+)
+# PRD-8 Phase 3 / WS2 (R3 NM1) — bot lifecycle SIGTERM grace window before
+# escalating to SIGKILL. Env-overridable so operators can tune for slow-
+# shutdown bots without code changes. Consumed by
+# .claude/scripts/dashboard_bot_lifecycle.py via the None-sentinel pattern
+# (Rule 1 — every public function takes ``grace_seconds: int | None = None``
+# and resolves to this constant inside the body, never at def time).
+DASHBOARD_BOT_GRACE_SECONDS = int(os.getenv("DASHBOARD_BOT_GRACE_SECONDS", "5"))
 CHAT_MAX_TURNS = int(os.getenv("CHAT_MAX_TURNS", "25"))
 CHAT_MAX_BUDGET_USD = float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0"))
 CHAT_ALLOWED_USERS = os.getenv("CHAT_ALLOWED_USERS", SLACK_OWNER_USER_ID).split(",")

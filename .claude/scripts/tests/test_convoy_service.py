@@ -429,3 +429,130 @@ def test_full_lifecycle_gui_off(svc):
     assert final.convoy.status == "completed"
     assert final.convoy.completed_subtasks == 3
     assert final.convoy.total_subtasks == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PRD-8 Phase 3 / WS2 (R3 NB3) — list_subtasks_by_agent public read query
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _make_convoy_with_assigned_subtasks(svc):
+    """Helper: create a convoy with subtasks assigned to multiple agents.
+
+    Layout:
+      * 2 subtasks assigned to "agent-a" (one ready, one running)
+      * 1 subtask assigned to "agent-b" (ready)
+      * 1 subtask assigned to "agent-a" but COMPLETED (terminal)
+
+    Returns the ConvoyWithSubtasks result.
+    """
+    inp = CreateConvoyInput(
+        title="Multi-agent",
+        created_by="sb",
+        subtasks=[
+            CreateSubtaskInput(title="A1", assigned_agent_id="agent-a"),
+            CreateSubtaskInput(title="A2", assigned_agent_id="agent-a"),
+            CreateSubtaskInput(title="B1", assigned_agent_id="agent-b"),
+            CreateSubtaskInput(title="A3", assigned_agent_id="agent-a"),
+        ],
+    )
+    result = svc.create_convoy(inp)
+    # Move one to running so the default (active) filter has variety.
+    svc.dispatch_subtask(result.subtasks[0].id)
+    svc.transition_subtask(result.subtasks[0].id, "running")
+    # Move A3 to completed (terminal — should be excluded by default filter).
+    svc.dispatch_subtask(result.subtasks[3].id)
+    svc.handle_subtask_completion(result.subtasks[3].id)
+    return result
+
+
+def test_list_subtasks_by_agent_returns_assigned_only(svc):
+    """Filters strictly on assigned_agent_id."""
+    _make_convoy_with_assigned_subtasks(svc)
+    rows = svc.list_subtasks_by_agent("agent-a")
+    assert len(rows) >= 1
+    for row in rows:
+        assert row.assigned_agent_id == "agent-a"
+
+
+def test_list_subtasks_by_agent_default_excludes_terminal(svc):
+    """Default status_filter (None) excludes terminal subtasks."""
+    _make_convoy_with_assigned_subtasks(svc)
+    rows = svc.list_subtasks_by_agent("agent-a")
+    statuses = {row.status for row in rows}
+    # No completed, failed, or cancelled rows by default.
+    assert "completed" not in statuses
+    assert "failed" not in statuses
+    assert "cancelled" not in statuses
+
+
+def test_list_subtasks_by_agent_explicit_status_filter(svc):
+    """Explicit status_filter narrows to the named statuses only."""
+    _make_convoy_with_assigned_subtasks(svc)
+    # Only completed — and the helper put one A3 row there.
+    rows = svc.list_subtasks_by_agent(
+        "agent-a", status_filter={"completed"}
+    )
+    assert len(rows) == 1
+    assert rows[0].status == "completed"
+    assert rows[0].assigned_agent_id == "agent-a"
+
+
+def test_list_subtasks_by_agent_empty_filter_returns_empty(svc):
+    """Empty status_filter (set()) returns [] without hitting DB."""
+    _make_convoy_with_assigned_subtasks(svc)
+    rows = svc.list_subtasks_by_agent("agent-a", status_filter=set())
+    assert rows == []
+
+
+def test_list_subtasks_by_agent_unknown_agent_returns_empty(svc):
+    """Unknown agent → empty list (NOT raise, NOT 404)."""
+    _make_convoy_with_assigned_subtasks(svc)
+    rows = svc.list_subtasks_by_agent("agent-zzz-does-not-exist")
+    assert rows == []
+
+
+def test_list_subtasks_by_agent_pagination_before_id(svc):
+    """Pagination via id-DESC cursor with ``before_id``."""
+    _make_convoy_with_assigned_subtasks(svc)
+    page1 = svc.list_subtasks_by_agent("agent-a", limit=1)
+    assert len(page1) == 1
+    first_id = page1[0].id
+    page2 = svc.list_subtasks_by_agent(
+        "agent-a", limit=1, before_id=first_id
+    )
+    # Page 2 must be a strictly smaller id.
+    if page2:
+        assert page2[0].id < first_id
+
+
+def test_list_subtasks_by_agent_emits_orchestration_span(svc, monkeypatch):
+    """The method body is wrapped in ``orchestration_span``.
+
+    Patches ``orchestration_span`` to record invocations and asserts at
+    least one call with the canonical span name.
+    """
+    import orchestration.convoy_service as convoy_svc_mod
+
+    invocations: list[str] = []
+
+    # Mimic the contextmanager interface but record invocations.
+    from contextlib import contextmanager
+
+    @contextmanager
+    def recording_span(name, **kwargs):
+        invocations.append(name)
+        yield {}
+
+    monkeypatch.setattr(
+        convoy_svc_mod, "orchestration_span", recording_span
+    )
+    _make_convoy_with_assigned_subtasks(svc)
+    svc.list_subtasks_by_agent("agent-a")
+    assert "convoy_service.list_subtasks_by_agent" in invocations
+
+
+def test_list_subtasks_by_agent_raises_on_empty_agent_id(svc):
+    """Empty agent_id is a programming bug — raise instead of all-rows leak."""
+    with pytest.raises(ValueError):
+        svc.list_subtasks_by_agent("")

@@ -213,6 +213,40 @@ def _profile_root(name: str) -> Path:
     return get_default_homie_root() / "profiles" / name
 
 
+def resolve_profile_root(name: str) -> Path:
+    """Public alias for the named-profile root (PRD-8 Phase 3 / WS2).
+
+    The dashboard slice (``dashboard_api.py``, ``dashboard_bot_lifecycle.py``)
+    needs to resolve the on-disk root for a named profile to:
+
+      * derive disk-state physical_state for ``DELETE /api/agents/{id}/full``
+        (R6 NB1 Rule 2 — response/audit/status MUST come from
+        ``resolve_profile_root(name).exists()``, NOT from try/except);
+      * resolve avatar storage paths (``personas/<id>/avatar.{png,jpg,webp}``);
+      * resolve TARGET persona paths in the bot lifecycle module without
+        mutating the dashboard's own ``HOMIE_HOME``.
+
+    The PRP-7a R2 NM3 ban prohibits production code from importing
+    underscore-prefixed personas helpers; this public re-export keeps the
+    dashboard slice in compliance while the single-source-of-truth root
+    resolution stays in ``_profile_root``. NOT added to
+    ``personas.__all__`` because Phase 3 R1 B4 grew the package surface
+    only by the two validate helpers — ``resolve_profile_root`` lives on
+    ``personas.lifecycle`` exclusively and consumers import it directly.
+
+    NOT valid for ``name == "default"`` (use ``personas.get_persona_paths``
+    or ``personas.get_default_paths`` for the default profile install
+    layout). Callers that need to handle both branches MUST guard
+    ``name == "default"`` themselves.
+    """
+    if name == "default":
+        raise ValueError(
+            "resolve_profile_root does not handle the default profile; "
+            "use personas.get_default_paths() for the install-dir layout"
+        )
+    return _profile_root(name)
+
+
 def _profiles_root() -> Path:
     """Return the parent directory holding all named profiles."""
     return get_default_homie_root() / "profiles"
@@ -742,7 +776,12 @@ def show_profile(name: str) -> ProfileInfo:
 # =============================================================================
 
 
-def delete_profile(name: str, *, yes: bool = False) -> Path:
+def delete_profile(
+    name: str,
+    *,
+    yes: bool = False,
+    hard: bool = False,
+) -> Path:
     """Delete a profile — wrap quiesce + rmtree in delete-lock (R1 B1).
 
     Single-source-of-truth root resolution: ``_profile_root(name)``.
@@ -762,7 +801,31 @@ def delete_profile(name: str, *, yes: bool = False) -> Path:
     defense in depth in case ``_RESERVED`` is reduced later.
 
     Returns the profile path that was deleted (for caller logging).
+
+    PRD-8 Phase 3 / WS2 (R3 cross-spec, R6 RB1) — ``hard: bool = False``
+    keyword added to support the ``DELETE /api/agents/{id}/full``
+    enterprise-grade hard-delete endpoint. Behavior:
+
+      * ``hard=False`` (default): legacy behavior — same destructive
+        sequence as before. Existing callers unchanged.
+      * ``hard=True``: signals the caller intends a true hard-delete with
+        no archive/soft-delete fallback. Phase 3 ships the same
+        destructive sequence under both flags (the ``DELETE /api/agents/{id}``
+        soft-archive variant calls with ``hard=False``; the ``/full``
+        hard-delete calls with ``hard=True``). The flag is preserved so
+        future phases (e.g. Phase 7 archive support) can branch without
+        touching the public signature again.
+
+    The R6 RB1 charter rule: HTTP callers MUST pass ``yes=True`` so the
+    endpoint never invokes ``input()`` on stdin. ``hard`` is orthogonal
+    to ``yes`` — both flags are required for the dashboard endpoint to
+    function (HTTP confirmation is the destructive-intent gate; ``yes``
+    is the stdin-prompt skip).
     """
+    # ``hard`` is reserved for future archive/soft-delete branching.
+    # Phase 3 keeps both paths converged on the existing delete sequence
+    # so behavior is byte-identical for legacy callers.
+    _ = hard  # noqa: F841 — captured-but-unused in Phase 3; preserves signature.
     validate_persona_name(name)
     if name == "default":
         raise ValueError("Cannot delete the default profile.")

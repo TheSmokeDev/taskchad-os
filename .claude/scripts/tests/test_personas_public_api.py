@@ -54,6 +54,8 @@ EXPECTED_PUBLIC_API: tuple[str, ...] = (
     "read_active_profile",
     "resolve_persona_env",
     "set_active_profile",
+    "validate_config_dict",
+    "validate_config_yaml_text",
     "validate_persona_name",
 )
 
@@ -92,10 +94,31 @@ def test_all_size_matches_expected_api() -> None:
 
     Tied to the list, NOT a magic number. Future API additions only require
     updating ``EXPECTED_PUBLIC_API`` in one place — this assertion follows
-    automatically. Pre-PRD-8 Phase 2 the assertion was ``== 12``; after
-    WS1 expansion it is ``== len(EXPECTED_PUBLIC_API)`` (14 today).
+    automatically. Pre-PRD-8 Phase 2 the assertion was ``== 12``; PRD-8
+    Phase 2 grew to 14 (added ``load_persona_config`` + ``ConfigShapeError``);
+    PRD-8 Phase 3 / WS2 grows to 16 (added ``validate_config_dict`` +
+    ``validate_config_yaml_text`` per R1 B4).
     """
     assert len(personas.__all__) == len(EXPECTED_PUBLIC_API)
+
+
+def test_personas_all_length_is_16() -> None:
+    """``personas.__all__`` is exactly 16 entries (PRD-8 Phase 3 / WS2).
+
+    Phase 3 R1 B4 lock: dashboard PATCH validation needs the
+    ``validate_config_dict`` + ``validate_config_yaml_text`` helpers
+    promoted to public API. ``__all__`` grew from Phase 2's 14 to 16.
+
+    This test is a structural anchor — if a future PRP adds a 17th
+    helper, this test SHOULD fail and force the PRP author to update
+    the assertion explicitly. The literal 16 is intentional (matches
+    the criterion ``personas_all_size_matches_expected_api_test_updated_to_16``
+    in JSON contract).
+    """
+    assert len(personas.__all__) == 16, (
+        f"personas.__all__ should be 16 entries (Phase 3 / WS2 R1 B4); "
+        f"got {len(personas.__all__)} — names: {sorted(personas.__all__)}"
+    )
 
 
 def test_every_public_name_resolves_to_callable() -> None:

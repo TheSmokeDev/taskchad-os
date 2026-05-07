@@ -57,3 +57,9 @@ NUL
 # Stray entity_extractor output if it ever lands at repo root again
 /concepts/
 /connections/
+
+# Dashboard slice (PRD-8 Phase 3)
+dashboard/server/dist/
+dashboard/server/node_modules/
+dashboard/web/dist/
+dashboard/web/node_modules/

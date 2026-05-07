@@ -33,6 +33,12 @@ from orchestration.models import (
     ProgressReport,
     Subtask,
 )
+# PRD-8 Phase 3 / WS2 (R3 NB3) — orchestration_span for the new
+# list_subtasks_by_agent public read query. Late-binds Langfuse via the
+# existing ``from runtime import langfuse_setup`` pattern in
+# observability.py:19 (Rule 3 compliance — no new top-level Langfuse
+# import in this module).
+from orchestration.observability import orchestration_span
 
 
 class ConvoyService:
@@ -197,6 +203,111 @@ class ConvoyService:
         if not row:
             return None
         return self.db.row_to_subtask(row)
+
+    def list_subtasks_by_agent(
+        self,
+        agent_id: str,
+        *,
+        workspace_id: int = DEFAULT_WORKSPACE_ID,
+        status_filter: frozenset[SubtaskStatus] | set[SubtaskStatus] | None = None,
+        limit: int = 100,
+        before_id: int | None = None,
+    ) -> list[Subtask]:
+        """List subtasks assigned to ``agent_id`` (PRD-8 Phase 3 / WS2 R3 NB3).
+
+        Powers ``GET /api/agents/{id}/tasks`` in ``dashboard_api.py``.
+        Read-only, additive, respects the frozen contract — NO change to
+        ``contract.py``, NO change to ``db.py`` schema, NO change to
+        ``SUBTASK_TRANSITIONS``, NO new ``SubtaskStatus`` value. The
+        ``assigned_agent_id`` column already exists in the ``subtasks``
+        table (db.py:61); this is the first read query that filters on it.
+
+        Behavior contract (matches JSON criterion
+        ``convoy_service_list_subtasks_by_agent_method_added``):
+
+        1. Filters ``subtasks`` table on ``assigned_agent_id == agent_id``.
+        2. ``status_filter=None`` (default sentinel) means active subtasks
+           only — i.e. status NOT IN ``TERMINAL_SUBTASK_STATUSES``. Pass
+           an explicit set/frozenset/iterable to narrow further (e.g.
+           ``{"running"}``); pass an empty iterable to return ``[]``
+           without hitting the DB.
+        3. Pagination via ``id``-DESC cursor with ``before_id``; ``limit``
+           clamped to ``[1, 500]``.
+        4. ``orchestration_span`` wraps the query body for Langfuse
+           tracing — module-attribute lookup of ``is_langfuse_enabled``
+           preserved (Rule 3 compliance).
+        5. Rule 1 compliance: ``status_filter=None`` and ``before_id=None``
+           are sentinels resolved INSIDE the body. ``limit=100`` is a
+           literal int (no ``config.X`` default-arg binding).
+        6. Raises ``ValueError`` on empty ``agent_id`` so a frontend
+           bug (e.g. blank UI param) doesn't quietly return all rows
+           with NULL agent_id.
+
+        Returns: list of :class:`Subtask`, ordered by ``id`` DESC. Empty
+        list if no rows match (caller wraps in ``{"tasks": []}``,
+        NOT 404).
+        """
+        # Rule 1 — None sentinels resolved inside the body, not at def time.
+        # Empty agent_id is a programming bug, not a "all subtasks" query.
+        if not agent_id:
+            raise ValueError("agent_id must be non-empty")
+
+        # Resolve status filter sentinel.
+        if status_filter is None:
+            # Default: active subtasks only (non-terminal).
+            effective_statuses: tuple[str, ...] = tuple(
+                s for s in SUBTASK_TRANSITIONS.keys() if s not in TERMINAL_SUBTASK_STATUSES
+            )
+            # SUBTASK_TRANSITIONS.keys() = pending, ready, dispatched,
+            # running, stalled. None of those are terminal, so the filter
+            # is effectively: status IN (pending, ready, dispatched,
+            # running, stalled).
+        elif len(status_filter) == 0:
+            # Explicit empty set means "no statuses" — return empty.
+            return []
+        else:
+            effective_statuses = tuple(status_filter)
+
+        # Clamp limit to a safe range.
+        if limit < 1:
+            limit = 1
+        elif limit > 500:
+            limit = 500
+
+        with orchestration_span(
+            "convoy_service.list_subtasks_by_agent",
+            metadata={
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+                "status_filter_count": len(effective_statuses),
+                "limit": limit,
+                "has_cursor": before_id is not None,
+            },
+            expected_exceptions=(ValueError,),
+        ):
+            # Build the query — parameter list is dynamic because of the
+            # IN (?, ?, ...) placeholders. SQLite parameter binding is
+            # safe — values are not concatenated into SQL.
+            placeholders = ",".join(["?"] * len(effective_statuses))
+            params: list[object] = [
+                agent_id,
+                workspace_id,
+                *effective_statuses,
+            ]
+            sql = (
+                "SELECT * FROM subtasks "
+                "WHERE assigned_agent_id = ? "
+                "  AND workspace_id = ? "
+                f"  AND status IN ({placeholders})"
+            )
+            if before_id is not None:
+                sql += " AND id < ?"
+                params.append(before_id)
+            sql += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+
+            rows = self.db.conn.execute(sql, params).fetchall()
+            return [self.db.row_to_subtask(r) for r in rows]
 
     # ── Dispatch ───────────────────────────────────────────────────────────
     # Parity: convoy.ts:dispatchSubtask()

@@ -17,6 +17,7 @@ Within that framework, behavior is organized as vertical slices. Group behavior 
 | `.claude/scripts/orchestration/` | Convoy/mailbox service layer, executor adapters, local API (port 4322), contract |
 | `.claude/scripts/integrations/` | Direct platform API integrations |
 | `.claude/scripts/integrations/finance_*` | Personal finance: bank sync, budget queries, Teller/Plaid clients |
+| `.claude/scripts/dashboard_*.py` + `dashboard/server/` + `dashboard/web/` | Dashboard slice — framework HTTP API on port 4322 (dashboard_api.py + dashboard_db.py + dashboard_bot_lifecycle.py), Hono thin proxy on port 3141 (dashboard/server/), Vite+Preact web bundle (dashboard/web/) |
 | `vault/memory/` | Canonical memory substrate |
 | `C:\Users\YourUser\mission-control\src\app\api\` | Hub / Mission Control control-plane APIs |
 | `C:\Users\YourUser\mission-control\src\components\` | Hub / Mission Control GUI panels and interaction surfaces |

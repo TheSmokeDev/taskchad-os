@@ -67,6 +67,13 @@ dependencies = [
     # contract explicit so personas.services.load_persona_config can rely
     # on it without depending on the transitive resolution staying stable.
     "pyyaml>=6.0",
+    # PRD-8 Phase 3 / WS2 — explicit Pillow dep (R6 NB2, 2026-05-07).
+    # Required for avatar magic-byte+anti-spoof validation in
+    # dashboard_api.py PUT /api/agents/{id}/avatar (per criterion
+    # framework_endpoint_put_and_delete_avatar). Transitive presence via
+    # FastEmbed/etc is NOT relied on per Rule 2 / explicit-contract
+    # discipline.
+    "Pillow>=10.0.0",
 ]
 
 [project.scripts]

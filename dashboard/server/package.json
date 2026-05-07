@@ -1,0 +1,29 @@
+{
+  "name": "@thehomie/dashboard-server",
+  "version": "0.3.0",
+  "description": "Hono thin proxy for The Homie dashboard slice (PRD-8 Phase 3 / WS3). Translates browser-facing routes (with 'main' persona id) to Python framework calls (with 'default' persona id) on port 4322.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "hono": "^4.6.14",
+    "pino": "^9.5.0",
+    "isomorphic-dompurify": "^2.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

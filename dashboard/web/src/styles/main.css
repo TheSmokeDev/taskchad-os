@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-bg: #0d0e12;
+    --color-sidebar: #0a0b0f;
+    --color-card: #14161b;
+    --color-elevated: #1a1d24;
+    --color-border: #232730;
+    --color-border-strong: #303641;
+
+    --color-text: #e4e5e8;
+    --color-text-muted: #9094a0;
+    --color-text-faint: #5e6370;
+
+    --color-accent: #8b8af0;
+    --color-accent-hover: #7574e4;
+    --color-accent-soft: rgba(139, 138, 240, 0.18);
+
+    --color-status-done: #4ade80;
+    --color-status-warn: #facc15;
+    --color-status-failed: #f87171;
+  }
+
+  html[data-theme='midnight'] {
+    --color-bg: #07090f;
+    --color-sidebar: #050710;
+    --color-card: #0f1320;
+    --color-elevated: #141a2a;
+    --color-border: #1c2335;
+    --color-border-strong: #283149;
+
+    --color-accent: #5eb6ff;
+    --color-accent-hover: #4aa6f0;
+    --color-accent-soft: rgba(94, 182, 255, 0.18);
+  }
+
+  html[data-theme='crimson'] {
+    --color-bg: #110a0c;
+    --color-sidebar: #0c0709;
+    --color-card: #1a1015;
+    --color-elevated: #22141a;
+    --color-border: #2d1c25;
+    --color-border-strong: #3d2735;
+
+    --color-accent: #ff5e6e;
+    --color-accent-hover: #ef4f5f;
+    --color-accent-soft: rgba(255, 94, 110, 0.18);
+  }
+
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    background: var(--color-bg);
+    color: var(--color-text);
+  }
+
+  /* Scrollbar styling for dark themes. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-border-strong);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* Tight prose for chat/memory body. */
+  .prose-sm p { margin: 0.5em 0; }
+  .prose-sm pre {
+    background: var(--color-elevated);
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 11px;
+  }
+  .prose-sm code {
+    background: var(--color-elevated);
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+    font-size: 0.9em;
+  }
+  .prose-sm pre code {
+    background: transparent;
+    padding: 0;
+  }
+  .prose-sm a {
+    color: var(--color-accent);
+    text-decoration: underline;
+  }
+  .prose-sm ul, .prose-sm ol {
+    margin: 0.5em 0;
+    padding-left: 1.5em;
+  }
+  .prose-sm h1, .prose-sm h2, .prose-sm h3, .prose-sm h4 {
+    margin: 0.75em 0 0.25em;
+    font-weight: 600;
+  }
+}

@@ -57,6 +57,8 @@ from personas.core import (
 from personas.services import (
     ConfigShapeError,
     load_persona_config,
+    validate_config_dict,
+    validate_config_yaml_text,
 )
 
 __all__ = [
@@ -73,9 +75,13 @@ __all__ = [
     "read_active_profile",
     "resolve_persona_env",
     "set_active_profile",
+    "validate_config_dict",
+    "validate_config_yaml_text",
     "validate_persona_name",
 ]
-# 14 helpers exposed (PRD-8 Phase 2 — added load_persona_config + ConfigShapeError).
-# Sorted alphabetically. test_personas_public_api.py asserts
+# 16 helpers exposed (PRD-8 Phase 3 / WS2 — added validate_config_dict +
+# validate_config_yaml_text per R1 B4; was 14 in Phase 2 after load_persona_config
+# + ConfigShapeError; was 12 in PRP-7a Phase 1). Sorted alphabetically.
+# test_personas_public_api.py asserts
 # ``len(personas.__all__) == len(EXPECTED_PUBLIC_API)`` so the list is the
 # single source of truth — no magic number.

@@ -251,7 +251,17 @@ app = FastAPI(title="Orchestration Control API", version="0.1.0")
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Bearer token enforcement. Active only when ORCHESTRATION_API_TOKEN is set."""
+    """Bearer token enforcement. Active only when ORCHESTRATION_API_TOKEN is set.
+
+    PRD-8 Phase 3 / WS2 (R1 B3 + owner Decision 3) — ``/api/health`` is
+    explicitly EXEMPT from bearer auth in BOTH token-set and token-unset
+    deployment modes. The path check happens BEFORE the bearer check so
+    health probes work without leaking auth requirements. The endpoint
+    response is intentionally minimal (NO PII, NO secrets, NO internal
+    paths).
+    """
+    if request.url.path == "/api/health":
+        return await call_next(request)
     if ORCHESTRATION_API_TOKEN is not None:
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[7:] != ORCHESTRATION_API_TOKEN:
@@ -871,3 +881,22 @@ def delete_team_memory_endpoint(team_id: int, filename: str):
             raise HTTPException(status_code=404, detail=f"Team memory file not found: {filename}")
         update_observation(metadata={"team_id": team_id, "memory_filename": filename}, output={"status": "deleted"})
         return {"team_id": team_id, "filename": filename, "status": "deleted"}
+
+
+# ── PRD-8 Phase 3 / WS2 — dashboard router mount ─────────────────────────
+#
+# Slice ownership: orchestration/api.py contains ZERO dashboard logic. The
+# dashboard router lives in its own module (.claude/scripts/dashboard_api.py)
+# owned by dashboard-owner. The two-touch is just (a) the /api/health path
+# exemption in auth_middleware above (R1 B3 + owner Decision 3) and (b)
+# the one-line include_router below.
+#
+# Lazy import inside a try/except so a partial dashboard install (e.g.
+# missing dashboard_db.py during a fresh checkout) does NOT prevent the
+# orchestration API from booting. Existing convoy/mailbox/team endpoints
+# stay reachable; the dashboard surface goes dark with a logged warning.
+try:
+    from dashboard_api import router as _dashboard_router
+    app.include_router(_dashboard_router)
+except Exception as _exc:  # noqa: BLE001
+    logger.warning("dashboard_api router not mounted: %s", _exc)
