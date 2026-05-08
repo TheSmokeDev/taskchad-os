@@ -57,7 +57,6 @@ What this module does NOT do:
 from __future__ import annotations
 
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -90,94 +89,33 @@ __all__ = [
 ]
 
 
-# ── Subprocess env scrubbing (Phase 7 seed) ──────────────────────────────
+# ── Subprocess env scrubbing (PRD-8 Phase 7a — delegated) ────────────────
 #
-# When the dashboard spawns a persona's bot, the child MUST NOT inherit
-# dashboard-only env vars (token, bind, port, db_path) — those are the
-# operator's HTTP control plane, not bot config. Pattern-matched secret-
-# shaped keys are also scrubbed unless they belong to the bot-creds
-# whitelist (TELEGRAM_*, ANTHROPIC_*, OPENAI_*, etc.).
-#
-# Phase 7 follow-up: runtime/subprocess_env.py:get_scrubbed_sdk_env()
-# will absorb this implementation; the contract above is preserved.
+# Phase 3 shipped the scrub seed inline here. PRD-8 Phase 7a (WS3) absorbs
+# the implementation into `runtime/subprocess_env.py` so voice/Cabinet
+# subprocess spawns can share the same logic. `_scrub_dashboard_env`
+# remains as a deprecated alias for back-compat — it now delegates to
+# `get_scrubbed_sdk_env`. Phase 4 prep keys (GROQ_, GRADIUM_, DAILY_) and
+# Max OAuth carve-out (HOME/USERPROFILE preserved) live in the new module.
 
-_DASHBOARD_ONLY_KEYS: frozenset[str] = frozenset({
-    "DASHBOARD_TOKEN",
-    "DASHBOARD_BIND",
-    "DASHBOARD_PORT",
-    "DASHBOARD_DB_PATH",
-    "DASHBOARD_DEV_MODE_NO_AUTH",
-})
-
-# Bot-creds whitelist — env var prefixes that the BOT subprocess SHOULD
-# inherit (these are the platform credentials the bot needs to connect).
-# Anything else that looks secret-shaped (matches _SECRET_SHAPED_RE) gets
-# scrubbed so the bot never sees, e.g., AWS or Stripe keys that belong
-# to the dashboard process only.
-_BOT_CREDS_PREFIXES: tuple[str, ...] = (
-    "TELEGRAM_",
-    "ANTHROPIC_",
-    "OPENAI_",
-    "GEMINI_",
-    "OPENROUTER_",
-    "KIMI_",
-    "LANGFUSE_",
-    "DISCORD_",
-    "SLACK_",
-    "WHATSAPP_",
-    "ELEVENLABS_",
-)
-
-# Secret-shaped key heuristic — env var names that suggest credential
-# material. Compared case-insensitively. Anything matching this AND not
-# matching a _BOT_CREDS_PREFIXES prefix gets scrubbed.
-_SECRET_SHAPED_RE = re.compile(
-    r"(?:_TOKEN|_KEY|_SECRET|_PASSWORD|_PASSWD|_PWD|_API|_CREDENTIALS?|_CERT)$",
-    re.IGNORECASE,
-)
-
-
-def _is_bot_creds_key(name: str) -> bool:
-    """True iff *name* belongs to the bot-creds whitelist (prefix match)."""
-    upper = name.upper()
-    return any(upper.startswith(p) for p in _BOT_CREDS_PREFIXES)
+from runtime.subprocess_env import get_scrubbed_sdk_env  # noqa: E402
 
 
 def _scrub_dashboard_env(
     parent_env: dict[str, str] | None = None,
     profile_root: Path | None = None,
 ) -> dict[str, str]:
-    """Return a sanitized env dict for a persona-bot subprocess.
+    """Deprecated alias — delegates to runtime.subprocess_env.get_scrubbed_sdk_env.
 
-    Drops dashboard-only keys + pattern-matched secret-shaped keys not
-    on the bot-creds whitelist. Forces ``HOMIE_HOME`` to *profile_root*
-    so the child boot resolves the TARGET persona's paths.
+    PRD-8 Phase 7a (WS3) — body migrated to runtime/subprocess_env.py so
+    voice/Cabinet subprocess spawns share the same scrub logic.
 
-    Rule 1 — both args are None-sentineled and resolved in body:
+    Rule 1 — both args None-sentineled (delegated to the new module):
       * ``parent_env=None`` → ``os.environ.copy()`` at call time
       * ``profile_root=None`` → ``ValueError`` (caller MUST pass an
         explicit target — never silently inherit dashboard's HOMIE_HOME)
     """
-    if parent_env is None:
-        parent_env = os.environ.copy()
-    if profile_root is None:
-        raise ValueError(
-            "_scrub_dashboard_env: profile_root MUST be passed explicitly "
-            "(do NOT silently inherit dashboard's HOMIE_HOME)"
-        )
-
-    out: dict[str, str] = {}
-    for key, value in parent_env.items():
-        if key in _DASHBOARD_ONLY_KEYS:
-            continue
-        if _SECRET_SHAPED_RE.search(key) and not _is_bot_creds_key(key):
-            # Looks secret-shaped + not on the bot-creds whitelist → drop.
-            continue
-        out[key] = value
-
-    # Force HOMIE_HOME to the target persona's root.
-    out["HOMIE_HOME"] = str(profile_root)
-    return out
+    return get_scrubbed_sdk_env(parent_env=parent_env, profile_root=profile_root)
 
 
 # ── Profile-aware path resolution ────────────────────────────────────────

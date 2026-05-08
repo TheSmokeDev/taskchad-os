@@ -262,6 +262,16 @@ async def auth_middleware(request: Request, call_next):
     """
     if request.url.path == "/api/health":
         return await call_next(request)
+    # PRD-8 Phase 7a R3 NB1 — /api/audit-log is exempt from the outer
+    # ORCHESTRATION_API_TOKEN bearer middleware. The endpoint enforces its
+    # own DASHBOARD_ADMIN_TOKEN bearer internally (in dashboard_api.py).
+    # Without this exemption, the single Authorization header would have to
+    # equal BOTH tokens — fail-closed forever in token-set deployments
+    # unless the two tokens happened to be equal (defeats the "separate
+    # admin token" security boundary). Mirrors the /api/health exemption
+    # above.
+    if request.url.path == "/api/audit-log":
+        return await call_next(request)
     if ORCHESTRATION_API_TOKEN is not None:
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[7:] != ORCHESTRATION_API_TOKEN:

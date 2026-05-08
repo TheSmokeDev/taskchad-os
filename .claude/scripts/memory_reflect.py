@@ -342,6 +342,20 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
         )
 
     except Exception as e:
+        # PRD-8 Phase 7a WS4 R2 NM2 — detect kill-switch and exit cleanly
+        # (NOT failed-with-traceback). Late-bind import (defensive).
+        try:
+            from security.kill_switches import KillSwitchDisabled
+        except ImportError:
+            KillSwitchDisabled = ()  # type: ignore[assignment,misc]
+        if isinstance(e, KillSwitchDisabled):  # type: ignore[arg-type]
+            switch_name = getattr(e, "switch_name", "unknown")
+            print(f"[{now_local()}] Reflection skipped: kill-switch '{switch_name}' disabled")
+            append_to_daily_log(
+                f"**SKIPPED**: Reflection skipped (kill-switch '{switch_name}' disabled)",
+                "Reflection",
+            )
+            return None  # exit 0, NOT an error
         print(f"[{now_local()}] Reflection error: {e}")
         append_to_daily_log(f"**ERROR**: Reflection failed - {e}", "Reflection")
         return None

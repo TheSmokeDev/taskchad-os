@@ -445,6 +445,26 @@ def _aggregate_lane_aware_tokens(
 # ── /api/health (NO auth — explicit middleware exemption) ────────────────
 
 
+def _get_kill_switch_health_snapshot() -> dict:
+    """Read from security.kill_switches via module-attribute lookup (Rule 3).
+
+    PRD-8 Phase 7a (WS5) R1 M6 + M7 — exposes the rich snapshot:
+    counters, audit_write_failures, process_started_at. Fail-open — if the
+    security/ slice is unavailable, return an empty snapshot so /api/health
+    still returns 200. The dashboard frontend KillSwitchBanner.tsx renders
+    nothing for empty counters, so an unavailable backend renders silently.
+    """
+    try:
+        from security import kill_switches
+        return kill_switches.get_health_snapshot()
+    except Exception:
+        return {
+            "counters": {},
+            "audit_write_failures": {},
+            "process_started_at": None,
+        }
+
+
 @router.get("/api/health")
 def get_health() -> dict:
     """Minimal health payload — NO PII, NO secrets, NO internal paths.
@@ -452,6 +472,15 @@ def get_health() -> dict:
     R1 B3 + owner Decision 3 — auth_middleware exempts this path BEFORE
     the bearer check (see orchestration/api.py modification). Both
     token-set and token-unset modes return 200.
+
+    PRD-8 Phase 7a (WS5) R2 NM4 — `killSwitches` is now a rich snapshot:
+        {
+            "counters": {<switch>: <int>},
+            "audit_write_failures": {<switch>: <int>},
+            "process_started_at": <unix_timestamp_float | null>,
+        }
+    Operators see process_started_at so they understand counters reset on
+    restart; audit_write_failures surfaces silent persistence loss.
     """
     # Lane status — best-effort. Default to "ready" since the framework
     # is up if this handler is reachable.
@@ -461,7 +490,7 @@ def get_health() -> dict:
         "version": "0.3.0",
         "uptime_seconds": int(time.time() - _START_TIME),
         "lane_status": lane_status,
-        "killSwitches": {},
+        "killSwitches": _get_kill_switch_health_snapshot(),
     }
 
 
@@ -825,6 +854,100 @@ async def hard_delete_agent(
             response["warnings"] = list(warnings)
 
     return JSONResponse(status_code=status_code, content=response)
+
+
+# ── /api/audit-log (PRD-8 Phase 7a WS5 — admin-only paginated query) ─────
+
+
+def _redact_secret_shaped(text: str) -> str:
+    """Scan text for SECRET_PREFIXES matches, replace with <REDACTED-{vendor}>.
+
+    Used to scrub the `detail` field of audit-log rows on read — defense in
+    depth against any caller path / stringified object that includes a real
+    key. Iterates SECRET_PREFIXES in the canonical length-desc order so the
+    most-specific vendor label wins.
+    """
+    try:
+        from security.patterns import (
+            LEAK_PATTERN_REGEX,
+            PREFIX_VENDOR_MAP,
+            SECRET_PREFIXES,
+        )
+    except Exception:
+        return text  # security/ slice unavailable — return untouched
+    out = text
+    for prefix, regex in zip(SECRET_PREFIXES, LEAK_PATTERN_REGEX, strict=True):
+        vendor = PREFIX_VENDOR_MAP.get(prefix, "unknown")
+        out = regex.sub(f"<REDACTED-{vendor}>", out)
+    return out
+
+
+@router.get("/api/audit-log")
+async def get_audit_log(
+    request: Request,
+    limit: int = 50,
+    before_id: int | None = None,
+    action: str | None = None,
+) -> dict:
+    """PRD-8 Phase 7a (WS5) — admin-only audit-log query (paginated).
+
+    Auth (R3 NB1): the outer ``ORCHESTRATION_API_TOKEN`` middleware is
+    EXEMPT for this path (mirrors /api/health). The
+    ``Authorization: Bearer <DASHBOARD_ADMIN_TOKEN>`` header is the SOLE
+    auth path. Without ``DASHBOARD_ADMIN_TOKEN`` set, the endpoint returns
+    503 (fail-closed).
+
+    Pagination: ``limit`` capped at 200 (default 50); ``before_id`` for
+    cursor-style backwards iteration (id < before_id). Optional ``action``
+    filter (e.g. action=killswitch_refusal). Detail field is redacted on
+    read via SECRET_PREFIXES (defense-in-depth).
+
+    Phase 7a scope: returns kill-switch refusal rows + Phase 3 hard-delete
+    rows. Cabinet tool-call writes + dashboard-mutation writes (PRD §16)
+    are deferred to Phase 7b.
+    """
+    admin_token = os.getenv("DASHBOARD_ADMIN_TOKEN", "").strip() or None
+    if admin_token is None:
+        raise HTTPException(
+            status_code=503,
+            detail="DASHBOARD_ADMIN_TOKEN must be set; audit-log endpoint disabled",
+        )
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or auth[7:] != admin_token:
+        raise HTTPException(status_code=403, detail="admin bearer token required")
+
+    capped_limit = max(1, min(limit, 200))
+
+    conn = get_connection()
+    try:
+        params: dict[str, object] = {"limit": capped_limit}
+        where_clauses: list[str] = []
+        if before_id is not None:
+            where_clauses.append("id < :before_id")
+            params["before_id"] = before_id
+        if action is not None:
+            where_clauses.append("action = :action")
+            params["action"] = action
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        cur = conn.execute(
+            f"""SELECT id, persona_id, action, detail, blocked, created_at,
+                       operator_id, target_persona_id, outcome
+                FROM audit_log{where_sql}
+                ORDER BY id DESC
+                LIMIT :limit""",
+            params,
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    # Redact-on-read — defense in depth. detail may carry caller paths or
+    # stringified objects that include real keys.
+    for row in rows:
+        row["detail"] = _redact_secret_shaped(str(row.get("detail") or ""))
+
+    next_before_id = rows[-1]["id"] if rows else None
+    return {"rows": rows, "next_before_id": next_before_id}
 
 
 # ── /api/agents/{id}/avatar (PUT + DELETE, enterprise-grade) ─────────────

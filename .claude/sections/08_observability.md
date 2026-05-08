@@ -80,7 +80,7 @@ with propagate_attributes(session_id=..., user_id=..., tags=...):
 
 ```
 LANGFUSE_PUBLIC_KEY=pk-lf-your-public-key
-LANGFUSE_SECRET_KEY=sk-lf-your-secret-key
+LANGFUSE_SECRET_KEY=<REDACTED-openai>
 LANGFUSE_BASE_URL=http://localhost:3000
 LANGFUSE_ENABLED=true   # set to "false" to disable all tracing
 ```

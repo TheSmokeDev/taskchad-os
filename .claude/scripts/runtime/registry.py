@@ -1,6 +1,13 @@
-"""Runtime selection and fallback execution."""
+"""Runtime selection and fallback execution.
+
+PRD-8 Phase 7a WS4 — `requireEnabled("llm")` is invoked at the head of
+`run_with_fallback` so even legacy callers that bypass the lane router
+hit the kill-switch. Module-attribute lookup (Rule 3).
+"""
 
 from __future__ import annotations
+
+from security import kill_switches
 
 from . import langfuse_setup
 from .base import RuntimeRequest, RuntimeResult
@@ -9,6 +16,10 @@ from .lane_router import run_with_runtime_lanes
 
 async def run_with_fallback(request: RuntimeRequest) -> RuntimeResult:
     """Deprecated compatibility shim for the old provider-first runtime facade."""
+
+    # PRD-8 Phase 7a WS4 — operator kill-switch. Mirrors lane_router so legacy
+    # callers that import this shim directly are also gated.
+    kill_switches.requireEnabled("llm", caller="registry_shim")
 
     # Module-attribute lookup so monkey-patches on
     # `runtime.langfuse_setup.is_langfuse_enabled` (e.g. in `isolate_langfuse()`)

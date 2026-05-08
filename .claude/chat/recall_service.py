@@ -193,6 +193,25 @@ async def recall(
         except Exception:
             pass
 
+    # PRD-8 Phase 7a WS4 — operator kill-switch (recall lane). Wrapped INSIDE
+    # the @observe scope so the chat_message → recall span hierarchy is
+    # preserved on refusal. The refusal becomes the span output (tier=
+    # "killswitch_disabled"), giving operators trace-level visibility into
+    # which queries got blocked. Module-attribute lookup so monkeypatch
+    # propagates (Rule 3).
+    from security import kill_switches  # late-bind, Rule 3
+    try:
+        kill_switches.requireEnabled("recall", caller="recall_service")
+    except kill_switches.KillSwitchDisabled:
+        log = _make_log(
+            tier="killswitch_disabled",
+            caller=caller,
+            search_mode=search_mode.value,
+        )
+        _persist_log(log)
+        _update_span(log)
+        return RecallResponse(results=[], formatted_text="", log=log)
+
     if not RECALL_ENABLED:
         log = _make_log(tier="disabled", caller=caller, search_mode=search_mode.value)
         _persist_log(log)

@@ -111,7 +111,11 @@ def test_get_health_returns_minimal_shape(isolated_app):
     assert "version" in body
     assert "uptime_seconds" in body
     assert "lane_status" in body
-    assert body["killSwitches"] == {}
+    # PRD-8 Phase 7a (R2 NM4) — rich snapshot shape, not flat dict.
+    assert isinstance(body["killSwitches"], dict)
+    assert "counters" in body["killSwitches"]
+    assert "audit_write_failures" in body["killSwitches"]
+    assert "process_started_at" in body["killSwitches"]
 
 
 def test_get_health_no_auth_required_token_unset(isolated_app):
@@ -144,8 +148,12 @@ def test_get_health_no_auth_required_token_set(tmp_path, monkeypatch):
 
 
 def test_get_health_kill_switches_empty_stub(isolated_app):
+    """PRD-8 Phase 7a — fresh process has empty counters but rich snapshot shape."""
     r = isolated_app.get("/api/health")
-    assert r.json()["killSwitches"] == {}
+    snap = r.json()["killSwitches"]
+    # counters and audit_write_failures may be empty on fresh process.
+    assert isinstance(snap.get("counters"), dict)
+    assert isinstance(snap.get("audit_write_failures"), dict)
 
 
 def test_get_health_response_has_no_secrets_or_pii(isolated_app):
@@ -399,7 +407,7 @@ def test_hard_delete_partial_when_only_config_yaml_missing(isolated_app, tmp_pat
     assert body["partial"] is True
 
 
-def test_hard_delete_real_disk_intact_when_lifecycle_raises_before_any_delete(isolated_app, tmp_path, monkeypatch):
+def test_hard_delete_real_di<REDACTED-elevenlabs>(isolated_app, tmp_path, monkeypatch):
     """REAL filesystem: lifecycle raises BEFORE any delete → 500 lifecycle_error_no_change."""
     homie_home = tmp_path / ".homie"
     profile_root = homie_home / "profiles" / "intact-test"
@@ -420,7 +428,7 @@ def test_hard_delete_real_disk_intact_when_lifecycle_raises_before_any_delete(is
     assert any("lifecycle_error_no_change" in w for w in body["warnings"])
 
 
-def test_hard_delete_real_disk_idempotent_when_already_gone(isolated_app, tmp_path, monkeypatch):
+def test_hard_delete_real_di<REDACTED-elevenlabs>(isolated_app, tmp_path, monkeypatch):
     """REAL filesystem: profile root never existed → 200 deleted (idempotent)."""
     homie_home = tmp_path / ".homie"
     homie_home.mkdir()
@@ -1049,3 +1057,201 @@ def test_post_restart_chains_deactivate_then_activate(isolated_app):
         body = r.json()
         assert body["old_pid"] == 100
         assert body["new_pid"] == 200
+
+
+# ── PRD-8 Phase 7a (WS5) — /api/audit-log + rich /api/health snapshot ─────
+
+
+def test_phase7a_health_kill_switches_shape_after_refusal(isolated_app, monkeypatch):
+    """After a kill-switch refusal, /api/health.killSwitches.counters reflects it."""
+    monkeypatch.setenv("HOMIE_KILLSWITCH_LLM", "disabled")
+    from security import kill_switches
+    # Reset and trigger a refusal.
+    kill_switches._REFUSAL_COUNTERS.clear()
+    kill_switches._AUDIT_WRITE_FAILURES.clear()
+    try:
+        kill_switches.requireEnabled("llm", caller="test")
+    except kill_switches.KillSwitchDisabled:
+        pass
+    r = isolated_app.get("/api/health")
+    snap = r.json()["killSwitches"]
+    assert snap["counters"].get("llm", 0) >= 1
+    assert isinstance(snap.get("process_started_at"), (int, float))
+    kill_switches._REFUSAL_COUNTERS.clear()
+    kill_switches._AUDIT_WRITE_FAILURES.clear()
+
+
+def test_phase7a_audit_log_endpoint_503_when_admin_token_unset(isolated_app, monkeypatch):
+    """Fail-closed when DASHBOARD_ADMIN_TOKEN is unset."""
+    monkeypatch.delenv("DASHBOARD_ADMIN_TOKEN", raising=False)
+    r = isolated_app.get("/api/audit-log")
+    assert r.status_code == 503
+    assert "DASHBOARD_ADMIN_TOKEN" in r.json()["detail"]
+
+
+def test_phase7a_audit_log_endpoint_403_when_bearer_wrong(isolated_app, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_ADMIN_TOKEN", "admin-secret")
+    r = isolated_app.get(
+        "/api/audit-log", headers={"Authorization": "Bearer wrong-token"}
+    )
+    assert r.status_code == 403
+
+
+def test_phase7a_audit_log_endpoint_200_when_bearer_correct(isolated_app, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_ADMIN_TOKEN", "admin-secret")
+    r = isolated_app.get(
+        "/api/audit-log", headers={"Authorization": "Bearer admin-secret"}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "rows" in body
+    assert "next_before_id" in body
+    assert isinstance(body["rows"], list)
+
+
+def test_phase7a_audit_log_endpoint_paginated_via_before_id(isolated_app, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_ADMIN_TOKEN", "admin-secret")
+    # Seed 5 rows via _audit_write.
+    import dashboard_api
+    for i in range(5):
+        dashboard_api._audit_write(
+            operator_id="test",
+            action="killswitch_refusal",
+            target_persona_id=f"sw-{i}",
+            outcome="disabled",
+            detail={"i": i},
+            blocked=True,
+        )
+    r = isolated_app.get(
+        "/api/audit-log?limit=2",
+        headers={"Authorization": "Bearer admin-secret"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["rows"]) == 2
+    assert body["next_before_id"] is not None
+
+
+def test_phase7a_audit_log_endpoint_default_limit_50_max_200(isolated_app, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_ADMIN_TOKEN", "admin-secret")
+    r = isolated_app.get(
+        "/api/audit-log?limit=10000",
+        headers={"Authorization": "Bearer admin-secret"},
+    )
+    # No assertion error — endpoint clamps internally; test just confirms 200.
+    assert r.status_code == 200
+
+
+def test_phase7a_audit_log_endpoint_action_filter(isolated_app, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_ADMIN_TOKEN", "admin-secret")
+    import dashboard_api
+    dashboard_api._audit_write(
+        operator_id="test",
+        action="killswitch_refusal",
+        target_persona_id="llm",
+        outcome="disabled",
+        detail={},
+        blocked=True,
+    )
+    dashboard_api._audit_write(
+        operator_id="test",
+        action="hard_delete",
+        target_persona_id="sales",
+        outcome="success",
+        detail={},
+        blocked=False,
+    )
+    r = isolated_app.get(
+        "/api/audit-log?action=killswitch_refusal",
+        headers={"Authorization": "Bearer admin-secret"},
+    )
+    assert r.status_code == 200
+    rows = r.json()["rows"]
+    for row in rows:
+        assert row["action"] == "killswitch_refusal"
+
+
+def test_phase7a_audit_log_endpoint_redacts_secret_shaped_in_detail(
+    isolated_app, monkeypatch
+):
+    """Detail field with a synthetic key gets scrubbed to <REDACTED-...>."""
+    monkeypatch.setenv("DASHBOARD_ADMIN_TOKEN", "admin-secret")
+    import dashboard_api
+    fake_key = "ghp_" + "x" * 30  # synthetic, not real
+    dashboard_api._audit_write(
+        operator_id="test",
+        action="killswitch_refusal",
+        target_persona_id="recall",
+        outcome="disabled",
+        detail={"caller_path": fake_key, "switch": "recall"},
+        blocked=True,
+    )
+    r = isolated_app.get(
+        "/api/audit-log?action=killswitch_refusal",
+        headers={"Authorization": "Bearer admin-secret"},
+    )
+    assert r.status_code == 200
+    body_text = r.text
+    assert fake_key not in body_text, "Synthetic ghp_ key was NOT redacted"
+    assert "<REDACTED-github>" in body_text
+
+
+def test_phase7a_audit_log_endpoint_works_with_admin_token_when_orch_token_different(
+    tmp_path, monkeypatch
+):
+    """R3 NB1 — admin token != orch token must still authenticate (exemption works)."""
+    monkeypatch.setenv("ORCHESTRATION_API_TOKEN", "orch-token-abc")
+    monkeypatch.setenv("DASHBOARD_ADMIN_TOKEN", "admin-token-xyz")
+    dash_db = tmp_path / "dashboard.db"
+    import config
+    monkeypatch.setattr(config, "DASHBOARD_DB_PATH", dash_db)
+    monkeypatch.setattr(config, "ORCHESTRATION_DB_PATH", tmp_path / "orch.db")
+
+    import orchestration.api as oa
+    importlib.reload(oa)
+    db, cs, ms, reg, ts = oa._get_services()
+    oa._db = db
+    oa._convoy_svc = cs
+    oa._mailbox_svc = ms
+    oa._executor_registry = reg
+    oa._team_svc = ts
+
+    client = TestClient(oa.app)
+    r = client.get(
+        "/api/audit-log",
+        headers={"Authorization": "Bearer admin-token-xyz"},
+    )
+    assert r.status_code == 200, (
+        "/api/audit-log must accept admin token when orchestration token is "
+        f"a DIFFERENT value. Got {r.status_code}: {r.text}"
+    )
+    db.close()
+
+
+def test_phase7a_audit_log_endpoint_503_even_when_orch_token_set(
+    tmp_path, monkeypatch
+):
+    """R3 NB1 — orch token alone is NOT enough; admin token must be set or 503."""
+    monkeypatch.setenv("ORCHESTRATION_API_TOKEN", "orch-token-abc")
+    monkeypatch.delenv("DASHBOARD_ADMIN_TOKEN", raising=False)
+    dash_db = tmp_path / "dashboard.db"
+    import config
+    monkeypatch.setattr(config, "DASHBOARD_DB_PATH", dash_db)
+    monkeypatch.setattr(config, "ORCHESTRATION_DB_PATH", tmp_path / "orch.db")
+
+    import orchestration.api as oa
+    importlib.reload(oa)
+    db, cs, ms, reg, ts = oa._get_services()
+    oa._db = db
+    oa._convoy_svc = cs
+    oa._mailbox_svc = ms
+    oa._executor_registry = reg
+    oa._team_svc = ts
+
+    client = TestClient(oa.app)
+    r = client.get(
+        "/api/audit-log",
+        headers={"Authorization": "Bearer orch-token-abc"},
+    )
+    assert r.status_code == 503
+    db.close()

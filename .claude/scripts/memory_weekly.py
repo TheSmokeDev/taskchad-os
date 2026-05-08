@@ -355,6 +355,20 @@ If there is no real cross-domain signal this week, write: `No cross-domain signa
         )
 
     except Exception as e:
+        # PRD-8 Phase 7a WS4 R2 NM2 — detect kill-switch and exit cleanly
+        # (NOT failed-with-traceback). Late-bind import (defensive).
+        try:
+            from security.kill_switches import KillSwitchDisabled
+        except ImportError:
+            KillSwitchDisabled = ()  # type: ignore[assignment,misc]
+        if isinstance(e, KillSwitchDisabled):  # type: ignore[arg-type]
+            switch_name = getattr(e, "switch_name", "unknown")
+            print(f"[{now_local()}] Weekly synthesis skipped: kill-switch '{switch_name}' disabled")
+            append_to_daily_log(
+                f"**SKIPPED**: Weekly synthesis skipped (kill-switch '{switch_name}' disabled)",
+                "Weekly Synthesis",
+            )
+            return None  # exit 0, NOT an error
         print(f"[{now_local()}] Weekly synthesis error: {e}")
         append_to_daily_log(f"**ERROR**: Weekly synthesis failed - {e}", "Weekly Synthesis")
         return None

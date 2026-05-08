@@ -4,9 +4,18 @@ PR1 scope:
 - preserve existing adapter behavior
 - introduce lane-first selection
 - keep registry.py as a compatibility shim
+
+PRD-8 Phase 7a WS4 — `requireEnabled("llm")` is invoked at the head of
+`run_with_runtime_lanes` so any LLM lane execution is gated by the operator
+kill-switch. Module-attribute lookup (Rule 3) — `from security import
+kill_switches` then `kill_switches.requireEnabled(...)`. Top-level
+`from security.kill_switches import requireEnabled` would defeat
+monkeypatch propagation in tests.
 """
 
 from __future__ import annotations
+
+from security import kill_switches
 
 from .base import (
     RUNTIME_LANE_CLAUDE_NATIVE,
@@ -76,6 +85,11 @@ def _resolve_lane_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
 
 async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
     """Run a request through the lane-first runtime facade."""
+
+    # PRD-8 Phase 7a WS4 — operator kill-switch. Raises KillSwitchDisabled
+    # when HOMIE_KILLSWITCH_LLM=disabled. Callers (engine.py, memory_reflect,
+    # memory_weekly, memory_dream) catch this explicitly and degrade cleanly.
+    kill_switches.requireEnabled("llm", caller="lane_router")
 
     lane = resolve_runtime_lane(request)
     errors: list[str] = []

@@ -876,6 +876,29 @@ class ConversationEngine:
             )
             return
         except Exception as e:
+            # PRD-8 Phase 7a WS4 R2 NM2 — explicit KillSwitchDisabled handling.
+            # Late-bind import so engine.py doesn't hard-depend on the security/
+            # slice (defensive — empty-tuple fallback makes isinstance False on
+            # older deploys without the slice). Fail-open at deploy boundary,
+            # fail-closed at security boundary.
+            try:
+                from security.kill_switches import KillSwitchDisabled
+            except ImportError:
+                KillSwitchDisabled = ()  # type: ignore[assignment,misc]
+            if isinstance(e, KillSwitchDisabled):  # type: ignore[arg-type]
+                switch_name = getattr(e, "switch_name", "unknown")
+                yield OutgoingMessage(
+                    text=(
+                        f"[killswitch:{switch_name}] This feature is disabled by "
+                        f"the operator. The runtime did not produce a response. "
+                        f"To re-enable, unset HOMIE_KILLSWITCH_{switch_name.upper()} "
+                        f"in the environment."
+                    ),
+                    channel=message.channel,
+                    thread=message.thread,
+                    is_error=False,  # operator-intended state, NOT an error
+                )
+                return
             print(f"[{datetime.now()}] Runtime error: {e}")
             yield OutgoingMessage(
                 text=f"Sorry, I hit an error: {e}",

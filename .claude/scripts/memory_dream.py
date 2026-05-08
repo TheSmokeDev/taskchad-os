@@ -734,6 +734,23 @@ async def _run_dream_inner(
             print(f"[{now_local()}] Phase 4: Skipped (MEMORY.md under 150 lines in test mode)")
 
     except Exception as exc:
+        # PRD-8 Phase 7a WS4 R2 NM2 — kill-switch is operator intent, not a
+        # failure. Save state with result="skipped_killswitch" (NOT "failed")
+        # so the recency guard does NOT force immediate retry — operator
+        # deliberately disabled the feature. Late-bind import (defensive).
+        try:
+            from security.kill_switches import KillSwitchDisabled
+        except ImportError:
+            KillSwitchDisabled = ()  # type: ignore[assignment,misc]
+        if isinstance(exc, KillSwitchDisabled):  # type: ignore[arg-type]
+            switch_name = getattr(exc, "switch_name", "unknown")
+            state["result"] = "skipped_killswitch"  # NOT "failed"
+            state["phases_completed"] = phases_completed
+            state["killswitch"] = switch_name
+            save_state(state, DREAM_STATE_FILE)
+            print(f"[{now_local()}] Dream skipped: kill-switch '{switch_name}' disabled")
+            return  # CLEAN exit — recency guard treats this as a successful skip
+
         # LLM failure — mark state as failed so recency guard allows retry
         state["result"] = "failed"
         state["phases_completed"] = phases_completed

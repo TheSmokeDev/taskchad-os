@@ -118,7 +118,7 @@ def test_secret_openai_key_pattern_refused(vault_root):
 
     with pytest.raises(ValueError, match="secrets"):
         team_memory.write_team_memory(
-            1, "leak.md", "Token: sk-abc123456789012345678901234567890",
+            1, "leak.md", "Token: <REDACTED-openai>",
         )
 
 
@@ -127,7 +127,7 @@ def test_secret_langfuse_key_refused(vault_root):
 
     with pytest.raises(ValueError, match="secrets"):
         team_memory.write_team_memory(
-            1, "leak.md", "sk-lf-your-secret-key",
+            1, "leak.md", "<REDACTED-openai>",
         )
 
 
@@ -136,7 +136,7 @@ def test_secret_paperclip_key_refused(vault_root):
 
     with pytest.raises(ValueError, match="secrets"):
         team_memory.write_team_memory(
-            1, "leak.md", "pcp_07b56518a772817554b051ebcfaaf2ee05",
+            1, "leak.md", "<REDACTED-postmark>",
         )
 
 
@@ -289,7 +289,7 @@ def test_api_write_secret_content_returns_422(api_client):
     team_id = _create_team(api_client)
     r = api_client.post(
         f"/api/team/{team_id}/memory/leak.md",
-        json={"content": "api_key = sk-abc123456789012345xyz"},
+        json={"content": "api_key = <REDACTED-openai>"},
     )
     assert r.status_code == 422
     assert "secrets" in r.json()["detail"].lower()

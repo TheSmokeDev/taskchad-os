@@ -359,6 +359,27 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
             # Auto-draft AI-written pitches for each matched query
             drafts_created: list[str] = []
             if matched_queries:
+                # PRD-8 Phase 7a WS4 (R1 B5) — kill-switch guard for direct
+                # claude_agent_sdk.query call (bypasses lane_router/registry).
+                # Module-attribute lookup so monkeypatch propagates (Rule 3).
+                # Defensive ImportError + duck-typed exception check lets
+                # heartbeat run on partial deploys where security/ isn't
+                # present yet — fail-open at deploy boundary, fail-closed at
+                # security boundary.
+                try:
+                    from security import kill_switches as _kill_switches
+                    _kill_switches.requireEnabled("llm", caller="heartbeat_haro_pitch")
+                except ImportError:
+                    pass  # security/ slice not deployed yet — fail-open
+                except Exception as _exc:
+                    if _exc.__class__.__name__ == "KillSwitchDisabled":
+                        print(
+                            f"[{now_local()}] HARO pitch generation skipped: "
+                            f"kill-switch '{getattr(_exc, 'switch_name', 'llm')}' disabled"
+                        )
+                        return  # exit cleanly — operator turned off LLM
+                    raise
+
                 from claude_agent_sdk import (
                     AssistantMessage,
                     ClaudeAgentOptions,

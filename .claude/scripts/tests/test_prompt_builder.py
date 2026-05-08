@@ -70,7 +70,7 @@ def test_system_prompt_dict_no_append_key_skipped() -> None:
     assert "System context" not in result
 
 
-def test_task_name_and_prompt_always_present() -> None:
+def test_ta<REDACTED-elevenlabs>() -> None:
     req = RuntimeRequest(prompt="hello world", cwd=".", task_name="my_task")
     result = render_cli_prompt(req)
     assert "Task name: my_task" in result

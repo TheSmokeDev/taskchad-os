@@ -197,7 +197,7 @@ def test_dispatch_unknown_executor_returns_400(client):
     assert "unknown executor" in r.json()["detail"].lower()
 
 
-def test_dispatch_rejects_subtask_from_other_convoy(client):
+def test_dispatch_rejects_subta<REDACTED-elevenlabs>(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -235,7 +235,7 @@ def test_complete_subtask(client):
     assert isinstance(data["newly_ready"], list)
 
 
-def test_complete_rejects_subtask_from_other_convoy(client):
+def test_complete_rejects_subta<REDACTED-elevenlabs>(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -275,7 +275,7 @@ def test_fail_subtask(client):
     assert "convoy_failed" in r.json()
 
 
-def test_fail_rejects_subtask_from_other_convoy(client):
+def test_fail_rejects_subta<REDACTED-elevenlabs>(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -650,7 +650,7 @@ def test_transition_from_terminal_returns_400(client):
     assert r.status_code == 400
 
 
-def test_transition_rejects_subtask_from_other_convoy(client):
+def test_transition_rejects_subta<REDACTED-elevenlabs>(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -687,7 +687,7 @@ def test_update_subtask_fields(client):
     assert data["worktree_branch"] == "feat/task-1"
 
 
-def test_update_subtask_fields_terminal_rejects_non_seal(client):
+def test_update_subta<REDACTED-elevenlabs>(client):
     """Non-seal fields (assigned_agent_id) rejected on terminal subtasks."""
     cid, sid = _make_dispatched_subtask(client)
     client.post(f"/api/convoy/{cid}/subtask/{sid}/transition", json={"status": "cancelled"})
@@ -701,7 +701,7 @@ def test_update_subtask_fields_terminal_rejects_non_seal(client):
     assert "terminal" in r.json()["detail"].lower()
 
 
-def test_update_subtask_fields_rejects_other_convoy(client):
+def test_update_subta<REDACTED-elevenlabs>(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -896,7 +896,7 @@ def test_callback_unknown_event_type(client):
     assert "unknown event_type" in r.json()["detail"].lower()
 
 
-def test_callback_subtask_completed_no_deps(client):
+def test_callback_subta<REDACTED-elevenlabs>(client):
     """Single subtask with no deps: completed callback → convoy completed."""
     cid, sid = _make_ready_subtask(client)
     client.post(f"/api/convoy/{cid}/subtask/{sid}/dispatch", json={})
@@ -920,7 +920,7 @@ def test_callback_subtask_completed_no_deps(client):
     assert convoy["convoy"]["status"] == "completed"
 
 
-def test_callback_subtask_completed_triggers_auto_dispatch(client):
+def test_callback_subta<REDACTED-elevenlabs>(client):
     """A → B chain: completing A auto-dispatches B and returns b_id in newly_dispatched."""
     r = client.post(
         "/api/convoy",
@@ -1080,7 +1080,7 @@ def test_callback_completed_with_merge_commit(client):
     assert s["merge_commit"] == "deadbeef1234"
 
 
-def test_callback_invalid_subtask_id_deletes_receipt_for_retry(client):
+def test_callback_invalid_subta<REDACTED-elevenlabs>(client):
     """Processing error deletes the receipt so the same idempotency_key can be retried."""
     cid = client.post(
         "/api/convoy", json={"title": "Retry", "created_by": "sb"}
@@ -1421,3 +1421,45 @@ def test_completion_newly_unblocked_only_excludes_preexisting_ready(client):
     convoy = client.get(f"/api/convoy/{cid}").json()
     b = next(s for s in convoy["subtasks"] if s["id"] == b_id)
     assert b["status"] == "ready"
+
+
+# ── PRD-8 Phase 7a (R3 NB1) — /api/audit-log middleware exemption ────────
+
+
+def test_phase7a_audit_log_path_exempt_from_outer_bearer(tmp_path, monkeypatch):
+    """R3 NB1 — outer ORCHESTRATION_API_TOKEN middleware skips /api/audit-log.
+
+    Without the exemption, a token-set deployment would force the SAME
+    Authorization: Bearer to satisfy BOTH the orchestration token (outer)
+    AND the dashboard admin token (inner) — fail-closed forever unless the
+    two tokens happen to be equal. This test proves the middleware passes
+    through (NOT 401), and the inner endpoint returns 503 since
+    DASHBOARD_ADMIN_TOKEN is unset.
+    """
+    monkeypatch.setenv("ORCHESTRATION_API_TOKEN", "orch-token-abc")
+    monkeypatch.delenv("DASHBOARD_ADMIN_TOKEN", raising=False)
+    db_path = tmp_path / "test_orch_audit_exempt.db"
+    monkeypatch.setattr("config.ORCHESTRATION_DB_PATH", db_path)
+    monkeypatch.setattr(
+        "config.DASHBOARD_DB_PATH", tmp_path / "test_audit_dashboard.db"
+    )
+    import importlib
+    import orchestration.api as api_mod
+    importlib.reload(api_mod)
+    db, cs, ms, reg, ts = api_mod._get_services()
+    api_mod._db = db
+    api_mod._convoy_svc = cs
+    api_mod._mailbox_svc = ms
+    api_mod._executor_registry = reg
+    api_mod._team_svc = ts
+
+    test_client = TestClient(api_mod.app)
+    # No Bearer header. If middleware NOT exempt, this would 401. With the
+    # exemption, the request reaches the inner handler and 503s on missing
+    # DASHBOARD_ADMIN_TOKEN.
+    r = test_client.get("/api/audit-log")
+    assert r.status_code == 503, (
+        f"Expected 503 (admin-token unset, exemption passed through). "
+        f"Got {r.status_code}: {r.text}"
+    )
+    db.close()

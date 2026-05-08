@@ -178,7 +178,7 @@ class TestReloadConfigFunction:
         original = config.OPENAI_API_KEY
 
         try:
-            os.environ["OPENAI_API_KEY"] = "sk-new-test-key-123"
+            os.environ["OPENAI_API_KEY"] = "<REDACTED-openai>"
             from config import reload_config
 
             changes = reload_config()

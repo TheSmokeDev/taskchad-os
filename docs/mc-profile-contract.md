@@ -69,13 +69,27 @@ token-unset modes return 200 — liveness probes do not need credentials.
   "version": "<server version>",
   "uptime_seconds": <int>,
   "lane_status": { "claude_native": "ready", "generic_runtime": "ready" },
-  "killSwitches": {}
+  "killSwitches": {
+    "counters": { "<switch_name>": <int_refusal_count> },
+    "audit_write_failures": { "<switch_name>": <int_failure_count> },
+    "process_started_at": <unix_timestamp_float | null>
+  }
 }
 ```
 
-The payload contains NO PII, NO secrets, and NO internal paths.
-`killSwitches` is an empty-object stub in Phase 3 (Q3 forward-only-
-additive contract slot reserved for Phase 7 expansion).
+The payload contains NO PII, NO secrets, and NO internal paths. PRD-8
+Phase 7a (R2 NM4) populated the `killSwitches` field — formerly an empty
+stub `{}` (Phase 3 forward-only-additive contract slot). The rich
+snapshot exposes:
+
+- `counters` — per-switch refusal count since process start (resets on
+  restart). Rendered by `dashboard/web/src/components/KillSwitchBanner.tsx`
+  (PRD-8 Phase 7a WS7 — see §8 below).
+- `audit_write_failures` — per-switch audit-write failure count. Surfaces
+  silent persistence loss (e.g., dashboard.db disk-full). Operators see
+  this as a separate banner segment.
+- `process_started_at` — unix timestamp when the FastAPI process began
+  serving (so operators understand counters are process-local).
 
 ### 1.4 Browser SSE token-via-query exception
 
@@ -180,6 +194,7 @@ extended for The Homie's persona-bot lifecycle. They are defined in
 | GET | `/api/dashboard/settings` | Dashboard UI settings (theme, suggestions cursor, etc.). |
 | PATCH | `/api/dashboard/settings` | Update dashboard UI settings. |
 | GET | `/api/conversation/{persona_id}/stream` | SSE stream for live chat overlay. See §6. |
+| GET | `/api/audit-log` | PRD-8 Phase 7a admin-only audit-log query (paginated). Auth: `Authorization: Bearer <DASHBOARD_ADMIN_TOKEN>` (sole auth path — outer middleware exempts this path). 503 fail-closed when `DASHBOARD_ADMIN_TOKEN` unset. Query params: `limit` (default 50, max 200), `before_id` (cursor pagination), optional `action` filter (e.g. `action=killswitch_refusal`). Detail field redacted on read via SECRET_PREFIXES. Phase 7a scope: kill-switch refusal rows + Phase 3 hard-delete rows ONLY (this is a `security_events` view, NOT a full audit trail — broader writers ship in Phase 7b). |
 
 ### 3.2 Convoy / team / mailbox / executor endpoints (existing — Phase 3 dashboard MAY consume)
 
@@ -447,6 +462,82 @@ that operators already depend on.
   configuration. Phase 7 will add new fields to existing audit-log
   rows but will not rename or remove the existing
   `outcome` / `target_persona_id` / `operator_id` shape contract.
+
+---
+
+## 8. Kill-switches (PRD-8 Phase 7a)
+
+Operator-toggleable env-var kill-switches gate LLM and recall surfaces.
+Each refusal raises `KillSwitchDisabled`, increments a per-switch counter,
+and writes an `audit_log` row with `action='killswitch_refusal'`. Callers
+catch the exception explicitly and degrade gracefully.
+
+### 8.1 Env var pattern
+
+`HOMIE_KILLSWITCH_<NAME>=disabled` (case-insensitive). Read on every call
+(Rule 2 — never cached). Phase 7a defines:
+
+- `HOMIE_KILLSWITCH_LLM` — gates `runtime/lane_router.run_with_runtime_lanes`,
+  `runtime/registry.run_with_fallback`, and `heartbeat.py` HARO direct-SDK
+  pitch generation
+- `HOMIE_KILLSWITCH_RECALL` — gates `chat/recall_service.recall` (wrap is
+  INSIDE the `@observe` scope so the `chat_message → recall` Langfuse span
+  hierarchy is preserved on refusal — refusal becomes the span output with
+  `tier="killswitch_disabled"`)
+
+Phase 7b will add `voice` (Phase 4 cabinet voice) and `cabinet` (Phase 5
+cabinet text) once those surfaces are created.
+
+### 8.2 KillSwitchDisabled contract
+
+Callers MUST catch `KillSwitchDisabled` explicitly and return a documented
+degraded response (NOT swallow silently, NOT surface as a generic error).
+Phase 7a wires explicit catches at:
+
+- `chat/engine.py` — yields `[killswitch:<name>] This feature is disabled
+  by the operator…` outgoing message
+- `scripts/memory_reflect.py` — logs `Reflection skipped: kill-switch
+  '<name>' disabled`, returns None (exit 0, NOT failed)
+- `scripts/memory_weekly.py` — logs `Weekly synthesis skipped: kill-switch
+  '<name>' disabled`, returns None
+- `scripts/memory_dream.py` — saves state with `result="skipped_killswitch"`
+  (NOT `"failed"`) so the recency guard does NOT force retry
+
+### 8.3 Refusal counter visibility
+
+`/api/health` exposes the rich snapshot under `killSwitches` (see §1.3).
+The dashboard frontend `dashboard/web/src/components/KillSwitchBanner.tsx`
+(PRD-8 Phase 7a WS7) renders nonzero counters/audit_write_failures
+explicitly; 4 vitest tests at
+`dashboard/web/src/__tests__/kill-switch-banner.test.tsx` lock the contract.
+
+### 8.4 Audit row shape on refusal
+
+```json
+{
+  "action": "killswitch_refusal",
+  "operator_id": "kill_switch_runtime",
+  "target_persona_id": "<switch_name>",   // e.g. "llm" or "recall"
+  "outcome": "disabled",
+  "blocked": true,
+  "detail": "{\"caller\": \"<caller_label>\", \"switch\": \"<switch_name>\"}"
+}
+```
+
+`/api/audit-log` (admin-only) reads these rows back with the `detail`
+field scrubbed via SECRET_PREFIXES (defense-in-depth — caller paths or
+stringified objects could include real keys).
+
+### 8.5 Single-source-of-truth secret patterns
+
+`.claude/scripts/security/patterns.py:SECRET_PREFIXES` (≥27 vendor key
+prefixes — Anthropic, OpenAI, Stripe, ElevenLabs, Groq, Gradium, Slack,
+GitHub, AWS, Google, JWT, npm, Docker, GitLab, SendGrid, Mailgun, Heroku,
+Postmark, Langfuse) is the sole source consumed by `scripts/sanitize.py`,
+`runtime/subprocess_env.py`, and the dashboard `_redact_secret_shaped`
+helper. Three-layer parity test rejects any local copies. Phase 4 keys
+(`sk_` ElevenLabs, `gsk_` Groq, `gr_` Gradium) are present so Phase 4
+ships safely.
 
 ---
 
