@@ -3,11 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import tempfile
 from datetime import datetime
 from typing import Any
 
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, User
+
+# Phase 4 (PRD-8) — voice cascade + marker dispatch.
+import voice as voice_mod
+from voice_markers import parse_send_markers, strip_send_markers
+
+_SLACK_AUDIO_MIMES: tuple[str, ...] = (
+    "audio/ogg",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/m4a",
+    "audio/x-m4a",
+    "audio/webm",
+    "audio/wav",
+    "audio/flac",
+)
 
 
 class SlackAdapter:
@@ -77,10 +94,21 @@ class SlackAdapter:
             yield message
 
     async def send(self, message: OutgoingMessage) -> str | None:
-        """Send or update a message in Slack. Returns the message ts for updates."""
-        text = self._markdown_to_mrkdwn(message.text)
+        """Send or update a message in Slack. Returns the message ts for updates.
+
+        Phase 4: parses [SEND_FILE]/[SEND_PHOTO] markers and dispatches each
+        via files_upload_v2 BEFORE the text reply. Markers are stripped from
+        the text before send.
+        """
         channel_id = message.channel.platform_id
         thread_ts = message.thread.thread_id if message.thread else None
+
+        # Phase 4: marker dispatch (before text)
+        await self._dispatch_send_markers(channel_id, message.text, thread_ts)
+
+        text = self._markdown_to_mrkdwn(strip_send_markers(message.text))
+        if not text:
+            return None
 
         # Update an existing message
         if message.is_update and message.update_message_id:
@@ -111,6 +139,89 @@ class SlackAdapter:
                 print(f"[{datetime.now()}] Error sending message: {e}")
         return first_ts
 
+    async def _dispatch_send_markers(
+        self,
+        channel_id: str,
+        text: str,
+        thread_ts: str | None = None,
+    ) -> None:
+        """Phase 4: parse markers and upload via files_upload_v2."""
+        markers = parse_send_markers(text)
+        if not markers:
+            return
+        for m in markers:
+            try:
+                if m.path.startswith(("http://", "https://")):
+                    import httpx
+                    from pathlib import Path as _P
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        resp = await client.get(m.path)
+                        resp.raise_for_status()
+                        fd, local_path = tempfile.mkstemp(
+                            suffix=_P(m.path).suffix or ".bin",
+                            prefix="homie_slack_marker_",
+                        )
+                        os.close(fd)
+                        try:
+                            with open(local_path, "wb") as fh:
+                                fh.write(resp.content)
+                            await self.app.client.files_upload_v2(
+                                channel=channel_id,
+                                file=local_path,
+                                initial_comment=m.caption or "",
+                                thread_ts=thread_ts,
+                            )
+                        finally:
+                            try:
+                                os.unlink(local_path)
+                            except OSError:
+                                pass
+                else:
+                    await self.app.client.files_upload_v2(
+                        channel=channel_id,
+                        file=m.path,
+                        initial_comment=m.caption or "",
+                        thread_ts=thread_ts,
+                    )
+            except Exception as e:
+                print(f"[{datetime.now()}] Slack marker dispatch failed ({m.path}): {e}")
+
+    async def _send_voice_response(
+        self,
+        channel_id: str,
+        text: str,
+        thread_ts: str | None = None,
+    ) -> None:
+        """Phase 4: synthesize text via voice cascade, upload audio via files_upload_v2."""
+        try:
+            audio = await voice_mod.synthesize(text)
+            fd, local_path = tempfile.mkstemp(suffix=".ogg", prefix="homie_slack_tts_")
+            os.close(fd)
+            try:
+                with open(local_path, "wb") as fh:
+                    fh.write(audio)
+                await self.app.client.files_upload_v2(
+                    channel=channel_id,
+                    file=local_path,
+                    filename="response.ogg",
+                    thread_ts=thread_ts,
+                )
+            finally:
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
+        except Exception as e:
+            print(f"[{datetime.now()}] Slack TTS failed, falling back to text: {e}")
+            try:
+                await self.app.client.chat_postMessage(
+                    channel=channel_id,
+                    text=text,
+                    thread_ts=thread_ts,
+                )
+            except Exception as e2:
+                print(f"[{datetime.now()}] Slack text fallback failed: {e2}")
+
     async def update(self, message: OutgoingMessage) -> None:
         """Edit an existing message (convenience wrapper around send)."""
         await self.send(message)
@@ -130,9 +241,18 @@ class SlackAdapter:
         await self._queue.put(incoming)
 
     async def _on_message(self, event: dict[str, Any], say: Any, client: Any) -> None:
-        """Handle direct messages and thread replies to heartbeat notifications."""
-        # Skip bot messages and subtypes (joins, leaves, etc.)
-        if event.get("bot_id") or event.get("subtype"):
+        """Handle direct messages and thread replies to heartbeat notifications.
+
+        Phase 4: detect audio file uploads and replace event text with the
+        transcript before normalising. R4 NB2: uses canonical
+        voice.transcribe_audio_file (NOT legacy 3-arg transcribe).
+        """
+        # Skip bot messages and subtypes — but keep "file_share" subtype so
+        # voice notes (uploaded files) still flow through.
+        if event.get("bot_id"):
+            return
+        subtype = event.get("subtype")
+        if subtype and subtype not in ("file_share",):
             return
 
         user_id = event.get("user", "")
@@ -150,8 +270,72 @@ class SlackAdapter:
             if not self._is_heartbeat_thread(channel_id, thread_ts):
                 return  # Not a heartbeat thread, ignore
 
+        # Phase 4 voice ingress — transcribe audio uploads.
+        transcript = await self._transcribe_audio_files(event)
+        if transcript:
+            event = dict(event)
+            event["text"] = transcript
+
         incoming = self._normalize_event(event, is_dm=is_dm)
         await self._queue.put(incoming)
+
+    async def _transcribe_audio_files(self, event: dict[str, Any]) -> str:
+        """Phase 4: detect audio file uploads on the event, transcribe via cascade.
+
+        Returns transcript text if an audio file was found and transcribed;
+        otherwise empty string. R4 NB2: uses canonical
+        voice.transcribe_audio_file.
+        """
+        files = event.get("files") or []
+        if not files:
+            return ""
+        for f in files:
+            mime = (f.get("mimetype") or "").lower()
+            if not any(mime.startswith(prefix) for prefix in _SLACK_AUDIO_MIMES):
+                continue
+            # Phase 4 post-build NM1: use files.info to fetch private URL
+            # rather than reading url_private[_download] off the event payload.
+            # The event payload omits these for some file types; files.info
+            # is the canonical Slack API path. Bot token is already in scope.
+            file_id = f.get("id")
+            url = None
+            if file_id:
+                try:
+                    info = await self.app.client.files_info(file=file_id)
+                    info_file = info.get("file", {}) if isinstance(info, dict) else getattr(info, "data", {}).get("file", {})
+                    url = info_file.get("url_private_download") or info_file.get("url_private")
+                except Exception as e:
+                    print(f"[{datetime.now()}] Slack files.info failed for {file_id}: {e}")
+            # Fallback to event-payload URL if files.info is unavailable.
+            if not url:
+                url = f.get("url_private_download") or f.get("url_private")
+            if not url:
+                continue
+            import httpx
+
+            from pathlib import Path as _P
+            ext = _P(f.get("name") or "voice.ogg").suffix or ".ogg"
+            fd, local_path = tempfile.mkstemp(suffix=ext, prefix="homie_slack_voice_")
+            os.close(fd)
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {self.bot_token}"},
+                    )
+                    resp.raise_for_status()
+                    with open(local_path, "wb") as fh:
+                        fh.write(resp.content)
+                return (await voice_mod.transcribe_audio_file(local_path)).strip()
+            except Exception as e:
+                print(f"[{datetime.now()}] Slack voice transcribe failed: {e}")
+                return ""
+            finally:
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
+        return ""
 
     # ── Private Helpers ─────────────────────────────────────────────
 

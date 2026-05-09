@@ -46,6 +46,14 @@ AUDITED_FILES: list[Path] = [
     _SCRIPTS_DIR / "memory_weekly.py",
     _SCRIPTS_DIR / "memory_dream.py",
     _SCRIPTS_DIR / "personas" / "services.py",
+    # PRD-8 Phase 5a / WS1.11 (B7) — cabinet modules join the canonical
+    # AUDITED_FILES list (NOT a separate test file).
+    _SCRIPTS_DIR / "cabinet" / "meeting_channel.py",
+    _SCRIPTS_DIR / "cabinet" / "text_orchestrator.py",
+    _SCRIPTS_DIR / "cabinet" / "text_router.py",
+    _SCRIPTS_DIR / "cabinet" / "tool_policy.py",
+    _SCRIPTS_DIR / "cabinet" / "title.py",
+    _CHAT_DIR / "cabinet_text.py",
 ]
 
 # Stable parametrize ids — relative to repo for legible failure output.
@@ -178,18 +186,23 @@ def test_rule2_no_module_level_file_reads(path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_audit_covers_six_files() -> None:
-    """The PRP locks 6 files into the Phase 2 audit surface — guard against drift."""
-    assert len(AUDITED_FILES) == 6, (
-        f"Phase 2 anti-pattern audit must cover exactly 6 files; got {len(AUDITED_FILES)}"
-    )
+def test_audit_covers_phase_2_six_files_plus_phase_5a_cabinet() -> None:
+    """Phase 2 locks 6 identity-reconciliation files; Phase 5a (B7) adds 6 cabinet files."""
     expected_names = {
+        # Phase 2 (6).
         "identity_payload.py",
         "engine.py",
         "memory_reflect.py",
         "memory_weekly.py",
         "memory_dream.py",
         "services.py",
+        # Phase 5a (B7) — 5 cabinet modules + 1 chat-side shim.
+        "meeting_channel.py",
+        "text_orchestrator.py",
+        "text_router.py",
+        "tool_policy.py",
+        "title.py",
+        "cabinet_text.py",
     }
     actual_names = {p.name for p in AUDITED_FILES}
     assert actual_names == expected_names, (

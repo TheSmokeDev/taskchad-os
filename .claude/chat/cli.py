@@ -80,6 +80,20 @@ main.add_command(session_group)
 @click.option("--resume", "-r", "resume_id", default=None, help="Resume session by ID")
 @click.option("--continue", "-c", "continue_last", is_flag=True, help="Resume most recent session")
 @click.option(
+    "--voice",
+    "voice_path",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    default=None,
+    help="Audio file to transcribe via voice cascade and feed as the user message (Phase 4 single-shot voice ingress).",
+)
+@click.option(
+    "--voice-out",
+    "voice_out_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Synthesize the agent reply to the given audio path via voice cascade (Phase 4 single-shot voice egress).",
+)
+@click.option(
     "--source",
     type=click.Choice(SOURCE_VALUES, case_sensitive=True),
     default="interactive",
@@ -91,7 +105,7 @@ main.add_command(session_group)
         "Values are case-sensitive (lowercase only)."
     ),
 )
-def chat(query, quiet, model, toolsets, resume_id, continue_last, source):
+def chat(query, quiet, model, toolsets, resume_id, continue_last, voice_path, voice_out_path, source):
     """Chat with The Homie. Interactive REPL or single query (-q)."""
     ensure_directories()
 
@@ -120,6 +134,8 @@ def chat(query, quiet, model, toolsets, resume_id, continue_last, source):
         toolsets=toolsets,
         resume_session=resume_id,
         continue_last=continue_last,
+        voice_path=voice_path,
+        voice_out_path=voice_out_path,
         source=source,
     )
 

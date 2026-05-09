@@ -13,6 +13,10 @@ from datetime import datetime
 
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, User
 
+# Phase 4 (PRD-8) — voice cascade + marker dispatch.
+import voice as voice_mod
+from voice_markers import parse_send_markers, strip_send_markers
+
 
 def _resolve_active_profile_name() -> str:
     """Read the active profile name; fail-open to ``"unknown"`` on resolver error.
@@ -99,6 +103,8 @@ class CLIAdapter:
         resume_session: str | None = None,
         continue_last: bool = False,
         source: str = "interactive",
+        voice_path: str | None = None,
+        voice_out_path: str | None = None,
     ):
         self._query = query
         self._quiet = quiet
@@ -110,6 +116,11 @@ class CLIAdapter:
         # every IncomingMessage this adapter yields and surfaced via
         # get_session_info() for the quiet JSON envelope (WS4).
         self.source: str = source
+        # PRD-8 Phase 4: voice ingress/egress.
+        # voice_path: read from file, transcribe via cascade, use as user message.
+        # voice_out_path: write voice.synthesize(reply) to this path.
+        self._voice_path: str | None = voice_path
+        self._voice_out_path: str | None = voice_out_path
         self._responses: list[OutgoingMessage] = []
         self._final_response: str = ""
         self._got_error: bool = False
@@ -181,6 +192,25 @@ class CLIAdapter:
         self._channel_id = channel_id
         self._user_id = user.platform_id
 
+        # Phase 4: --voice <path> flag — transcribe file as user message.
+        # Single-shot; takes precedence over --query if both set.
+        if self._voice_path:
+            try:
+                transcript = await voice_mod.transcribe_audio_file(self._voice_path)
+            except Exception as e:
+                print(f"[{datetime.now()}] CLI voice transcribe failed: {e}")
+                transcript = ""
+            if transcript.strip():
+                yield IncomingMessage(
+                    text=transcript.strip(),
+                    user=user,
+                    channel=channel,
+                    platform=Platform.CLI,
+                    timestamp=datetime.now(),
+                    source=self.source,
+                )
+                return
+
         if self._query:
             yield IncomingMessage(
                 text=self._query,
@@ -225,14 +255,43 @@ class CLIAdapter:
         Footer (gap-6 concept draft hint) is appended below the body with
         a blank line separator. Only rendered in non-quiet mode so the
         Paperclip JSON contract stays clean.
+
+        Phase 4: parses [SEND_FILE]/[SEND_PHOTO] markers and writes each
+        media path to stdout (or copies to the local CWD); writes voice
+        synthesis result to --voice-out path when set.
         """
         footer = getattr(message, "footer", None)
+
+        # Phase 4: marker dispatch — emit one line per marker (path-write only).
+        markers = parse_send_markers(message.text)
+        for m in markers:
+            try:
+                # CLI dispatch: just acknowledge the path on stdout. Real CLI
+                # users can chain with `xargs cp` or similar — keep it simple.
+                if not self._quiet:
+                    print(f"[CLI media: kind={m.kind} path={m.path}"
+                          + (f" caption={m.caption!r}" if m.caption else "")
+                          + "]", flush=True)
+            except Exception as e:
+                print(f"[{datetime.now()}] CLI marker dispatch failed: {e}")
+
+        text = strip_send_markers(message.text)
+
+        # Phase 4: --voice-out flag — synthesize reply audio to file.
+        if self._voice_out_path and text:
+            try:
+                audio = await voice_mod.synthesize(text)
+                with open(self._voice_out_path, "wb") as f:
+                    f.write(audio)
+            except Exception as e:
+                print(f"[{datetime.now()}] CLI voice-out failed: {e}")
+
         if self._quiet:
-            self._final_response = message.text
+            self._final_response = text
             if getattr(message, "is_error", False):
                 self._got_error = True
         else:
-            print(message.text, flush=True)
+            print(text, flush=True)
             if footer:
                 print(f"\n{footer}", flush=True)
         self._responses.append(message)

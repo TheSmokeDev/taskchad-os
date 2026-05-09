@@ -44,8 +44,11 @@ function extractToken(c: Context, urlPathname: string): string | null {
 }
 
 function isSseStreamPath(pathname: string): boolean {
-  // Matches /api/conversation/<persona_id>/stream and similar.
-  return /^\/api\/conversation\/[^/]+\/stream$/.test(pathname);
+  // Matches /api/conversation/<persona_id>/stream and /api/cabinet/stream
+  // (Phase 5a, action/query-shaped — meetingId is in the query string).
+  if (/^\/api\/conversation\/[^/]+\/stream$/.test(pathname)) return true;
+  if (pathname === '/api/cabinet/stream') return true;
+  return false;
 }
 
 /**

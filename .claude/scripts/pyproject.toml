@@ -111,6 +111,30 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+# PRD-8 Phase 5a — cabinet text_router.py and text_orchestrator.py contain
+# verbatim ports of upstream prompt strings (the exact wording is calibrated
+# for Haiku) and per-line UI labels that must stay readable for grep parity
+# with `warroom-text-orchestrator.ts:114-525`. E501 line-length on those
+# files would force gratuitous wrapping that diverges from upstream.
+[tool.ruff.lint.per-file-ignores]
+"cabinet/text_router.py" = ["E501"]
+"cabinet/text_orchestrator.py" = ["E501"]
+# PRD-8 Phase 5a / WS2 — cabinet REST + SSE endpoints in dashboard_api.py
+# carry camelCase wire fields verbatim from upstream `dashboard.ts:802-1254`
+# (`meetingId`, `chatId`, `clientMsgId`, `agentId`) so the wire contract
+# matches ClaudeClaw's UI consumers without translation. N803/N806/N815
+# would force snake_case which would either rename the wire field (Q4
+# violation) or require `Query(alias=...)` boilerplate for every param.
+"dashboard_api.py" = ["N803", "N806", "N815"]
+# PRD-8 Phase 5b / WS1 — cabinet_api.py exception class names are pinned
+# verbatim by PRPs/active/PRP-prd-8-phase-5b-cabinet-chat-routing.md and
+# the JSON contract criterion `cabinet_api_friendly_error_classes`
+# (CabinetAPIUnreachable, CabinetAuthFailure, CabinetKillSwitchDisabled,
+# CabinetMeetingNotFound, CabinetMeetingEnded, CabinetBadRequest,
+# CabinetChatScopeMismatch). N818 would force an `Error` suffix that
+# diverges from the locked contract.
+"integrations/cabinet_api.py" = ["N818"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

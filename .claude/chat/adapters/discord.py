@@ -19,6 +19,24 @@ from models import (
     User,
 )
 
+# Phase 4 (PRD-8) — voice cascade + marker dispatch.
+import voice as voice_mod
+from voice_markers import parse_send_markers, strip_send_markers
+
+# Audio MIME types Discord clients commonly send for voice messages /
+# audio attachments (M4A from voice-message recorder, OGG/Opus from
+# bots, WebM from web clients).
+_DISCORD_AUDIO_MIMES: tuple[str, ...] = (
+    "audio/ogg",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/m4a",
+    "audio/x-m4a",
+    "audio/webm",
+    "audio/wav",
+    "audio/flac",
+)
+
 
 class DiscordAdapter:
     """Discord platform adapter using discord.py gateway.
@@ -71,6 +89,13 @@ class DiscordAdapter:
             is_dm = isinstance(msg.channel, discord.DMChannel)
             is_watched = str(msg.channel.id) in self._watched_channels
             if not is_dm and not is_watched and self._client.user not in msg.mentions:
+                return
+
+            # Phase 4: voice ingress — transcribe audio attachments first.
+            voice_text = await self._on_voice_message(msg)
+            if voice_text:
+                incoming = self._normalize_message(msg, is_dm, voice_text, [])
+                await self._queue.put(incoming)
                 return
 
             # Download image attachments to local disk
@@ -165,10 +190,18 @@ class DiscordAdapter:
             yield message
 
     async def send(self, message: OutgoingMessage) -> str | None:
-        """Send a message to a Discord channel, optionally with buttons and embeds."""
+        """Send a message to a Discord channel, optionally with buttons and embeds.
+
+        Phase 4: parses [SEND_FILE]/[SEND_PHOTO] markers from message.text and
+        dispatches each as a discord.File attachment via channel.send(file=).
+        Markers are stripped from the text reply before send.
+        """
         channel = self._client.get_channel(int(message.channel.platform_id))
         if not channel:
             return None
+
+        # Phase 4: marker dispatch BEFORE text send (so attachments arrive first).
+        await self._dispatch_send_markers(channel, message.text)
 
         # Build View from components if present
         view = self._build_view(message.components) if message.components else None
@@ -176,7 +209,10 @@ class DiscordAdapter:
         # Build embed if present
         embed = self._build_embed(message.embed) if message.embed else None
 
-        text = message.text
+        text = strip_send_markers(message.text)
+        if not text:
+            # All-marker reply — nothing left to send as text.
+            return None
         sent = None
         chunks = self._split_message(text, max_length=1900)
         for i, chunk in enumerate(chunks):
@@ -332,6 +368,92 @@ class DiscordAdapter:
                 "guild": str(getattr(msg.guild, "id", "")),
             },
         )
+
+    async def _on_voice_message(self, msg: Any) -> str:
+        """Phase 4: detect audio attachments, transcribe via voice cascade.
+
+        Returns the transcript text if an audio attachment was present and
+        transcribed, otherwise empty string.
+        """
+        if not msg.attachments:
+            return ""
+        for att in msg.attachments:
+            ct = (att.content_type or "").lower()
+            if not any(ct.startswith(prefix) for prefix in _DISCORD_AUDIO_MIMES):
+                continue
+            if att.size and att.size > 25 * 1024 * 1024:
+                continue
+            # Download to temp file
+            import tempfile
+            from pathlib import Path
+            import httpx
+
+            ext = Path(att.filename).suffix or ".ogg"
+            fd, local_path = tempfile.mkstemp(suffix=ext, prefix="homie_discord_voice_")
+            os.close(fd)
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(str(att.url))
+                    resp.raise_for_status()
+                    with open(local_path, "wb") as f:
+                        f.write(resp.content)
+                transcript = await voice_mod.transcribe_audio_file(local_path)
+                return transcript.strip()
+            except Exception as e:
+                print(f"[{datetime.now()}] Discord voice transcribe failed: {e}")
+                return ""
+            finally:
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
+        return ""
+
+    async def _send_voice_response(self, channel: Any, text: str) -> None:
+        """Phase 4: synthesize text via voice cascade, send as audio attachment."""
+        try:
+            import discord  # type: ignore[import-not-found]
+            from io import BytesIO
+
+            audio = await voice_mod.synthesize(text)
+            # discord.File accepts a file-like object
+            buf = BytesIO(audio)
+            file = discord.File(buf, filename="response.ogg")
+            await channel.send(file=file)
+        except Exception as e:
+            print(f"[{datetime.now()}] Discord TTS failed, falling back to text: {e}")
+            try:
+                await channel.send(content=text[:1900])
+            except Exception as e2:
+                print(f"[{datetime.now()}] Discord text fallback failed: {e2}")
+
+    async def _dispatch_send_markers(self, channel: Any, text: str) -> None:
+        """Phase 4: parse [SEND_FILE]/[SEND_PHOTO] markers, send as files."""
+        markers = parse_send_markers(text)
+        if not markers:
+            return
+        try:
+            import discord  # type: ignore[import-not-found]
+        except ImportError:
+            return
+        for m in markers:
+            try:
+                # discord.File accepts a path string OR a URL via httpx fetch.
+                if m.path.startswith(("http://", "https://")):
+                    import httpx
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        resp = await client.get(m.path)
+                        resp.raise_for_status()
+                        from io import BytesIO
+                        buf = BytesIO(resp.content)
+                        from pathlib import Path as _P
+                        fname = _P(m.path).name or "attachment"
+                        file = discord.File(buf, filename=fname)
+                else:
+                    file = discord.File(m.path)
+                await channel.send(file=file, content=m.caption or None)
+            except Exception as e:
+                print(f"[{datetime.now()}] Discord marker dispatch failed ({m.path}): {e}")
 
     async def _download_image_attachments(self, msg: Any) -> tuple[str, list]:
         """Download image attachments from Discord CDN to local temp files.

@@ -106,10 +106,15 @@ CREATE TABLE IF NOT EXISTS cabinet_meetings (
     duration_s INTEGER,
     mode TEXT,
     pinned_persona TEXT,
-    entry_count INTEGER NOT NULL DEFAULT 0
+    entry_count INTEGER NOT NULL DEFAULT 0,
+    title TEXT,
+    chat_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_cabinet_meetings_started
     ON cabinet_meetings(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cabinet_meetings_chat_open
+    ON cabinet_meetings(chat_id, started_at DESC)
+    WHERE ended_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS cabinet_transcripts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +125,34 @@ CREATE TABLE IF NOT EXISTS cabinet_transcripts (
 );
 CREATE INDEX IF NOT EXISTS idx_cabinet_transcripts_meeting
     ON cabinet_transcripts(meeting_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_cabinet_transcripts_meeting_id_desc
+    ON cabinet_transcripts(meeting_id, id DESC);
+
+-- PRD-8 Phase 5a / WS3 — additive Q3 forward-only.
+-- cabinet_text_meetings: per-meeting roster snapshot (port of
+--   ClaudeClaw warroom_text_meetings; Phase 5a uses cabinet_meetings
+--   for primary state, this table records the immutable roster + pin
+--   AS-OF meeting creation for replay determinism).
+CREATE TABLE IF NOT EXISTS cabinet_text_meetings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id INTEGER NOT NULL UNIQUE REFERENCES cabinet_meetings(id) ON DELETE CASCADE,
+    roster_json TEXT NOT NULL DEFAULT '[]',
+    pinned_agent TEXT,
+    started_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    ended_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_cabinet_text_meetings_meeting
+    ON cabinet_text_meetings(meeting_id);
+
+-- cabinet_client_msg_seen: dedup LRU for client_msg_id.
+CREATE TABLE IF NOT EXISTS cabinet_client_msg_seen (
+    meeting_id INTEGER NOT NULL,
+    client_msg_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    PRIMARY KEY (meeting_id, client_msg_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cabinet_client_msg_seen_age
+    ON cabinet_client_msg_seen(created_at);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,6 +190,35 @@ def _resolve_db_path(db_path: Path | None) -> Path:
     # env-overrides applied mid-process take effect immediately.
     import config as _config  # noqa: PLC0415 — late-bind by design (Rule 1/2)
     return Path(_config.DASHBOARD_DB_PATH)
+
+
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the set of column names for *table* (empty if table missing)."""
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return set()
+    return {row[1] for row in rows}
+
+
+def _apply_phase_5a_columns(conn: sqlite3.Connection) -> None:
+    """Forward-only-additive Phase 5a column additions on cabinet_meetings.
+
+    Pre-Phase-5a deployments shipped `cabinet_meetings` without `title` or
+    `chat_id` (see Phase 3 schema). ALTER TABLE ADD COLUMN is the only way
+    to add them on a live DB. Each ADD is guarded by a PRAGMA inspection
+    so re-invocations are no-ops.
+
+    Rule 2 — physical-state-first: PRAGMA inspects sqlite_master directly
+    rather than trusting a meta/version row.
+    """
+    cols = _column_names(conn, "cabinet_meetings")
+    if "title" not in cols:
+        conn.execute("ALTER TABLE cabinet_meetings ADD COLUMN title TEXT")
+    if "chat_id" not in cols:
+        conn.execute(
+            "ALTER TABLE cabinet_meetings ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -229,7 +291,7 @@ class DashboardDB:
         return conn
 
     def init_schema(self, conn: sqlite3.Connection | None = None) -> None:
-        """Create all 6 tables idempotently.
+        """Create all tables idempotently.
 
         Uses ``executescript`` so the entire DDL runs in a single transaction
         — no partial-init half-state is possible. CREATE IF NOT EXISTS makes
@@ -237,11 +299,17 @@ class DashboardDB:
         backend (via CREATE IF NOT EXISTS), not a sidecar 'schema_version'
         flag, so meta lies cannot make us skip a table that physically went
         missing.
+
+        Phase 5a additive migration — `cabinet_meetings.title` and
+        `cabinet_meetings.chat_id` columns are added via ALTER TABLE if
+        missing on a pre-Phase-5a database (Q3 forward-only-additive).
+        Idempotent — re-runs are no-ops.
         """
         if conn is None:
             conn = self.connect()
             return  # connect() already calls init_schema(conn) on the fresh conn
         conn.executescript(_SCHEMA_SQL)
+        _apply_phase_5a_columns(conn)
         conn.commit()
 
     def close(self) -> None:

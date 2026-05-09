@@ -211,6 +211,15 @@ class ClaudeSdkRuntime:
             options_kwargs["resume"] = request.resume
         if request.stderr is not None:
             options_kwargs["stderr"] = request.stderr
+        # PRD-8 Phase 5a / WS1.0 (NB2) — cabinet tool-policy threading.
+        # These two fields ARE forwarded to the SDK options dict so the
+        # subprocess CLI honors the cabinet's allow/deny floor. `metadata`
+        # and `auth_profile` are intentionally NOT forwarded — they are
+        # lane-router/Langfuse routing context only.
+        if request.disallowed_tools is not None:
+            options_kwargs["disallowed_tools"] = request.disallowed_tools
+        if request.mcp_servers is not None:
+            options_kwargs["mcp_servers"] = request.mcp_servers
 
         response_text = ""
         session_id: str | None = None

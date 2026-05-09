@@ -5,6 +5,9 @@ HOMIE_HOME to the target persona's profile root. Preserves HOME/USERPROFILE
 (Max OAuth credentials path lookup).
 
 Phase 4 prep: GROQ_, GRADIUM_, DAILY_ added to bot-creds whitelist.
+Phase 4 (R1 B5 fix): MISTRAL_ and GOOGLE_ added to bot-creds whitelist so
+        Mistral Voxtral STT/TTS and Gemini TTS keys survive the scrub in
+        bot/persona subprocesses.
 R2 NB2: CLAUDE_CODE_ added to bot-creds whitelist (CLAUDE_CODE_OAUTH_TOKEN
         for CI/container deploys).
 R2 NB2: CLAUDE_CONFIG_DIR added to Max OAuth carve-out (config-dir override).
@@ -44,6 +47,7 @@ _BOT_CREDS_PREFIXES: tuple[str, ...] = (
     "ANTHROPIC_",
     "OPENAI_",
     "GEMINI_",
+    "GOOGLE_",        # Phase 4 (R1 B5) — Gemini TTS reuses GOOGLE_API_KEY
     "OPENROUTER_",
     "KIMI_",
     "LANGFUSE_",
@@ -54,6 +58,7 @@ _BOT_CREDS_PREFIXES: tuple[str, ...] = (
     "GROQ_",          # Phase 4
     "GRADIUM_",       # Phase 4
     "DAILY_",         # Phase 4 (Daily.co Cabinet voice)
+    "MISTRAL_",       # Phase 4 (R1 B5) — Mistral Voxtral STT+TTS shared key
     "CLAUDE_CODE_",   # R2 NB2 — CLAUDE_CODE_OAUTH_TOKEN for CI/container deploys
 )
 

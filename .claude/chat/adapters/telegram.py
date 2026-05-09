@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,6 +21,10 @@ from models import (
     Thread,
     User,
 )
+
+# Phase 4 (PRD-8) — voice cascade + marker dispatch.
+import voice as voice_mod
+from voice_markers import parse_send_markers, strip_send_markers
 
 
 @dataclass(frozen=True)
@@ -168,6 +173,13 @@ class TelegramAdapter:
         chat_id = int(message.channel.platform_id)
         thread_id = message.thread.thread_id if message.thread else message.channel.platform_id
         body_text = message.text
+
+        # Phase 4: parse [SEND_FILE]/[SEND_PHOTO] markers and dispatch via
+        # bot.send_document / bot.send_photo (kind == 'document' | 'photo'
+        # maps directly to Telegram's send method names — R1 M5).
+        await self._dispatch_send_markers(chat_id, body_text)
+        body_text = strip_send_markers(body_text)
+
         footer = getattr(message, "footer", None)
         if footer:
             body_text = f"{body_text}\n\n{footer}" if body_text else footer
@@ -190,22 +202,25 @@ class TelegramAdapter:
                 except Exception as e:
                     print(f"[{datetime.now()}] Failed to delete placeholder: {e}")
 
-            # Decide voice reply strategy based on response complexity
-            tier = self._classify_voice_tier(message.text)
+            # Decide voice reply strategy based on marker-stripped body_text
+            # (R-runtime-chat F1: must use marker-stripped body_text, NOT raw
+            # message.text — otherwise TTS would speak [SEND_FILE:...] aloud
+            # and text fallback would echo marker syntax in chat bubble).
+            tier = self._classify_voice_tier(body_text)
             if tier == "voice_only":
                 # Short & conversational — voice bubble, no text
-                await self._send_voice_response(chat_id, message.text)
+                await self._send_voice_response(chat_id, body_text)
             elif tier == "voice_and_text":
                 # Medium length — voice summary + full formatted text
-                await self._send_voice_response(chat_id, message.text)
-                text = self._format_for_telegram(message.text)
+                await self._send_voice_response(chat_id, body_text)
+                text = self._format_for_telegram(body_text)
                 await self._app.bot.send_message(
                     chat_id=chat_id, text=text,
                     parse_mode="HTML",
                 )
             else:
                 # Long/technical — text only, voice would be painful
-                text = self._format_for_telegram(message.text)
+                text = self._format_for_telegram(body_text)
                 for chunk in self._split_message(text):
                     try:
                         await self._app.bot.send_message(
@@ -533,32 +548,52 @@ class TelegramAdapter:
             await msg.reply_text("Not authorized.")
             return
 
-        # Need API key for transcription
-        if self._voice_providers.stt is None:
+        # Phase 4: prefer the voice cascade if any provider is configured.
+        # Falls back to legacy single-provider STT (preserves existing back-compat).
+        capabilities = voice_mod.voice_capabilities()
+        if not capabilities.get("stt") and self._voice_providers.stt is None:
             await msg.reply_text(
-                "Voice notes require an OpenAI API key for transcription. "
-                "Set OPENAI_API_KEY in .env to enable."
+                "Voice notes require a configured STT provider. "
+                "Set GROQ_API_KEY, OPENAI_API_KEY, MISTRAL_API_KEY, or "
+                "WHISPER_MODEL_PATH in .env to enable."
             )
             return
 
-        # Download voice file to memory
+        # Download voice file to disk so cascade providers can stream from it.
+        local_path: str | None = None
         try:
             voice_file = await self._app.bot.get_file(msg.voice.file_id)
-            buf = BytesIO()
-            await voice_file.download_to_memory(buf)
-            audio_bytes = buf.getvalue()
+            fd, local_path = tempfile.mkstemp(suffix=".ogg", prefix="homie_tg_voice_")
+            os.close(fd)
+            await voice_file.download_to_drive(local_path)
         except Exception as e:
             print(f"[{datetime.now()}] Voice download failed: {e}")
+            if local_path:
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
             await msg.reply_text("Failed to download voice note.")
             return
 
-        # Transcribe
+        # Transcribe — prefer cascade, fall back to legacy single-provider.
+        transcript = ""
         try:
-            transcript = await self._voice_providers.stt.transcribe(audio_bytes)
+            if capabilities.get("stt"):
+                transcript = await voice_mod.transcribe_audio_file(local_path)
+            elif self._voice_providers.stt is not None:
+                with open(local_path, "rb") as f:
+                    audio_bytes = f.read()
+                transcript = await self._voice_providers.stt.transcribe(audio_bytes)
         except Exception as e:
             print(f"[{datetime.now()}] Transcription failed: {e}")
             await msg.reply_text(f"Transcription failed: {e}")
             return
+        finally:
+            try:
+                os.unlink(local_path)
+            except OSError:
+                pass
 
         if not transcript.strip():
             await msg.reply_text("Couldn't make out any speech in that voice note.")
@@ -840,11 +875,19 @@ class TelegramAdapter:
         return text.strip()
 
     async def _send_voice_response(self, chat_id: int, text: str) -> None:
-        """Synthesize text to speech and send as a voice bubble."""
+        """Synthesize text to speech and send as a voice bubble.
+
+        R-runtime-chat F2: uses voice_mod.synthesize() cascade — full 9-provider
+        cascade (ElevenLabs → Gradium → Mistral → Gemini → OpenAI → Kokoro →
+        KittenTTS → Edge → macOS-say) with per-provider char-cap truncation,
+        matching the other 5 adapters. Pre-Phase-4 path used legacy single-
+        provider self._voice_providers.tts.synthesize() which never tried
+        Mistral/Gemini/Kokoro/KittenTTS even when configured.
+        """
         text = self._clean_for_tts(text)
 
         try:
-            audio = await self._voice_providers.tts.synthesize(text)
+            audio = await voice_mod.synthesize(text)
             buf = BytesIO(audio)
             buf.name = "response.ogg"
             await self._app.bot.send_voice(chat_id=chat_id, voice=buf)
@@ -855,6 +898,41 @@ class TelegramAdapter:
                 await self._app.bot.send_message(chat_id=chat_id, text=text)
             except Exception as e2:
                 print(f"[{datetime.now()}] Text fallback also failed: {e2}")
+
+    async def _dispatch_send_markers(self, chat_id: int, text: str) -> None:
+        """Phase 4 (PRD-8): parse [SEND_FILE]/[SEND_PHOTO] markers, dispatch as media.
+
+        kind == 'document' → bot.send_document; kind == 'photo' → bot.send_photo.
+        URLs are passed through; local paths are opened and sent as InputFile.
+        """
+        markers = parse_send_markers(text)
+        if not markers:
+            return
+        try:
+            from telegram import InputFile  # type: ignore[import-not-found]
+        except ImportError:
+            return
+        for m in markers:
+            try:
+                if m.path.startswith(("http://", "https://")):
+                    payload: Any = m.path
+                else:
+                    payload = InputFile(open(m.path, "rb"))
+
+                if m.kind == "photo":
+                    await self._app.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=payload,
+                        caption=m.caption,
+                    )
+                else:
+                    await self._app.bot.send_document(
+                        chat_id=chat_id,
+                        document=payload,
+                        caption=m.caption,
+                    )
+            except Exception as e:
+                print(f"[{datetime.now()}] Telegram marker dispatch failed ({m.path}): {e}")
 
     # ── Formatting ─────────────────────────────────────────────────
 

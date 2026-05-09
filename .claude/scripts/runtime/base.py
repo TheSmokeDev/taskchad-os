@@ -14,7 +14,16 @@ RUNTIME_LANE_GENERIC = "generic_runtime"
 
 @dataclass(slots=True)
 class RuntimeRequest:
-    """Normalized runtime request for background jobs and chat flows."""
+    """Normalized runtime request for background jobs and chat flows.
+
+    PRD-8 Phase 5a / WS1.0 (NB2): four additive fields for the cabinet
+    port — `disallowed_tools` and `mcp_servers` thread tool-policy results
+    from `cabinet.tool_policy.cabinet_tool_policy()` into the SDK options
+    dict (forwarded by `runtime/claude_sdk.py:183-214`); `metadata` and
+    `auth_profile` are lane-router/Langfuse routing context (NOT forwarded
+    to SDK options). All four default to `None` so existing 19 fields and
+    every existing caller keep working unchanged.
+    """
 
     prompt: str
     cwd: Path | str
@@ -35,6 +44,11 @@ class RuntimeRequest:
     stderr: Any | None = None
     allow_fallback: bool = True
     runtime_lane: str | None = None
+    # PRD-8 Phase 5a / WS1.0 (NB2) — cabinet tool-policy + persona auth.
+    disallowed_tools: list[str] | None = None
+    mcp_servers: list[str] | None = None
+    metadata: dict[str, Any] | None = None
+    auth_profile: str | None = None
 
 
 @dataclass(slots=True)

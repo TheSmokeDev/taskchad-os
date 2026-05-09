@@ -43,3 +43,24 @@ cd .claude/scripts && uv run python ../chat/main.py --test
 | `extension_manager.py` | Registry-driven command dispatch, intent detection, extension metadata |
 
 **Config:** `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` in `.claude/scripts/.env`.
+
+### Cabinet Slash Commands (PRD-8 Phase 5b)
+
+Three router-typed slash commands let an operator drive multi-persona text meetings from Telegram (or any other adapter that consumes the unified router). Cabinet handlers HTTP-route to `localhost:4322/api/cabinet/*` (the orchestration API process — same shape as `/budget` → `finance_api` → Supabase).
+
+| Command | What it does | API call(s) |
+|---------|-------------|-------------|
+| `/cabinet` | Subcommand dispatcher: `create` / `list` / `send <id> <text>` / `end <id>` | `POST /api/cabinet/new` / `GET /list` / `POST /send` / `POST /end` |
+| `/standup [question]` | Create meeting + send standup question as operator turn (default question via `CABINET_STANDUP_QUESTION` env) | `POST /api/cabinet/new` then `POST /api/cabinet/send` |
+| `/discuss <topic>` | Create meeting + send the topic as the seed turn | `POST /api/cabinet/new` then `POST /api/cabinet/send` |
+
+**Cross-process invariant:** the chat process (`.claude/chat/main.py`) and the orchestration API process (`.claude/scripts/orchestration/run_api.py`) are SEPARATE Python processes. Module-local channel registries cannot bridge them. Cabinet handlers MUST go via HTTP through `.claude/scripts/integrations/cabinet_api.py` — NOT direct `from cabinet.text_orchestrator import …` (which would land in the chat-process's empty `_CHANNELS`, never reaching the SSE subscribers in the API process). See `PRPs/active/PRP-prd-8-phase-5b-cabinet-chat-routing.md` for the full architectural rationale.
+
+**Roster behavior:** Phase 5a's `_roster_from_personas()` (`.claude/scripts/cabinet/text_orchestrator.py:81-130`) auto-snapshots whichever cabinet-eligible personas are registered at meeting-create time. Operators manage the active roster via `/persona` BEFORE running `/cabinet create`. There is NO persona-selection arg at the chat-command level (R1 B4 fix). When no cabinet-eligible personas are registered, `_roster_from_personas()` falls back to a Main-only single-turn reply.
+
+**Friendly error UX:** `cabinet_api` raises `CabinetAPIUnreachable` (httpx.ConnectError), `CabinetAuthFailure` (401), `CabinetKillSwitchDisabled` (503 on synchronous endpoints — `/new` and `/end`), `CabinetMeetingNotFound` (404), `CabinetMeetingEnded` (410), `CabinetBadRequest` (400), and `CabinetChatScopeMismatch` (403 chat_mismatch from `dashboard_api.py:1986-1997`). Each carries a `friendly_message` string the handlers return verbatim — operators see "Cabinet API is not running…" / "That meeting belongs to a different chat. Use /cabinet list…" instead of stack traces.
+
+**Config:**
+- `ORCHESTRATION_API_BASE_URL` (default `http://127.0.0.1:4322`) — base URL for the orchestration API.
+- `ORCHESTRATION_API_TOKEN` (optional in loopback no-token mode) — mirrors the server-side bearer-token middleware in `.claude/scripts/orchestration/api.py:252-279`. When the server has a token set, the chat-side env must match.
+- `CABINET_STANDUP_QUESTION` (optional) — overrides the default standup seed.

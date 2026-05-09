@@ -580,6 +580,160 @@ async def handle_budget(adapter: Any, incoming: Any, args: str, *, collect_only:
     """Personal finance / budget commands — requires finance integration modules."""
     return "Finance module not configured. See docs for Teller/Plaid setup."
 
+async def handle_cabinet(
+    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
+) -> str:
+    """Multi-persona text meeting — `/cabinet [create | list | send <id> <text> | end <id>]`.
+
+    Roster comes from whichever cabinet-eligible personas Phase 5a's
+    `_roster_from_personas()` snapshots at meeting-create time
+    (`cabinet/text_orchestrator.py:81-130`). Operators manage active personas
+    via `/persona` BEFORE running `/cabinet create`. R1 B4 fix — handlers do
+    NOT validate persona ids; the API layer auto-snapshots.
+    """
+    from integrations import cabinet_api  # lazy: avoid HTTP/httpx cost on every import
+
+    args = (args or "").strip()
+    if not args or args.lower() in {"help", "?"}:
+        return _cabinet_usage_text()
+
+    chat_id = getattr(incoming, "chat_id", None)
+    chat_id_str = str(chat_id) if chat_id else None
+
+    try:
+        if args.lower() == "list":
+            meetings = await cabinet_api.list_meetings(limit=20, chat_id=chat_id_str)
+            return _format_meeting_list(meetings)
+
+        if args.lower() == "create":
+            ref = await cabinet_api.create_meeting(chat_id=chat_id_str)
+            return (
+                f"Cabinet meeting #{ref.id} started.\n"
+                f"Watch live: http://localhost:3141/cabinet?id={ref.id}\n"
+                f"Add a turn: /cabinet send {ref.id} <message>"
+            )
+
+        if args.lower().startswith("send"):
+            # /cabinet send <id> <text>
+            rest = args[len("send"):].strip()
+            meeting_id_str, _, text = rest.partition(" ")
+            try:
+                meeting_id = int(meeting_id_str)
+            except ValueError:
+                return "Usage: /cabinet send <meeting_id> <text>"
+            if not text.strip():
+                return "Usage: /cabinet send <meeting_id> <text>"
+            # /api/cabinet/send is fire-and-forget — returns 200 {ok, queued}.
+            # Kill-switch refusal surfaces via SSE error event in Cabinet.tsx,
+            # NOT a 503 here (R1 B6 + verified dashboard_api.py:2362-XXXX).
+            await cabinet_api.send_message(
+                meeting_id, text.strip(), chat_id=chat_id_str,
+            )
+            return (
+                f"Sent to meeting #{meeting_id}. "
+                f"Watch http://localhost:3141/cabinet?id={meeting_id} for persona turns "
+                f"(or any system notes if cabinet is disabled)."
+            )
+
+        if args.lower().startswith("end"):
+            rest = args[len("end"):].strip()
+            try:
+                meeting_id = int(rest)
+            except ValueError:
+                return "Usage: /cabinet end <meeting_id>"
+            result = await cabinet_api.end_meeting(meeting_id, chat_id=chat_id_str)
+            if result.get("alreadyEnded"):
+                return f"Meeting #{meeting_id} was already ended."
+            return f"Meeting #{meeting_id} ended."
+
+        return _cabinet_usage_text()
+
+    except cabinet_api.CabinetAPIError as e:
+        return e.friendly_message
+
+
+async def handle_standup(
+    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
+) -> str:
+    """Standup-style seed question — `/standup [optional seed question]`.
+
+    UX shorthand for "create cabinet meeting + send standup question as
+    operator turn". Roster comes from whatever Phase 5a's
+    `_roster_from_personas()` snapshots at meeting-create time
+    (`cabinet/text_orchestrator.py:81-130`). NO rotating-speaker semantics —
+    the Haiku classifier in `text_orchestrator` routes the question normally;
+    if no @mention, it goes to the most appropriate persona.
+
+    R2 NM2 fallback (DOCUMENTED, ALLOWED): when no cabinet-eligible personas
+    are registered (or `list_profiles()` fails), `_roster_from_personas()`
+    returns `[_MAIN_AGENT]` only — `/standup` then runs as a Main-only reply.
+    The chat reply explicitly tells the operator a Main-only fallback may
+    occur. To get a multi-persona standup, register cabinet-eligible
+    personas via `/persona` BEFORE running `/standup`.
+
+    R1/R2 fix: send the standup question as PLAIN user text. Do NOT prefix
+    with `/standup` — `text_orchestrator.parse_slash_command` (`:266-276`)
+    would short-circuit with a "requires Phase 5b" system_note.
+    """
+    from integrations import cabinet_api  # lazy
+
+    chat_id = getattr(incoming, "chat_id", None)
+    chat_id_str = str(chat_id) if chat_id else None
+
+    standup_q = (args or "").strip() or os.getenv(
+        "CABINET_STANDUP_QUESTION",
+        "What are you working on, what's blocking you, "
+        "what's your highest-priority next step?",
+    )
+
+    try:
+        ref = await cabinet_api.create_meeting(chat_id=chat_id_str)
+        await cabinet_api.send_message(
+            ref.id, standup_q, chat_id=chat_id_str,
+        )
+        return (
+            f"Standup #{ref.id} started.\n"
+            f"Watch http://localhost:3141/cabinet?id={ref.id} for persona answers "
+            f"(or a Main-only reply if no cabinet-eligible personas are registered)."
+        )
+    except cabinet_api.CabinetAPIError as e:
+        return e.friendly_message
+
+
+async def handle_discuss(
+    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
+) -> str:
+    """Forward operator slash to active cabinet meeting via cabinet_api.send_message.
+
+    Phase 5a's text_orchestrator (`text_orchestrator.py:795-810`) recognizes
+    `/discuss` as a slash-prefixed input and emits a system_note; Phase 5b's
+    job is to ensure the slash reaches a cabinet meeting context (creates
+    one if needed, then forwards the operator turn). No "multi-agent debate"
+    framing — actual fan-out behavior is determined by Phase 5a's roster
+    snapshot at meeting create-time. The operator's text is the SEED TURN
+    (sent as plain user text via cabinet_api.send_message), not as a
+    slash-prefixed command (which would short-circuit at parse_slash_command).
+    """
+    from integrations import cabinet_api  # lazy
+
+    args = (args or "").strip()
+    if not args:
+        return "Usage: /discuss <topic>\nExample: /discuss should we deprecate mc?"
+
+    chat_id = getattr(incoming, "chat_id", None)
+    chat_id_str = str(chat_id) if chat_id else None
+
+    try:
+        ref = await cabinet_api.create_meeting(chat_id=chat_id_str)
+        await cabinet_api.send_message(ref.id, args, chat_id=chat_id_str)
+        return (
+            f"Discussion #{ref.id} started — topic: {args}\n"
+            f"Watch: http://localhost:3141/cabinet?id={ref.id}"
+        )
+    except cabinet_api.CabinetAPIError as e:
+        return e.friendly_message
+
+
 async def handle_send(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Send an email draft from the drafts folder."""
     try:
@@ -997,6 +1151,11 @@ CORE_HANDLERS: dict[str, Any] = {
     "cleanup": handle_cleanup,
     "analytics": handle_analytics,
     "budget": handle_budget,
+    # Cabinet (Phase 5b) — keys are slashless, matching all other entries
+    # (Phase 5 R1 B3 + Codex M2 fix).
+    "cabinet": handle_cabinet,
+    "standup": handle_standup,
+    "discuss": handle_discuss,
     "send": handle_send,
     "brief": handle_brief,
     "working": handle_working,

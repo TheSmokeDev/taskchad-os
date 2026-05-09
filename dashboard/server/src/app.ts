@@ -28,6 +28,7 @@ import { memoriesRoute } from './routes/memories.js';
 import { hiveMindRoute } from './routes/hive-mind.js';
 import { settingsRoute } from './routes/settings.js';
 import { missionRoute } from './routes/mission.js';
+import { cabinetRoute } from './routes/cabinet.js';
 
 export function buildDashboardApp(): Hono {
   const app = new Hono();
@@ -47,6 +48,7 @@ export function buildDashboardApp(): Hono {
   app.route('/', hiveMindRoute);
   app.route('/', settingsRoute);
   app.route('/', missionRoute);
+  app.route('/', cabinetRoute);
 
   return app;
 }

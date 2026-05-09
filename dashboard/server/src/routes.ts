@@ -104,4 +104,19 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/team/:id/shutdown',
   '/api/team/:id/memory',
   '/api/executor/callback',
+
+  // cabinet.ts — PRD-8 Phase 5a (action/query-shaped, NOT RESTful per
+  // upstream dashboard.ts:802-1254 verbatim).
+  '/api/cabinet/list',
+  '/api/cabinet/new',
+  '/api/cabinet/warmup',
+  '/api/cabinet/details',
+  '/api/cabinet/transcripts',
+  '/api/cabinet/stream',
+  '/api/cabinet/send',
+  '/api/cabinet/abort',
+  '/api/cabinet/pin',
+  '/api/cabinet/unpin',
+  '/api/cabinet/clear',
+  '/api/cabinet/end',
 ] as const;

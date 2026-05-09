@@ -109,4 +109,15 @@ describe('static invariants: thin-proxy boundary', () => {
     }
     expect(violations).toEqual([]);
   });
+
+  it('cabinet stream route locked to authedFetchStream (B3)', () => {
+    // PRD-8 Phase 5a / WS3 — extends WS4.5 contract.
+    const cabinetRoute = join(ROUTES_DIR, 'cabinet.ts');
+    const src = readSource(cabinetRoute);
+    // Locate the /api/cabinet/stream handler block.
+    const block = src.match(/cabinetRoute\.get\(\s*['"]\/api\/cabinet\/stream['"][\s\S]*?\}\);/);
+    expect(block, 'no /api/cabinet/stream handler in cabinet.ts').toBeTruthy();
+    expect(block![0]).toContain('authedFetchStream(');
+    expect(block![0]).not.toMatch(/\bauthedFetch\(/);
+  });
 });

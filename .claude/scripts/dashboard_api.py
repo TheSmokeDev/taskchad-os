@@ -1851,6 +1851,19 @@ def _sse_format(event_id: int, event_type: str, data: str) -> str:
     return f"id: {event_id}\nevent: {event_type}\ndata: {data}\n\n"
 
 
+def _sse_format_no_id(event_type: str, data: str) -> str:
+    """Format an SSE event WITHOUT an ``id:`` line.
+
+    Per the SSE spec (https://html.spec.whatwg.org/multipage/server-sent-events.html#concept-event-stream-last-event-id),
+    when a `data:` event arrives without an `id:` line, the browser KEEPS
+    its prior lastEventId. Use this for snapshot/initial-state writes that
+    must NOT clobber the client's reconnect cursor with a low value.
+    (Phase 5a dashboard-owner SSE minor fix — snapshot id=0 was overwriting
+    real Last-Event-ID positions on reconnect.)
+    """
+    return f"event: {event_type}\ndata: {data}\n\n"
+
+
 @router.get("/api/conversation/{persona_id}/stream")
 async def conversation_stream(
     persona_id: str,
@@ -1918,3 +1931,646 @@ async def conversation_stream(
             "Referrer-Policy": "no-referrer",
         },
     )
+
+
+# ── Cabinet endpoints (PRD-8 Phase 5a / WS2) ─────────────────────────────
+#
+# 11 verbatim ports of `dashboard.ts:802-1254` action/query-shaped routes
+# (`/list`, `/new`, `/warmup`, `/transcripts` (= upstream `/history`),
+# `/stream`, `/send`, `/abort`, `/pin`, `/unpin`, `/clear`, `/end`) PLUS
+# 1 Homie delta `GET /api/cabinet/details` (page-load helper not present
+# upstream).
+#
+# HOMIE PREFIX DELTA: `/api/warroom/text/...` → `/api/cabinet/...`.
+#
+# B1 lock — the orchestrator dispatches every per-persona turn via
+# `runtime.lane_router.run_with_runtime_lanes(RuntimeRequest)`. NO direct
+# provider-SDK calls inside cabinet/* modules.
+#
+# B4 SSE shape — subscribe-first → seen_seqs dedup → snapshot direct-write
+# → replay-after. 410+X-Refetch-Hint Homie delta when Last-Event-ID <
+# oldest_seq.
+#
+# B6 Q4 translation — every persona-id-bearing field translated at the
+# Hono boundary (`dashboard/server/src/routes/cabinet.ts`); the Python
+# framework rejects `'main'` and accepts `'default'`.
+
+from cabinet import (  # noqa: E402, I001
+    meeting_channel as _cabinet_channels,
+    text_orchestrator as _cabinet_orch,
+    title as _cabinet_title,
+)
+
+class CabinetNewBody(BaseModel):
+    chatId: str | None = None
+
+
+class CabinetSendBody(BaseModel):
+    meetingId: int
+    text: str
+    clientMsgId: str
+    chatId: str | None = None
+
+
+class CabinetMeetingIdBody(BaseModel):
+    meetingId: int
+    chatId: str | None = None
+
+
+class CabinetPinBody(BaseModel):
+    meetingId: int
+    agentId: str
+    chatId: str | None = None
+
+
+def _cabinet_chat_match_or_403(meeting: dict, request_chat_id: str) -> bool:
+    """Port dashboard.ts:1007-1014 requireChatMatches.
+
+    Legacy meetings (chat_id == '') accept any chatId. Otherwise the
+    meeting's chat_id MUST match the request's chat_id (chat-scope guard).
+    """
+    meeting_chat = meeting.get("chat_id", "") or ""
+    if meeting_chat == "":
+        return True
+    if meeting_chat == (request_chat_id or ""):
+        return True
+    return False
+
+
+def _cabinet_get_meeting(meeting_id: int) -> dict | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """SELECT id, started_at, ended_at, mode, pinned_persona, entry_count,
+                       title, chat_id
+               FROM cabinet_meetings WHERE id = ?""",
+            (meeting_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def _cabinet_roster_dicts() -> list[dict]:
+    """Roster as plain dicts (camelCase wire shape) for SSE/REST responses."""
+    return [
+        {"id": a.id, "name": a.name, "description": a.description}
+        for a in _cabinet_orch.get_roster()
+    ]
+
+
+@router.get("/api/cabinet/list")
+def cabinet_list(
+    limit: int = Query(default=20, ge=1, le=100),
+    chatId: str | None = Query(default=None),
+) -> dict:
+    """Port dashboard.ts:802-810 — list cabinet meetings."""
+    conn = get_connection()
+    try:
+        if chatId is not None:
+            rows = conn.execute(
+                """SELECT id, started_at, ended_at, mode, pinned_persona, entry_count,
+                          title, chat_id
+                   FROM cabinet_meetings
+                   WHERE chat_id = ?
+                   ORDER BY started_at DESC LIMIT ?""",
+                (chatId, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, started_at, ended_at, mode, pinned_persona, entry_count,
+                          title, chat_id
+                   FROM cabinet_meetings
+                   ORDER BY started_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+    finally:
+        conn.close()
+    return {"ok": True, "meetings": [dict(r) for r in rows]}
+
+
+@router.post("/api/cabinet/new")
+def cabinet_new(body: CabinetNewBody | None = None) -> dict:
+    """Port dashboard.ts:812-838 — create meeting + auto-end stale.
+
+    Audit-log row written for `cabinet_create`.
+    """
+    chat_id = (body.chatId.strip() if body and body.chatId else "")
+    conn = get_connection()
+    try:
+        # Force-end any prior open meetings IN THE SAME CHAT.
+        if chat_id:
+            stale_rows = conn.execute(
+                """SELECT id FROM cabinet_meetings
+                   WHERE chat_id = ? AND ended_at IS NULL""",
+                (chat_id,),
+            ).fetchall()
+        else:
+            stale_rows = []
+        stale_ids = [r["id"] for r in stale_rows]
+
+        cur = conn.execute(
+            """INSERT INTO cabinet_meetings (mode, chat_id) VALUES (?, ?)""",
+            ("text", chat_id),
+        )
+        meeting_id = cur.lastrowid
+
+        # Mark stale meetings ended.
+        for sid in stale_ids:
+            conn.execute(
+                """UPDATE cabinet_meetings SET ended_at = strftime('%s','now')
+                   WHERE id = ? AND ended_at IS NULL""",
+                (sid,),
+            )
+
+        # Snapshot roster for replay determinism.
+        roster_json = json.dumps(_cabinet_roster_dicts())
+        conn.execute(
+            """INSERT INTO cabinet_text_meetings (meeting_id, roster_json)
+               VALUES (?, ?)""",
+            (meeting_id, roster_json),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Prime the channel so the SSE emit for meeting_state has a target.
+    _cabinet_channels.get_channel(meeting_id)
+
+    _audit_write(
+        operator_id="cabinet",
+        action="cabinet_create",
+        target_persona_id="",
+        outcome="created",
+        detail={"meeting_id": meeting_id, "auto_ended": stale_ids, "chat_id": chat_id},
+    )
+
+    # Best-effort emit of meeting_ended on the stale meetings' channels.
+    for sid in stale_ids:
+        try:
+            ch = _cabinet_channels.get_channel(sid)
+            ch.emit({
+                "type": "meeting_ended",
+                "meetingId": sid,
+                "at": int(time.time()),
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {"ok": True, "meetingId": meeting_id, "autoEnded": stale_ids}
+
+
+@router.post("/api/cabinet/warmup")
+async def cabinet_warmup() -> dict:
+    """Port dashboard.ts:843-849 — pre-warm SDK path. Idempotent."""
+    if _cabinet_orch.is_warmup_done():
+        return {"ok": True, "already": True}
+    # Don't await — fire-and-forget so the client doesn't block.
+    import asyncio  # noqa: PLC0415
+    asyncio.create_task(_cabinet_orch.warmup_meeting())
+    return {"ok": True, "started": True}
+
+
+@router.get("/api/cabinet/details")
+def cabinet_details(meetingId: int = Query(...)) -> dict:
+    """HOMIE DELTA — page-load helper not present upstream.
+
+    Returns meeting details + roster + pinned + status for `Cabinet.tsx`.
+    """
+    meeting = _cabinet_get_meeting(meetingId)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    roster = _cabinet_roster_dicts()
+    return {
+        "ok": True,
+        "meeting": meeting,
+        "roster": roster,
+        "pinnedAgent": meeting.get("pinned_persona"),
+        "status": "ended" if meeting.get("ended_at") else "open",
+    }
+
+
+@router.get("/api/cabinet/transcripts")
+def cabinet_transcripts(
+    meetingId: int = Query(...),
+    chatId: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    beforeTs: int | None = Query(default=None),
+    beforeId: int | None = Query(default=None),
+) -> dict:
+    """Port dashboard.ts:851-883 — paginated transcript with B8 high-water cursor.
+
+    `cabinet_transcripts.id` is the durable cursor (NEVER SSE seq). Page
+    backward via `beforeId`. Captures `latestSeq` BEFORE the transcript
+    query so the SSE seenSeqs dedup is gap-safe.
+    """
+    meeting = _cabinet_get_meeting(meetingId)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    if chatId is not None and not _cabinet_chat_match_or_403(meeting, chatId):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+
+    # Capture latestSeq BEFORE the transcript query (port comment :864-870).
+    latest_seq = _cabinet_channels.get_channel(meetingId).latest_seq()
+
+    conn = get_connection()
+    try:
+        # Build the query with optional beforeTs / beforeId cursors.
+        clauses = ["meeting_id = ?"]
+        params: list = [meetingId]
+        if beforeTs is not None:
+            clauses.append("created_at < ?")
+            params.append(beforeTs)
+        if beforeId is not None:
+            clauses.append("id < ?")
+            params.append(beforeId)
+        sql = (
+            "SELECT id, meeting_id, speaker, text, created_at "
+            "FROM cabinet_transcripts WHERE " + " AND ".join(clauses) +
+            " ORDER BY id DESC LIMIT ?"
+        )
+        params.append(limit)
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    finally:
+        conn.close()
+
+    # Reverse to chronological (oldest first) per upstream.
+    transcript = list(reversed([dict(r) for r in rows]))
+
+    return {
+        "ok": True,
+        "meetingId": meetingId,
+        "transcript": transcript,
+        "pinnedAgent": meeting.get("pinned_persona"),
+        "meetingStartedAt": meeting.get("started_at"),
+        "endedAt": meeting.get("ended_at"),
+        "agents": _cabinet_roster_dicts(),
+        "latestSeq": latest_seq,
+    }
+
+
+@router.get("/api/cabinet/stream")
+async def cabinet_stream(
+    request: Request,
+    meetingId: int = Query(...),
+    chatId: str | None = Query(default=None),
+    sinceSeq: int = Query(default=0, ge=0),
+) -> StreamingResponse:
+    """Port dashboard.ts:885-990 — SSE consumer.
+
+    B4 Race-hardening Homie delta (subscribe-first → seen_seqs → snapshot
+    direct-write → replay-after) inspired by upstream's seenSeqs pattern at
+    dashboard.ts:925-972.
+
+    M4 Homie delta — 410 Gone + X-Refetch-Hint header when sinceSeq is
+    older than the channel's oldest_seq (vs upstream's `replay_gap`-event-only).
+    """
+    meeting = _cabinet_get_meeting(meetingId)
+    if meeting is None:
+        return JSONResponse({"error": "meeting_not_found"}, status_code=404)
+    if chatId is not None and not _cabinet_chat_match_or_403(meeting, chatId):
+        return JSONResponse({"error": "chat_mismatch"}, status_code=403)
+
+    # Last-Event-ID overrides sinceSeq when present (browser standard).
+    last_event_id_header = request.headers.get("Last-Event-ID")
+    if last_event_id_header:
+        try:
+            sinceSeq = max(sinceSeq, int(last_event_id_header))
+        except ValueError:
+            pass
+
+    channel = _cabinet_channels.get_channel(meetingId)
+
+    # B4 — emit 410 Gone with X-Refetch-Hint when replay window exceeded.
+    oldest = channel.oldest_seq()
+    if sinceSeq > 0 and oldest > 0 and sinceSeq < oldest - 1:
+        return JSONResponse(
+            status_code=410,
+            content={
+                "error": "replay_gap",
+                "sinceSeq": sinceSeq,
+                "oldestSeq": oldest,
+                "latestSeq": channel.latest_seq(),
+            },
+            headers={
+                "X-Refetch-Hint": f"GET /api/cabinet/transcripts?meetingId={meetingId}",
+            },
+        )
+
+    async def event_gen() -> AsyncIterator[bytes]:
+        # B4 SUBSCRIBE FIRST so events emitted concurrently with the replay
+        # drain aren't lost.
+        queue, unsub = channel.subscribe()
+        seen_seqs: set[int] = set()
+        try:
+            # 1. Initial meeting_state snapshot — DIRECT write to this
+            #    subscriber (NOT through channel.emit; that would pollute
+            #    the buffer for OTHER subscribers).
+            snapshot_event = {
+                "type": "meeting_state",
+                "meetingId": meetingId,
+                "pinnedAgent": meeting.get("pinned_persona"),
+                "agents": _cabinet_roster_dicts(),
+                "isFresh": meeting.get("ended_at") is None and meeting.get("entry_count", 0) == 0,
+            }
+            # Use _sse_format_no_id so the snapshot does NOT clobber the
+            # browser's lastEventId on reconnect (dashboard-owner SSE minor
+            # fix). The snapshot is replay-position-neutral; only real
+            # channel events with seq>=1 advance lastEventId.
+            payload = json.dumps({"seq": 0, "event": snapshot_event})
+            yield _sse_format_no_id("message", payload).encode("utf-8")
+
+            # If meeting already ended, send meeting_ended + close.
+            if meeting.get("ended_at") is not None:
+                ended_evt = {
+                    "type": "meeting_ended",
+                    "meetingId": meetingId,
+                    "at": meeting["ended_at"],
+                }
+                yield _sse_format(
+                    0, "message", json.dumps({"seq": 0, "event": ended_evt})
+                ).encode("utf-8")
+                return
+
+            # 2. Replay window AFTER subscribing — dedup against seen_seqs.
+            for entry in channel.since(sinceSeq):
+                if entry.seq in seen_seqs:
+                    continue
+                seen_seqs.add(entry.seq)
+                payload = json.dumps({"seq": entry.seq, "event": entry.event})
+                yield _sse_format(entry.seq, "message", payload).encode("utf-8")
+
+            # 3. Live drain.
+            import asyncio  # noqa: PLC0415
+            last_keepalive = time.monotonic()
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except TimeoutError:
+                    now = time.monotonic()
+                    if now - last_keepalive >= 20:
+                        yield _sse_format(0, "ping", "{}").encode("utf-8")
+                        last_keepalive = now
+                    continue
+                if entry.seq in seen_seqs:
+                    continue
+                seen_seqs.add(entry.seq)
+                payload = json.dumps({"seq": entry.seq, "event": entry.event})
+                yield _sse_format(entry.seq, "message", payload).encode("utf-8")
+        finally:
+            unsub()
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
+
+
+@router.post("/api/cabinet/send")
+async def cabinet_send(body: CabinetSendBody) -> dict:
+    """Port dashboard.ts:1016-1105 — operator message → orchestrator.
+
+    M7 — kill-switch chain: `kill_switches.requireEnabled('cabinet')`
+    raises KillSwitchDisabled → 503; lane_router's `llm` switch (automatic)
+    will refuse subsequent SDK calls.
+    """
+    text = (body.text or "").strip()
+    client_msg_id = (body.clientMsgId or "").strip()
+    chat_id = (body.chatId or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="empty text")
+    if len(text) > 8000:
+        raise HTTPException(status_code=400, detail="text too long (max 8000 chars)")
+    if not client_msg_id:
+        raise HTTPException(status_code=400, detail="invalid clientMsgId")
+
+    meeting = _cabinet_get_meeting(body.meetingId)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    if meeting.get("ended_at") is not None:
+        raise HTTPException(status_code=410, detail="meeting_ended")
+    if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+
+    # Fire-and-forget — client tracks progress via SSE.
+    import asyncio  # noqa: PLC0415
+
+    async def _run() -> None:
+        try:
+            from cabinet.text_orchestrator import handle_text_turn  # noqa: PLC0415
+            await handle_text_turn(body.meetingId, text, client_msg_id)
+        except Exception as exc:  # noqa: BLE001
+            # Surface to channel as error event so UI unfreezes.
+            ch = _cabinet_channels.get_channel(body.meetingId)
+            ch.emit({
+                "type": "error",
+                "message": str(exc),
+                "recoverable": True,
+            })
+
+    asyncio.create_task(_run())
+    return {"ok": True, "queued": True}
+
+
+@router.post("/api/cabinet/abort")
+def cabinet_abort(body: CabinetMeetingIdBody) -> dict:
+    """Port dashboard.ts:1107-1119."""
+    meeting = _cabinet_get_meeting(body.meetingId)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    chat_id = (body.chatId or "").strip()
+    if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+    count = _cabinet_orch.cancel_meeting_turns(body.meetingId)
+    return {"ok": True, "cancelled": count}
+
+
+@router.post("/api/cabinet/pin")
+def cabinet_pin(body: CabinetPinBody) -> dict:
+    """Port dashboard.ts:1121-1140."""
+    agent_id = (body.agentId or "").strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="invalid agentId")
+    # Phase 5a dashboard-owner GAP 3 fix: defense-in-depth — reject literal
+    # "main" with the canonical 4xx detail from _reject_main_translation
+    # rather than relying on the generic "unknown agent" message. Matches the
+    # pattern used by every conversation/* endpoint.
+    _reject_main_translation(agent_id)
+    roster_ids = {a.id for a in _cabinet_orch.get_roster()}
+    if agent_id not in roster_ids:
+        raise HTTPException(status_code=400, detail="unknown agent")
+    meeting = _cabinet_get_meeting(body.meetingId)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    if meeting.get("ended_at") is not None:
+        raise HTTPException(status_code=410, detail="meeting_ended")
+    chat_id = (body.chatId or "").strip()
+    if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE cabinet_meetings SET pinned_persona = ? WHERE id = ?",
+            (agent_id, body.meetingId),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _cabinet_channels.get_channel(body.meetingId).emit({
+        "type": "meeting_state_update",
+        "pinnedAgent": agent_id,
+    })
+    return {"ok": True, "meetingId": body.meetingId, "pinnedAgent": agent_id}
+
+
+@router.post("/api/cabinet/unpin")
+def cabinet_unpin(body: CabinetMeetingIdBody) -> dict:
+    """Port dashboard.ts:1142-1155."""
+    meeting = _cabinet_get_meeting(body.meetingId)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    if meeting.get("ended_at") is not None:
+        raise HTTPException(status_code=410, detail="meeting_ended")
+    chat_id = (body.chatId or "").strip()
+    if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE cabinet_meetings SET pinned_persona = NULL WHERE id = ?",
+            (body.meetingId,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _cabinet_channels.get_channel(body.meetingId).emit({
+        "type": "meeting_state_update",
+        "pinnedAgent": None,
+    })
+    return {"ok": True, "meetingId": body.meetingId, "pinnedAgent": None}
+
+
+@router.post("/api/cabinet/clear")
+async def cabinet_clear(body: CabinetMeetingIdBody) -> dict:
+    """Port dashboard.ts:1157-1194."""
+    meeting = _cabinet_get_meeting(body.meetingId)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    if meeting.get("ended_at") is not None:
+        raise HTTPException(status_code=410, detail="meeting_ended")
+    chat_id = (body.chatId or "").strip()
+    if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+
+    # Cancel in-flight turn FIRST and wait idle.
+    if _cabinet_orch.get_active_turn_ids(body.meetingId):
+        _cabinet_orch.cancel_meeting_turns(body.meetingId)
+        await _cabinet_orch.wait_for_meeting_turns_idle(body.meetingId, timeout_ms=5000)
+
+    # Persist divider row so reload shows the marker.
+    conn = get_connection()
+    try:
+        conn.execute(
+            """INSERT INTO cabinet_transcripts (meeting_id, speaker, text)
+               VALUES (?, ?, ?)""",
+            (body.meetingId, "__divider__", "Memory cleared — agents start fresh from here"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    channel = _cabinet_channels.get_channel(body.meetingId)
+    channel.emit({
+        "type": "divider",
+        "kind": "memory_cleared",
+        "text": "Memory cleared — agents start fresh from here",
+    })
+    channel.emit({
+        "type": "system_note",
+        "text": "Sessions cleared. Next message starts fresh.",
+        "tone": "info",
+        "dismissable": True,
+    })
+    return {"ok": True, "cleared": True}
+
+
+@router.post("/api/cabinet/end")
+async def cabinet_end(body: CabinetMeetingIdBody) -> dict:
+    """Port dashboard.ts:1239-1254 + endTextMeeting helper at :1199-1237."""
+    meeting = _cabinet_get_meeting(body.meetingId)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    chat_id = (body.chatId or "").strip()
+    if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+
+    if meeting.get("ended_at") is not None:
+        return {"ok": True, "meetingId": body.meetingId, "alreadyEnded": True}
+
+    # End meeting in DB + cancel active turns + close channel after grace.
+    conn = get_connection()
+    try:
+        conn.execute(
+            """UPDATE cabinet_meetings
+               SET ended_at = strftime('%s','now')
+               WHERE id = ? AND ended_at IS NULL""",
+            (body.meetingId,),
+        )
+        # Mirror in cabinet_text_meetings (best-effort).
+        conn.execute(
+            """UPDATE cabinet_text_meetings
+               SET ended_at = strftime('%s','now')
+               WHERE meeting_id = ? AND ended_at IS NULL""",
+            (body.meetingId,),
+        )
+        row = conn.execute(
+            "SELECT entry_count FROM cabinet_meetings WHERE id = ?",
+            (body.meetingId,),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    entry_count = row["entry_count"] if row else 0
+
+    if _cabinet_orch.get_active_turn_ids(body.meetingId):
+        _cabinet_orch.cancel_meeting_turns(body.meetingId)
+        await _cabinet_orch.wait_for_meeting_turns_idle(body.meetingId, timeout_ms=3000)
+
+    channel = _cabinet_channels.get_channel(body.meetingId)
+    channel.emit({
+        "type": "meeting_ended",
+        "meetingId": body.meetingId,
+        "at": int(time.time()),
+    })
+
+    # Close channel after a short grace so in-flight SSE writes drain.
+    import asyncio  # noqa: PLC0415
+
+    async def _close_after_grace() -> None:
+        await asyncio.sleep(1.5)
+        _cabinet_channels.close_channel(body.meetingId)
+
+    try:
+        asyncio.create_task(_close_after_grace())
+    except Exception:  # noqa: BLE001
+        _cabinet_channels.close_channel(body.meetingId)
+
+    _audit_write(
+        operator_id="cabinet",
+        action="cabinet_end",
+        target_persona_id="",
+        outcome="ended",
+        detail={"meeting_id": body.meetingId, "entry_count": entry_count},
+    )
+    return {"ok": True, "meetingId": body.meetingId, "entryCount": entry_count}
+
+
+# Silence unused-import lint warnings for late imports above.
+_ = (_cabinet_title,)
