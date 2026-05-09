@@ -95,4 +95,98 @@ describe('KillSwitchBanner — rich snapshot consumer', () => {
       expect(text).toContain('llm=2');
     });
   });
+
+  // ── Phase 7b WS6 — new switches auto-light-up ──────────────────────
+  //
+  // Phase 7a's _REFUSAL_COUNTERS dict structure means new switches added
+  // in Phase 7b (voice, persona_mutation, persona_operations) AND Phase 7b
+  // commit-2 (cabinet) flow through the same /api/health.killSwitches.counters
+  // shape with ZERO backend changes. These vitest cases lock the frontend
+  // contract for each new switch so banner renders nonzero counters.
+
+  test('renders voice refusal count (Phase 7b WS2 — voice cascade)', async () => {
+    mockHealth({
+      counters: { voice: 5 },
+      audit_write_failures: {},
+      process_started_at: 1715120000,
+    });
+    const { container } = render(<KillSwitchBanner />);
+    await waitFor(() => {
+      const text = container.textContent || '';
+      expect(text).toContain('Kill-switch refusals');
+      expect(text).toContain('voice=5');
+    });
+  });
+
+  test('renders persona_mutation refusal count (Phase 7b WS4)', async () => {
+    mockHealth({
+      counters: { persona_mutation: 2 },
+      audit_write_failures: {},
+      process_started_at: 1715120000,
+    });
+    const { container } = render(<KillSwitchBanner />);
+    await waitFor(() => {
+      const text = container.textContent || '';
+      expect(text).toContain('Kill-switch refusals');
+      expect(text).toContain('persona_mutation=2');
+    });
+  });
+
+  test('renders persona_operations refusal count (Phase 7b WS4 — runtime ops)', async () => {
+    mockHealth({
+      counters: { persona_operations: 1 },
+      audit_write_failures: {},
+      process_started_at: 1715120000,
+    });
+    const { container } = render(<KillSwitchBanner />);
+    await waitFor(() => {
+      const text = container.textContent || '';
+      expect(text).toContain('Kill-switch refusals');
+      expect(text).toContain('persona_operations=1');
+    });
+  });
+
+  test('renders cabinet refusal count (Phase 7b commit-2 reference)', async () => {
+    // Forward-compat lock — when commit-2 wires cabinet kill-switches into
+    // handle_cabinet/standup/discuss, the counter auto-surfaces here. This
+    // test asserts the banner rendering path is contract-correct ahead of
+    // commit-2 ship so any regression on the rendering layer is caught.
+    mockHealth({
+      counters: { cabinet: 4 },
+      audit_write_failures: {},
+      process_started_at: 1715120000,
+    });
+    const { container } = render(<KillSwitchBanner />);
+    await waitFor(() => {
+      const text = container.textContent || '';
+      expect(text).toContain('Kill-switch refusals');
+      expect(text).toContain('cabinet=4');
+    });
+  });
+
+  test('renders all new switches together (Phase 7b commit-1+commit-2)', async () => {
+    mockHealth({
+      counters: {
+        voice: 5,
+        persona_mutation: 2,
+        persona_operations: 1,
+        cabinet: 3,
+        llm: 7,
+      },
+      audit_write_failures: { voice: 1 },
+      process_started_at: 1715120000,
+    });
+    const { container } = render(<KillSwitchBanner />);
+    await waitFor(() => {
+      const text = container.textContent || '';
+      expect(text).toContain('Kill-switch refusals');
+      expect(text).toContain('voice=5');
+      expect(text).toContain('persona_mutation=2');
+      expect(text).toContain('persona_operations=1');
+      expect(text).toContain('cabinet=3');
+      expect(text).toContain('llm=7');
+      expect(text).toContain('Audit-write failures');
+      expect(text).toContain('voice=1');
+    });
+  });
 });

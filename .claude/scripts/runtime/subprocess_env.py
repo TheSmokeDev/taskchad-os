@@ -38,6 +38,39 @@ _DASHBOARD_ONLY_KEYS: frozenset[str] = frozenset({
     "DASHBOARD_DEV_MODE_NO_AUTH",
 })
 
+# PRD-8 Phase 7b WS5 (codex post-build F3) — exact drops mirroring ClaudeClaw
+# SDK_DROP_VARS_SECRETS that are NOT covered by either ``_DASHBOARD_ONLY_KEYS``
+# (dashboard-secret family) or ``_SECRET_SHAPED_RE`` (suffix matching). PIN_HASH
+# is the ClaudeClaw signature case: a credential-shaped env var that does NOT
+# end in _TOKEN/_KEY/_SECRET/etc. and so escapes the heuristic regex without
+# this explicit drop.
+_EXTRA_EXACT_DROPS: frozenset[str] = frozenset({
+    "PIN_HASH",  # ClaudeClaw security.ts:266
+})
+
+# PRD-8 Phase 7b WS5 — nested Claude-Code-session state (ClaudeClaw security.ts:235-243
+# parity). When the parent process is itself running inside Claude Code (e.g. a dev
+# session spawning the bot), these env vars expose the parent's IPC/SSE state. A
+# child SDK process inheriting them can:
+#   - try to attach to the parent's IPC socket (legacy bug in early SDK builds)
+#   - leak parent session metadata (entrypoint, execpath) into model context
+#   - inherit the parent's max-output-tokens cap (incorrect for the child)
+#
+# We DROP these unconditionally — they're never useful to a child SDK process and
+# they're not auth secrets, just session-state leakage. ``CLAUDECODE`` (no
+# underscore) deliberately precedes the prefix-allowlist check so the
+# CLAUDE_CODE_OAUTH_TOKEN whitelist doesn't inadvertently re-admit
+# ``CLAUDE_CODE_ENTRYPOINT``/``_EXECPATH``/etc. via prefix match.
+_NESTED_CLAUDE_CODE_STATE_KEYS: frozenset[str] = frozenset({
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_IPC_PORT",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+})
+
 # Bot-creds whitelist — env var prefixes that the BOT subprocess SHOULD inherit.
 # Phase 7a additions: GROQ_, GRADIUM_, DAILY_ (Phase 4 prep). ELEVENLABS_ already
 # present in the Phase 3 seed. R2 NB2 fix: CLAUDE_CODE_ added so containers/CI
@@ -65,7 +98,13 @@ _BOT_CREDS_PREFIXES: tuple[str, ...] = (
 # Secret-shaped key heuristic — env var names that suggest credential material.
 # Compared case-insensitively. Anything matching this AND not matching a
 # _BOT_CREDS_PREFIXES prefix gets scrubbed.
+#
+# PRD-8 Phase 7b WS5 (codex post-build F3): added ``^SECRET_`` prefix
+# branch to mirror ClaudeClaw security.ts:278 exactly. Without it, names
+# like ``SECRET_FOO`` would survive the scrub since they have no
+# secret-shaped suffix and aren't on any whitelist prefix.
 _SECRET_SHAPED_RE = re.compile(
+    r"^SECRET_|"
     r"(?:_TOKEN|_KEY|_SECRET|_PASSWORD|_PASSWD|_PWD|_API|_CREDENTIALS?|_CERT)$",
     re.IGNORECASE,
 )
@@ -122,6 +161,19 @@ def get_scrubbed_sdk_env(
             out[key] = value
             continue
         if key in _DASHBOARD_ONLY_KEYS:
+            continue
+        # PRD-8 Phase 7b WS5 (codex post-build F3) — drop ClaudeClaw-mirror
+        # exact secrets (PIN_HASH and any future names that escape the
+        # suffix regex) BEFORE bot-creds prefix.
+        if key in _EXTRA_EXACT_DROPS:
+            continue
+        # PRD-8 Phase 7b WS5 — drop nested Claude-Code-session state
+        # BEFORE the bot-creds prefix check, so CLAUDE_CODE_ENTRYPOINT/
+        # _EXECPATH/_SSE_PORT/_IPC_PORT/_MAX_OUTPUT_TOKENS/
+        # _EXPERIMENTAL_AGENT_TEAMS aren't preserved by the
+        # ``CLAUDE_CODE_`` whitelist prefix (that prefix exists for
+        # CLAUDE_CODE_OAUTH_TOKEN; the IPC/state vars must NOT inherit).
+        if key in _NESTED_CLAUDE_CODE_STATE_KEYS:
             continue
         if _SECRET_SHAPED_RE.search(key) and not _is_bot_creds_key(key):
             continue

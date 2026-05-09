@@ -30,6 +30,11 @@ from security import kill_switches
 
 logger = logging.getLogger(__name__)
 
+# PRD-8 Phase 7b WS1 (codex post-build F1) — log-message redaction at every
+# cabinet log emit site. Module-attribute import (Rule 3); redact() unconditional.
+from security import redact as _redact_mod  # noqa: E402
+_redact = _redact_mod.redact
+
 
 # Match warroom-text-router.ts:21-26.
 ROUTER_MODEL: Final[str] = "claude-haiku-4-5-20251001"
@@ -328,16 +333,24 @@ async def route_message(ctx: RouterContext) -> RouterDecision:
             timeout=ROUTER_TIMEOUT_S,
         )
     except (TimeoutError, Exception) as exc:  # noqa: BLE001 — never let router exception escape
-        logger.warning("cabinet router failed: %s", exc)
+        logger.warning("cabinet router failed: %s", _redact(str(exc)))
         return router_fallback(ctx)
 
     raw = parse_json(result.text)
     if raw is None:
-        logger.warning("cabinet router produced unparseable output: %r", result.text[:200])
+        # PRD-8 Phase 7b WS1 (iter2 F1) — model output snippets can echo
+        # secrets the prompt-injected user text smuggled in.
+        logger.warning(
+            "cabinet router produced unparseable output: %r",
+            _redact(result.text[:200]),
+        )
         return router_fallback(ctx)
     clean = sanitize_decision(raw, ctx)
     if clean is None:
-        logger.warning("cabinet router produced bad shape: %r", result.text[:200])
+        logger.warning(
+            "cabinet router produced bad shape: %r",
+            _redact(result.text[:200]),
+        )
         return router_fallback(ctx)
     return RouterDecision(
         primary=clean["primary"],
@@ -376,7 +389,7 @@ async def intervention_gate(ctx: InterventionContext) -> InterventionDecision:
             timeout=GATE_TIMEOUT_S,
         )
     except (TimeoutError, Exception) as exc:  # noqa: BLE001
-        logger.warning("cabinet intervention gate failed: %s", exc)
+        logger.warning("cabinet intervention gate failed: %s", _redact(str(exc)))
         return InterventionDecision(speak=False, reply="")
 
     raw = parse_json(result.text)

@@ -465,9 +465,10 @@ that operators already depend on.
 
 ---
 
-## 8. Kill-switches (PRD-8 Phase 7a)
+## 8. Kill-switches (PRD-8 Phase 7a + Phase 7b)
 
-Operator-toggleable env-var kill-switches gate LLM and recall surfaces.
+Operator-toggleable env-var kill-switches gate LLM, recall, voice, persona-
+mutation, persona-operations (and — Phase 7b commit-2 — cabinet) surfaces.
 Each refusal raises `KillSwitchDisabled`, increments a per-switch counter,
 and writes an `audit_log` row with `action='killswitch_refusal'`. Callers
 catch the exception explicitly and degrade gracefully.
@@ -475,18 +476,41 @@ catch the exception explicitly and degrade gracefully.
 ### 8.1 Env var pattern
 
 `HOMIE_KILLSWITCH_<NAME>=disabled` (case-insensitive). Read on every call
-(Rule 2 — never cached). Phase 7a defines:
+(Rule 2 — never cached). Switches:
 
-- `HOMIE_KILLSWITCH_LLM` — gates `runtime/lane_router.run_with_runtime_lanes`,
+- `HOMIE_KILLSWITCH_LLM` (Phase 7a) — gates `runtime/lane_router.run_with_runtime_lanes`,
   `runtime/registry.run_with_fallback`, and `heartbeat.py` HARO direct-SDK
   pitch generation
-- `HOMIE_KILLSWITCH_RECALL` — gates `chat/recall_service.recall` (wrap is
-  INSIDE the `@observe` scope so the `chat_message → recall` Langfuse span
-  hierarchy is preserved on refusal — refusal becomes the span output with
-  `tier="killswitch_disabled"`)
-
-Phase 7b will add `voice` (Phase 4 cabinet voice) and `cabinet` (Phase 5
-cabinet text) once those surfaces are created.
+- `HOMIE_KILLSWITCH_RECALL` (Phase 7a) — gates `chat/recall_service.recall`
+  (wrap is INSIDE the `@observe` scope so the `chat_message → recall`
+  Langfuse span hierarchy is preserved on refusal — refusal becomes the
+  span output with `tier="killswitch_disabled"`)
+- `HOMIE_KILLSWITCH_VOICE` (Phase 7b commit-1, WS2) — gates ALL THREE voice
+  cascade chokepoints: `voice.transcribe_audio_file` (cascade STT entry),
+  `voice.transcribe` (legacy 3-arg helper), `voice.synthesize` (cascade TTS
+  entry). All 6 adapters (Telegram, Discord, Slack, WhatsApp, Web/Relay,
+  CLI) catch and emit a friendly degraded reply.
+- `HOMIE_KILLSWITCH_PERSONA_MUTATION` (Phase 7b commit-1, WS4) — gates
+  persistent-state mutations on the persona surface. Lifecycle layer:
+  `personas.lifecycle.create_profile`, `delete_profile`, `use_profile`.
+  HTTP layer: 9 routes (`POST /api/agents`, `DELETE /api/agents/{id}`,
+  `DELETE /api/agents/{id}/full`, `PUT/DELETE /api/agents/{id}/avatar`,
+  `POST /api/agents/suggestions/refresh`, `PATCH /api/agents/model`,
+  `PATCH /api/agents/{id}/model`, `PATCH /api/agents/{id}/files/{filename}`).
+  Returns 503 with `{"error": "persona mutations are disabled by operator",
+  "switch": "persona_mutation"}` on refusal.
+- `HOMIE_KILLSWITCH_PERSONA_OPERATIONS` (Phase 7b commit-1, WS4) — SECOND,
+  lighter-scope switch for runtime-lifecycle ONLY (NO persistent-state
+  writes): `POST /api/agents/{id}/activate`, `POST /api/agents/{id}/deactivate`,
+  `POST /api/agents/{id}/restart`. Operators can lock identity changes
+  (persona_mutation) while still rebooting persona bots, or vice versa.
+  Returns 503 with `{"error": "persona operations are disabled by operator",
+  "switch": "persona_operations"}` on refusal.
+- `HOMIE_KILLSWITCH_CABINET` (Phase 7b commit-2 — pending cabinet ship) —
+  will gate cabinet chat-process chokepoints at `core_handlers.handle_cabinet`,
+  `handle_standup`, `handle_discuss`. The HTTP-layer cabinet wrap on
+  `/api/cabinet/send` already exists (see Phase 5a M7 layer 1). Adding the
+  chat chokepoints in commit-2 closes the direct-CLI/Telegram bypass.
 
 ### 8.2 KillSwitchDisabled contract
 
@@ -508,8 +532,12 @@ Phase 7a wires explicit catches at:
 `/api/health` exposes the rich snapshot under `killSwitches` (see §1.3).
 The dashboard frontend `dashboard/web/src/components/KillSwitchBanner.tsx`
 (PRD-8 Phase 7a WS7) renders nonzero counters/audit_write_failures
-explicitly; 4 vitest tests at
-`dashboard/web/src/__tests__/kill-switch-banner.test.tsx` lock the contract.
+explicitly. Phase 7a shipped 4 vitest tests; Phase 7b commit-1 (WS6)
+extended that to 9 to cover voice, persona_mutation, persona_operations,
+and a forward-compat cabinet case (the new switches auto-light-up via the
+`_REFUSAL_COUNTERS` dict; ZERO backend changes needed for the banner to
+surface them — the test extension locks the rendering contract).
+`dashboard/web/src/__tests__/kill-switch-banner.test.tsx`.
 
 ### 8.4 Audit row shape on refusal
 
@@ -538,6 +566,43 @@ Postmark, Langfuse) is the sole source consumed by `scripts/sanitize.py`,
 helper. Three-layer parity test rejects any local copies. Phase 4 keys
 (`sk_` ElevenLabs, `gsk_` Groq, `gr_` Gradium) are present so Phase 4
 ships safely.
+
+### 8.6 Log-message redact (Phase 7b commit-1, WS1)
+
+`.claude/scripts/security/redact.py` (Hermes verbatim port — 340 LOC) is
+the single redaction helper for log/error message text, NOT just env
+scrubbing. Default ON via `_REDACT_ENABLED` import-time snapshot reading
+`HOMIE_REDACT_SECRETS` against the tuple `("0", "false", "no",
+"off")`. Unset env → not in tuple → True (ON), matching Hermes line 60.
+Operators wrap log call sites:
+
+```python
+from security import redact
+logger.error("submission failed: %s", redact.redact(str(exc)))
+```
+
+`redact()` is unconditional (NOT gated on a kill-switch — making it
+operator-toggleable would let an operator disable secret scrubbing). The
+`_REDACT_ENABLED` snapshot is for test/debug ONLY; it's resolved at module
+import and not re-read on each call (defeats LLM mid-process attacks that
+might try to flip the env var).
+
+The `security/__init__.py` re-export of `redact` is LAZY via PEP 562
+`__getattr__` — non-redact consumers (lane_router, cabinet text_router/
+text_orchestrator) do NOT trigger config import or `_REDACT_ENABLED`
+snapshot when they `from security import kill_switches`. Only consumers
+that explicitly access `security.redact` pay the import cost.
+
+ClaudeClaw `getScrubbedSdkEnv` parity (Phase 7b WS5) lives in
+`runtime/subprocess_env.py`; the upstream audit at
+`~/.refs/claudeclaw-os/src/security.ts:200-334` is locked
+by `tests/test_subprocess_env_claudeclaw_parity.py` (36 tests). Closed
+gap on this audit: nested Claude-Code-session state vars
+(`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `_EXECPATH`, `_SSE_PORT`,
+`_IPC_PORT`, `_MAX_OUTPUT_TOKENS`, `_EXPERIMENTAL_AGENT_TEAMS`) added
+to `_NESTED_CLAUDE_CODE_STATE_KEYS` and dropped BEFORE the `CLAUDE_CODE_`
+prefix-allowlist check (the prefix exists for `CLAUDE_CODE_OAUTH_TOKEN`
+auth — not session state).
 
 ---
 

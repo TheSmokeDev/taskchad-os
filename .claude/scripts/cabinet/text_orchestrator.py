@@ -57,6 +57,12 @@ from .tool_policy import cabinet_tool_policy, filter_mcp_servers
 
 logger = logging.getLogger(__name__)
 
+# PRD-8 Phase 7b WS1 (codex post-build F1) — log-message redaction at every
+# cabinet log emit site. Module-attribute import (Rule 3); redact() unconditional
+# (NOT kill-switch gated — see security/redact.py docstring).
+from security import redact as _redact_mod  # noqa: E402
+_redact = _redact_mod.redact
+
 
 # ── Roster ────────────────────────────────────────────────────────────────
 
@@ -89,7 +95,7 @@ def _roster_from_personas() -> list[RosterAgent]:
     try:
         profiles = personas.lifecycle.list_profiles()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("cabinet roster: list_profiles failed: %s", exc)
+        logger.debug("cabinet roster: list_profiles failed: %s", _redact(str(exc)))
         return [_MAIN_AGENT]
 
     for profile in profiles:
@@ -548,7 +554,7 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
                 "argsPreview": _preview_args(tc.arguments),
             })
     except kill_switches.KillSwitchDisabled as exc:
-        logger.info("cabinet persona turn refused: %s", exc)
+        logger.info("cabinet persona turn refused: %s", _redact(str(exc)))
         args.turn_state["anyIncomplete"] = True
         channel.emit({
             "type": "intervention_skipped",
@@ -558,7 +564,11 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
         })
         return ""
     except Exception as exc:  # noqa: BLE001
-        logger.warning("cabinet persona turn failed (%s): %s", args.persona_id, exc)
+        logger.warning(
+            "cabinet persona turn failed (%s): %s",
+            args.persona_id,
+            _redact(str(exc)),
+        )
         args.turn_state["anyIncomplete"] = True
         channel.emit({
             "type": "error",
@@ -590,7 +600,7 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
             finally:
                 conn.close()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("cabinet transcript write failed: %s", exc)
+            logger.warning("cabinet transcript write failed: %s", _redact(str(exc)))
 
     channel.emit({
         "type": "agent_done",
@@ -634,7 +644,7 @@ def _get_meeting(meeting_id: int) -> dict | None:
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("cabinet _get_meeting failed: %s", exc)
+        logger.warning("cabinet _get_meeting failed: %s", _redact(str(exc)))
         return None
     if row is None:
         return None
@@ -661,7 +671,7 @@ def _persist_user_message(meeting_id: int, text: str) -> int | None:
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("cabinet user-row write failed: %s", exc)
+        logger.warning("cabinet user-row write failed: %s", _redact(str(exc)))
         return None
 
 
@@ -685,7 +695,7 @@ def _remember_client_msg_id(meeting_id: int, client_msg_id: str) -> bool:
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("cabinet dedup write failed: %s", exc)
+        logger.warning("cabinet dedup write failed: %s", _redact(str(exc)))
         return True  # fail-open — better to dispatch than silently drop.
 
 
@@ -912,7 +922,7 @@ async def handle_text_turn(
             try:
                 decision = await route_message(router_ctx)
             except Exception as exc:  # noqa: BLE001 — router itself shouldn't throw, but be defensive
-                logger.warning("cabinet router unexpected error: %s", exc)
+                logger.warning("cabinet router unexpected error: %s", _redact(str(exc)))
                 decision = router_fallback(router_ctx)
 
         channel.emit({
@@ -999,7 +1009,7 @@ async def handle_text_turn(
             try:
                 schedule_title_generation(meeting_id, trimmed, primary_text)
             except Exception as exc:  # noqa: BLE001
-                logger.debug("cabinet title schedule failed: %s", exc)
+                logger.debug("cabinet title schedule failed: %s", _redact(str(exc)))
 
         # 6. Intervener loop.
         if decision.interveners and not cancel_flag["cancelled"]:
@@ -1099,7 +1109,7 @@ async def handle_text_turn(
         # Caller (HTTP handler) catches and returns 503; re-raise.
         raise
     except Exception as exc:  # noqa: BLE001 — defensive top-level
-        logger.error("cabinet handle_text_turn crashed: %s", exc)
+        logger.error("cabinet handle_text_turn crashed: %s", _redact(str(exc)))
         channel.emit({
             "type": "error",
             "turnId": turn_id,

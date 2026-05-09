@@ -26,6 +26,12 @@ from models import (
 import voice as voice_mod
 from voice_markers import parse_send_markers, strip_send_markers
 
+# PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
+# Module-attribute lookup so monkeypatch propagates (Rule 3). Adapter catches
+# KillSwitchDisabled before generic Exception so refusals get the friendly
+# degraded reply, not a generic "Transcription failed: <ex>" message.
+from security import kill_switches as _kill_switches
+
 
 @dataclass(frozen=True)
 class _TelegramMediaRef:
@@ -577,14 +583,46 @@ class TelegramAdapter:
             return
 
         # Transcribe — prefer cascade, fall back to legacy single-provider.
+        # PRD-8 Phase 7b WS2 (codex post-build F2): both paths route through
+        # voice_mod entry points so the kill-switch ("voice") gates all
+        # variants. The legacy fallback now goes through voice_mod.transcribe()
+        # (which is gated at voice.py:585-589) instead of direct
+        # _voice_providers.stt.transcribe(audio_bytes). Catches
+        # KillSwitchDisabled BEFORE generic Exception so the operator
+        # message is the documented degraded reply, not a generic error.
         transcript = ""
         try:
             if capabilities.get("stt"):
                 transcript = await voice_mod.transcribe_audio_file(local_path)
             elif self._voice_providers.stt is not None:
+                # Route through voice_mod.transcribe — which IS gated by the
+                # voice kill-switch — instead of calling the provider directly
+                # so HOMIE_KILLSWITCH_VOICE=disabled refuses cleanly.
                 with open(local_path, "rb") as f:
                     audio_bytes = f.read()
-                transcript = await self._voice_providers.stt.transcribe(audio_bytes)
+                # Use the legacy entrypoint signature (bytes, key, model).
+                # We pass an empty api_key — the gated cascade refuses BEFORE
+                # the provider dispatch reads the key. If the kill-switch is
+                # NOT disabled, the provider lookup happens in voice_mod and
+                # uses the configured _voice_providers state via voice.py
+                # internals. R4 NM4 closed this Telegram bypass.
+                api_key = (
+                    getattr(self._voice_providers.stt, "api_key", "")
+                    if self._voice_providers.stt is not None
+                    else ""
+                )
+                transcript = await voice_mod.transcribe(audio_bytes, api_key)
+        except _kill_switches.KillSwitchDisabled as ks_exc:
+            # Operator-toggleable refusal — friendly degraded message
+            # (NOT a generic error). Refusal counter already incremented
+            # inside voice_mod.requireEnabled() call.
+            print(f"[{datetime.now()}] Voice cascade refused: {ks_exc}")
+            await msg.reply_text(
+                f"[killswitch:{ks_exc.switch_name}] Voice transcription is "
+                f"disabled by the operator. To re-enable, unset "
+                f"HOMIE_KILLSWITCH_{ks_exc.switch_name.upper()}."
+            )
+            return
         except Exception as e:
             print(f"[{datetime.now()}] Transcription failed: {e}")
             await msg.reply_text(f"Transcription failed: {e}")
@@ -891,6 +929,18 @@ class TelegramAdapter:
             buf = BytesIO(audio)
             buf.name = "response.ogg"
             await self._app.bot.send_voice(chat_id=chat_id, voice=buf)
+        except _kill_switches.KillSwitchDisabled as ks_exc:
+            # Operator-toggleable refusal — degrade to text-only reply with
+            # explicit operator-facing context instead of silent text fallback.
+            print(f"[{datetime.now()}] TTS refused by kill-switch: {ks_exc}")
+            degraded_text = (
+                f"[killswitch:{ks_exc.switch_name}] Voice synthesis is "
+                f"disabled by the operator. Falling back to text.\n\n{text}"
+            )
+            try:
+                await self._app.bot.send_message(chat_id=chat_id, text=degraded_text)
+            except Exception as e2:
+                print(f"[{datetime.now()}] TTS killswitch text fallback failed: {e2}")
         except Exception as e:
             print(f"[{datetime.now()}] TTS failed, falling back to text: {e}")
             # Fallback to text if TTS fails

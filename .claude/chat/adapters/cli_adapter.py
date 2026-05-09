@@ -17,6 +17,9 @@ from models import Channel, IncomingMessage, OutgoingMessage, Platform, User
 import voice as voice_mod
 from voice_markers import parse_send_markers, strip_send_markers
 
+# PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
+from security import kill_switches as _kill_switches
+
 
 def _resolve_active_profile_name() -> str:
     """Read the active profile name; fail-open to ``"unknown"`` on resolver error.
@@ -197,6 +200,13 @@ class CLIAdapter:
         if self._voice_path:
             try:
                 transcript = await voice_mod.transcribe_audio_file(self._voice_path)
+            except _kill_switches.KillSwitchDisabled as ks_exc:
+                # PRD-8 Phase 7b WS2 (codex post-build F2) — refusal-aware path.
+                print(
+                    f"[{datetime.now()}] CLI voice cascade refused "
+                    f"(killswitch:{ks_exc.switch_name})"
+                )
+                transcript = ""
             except Exception as e:
                 print(f"[{datetime.now()}] CLI voice transcribe failed: {e}")
                 transcript = ""
@@ -283,6 +293,13 @@ class CLIAdapter:
                 audio = await voice_mod.synthesize(text)
                 with open(self._voice_out_path, "wb") as f:
                     f.write(audio)
+            except _kill_switches.KillSwitchDisabled as ks_exc:
+                # PRD-8 Phase 7b WS2 (codex post-build F2) — degraded handling.
+                # CLI prints a notice; the text reply still goes to stdout below.
+                print(
+                    f"[{datetime.now()}] CLI voice-out refused "
+                    f"(killswitch:{ks_exc.switch_name})"
+                )
             except Exception as e:
                 print(f"[{datetime.now()}] CLI voice-out failed: {e}")
 

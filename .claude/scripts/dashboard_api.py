@@ -74,6 +74,14 @@ from personas.lifecycle import (
 
 logger = logging.getLogger(__name__)
 
+# PRD-8 Phase 7b WS1 (codex post-build F1) — log-message redaction at every
+# persona-mutation/avatar/file/auth log emit site. Module-attribute import
+# (Rule 3); redact() is unconditional (NOT kill-switch gated — see
+# security/redact.py docstring). Wrap dynamic args (exception strings, paths,
+# tokens-in-URLs, JWTs in error bodies) so secrets get scrubbed before logs land.
+from security import redact as _redact_mod  # noqa: E402
+_redact = _redact_mod.redact
+
 # ── Router ───────────────────────────────────────────────────────────────
 
 router = APIRouter()
@@ -243,7 +251,7 @@ def _list_personas() -> list[dict]:
     try:
         profiles = _lifecycle.list_profiles()
     except Exception as exc:
-        logger.warning("list_profiles failed: %s", exc)
+        logger.warning("list_profiles failed: %s", _redact(str(exc)))
         return []
 
     for profile in profiles:
@@ -262,7 +270,7 @@ def _list_personas() -> list[dict]:
             # Bootstrap default profile may have no config.yaml — skip.
             pass
         except Exception as exc:
-            logger.debug("load_persona_config(%s) failed: %s", profile.name, exc)
+            logger.debug("load_persona_config(%s) failed: %s", profile.name, _redact(str(exc)))
 
         # Compute today's stats from chat_messages (best-effort).
         try:
@@ -542,6 +550,19 @@ def list_agents() -> dict:
 def create_agent(body: CreatePersonaBody) -> dict:
     _reject_main_translation(body.persona_id)
 
+    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_mutation", caller="api_create_agent")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona mutations are disabled by operator",
+                "switch": "persona_mutation",
+            },
+        )
+
     # Validate via personas.validate_persona_name first (regex + reserved check).
     try:
         personas.validate_persona_name(body.persona_id)
@@ -571,6 +592,19 @@ def soft_delete_agent(persona_id: str) -> dict:
     _reject_main_translation(persona_id)
     if persona_id == "default":
         raise HTTPException(status_code=400, detail="cannot delete default persona")
+
+    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_mutation", caller="api_soft_delete_agent")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona mutations are disabled by operator",
+                "switch": "persona_mutation",
+            },
+        )
 
     try:
         delete_profile(persona_id, yes=True)
@@ -705,6 +739,22 @@ async def hard_delete_agent(
     """Enterprise-grade hard-delete. 6 requirements per PRP §1014-1022."""
     _reject_main_translation(persona_id)
 
+    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
+    # Hard-delete is the most destructive persona mutation; refuse BEFORE any
+    # audit-before write so the audit log doesn't record initiated events for
+    # operations the kill-switch will reject.
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_mutation", caller="api_hard_delete_agent")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona mutations are disabled by operator",
+                "switch": "persona_mutation",
+            },
+        )
+
     operator_id = _operator_id_from_request(request)
 
     # Resolve confirmation:
@@ -772,7 +822,7 @@ async def hard_delete_agent(
             detail=initiated_detail,
         )
     except Exception as exc:
-        logger.error("hard_delete audit-before failed: %s", exc)
+        logger.error("hard_delete audit-before failed: %s", _redact(str(exc)))
         return JSONResponse(
             status_code=503,
             content={"error": "audit log unavailable"},
@@ -787,7 +837,7 @@ async def hard_delete_agent(
         logger.warning(
             "delete_profile raised during hard-delete of %s: %s",
             persona_id,
-            exc,
+            _redact(str(exc)),
         )
 
     # R6 NB1 — derive state from physical disk, NOT from exception path.
@@ -845,7 +895,7 @@ async def hard_delete_agent(
             operator_id,
             persona_id,
             audit_outcome,
-            exc,
+            _redact(str(exc)),
         )
         warnings.append(f"audit_after_write_failed: {exc}")
         if "warnings" in response:
@@ -964,6 +1014,21 @@ async def put_avatar(
         # Allow default avatar upload? PRP doesn't ban it — proceed.
         pass
 
+    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
+    # Avatar write alters persona identity (file content on disk); refuse
+    # BEFORE any UploadFile read so request body isn't consumed.
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_mutation", caller="api_put_avatar")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona mutations are disabled by operator",
+                "switch": "persona_mutation",
+            },
+        )
+
     # (1) Content-Type validation.
     content_type = (image.content_type or "").lower()
     if content_type not in _AVATAR_ALLOWED_CONTENT_TYPES:
@@ -987,7 +1052,7 @@ async def put_avatar(
     try:
         from PIL import Image, UnidentifiedImageError  # noqa: PLC0415
     except ImportError as exc:
-        logger.error("Pillow not installed: %s", exc)
+        logger.error("Pillow not installed: %s", _redact(str(exc)))
         return JSONResponse(
             status_code=500,
             content={"error": "Pillow dependency missing"},
@@ -997,7 +1062,7 @@ async def put_avatar(
         with Image.open(io.BytesIO(raw_bytes)) as img:
             img.verify()
     except (UnidentifiedImageError, SyntaxError, OSError, Exception) as exc:  # noqa: BLE001
-        logger.warning("Pillow .verify() rejected upload: %s", exc)
+        logger.warning("Pillow .verify() rejected upload: %s", _redact(str(exc)))
         return JSONResponse(
             status_code=422,
             content={"error": "invalid image data"},
@@ -1008,7 +1073,7 @@ async def put_avatar(
         with Image.open(io.BytesIO(raw_bytes)) as img:
             detected_format = img.format
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Pillow re-open failed: %s", exc)
+        logger.warning("Pillow re-open failed: %s", _redact(str(exc)))
         return JSONResponse(
             status_code=422,
             content={"error": "invalid image data"},
@@ -1058,7 +1123,7 @@ async def put_avatar(
         # 6d: atomic rename.
         os.replace(tmp_path, target_path)
     except Exception as exc:
-        logger.error("avatar write failed for %s: %s", persona_id, exc)
+        logger.error("avatar write failed for %s: %s", persona_id, _redact(str(exc)))
         # 6f: failed write — preserve any pre-existing avatar; clean tmp.
         try:
             os.remove(tmp_path)
@@ -1079,7 +1144,7 @@ async def put_avatar(
         except FileNotFoundError:
             pass
         except OSError as exc:
-            logger.warning("avatar cleanup of %s failed: %s", other_path, exc)
+            logger.warning("avatar cleanup of %s failed: %s", other_path, _redact(str(exc)))
 
     # (7) Return ok with etag.
     avatar_etag = hashlib.sha256(raw_bytes).hexdigest()[:8]
@@ -1097,6 +1162,20 @@ async def put_avatar(
 def delete_avatar(persona_id: str) -> dict:
     """Idempotent — removes any avatar.{png,jpg,webp} present."""
     _reject_main_translation(persona_id)
+
+    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_mutation", caller="api_delete_avatar")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona mutations are disabled by operator",
+                "switch": "persona_mutation",
+            },
+        )
+
     avatar_dir = _resolve_avatar_dir(persona_id)
     for ext in _AVATAR_EXTENSIONS:
         path = avatar_dir / f"avatar.{ext}"
@@ -1105,7 +1184,7 @@ def delete_avatar(persona_id: str) -> dict:
         except FileNotFoundError:
             pass
         except OSError as exc:
-            logger.warning("delete_avatar cleanup of %s failed: %s", path, exc)
+            logger.warning("delete_avatar cleanup of %s failed: %s", path, _redact(str(exc)))
     return {"ok": True}
 
 
@@ -1115,32 +1194,88 @@ def delete_avatar(persona_id: str) -> dict:
 @router.post("/api/agents/{persona_id}/activate")
 def activate_agent(persona_id: str) -> dict:
     _reject_main_translation(persona_id)
+
+    # PRD-8 Phase 7b WS4.3 — persona_operations kill-switch (Rule 3 module-attr).
+    # SECOND switch — runtime lifecycle ONLY (activate/deactivate/restart).
+    # NO persistent-state write; lighter scope than persona_mutation.
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_operations", caller="api_activate_agent")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona operations are disabled by operator",
+                "switch": "persona_operations",
+            },
+        )
+
     try:
         return dashboard_bot_lifecycle.activate(persona_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
-        logger.exception("activate failed for %s", persona_id)
+        # PRD-8 Phase 7b WS1 (codex post-build iter2 F1) — wrap exception in
+        # explicit log call instead of logger.exception so we control the
+        # formatted output through redact(). logger.exception would dump the
+        # full traceback (which can include secret-laden stack frame locals).
+        logger.error(
+            "activate failed for %s: %s", persona_id, _redact(str(exc))
+        )
         raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/api/agents/{persona_id}/deactivate")
 def deactivate_agent(persona_id: str) -> dict:
     _reject_main_translation(persona_id)
+
+    # PRD-8 Phase 7b WS4.3 — persona_operations kill-switch (Rule 3 module-attr).
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_operations", caller="api_deactivate_agent")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona operations are disabled by operator",
+                "switch": "persona_operations",
+            },
+        )
+
     try:
         return dashboard_bot_lifecycle.deactivate(persona_id)
     except Exception as exc:
-        logger.exception("deactivate failed for %s", persona_id)
+        # PRD-8 Phase 7b WS1 (iter2 F1) — see activate_agent for rationale.
+        logger.error(
+            "deactivate failed for %s: %s", persona_id, _redact(str(exc))
+        )
         raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/api/agents/{persona_id}/restart")
 def restart_agent(persona_id: str) -> dict:
     _reject_main_translation(persona_id)
+
+    # PRD-8 Phase 7b WS4.3 — persona_operations kill-switch (Rule 3 module-attr).
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_operations", caller="api_restart_agent")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona operations are disabled by operator",
+                "switch": "persona_operations",
+            },
+        )
+
     try:
         return dashboard_bot_lifecycle.restart(persona_id)
     except Exception as exc:
-        logger.exception("restart failed for %s", persona_id)
+        # PRD-8 Phase 7b WS1 (iter2 F1) — see activate_agent for rationale.
+        logger.error(
+            "restart failed for %s: %s", persona_id, _redact(str(exc))
+        )
         raise HTTPException(status_code=500, detail=str(exc))
 
 
@@ -1243,6 +1378,22 @@ def get_suggestions() -> dict:
 
 @router.post("/api/agents/suggestions/refresh")
 def refresh_suggestions() -> dict:
+    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
+    # NM1 boundary: suggestions/refresh writes ``dashboard_settings`` cursor,
+    # which IS persistent state — belongs under persona_mutation, NOT
+    # persona_operations.
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_mutation", caller="api_refresh_suggestions")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona mutations are disabled by operator",
+                "switch": "persona_mutation",
+            },
+        )
+
     cursor = int(_read_settings_value("suggestions_cursor", 0) or 0)
     new_cursor = (cursor + 5) % len(_SUGGESTIONS_POOL)
     _write_settings_value("suggestions_cursor", new_cursor)
@@ -1281,6 +1432,21 @@ def patch_global_model(body: PatchModelBody) -> dict:
 
     Returns ``{ok, updated, restartRequired}`` matching donor Agents.tsx:74.
     """
+    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
+    # NM1 boundary: model PATCH writes ``config.yaml`` (changes persona model
+    # behavior materially) — belongs under persona_mutation.
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_mutation", caller="api_patch_global_model")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona mutations are disabled by operator",
+                "switch": "persona_mutation",
+            },
+        )
+
     updated: list[str] = []
     restart_required: list[str] = []
     try:
@@ -1375,6 +1541,21 @@ def patch_per_agent_model(persona_id: str, body: PatchModelBody) -> dict:
     /api/agents/{id}/restart).
     """
     _reject_main_translation(persona_id)
+
+    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
+    # NM1 boundary: per-agent model PATCH writes ``config.yaml``.
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_mutation", caller="api_patch_per_agent_model")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona mutations are disabled by operator",
+                "switch": "persona_mutation",
+            },
+        )
+
     try:
         _patch_persona_config_model(persona_id, body.model, scope="per_agent")
     except Exception as exc:
@@ -1423,6 +1604,23 @@ def get_files(persona_id: str) -> dict:
 @router.patch("/api/agents/{persona_id}/files/{filename}")
 def patch_file(persona_id: str, filename: str, body: PatchFileBody) -> dict:
     _reject_main_translation(persona_id)
+
+    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
+    # NM1 boundary: file PATCH writes arbitrary persona files (CLAUDE.md,
+    # SOUL.md, USER.md, MEMORY.md, GOALS.md, config.yaml) AND inserts a
+    # history row — alters persona behavior materially.
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled("persona_mutation", caller="api_patch_file")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "persona mutations are disabled by operator",
+                "switch": "persona_mutation",
+            },
+        )
+
     path = _resolve_file_path(persona_id, filename)
     if not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)

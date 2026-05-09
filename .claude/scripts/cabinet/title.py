@@ -25,6 +25,11 @@ from runtime.capabilities import TEXT_REASONING
 
 logger = logging.getLogger(__name__)
 
+# PRD-8 Phase 7b WS1 (codex post-build F1) — log-message redaction at every
+# cabinet log emit site. Module-attribute import (Rule 3); redact() unconditional.
+from security import redact as _redact_mod  # noqa: E402
+_redact = _redact_mod.redact
+
 
 TITLE_MODEL: Final[str] = "claude-haiku-4-5-20251001"
 TITLE_GENERATION_TIMEOUT_S: Final[float] = 30.0
@@ -94,7 +99,7 @@ async def generate_title(
             timeout=resolved_timeout,
         )
     except (TimeoutError, Exception) as exc:  # noqa: BLE001
-        logger.debug("cabinet title generation failed: %s", exc)
+        logger.debug("cabinet title generation failed: %s", _redact(str(exc)))
         return None
 
     return _clean_title(result.text or "")
@@ -124,7 +129,7 @@ async def maybe_set_meeting_title(
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("cabinet title pre-check failed: %s", exc)
+        logger.debug("cabinet title pre-check failed: %s", _redact(str(exc)))
         return
 
     if row is None:
@@ -148,7 +153,7 @@ async def maybe_set_meeting_title(
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("cabinet title write failed: %s", exc)
+        logger.debug("cabinet title write failed: %s", _redact(str(exc)))
 
 
 def schedule_title_generation(

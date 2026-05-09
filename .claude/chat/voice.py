@@ -35,6 +35,14 @@ from typing import Any, Final, Protocol
 
 logger = logging.getLogger(__name__)
 
+# PRD-8 Phase 7b WS1 (codex post-build F1) — log-message redaction. Wrap dynamic
+# args (provider exception strings, paths, URLs) at every cabinet/voice/dashboard
+# log call site so secrets embedded in those values get scrubbed before logs land.
+# Module-attribute import (Rule 3); redact() is unconditional (NOT kill-switch
+# gated — see security/redact.py docstring).
+from security import redact as _redact_mod  # noqa: E402
+_redact = _redact_mod.redact
+
 # Module-state cache — Rule 2 exception (one-time subprocess probe, derived state)
 _ffmpeg_available: bool | None = None
 
@@ -495,7 +503,16 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
       5. OpenAI Whisper (back-compat) if OPENAI_API_KEY set
 
     On exception per provider, log warn and try next. If all fail, raise.
+
+    PRD-8 Phase 7b WS2.1 — operator kill-switch ("voice"). Module-attribute
+    lookup so monkeypatch propagates (Rule 3). Catches BEFORE any provider
+    cascade attempt; refusal counter increments + audit_log row written.
+    Adapters catch ``KillSwitchDisabled`` and emit friendly degraded reply.
     """
+    # Phase 7b kill-switch — late-bind module import (Rule 3).
+    from security import kill_switches
+    kill_switches.requireEnabled("voice", caller="voice_cascade_transcribe")
+
     path_str = str(file_path)
     last_err: Exception | None = None
 
@@ -505,7 +522,7 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
         try:
             return await _GroqWhisperProvider(api_key=groq_key).transcribe(path_str)
         except Exception as e:
-            logger.warning("Groq Whisper failed, trying faster-whisper local: %s", e)
+            logger.warning("Groq Whisper failed, trying faster-whisper local: %s", _redact(str(e)))
             last_err = e
 
     # 2. faster-whisper local (Hermes extras)
@@ -514,10 +531,10 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
             model_size = os.environ.get("FASTER_WHISPER_MODEL", "base")
             return await _FasterWhisperProvider(model_size=model_size).transcribe(path_str)
         except ImportError as e:
-            logger.warning("faster-whisper import failed, trying next: %s", e)
+            logger.warning("faster-whisper import failed, trying next: %s", _redact(str(e)))
             last_err = e
         except Exception as e:
-            logger.warning("faster-whisper local failed, trying next: %s", e)
+            logger.warning("faster-whisper local failed, trying next: %s", _redact(str(e)))
             last_err = e
 
     # 3. whisper-cpp local (voice.ts:231-254)
@@ -530,7 +547,7 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
                 model_path=whisper_model,
             ).transcribe(path_str)
         except Exception as e:
-            logger.warning("whisper-cpp local failed, trying Mistral: %s", e)
+            logger.warning("whisper-cpp local failed, trying Mistral: %s", _redact(str(e)))
             last_err = e
 
     # 4. Mistral Voxtral (Hermes extras)
@@ -539,10 +556,10 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
         try:
             return await _MistralVoxtralSttProvider(api_key=mistral_key).transcribe(path_str)
         except ImportError as e:
-            logger.warning("mistralai SDK unavailable, trying OpenAI Whisper: %s", e)
+            logger.warning("mistralai SDK unavailable, trying OpenAI Whisper: %s", _redact(str(e)))
             last_err = e
         except Exception as e:
-            logger.warning("Mistral Voxtral STT failed, trying OpenAI Whisper: %s", e)
+            logger.warning("Mistral Voxtral STT failed, trying OpenAI Whisper: %s", _redact(str(e)))
             last_err = e
 
     # 5. OpenAI Whisper (back-compat)
@@ -551,7 +568,7 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
         try:
             return await OpenAIWhisperProvider(api_key=openai_key).transcribe(path_str)
         except Exception as e:
-            logger.warning("OpenAI Whisper failed: %s", e)
+            logger.warning("OpenAI Whisper failed: %s", _redact(str(e)))
             last_err = e
 
     raise RuntimeError(
@@ -565,7 +582,18 @@ async def transcribe(audio_bytes: bytes, api_key: str, model: str = "whisper-1")
 
     Adapters that haven't migrated to the cascade still call this. R1 B6 fix:
     legacy 3-arg signature stays; new cascade is `transcribe_audio_file()`.
+
+    PRD-8 Phase 7b WS2.1 R4 (codex R3 NM4 — CORRECTNESS FIX): operator
+    kill-switch ("voice"). Module-attribute lookup so monkeypatch propagates
+    (Rule 3). Closes the Telegram fallback bypass — adapters/telegram.py:587
+    rerouted through this entrypoint will refuse with KillSwitchDisabled when
+    HOMIE_KILLSWITCH_VOICE=disabled. Refusal counter increments + audit_log
+    row written; 6 adapters catch and emit friendly degraded reply.
     """
+    # Phase 7b kill-switch — late-bind module import (Rule 3).
+    from security import kill_switches
+    kill_switches.requireEnabled("voice", caller="voice_legacy_transcribe")
+
     return await OpenAIWhisperProvider(api_key=api_key, model=model).transcribe(audio_bytes)
 
 
@@ -949,7 +977,17 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
     extension dict (gradium/kokoro/macos_say) AFTER Hermes returns FALLBACK,
     so Homie-only providers get their intended caps. Hermes-known providers
     (elevenlabs=10000, etc.) pass through unchanged.
+
+    PRD-8 Phase 7b WS2.1 R4 (codex R3 NM4 — CORRECTNESS FIX): operator
+    kill-switch ("voice"). Module-attribute lookup so monkeypatch propagates
+    (Rule 3). Catches BEFORE any provider cascade attempt; refusal counter
+    increments + audit_log row written. Adapters catch ``KillSwitchDisabled``
+    and emit friendly degraded reply.
     """
+    # Phase 7b kill-switch — late-bind module import (Rule 3).
+    from security import kill_switches
+    kill_switches.requireEnabled("voice", caller="voice_cascade_synthesize")
+
     last_err: Exception | None = None
 
     # 1. ElevenLabs (voice.ts primary)
@@ -964,7 +1002,7 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
                 tts_config,
             )
         except Exception as e:
-            logger.warning("ElevenLabs TTS failed, trying Gradium: %s", e)
+            logger.warning("ElevenLabs TTS failed, trying Gradium: %s", _redact(str(e)))
             last_err = e
 
     # 2. Gradium (voice.ts secondary)
@@ -979,7 +1017,7 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
                 tts_config,
             )
         except Exception as e:
-            logger.warning("Gradium TTS failed, trying Mistral: %s", e)
+            logger.warning("Gradium TTS failed, trying Mistral: %s", _redact(str(e)))
             last_err = e
 
     # 3. Mistral Voxtral (Hermes extras)
@@ -993,10 +1031,10 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
                 tts_config,
             )
         except ImportError as e:
-            logger.warning("mistralai SDK unavailable, trying Gemini: %s", e)
+            logger.warning("mistralai SDK unavailable, trying Gemini: %s", _redact(str(e)))
             last_err = e
         except Exception as e:
-            logger.warning("Mistral Voxtral TTS failed, trying Gemini: %s", e)
+            logger.warning("Mistral Voxtral TTS failed, trying Gemini: %s", _redact(str(e)))
             last_err = e
 
     # 4. Gemini TTS (Hermes extras) — prefer GEMINI_API_KEY then GOOGLE_API_KEY
@@ -1010,7 +1048,7 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
                 tts_config,
             )
         except Exception as e:
-            logger.warning("Gemini TTS failed, trying OpenAI: %s", e)
+            logger.warning("Gemini TTS failed, trying OpenAI: %s", _redact(str(e)))
             last_err = e
 
     # 5. OpenAI TTS (existing module — added to cascade)
@@ -1024,7 +1062,7 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
                 tts_config,
             )
         except Exception as e:
-            logger.warning("OpenAI TTS failed, trying Kokoro: %s", e)
+            logger.warning("OpenAI TTS failed, trying Kokoro: %s", _redact(str(e)))
             last_err = e
 
     # 6. Kokoro local OpenAI-compat (voice.ts)
@@ -1042,7 +1080,7 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
                 tts_config,
             )
         except Exception as e:
-            logger.warning("Kokoro TTS failed, trying KittenTTS: %s", e)
+            logger.warning("Kokoro TTS failed, trying KittenTTS: %s", _redact(str(e)))
             last_err = e
 
     # 7. KittenTTS (Hermes extras — local cross-platform)
@@ -1056,10 +1094,10 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
                 tts_config,
             )
         except ImportError as e:
-            logger.warning("kittentts unavailable, trying Edge: %s", e)
+            logger.warning("kittentts unavailable, trying Edge: %s", _redact(str(e)))
             last_err = e
         except Exception as e:
-            logger.warning("KittenTTS failed, trying Edge: %s", e)
+            logger.warning("KittenTTS failed, trying Edge: %s", _redact(str(e)))
             last_err = e
 
     # 8. Edge TTS (existing module — added to cascade)
@@ -1073,10 +1111,10 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
                 tts_config,
             )
         except ImportError as e:
-            logger.warning("edge-tts unavailable, trying macOS-say: %s", e)
+            logger.warning("edge-tts unavailable, trying macOS-say: %s", _redact(str(e)))
             last_err = e
         except Exception as e:
-            logger.warning("Edge TTS failed, trying macOS-say: %s", e)
+            logger.warning("Edge TTS failed, trying macOS-say: %s", _redact(str(e)))
             last_err = e
 
     # 9. macOS-say (voice.ts mac-only fallback)
@@ -1089,7 +1127,7 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
                 tts_config,
             )
         except Exception as e:
-            logger.warning("macOS-say failed: %s", e)
+            logger.warning("macOS-say failed: %s", _redact(str(e)))
             last_err = e
 
     raise RuntimeError(

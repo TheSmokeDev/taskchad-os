@@ -592,6 +592,7 @@ async def handle_cabinet(
     NOT validate persona ids; the API layer auto-snapshots.
     """
     from integrations import cabinet_api  # lazy: avoid HTTP/httpx cost on every import
+    from security import kill_switches  # Phase 7b WS3 — Rule 3 module-attribute lookup
 
     args = (args or "").strip()
     if not args or args.lower() in {"help", "?"}:
@@ -601,6 +602,10 @@ async def handle_cabinet(
     chat_id_str = str(chat_id) if chat_id else None
 
     try:
+        # Phase 7b WS3 kill-switch — chat-process side of symmetric cabinet gate.
+        # Phase 5a's API-process orchestrator also gates; this adds chat-side refusal counting.
+        kill_switches.requireEnabled("cabinet", caller="handle_cabinet")
+
         if args.lower() == "list":
             meetings = await cabinet_api.list_meetings(limit=20, chat_id=chat_id_str)
             return _format_meeting_list(meetings)
@@ -648,6 +653,8 @@ async def handle_cabinet(
 
         return _cabinet_usage_text()
 
+    except kill_switches.KillSwitchDisabled:
+        return "Cabinet is disabled by operator. Reach out for an override."
     except cabinet_api.CabinetAPIError as e:
         return e.friendly_message
 
@@ -676,6 +683,7 @@ async def handle_standup(
     would short-circuit with a "requires Phase 5b" system_note.
     """
     from integrations import cabinet_api  # lazy
+    from security import kill_switches  # Phase 7b WS3 — Rule 3 module-attribute lookup
 
     chat_id = getattr(incoming, "chat_id", None)
     chat_id_str = str(chat_id) if chat_id else None
@@ -687,6 +695,9 @@ async def handle_standup(
     )
 
     try:
+        # Phase 7b WS3 kill-switch — chat-process side of symmetric cabinet gate.
+        kill_switches.requireEnabled("cabinet", caller="handle_standup")
+
         ref = await cabinet_api.create_meeting(chat_id=chat_id_str)
         await cabinet_api.send_message(
             ref.id, standup_q, chat_id=chat_id_str,
@@ -696,6 +707,8 @@ async def handle_standup(
             f"Watch http://localhost:3141/cabinet?id={ref.id} for persona answers "
             f"(or a Main-only reply if no cabinet-eligible personas are registered)."
         )
+    except kill_switches.KillSwitchDisabled:
+        return "Cabinet is disabled by operator. Reach out for an override."
     except cabinet_api.CabinetAPIError as e:
         return e.friendly_message
 
@@ -715,6 +728,7 @@ async def handle_discuss(
     slash-prefixed command (which would short-circuit at parse_slash_command).
     """
     from integrations import cabinet_api  # lazy
+    from security import kill_switches  # Phase 7b WS3 — Rule 3 module-attribute lookup
 
     args = (args or "").strip()
     if not args:
@@ -724,12 +738,17 @@ async def handle_discuss(
     chat_id_str = str(chat_id) if chat_id else None
 
     try:
+        # Phase 7b WS3 kill-switch — chat-process side of symmetric cabinet gate.
+        kill_switches.requireEnabled("cabinet", caller="handle_discuss")
+
         ref = await cabinet_api.create_meeting(chat_id=chat_id_str)
         await cabinet_api.send_message(ref.id, args, chat_id=chat_id_str)
         return (
             f"Discussion #{ref.id} started — topic: {args}\n"
             f"Watch: http://localhost:3141/cabinet?id={ref.id}"
         )
+    except kill_switches.KillSwitchDisabled:
+        return "Cabinet is disabled by operator. Reach out for an override."
     except cabinet_api.CabinetAPIError as e:
         return e.friendly_message
 

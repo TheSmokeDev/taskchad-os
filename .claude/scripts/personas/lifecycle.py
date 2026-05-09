@@ -399,7 +399,18 @@ def create_profile(
         ``"default"`` because it's in ``_RESERVED``).
 
     Returns a ``ProfileInfo`` for the freshly-created profile.
+
+    PRD-8 Phase 7b WS4.1 — operator kill-switch ("persona_mutation"). Module-
+    attribute lookup so monkeypatch propagates (Rule 3). Catches BEFORE any
+    filesystem work so disk state is fully unchanged on refusal. Refusal
+    counter increments + audit_log row written. Defense-in-depth with the
+    HTTP-layer wrap (WS4.2): direct CLI invocations and any future internal
+    callers ALSO refuse here; the HTTP wrap converts the exception to a 503.
     """
+    # Phase 7b kill-switch — late-bind module import (Rule 3).
+    from security import kill_switches  # noqa: PLC0415
+    kill_switches.requireEnabled("persona_mutation", caller="lifecycle_create_profile")
+
     # --- Step 0: OS-flag pre-validation (R1 B4 + R3 NNM3) ---------------
     # Fail FAST on OS-mismatched flags BEFORE any filesystem work so
     # there's no partial profile dir to roll back.
@@ -822,6 +833,14 @@ def delete_profile(
     function (HTTP confirmation is the destructive-intent gate; ``yes``
     is the stdin-prompt skip).
     """
+    # PRD-8 Phase 7b WS4.1 — operator kill-switch ("persona_mutation").
+    # Module-attribute lookup so monkeypatch propagates (Rule 3). Catches
+    # BEFORE quiesce/rmtree so disk state is fully unchanged on refusal.
+    # Defense-in-depth with WS4.2 HTTP wraps for both /api/agents/{id}
+    # (soft) and /api/agents/{id}/full (hard).
+    from security import kill_switches  # noqa: PLC0415
+    kill_switches.requireEnabled("persona_mutation", caller="lifecycle_delete_profile")
+
     # ``hard`` is reserved for future archive/soft-delete branching.
     # Phase 3 keeps both paths converged on the existing delete sequence
     # so behavior is byte-identical for legacy callers.
@@ -924,7 +943,16 @@ def use_profile(name: str) -> None:
 
     Raises ``ValueError`` if the name fails validation.
     Raises ``FileNotFoundError`` if the profile dir does not exist.
+
+    PRD-8 Phase 7b WS4.1 — operator kill-switch ("persona_mutation").
+    Module-attribute lookup so monkeypatch propagates (Rule 3). Catches
+    BEFORE the sticky-active-profile write so the active_profile state on
+    disk is unchanged on refusal.
     """
+    # Phase 7b kill-switch — late-bind module import (Rule 3).
+    from security import kill_switches  # noqa: PLC0415
+    kill_switches.requireEnabled("persona_mutation", caller="lifecycle_use_profile")
+
     if name == "default":
         # Default is a legitimate target but bypasses validate_persona_name
         # (which rejects "default" because it lives in _RESERVED).

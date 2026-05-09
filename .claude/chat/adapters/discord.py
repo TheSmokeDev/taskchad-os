@@ -23,6 +23,11 @@ from models import (
 import voice as voice_mod
 from voice_markers import parse_send_markers, strip_send_markers
 
+# PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
+# Module-attribute lookup (Rule 3); adapter catches KillSwitchDisabled
+# BEFORE generic Exception so the refusal gets a friendly degraded reply.
+from security import kill_switches as _kill_switches
+
 # Audio MIME types Discord clients commonly send for voice messages /
 # audio attachments (M4A from voice-message recorder, OGG/Opus from
 # bots, WebM from web clients).
@@ -399,6 +404,11 @@ class DiscordAdapter:
                         f.write(resp.content)
                 transcript = await voice_mod.transcribe_audio_file(local_path)
                 return transcript.strip()
+            except _kill_switches.KillSwitchDisabled as ks_exc:
+                # PRD-8 Phase 7b WS2 (codex post-build F2) — explicit catch
+                # before generic Exception so refusals get a degraded reply.
+                print(f"[{datetime.now()}] Discord voice cascade refused: {ks_exc}")
+                return ""
             except Exception as e:
                 print(f"[{datetime.now()}] Discord voice transcribe failed: {e}")
                 return ""
@@ -420,6 +430,18 @@ class DiscordAdapter:
             buf = BytesIO(audio)
             file = discord.File(buf, filename="response.ogg")
             await channel.send(file=file)
+        except _kill_switches.KillSwitchDisabled as ks_exc:
+            # PRD-8 Phase 7b WS2 (codex post-build F2) — degraded text reply.
+            print(f"[{datetime.now()}] Discord TTS refused by kill-switch: {ks_exc}")
+            try:
+                await channel.send(
+                    content=(
+                        f"[killswitch:{ks_exc.switch_name}] Voice synthesis disabled "
+                        f"by operator. Falling back to text.\n\n{text[:1850]}"
+                    )
+                )
+            except Exception as e2:
+                print(f"[{datetime.now()}] Discord killswitch text fallback failed: {e2}")
         except Exception as e:
             print(f"[{datetime.now()}] Discord TTS failed, falling back to text: {e}")
             try:

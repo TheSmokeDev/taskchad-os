@@ -16,6 +16,9 @@ from models import Channel, IncomingMessage, OutgoingMessage, Platform
 import voice as voice_mod
 from voice_markers import parse_send_markers, strip_send_markers
 
+# PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
+from security import kill_switches as _kill_switches
+
 if TYPE_CHECKING:
     from ws_client import RelayWSClient
 
@@ -152,6 +155,22 @@ class WebAdapter:
                 is_update=False,
                 is_done=False,
             )
+        except _kill_switches.KillSwitchDisabled as ks_exc:
+            # PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch
+            # refusal. Send degraded text frame instead of generic error.
+            print(f"[{datetime.now()}] Web TTS refused by kill-switch: {ks_exc}")
+            try:
+                await self.ws_client.send_response(
+                    request_id=request_id,
+                    text=(
+                        f"[killswitch:{ks_exc.switch_name}] Voice synthesis "
+                        f"disabled by operator. Falling back to text.\n\n{text}"
+                    ),
+                    is_update=False,
+                    is_done=False,
+                )
+            except Exception as e2:
+                print(f"[{datetime.now()}] Web killswitch text fallback failed: {e2}")
         except Exception as e:
             print(f"[{datetime.now()}] Web TTS failed: {e}")
 
@@ -181,6 +200,11 @@ class WebAdapter:
             with open(local_path, "wb") as f:
                 f.write(audio_bytes)
             return (await voice_mod.transcribe_audio_file(local_path)).strip()
+        except _kill_switches.KillSwitchDisabled as ks_exc:
+            # PRD-8 Phase 7b WS2 (codex post-build F2) — refusal returns empty
+            # transcript; relay caller treats empty transcript as "no speech".
+            print(f"[{datetime.now()}] Web voice cascade refused: {ks_exc}")
+            return ""
         finally:
             try:
                 os.unlink(local_path)

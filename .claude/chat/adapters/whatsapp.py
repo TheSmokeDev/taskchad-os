@@ -14,6 +14,9 @@ from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, 
 import voice as voice_mod
 from voice_markers import parse_send_markers, strip_send_markers
 
+# PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
+from security import kill_switches as _kill_switches
+
 
 class WhatsAppAdapter:
     """WhatsApp platform adapter using Meta Cloud API.
@@ -220,6 +223,20 @@ class WhatsAppAdapter:
                     os.unlink(local_path)
                 except OSError:
                     pass
+        except _kill_switches.KillSwitchDisabled as ks_exc:
+            # PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch
+            # refusal. Send degraded text reply with operator-facing context.
+            print(f"[{datetime.now()}] WhatsApp TTS refused by kill-switch: {ks_exc}")
+            try:
+                await self._send_text_message(
+                    recipient,
+                    (
+                        f"[killswitch:{ks_exc.switch_name}] Voice synthesis "
+                        f"disabled by operator. Falling back to text.\n\n{text}"
+                    ),
+                )
+            except Exception as e2:
+                print(f"[{datetime.now()}] WhatsApp killswitch text fallback failed: {e2}")
         except Exception as e:
             print(f"[{datetime.now()}] WhatsApp TTS failed: {e}")
 
@@ -342,6 +359,13 @@ class WhatsAppAdapter:
                             text_payload = (
                                 await voice_mod.transcribe_audio_file(local_path)
                             ).strip()
+                        except _kill_switches.KillSwitchDisabled as ks_exc:
+                            # PRD-8 Phase 7b WS2 (codex post-build F2) — explicit catch.
+                            print(
+                                f"[{datetime.now()}] WhatsApp voice cascade refused: "
+                                f"{ks_exc}"
+                            )
+                            continue
                         except Exception as e:
                             print(
                                 f"[{datetime.now()}] WhatsApp voice transcribe failed: {e}"

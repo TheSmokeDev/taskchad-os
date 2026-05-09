@@ -15,6 +15,9 @@ from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, 
 import voice as voice_mod
 from voice_markers import parse_send_markers, strip_send_markers
 
+# PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
+from security import kill_switches as _kill_switches
+
 _SLACK_AUDIO_MIMES: tuple[str, ...] = (
     "audio/ogg",
     "audio/mp4",
@@ -211,6 +214,21 @@ class SlackAdapter:
                     os.unlink(local_path)
                 except OSError:
                     pass
+        except _kill_switches.KillSwitchDisabled as ks_exc:
+            # PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch
+            # refusal gets a degraded text reply instead of generic error.
+            print(f"[{datetime.now()}] Slack TTS refused by kill-switch: {ks_exc}")
+            try:
+                await self.app.client.chat_postMessage(
+                    channel=channel_id,
+                    text=(
+                        f"[killswitch:{ks_exc.switch_name}] Voice synthesis "
+                        f"disabled by operator. Falling back to text.\n\n{text}"
+                    ),
+                    thread_ts=thread_ts,
+                )
+            except Exception as e2:
+                print(f"[{datetime.now()}] Slack killswitch text fallback failed: {e2}")
         except Exception as e:
             print(f"[{datetime.now()}] Slack TTS failed, falling back to text: {e}")
             try:
@@ -327,6 +345,10 @@ class SlackAdapter:
                     with open(local_path, "wb") as fh:
                         fh.write(resp.content)
                 return (await voice_mod.transcribe_audio_file(local_path)).strip()
+            except _kill_switches.KillSwitchDisabled as ks_exc:
+                # PRD-8 Phase 7b WS2 (codex post-build F2) — explicit catch.
+                print(f"[{datetime.now()}] Slack voice cascade refused: {ks_exc}")
+                return ""
             except Exception as e:
                 print(f"[{datetime.now()}] Slack voice transcribe failed: {e}")
                 return ""
