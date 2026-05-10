@@ -156,10 +156,10 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
 ]
 
-# Personal Gmail (pedro6392mendoza@gmail.com — read-only, separate token)
-PERSONAL_GMAIL_ACCOUNT = os.getenv("PERSONAL_GMAIL_ACCOUNT", "pedro6392mendoza@gmail.com")
+# Personal Gmail (owner6392lastname@gmail.com — read-only, separate token)
+PERSONAL_GMAIL_ACCOUNT = os.getenv("PERSONAL_GMAIL_ACCOUNT", "owner6392lastname@gmail.com")
 PERSONAL_GMAIL_TOKEN_PATH = os.getenv(
-    "PERSONAL_GMAIL_TOKEN", str(INTEGRATIONS_DIR / "google_token_pedro.json")
+    "PERSONAL_GMAIL_TOKEN", str(INTEGRATIONS_DIR / "google_token_owner.json")
 )
 PERSONAL_GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 

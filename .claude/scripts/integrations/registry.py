@@ -111,7 +111,7 @@ _REGISTRY: dict[str, IntegrationInfo] = {
         name="personal_gmail",
         display_name="Personal Gmail (read-only)",
         auth_type="personal_gmail_token",
-        required_config=[],  # File-based (google_token_pedro.json)
+        required_config=[],  # File-based (google_token_owner.json)
         module_path="integrations.personal_gmail",
     ),
 }
@@ -126,7 +126,7 @@ def _has_google_token() -> bool:
 def _has_personal_gmail_token() -> bool:
     """Check if personal Gmail OAuth token file exists."""
     import os
-    token_path = os.getenv("PERSONAL_GMAIL_TOKEN", str(Path(__file__).parent / "google_token_pedro.json"))
+    token_path = os.getenv("PERSONAL_GMAIL_TOKEN", str(Path(__file__).parent / "google_token_owner.json"))
     return Path(token_path).exists()
 
 

@@ -393,19 +393,38 @@ async def send_message(
     client_msg_id: str | None = None,
     chat_id: str | None = None,
     *,
+    is_voice: bool = False,
+    target_agent_id: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """POST ``/api/cabinet/send`` — add an operator turn to a meeting.
 
-    Body shape (verified ``dashboard_api.py:2336-2380``)::
+    Body shape (verified ``dashboard_api.py:2336-2380`` + Phase 6 extension)::
 
-        {"meetingId": int, "text": str, "clientMsgId": str, "chatId": str?}
+        {"meetingId": int, "text": str, "clientMsgId": str, "chatId": str?,
+         "isVoice": bool?, "targetAgentId": str?}
 
     ``clientMsgId`` is REQUIRED on the wire — Phase 5a's ``cabinet_send``
     raises 400 ``invalid clientMsgId`` if missing or empty. R1 M3 fix:
     when the caller passes ``None``, this helper auto-generates via
     ``uuid.uuid4().hex``. To preserve idempotency the caller may pass an
     explicit value (e.g. derived from a Telegram message id).
+
+    PRD-8 Phase 6 — voice extensions (R1 v2 B1 + B3 fixes):
+
+    * ``is_voice`` (default False) — when True, Phase 5a's
+      ``_run_agent_turn`` prepends a voice-mode context hint
+      (``agent-voice-bridge.ts:144`` upstream) so persona replies stay
+      brief and conversational. Forward-additive: ``is_voice=False``
+      preserves existing Phase 5a/5b behavior verbatim.
+
+    * ``target_agent_id`` (default None) — when set, Phase 5a's
+      orchestrator pins this turn to the named persona, bypassing the
+      Haiku router decision. Voice ``AgentRouter`` (port of
+      ``warroom/router.py``) uses this to route "research, summarize..."
+      to the research persona without a second text-router round trip
+      (R1 v2 B1 fix — preserves the upstream agent_id selection from
+      ``warroom/agent_bridge.py:59-66``).
 
     This endpoint is FIRE-AND-FORGET: returns 200 ``{ok: True, queued:
     True}`` regardless of orchestrator state. Kill-switch refusal during
@@ -423,7 +442,139 @@ async def send_message(
     }
     if chat_id is not None:
         payload["chatId"] = chat_id
+    if is_voice:
+        payload["isVoice"] = True
+    if target_agent_id is not None:
+        payload["targetAgentId"] = target_agent_id
     return await _post("/api/cabinet/send", payload, client=client)
+
+
+async def stream_meeting(
+    meeting_id: int,
+    since_seq: int | None = None,
+    chat_id: str | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> "AsyncIterator[dict[str, Any]]":
+    """GET ``/api/cabinet/stream`` — SSE async-generator yielding parsed events.
+
+    PRD-8 Phase 6 voice consumer entry point. Voice subprocess
+    (``cabinet/voice/agent_bridge.py``) consumes this generator after
+    posting a turn via :func:`send_message` and matches the
+    ``turn_start.clientMsgId`` to its outgoing ``client_msg_id`` (R1 v2
+    B2 correlation fix), then waits only for the matching
+    ``agent_done`` / ``error`` / ``turn_complete`` events.
+
+    Each yielded value is the parsed inner JSON envelope:
+
+        {"seq": int, "event": {"type": str, ... payload}}
+
+    The very first event is the ``meeting_state`` snapshot
+    (``dashboard_api.py:2467-2479``) — voice consumer typically ignores
+    it. Subsequent events match the SSE wire shape from
+    ``dashboard_api.py:2410-2533``.
+
+    Args:
+        meeting_id: cabinet meeting id.
+        since_seq: optional replay anchor (default 0 == replay from
+            start). Set to a known high-water mark to avoid reprocessing
+            historical turns.
+        chat_id: optional chat-scope binding (HTTP 403 on mismatch).
+        client: optional caller-managed httpx client (Rule 2 — when
+            None, a fresh streaming client is created and closed on
+            generator exit).
+
+    Raises:
+        CabinetMeetingNotFound: HTTP 404 — meeting id not found.
+        CabinetMeetingEnded: HTTP 410 — replay window exceeded (server
+            emits 410 ``replay_gap`` per ``dashboard_api.py:2444-2456``).
+        CabinetChatScopeMismatch: HTTP 403 — chat_id mismatch.
+        CabinetAuthFailure: HTTP 401.
+        CabinetAPIUnreachable: ``httpx.ConnectError``.
+
+    Rule 1: ``since_seq=None`` sentinel resolved at call time.
+    """
+    # Local import to keep module-top imports tight.
+    from typing import AsyncIterator  # noqa: F401  (used in return type docstring)
+
+    params: dict[str, Any] = {"meetingId": meeting_id}
+    params["sinceSeq"] = since_seq if since_seq is not None else 0
+    if chat_id is not None:
+        params["chatId"] = chat_id
+
+    url = f"{_base_url()}/api/cabinet/stream"
+    headers = _auth_headers()
+    headers["Accept"] = "text/event-stream"
+
+    # SSE streams require a client with no read-timeout (default 10s would
+    # close the stream every 10s). When caller injects a client they own
+    # the timeout; otherwise we open a long-lived client for the generator
+    # lifetime.
+    owns_client = client is None
+    if owns_client:
+        # Per-line streaming uses iter_lines; total stream lifetime is
+        # caller-bounded (caller `break`s out of the for loop or raises).
+        client = httpx.AsyncClient(timeout=httpx.Timeout(connect=DEFAULT_TIMEOUT_S, read=None, write=DEFAULT_TIMEOUT_S, pool=DEFAULT_TIMEOUT_S))
+    try:
+        try:
+            async with client.stream("GET", url, params=params, headers=headers) as resp:
+                # Pre-stream status check: surface 4xx/5xx as friendly errors
+                # BEFORE entering the iterator. _check_status raises on >=400.
+                if resp.status_code >= 400:
+                    # Drain the body for error context (we'll discard).
+                    try:
+                        await resp.aread()
+                    except Exception:
+                        pass
+                    # Reuse the shared status mapping by constructing a fake
+                    # request-like object — reuse the actual httpx response.
+                    _check_status(resp)
+                    return  # unreachable; _check_status raised.
+                # Parse SSE: each event is `data: <json>\n\n`. The shipped
+                # cabinet_stream uses `_sse_format` which emits lines like:
+                #   id: <seq>\n
+                #   event: message\n
+                #   data: <json>\n\n
+                # Concatenate `data:` lines per event; emit on blank line.
+                data_buf: list[str] = []
+                async for raw_line in resp.aiter_lines():
+                    line = raw_line.rstrip("\n").rstrip("\r")
+                    if line == "":
+                        if data_buf:
+                            payload_str = "\n".join(data_buf)
+                            data_buf = []
+                            try:
+                                import json as _json
+                                event_obj = _json.loads(payload_str)
+                            except (ValueError, Exception):
+                                continue
+                            if isinstance(event_obj, dict):
+                                yield event_obj
+                        continue
+                    if line.startswith("data:"):
+                        # Trim the leading "data:" and the optional space.
+                        chunk = line[5:]
+                        if chunk.startswith(" "):
+                            chunk = chunk[1:]
+                        data_buf.append(chunk)
+                # Flush a final partial event if the stream closed without
+                # a trailing blank line.
+                if data_buf:
+                    payload_str = "\n".join(data_buf)
+                    try:
+                        import json as _json
+                        event_obj = _json.loads(payload_str)
+                    except (ValueError, Exception):
+                        return
+                    if isinstance(event_obj, dict):
+                        yield event_obj
+        except httpx.ConnectError as e:
+            raise CabinetAPIUnreachable() from e
+        except httpx.HTTPError as e:
+            raise CabinetAPIError() from e
+    finally:
+        if owns_client and client is not None:
+            await client.aclose()
 
 
 async def end_meeting(
@@ -455,6 +606,7 @@ __all__ = [
     "list_meetings",
     "get_transcripts",
     "send_message",
+    "stream_meeting",
     "end_meeting",
     # Friendly error hierarchy (handlers catch these and return
     # ``e.friendly_message`` to chat).

@@ -221,6 +221,28 @@ def _apply_phase_5a_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _apply_phase_6_columns(conn: sqlite3.Connection) -> None:
+    """Forward-only-additive Phase 6 column additions on cabinet_meetings.
+
+    Phase 6 (cabinet voice) snapshots the voice-broadcast persona order at
+    meeting create time so the voice subprocess can iterate broadcast turns
+    in stable order even if the live persona registry changes mid-meeting.
+    Stored as JSON-encoded list[str] in the new ``broadcast_order`` column.
+
+    Pre-Phase-6 deployments shipped `cabinet_meetings` without
+    ``broadcast_order``. ALTER TABLE ADD COLUMN with PRAGMA guard makes
+    this re-runnable on a live DB.
+
+    Rule 2 — physical-state-first: PRAGMA inspects sqlite_master directly
+    rather than trusting a meta/version row.
+    """
+    cols = _column_names(conn, "cabinet_meetings")
+    if "broadcast_order" not in cols:
+        conn.execute(
+            "ALTER TABLE cabinet_meetings ADD COLUMN broadcast_order TEXT"
+        )
+
+
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
     """Set the canonical pragmas on a fresh connection.
 
@@ -310,6 +332,8 @@ class DashboardDB:
             return  # connect() already calls init_schema(conn) on the fresh conn
         conn.executescript(_SCHEMA_SQL)
         _apply_phase_5a_columns(conn)
+        # PRD-8 Phase 6 — additive `broadcast_order` column on cabinet_meetings.
+        _apply_phase_6_columns(conn)
         conn.commit()
 
     def close(self) -> None:

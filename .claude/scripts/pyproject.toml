@@ -103,6 +103,13 @@ dev = [
     # `mypy --strict personas/services.py` is clean.
     "types-PyYAML>=6.0",
 ]
+# PRD-8 Phase 6 — cabinet voice. Optional install per the port-first PRP:
+# voice subprocess (`cabinet/voice/voice_server.py`) imports pipecat at
+# runtime; tests + non-voice imports tolerate ImportError so the framework
+# stays installable without ~2GB of pipecat deps in default checkouts.
+voice = [
+    "pipecat-ai[websocket,silero]==0.0.108",
+]
 
 [tool.ruff]
 target-version = "py312"

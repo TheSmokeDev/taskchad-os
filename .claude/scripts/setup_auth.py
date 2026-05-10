@@ -280,7 +280,7 @@ def check_slack(check_only: bool = False) -> bool:
 
 
 def setup_personal_gmail(headless: bool = False) -> bool:
-    """Authenticate personal Gmail (pedro6392mendoza@gmail.com) with gmail.readonly scope."""
+    """Authenticate personal Gmail (owner6392lastname@gmail.com) with gmail.readonly scope."""
     from pathlib import Path
 
     print_header(f"Personal Gmail (read-only) — {PERSONAL_GMAIL_ACCOUNT}")
@@ -367,7 +367,7 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true",
                         help="Use manual URL copy-paste flow (for remote/headless machines)")
     parser.add_argument("--personal", action="store_true",
-                        help="Authenticate personal Gmail only (pedro6392mendoza@gmail.com, readonly)")
+                        help="Authenticate personal Gmail only (owner6392lastname@gmail.com, readonly)")
     args = parser.parse_args()
 
     ensure_directories()

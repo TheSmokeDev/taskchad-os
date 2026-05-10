@@ -2168,6 +2168,13 @@ class CabinetSendBody(BaseModel):
     text: str
     clientMsgId: str
     chatId: str | None = None
+    # PRD-8 Phase 6 — voice extensions (forward-additive, default-False).
+    # ``isVoice``: when True, _run_agent_turn prepends a voice-mode context
+    # hint (port from agent-voice-bridge.ts:144). ``targetAgentId``: when
+    # set, pin the turn to this persona — bypass Haiku router (preserves
+    # the upstream agent_id selection from warroom/agent_bridge.py:59-66).
+    isVoice: bool = False
+    targetAgentId: str | None = None
 
 
 class CabinetMeetingIdBody(BaseModel):
@@ -2267,9 +2274,23 @@ def cabinet_new(body: CabinetNewBody | None = None) -> dict:
             stale_rows = []
         stale_ids = [r["id"] for r in stale_rows]
 
+        # PRD-8 Phase 6 v2 fix-pass 2026-05-10 (M3 fix) — populate
+        # broadcast_order at meeting-create time. Phase 6's voice
+        # subprocess (HomieAgentBridge) iterates this list in stable order
+        # for broadcast turns ("everyone, status update"). Without writing
+        # at create time the column stays NULL and the bridge falls back
+        # to the hardcoded BROADCAST_ORDER constant in agent_bridge.py
+        # (which doesn't reflect the actual roster snapshot for this
+        # meeting). The snapshot uses the same cabinet roster shape as
+        # roster_json above so the two derived states stay consistent.
+        roster_dicts = _cabinet_roster_dicts()
+        broadcast_order_ids = [a["id"] for a in roster_dicts if isinstance(a, dict) and a.get("id")]
+        broadcast_order_json = json.dumps(broadcast_order_ids)
+
         cur = conn.execute(
-            """INSERT INTO cabinet_meetings (mode, chat_id) VALUES (?, ?)""",
-            ("text", chat_id),
+            """INSERT INTO cabinet_meetings (mode, chat_id, broadcast_order)
+               VALUES (?, ?, ?)""",
+            ("text", chat_id, broadcast_order_json),
         )
         meeting_id = cur.lastrowid
 
@@ -2282,7 +2303,7 @@ def cabinet_new(body: CabinetNewBody | None = None) -> dict:
             )
 
         # Snapshot roster for replay determinism.
-        roster_json = json.dumps(_cabinet_roster_dicts())
+        roster_json = json.dumps(roster_dicts)
         conn.execute(
             """INSERT INTO cabinet_text_meetings (meeting_id, roster_json)
                VALUES (?, ?)""",
@@ -2562,8 +2583,18 @@ async def cabinet_send(body: CabinetSendBody) -> dict:
 
     async def _run() -> None:
         try:
-            from cabinet.text_orchestrator import handle_text_turn  # noqa: PLC0415
-            await handle_text_turn(body.meetingId, text, client_msg_id)
+            from cabinet.text_orchestrator import (  # noqa: PLC0415
+                HandleTurnOptions,
+                handle_text_turn,
+            )
+            opts = HandleTurnOptions(
+                # Phase 6 voice extensions — forward to the orchestrator.
+                # When isVoice/targetAgentId are False/None on the wire body
+                # the dataclass defaults preserve Phase 5a behavior verbatim.
+                is_voice=body.isVoice,
+                target_agent_id=body.targetAgentId,
+            )
+            await handle_text_turn(body.meetingId, text, client_msg_id, opts)
         except Exception as exc:  # noqa: BLE001
             # Surface to channel as error event so UI unfreezes.
             ch = _cabinet_channels.get_channel(body.meetingId)
@@ -2772,3 +2803,219 @@ async def cabinet_end(body: CabinetMeetingIdBody) -> dict:
 
 # Silence unused-import lint warnings for late imports above.
 _ = (_cabinet_title,)
+
+
+# ── PRD-8 Phase 6 — cabinet voice browser endpoints ──────────────────────
+#
+# Three routes mounted on the orchestration API process (port 4322):
+#
+#   GET /api/cabinet/voice/ui                — server-rendered HTML page
+#   GET /api/cabinet/voice/client.bundle.js  — vendored Pipecat bundle
+#   GET /api/cabinet/voice/client.js         — vendored esbuild source (rebuild reference)
+#   GET /api/cabinet/voice/avatars/{id}.png  — bundled persona avatar
+#
+# Per Translation Boundary Audit (R1 v2 B6 fix), the avatar route is an
+# explicit Homie deviation — upstream's /warroom-avatar/:id was already
+# removed, and the canonical replacement is this token-bound endpoint.
+# Everything else is a verbatim port of src/dashboard.ts:453-565.
+
+
+_CABINET_VOICE_STATIC_DIR = (
+    Path(__file__).resolve().parent / "cabinet" / "voice" / "static"
+)
+
+
+@router.get("/api/cabinet/voice/ui")
+async def cabinet_voice_ui(
+    token: str = Query(..., description="orchestration API token (loopback OK if empty)"),
+    meetingId: int = Query(..., description="Phase 5a cabinet meeting id"),
+    chatId: str = Query("", description="Telegram chat id (empty = any)"),
+) -> Any:
+    """Server-rendered cabinet voice meeting page.
+
+    VERBATIM port of ``src/dashboard.ts:453-565`` ``app.get('/warroom', ...)``
+    — read token + chatId + meetingId from query, return the HTML page.
+
+    Auth contract (PRD-8 Phase 6 v2 fix-pass 2026-05-10 — B1 fix):
+    ``/api/cabinet/voice/*`` is exempt from the orchestration API's
+    header-bearer middleware AND validates a query-param token instead.
+    The middleware exemption + query-param validator live at
+    ``orchestration/api.py:auth_middleware``. In token-unset mode the
+    voice UI is loopback-only (mirrors orchestration loopback no-token
+    mode); in token-set mode the query-param ``token`` must equal
+    ``ORCHESTRATION_API_TOKEN`` or the middleware returns 401 BEFORE the
+    route handler runs.
+    """
+    from cabinet.voice.voice_html import get_voice_meeting_html  # noqa: PLC0415
+    from cabinet.voice.config import voice_port  # noqa: PLC0415
+    from fastapi.responses import HTMLResponse  # noqa: PLC0415
+
+    # Verify the meeting exists + chat-scope binding.
+    meeting = _cabinet_get_meeting(meetingId)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    if chatId and not _cabinet_chat_match_or_403(meeting, chatId):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+    if meeting.get("ended_at") is not None:
+        raise HTTPException(status_code=410, detail="meeting_ended")
+
+    body = get_voice_meeting_html(
+        token=token,
+        meeting_id=meetingId,
+        chat_id=chatId,
+        ws_port=voice_port(),
+    )
+    return HTMLResponse(content=body, status_code=200)
+
+
+@router.get("/api/cabinet/voice/client.bundle.js")
+async def cabinet_voice_client_bundle(
+    token: str = Query("", description="orchestration API token (loopback OK)"),
+) -> Any:
+    """Serve the vendored Pipecat browser bundle.
+
+    Maps upstream ``app.get('/warroom-client.js', ...)`` (verbatim
+    contract). Ships ~430KB built artifact from
+    ``cabinet/voice/static/client.bundle.js`` (BSD-2 attributed via
+    prepended comment block — see static/client.bundle.js header).
+    """
+    from fastapi.responses import FileResponse  # noqa: PLC0415
+
+    path = _CABINET_VOICE_STATIC_DIR / "client.bundle.js"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="client_bundle_missing")
+    # token is read for parity with /warroom-client.js?token=... but is not
+    # currently enforced — bundle is public static content (matches upstream).
+    _ = token
+    return FileResponse(
+        path=str(path),
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/api/cabinet/voice/client.js")
+async def cabinet_voice_client_source() -> Any:
+    """Serve the 12-LOC esbuild source (rebuild reference).
+
+    Vendored verbatim from ClaudeClaw ``warroom/client.js``. Operators who
+    need to rebuild the bundle locally can use this as the entry point.
+    """
+    from fastapi.responses import FileResponse  # noqa: PLC0415
+
+    path = _CABINET_VOICE_STATIC_DIR / "client.js"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="client_js_missing")
+    return FileResponse(
+        path=str(path),
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/api/cabinet/voice/avatars/{persona_id}.png")
+async def cabinet_voice_avatar(persona_id: str) -> Any:
+    """Serve a persona avatar image.
+
+    Lookup precedence:
+      1. ``<profile>/config.yaml.cabinet.avatar_path`` (per-persona override).
+      2. Bundled ClaudeClaw avatar at
+         ``cabinet/voice/static/avatars/{persona_id}.png``.
+      3. Bundled ``default.png`` (Q4 canonical fallback for unknown personas).
+      4. Bundled ``main.png`` (backwards-compatible upstream fallback).
+
+    The persona_id is sanity-checked against a strict whitelist regex so
+    a maliciously-crafted URL can't escape the static dir (defense-in-depth
+    on top of FastAPI's path validation).
+
+    PRD-8 Phase 6 v2 R2 fix-pass 2026-05-10 (R2-M1): inserted
+    ``default.png`` as step 3 between the persona-specific bundled asset
+    and the upstream-compat ``main.png``. Q4 added ``default.png`` as the
+    canonical fallback, so unknown personas should hit it before
+    ``main.png``; if ``main.png`` is later removed, ``default.png``
+    keeps unknown-persona avatar requests serving cleanly.
+    """
+    import re as _re  # noqa: PLC0415
+    from fastapi.responses import FileResponse  # noqa: PLC0415
+
+    if not _re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", persona_id or ""):
+        raise HTTPException(status_code=400, detail="invalid persona_id")
+
+    # 1. Per-persona override from config.yaml.cabinet.avatar_path.
+    #
+    # PRD-8 Phase 6 v2 fix-pass 2026-05-10 (M4 fix) — verify PNG magic
+    # bytes (0x89 0x50 0x4E 0x47 0x0D 0x0A 0x1A 0x0A) before serving an
+    # operator-supplied override. Defense-in-depth: if a non-PNG file
+    # gets pointed at via config (e.g. operator typo or symlink swap),
+    # fall through to the bundled avatar instead of streaming an
+    # arbitrary file with image/png Content-Type. FileResponse already
+    # blocks directory traversal via Path().is_file(); this adds content
+    # validation on top.
+    _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+    try:
+        cfg = personas.load_persona_config(persona_id)
+        cabinet_block = cfg.get("cabinet") if isinstance(cfg, dict) else None
+        if isinstance(cabinet_block, dict):
+            override = cabinet_block.get("avatar_path")
+            if isinstance(override, str) and override.strip():
+                override_path = Path(override).expanduser()
+                if not override_path.is_absolute():
+                    profile_root = resolve_profile_root(persona_id)
+                    override_path = profile_root / override_path
+                if override_path.is_file():
+                    try:
+                        with open(override_path, "rb") as _f:
+                            magic = _f.read(8)
+                    except OSError as _read_exc:
+                        logger.warning(
+                            "cabinet voice avatar override read failed for %s: %s",
+                            _redact(persona_id),
+                            _redact(str(_read_exc)),
+                        )
+                        magic = b""
+                    if magic == _PNG_MAGIC:
+                        return FileResponse(
+                            path=str(override_path),
+                            media_type="image/png",
+                            headers={"Cache-Control": "public, max-age=3600"},
+                        )
+                    logger.warning(
+                        "cabinet voice avatar override at %s is not a valid "
+                        "PNG (magic bytes mismatch); falling back to bundled",
+                        _redact(str(override_path)),
+                    )
+    except Exception as exc:  # noqa: BLE001 — fall through to bundled.
+        logger.debug(
+            "cabinet voice avatar override read failed for %s: %s",
+            _redact(persona_id),
+            _redact(str(exc)),
+        )
+
+    # 2. Bundled ClaudeClaw avatar.
+    bundled = _CABINET_VOICE_STATIC_DIR / "avatars" / f"{persona_id}.png"
+    if bundled.is_file():
+        return FileResponse(
+            path=str(bundled),
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    # 3. Bundled default.png — Q4 canonical fallback for unknown personas.
+    default_fallback = _CABINET_VOICE_STATIC_DIR / "avatars" / "default.png"
+    if default_fallback.is_file():
+        return FileResponse(
+            path=str(default_fallback),
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
+    # 4. Bundled main.png — backwards-compatible upstream fallback.
+    fallback = _CABINET_VOICE_STATIC_DIR / "avatars" / "main.png"
+    if fallback.is_file():
+        return FileResponse(
+            path=str(fallback),
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
+    raise HTTPException(status_code=404, detail="avatar_missing")

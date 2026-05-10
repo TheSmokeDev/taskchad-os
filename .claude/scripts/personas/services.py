@@ -876,11 +876,32 @@ def _validate_mcp_section(value: Any, config_path: Path) -> None:
                 )
 
 
+_CABINET_VOICE_PROVIDER_ENUM: frozenset[str] = frozenset({
+    "elevenlabs",
+    "edge",
+    "openai",
+    "gemini",
+    "mistral",
+    "gradium",
+    "kokoro",
+    "kittentts",
+    "macos_say",
+})
+
+
 def _validate_cabinet_section(value: Any, config_path: Path) -> None:
     """Validate the ``cabinet`` section: mapping with optional fields.
 
     Recognised fields:
       * ``voice_id`` (str) — TTS voice identifier
+      * ``voice_provider`` (str, enum) — Phase 6 cabinet voice provider key.
+        Must be one of :data:`_CABINET_VOICE_PROVIDER_ENUM`.
+      * ``voice_persona_prompt`` (str) — Phase 6 per-persona voice system
+        prompt (replaces ClaudeClaw warroom/personas.AGENT_PERSONAS dict
+        per Q5 single-config-yaml lock).
+      * ``avatar_path`` (str) — Phase 6 per-persona avatar override path
+        (relative to profile root or absolute). Bundled fallback at
+        ``cabinet/voice/static/avatars/{persona_id}.png`` when unset.
       * ``tools`` (list[str]) — cabinet/warroom tool names
         (Q-naming lock: ClaudeClaw "warroom_tools" → our "cabinet.tools")
     """
@@ -889,6 +910,30 @@ def _validate_cabinet_section(value: Any, config_path: Path) -> None:
     if "voice_id" in value and not isinstance(value["voice_id"], str):
         raise _shape_error(
             config_path, "cabinet.voice_id", value["voice_id"], "str"
+        )
+    # PRD-8 Phase 6 — voice_provider enum validation.
+    if "voice_provider" in value:
+        provider = value["voice_provider"]
+        if not isinstance(provider, str):
+            raise _shape_error(
+                config_path, "cabinet.voice_provider", provider, "str"
+            )
+        if provider not in _CABINET_VOICE_PROVIDER_ENUM:
+            raise ConfigShapeError(
+                f"cabinet.voice_provider: {provider!r} is not a known voice "
+                f"provider (known: {', '.join(sorted(_CABINET_VOICE_PROVIDER_ENUM))}) "
+                f"in {config_path}"
+            )
+    if "voice_persona_prompt" in value and not isinstance(value["voice_persona_prompt"], str):
+        raise _shape_error(
+            config_path,
+            "cabinet.voice_persona_prompt",
+            value["voice_persona_prompt"],
+            "str",
+        )
+    if "avatar_path" in value and not isinstance(value["avatar_path"], str):
+        raise _shape_error(
+            config_path, "cabinet.avatar_path", value["avatar_path"], "str"
         )
     if "tools" in value:
         tools = value["tools"]

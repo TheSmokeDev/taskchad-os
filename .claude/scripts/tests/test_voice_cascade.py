@@ -230,7 +230,10 @@ def test_openai_tts_in_cascade():
     expected = ("elevenlabs", "gradium", "mistral", "gemini", "openai",
                 "kokoro", "kittentts", "edge", "macos_say")
     assert voice._TTS_CASCADE_ORDER == expected
-    assert "OpenAITtsProvider(api_key=openai_key)" in src
+    # Phase 6 WS0 voice_overrides backport added a `voice=openai_voice` kwarg
+    # for per-call voice override; preserve the original "wired to openai_key
+    # env var" intent without locking the literal constructor string.
+    assert "OpenAITtsProvider(api_key=openai_key" in src
     assert "_KokoroProvider(" in src
 
 

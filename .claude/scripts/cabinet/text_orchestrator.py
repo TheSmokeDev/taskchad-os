@@ -141,8 +141,25 @@ def get_roster() -> list[RosterAgent]:
 
 @dataclass
 class HandleTurnOptions:
-    """Port warroom-text-orchestrator.ts:100-103 HandleTurnOptions."""
+    """Port warroom-text-orchestrator.ts:100-103 HandleTurnOptions.
+
+    PRD-8 Phase 6 — voice extensions (forward-additive, default-False/None
+    preserves Phase 5a behavior verbatim per R1 v2 B3 fix):
+
+    * ``is_voice`` — when True, _run_agent_turn prepends a voice-mode
+      context hint VERBATIM from upstream ``agent-voice-bridge.ts:144``
+      so persona replies stay brief and conversational. Phase 5a's
+      ``max_turns=1`` already correct; no additional cap needed.
+    * ``target_agent_id`` — when set, pins this turn to the named
+      persona, bypassing the Haiku router. Voice ``AgentRouter`` (port
+      of ``warroom/router.py``) sets this so "research, summarize..."
+      reaches the research persona without a second text-router round
+      trip (R1 v2 B1 fix — preserves the upstream agent_id selection
+      from ``warroom/agent_bridge.py:59-66``).
+    """
     roster: list[RosterAgent] | None = None
+    is_voice: bool = False
+    target_agent_id: str | None = None
 
 
 @dataclass
@@ -461,6 +478,17 @@ def _audit_cabinet(action: str, meeting_id: int, persona_id: str, outcome: str, 
 # ── Per-persona turn (B1: lane-router-only dispatch) ─────────────────────
 
 
+# PRD-8 Phase 6 voice-mode context hint, ported VERBATIM from
+# ClaudeClaw `src/agent-voice-bridge.ts:144`. Prepended to the runtime
+# prompt when the operator turn is flagged voice-mode (see
+# HandleTurnOptions.is_voice). Persona replies stay brief and conversational
+# so the ClaudeClaw warroom-html.ts transcript + Pipecat TTS reads naturally.
+_VOICE_CONTEXT_HINT_VERBATIM: Final[str] = (
+    "[Voice meeting mode: Keep responses concise and conversational. "
+    "Aim for 2-3 sentences unless asked for detail. Start with a brief acknowledgment.]"
+)
+
+
 @dataclass
 class _RunAgentArgs:
     persona_id: str
@@ -473,6 +501,10 @@ class _RunAgentArgs:
     turn_state: dict[str, bool]
     persona: RosterAgent
     roster: list[RosterAgent]
+    # PRD-8 Phase 6 — when True, prepend the voice-mode context hint to
+    # the runtime prompt (forward-additive — default False preserves
+    # Phase 5a behavior verbatim).
+    is_voice: bool = False
 
 
 async def _run_agent_turn(args: _RunAgentArgs) -> str:
@@ -484,6 +516,11 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
 
     Cabinet code never invokes any concrete provider client — every per-
     persona turn dispatches via `runtime.lane_router.run_with_runtime_lanes`.
+
+    PRD-8 Phase 6 — when ``args.is_voice`` is True, the runtime prompt is
+    prefixed with :data:`_VOICE_CONTEXT_HINT_VERBATIM` so persona replies
+    stay brief for TTS readout. ``max_turns=1`` (Phase 5a) is already the
+    correct cap for voice; no additional limit needed.
     """
     channel = args.channel
 
@@ -506,8 +543,16 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
         "role": args.role,
     })
 
+    # PRD-8 Phase 6 — voice-mode prompt assembly.
+    # Forward-additive lock: when is_voice=False, prompt is exactly
+    # args.user_text (Phase 5a behavior unchanged).
+    if args.is_voice:
+        runtime_prompt = f"{_VOICE_CONTEXT_HINT_VERBATIM}\n\n{args.user_text}"
+    else:
+        runtime_prompt = args.user_text
+
     request = RuntimeRequest(
-        prompt=args.user_text,
+        prompt=runtime_prompt,
         cwd=Path.cwd(),
         task_name="cabinet_persona_turn",
         capability=TEXT_REASONING,
@@ -831,7 +876,51 @@ async def handle_text_turn(
 
         decision: RouterDecision
 
-        if mentions:
+        # PRD-8 Phase 6 — voice routing precedence override (R1 v2 B1 fix).
+        # The voice subprocess's ``AgentRouter`` (port of warroom/router.py)
+        # already selected the target persona by name-prefix / pin / broadcast
+        # / default, so we must NOT re-run the Haiku router (would double-route
+        # and may answer as the wrong persona, exactly the bug R1 flagged).
+        # When ``target_agent_id`` is set on HandleTurnOptions and resolves to a
+        # roster member, bypass the routing chain entirely. Wire-id "main"
+        # also resolves to the canonical "default" persona id (Q4 main↔default
+        # translation site lock).
+        forced_target: str | None = None
+        if resolved_opts.target_agent_id:
+            requested = resolved_opts.target_agent_id.strip()
+            # Q4 wire-string translation: "main" (upstream wire) → "default" (internal id).
+            if requested == "main":
+                requested = "default"
+            if requested == "all":
+                # Broadcast — Phase 5a does not currently loop targets, but the
+                # voice subprocess broadcasts itself by sending N turns. Treat
+                # "all" as a no-op override here (router falls through).
+                forced_target = None
+            elif requested in roster_by_id:
+                forced_target = requested
+            else:
+                # Unknown target — do not crash; let the standard routing run.
+                logger.debug(
+                    "cabinet voice target_agent_id=%s not in roster; falling back to router",
+                    _redact(requested),
+                )
+                forced_target = None
+
+        if forced_target is not None:
+            channel.emit({
+                "type": "status_update",
+                "turnId": turn_id,
+                "phase": "starting",
+                "label": f"Starting {roster_by_id[forced_target].name}…",
+                "agentId": forced_target,
+            })
+            decision = RouterDecision(
+                primary=forced_target,
+                interveners=[],
+                reason=f"voice forced target {forced_target}",
+                router_degraded=False,
+            )
+        elif mentions:
             primary = mentions[0]
             interveners = [m for m in mentions[1:3] if m != primary]
             if len(mentions) > 3:
@@ -1000,6 +1089,7 @@ async def handle_text_turn(
             turn_state=turn_state,
             persona=primary_persona,
             roster=roster,
+            is_voice=resolved_opts.is_voice,
         ))
 
         # M2: schedule background title generation if this looks like the
@@ -1091,6 +1181,7 @@ async def handle_text_turn(
                 turn_state=turn_state,
                 persona=candidate,
                 roster=roster,
+                is_voice=resolved_opts.is_voice,
             ))
 
         # 7. turn_complete vs turn_aborted.

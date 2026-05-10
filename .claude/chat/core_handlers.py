@@ -446,7 +446,7 @@ async def handle_email(adapter: Any, incoming: Any, args: str, *, collect_only: 
 async def handle_personal_email(
     adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
 ) -> str:
-    """Fetch personal Gmail (pedro6392mendoza@gmail.com) — read-only."""
+    """Fetch personal Gmail (owner6392lastname@gmail.com) — read-only."""
     try:
         from integrations.personal_gmail import (
             format_personal_emails_for_context,
@@ -638,6 +638,68 @@ async def handle_cabinet(
                 f"Sent to meeting #{meeting_id}. "
                 f"Watch http://localhost:3141/cabinet?id={meeting_id} for persona turns "
                 f"(or any system notes if cabinet is disabled)."
+            )
+
+        if args.lower().startswith("voice"):
+            # PRD-8 Phase 6 — /cabinet voice [meeting_id]
+            # With explicit meeting_id: verify exists + return browser URL.
+            # Without: create new meeting + return browser URL.
+            rest = args[len("voice"):].strip()
+
+            if rest:
+                try:
+                    target_meeting_id = int(rest)
+                except ValueError:
+                    return "Usage: /cabinet voice [meeting_id]"
+                # Verify the meeting exists in this chat scope by listing.
+                # (We could add a dedicated cabinet_api.get_meeting_details
+                # helper, but list_meetings is sufficient for a single
+                # one-shot lookup and avoids a new API surface.)
+                meetings = await cabinet_api.list_meetings(
+                    limit=50, chat_id=chat_id_str
+                )
+                match = next(
+                    (m for m in meetings if int(m.get("id", -1)) == target_meeting_id),
+                    None,
+                )
+                if match is None:
+                    return (
+                        f"Meeting #{target_meeting_id} not found in this chat. "
+                        f"Use /cabinet list to see meetings here."
+                    )
+                if match.get("ended_at"):
+                    return f"Meeting #{target_meeting_id} has ended. Start a new one with /cabinet voice."
+                meeting_id_for_url = target_meeting_id
+            else:
+                ref = await cabinet_api.create_meeting(chat_id=chat_id_str)
+                meeting_id_for_url = ref.id
+
+            # Build the browser URL operators tap to open the voice page.
+            # Prefer ORCHESTRATION_API_BASE_URL when set; fall back to the
+            # canonical loopback host. Token defaults to empty string in
+            # loopback no-token mode.
+            #
+            # PRD-8 Phase 6 v2 fix-pass 2026-05-10 (B1) — use urlencode so a
+            # token containing `&` / `=` / `?` / spaces does not corrupt the
+            # query string and so chat_id values are URL-safe.
+            import os as _os
+            from urllib.parse import urlencode as _urlencode
+            base = _os.environ.get(
+                "ORCHESTRATION_API_BASE_URL", "http://127.0.0.1:4322"
+            ).rstrip("/")
+            token = _os.environ.get("ORCHESTRATION_API_TOKEN", "")
+            chat_for_url = chat_id_str or ""
+            qs = _urlencode(
+                {
+                    "token": token,
+                    "meetingId": meeting_id_for_url,
+                    "chatId": chat_for_url,
+                }
+            )
+            url = f"{base}/api/cabinet/voice/ui?{qs}"
+            return (
+                f"Cabinet voice meeting #{meeting_id_for_url} ready.\n"
+                f"Open in browser (Chrome/Edge for mic permission):\n{url}"
             )
 
         if args.lower().startswith("end"):

@@ -260,7 +260,8 @@ async def auth_middleware(request: Request, call_next):
     response is intentionally minimal (NO PII, NO secrets, NO internal
     paths).
     """
-    if request.url.path == "/api/health":
+    path = request.url.path
+    if path == "/api/health":
         return await call_next(request)
     # PRD-8 Phase 7a R3 NB1 — /api/audit-log is exempt from the outer
     # ORCHESTRATION_API_TOKEN bearer middleware. The endpoint enforces its
@@ -270,8 +271,28 @@ async def auth_middleware(request: Request, call_next):
     # unless the two tokens happened to be equal (defeats the "separate
     # admin token" security boundary). Mirrors the /api/health exemption
     # above.
-    if request.url.path == "/api/audit-log":
+    if path == "/api/audit-log":
         return await call_next(request)
+    # PRD-8 Phase 6 v2 fix-pass 2026-05-10 (B1 fix) — /api/cabinet/voice/*
+    # is exempt from header-bearer auth and instead validates a query-param
+    # token. Browsers cannot send Authorization headers reliably on initial
+    # GETs (especially across iframe / new-tab boundaries). Mirrors the
+    # ClaudeClaw upstream pattern at src/dashboard.ts:453-565 where the
+    # operator pastes the URL with ?token=... and the server consumes it.
+    #
+    # Token-unset mode: voice UI is loopback-only via API_HOST guard; no
+    # token required (mirrors orchestration loopback no-token mode).
+    # Token-set mode: query-param token must equal ORCHESTRATION_API_TOKEN.
+    if path.startswith("/api/cabinet/voice/"):
+        if ORCHESTRATION_API_TOKEN is None:
+            return await call_next(request)
+        query_token = request.query_params.get("token", "")
+        if query_token == ORCHESTRATION_API_TOKEN:
+            return await call_next(request)
+        return JSONResponse(
+            {"detail": "Invalid or missing query-param token for cabinet voice"},
+            status_code=401,
+        )
     if ORCHESTRATION_API_TOKEN is not None:
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[7:] != ORCHESTRATION_API_TOKEN:

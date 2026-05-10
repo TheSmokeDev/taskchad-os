@@ -102,7 +102,7 @@ def test_load_persona_config_full_schema(
         "    - brave-search\n"
         "    - exa\n"
         "cabinet:\n"
-        "  voice_id: sl0R3QvM8Xa45lGiK8sL\n"
+        "  voice_id: VOICE_ID_EXAMPLE\n"
         "  tools:\n"
         "    - slack-cli\n"
         "voice:\n"
@@ -120,7 +120,7 @@ def test_load_persona_config_full_schema(
     assert data["model"]["preferred"] == "claude-sonnet-4-7"
     assert data["model"]["fallback"] == ["codex", "gemini"]
     assert data["mcp"]["servers"] == ["brave-search", "exa"]
-    assert data["cabinet"]["voice_id"] == "sl0R3QvM8Xa45lGiK8sL"
+    assert data["cabinet"]["voice_id"] == "VOICE_ID_EXAMPLE"
     assert data["cabinet"]["tools"] == ["slack-cli"]
     # Q5 canonical default-cascade shape: list of provider names as strings.
     assert data["voice"]["cascade"] == ["edge", "gradium"]
@@ -143,7 +143,7 @@ def test_load_persona_config_voice_cascade_mapping_shape(
         "  cascade:\n"
         "    - edge\n"
         "    - provider: elevenlabs\n"
-        "      voice_id: sl0R3QvM8Xa45lGiK8sL\n",
+        "      voice_id: VOICE_ID_EXAMPLE\n",
     )
     monkeypatch.setenv("HOMIE_HOME", str(sales_dir))
     _activate_named(monkeypatch, "sales")
@@ -152,7 +152,7 @@ def test_load_persona_config_voice_cascade_mapping_shape(
 
     assert data["voice"]["cascade"][0] == "edge"
     assert data["voice"]["cascade"][1]["provider"] == "elevenlabs"
-    assert data["voice"]["cascade"][1]["voice_id"] == "sl0R3QvM8Xa45lGiK8sL"
+    assert data["voice"]["cascade"][1]["voice_id"] == "VOICE_ID_EXAMPLE"
 
 
 def test_validation_rejects_voice_cascade_unknown_string_provider(
@@ -562,7 +562,7 @@ def test_validation_accepts_valid_full_schema(
         "mcp:\n"
         "  servers: [brave-search, exa]\n"
         "cabinet:\n"
-        "  voice_id: sl0R3QvM8Xa45lGiK8sL\n"
+        "  voice_id: VOICE_ID_EXAMPLE\n"
         "  tools: [slack-cli]\n"
         "voice:\n"
         "  cascade:\n"

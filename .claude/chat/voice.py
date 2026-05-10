@@ -966,7 +966,11 @@ async def _try_provider(
     return await provider.synthesize(text_to_send)
 
 
-async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
+async def synthesize(
+    text: str,
+    tts_config: dict | None = None,
+    voice_overrides: dict[str, str] | None = None,
+) -> bytes:
     """TTS cascade: ElevenLabs → Gradium → Mistral → Gemini → OpenAI → Kokoro → KittenTTS → Edge → macOS-say.
 
     Port voice.ts:443-479. Per-provider char-limit truncation BEFORE the call
@@ -983,16 +987,35 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
     (Rule 3). Catches BEFORE any provider cascade attempt; refusal counter
     increments + audit_log row written. Adapters catch ``KillSwitchDisabled``
     and emit friendly degraded reply.
+
+    PRD-8 Phase 6 / WS0 (port-first cabinet voice — voice_overrides backport):
+
+    ``voice_overrides`` is an OPTIONAL ``dict[str, str]`` keyed by provider name
+    (``elevenlabs``/``gradium``/``mistral``/``gemini``/``openai``/``kokoro``/
+    ``kittentts``/``edge``/``macos_say``). When supplied, the matching cascade
+    branch reads its voice id/name from the override before falling back to the
+    env var default. Forward-additive: ``voice_overrides=None`` (default) and
+    ``voice_overrides={}`` BOTH preserve existing Phase 4 behavior verbatim —
+    every provider continues to read voice from the same env vars it always
+    has. Phase 6's HomieTTS computes ``{voice_provider: voice_id}`` per-persona
+    from ``<profile>/config.yaml.cabinet.voice_id`` + ``cabinet.voice_provider``.
+
+    Rule 1 compliance: ``voice_overrides=None`` is the sentinel; resolved at
+    call time inside the body. No def-time bind to module/config constants.
     """
     # Phase 7b kill-switch — late-bind module import (Rule 3).
     from security import kill_switches
     kill_switches.requireEnabled("voice", caller="voice_cascade_synthesize")
 
+    # Rule 1: resolve sentinel inside body. Empty dict is the no-override path.
+    if voice_overrides is None:
+        voice_overrides = {}
+
     last_err: Exception | None = None
 
     # 1. ElevenLabs (voice.ts primary)
     el_key = os.environ.get("ELEVENLABS_API_KEY")
-    el_voice = os.environ.get("ELEVENLABS_VOICE_ID")
+    el_voice = voice_overrides.get("elevenlabs") or os.environ.get("ELEVENLABS_VOICE_ID")
     if el_key and el_voice:
         try:
             return await _try_provider(
@@ -1007,7 +1030,7 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
 
     # 2. Gradium (voice.ts secondary)
     gr_key = os.environ.get("GRADIUM_API_KEY")
-    gr_voice = os.environ.get("GRADIUM_VOICE_ID")
+    gr_voice = voice_overrides.get("gradium") or os.environ.get("GRADIUM_VOICE_ID")
     if gr_key and gr_voice:
         try:
             return await _try_provider(
@@ -1020,7 +1043,9 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
             logger.warning("Gradium TTS failed, trying Mistral: %s", _redact(str(e)))
             last_err = e
 
-    # 3. Mistral Voxtral (Hermes extras)
+    # 3. Mistral Voxtral (Hermes extras) — Mistral does not currently expose a
+    # per-call voice override on the public API; voice_overrides["mistral"] is
+    # accepted for forward compatibility but does not affect provider config.
     mistral_key = os.environ.get("MISTRAL_API_KEY")
     if mistral_key:
         try:
@@ -1041,9 +1066,10 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if gemini_key:
         try:
+            gemini_voice = voice_overrides.get("gemini") or os.environ.get("GEMINI_TTS_VOICE", "Charon")
             return await _try_provider(
                 "gemini",
-                _GeminiTtsProvider(api_key=gemini_key),
+                _GeminiTtsProvider(api_key=gemini_key, voice=gemini_voice),
                 text,
                 tts_config,
             )
@@ -1055,9 +1081,10 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
     openai_key = os.environ.get("OPENAI_API_KEY")
     if openai_key:
         try:
+            openai_voice = voice_overrides.get("openai") or os.environ.get("OPENAI_TTS_VOICE", "alloy")
             return await _try_provider(
                 "openai",
-                OpenAITtsProvider(api_key=openai_key),
+                OpenAITtsProvider(api_key=openai_key, voice=openai_voice),
                 text,
                 tts_config,
             )
@@ -1069,11 +1096,12 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
     kokoro_url = os.environ.get("KOKORO_URL")
     if kokoro_url:
         try:
+            kokoro_voice = voice_overrides.get("kokoro") or os.environ.get("KOKORO_VOICE", "af_heart")
             return await _try_provider(
                 "kokoro",
                 _KokoroProvider(
                     base_url=kokoro_url,
-                    voice=os.environ.get("KOKORO_VOICE", "af_heart"),
+                    voice=kokoro_voice,
                     model=os.environ.get("KOKORO_MODEL", "kokoro"),
                 ),
                 text,
@@ -1086,7 +1114,7 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
     # 7. KittenTTS (Hermes extras — local cross-platform)
     if _kittentts_installed():
         try:
-            kitten_voice = os.environ.get("KITTENTTS_VOICE", "Jasper")
+            kitten_voice = voice_overrides.get("kittentts") or os.environ.get("KITTENTTS_VOICE", "Jasper")
             return await _try_provider(
                 "kittentts",
                 _KittenTtsProvider(voice=kitten_voice),
@@ -1103,7 +1131,7 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
     # 8. Edge TTS (existing module — added to cascade)
     if _edge_tts_installed():
         try:
-            edge_voice = os.environ.get("EDGE_TTS_VOICE", "en-US-GuyNeural")
+            edge_voice = voice_overrides.get("edge") or os.environ.get("EDGE_TTS_VOICE", "en-US-GuyNeural")
             return await _try_provider(
                 "edge",
                 EdgeTtsProvider(voice=edge_voice),
@@ -1120,9 +1148,10 @@ async def synthesize(text: str, tts_config: dict | None = None) -> bytes:
     # 9. macOS-say (voice.ts mac-only fallback)
     if platform.system() == "Darwin":
         try:
+            macos_voice = voice_overrides.get("macos_say") or os.environ.get("TTS_VOICE", "Thomas")
             return await _try_provider(
                 "macos_say",
-                _MacOsSayProvider(voice=os.environ.get("TTS_VOICE", "Thomas")),
+                _MacOsSayProvider(voice=macos_voice),
                 text,
                 tts_config,
             )

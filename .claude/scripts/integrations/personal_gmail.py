@@ -1,8 +1,8 @@
 """
 Personal Gmail Read-Only Integration for The Homie.
 
-Connects to pedro6392mendoza@gmail.com with gmail.readonly scope.
-Uses a separate OAuth token (google_token_pedro.json) — completely
+Connects to owner6392lastname@gmail.com with gmail.readonly scope.
+Uses a separate OAuth token (google_token_owner.json) — completely
 independent of the AI account token (google_token.json).
 
 No write operations. All content passes through email_sanitizer.
