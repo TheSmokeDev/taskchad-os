@@ -112,9 +112,10 @@ CREATE TABLE IF NOT EXISTS cabinet_meetings (
 );
 CREATE INDEX IF NOT EXISTS idx_cabinet_meetings_started
     ON cabinet_meetings(started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_cabinet_meetings_chat_open
-    ON cabinet_meetings(chat_id, started_at DESC)
-    WHERE ended_at IS NULL;
+-- idx_cabinet_meetings_chat_open is created AFTER `_apply_phase_5a_columns`
+-- runs in `init_schema()` so older DBs that pre-date the `chat_id` column
+-- don't crash during initial migration. CREATE INDEX must follow
+-- column-add ordering (Phase 5a backwards-compat path).
 
 CREATE TABLE IF NOT EXISTS cabinet_transcripts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -334,6 +335,15 @@ class DashboardDB:
         _apply_phase_5a_columns(conn)
         # PRD-8 Phase 6 — additive `broadcast_order` column on cabinet_meetings.
         _apply_phase_6_columns(conn)
+        # Indexes that depend on backwards-compat-added columns must run
+        # AFTER the column-ensure step (older DBs would crash with
+        # "no such column" otherwise — same class as orchestration/db.py
+        # msg_type ordering fix).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cabinet_meetings_chat_open "
+            "ON cabinet_meetings(chat_id, started_at DESC) "
+            "WHERE ended_at IS NULL"
+        )
         conn.commit()
 
     def close(self) -> None:

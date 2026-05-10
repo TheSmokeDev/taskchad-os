@@ -128,7 +128,9 @@ CREATE TABLE IF NOT EXISTS agent_messages (
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_agent_messages_convoy ON agent_messages(workspace_id, convoy_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_agent_messages_msg_type ON agent_messages(convoy_id, msg_type);
+-- idx_agent_messages_msg_type is created AFTER `_ensure_column` runs in
+-- `_migrate()` so older DBs that pre-date the msg_type column don't crash
+-- during initial migration. CREATE INDEX must follow column-add ordering.
 
 CREATE TABLE IF NOT EXISTS agent_deliveries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,6 +222,13 @@ class OrchestrationDB:
         # SQLite < 3.37 lacks `ADD COLUMN IF NOT EXISTS`, so we inspect
         # table_info first and only ALTER when the column is missing.
         self._ensure_column("agent_messages", "msg_type", "TEXT")
+        # Indexes that depend on backwards-compat-added columns must run
+        # AFTER the column-ensure step (older DBs would crash with
+        # "no such column" otherwise).
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_messages_msg_type "
+            "ON agent_messages(convoy_id, msg_type)"
+        )
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, decl: str) -> None:
