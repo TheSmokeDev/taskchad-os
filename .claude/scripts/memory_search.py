@@ -22,7 +22,14 @@ from personas import apply_persona_override
 
 apply_persona_override()
 
-import config as _cfg  # noqa: E402
+# Note: ``config`` is intentionally NOT cached as a module-level alias.
+# ``importlib.reload(sys.modules["config"])`` (used by e.g.
+# ``test_dashboard_db.test_env_override_honored``) swaps the module object,
+# but any cached alias bound at module-import time still points at the
+# obsolete instance, so attribute reads return stale defaults. Functions
+# below re-resolve ``config`` from ``sys.modules`` each call via a local
+# ``import config as _cfg`` (Rule 2 — physical state-first; consistent with
+# the same pattern in ``evolve.config_override.override_config``).
 from db import get_memory_db  # noqa: E402
 
 
@@ -45,6 +52,7 @@ def search_keyword(
     path_prefix: str = "",
 ) -> list[SearchResult]:
     """Keyword search (FTS5 for SQLite, tsvector for Postgres)."""
+    import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
     if limit is None:
         limit = _cfg.SEARCH_DEFAULT_LIMIT
     if not query.strip():
@@ -76,6 +84,7 @@ def search_semantic(
     path_prefix: str = "",
 ) -> list[SearchResult]:
     """Semantic search using vector similarity."""
+    import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
     if limit is None:
         limit = _cfg.SEARCH_DEFAULT_LIMIT
     if min_score is None:
@@ -117,6 +126,7 @@ def search_hybrid(
     graph_scores: dict[str, float] | None = None,
 ) -> list[SearchResult]:
     """Hybrid search combining keyword and semantic with weighted scoring."""
+    import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
     if limit is None:
         limit = _cfg.SEARCH_DEFAULT_LIMIT
     if min_score is None:
@@ -197,6 +207,7 @@ def search(
     path_prefix: str = "",
 ) -> list[SearchResult]:
     """Main search entry point. Dispatches to mode function."""
+    import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
     if limit is None:
         limit = _cfg.SEARCH_DEFAULT_LIMIT
     if mode == "keyword":
@@ -255,6 +266,7 @@ def _run_test_queries() -> None:
 
 def main() -> None:
     """CLI entry point."""
+    import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
     parser = argparse.ArgumentParser(description="Search memory files")
     parser.add_argument("query", nargs="?", default="", help="Search query")
     parser.add_argument(

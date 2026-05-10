@@ -24,6 +24,16 @@ def _codex_profile(key_prefix: str = "fallback", model: str = "gpt-5") -> Runtim
 
 
 def test_resolve_primary_openai_codex_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Clear lane-first env so the legacy provider key gets the routing.
+    # The lane-first refactor (PR1/PR2 2026-04-10) added
+    # SECOND_BRAIN_RUNTIME_LANE which is read via dotenv at config-load
+    # time. If `.env` sets it to ``claude_native`` (e.g. on this repo),
+    # the legacy ``SECOND_BRAIN_RUNTIME_PROVIDER=openai_codex`` setting
+    # alone is overridden because the explicit lane wins in
+    # ``resolve_runtime_selection()``. Clearing both new keys here
+    # restores the pre-lane-first contract that the test asserts.
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.setenv("SECOND_BRAIN_RUNTIME_PROVIDER", "openai_codex")
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_MODEL", raising=False)
     monkeypatch.setattr(
@@ -35,7 +45,7 @@ def test_resolve_primary_openai_codex_profile(monkeypatch: pytest.MonkeyPatch) -
     request = RuntimeRequest(prompt="hi", cwd=".", task_name="safe_text")
     resolved = profiles.resolve_runtime_profiles(request)
 
-    # Codex should be primary when pinned
+    # Codex should be primary when pinned via the legacy provider key.
     assert resolved[0].provider == "openai-codex"
     assert resolved[0].command == "codex"
 
