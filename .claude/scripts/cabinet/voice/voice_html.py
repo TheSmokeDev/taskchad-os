@@ -81,6 +81,7 @@ def get_voice_meeting_html(
     meeting_id: int,
     chat_id: str,
     ws_port: int,
+    roster: list[dict] | None = None,
 ) -> str:
     """Return the HTML page for a single voice cabinet meeting.
 
@@ -92,13 +93,23 @@ def get_voice_meeting_html(
         chat_id: Telegram chat id (for chat-scope binding on send/end).
         ws_port: WebSocket transport port (separate process; matches
             ``CABINET_VOICE_PORT`` env, default 7860).
+        roster: Optional list of ``{id, name, description}`` dicts to
+            render as agent tiles. Resolved from the meeting's
+            ``broadcast_order`` snapshot by the dashboard handler. When
+            ``None`` (pre-Phase-6 meetings with NULL broadcast_order, OR
+            any malformed-snapshot fall-through), ``_build_default_agent_tiles_html``
+            renders the hardcoded 5-stub default for backwards-compat.
+            PRD-8 Phase 6 follow-up 2026-05-10 — closes the UI-vs-routing
+            gap surfaced by the live-test verification: the 5 tile stubs
+            don't match the actual roster, leading to "Research is typing"
+            indicators on personas that never receive turns.
 
     Returns:
         Complete HTML document as a string.
 
     Anti-pattern compliance:
-      * Rule 1 — all params required; no def-time bind to module/config
-        constants (template substitutions happen inside the function body).
+      * Rule 1 — ``roster=None`` sentinel resolved inside
+        ``_build_default_agent_tiles_html`` body (no def-time bind).
       * Rule 3 N/A (no optional-provider SDK touched here; pure string
         template).
     """
@@ -126,9 +137,12 @@ def get_voice_meeting_html(
     js_ws_port = _script_safe_json(ws_port)
 
     # Pre-format the avatars and the inline script to keep the f-string
-    # clean. Five default ClaudeClaw personas; Phase 6 follow-up can wire
-    # this from /api/cabinet/voice/agents.
-    avatars_html = _build_default_agent_tiles_html(safe_token_qs)
+    # clean. Dynamic roster path (PRD-8 Phase 6 follow-up 2026-05-10) —
+    # renders the meeting's actual ``broadcast_order`` snapshot when the
+    # caller resolves it; falls through to the hardcoded ClaudeClaw 5-stub
+    # default when ``roster=None`` (pre-Phase-6 meetings + malformed
+    # snapshots — see ``_build_default_agent_tiles_html`` docstring).
+    avatars_html = _build_default_agent_tiles_html(safe_token_qs, roster)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -723,18 +737,34 @@ window.addEventListener('beforeunload', __cabinetVoiceCleanup);
 </html>"""
 
 
-def _build_default_agent_tiles_html(safe_token_qs: str) -> str:
-    """Build the default agent-card tiles for the sidebar.
+def _build_default_agent_tiles_html(
+    safe_token_qs: str,
+    roster: list[dict] | None = None,
+) -> str:
+    """Build the agent-card tiles for the sidebar.
 
-    Port of warroom-html.ts:706-725 stage avatars. Five default ClaudeClaw
-    personas — Phase 6 follow-up can render dynamically from the cabinet
-    roster API.
+    Port of warroom-html.ts:706-725 stage avatars. When ``roster`` is
+    provided, renders one tile per dict (``{id, name, description}``) in
+    snapshot order. When ``roster`` is None (caller passed no snapshot,
+    or the meeting's ``broadcast_order`` was NULL/malformed), falls back
+    to the five hardcoded ClaudeClaw default personas — preserves the
+    pre-2026-05-10 behavior for pre-Phase-6 meetings.
 
     PRD-8 Phase 6 v2 R2 fix-pass 2026-05-10 (B1-R2): the ``safe_token_qs``
     argument is the URL-encoded-then-HTML-escaped token. Avatar URLs use it
     in ``?token=…`` query strings so tokens containing ``&`` / ``=`` /
     URL-reserved chars don't split browser-parsed query params and fail
     the middleware token check.
+
+    PRD-8 Phase 6 follow-up 2026-05-10 — dynamic roster path closes the
+    UI-vs-routing gap surfaced by the live-test verification (5 tile
+    stubs vs Main-only actual routing). When the caller passes the
+    meeting's resolved roster, the tiles match the agents that will
+    actually receive turns.
+
+    Rule 1: ``roster=None`` sentinel resolved here in the body (not at
+    def time). Rule 2: roster comes from the caller's read of the
+    physical ``broadcast_order`` snapshot, not a sidecar cache.
     """
     # PRD-8 Phase 6 v2 fix-pass 2026-05-10 (B2 fix) — Q4 lock: emit the
     # canonical internal id ``"default"`` as the wire string at the HTML
@@ -745,15 +775,52 @@ def _build_default_agent_tiles_html(safe_token_qs: str) -> str:
     # through ``personas.load_persona_config("default")`` without a
     # boundary-translation hop. The display name stays "Main" — only the
     # wire id is canonicalized.
-    agents = [
+    DEFAULT_AGENTS = [
         ("default", "Main", "General ops & triage"),
         ("research", "Research", "Web research & competitive intel"),
         ("comms", "Comms", "Email, Slack, customer comms"),
         ("content", "Content", "Writing, scripts, creative direction"),
         ("ops", "Ops", "Calendar, automations, scheduled tasks"),
     ]
+
+    if roster:
+        agents: list[tuple[str, str, str]] = []
+        for entry in roster:
+            if not isinstance(entry, dict):
+                continue
+            agent_id = entry.get("id")
+            if not isinstance(agent_id, str) or not agent_id:
+                continue
+            name = entry.get("name") if isinstance(entry.get("name"), str) and entry.get("name") else agent_id
+            description = entry.get("description") if isinstance(entry.get("description"), str) else ""
+            agents.append((agent_id, name, description))
+        # Defensive: if every roster entry was malformed, fall through to
+        # the hardcoded default rather than rendering zero tiles.
+        if not agents:
+            agents = list(DEFAULT_AGENTS)
+    else:
+        agents = list(DEFAULT_AGENTS)
+    # PRD-8 Phase 6 follow-up 2026-05-10 — per
+    # ``feedback_security_test_attack_payload.md``, every dynamic value
+    # embedded into HTML/attribute/URL context MUST be escaped at the
+    # source. The dynamic roster path means ``agent_id`` + ``name`` +
+    # ``role`` can come from user-configured profile YAML, so we cannot
+    # trust them to be HTML-/URL-safe. Hardcoded DEFAULT_AGENTS values
+    # are also routed through the same escaping (no special-case branch)
+    # so the escaping invariant holds for every code path.
     parts: list[str] = []
     for agent_id, name, role in agents:
+        # agent_id appears in:
+        #   * id="agent-{...}" + id="status-{...}" — HTML attribute (quote-context)
+        #   * url('/api/cabinet/voice/avatars/{...}.png?...') — URL path segment
+        # URL-encode for the path segment, then html-escape for the
+        # attribute wrapper (defense-in-depth, same pattern as
+        # safe_token_qs at line 112).
+        safe_id_url = html.escape(urllib.parse.quote(agent_id, safe=""), quote=True)
+        safe_id_attr = html.escape(agent_id, quote=True)
+        # name + role appear in <div> text-content (HTML body context).
+        safe_name = html.escape(name, quote=True)
+        safe_role = html.escape(role, quote=True)
         # Note: the avatar URL points to the Phase 6 cabinet voice avatar
         # endpoint. Per Translation Boundary Audit (R1 v2 B6 fix), this is
         # the renamed Homie deviation — upstream's /warroom-avatar/:id was
@@ -761,13 +828,13 @@ def _build_default_agent_tiles_html(safe_token_qs: str) -> str:
         # /api/cabinet/voice/avatars/{id}.png. The endpoint enforces
         # tokenized access via the dashboard auth middleware.
         parts.append(
-            f'<div class="agent-card" id="agent-{agent_id}">'
-            f'<div class="agent-avatar" style="background-image:url(&apos;/api/cabinet/voice/avatars/{agent_id}.png?token={safe_token_qs}&apos;)"></div>'
+            f'<div class="agent-card" id="agent-{safe_id_attr}">'
+            f'<div class="agent-avatar" style="background-image:url(&apos;/api/cabinet/voice/avatars/{safe_id_url}.png?token={safe_token_qs}&apos;)"></div>'
             f'<div class="agent-info">'
-            f'<div class="agent-name">{name}</div>'
-            f'<div class="agent-role">{role}</div>'
+            f'<div class="agent-name">{safe_name}</div>'
+            f'<div class="agent-role">{safe_role}</div>'
             f"</div>"
-            f'<div class="agent-indicator" id="status-{agent_id}"></div>'
+            f'<div class="agent-indicator" id="status-{safe_id_attr}"></div>'
             f"</div>"
         )
     return "\n".join(parts)

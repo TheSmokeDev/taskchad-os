@@ -109,7 +109,7 @@ async def test_interim_dropped(monkeypatch):
     # pipecat is not installed; for tests we exercise the router's own logic.
 
     # Build an interim frame stub.
-    interim = voice_router.InterimTranscriptionFrame()
+    interim = voice_router.InterimTranscriptionFrame(text="hello", user_id="", timestamp="")
     await router.process_frame(interim, voice_router.FrameDirection.DOWNSTREAM)
 
     # Interim must be silently dropped — NO push_frame call.
@@ -127,9 +127,12 @@ async def test_broadcast_trigger_emits_route_frame(monkeypatch):
 
     monkeypatch.setattr(router, "push_frame", fake_push)
 
-    # Build a final TranscriptionFrame with broadcast text.
-    frame = voice_router.TranscriptionFrame()
-    frame.text = "everyone, status update please"
+    # Build a final TranscriptionFrame with broadcast text. Pipecat
+    # 0.0.108 requires text/user_id/timestamp as positional kwargs;
+    # the voice_router stub (used when pipecat is absent) is a no-arg
+    # pass-body class. Pass kwargs explicitly so the test works under
+    # both — pipecat-installed and pipecat-missing.
+    frame = voice_router.TranscriptionFrame(text="everyone, status update please", user_id="", timestamp="")
     await router.process_frame(frame, voice_router.FrameDirection.DOWNSTREAM)
 
     # Should have pushed exactly one AgentRouteFrame with agent_id='all'.
@@ -151,8 +154,7 @@ async def test_name_prefix_emits_single_route_frame(monkeypatch):
 
     monkeypatch.setattr(router, "push_frame", fake_push)
 
-    frame = voice_router.TranscriptionFrame()
-    frame.text = "research, summarize the latest threat report"
+    frame = voice_router.TranscriptionFrame(text="research, summarize the latest threat report", user_id="", timestamp="")
     await router.process_frame(frame, voice_router.FrameDirection.DOWNSTREAM)
 
     assert len(pushed) == 1
@@ -176,8 +178,7 @@ async def test_default_main_emits_single_route_frame(monkeypatch):
     # Stub _get_pinned_agent to return None (no pin file).
     monkeypatch.setattr(router, "_get_pinned_agent", lambda: None)
 
-    frame = voice_router.TranscriptionFrame()
-    frame.text = "what's the weather"
+    frame = voice_router.TranscriptionFrame(text="what's the weather", user_id="", timestamp="")
     await router.process_frame(frame, voice_router.FrameDirection.DOWNSTREAM)
 
     assert len(pushed) == 1
@@ -198,8 +199,7 @@ async def test_pinned_routes_to_pinned_when_no_other_match(monkeypatch):
     monkeypatch.setattr(router, "push_frame", fake_push)
     monkeypatch.setattr(router, "_get_pinned_agent", lambda: "comms")
 
-    frame = voice_router.TranscriptionFrame()
-    frame.text = "what's the weather"
+    frame = voice_router.TranscriptionFrame(text="what's the weather", user_id="", timestamp="")
     await router.process_frame(frame, voice_router.FrameDirection.DOWNSTREAM)
 
     assert len(pushed) == 1
@@ -220,8 +220,7 @@ async def test_broadcast_beats_pinned(monkeypatch):
     monkeypatch.setattr(router, "push_frame", fake_push)
     monkeypatch.setattr(router, "_get_pinned_agent", lambda: "comms")
 
-    frame = voice_router.TranscriptionFrame()
-    frame.text = "team, what's our standup"
+    frame = voice_router.TranscriptionFrame(text="team, what's our standup", user_id="", timestamp="")
     await router.process_frame(frame, voice_router.FrameDirection.DOWNSTREAM)
 
     f, _ = pushed[0]
@@ -241,8 +240,7 @@ async def test_name_prefix_beats_pinned(monkeypatch):
     monkeypatch.setattr(router, "push_frame", fake_push)
     monkeypatch.setattr(router, "_get_pinned_agent", lambda: "comms")
 
-    frame = voice_router.TranscriptionFrame()
-    frame.text = "hey research, look at this"
+    frame = voice_router.TranscriptionFrame(text="hey research, look at this", user_id="", timestamp="")
     await router.process_frame(frame, voice_router.FrameDirection.DOWNSTREAM)
 
     f, _ = pushed[0]

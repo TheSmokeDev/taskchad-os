@@ -525,3 +525,91 @@ def test_avatar_fallback_chain_includes_default_png(
         "Unknown-persona avatar request must serve default.png bytes "
         "(Q4 canonical fallback, step 3 in lookup precedence)."
     )
+
+
+# ─── Phase 6 follow-up: dynamic UI tile roster resolution ────────────────
+
+
+def test_voice_ui_renders_tiles_from_broadcast_order_snapshot(
+    dash_client: TestClient,
+) -> None:
+    """PRD-8 Phase 6 follow-up 2026-05-10 — the voice UI page must render
+    tiles from the meeting's ``broadcast_order`` snapshot (NOT the
+    hardcoded ClaudeClaw 5-stub default).
+
+    Closes the UI-vs-routing gap surfaced by the live-test verification:
+    previously the page showed Research/Comms/Content/Ops tiles even
+    when only Main was registered, leading to 'Research is typing'
+    indicators on personas that never received turns.
+    """
+    meeting_id = _create_meeting(dash_client, "tg-tiles")
+    r = dash_client.get(
+        "/api/cabinet/voice/ui",
+        params={"token": "", "meetingId": meeting_id, "chatId": "tg-tiles"},
+    )
+    assert r.status_code == 200, r.text
+    html = r.text
+    # Inspect what the meeting's broadcast_order actually contains.
+    db_path = config.DASHBOARD_DB_PATH
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT broadcast_order FROM cabinet_meetings WHERE id = ?",
+            (meeting_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    broadcast_ids = json.loads(row[0]) if row[0] else []
+    # Every id in broadcast_order should appear as a tile.
+    for pid in broadcast_ids:
+        assert f'id="agent-{pid}"' in html, (
+            f"Tile for persona {pid!r} (from broadcast_order snapshot) "
+            f"missing from voice UI HTML."
+        )
+    # When broadcast_order has fewer than 5 personas (the hardcoded
+    # default count), the stub personas NOT in the snapshot must NOT
+    # appear — otherwise we're back to the UI-vs-routing gap.
+    if len(broadcast_ids) < 5:
+        stub_ids = {"research", "comms", "content", "ops"}
+        snapshot_ids = set(broadcast_ids)
+        for stub in stub_ids - snapshot_ids:
+            assert f'id="agent-{stub}"' not in html, (
+                f"Stub tile {stub!r} rendered despite NOT being in "
+                f"broadcast_order snapshot {broadcast_ids!r} — UI-vs-routing "
+                f"gap reopened."
+            )
+
+
+def test_voice_ui_falls_back_to_default_when_broadcast_order_null(
+    dash_client: TestClient, tmp_path: Path
+) -> None:
+    """Backwards-compat: meetings created BEFORE the Phase 6
+    ``broadcast_order`` migration land had NULL in the column. The voice
+    UI must still render with the hardcoded 5-stub default for those
+    pre-migration meetings. Simulated by manually NULL-ing the column
+    on a freshly-created meeting."""
+    meeting_id = _create_meeting(dash_client, "tg-null-bo")
+    # Force broadcast_order to NULL to simulate a pre-Phase-6 meeting.
+    db_path = config.DASHBOARD_DB_PATH
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "UPDATE cabinet_meetings SET broadcast_order = NULL WHERE id = ?",
+            (meeting_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    r = dash_client.get(
+        "/api/cabinet/voice/ui",
+        params={"token": "", "meetingId": meeting_id, "chatId": "tg-null-bo"},
+    )
+    assert r.status_code == 200, r.text
+    html = r.text
+    # Hardcoded 5-stub default must render verbatim for pre-Phase-6 meetings.
+    for agent_id in ("default", "research", "comms", "content", "ops"):
+        assert f'id="agent-{agent_id}"' in html, (
+            f"Hardcoded stub {agent_id!r} missing from fallback render "
+            f"when broadcast_order=NULL (backwards-compat for pre-Phase-6 meetings)."
+        )

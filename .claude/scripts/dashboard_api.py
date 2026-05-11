@@ -2859,13 +2859,89 @@ async def cabinet_voice_ui(
     if meeting.get("ended_at") is not None:
         raise HTTPException(status_code=410, detail="meeting_ended")
 
+    # PRD-8 Phase 6 follow-up 2026-05-10 — dynamic UI tiles. Resolve the
+    # tile roster from the meeting's ``broadcast_order`` JSON snapshot
+    # (written at meeting-create time, see ``cabinet_new``) so the tiles
+    # match the agents that will actually receive turns. Falls back to
+    # ``None`` (→ voice_html's hardcoded 5-stub default) for pre-Phase-6
+    # meetings where ``broadcast_order`` is NULL.
+    roster = _cabinet_voice_resolve_roster(meetingId)
+
     body = get_voice_meeting_html(
         token=token,
         meeting_id=meetingId,
         chat_id=chatId,
         ws_port=voice_port(),
+        roster=roster,
     )
     return HTMLResponse(content=body, status_code=200)
+
+
+def _cabinet_voice_resolve_roster(meeting_id: int) -> list[dict] | None:
+    """Resolve the voice UI's tile roster from the meeting's broadcast_order.
+
+    PRD-8 Phase 6 follow-up 2026-05-10 — close the UI-vs-routing gap.
+    Returns a list of ``{id, name, description}`` dicts matching the
+    meeting's ``broadcast_order`` snapshot, preserving snapshot order.
+
+    For each broadcast_order id, looks up the live roster dict (built
+    by ``_cabinet_roster_dicts``); if a persona was deleted post-meeting-
+    create, falls back to a stub ``{id, name: id-titlecased, description: ""}``
+    so the tile still renders.
+
+    Returns ``None`` when ``broadcast_order`` is NULL/empty/malformed.
+    Caller falls through to ``voice_html``'s hardcoded 5-stub default for
+    pre-Phase-6 meetings.
+
+    Rule 2 — physical-state-first: reads ``broadcast_order`` directly from
+    the meeting row (snapshot at create time) via a fresh query, not a
+    meta/version row. The standard ``_cabinet_get_meeting`` query does NOT
+    select ``broadcast_order`` (R6 NB1 query shape frozen), so this helper
+    does its own narrow read.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT broadcast_order FROM cabinet_meetings WHERE id = ?",
+            (meeting_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Stale DB pre-dating the Phase 6 ``broadcast_order`` column —
+        # fall through to the hardcoded voice_html default. Same Rule 2
+        # graceful-degrade pattern voice_server._load_broadcast_order_from_db
+        # uses.
+        return None
+    if row is None:
+        return None
+    raw = row[0] if not isinstance(row, dict) else row.get("broadcast_order")
+    if not raw:
+        return None
+    try:
+        ids = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(ids, list) or not ids:
+        return None
+
+    live_lookup = {a["id"]: a for a in _cabinet_roster_dicts() if isinstance(a, dict) and a.get("id")}
+
+    resolved: list[dict] = []
+    for pid in ids:
+        if not isinstance(pid, str) or not pid:
+            continue
+        live = live_lookup.get(pid)
+        if live is not None:
+            resolved.append(live)
+        else:
+            # Persona was deleted post-meeting-create — stub the tile so
+            # operators see the historical roster shape even if the persona
+            # is gone. ``description`` is intentionally empty (don't fabricate).
+            resolved.append({
+                "id": pid,
+                "name": pid.replace("_", " ").replace("-", " ").title() or pid,
+                "description": "",
+            })
+    return resolved if resolved else None
 
 
 @router.get("/api/cabinet/voice/client.bundle.js")

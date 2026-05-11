@@ -216,3 +216,110 @@ def test_token_query_param_threaded_to_bundle():
     # Bundle URL should include token query param.
     pattern = re.compile(r"/api/cabinet/voice/client\.bundle\.js\?token=secret_token_xyz")
     assert pattern.search(html) is not None
+
+
+# ─── Dynamic-roster tile rendering (PRD-8 Phase 6 follow-up 2026-05-10) ──
+
+
+def test_dynamic_roster_renders_only_provided_agents():
+    """When ``roster`` is provided, ONLY those tiles render (in order).
+
+    Closes the UI-vs-routing gap surfaced by Phase 6 live-test verification:
+    the hardcoded 5-tile stub showed Research/Comms/Content/Ops even when
+    only Main was actually registered, leading to 'Research is typing'
+    indicators on personas that never received turns.
+    """
+    roster = [
+        {"id": "default", "name": "Main", "description": "General ops and triage"},
+        {"id": "seo_lead", "name": "SEO Lead", "description": "Tactical SEO + content angles"},
+    ]
+    html = _render_default(roster=roster)
+    # Both roster tiles present.
+    assert 'id="agent-default"' in html
+    assert 'id="agent-seo_lead"' in html
+    assert ">Main<" in html
+    assert ">SEO Lead<" in html
+    # Hardcoded stubs that are NOT in the roster must NOT render.
+    assert 'id="agent-research"' not in html
+    assert 'id="agent-comms"' not in html
+    assert 'id="agent-content"' not in html
+    assert 'id="agent-ops"' not in html
+
+
+def test_roster_none_falls_through_to_hardcoded_default():
+    """Backwards-compat: when ``roster`` is None (pre-Phase-6 meetings with
+    NULL broadcast_order, OR any malformed-snapshot fall-through), the
+    5-stub hardcoded default renders verbatim. Preserves the
+    pre-2026-05-10 behavior for meetings created before the dynamic-roster
+    wiring landed."""
+    html = _render_default(roster=None)
+    for agent_id in ("default", "research", "comms", "content", "ops"):
+        assert f'id="agent-{agent_id}"' in html
+    # Display names from the hardcoded default.
+    for name in ("Main", "Research", "Comms", "Content", "Ops"):
+        assert f">{name}<" in html
+
+
+def test_roster_empty_list_falls_through_to_hardcoded_default():
+    """Defensive: a malformed empty roster list also falls through to the
+    hardcoded default (rather than rendering zero tiles)."""
+    html = _render_default(roster=[])
+    # 5-stub default present.
+    assert 'id="agent-default"' in html
+    assert 'id="agent-ops"' in html
+
+
+def test_roster_with_malformed_entries_renders_only_well_formed():
+    """Malformed entries (non-dict, missing id, empty id) are skipped; if
+    every entry is bad, fall through to hardcoded default."""
+    roster = [
+        {"id": "good_one", "name": "Good", "description": "Real entry"},
+        "not_a_dict",  # skipped
+        {"name": "no id"},  # skipped (no id)
+        {"id": "", "name": "empty id"},  # skipped (empty id)
+        {"id": "another_good", "name": "Another", "description": ""},
+    ]
+    html = _render_default(roster=roster)
+    assert 'id="agent-good_one"' in html
+    assert 'id="agent-another_good"' in html
+    # The bad ones must not appear.
+    assert 'id="agent-no_id"' not in html
+
+
+def test_roster_falls_back_to_id_when_name_missing():
+    """When a roster entry has no ``name`` (e.g. persona was deleted
+    post-meeting-create and the dashboard handler stubbed it), the tile
+    renders with the id as the display name rather than crashing."""
+    roster = [{"id": "deleted_persona"}]
+    html = _render_default(roster=roster)
+    assert 'id="agent-deleted_persona"' in html
+    assert ">deleted_persona<" in html  # id-as-name fallback
+
+
+def test_roster_xss_payload_escaped_in_attributes_and_body():
+    """Per ``feedback_security_test_attack_payload.md`` — when ``roster``
+    entries come from user-configured profile YAML, every dynamic value
+    embedded into HTML must be escaped at the source.
+
+    Hostile payload covers all three contexts:
+      * agent_id in attribute (``id="agent-{...}"``)
+      * agent_id in URL path (``/avatars/{...}.png``)
+      * name + description in HTML body (``<div>{...}</div>``)
+    """
+    roster = [{
+        "id": "x\"><script>alert(1)</script>",
+        "name": "<script>alert('name')</script>",
+        "description": "<img src=x onerror=alert('desc')>",
+    }]
+    html = _render_default(roster=roster)
+    # NEGATIVE: the raw attack payloads must NOT survive into the rendered
+    # output anywhere (script-tag injection, attribute boundary break, etc).
+    assert "<script>alert(1)</script>" not in html
+    assert "<script>alert('name')</script>" not in html
+    assert "<img src=x onerror=alert('desc')>" not in html
+    # POSITIVE: escaped forms confirm we ran the values through the
+    # escape pipeline (not just dropped them).
+    assert "&lt;script&gt;" in html or "%3Cscript%3E" in html, (
+        "Hostile name/description must be HTML-escaped to &lt;script&gt; "
+        "(html.escape) or URL-encoded to %3Cscript%3E (urllib.parse.quote)."
+    )
