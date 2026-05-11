@@ -73,6 +73,36 @@
 * WS reconnect/backoff in `voice_html.py:583-585` — single connection, no reconnect loop. Explicitly deferred to Phase 6+ enhancement.
 * **Phase 6b/6c/6d roadmap (per PRD-8 §15):** 6b = SmallWebRTC + coturn cross-NAT; 6c = self-hosted LiveKit SFU multi-party; 6d = external participant adapter.
 
+**Phase 6 live-test verification (2026-05-10 evening — agent-browser + fake-mic flags):**
+
+| Layer | Status | Evidence |
+|-------|--------|----------|
+| Pipecat install on Windows | ✅ | `uv add 'pipecat-ai[websocket,silero]==0.0.108'` — 14 packages, onnxruntime for silero VAD |
+| Voice subprocess binds `127.0.0.1:7860` | ✅ | netstat shows LISTENING |
+| HTML page + 429KB Pipecat bundle load in browser | ✅ | `window.PipecatWarRoom.PipecatClient` constructor present |
+| Q4 canonical "default" lock (R2 B2 fix) live-verified | ✅ | DOM agent IDs: `agent-default` / `agent-research` / `agent-comms` / `agent-content` / `agent-ops` (NOT upstream's `agent-main`) |
+| Mic-permission gate handled | ✅ | Got past it via `--use-fake-ui-for-media-stream` + `--use-fake-device-for-media-stream` |
+| **WebSocket handshake** | ✅ | Console capture: `[Pipecat Client] Initialized 1.7.0` → `wss connection opened to ws://127.0.0.1:7860?token=&meetingId=1&chatId=demo-local` → `[Cabinet] Connected` → `[RTVI Message] bot-ready (id: 01c0a558)` → `[Pipecat Client] Bot is ready. Version: 1.2.0`. Client v1.7.0 ↔ server v1.2.0 protocol-compatible. |
+| **Brain chain via `/api/cabinet/send` + SSE** | ✅ | POST returns `{ok: true, queued: true}`; SSE emits 7 events in correct order: `meeting_state` → `turn_start` → `status_update` ("Starting Main…") → `router_decision` (`{primary: "default", reason: "greeting → default"}`) → `agent_selected` → `agent_typing` → `error` → `turn_complete`. Heuristic router fires; persona selection works; error path graceful (`recoverable: true`). |
+| Roster reality vs UI | ⚠️ | `meeting_state` reports 1 agent only (`default/Main`). The 5 tiles on the page are HARDCODED stubs at `voice_html.py:691-697`. owner's install has 1 profile (`sales` at `C:\Users\YourUser\.homie\profiles\sales\config.yaml`) with only `ports:` block, no `cabinet:` section. |
+| Claude SDK LLM subprocess | ⚠️ | When orchestration API runs FROM WITHIN a Claude Code session, `cabinet_persona_turn` task on `claude_native` lane fails with `Command failed with exit code 1`. Likely recursive-spawn collision (parent Claude Code owns the Claude Agent SDK credential lane). Phase 6 plumbing is correct; this is a runtime collision specific to running orchestration API inside Claude Code's process tree. Should work when launched from a fresh terminal. |
+| STT pipeline (silero VAD → ASR) | ❌ | Not tested. The synthetic 440Hz tone from `--use-fake-device-for-media-stream` doesn't trigger as speech. Requires real mic input OR a synthetic-speech audio harness. |
+| Per-persona voice cloning | ❌ | Not tested. No `ELEVENLABS_API_KEY` set (`.env` has `VOICE_TTS_ENGINE=edge` only). TTS would fall through to Edge TTS (free, generic). |
+| Multi-persona broadcast routing | ❌ | Not tested. Only Main is registered. Router has no choice. |
+| Full mic-in → speaker-out round-trip | ❌ | owner physically using mic in real Chrome required, OR a synthetic-speech harness. |
+
+**Gap-list to make Phase 6 actually-usable for owner's daily war room:**
+
+1. **Add `cabinet:` blocks to multiple `<profile>/config.yaml` files** — need ≥3 cabinet-eligible personas for the 5-tile UI to be honest. Currently only `sales` profile exists and has no cabinet section.
+2. **Set `ELEVENLABS_API_KEY` + per-persona `voice_id` in cabinet:** sections — for voice cloning (currently falls through to Edge TTS).
+3. **Run orchestration API from a fresh terminal** (not inside Claude Code) to avoid Claude SDK recursive-spawn collision.
+4. **Make `voice_html.py:691-697` pull tiles from `broadcast_order` snapshot** instead of hardcoded list. Phase 6 follow-up — already documented in the file's own docstring at line 678-680.
+5. **Validate full mic round-trip in real Chrome** — owner speaking, hearing TTS response back, verifying the agent that responded is the routed persona.
+
+**Test infrastructure used (handy for next session):**
+- agent-browser Mode A with `--args "--use-fake-ui-for-media-stream,--use-fake-device-for-media-stream,--autoplay-policy=no-user-gesture-required"` — auto-accepts mic permission + provides synthetic 440Hz audio source. Profile dir: `~/.agent-browser/profiles/cabinet-voice`.
+- Observability available but not used in this verification: Langfuse (`http://localhost:3000`) for trace nesting + Sentry for error capture. Useful when retesting the LLM subprocess path outside Claude Code, since the runtime emits `chat_message` root spans with `recall` / `region_assembly` / `run_with_fallback` children that would surface the exit-code-1 root cause.
+
 **Strategic decision pending: hermes-desktop fork** — `https://github.com/fathah/hermes-desktop` (1666 stars, MIT, TypeScript, native Electron desktop app for Hermes Agent). Validated parallel to The Homie (~80% feature parity in 22 slash commands + 16 messaging gateways + 14 toolsets + memory/persona/scheduled-tasks/session-FTS5/multi-provider). Missing surface for The Homie = native desktop wrapper. Decision options: (A) fork-and-adapt to point at The Homie's `:4322`, (B) use as architectural reference + build our own, (C) stay browser/CLI-only. Not started — deferred to next session.
 
 ---

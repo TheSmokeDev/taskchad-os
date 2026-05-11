@@ -74,6 +74,7 @@ dependencies = [
     # FastEmbed/etc is NOT relied on per Rule 2 / explicit-contract
     # discipline.
     "Pillow>=10.0.0",
+    "pipecat-ai[silero,websocket]==0.0.108",
 ]
 
 [project.scripts]
