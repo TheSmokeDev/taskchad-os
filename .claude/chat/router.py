@@ -26,6 +26,8 @@ _VAULT_INGEST_URL_RE = re.compile(
     r"^/vault-ingest\s+(https?://\S+)\s*$", re.IGNORECASE
 )
 
+ENGINE_TIMEOUT_SECONDS = 90
+
 
 class ChatRouter:
     """Routes messages between platform adapters and the conversation engine.
@@ -391,7 +393,9 @@ class ChatRouter:
         final_is_error = False
         final_footer: str | None = None
         final_components: list[Any] = []
-        try:
+
+        async def _run_engine() -> None:
+            nonlocal final_text, final_is_error, final_footer, final_components
             async for outgoing in self.engine.handle_message(incoming, progress=progress):
                 final_text = outgoing.text
                 final_is_error = getattr(outgoing, "is_error", False)
@@ -402,6 +406,16 @@ class ChatRouter:
                 yielded_components = getattr(outgoing, "components", None) or []
                 if yielded_components:
                     final_components = list(yielded_components)
+
+        try:
+            await asyncio.wait_for(_run_engine(), timeout=ENGINE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            print(f"[{datetime.now()}] Engine timed out after {ENGINE_TIMEOUT_SECONDS}s")
+            final_text = (
+                f"That took too long (>{ENGINE_TIMEOUT_SECONDS}s). "
+                "Try a more specific question or break it into smaller queries."
+            )
+            final_is_error = True
         except Exception as e:
             print(f"[{datetime.now()}] Engine error: {e}")
             final_text = f"Sorry, something went wrong: {e}"
