@@ -66,6 +66,7 @@ function translatePersonaFieldsOutbound<T extends Record<string, unknown>>(obj: 
     'participantId',
     'intervenerId',
     'primary',
+    'targetAgentId',
   ];
   const out: Record<string, unknown> = { ...obj };
   for (const f of fields) {
@@ -81,6 +82,12 @@ function translatePersonaFieldsOutbound<T extends Record<string, unknown>>(obj: 
   }
   if ('personas' in out) {
     out.personas = translatePersonaArray(out.personas, outboundPersonaId);
+  }
+  if ('targetAgentIds' in out) {
+    out.targetAgentIds = translatePersonaArray(out.targetAgentIds, outboundPersonaId);
+  }
+  if ('broadcastOrder' in out) {
+    out.broadcastOrder = translatePersonaArray(out.broadcastOrder, outboundPersonaId);
   }
   // agents[].id rewrite for meeting_state / details / list / transcripts.
   if (Array.isArray(out.agents)) {
@@ -125,6 +132,7 @@ function translatePersonaFieldsInbound<T extends Record<string, unknown>>(obj: T
     'pinnedPersona',
     'participantId',
     'intervenerId',
+    'targetAgentId',
   ];
   const out: Record<string, unknown> = { ...obj };
   for (const f of fields) {
@@ -134,6 +142,9 @@ function translatePersonaFieldsInbound<T extends Record<string, unknown>>(obj: T
   }
   if ('personas' in out) {
     out.personas = translatePersonaArray(out.personas, inboundPersonaId);
+  }
+  if ('targetAgentIds' in out) {
+    out.targetAgentIds = translatePersonaArray(out.targetAgentIds, inboundPersonaId);
   }
   return out as T;
 }
@@ -173,6 +184,20 @@ cabinetRoute.post('/api/cabinet/new', async (c) => {
   return c.body(upstream.body, upstream.status as 200);
 });
 
+cabinetRoute.post('/api/cabinet/open', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const upstream = await authedFetch('/api/cabinet/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(translatePersonaFieldsInbound(body)),
+  });
+  const parsed = upstream.json();
+  if (parsed && typeof parsed === 'object') {
+    return c.json(translatePersonaFieldsOutbound(parsed as Record<string, unknown>), upstream.status as 200);
+  }
+  return c.body(upstream.body, upstream.status as 200);
+});
+
 cabinetRoute.post('/api/cabinet/warmup', async (c) => {
   const upstream = await authedFetch('/api/cabinet/warmup', { method: 'POST' });
   return c.body(upstream.body, upstream.status as 200, {
@@ -183,6 +208,44 @@ cabinetRoute.post('/api/cabinet/warmup', async (c) => {
 cabinetRoute.get('/api/cabinet/details', async (c) => {
   const url = new URL(c.req.url);
   const upstream = await authedFetch(`/api/cabinet/details${url.search}`);
+  const parsed = upstream.json();
+  if (parsed && typeof parsed === 'object') {
+    return c.json(translatePersonaFieldsOutbound(parsed as Record<string, unknown>), upstream.status as 200);
+  }
+  return c.body(upstream.body, upstream.status as 200);
+});
+
+cabinetRoute.get('/api/cabinet/participants/available', async (c) => {
+  const url = new URL(c.req.url);
+  const upstream = await authedFetch(`/api/cabinet/participants/available${url.search}`);
+  const parsed = upstream.json();
+  if (parsed && typeof parsed === 'object') {
+    return c.json(translatePersonaFieldsOutbound(parsed as Record<string, unknown>), upstream.status as 200);
+  }
+  return c.body(upstream.body, upstream.status as 200);
+});
+
+cabinetRoute.post('/api/cabinet/participants/add', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const upstream = await authedFetch('/api/cabinet/participants/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(translatePersonaFieldsInbound(body)),
+  });
+  const parsed = upstream.json();
+  if (parsed && typeof parsed === 'object') {
+    return c.json(translatePersonaFieldsOutbound(parsed as Record<string, unknown>), upstream.status as 200);
+  }
+  return c.body(upstream.body, upstream.status as 200);
+});
+
+cabinetRoute.post('/api/cabinet/participants/remove', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const upstream = await authedFetch('/api/cabinet/participants/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(translatePersonaFieldsInbound(body)),
+  });
   const parsed = upstream.json();
   if (parsed && typeof parsed === 'object') {
     return c.json(translatePersonaFieldsOutbound(parsed as Record<string, unknown>), upstream.status as 200);

@@ -104,6 +104,23 @@ def _bridge_timeout_seconds() -> float:
 BROADCAST_ORDER: list[str] = ["main", "research", "comms", "content", "ops"]
 
 
+# WS3 — Main default Edge voice. The Main persona (operator-mirror /
+# chairman) lives at the default install and has no profile config.yaml to
+# carry a ``cabinet.voice_id``. Before WS3, when the auto-router picked
+# Main for low-information inputs, ``_resolve_persona_voice`` returned
+# ``(None, None)``, no ``TTSUpdateSettingsFrame`` was emitted, HomieTTS
+# kept ``voice_overrides=None``, and ``voice.synthesize()`` fell through to
+# the global TTS cascade default (OpenAI). With OpenAI quota exhausted,
+# the cascade then bounced through Kokoro and produced malformed audio
+# frames that compounded the WS2 ``OutputAudioRawFrame`` cascade.
+# en-US-BrianMultilingualNeural picked because:
+#   * warm / conversational / authoritative — matches the chairman vibe.
+#   * NOT used by any of the 7 named personas, so no voice collision.
+#   * Edge TTS (free, no API key, no quota).
+_MAIN_DEFAULT_VOICE_ID: str = "en-US-BrianMultilingualNeural"
+_MAIN_DEFAULT_VOICE_PROVIDER: str = "edge"
+
+
 # ── HomieAgentBridge — port of warroom/agent_bridge.py:37-94 ──────────────
 
 
@@ -143,6 +160,7 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
         # Voice-switch guard — emit TTSUpdateSettingsFrame ONLY when voice
         # actually changes (verbatim from warroom/agent_bridge.py:88).
         self._current_voice: Optional[str] = None
+        self._current_tts_settings: tuple[str, str] | None = None
         # Per-persona voice config cache. Resolved per turn from
         # <profile>/config.yaml.cabinet.voice_id + voice_provider.
         self._voice_config_cache: dict[str, tuple[str | None, str | None]] = {}
@@ -168,7 +186,8 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
     async def _handle_single(self, agent_id: str, message: str) -> None:
         """Route a message to one agent and emit its response."""
         # Match upstream's "if not in roster, fall to default" guard.
-        if agent_id not in AGENT_NAMES:
+        known_agents = set(self._broadcast_order) | AGENT_NAMES | {"main", "default"}
+        if agent_id not in known_agents:
             agent_id = "main"
 
         response = await self._call_agent(agent_id, message)
@@ -193,18 +212,35 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
         Verbatim port — the ``if voice_id != self._current_voice`` guard is
         load-bearing for the voice-switch buffer behavior. ``TTSUpdateSettingsFrame``
         carries the per-persona voice override; the downstream HomieTTS reads
-        it via the Pipecat frame protocol.
+        it via the Pipecat frame protocol. Homie layers provider/voice atomicity
+        on top so downstream TTS never receives only one side of the setting.
         """
         voice_id, voice_provider = self._resolve_persona_voice(agent_id)
 
-        # Only send a voice-switch frame if we have a voice AND it actually changed.
-        # This is the load-bearing guard preserved verbatim from upstream.
-        if voice_id and voice_id != self._current_voice:
-            settings: dict[str, Any] = {"voice": voice_id}
-            if voice_provider:
-                settings["provider"] = voice_provider
-            await self.push_frame(TTSUpdateSettingsFrame(settings=settings))
-            self._current_voice = voice_id
+        # Only send a voice-switch frame if we have a full provider/voice pair
+        # AND it actually changed. This preserves the load-bearing upstream
+        # change guard while making the control frame atomic.
+        if voice_id and voice_provider:
+            tts_settings = (voice_provider, voice_id)
+            if tts_settings != self._current_tts_settings:
+                settings: dict[str, Any] = {
+                    "voice": voice_id,
+                    "provider": voice_provider,
+                }
+                logger.info(
+                    "tts_settings provider=%s voice=%s",
+                    _redact(voice_provider),
+                    _redact(voice_id),
+                )
+                await self.push_frame(TTSUpdateSettingsFrame(settings=settings))
+                self._current_tts_settings = tts_settings
+                self._current_voice = voice_id
+        elif voice_id or voice_provider:
+            logger.warning(
+                "tts_settings rejected provider=%s voice=%s",
+                _redact(str(voice_provider)),
+                _redact(str(voice_id)),
+            )
 
         await self.push_frame(TextFrame(text=text))
 
@@ -212,8 +248,11 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
         """Resolve (voice_id, voice_provider) for ``agent_id`` from config.yaml.
 
         Caches per-process; persona config is stable across a meeting. Falls
-        through to (None, None) when the persona has no cabinet voice config —
-        downstream HomieTTS keeps its default voice.
+        through to the Main-default Edge voice when the persona has no
+        cabinet voice config (WS3 — closes the gap where the auto-router
+        picks ``default`` / ``main`` for low-information inputs and HomieTTS
+        had no override → TTS cascade fell to OpenAI → 429 → Kokoro garbage
+        → AudioRawFrame errors).
 
         Q4 wire-translation: ``agent_id`` may be the wire ``"main"``. We
         resolve internally to ``"default"`` via :func:`personas.get_persona`'s
@@ -224,6 +263,19 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
             return cached
         from .personas import resolve_internal_persona_id  # noqa: PLC0415
         internal_id = resolve_internal_persona_id(agent_id)
+
+        # WS3 — Main is the operator-mirror / chairman. It lives at the
+        # default install, not under named profiles, so there is no
+        # config.yaml to load a cabinet.voice_id from. Hardcode the Main
+        # default to a free Edge voice so the TTS cascade dispatches to
+        # Edge (not OpenAI). en-US-BrianMultilingualNeural was picked
+        # because it is warm, conversational, authoritative, and is NOT
+        # used by any of the 7 named cabinet personas — no voice collision.
+        if internal_id in ("default", "main"):
+            result = (_MAIN_DEFAULT_VOICE_ID, _MAIN_DEFAULT_VOICE_PROVIDER)
+            self._voice_config_cache[agent_id] = result
+            return result
+
         try:
             import personas  # noqa: PLC0415
             cfg = personas.load_persona_config(internal_id)
@@ -233,19 +285,28 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
                 _redact(internal_id),
                 _redact(str(exc)),
             )
-            self._voice_config_cache[agent_id] = (None, None)
-            return None, None
+            # WS3 — fall through to Main default instead of (None, None) so
+            # HomieTTS always has an Edge override (no OpenAI fallback).
+            result = (_MAIN_DEFAULT_VOICE_ID, _MAIN_DEFAULT_VOICE_PROVIDER)
+            self._voice_config_cache[agent_id] = result
+            return result
         cabinet = cfg.get("cabinet") if isinstance(cfg, dict) else None
         if not isinstance(cabinet, dict):
-            self._voice_config_cache[agent_id] = (None, None)
-            return None, None
+            # WS3 — same fallback. Profile exists but has no cabinet: block.
+            result = (_MAIN_DEFAULT_VOICE_ID, _MAIN_DEFAULT_VOICE_PROVIDER)
+            self._voice_config_cache[agent_id] = result
+            return result
         voice_id = cabinet.get("voice_id") if isinstance(cabinet.get("voice_id"), str) else None
         voice_provider = (
             cabinet.get("voice_provider")
             if isinstance(cabinet.get("voice_provider"), str)
             else None
         )
-        result = (voice_id, voice_provider)
+        if voice_id is None and voice_provider is None:
+            # WS3 — cabinet block exists but no voice fields. Fallback.
+            result = (_MAIN_DEFAULT_VOICE_ID, _MAIN_DEFAULT_VOICE_PROVIDER)
+        else:
+            result = (voice_id, voice_provider)
         self._voice_config_cache[agent_id] = result
         return result
 

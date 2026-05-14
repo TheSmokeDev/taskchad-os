@@ -82,12 +82,16 @@ function EventRow({ event }: { event: CabinetEventLike }) {
       const agentId = String(event.agentId ?? '');
       const text = String(event.text ?? '');
       const role = String(event.role ?? '');
+      const incomplete = Boolean(event.incomplete);
+      const displayText = text || (incomplete ? 'No text reply returned.' : '');
       return (
         <div class="my-3 px-3 py-2 bg-[var(--color-card)] rounded-md">
           <div class="text-xs text-[var(--color-text-muted)] mb-1">
             {agentId} {role === 'intervener' ? '(intervener)' : ''}
           </div>
-          <div class="whitespace-pre-wrap text-sm">{text}</div>
+          <div class={`whitespace-pre-wrap text-sm ${!text && incomplete ? 'italic text-[var(--color-text-muted)]' : ''}`}>
+            {displayText}
+          </div>
         </div>
       );
     }
@@ -109,6 +113,14 @@ function EventRow({ event }: { event: CabinetEventLike }) {
           {String(event.text ?? '')}
         </div>
       );
+    case 'meeting_state_update': {
+      const count = Array.isArray(event.agents) ? event.agents.length : null;
+      return (
+        <div class="my-2 px-3 py-1 text-xs italic text-[var(--color-text-muted)]">
+          Room updated{count !== null ? `: ${count} homies` : ''}.
+        </div>
+      );
+    }
     case 'divider':
       return (
         <div class="my-3 border-t border-dashed border-[var(--color-border)] pt-1 text-xs text-center text-[var(--color-text-muted)]">

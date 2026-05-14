@@ -43,10 +43,13 @@ try:  # pragma: no cover — exercised by integration only.
         AudioRawFrame,
         EndFrame,
         Frame,
+        OutputAudioRawFrame,
         StartFrame,
+        TTSAudioRawFrame,
         TextFrame,
         TranscriptionFrame,
         TTSUpdateSettingsFrame,
+        UserStoppedSpeakingFrame,
     )
     from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
     from pipecat.pipeline.pipeline import Pipeline
@@ -91,9 +94,19 @@ except ImportError:  # pragma: no cover — pipecat optional dep.
             self.sample_rate = sample_rate
             self.num_channels = num_channels
 
+    class OutputAudioRawFrame(AudioRawFrame):  # type: ignore[no-redef,misc]
+        pass
+
+    class TTSAudioRawFrame(OutputAudioRawFrame):  # type: ignore[no-redef,misc]
+        pass
+
     class TTSUpdateSettingsFrame(Frame):  # type: ignore[no-redef,misc]
         def __init__(self, settings: dict | None = None) -> None:
             self.settings = settings or {}
+
+    class UserStoppedSpeakingFrame(Frame):  # type: ignore[no-redef,misc]
+        def __init__(self, emulated: bool = False) -> None:
+            self.emulated = emulated
 
     class Pipeline:  # type: ignore[no-redef]
         def __init__(self, processors: list) -> None:
@@ -141,16 +154,27 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
 
     DEFAULT_SAMPLE_RATE = 16000
     DEFAULT_CHANNELS = 1
-    # Bytes per second at 16kHz PCM16 mono. ~1.5s buffer gives Phase 4 STT
-    # enough audio to transcribe a short utterance reliably.
-    _MIN_FLUSH_BYTES = 16000 * 2 * 1  # = 32KB ~= 1s of audio
+    # Bytes per second at 16kHz PCM16 mono.
+    _BYTES_PER_SAMPLE = 2
+    _DEFAULT_MIN_UTTERANCE_SECS = 0.35
+    _DEFAULT_MAX_UTTERANCE_SECS = 8.0
+    _DEFAULT_MIN_RMS = 120
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._buffer: bytearray = bytearray()
+        self._sample_rate: int = self.DEFAULT_SAMPLE_RATE
+        self._audio_frame_count: int = 0
 
     async def process_frame(self, frame, direction) -> None:
         await super().process_frame(frame, direction)
+
+        if isinstance(frame, UserStoppedSpeakingFrame):
+            if direction == FrameDirection.DOWNSTREAM:
+                await self._flush_to_transcript(self._sample_rate, trigger="vad_stop")
+                return
+            await self.push_frame(frame, direction)
+            return
 
         # Pass-through everything except inbound audio.
         if not isinstance(frame, AudioRawFrame):
@@ -161,19 +185,55 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
             await self.push_frame(frame, direction)
             return
 
+        self._sample_rate = frame.sample_rate or self.DEFAULT_SAMPLE_RATE
         self._buffer.extend(frame.audio or b"")
+        self._audio_frame_count += 1
+        if self._audio_frame_count == 1 or self._audio_frame_count % 50 == 0:
+            logger.info(
+                "stt_audio_frame bytes=%s sample_rate=%s buffer_bytes=%s rms=%s",
+                _redact(str(len(frame.audio or b""))),
+                _redact(str(self._sample_rate)),
+                _redact(str(len(self._buffer))),
+                _redact(str(self._pcm16_rms(frame.audio or b""))),
+            )
 
-        # Naive flush when buffer accumulates past threshold (Pipecat will
-        # emit UserStoppedSpeaking on a more sophisticated VAD setup; until
-        # then this size-based flush keeps end-to-end latency reasonable).
-        if len(self._buffer) >= self._MIN_FLUSH_BYTES:
-            await self._flush_to_transcript(frame.sample_rate or self.DEFAULT_SAMPLE_RATE)
+        # Safety-net flush only for genuinely long continuous speech. The
+        # previous 1s byte-count flush raced VAD, chopped turns, and sent
+        # silence/noise into Whisper where it hallucinated. The primary
+        # utterance boundary is ``UserStoppedSpeakingFrame`` from Silero VAD.
+        if len(self._buffer) >= self._max_flush_bytes(self._sample_rate):
+            await self._flush_to_transcript(self._sample_rate, trigger="max_buffer")
 
-    async def _flush_to_transcript(self, sample_rate: int) -> None:
+    async def _flush_to_transcript(self, sample_rate: int, *, trigger: str) -> None:
         if not self._buffer:
+            logger.info("stt_flush trigger=%s ignored=empty_buffer", _redact(trigger))
             return
         audio_bytes = bytes(self._buffer)
         self._buffer.clear()
+        duration_ms = int((len(audio_bytes) / (sample_rate * self._BYTES_PER_SAMPLE)) * 1000)
+        rms = self._pcm16_rms(audio_bytes)
+        logger.info(
+            "stt_flush trigger=%s bytes=%s duration_ms=%s rms=%s",
+            _redact(trigger),
+            _redact(str(len(audio_bytes))),
+            _redact(str(duration_ms)),
+            _redact(str(rms)),
+        )
+
+        if len(audio_bytes) < self._min_transcribe_bytes(sample_rate):
+            logger.info(
+                "stt_ignored reason=too_short bytes=%s min_bytes=%s",
+                _redact(str(len(audio_bytes))),
+                _redact(str(self._min_transcribe_bytes(sample_rate))),
+            )
+            return
+        if rms < self._min_rms():
+            logger.info(
+                "stt_ignored reason=low_rms rms=%s min_rms=%s",
+                _redact(str(rms)),
+                _redact(str(self._min_rms())),
+            )
+            return
 
         # Wrap raw PCM as a WAV file for voice.transcribe_audio_file.
         try:
@@ -184,7 +244,7 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
 
         try:
             import voice  # noqa: PLC0415 — late-bind so import failures don't kill pipeline.
-            text = await voice.transcribe_audio_file(wav_path)
+            text = await self._transcribe_wav(voice, wav_path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("HomieSTT transcribe failed: %s", _redact(str(exc)))
             text = ""
@@ -200,6 +260,66 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
 
         # Emit final transcription so AgentRouter routes it.
         await self.push_frame(TranscriptionFrame(text=text, user_id="user", timestamp=""))
+
+    async def _transcribe_wav(self, voice_module, wav_path: str) -> str:
+        """Transcribe with the cabinet's free/local preference first.
+
+        The shared Phase 4 cascade still exists for generic voice features, but
+        cabinet voice should not burn time against exhausted cloud STT keys.
+        ``CABINET_VOICE_STT_PROVIDER=cascade`` opts back into the full cascade.
+        """
+        provider = (os.environ.get("CABINET_VOICE_STT_PROVIDER") or "faster_whisper").strip().lower()
+        if provider in {"faster_whisper", "faster-whisper", "local", "free"}:
+            installed = getattr(voice_module, "_faster_whisper_installed", lambda: False)
+            provider_cls = getattr(voice_module, "_FasterWhisperProvider", None)
+            if provider_cls is not None and installed():
+                model_size = os.environ.get("FASTER_WHISPER_MODEL", "base")
+                text = await provider_cls(model_size=model_size).transcribe(wav_path)
+                logger.info(
+                    "stt_provider provider=faster_whisper model=%s source=cabinet_local",
+                    _redact(model_size),
+                )
+                filter_fn = getattr(voice_module, "_filter_whisper_hallucination", lambda value: value)
+                return filter_fn(text)
+            logger.warning("cabinet local faster-whisper unavailable; falling back to voice cascade")
+        elif provider not in {"cascade", "auto", ""}:
+            logger.warning("unknown CABINET_VOICE_STT_PROVIDER=%s; falling back to voice cascade", _redact(provider))
+        return await voice_module.transcribe_audio_file(wav_path)
+
+    @classmethod
+    def _min_transcribe_bytes(cls, sample_rate: int) -> int:
+        seconds = cls._env_float("CABINET_STT_MIN_UTTERANCE_SECS", cls._DEFAULT_MIN_UTTERANCE_SECS)
+        return int(max(0.0, seconds) * sample_rate * cls._BYTES_PER_SAMPLE)
+
+    @classmethod
+    def _max_flush_bytes(cls, sample_rate: int) -> int:
+        seconds = cls._env_float("CABINET_STT_MAX_UTTERANCE_SECS", cls._DEFAULT_MAX_UTTERANCE_SECS)
+        return int(max(1.0, seconds) * sample_rate * cls._BYTES_PER_SAMPLE)
+
+    @classmethod
+    def _min_rms(cls) -> int:
+        return int(cls._env_float("CABINET_STT_MIN_RMS", float(cls._DEFAULT_MIN_RMS)))
+
+    @staticmethod
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name, "")
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _pcm16_rms(pcm_bytes: bytes) -> int:
+        sample_count = len(pcm_bytes) // 2
+        if sample_count <= 0:
+            return 0
+        view = memoryview(pcm_bytes[: sample_count * 2]).cast("h")
+        total = 0
+        for sample in view:
+            total += int(sample) * int(sample)
+        return int((total / sample_count) ** 0.5)
 
     @staticmethod
     async def _buffer_to_temp_wav(pcm_bytes: bytes, sample_rate: int) -> str:
@@ -246,8 +366,7 @@ class HomieTTS(FrameProcessor):  # type: ignore[misc]
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._current_voice: Optional[str] = None
-        self._current_provider: Optional[str] = None
+        self._current_tts_settings: tuple[str, str] | None = None
 
     async def process_frame(self, frame, direction) -> None:
         await super().process_frame(frame, direction)
@@ -257,11 +376,28 @@ class HomieTTS(FrameProcessor):  # type: ignore[misc]
             settings = getattr(frame, "settings", None) or {}
             voice = settings.get("voice") if isinstance(settings, dict) else None
             provider = settings.get("provider") if isinstance(settings, dict) else None
-            # Voice-switch guard — only update when it actually changed.
-            if isinstance(voice, str) and voice != self._current_voice:
-                self._current_voice = voice
-                if isinstance(provider, str) and provider:
-                    self._current_provider = provider
+            provider_ok = isinstance(provider, str) and bool(provider)
+            voice_ok = isinstance(voice, str) and bool(voice)
+            logger.info(
+                "tts_settings provider=%s voice=%s",
+                _redact(str(provider)),
+                _redact(str(voice)),
+            )
+            if provider_ok != voice_ok:
+                logger.warning(
+                    "tts_settings rejected provider=%s voice=%s",
+                    _redact(str(provider)),
+                    _redact(str(voice)),
+                )
+                return
+            if not provider_ok or not voice_ok:
+                logger.warning("tts_settings rejected provider=None voice=None")
+                return
+            next_settings = (provider, voice)
+            # Voice-switch guard — only update when the atomic provider/voice
+            # tuple actually changed.
+            if next_settings != self._current_tts_settings:
+                self._current_tts_settings = next_settings
             # Don't push the settings frame downstream — it's a control message.
             return
 
@@ -277,8 +413,15 @@ class HomieTTS(FrameProcessor):  # type: ignore[misc]
             return
 
         voice_overrides: dict[str, str] | None = None
-        if self._current_voice and self._current_provider:
-            voice_overrides = {self._current_provider: self._current_voice}
+        if self._current_tts_settings:
+            provider, voice = self._current_tts_settings
+            voice_overrides = {provider: voice}
+            logger.info(
+                "tts_settings provider=%s voice=%s",
+                _redact(provider),
+                _redact(voice),
+            )
+        logger.info("tts_synthesize voice_overrides=%s", bool(voice_overrides))
 
         try:
             import voice as voice_module  # noqa: PLC0415
@@ -294,9 +437,39 @@ class HomieTTS(FrameProcessor):  # type: ignore[misc]
         if not audio_bytes:
             return
 
+        # Codex review finding #2 — decode compressed TTS output to PCM16.
+        # Edge returns MP3 (FF F3 frame sync), Kokoro/OpenAI return Opus,
+        # ElevenLabs returns MP3. Pushing those compressed bytes wrapped in
+        # ``OutputAudioRawFrame(sample_rate=24000)`` makes Pipecat's output
+        # transport and the JS client decode them as RAW PCM and play garbage
+        # noise — owner's "trash" audio experience in meeting #6 was almost
+        # certainly this, even after the cascade fix routed TTS to Edge.
+        # ``voice.transcode_to_pcm16`` uses ffmpeg with auto-detected input
+        # format and emits raw 16-bit LE PCM at the target sample rate.
+        try:
+            pcm_bytes = await voice_module.transcode_to_pcm16(
+                audio_bytes,
+                sample_rate=self.DEFAULT_SAMPLE_RATE,
+                channels=1,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-quiet if ffmpeg unavailable.
+            logger.warning(
+                "HomieTTS PCM transcode failed (audio will be garbled): %s",
+                _redact(str(exc)),
+            )
+            # Don't push compressed bytes downstream — they'd play as noise.
+            return
+
+        if not pcm_bytes:
+            return
+
+        # Pipecat TTS services emit ``TTSAudioRawFrame`` (a subclass of
+        # ``OutputAudioRawFrame``). Use that canonical frame type so the output
+        # transport and RTVI observers treat this as TTS audio, not a bare raw
+        # audio mixin.
         await self.push_frame(
-            AudioRawFrame(
-                audio=audio_bytes,
+            TTSAudioRawFrame(
+                audio=pcm_bytes,
                 sample_rate=self.DEFAULT_SAMPLE_RATE,
                 num_channels=1,
             )
@@ -343,7 +516,7 @@ def build_voice_pipeline(
     from .agent_bridge import HomieAgentBridge  # noqa: PLC0415
 
     stt = HomieSTT()
-    router_proc = AgentRouter()
+    router_proc = AgentRouter(agent_names=broadcast_order)
     bridge = HomieAgentBridge(
         meeting_id=meeting_id,
         chat_id=chat_id,

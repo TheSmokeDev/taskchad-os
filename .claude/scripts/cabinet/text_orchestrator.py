@@ -34,13 +34,26 @@ from pathlib import Path
 from typing import Any, Final
 
 import personas
+# Codex roster review 2026-05-11 (HIGH): personas/__init__.py does NOT
+# auto-import the lifecycle submodule, so `personas.lifecycle.list_profiles()`
+# at line ~96 silently fails (`AttributeError: module 'personas' has no
+# attribute 'lifecycle'`) unless some sibling module has already imported it
+# (dashboard_api.py:67 happens to do so in the API process). When the function
+# is entered from any other entrypoint the cabinet roster collapses to Main
+# only with a one-line debug log nobody reads. Pin the submodule reference
+# explicitly so the roster works regardless of import order. Rule 3 module-
+# attribute lookup pattern.
+from personas import lifecycle as _persona_lifecycle
 from dashboard_db import get_connection
 from runtime import lane_router
 from runtime.base import RuntimeRequest
+from runtime.bootstrap import build_session_start_context
 from runtime.capabilities import TEXT_REASONING
+from runtime import subprocess_env as _subprocess_env
 from security import kill_switches
 
 from . import meeting_channel as _channels_mod
+from . import room_state as _room_state
 from .meeting_channel import MeetingChannel, get_channel
 from .text_router import (
     GATE_TIMEOUT_S,
@@ -77,6 +90,14 @@ class RosterAgent:
     auth_profile: str | None = None
 
 
+@dataclass
+class _ProfileExecutionContext:
+    env: dict[str, str] | None = None
+    system_prompt: str | None = None
+    tools: list[str] | None = None
+    error: str | None = None
+
+
 _MAIN_AGENT: Final[RosterAgent] = RosterAgent(
     id="default",
     name="Main",
@@ -93,7 +114,7 @@ def _roster_from_personas() -> list[RosterAgent]:
     """
     extras: list[RosterAgent] = []
     try:
-        profiles = personas.lifecycle.list_profiles()
+        profiles = _persona_lifecycle.list_profiles()
     except Exception as exc:  # noqa: BLE001
         logger.debug("cabinet roster: list_profiles failed: %s", _redact(str(exc)))
         return [_MAIN_AGENT]
@@ -136,6 +157,81 @@ def get_roster() -> list[RosterAgent]:
     return _roster_from_personas()
 
 
+def _profile_execution_context(persona_id: str) -> _ProfileExecutionContext:
+    """Resolve execution context for a Cabinet participant profile.
+
+    Roster snapshots are membership/order/display truth. The selected named
+    participant still has to resolve through the live profile system so a stale
+    snapshot cannot silently execute as the default Homie.
+    """
+    canonical_id = (persona_id or "").strip()
+    if canonical_id in {"", "default", "main"}:
+        return _ProfileExecutionContext()
+
+    try:
+        info = _persona_lifecycle.show_profile(canonical_id)
+        cfg = personas.load_persona_config(canonical_id)
+    except (FileNotFoundError, personas.ConfigShapeError, ValueError) as exc:
+        return _ProfileExecutionContext(error=_redact(str(exc)))
+
+    cabinet_block = cfg.get("cabinet")
+    if not isinstance(cabinet_block, dict):
+        return _ProfileExecutionContext(
+            error=f"profile {canonical_id!r} is no longer cabinet-eligible"
+        )
+    tools_raw = cabinet_block.get("tools")
+    tools = (
+        [tool for tool in tools_raw if isinstance(tool, str)]
+        if isinstance(tools_raw, list)
+        else []
+    )
+
+    try:
+        env = _subprocess_env.get_scrubbed_sdk_env(profile_root=info.path)
+    except Exception as exc:  # noqa: BLE001
+        return _ProfileExecutionContext(error=_redact(str(exc)))
+
+    paths = personas.get_persona_paths(canonical_id)
+    try:
+        profile_context = build_session_start_context(
+            source="cabinet_persona_turn",
+            memory_dir=paths["memory"],
+            daily_dir=paths["memory"] / "daily",
+        ).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "cabinet profile context load failed for %s: %s",
+            _redact(canonical_id),
+            _redact(str(exc)),
+        )
+        profile_context = ""
+
+    system_prompt = ""
+    if profile_context:
+        system_prompt = (
+            "## Cabinet Participant Profile\n"
+            f"You are responding as the `{canonical_id}` Homie profile inside "
+            "a shared Cabinet room. Use this profile's own identity, memory, "
+            "tools, and operating context for this turn.\n\n"
+            f"{profile_context}"
+        )
+
+    return _ProfileExecutionContext(
+        env=env,
+        system_prompt=system_prompt or None,
+        tools=tools,
+    )
+
+
+def _merge_system_prompts(*parts: str | None) -> str | None:
+    blocks = [
+        part.strip()
+        for part in parts
+        if isinstance(part, str) and part.strip()
+    ]
+    return "\n\n".join(blocks) if blocks else None
+
+
 # ── Public turn API ──────────────────────────────────────────────────────
 
 
@@ -160,6 +256,8 @@ class HandleTurnOptions:
     roster: list[RosterAgent] | None = None
     is_voice: bool = False
     target_agent_id: str | None = None
+    audience: str = "auto"
+    target_agent_ids: list[str] | None = None
 
 
 @dataclass
@@ -284,6 +382,35 @@ def extract_all_at_mentions(text: str, roster: list[RosterAgent]) -> list[str]:
         seen.add(candidate)
         out.append(candidate)
     return out
+
+
+def _canonical_agent_id(agent_id: str) -> str:
+    value = (agent_id or "").strip()
+    if value == "main":
+        return "default"
+    return value
+
+
+def _dedupe_known_agent_ids(
+    agent_ids: list[str],
+    roster_by_id: dict[str, RosterAgent],
+) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in agent_ids:
+        agent_id = _canonical_agent_id(raw)
+        if agent_id not in roster_by_id or agent_id in seen:
+            continue
+        seen.add(agent_id)
+        out.append(agent_id)
+    return out
+
+
+def _ordered_roster_targets(
+    roster: list[RosterAgent],
+    selected_ids: set[str],
+) -> list[str]:
+    return [agent.id for agent in roster if agent.id in selected_ids]
 
 
 # ── Slash-command recognition (Phase 5a recognizes; Phase 5b consumes) ───
@@ -489,6 +616,41 @@ _VOICE_CONTEXT_HINT_VERBATIM: Final[str] = (
 )
 
 
+# Codex roster review 2026-05-11 (HIGH): cabinet turn path was not injecting
+# the per-persona ``cabinet.voice_persona_prompt`` into ``RuntimeRequest``,
+# so every persona shared the lane_router's default system prompt and behaved
+# identically. The roster + UI tiles surfaced correctly while the persona
+# layer was unwired. This helper resolves the prompt at turn time via dynamic
+# config read (Rule 2 — physical state from disk, no module-level cache).
+# Returns ``None`` for the default ("main") persona and for any persona
+# without a usable prompt — callers fall through to lane_router defaults.
+def _resolve_voice_persona_prompt(persona_id: str) -> str | None:
+    """Read ``cabinet.voice_persona_prompt`` for ``persona_id`` (None if absent).
+
+    The default/main persona has no profile dir; callers should skip prompt
+    injection for it. For named personas the function fails open — any error
+    loading the config returns ``None`` so the turn still fires.
+    """
+    if persona_id in (None, "", "default", "main"):
+        return None
+    try:
+        cfg = personas.load_persona_config(persona_id)
+    except Exception as exc:  # noqa: BLE001 — fail open, log + skip injection
+        logger.debug(
+            "cabinet voice_persona_prompt load failed for %s: %s",
+            _redact(persona_id),
+            _redact(str(exc)),
+        )
+        return None
+    cabinet = cfg.get("cabinet")
+    if not isinstance(cabinet, dict):
+        return None
+    prompt = cabinet.get("voice_persona_prompt")
+    if isinstance(prompt, str) and prompt.strip():
+        return prompt.strip()
+    return None
+
+
 @dataclass
 class _RunAgentArgs:
     persona_id: str
@@ -505,6 +667,7 @@ class _RunAgentArgs:
     # the runtime prompt (forward-additive — default False preserves
     # Phase 5a behavior verbatim).
     is_voice: bool = False
+    require_profile_context: bool = False
 
 
 async def _run_agent_turn(args: _RunAgentArgs) -> str:
@@ -519,8 +682,9 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
 
     PRD-8 Phase 6 — when ``args.is_voice`` is True, the runtime prompt is
     prefixed with :data:`_VOICE_CONTEXT_HINT_VERBATIM` so persona replies
-    stay brief for TTS readout. ``max_turns=1`` (Phase 5a) is already the
-    correct cap for voice; no additional limit needed.
+    stay brief for TTS readout. Voice keeps ``max_turns=1``. Text turns allow
+    a follow-up model turn after a permitted tool call so a tool-only step
+    cannot leave the Cabinet room with an empty reply.
     """
     channel = args.channel
 
@@ -530,8 +694,30 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
     if args.cancel_flag.get("cancelled"):
         return ""
 
-    # Build tool-policy from persona config (M1 default-deny floor).
-    policy = cabinet_tool_policy(args.persona_id, args.persona.tools or None)
+    profile_context = (
+        _profile_execution_context(args.persona_id)
+        if args.require_profile_context
+        else _ProfileExecutionContext()
+    )
+    if profile_context.error:
+        args.turn_state["anyIncomplete"] = True
+        channel.emit({
+            "type": "error",
+            "turnId": args.turn_id,
+            "agentId": args.persona_id,
+            "message": f"Cabinet profile '{args.persona_id}' is not runnable: {profile_context.error}",
+            "recoverable": True,
+        })
+        return ""
+
+    # Build tool-policy from the live profile config when executing snapshot
+    # roster members. Snapshot rows are membership/display truth only.
+    persona_tools = (
+        profile_context.tools
+        if profile_context.tools is not None
+        else args.persona.tools
+    )
+    policy = cabinet_tool_policy(args.persona_id, persona_tools or None)
     mcp_filtered = filter_mcp_servers(args.persona.mcp_servers, policy)
     mcp_names = list(mcp_filtered.keys())
 
@@ -551,13 +737,25 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
     else:
         runtime_prompt = args.user_text
 
+    # Codex roster review 2026-05-11 (HIGH): inject per-persona prompt as
+    # RuntimeRequest.system_prompt so each persona actually plays its role.
+    # Voice turns only — Phase 5a text-only behavior unchanged (system_prompt
+    # left None, lane_router falls through to its default).
+    voice_system_prompt = (
+        _resolve_voice_persona_prompt(args.persona_id) if args.is_voice else None
+    )
+    persona_system_prompt = _merge_system_prompts(
+        profile_context.system_prompt,
+        voice_system_prompt,
+    )
+
     request = RuntimeRequest(
         prompt=runtime_prompt,
         cwd=Path.cwd(),
         task_name="cabinet_persona_turn",
         capability=TEXT_REASONING,
         # No model override — let lane_router resolve per persona/profile.
-        max_turns=1,
+        max_turns=1 if args.is_voice else 3,
         allowed_tools=list(policy.allowed_tools),
         disallowed_tools=list(policy.disallowed_tools),
         mcp_servers=mcp_names,
@@ -573,8 +771,19 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
                 "disallowed_count": len(policy.disallowed_tools),
                 "mcp_count": len(mcp_names),
             },
+            "system_prompt_source": (
+                "profile_context"
+                if profile_context.system_prompt and not voice_system_prompt
+                else "profile_context+voice_persona_prompt"
+                if profile_context.system_prompt and voice_system_prompt
+                else "voice_persona_prompt"
+                if voice_system_prompt
+                else "lane_router_default"
+            ),
         },
         auth_profile=args.persona.auth_profile,
+        env=profile_context.env,
+        system_prompt=persona_system_prompt,
     )
 
     text = ""
@@ -832,7 +1041,12 @@ async def handle_text_turn(
     # 3. Persist user row.
     user_row_id = _persist_user_message(meeting_id, trimmed)
 
-    roster = resolved_opts.roster if resolved_opts.roster is not None else get_roster()
+    roster = (
+        resolved_opts.roster
+        if resolved_opts.roster is not None
+        else _room_state.load_meeting_roster(meeting_id)
+    )
+    require_profile_context = resolved_opts.roster is None
     roster_by_id = {a.id: a for a in roster}
     cancel_flag: dict[str, bool] = {"cancelled": False}
     turn_state: dict[str, bool] = {"anyIncomplete": False}
@@ -876,48 +1090,63 @@ async def handle_text_turn(
 
         decision: RouterDecision
 
-        # PRD-8 Phase 6 — voice routing precedence override (R1 v2 B1 fix).
-        # The voice subprocess's ``AgentRouter`` (port of warroom/router.py)
-        # already selected the target persona by name-prefix / pin / broadcast
-        # / default, so we must NOT re-run the Haiku router (would double-route
-        # and may answer as the wrong persona, exactly the bug R1 flagged).
-        # When ``target_agent_id`` is set on HandleTurnOptions and resolves to a
-        # roster member, bypass the routing chain entirely. Wire-id "main"
-        # also resolves to the canonical "default" persona id (Q4 main↔default
-        # translation site lock).
-        forced_target: str | None = None
+        audience = (resolved_opts.audience or "auto").strip().lower()
+        if audience not in {"auto", "all", "mentions", "targets"}:
+            audience = "auto"
+        target_ids: list[str] | None = None
+
+        # PRD-8 Phase 6 voice routing keeps first precedence. The voice
+        # subprocess already selected one target; group fanout uses the new
+        # audience/target_agent_ids contract instead.
         if resolved_opts.target_agent_id:
-            requested = resolved_opts.target_agent_id.strip()
-            # Q4 wire-string translation: "main" (upstream wire) → "default" (internal id).
-            if requested == "main":
-                requested = "default"
+            requested = _canonical_agent_id(resolved_opts.target_agent_id)
             if requested == "all":
-                # Broadcast — Phase 5a does not currently loop targets, but the
-                # voice subprocess broadcasts itself by sending N turns. Treat
-                # "all" as a no-op override here (router falls through).
-                forced_target = None
+                target_ids = None
             elif requested in roster_by_id:
-                forced_target = requested
+                target_ids = [requested]
             else:
-                # Unknown target — do not crash; let the standard routing run.
                 logger.debug(
                     "cabinet voice target_agent_id=%s not in roster; falling back to router",
                     _redact(requested),
                 )
-                forced_target = None
+                target_ids = None
+        elif audience == "all":
+            target_ids = [agent.id for agent in roster]
+        elif audience == "targets" or resolved_opts.target_agent_ids:
+            raw_ids = resolved_opts.target_agent_ids or []
+            selected = set(_dedupe_known_agent_ids(raw_ids, roster_by_id))
+            target_ids = _ordered_roster_targets(roster, selected)
+        elif audience == "mentions":
+            target_ids = extract_all_at_mentions(trimmed, roster)
 
-        if forced_target is not None:
+        if target_ids is not None:
+            if not target_ids:
+                channel.emit({
+                    "type": "system_note",
+                    "turnId": turn_id,
+                    "text": "No matching Cabinet participants were selected.",
+                    "tone": "info",
+                    "dismissable": True,
+                })
+                channel.emit({"type": "turn_complete", "turnId": turn_id})
+                return HandleTurnResult(accepted=True, turn_id=turn_id)
+            primary = target_ids[0]
+            interveners = target_ids[1:]
+            explicit_mentions.update(target_ids)
             channel.emit({
                 "type": "status_update",
                 "turnId": turn_id,
                 "phase": "starting",
-                "label": f"Starting {roster_by_id[forced_target].name}…",
-                "agentId": forced_target,
+                "label": f"Starting {roster_by_id[primary].name}…",
+                "agentId": primary,
             })
             decision = RouterDecision(
-                primary=forced_target,
-                interveners=[],
-                reason=f"voice forced target {forced_target}",
+                primary=primary,
+                interveners=interveners,
+                reason=(
+                    f"audience {audience}: "
+                    + ", ".join("@" + agent_id for agent_id in target_ids)
+                ),
                 router_degraded=False,
             )
         elif mentions:
@@ -1090,6 +1319,7 @@ async def handle_text_turn(
             persona=primary_persona,
             roster=roster,
             is_voice=resolved_opts.is_voice,
+            require_profile_context=require_profile_context,
         ))
 
         # M2: schedule background title generation if this looks like the
@@ -1182,6 +1412,7 @@ async def handle_text_turn(
                 persona=candidate,
                 roster=roster,
                 is_voice=resolved_opts.is_voice,
+                require_profile_context=require_profile_context,
             ))
 
         # 7. turn_complete vs turn_aborted.

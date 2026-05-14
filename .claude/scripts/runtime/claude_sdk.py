@@ -185,6 +185,11 @@ class ClaudeSdkRuntime:
             "max_turns": request.max_turns,
             "allowed_tools": request.allowed_tools,
         }
+        if not request.allowed_tools and request.disallowed_tools == ["*"]:
+            # Empty allowed_tools alone omits --allowedTools, and the CLI still
+            # exposes its default tool surface. Pair the default-deny marker
+            # with --tools "" so no built-ins are advertised for the turn.
+            options_kwargs["tools"] = []
 
         # Redirect SDK to system CLI instead of bundled CLI.
         # On Windows, cli.js can't be executed directly — must use monkey-patch

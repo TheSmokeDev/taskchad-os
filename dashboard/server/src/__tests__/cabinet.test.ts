@@ -63,6 +63,9 @@ describe('cabinet route — static invariants', () => {
       'primary',
       'interveners',
       'clearedAgents',
+      'broadcastOrder',
+      'targetAgentId',
+      'targetAgentIds',
       'personas',
       'agents',
       'roster',
@@ -73,12 +76,16 @@ describe('cabinet route — static invariants', () => {
     }
   });
 
-  it('all 12 cabinet routes registered in ROUTE_MANIFEST', () => {
+  it('all cabinet routes registered in ROUTE_MANIFEST', () => {
     const expected = [
       '/api/cabinet/list',
       '/api/cabinet/new',
+      '/api/cabinet/open',
       '/api/cabinet/warmup',
       '/api/cabinet/details',
+      '/api/cabinet/participants/available',
+      '/api/cabinet/participants/add',
+      '/api/cabinet/participants/remove',
       '/api/cabinet/transcripts',
       '/api/cabinet/stream',
       '/api/cabinet/send',

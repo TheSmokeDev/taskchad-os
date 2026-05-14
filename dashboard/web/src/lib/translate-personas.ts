@@ -54,7 +54,7 @@ export function translateCabinetEventOutbound(event: Record<string, unknown>): R
   }
 
   // Array of persona ids
-  for (const arrKey of ['clearedAgents', 'interveners'] as const) {
+  for (const arrKey of ['clearedAgents', 'interveners', 'broadcastOrder'] as const) {
     if (Array.isArray(out[arrKey])) {
       out[arrKey] = (out[arrKey] as unknown[]).map((id) =>
         typeof id === 'string' ? outboundPersonaId(id) : id,

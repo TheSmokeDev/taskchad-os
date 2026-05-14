@@ -53,6 +53,7 @@ export interface CabinetStreamHandle {
 
 export interface OpenCabinetStreamOpts {
   meetingId: number;
+  chatId?: string;
   onEvent: (evt: CabinetEvent, seq: number) => void;
   /** Called on 410 Gone — caller should refetch /transcripts and reset its state. */
   onRefetchHint?: (hint: string) => void;
@@ -69,7 +70,9 @@ export function openCabinetStream(opts: OpenCabinetStreamOpts): CabinetStreamHan
 
   function open(): void {
     if (closed) return;
-    const path = `/api/cabinet/stream?meetingId=${opts.meetingId}`;
+    const qs = new URLSearchParams({ meetingId: String(opts.meetingId) });
+    if (opts.chatId) qs.set('chatId', opts.chatId);
+    const path = `/api/cabinet/stream?${qs.toString()}`;
     es = new EventSource(tokenizedSseUrl(path));
     es.onopen = () => { connected.value = true; };
     es.onerror = () => {
@@ -103,7 +106,9 @@ export function openCabinetStream(opts: OpenCabinetStreamOpts): CabinetStreamHan
     if (closed) return;
     if (!dashboardToken) return;
     try {
-      const res = await fetch(`/api/cabinet/stream?meetingId=${opts.meetingId}`, {
+      const qs = new URLSearchParams({ meetingId: String(opts.meetingId) });
+      if (opts.chatId) qs.set('chatId', opts.chatId);
+      const res = await fetch(`/api/cabinet/stream?${qs.toString()}`, {
         method: 'GET',
         headers: { Authorization: `Bearer ${dashboardToken}` },
       });
@@ -131,10 +136,12 @@ export function openCabinetStream(opts: OpenCabinetStreamOpts): CabinetStreamHan
 export async function fetchCabinetTranscripts(
   meetingId: number,
   beforeId?: number,
+  chatId?: string,
 ): Promise<{ transcript: Array<{ id: number; speaker: string; text: string; created_at: number }> }> {
   const qs = new URLSearchParams();
   qs.set('meetingId', String(meetingId));
   if (beforeId !== undefined) qs.set('beforeId', String(beforeId));
+  if (chatId) qs.set('chatId', chatId);
   const res = await fetch(`/api/cabinet/transcripts?${qs.toString()}`, {
     method: 'GET',
     headers: dashboardToken ? { Authorization: `Bearer ${dashboardToken}` } : {},

@@ -239,6 +239,60 @@ def _wrap_pcm_as_wav(
     return riff_header + fmt_chunk + data_chunk_header + pcm_bytes
 
 
+async def transcode_to_pcm16(
+    audio_bytes: bytes,
+    *,
+    sample_rate: int = 24000,
+    channels: int = 1,
+) -> bytes:
+    """Decode any audio format (MP3 / Opus / OGG / WAV) to raw PCM16 little-endian.
+
+    Cabinet voice fix (Codex review finding #2): TTS providers in this module
+    return their native compressed formats — Edge returns MP3 (FF F3 frame
+    sync), Kokoro returns Opus, OpenAI returns Opus, ElevenLabs returns MP3.
+    Pipecat's ``OutputAudioRawFrame`` is meant to carry RAW PCM16 audio at
+    the declared sample_rate; pushing compressed bytes wrapped in that frame
+    makes the browser decode them as raw PCM and play garbage noise. Every
+    caller that pushes provider TTS bytes into Pipecat's output transport
+    must transcode through this helper first.
+
+    Uses ffmpeg with auto-detected input format (``-i pipe:0``), output is
+    signed 16-bit LE PCM at the requested sample_rate and channel count.
+
+    Args:
+        audio_bytes: Compressed audio (any format ffmpeg auto-detects).
+        sample_rate: Target PCM sample rate. Default 24000 (matches Pipecat
+            ``WebsocketServerParams.audio_out_sample_rate``).
+        channels: Target channel count. Default 1 (mono).
+
+    Returns:
+        Raw PCM16 little-endian audio bytes. No WAV header.
+
+    Raises:
+        RuntimeError: ffmpeg missing or transcode failed.
+    """
+    if not await _has_ffmpeg():
+        raise RuntimeError("ffmpeg not installed — required for PCM transcode")
+
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-i", "pipe:0",
+        "-f", "s16le",            # raw signed 16-bit little-endian PCM
+        "-ar", str(sample_rate),  # target sample rate
+        "-ac", str(channels),     # target channels
+        "-y",
+        "pipe:1",
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate(input=audio_bytes)
+    if proc.returncode != 0:
+        err = stderr.decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"ffmpeg PCM transcode failed (rc={proc.returncode}): {err}")
+    return stdout
+
+
 async def _ffmpeg_pcm_wav_to_opus(wav_bytes: bytes) -> bytes:
     """Transcode WAV (or PCM-wrapped WAV) to OGG Opus via ffmpeg subprocess.
 
@@ -311,9 +365,21 @@ class _GroqWhisperProvider:
                 files = {
                     "file": (os.path.basename(file_path), f, "audio/ogg"),
                 }
+                # WS1 hallucination guards:
+                #   * language="en" pins Whisper to English, suppresses
+                #     "Obrigado" / "Gracias" drift on silent buffers.
+                #   * prompt="" tells Whisper there is no prior context to bias
+                #     toward (an unset prompt sometimes lets Whisper hallucinate
+                #     continuations of imagined transcripts).
+                #   * temperature=0 minimizes generative noise on low-confidence
+                #     audio; combined with VAD upstream, silence rarely reaches
+                #     this call, but defense-in-depth.
                 data = {
                     "model": self.model,
                     "response_format": "json",
+                    "language": "en",
+                    "prompt": "",
+                    "temperature": "0",
                 }
                 resp = await client.post(
                     "https://api.groq.com/openai/v1/audio/transcriptions",
@@ -488,6 +554,66 @@ _STT_CASCADE_ORDER: Final[tuple[str, ...]] = (
 )
 
 
+# WS1 — Whisper hallucination patterns. When fed silence or low-information
+# audio, Whisper confabulates politeness phrases from its YouTube training set
+# ("Thank you", "Thanks for watching", "Please subscribe", "Obrigado", etc.).
+# Even with Silero VAD upstream, brief mouth-clicks / background hiss can
+# slip through. This filter drops any transcript that is JUST a stock phrase
+# with no real content. Provider-agnostic — applies to every STT provider in
+# the cascade, so Telegram voice, Slack voice, and cabinet voice all benefit.
+# Case-insensitive, ignores leading/trailing punctuation and whitespace.
+_WHISPER_HALLUCINATION_PATTERNS: Final[tuple[str, ...]] = (
+    "thank you",
+    "thanks",
+    "thanks for watching",
+    "thanks for watching!",
+    "please subscribe",
+    "subscribe",
+    "obrigado",
+    "obrigada",
+    "gracias",
+    "merci",
+    "bye",
+    "bye bye",
+    "you",  # Whisper's most common silence hallucination on very short buffers
+    ".",
+    "...",
+)
+
+
+def _is_whisper_hallucination(text: str) -> bool:
+    """Return True if ``text`` is a known Whisper-on-silence confabulation.
+
+    Strips leading/trailing punctuation + whitespace, lowercases, then exact-
+    matches against ``_WHISPER_HALLUCINATION_PATTERNS``. The exact match is
+    important: a real reply like "Thanks for catching that bug" must NOT be
+    filtered, only the bare "Thanks" / "Thank you." / "Thanks for watching."
+    one-shots that Whisper emits when there's nothing to transcribe.
+
+    Punctuation-only outputs (".", "...", "?") are themselves a hallucination
+    signal — Whisper emits these when fed pure silence. After stripping, an
+    empty normalized string returns True.
+    """
+    if not text:
+        return False
+    normalized = text.strip().strip(".!?,;: \t\n").lower()
+    if not normalized:
+        # Pre-strip was non-empty but normalized to empty — punctuation/
+        # whitespace only. That's Whisper hallucinating on silence.
+        return True
+    return normalized in _WHISPER_HALLUCINATION_PATTERNS
+
+
+def _filter_whisper_hallucination(text: str) -> str:
+    """Return ``""`` if ``text`` is a known hallucination, else return ``text``.
+
+    Empty-string return lets HomieSTT / Telegram-voice ingress drop the
+    transcript silently (their existing ``if not text: return`` guards
+    already handle the empty case correctly).
+    """
+    return "" if _is_whisper_hallucination(text) else text
+
+
 async def transcribe_audio_file(file_path: str | Path) -> str:
     """STT cascade: Groq → faster-whisper local → whisper-cpp local → Mistral → OpenAI.
 
@@ -520,7 +646,9 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
     groq_key = os.environ.get("GROQ_API_KEY")
     if groq_key:
         try:
-            return await _GroqWhisperProvider(api_key=groq_key).transcribe(path_str)
+            text = await _GroqWhisperProvider(api_key=groq_key).transcribe(path_str)
+            logger.info("stt_provider provider=groq")
+            return _filter_whisper_hallucination(text)
         except Exception as e:
             logger.warning("Groq Whisper failed, trying faster-whisper local: %s", _redact(str(e)))
             last_err = e
@@ -529,7 +657,9 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
     if _faster_whisper_installed():
         try:
             model_size = os.environ.get("FASTER_WHISPER_MODEL", "base")
-            return await _FasterWhisperProvider(model_size=model_size).transcribe(path_str)
+            text = await _FasterWhisperProvider(model_size=model_size).transcribe(path_str)
+            logger.info("stt_provider provider=faster_whisper model=%s", _redact(model_size))
+            return _filter_whisper_hallucination(text)
         except ImportError as e:
             logger.warning("faster-whisper import failed, trying next: %s", _redact(str(e)))
             last_err = e
@@ -542,10 +672,12 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
     if whisper_model:
         whisper_bin = os.environ.get("WHISPER_CPP_PATH", "whisper-cpp")
         try:
-            return await _WhisperCppProvider(
+            text = await _WhisperCppProvider(
                 binary_path=whisper_bin,
                 model_path=whisper_model,
             ).transcribe(path_str)
+            logger.info("stt_provider provider=whisper_cpp")
+            return _filter_whisper_hallucination(text)
         except Exception as e:
             logger.warning("whisper-cpp local failed, trying Mistral: %s", _redact(str(e)))
             last_err = e
@@ -554,7 +686,9 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
     mistral_key = os.environ.get("MISTRAL_API_KEY")
     if mistral_key:
         try:
-            return await _MistralVoxtralSttProvider(api_key=mistral_key).transcribe(path_str)
+            text = await _MistralVoxtralSttProvider(api_key=mistral_key).transcribe(path_str)
+            logger.info("stt_provider provider=mistral")
+            return _filter_whisper_hallucination(text)
         except ImportError as e:
             logger.warning("mistralai SDK unavailable, trying OpenAI Whisper: %s", _redact(str(e)))
             last_err = e
@@ -566,7 +700,9 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
     openai_key = os.environ.get("OPENAI_API_KEY")
     if openai_key:
         try:
-            return await OpenAIWhisperProvider(api_key=openai_key).transcribe(path_str)
+            text = await OpenAIWhisperProvider(api_key=openai_key).transcribe(path_str)
+            logger.info("stt_provider provider=openai")
+            return _filter_whisper_hallucination(text)
         except Exception as e:
             logger.warning("OpenAI Whisper failed: %s", _redact(str(e)))
             last_err = e
@@ -1012,6 +1148,50 @@ async def synthesize(
         voice_overrides = {}
 
     last_err: Exception | None = None
+
+    # 0. Preferred-provider short-circuit (cabinet voice / meeting-#6 fix).
+    #
+    # The cabinet voice subprocess emits ``TTSUpdateSettingsFrame{voice, provider}``
+    # per persona; HomieTTS passes that as ``voice_overrides={"edge": "<voice-id>"}``.
+    # Before this short-circuit, the cascade walked elevenlabs → gradium → mistral
+    # → gemini → openai → kokoro → kittentts → edge in fixed order. OpenAI (5th)
+    # tried first, hit a 429 quota, and the cascade fell to Kokoro (6th) with
+    # generic audio output — Edge (8th) was never reached, so the operator's
+    # explicit per-persona Edge voice selection was silently bypassed and the
+    # operator heard the wrong voice (or nothing). The voice_overrides param
+    # WAS being honored as a voice-id override IF the cascade reached that
+    # provider, but it never controlled WHICH provider ran first.
+    #
+    # This short-circuit honors ``voice_overrides["edge"]`` by trying Edge FIRST.
+    # On failure, falls through to the existing cascade for defense-in-depth
+    # (Telegram voice ingress etc. may rely on cascade fallback). Forward-additive:
+    # ``voice_overrides=None`` or ``{}`` or any dict without an "edge" key skips
+    # this branch entirely and the cascade runs verbatim.
+    #
+    # Pipecat canonical pattern for this is ``ServiceSwitcher`` with
+    # ``ManuallySwitchServiceFrame`` (docs.pipecat.ai/api-reference/server/utilities/
+    # service-switchers/service-switcher) — a future refactor moves to that;
+    # this short-circuit is the minimal change to unblock cabinet voice tonight.
+    if "edge" in voice_overrides and _edge_tts_installed():
+        try:
+            return await _try_provider(
+                "edge",
+                EdgeTtsProvider(voice=voice_overrides["edge"]),
+                text,
+                tts_config,
+            )
+        except ImportError as e:
+            logger.warning(
+                "Preferred Edge TTS unavailable, falling through to cascade: %s",
+                _redact(str(e)),
+            )
+            last_err = e
+        except Exception as e:
+            logger.warning(
+                "Preferred Edge TTS failed, falling through to cascade: %s",
+                _redact(str(e)),
+            )
+            last_err = e
 
     # 1. ElevenLabs (voice.ts primary)
     el_key = os.environ.get("ELEVENLABS_API_KEY")

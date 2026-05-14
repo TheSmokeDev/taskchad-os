@@ -40,6 +40,26 @@ def _create_meeting(client: TestClient, chat_id: str = "test-chat") -> int:
     return r.json()["meetingId"]
 
 
+def _force_default_roster_snapshot(meeting_id: int) -> None:
+    from dashboard_db import get_connection
+    import json
+
+    roster = [{"id": "default", "name": "Main", "description": "host"}]
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE cabinet_text_meetings SET roster_json = ? WHERE meeting_id = ?",
+            (json.dumps(roster), meeting_id),
+        )
+        conn.execute(
+            "UPDATE cabinet_meetings SET broadcast_order = ? WHERE id = ?",
+            (json.dumps(["default"]), meeting_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ── 12 endpoints — happy path coverage ───────────────────────────────────
 
 
@@ -57,6 +77,21 @@ def test_cabinet_new_force_ends_stale_in_same_chat(client: TestClient) -> None:
     r = client.post("/api/cabinet/new", json={"chatId": "shared-chat"})
     body = r.json()
     assert m1 in body["autoEnded"]
+
+
+def test_cabinet_open_reuses_current_room(client: TestClient) -> None:
+    r1 = client.post("/api/cabinet/open", json={"chatId": "browser"})
+    assert r1.status_code == 200
+    first = r1.json()
+    assert first["created"] is True
+
+    r2 = client.post("/api/cabinet/open", json={"chatId": "browser"})
+    assert r2.status_code == 200
+    second = r2.json()
+    assert second["created"] is False
+    assert second["meetingId"] == first["meetingId"]
+    assert "roster" in second
+    assert "broadcastOrder" in second
 
 
 def test_cabinet_list_returns_meetings(client: TestClient) -> None:
@@ -93,6 +128,7 @@ def test_cabinet_details_homie_delta(client: TestClient) -> None:
     assert body["meeting"]["id"] == mid
     assert "roster" in body
     assert body["status"] == "open"
+    assert "broadcastOrder" in body
 
 
 def test_cabinet_details_404_on_unknown(client: TestClient) -> None:
@@ -122,6 +158,40 @@ def test_cabinet_transcripts_returns_rows(client: TestClient) -> None:
     assert len(body["transcript"]) == 1
     assert body["transcript"][0]["speaker"] == "user"
     assert "latestSeq" in body  # captured BEFORE the transcript query
+    assert "broadcastOrder" in body
+
+
+def test_cabinet_participant_add_remove_updates_room_state(client: TestClient) -> None:
+    mid = _create_meeting(client, "c")
+    _force_default_roster_snapshot(mid)
+    from cabinet.text_orchestrator import RosterAgent
+
+    live_roster = [
+        RosterAgent(id="default", name="Main", description="host"),
+        RosterAgent(id="finance", name="Finance", description="money"),
+    ]
+    with patch("cabinet.text_orchestrator.get_roster", return_value=live_roster):
+        available = client.get(f"/api/cabinet/participants/available?meetingId={mid}&chatId=c")
+        assert available.status_code == 200
+        assert [agent["id"] for agent in available.json()["agents"]] == ["finance"]
+
+        added = client.post(
+            "/api/cabinet/participants/add",
+            json={"meetingId": mid, "agentId": "finance", "chatId": "c"},
+        )
+        assert added.status_code == 200
+        assert added.json()["broadcastOrder"] == ["default", "finance"]
+
+        removed = client.post(
+            "/api/cabinet/participants/remove",
+            json={"meetingId": mid, "agentId": "finance", "chatId": "c"},
+        )
+        assert removed.status_code == 200
+        assert removed.json()["broadcastOrder"] == ["default"]
+
+    from cabinet import meeting_channel as channels_mod
+    events = [entry.event for entry in channels_mod.get_channel(mid).since(0)]
+    assert any(event.get("type") == "meeting_state_update" for event in events)
 
 
 def test_cabinet_transcripts_paginates_via_before_id(client: TestClient) -> None:
@@ -162,6 +232,26 @@ def test_cabinet_send_queues_turn(client: TestClient) -> None:
             "meetingId": mid,
             "text": "@main hi",
             "clientMsgId": "x_1",
+        })
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "queued": True}
+
+
+def test_cabinet_send_accepts_audience_all(client: TestClient) -> None:
+    mid = _create_meeting(client, "c")
+    captured: list[str] = []
+
+    async def fake_run(req):
+        captured.append(req.metadata.get("persona_id") if req.metadata else "")
+        return RuntimeResult(text="reply", runtime_lane="claude_native", provider="claude", model="haiku")
+
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_router.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        r = client.post("/api/cabinet/send", json={
+            "meetingId": mid,
+            "text": "what is everyone seeing?",
+            "clientMsgId": "aud_all",
+            "audience": "all",
         })
     assert r.status_code == 200
     assert r.json() == {"ok": True, "queued": True}
@@ -237,6 +327,47 @@ def test_cabinet_unpin_clears(client: TestClient) -> None:
     r = client.post("/api/cabinet/unpin", json={"meetingId": mid})
     assert r.status_code == 200
     assert r.json()["pinnedAgent"] is None
+
+
+def test_cabinet_send_slash_help_does_not_queue_llm(client: TestClient) -> None:
+    mid = _create_meeting(client, "c")
+    with patch(
+        "cabinet.text_orchestrator.handle_text_turn",
+        side_effect=AssertionError("slash help must not dispatch LLM"),
+    ):
+        r = client.post("/api/cabinet/send", json={
+            "meetingId": mid,
+            "text": "/help",
+            "clientMsgId": "slash_help",
+        })
+    assert r.status_code == 200
+    assert r.json()["command"] is True
+
+    from cabinet import meeting_channel as channels_mod
+    events = [entry.event for entry in channels_mod.get_channel(mid).since(0)]
+    assert any(event.get("type") == "system_note" for event in events)
+
+
+def test_cabinet_send_slash_add_updates_roster(client: TestClient) -> None:
+    mid = _create_meeting(client, "c")
+    _force_default_roster_snapshot(mid)
+    from cabinet.text_orchestrator import RosterAgent
+
+    live_roster = [
+        RosterAgent(id="default", name="Main", description="host"),
+        RosterAgent(id="finance", name="Finance", description="money"),
+    ]
+    with patch("cabinet.text_orchestrator.get_roster", return_value=live_roster):
+        r = client.post("/api/cabinet/send", json={
+            "meetingId": mid,
+            "text": "/add @finance",
+            "clientMsgId": "slash_add",
+        })
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["command"] is True
+    assert body["broadcastOrder"] == ["default", "finance"]
 
 
 def test_cabinet_clear_emits_divider(client: TestClient) -> None:

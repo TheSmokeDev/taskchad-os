@@ -340,6 +340,18 @@ async def create_meeting(
     )
 
 
+async def open_meeting(
+    chat_id: str | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """POST ``/api/cabinet/open`` — idempotently open the current room."""
+    payload: dict[str, Any] = {}
+    if chat_id is not None:
+        payload["chatId"] = chat_id
+    return await _post("/api/cabinet/open", payload, client=client)
+
+
 async def list_meetings(
     limit: int = 20,
     chat_id: str | None = None,
@@ -395,6 +407,8 @@ async def send_message(
     *,
     is_voice: bool = False,
     target_agent_id: str | None = None,
+    audience: str = "auto",
+    target_agent_ids: list[str] | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """POST ``/api/cabinet/send`` — add an operator turn to a meeting.
@@ -446,7 +460,53 @@ async def send_message(
         payload["isVoice"] = True
     if target_agent_id is not None:
         payload["targetAgentId"] = target_agent_id
+    if audience != "auto":
+        payload["audience"] = audience
+    if target_agent_ids is not None:
+        payload["targetAgentIds"] = target_agent_ids
     return await _post("/api/cabinet/send", payload, client=client)
+
+
+async def list_available_participants(
+    meeting_id: int,
+    chat_id: str | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    """GET available Cabinet participants for ``meeting_id``."""
+    params: dict[str, Any] = {"meetingId": meeting_id}
+    if chat_id is not None:
+        params["chatId"] = chat_id
+    body = await _get("/api/cabinet/participants/available", params, client=client)
+    return list(body.get("agents", []))
+
+
+async def add_participant(
+    meeting_id: int,
+    agent_id: str,
+    chat_id: str | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """POST ``/api/cabinet/participants/add``."""
+    payload: dict[str, Any] = {"meetingId": meeting_id, "agentId": agent_id}
+    if chat_id is not None:
+        payload["chatId"] = chat_id
+    return await _post("/api/cabinet/participants/add", payload, client=client)
+
+
+async def remove_participant(
+    meeting_id: int,
+    agent_id: str,
+    chat_id: str | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """POST ``/api/cabinet/participants/remove``."""
+    payload: dict[str, Any] = {"meetingId": meeting_id, "agentId": agent_id}
+    if chat_id is not None:
+        payload["chatId"] = chat_id
+    return await _post("/api/cabinet/participants/remove", payload, client=client)
 
 
 async def stream_meeting(
@@ -602,9 +662,13 @@ async def end_meeting(
 
 __all__ = [
     "CabinetMeetingRef",
+    "add_participant",
     "create_meeting",
+    "open_meeting",
     "list_meetings",
+    "list_available_participants",
     "get_transcripts",
+    "remove_participant",
     "send_message",
     "stream_meeting",
     "end_meeting",

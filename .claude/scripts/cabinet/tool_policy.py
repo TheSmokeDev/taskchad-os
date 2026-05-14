@@ -4,8 +4,9 @@ PORTED FROM ClaudeClaw `src/warroom-tool-policy.ts:1-128` per PRD-8 §0a.
 
 M1 Homie security delta — DEFAULT-DENY floor (stricter than upstream):
 when persona's `cabinet.tools` is missing OR explicitly empty (`[]`),
-`cabinet_tool_policy()` resolves `allowed_tools=[]`. Side-effect tools
-require explicit YAML opt-in via `cabinet.tools=[...]` enumeration.
+`cabinet_tool_policy()` resolves `allowed_tools=[]` and `disallowed_tools=["*"]`.
+Side-effect tools require explicit YAML opt-in via `cabinet.tools=[...]`
+enumeration.
 Upstream default-allows SAFE_READONLY_TOOLS even when the agent's
 allowlist is empty; The Homie does NOT.
 """
@@ -32,6 +33,15 @@ SIDE_EFFECT_TOOLS: Final[tuple[str, ...]] = (
     "NotebookEdit",
     "ExitPlanMode",
     "Skill",
+)
+
+# Cabinet is already the room transport. Messaging/delegation tools make
+# personas try to route messages through a second channel instead of answering
+# directly in the transcript.
+ROOM_TRANSPORT_TOOLS: Final[tuple[str, ...]] = (
+    "ToolSearch",
+    "SendMessage",
+    "Agent",
 )
 
 # Per-default-agent overrides. Match warroom-tool-policy.ts:64-79.
@@ -80,9 +90,10 @@ def cabinet_tool_policy(
 
     M1 — Homie default-deny floor:
         Upstream returns SAFE_READONLY_TOOLS when overrides is None/empty.
-        The Homie returns `allowed_tools=[]` so a misconfigured persona
-        with no `cabinet.tools` block has ZERO tool surface in the
-        cabinet. Operator must affirmatively opt in via YAML.
+        The Homie returns `allowed_tools=[]` plus `disallowed_tools=["*"]`
+        so a misconfigured persona with no `cabinet.tools` block has ZERO
+        tool surface in the cabinet. Operator must affirmatively opt in via
+        YAML.
 
     Rule 1 enforcement: `persona_tools=None` is the canonical sentinel
     — resolved at body-time inside the function. NEVER bind a config
@@ -111,11 +122,14 @@ def cabinet_tool_policy(
         # M1 — Homie default-deny. Empty allowed list when no operator opt-in.
         allowed = []
 
-    # Disallow EVERY side-effect tool the persona didn't explicitly opt into.
-    # Defense-in-depth — even if `allowed_tools=[]` (which the SDK treats
-    # as an explicit empty allow-set), list dangerous tools so a future
-    # change that flips to a non-empty allowlist still has a floor.
-    disallowed = [t for t in SIDE_EFFECT_TOOLS if t not in allowed]
+    if not has_overrides:
+        disallowed = ["*"]
+    else:
+        # Disallow EVERY side-effect tool the persona didn't explicitly opt
+        # into. Defense-in-depth — even if an allowlist is widened later,
+        # dangerous and room-transport tools still have a floor.
+        deny_floor = (*SIDE_EFFECT_TOOLS, *ROOM_TRANSPORT_TOOLS)
+        disallowed = [t for t in deny_floor if t not in allowed]
 
     # MCP servers default to none. `mcp:<name>` entries opt agents in.
     if persona_tools is None:
@@ -155,6 +169,7 @@ def filter_mcp_servers[T](
 __all__ = [
     "CabinetToolPolicy",
     "DEFAULT_AGENT_ALLOWLISTS",
+    "ROOM_TRANSPORT_TOOLS",
     "SAFE_READONLY_TOOLS",
     "SIDE_EFFECT_TOOLS",
     "cabinet_tool_policy",

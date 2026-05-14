@@ -198,6 +198,45 @@ async def test_claude_sdk_runtime_forwards_disallowed_and_mcp() -> None:
     assert captured.get("allowed_tools") == ["Read"]
 
 
+@pytest.mark.asyncio
+async def test_claude_sdk_runtime_disables_tools_for_default_deny() -> None:
+    """Cabinet default-deny must remove the CLI's default tool surface."""
+    from unittest.mock import patch
+
+    captured: dict[str, object] = {}
+
+    class _DummyOptions:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    async def _empty_query(prompt, options):  # noqa: ARG001
+        if False:
+            yield None
+
+    profile = RuntimeProfile(
+        key="primary-claude",
+        provider="claude",
+        model="claude-haiku-4-5-20251001",
+    )
+    runtime = ClaudeSdkRuntime(profile)
+    request = RuntimeRequest(
+        prompt="hi",
+        cwd=".",
+        task_name="cabinet_test",
+        capability="text_reasoning",
+        allowed_tools=[],
+        disallowed_tools=["*"],
+    )
+
+    with patch("claude_agent_sdk.ClaudeAgentOptions", _DummyOptions), \
+         patch("claude_agent_sdk.query", _empty_query):
+        await runtime.run(request)
+
+    assert captured.get("tools") == []
+    assert captured.get("allowed_tools") == []
+    assert captured.get("disallowed_tools") == ["*"]
+
+
 # (c) Cabinet integration — tool_policy threads onto RuntimeRequest ──────
 
 

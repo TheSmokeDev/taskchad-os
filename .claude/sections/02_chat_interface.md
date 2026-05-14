@@ -58,6 +58,23 @@ Three router-typed slash commands let an operator drive multi-persona text meeti
 
 **Roster behavior:** Phase 5a's `_roster_from_personas()` (`.claude/scripts/cabinet/text_orchestrator.py:81-130`) auto-snapshots whichever cabinet-eligible personas are registered at meeting-create time. Operators manage the active roster via `/persona` BEFORE running `/cabinet create`. There is NO persona-selection arg at the chat-command level (R1 B4 fix). When no cabinet-eligible personas are registered, `_roster_from_personas()` falls back to a Main-only single-turn reply.
 
+### Cabinet Browser Room (PRD-8 Phase 5c)
+
+The dashboard Cabinet page is now the text-first room surface. On load it calls `POST /api/cabinet/open` with a stable browser `chatId`, reuses the latest open room for that chat when one exists, and creates one only when needed. Room details, transcript fetches, stream snapshots, pin state, and participant changes all read the meeting roster snapshot from `cabinet_text_meetings.roster_json`; live persona registry reads are fallback behavior only when no usable snapshot exists.
+
+Browser sends use an additive audience contract:
+
+| Browser input | Send body | Behavior |
+|---------------|-----------|----------|
+| `@sales status?` | `audience="mentions"` | Only mentioned homies respond. |
+| `@sales @marketing plan?` | `audience="mentions"` | Mentioned homies respond in room roster order. |
+| `what is everyone seeing?` | `audience="all"` | Every active room participant responds. |
+| `/all <message>` | slash command | Server rewrites to an all-room turn without sending the command text to the LLM. |
+| `/add @finance` / `/remove @finance` | slash command | Server updates `roster_json` and `cabinet_meetings.broadcast_order` in one transaction, then emits `meeting_state_update`. |
+| `/pin @sales` / `/unpin` / `/voice` / `/end` / `/help` | slash command | Server-side command path; command text never enters the LLM prompt. |
+
+Each non-default participant turn resolves the current Homie profile for that participant ID before runtime execution. The roster snapshot owns membership/order/display; the selected profile owns identity, memory files, config, runtime/auth settings, tools, and voice configuration.
+
 **Friendly error UX:** `cabinet_api` raises `CabinetAPIUnreachable` (httpx.ConnectError), `CabinetAuthFailure` (401), `CabinetKillSwitchDisabled` (503 on synchronous endpoints — `/new` and `/end`), `CabinetMeetingNotFound` (404), `CabinetMeetingEnded` (410), `CabinetBadRequest` (400), and `CabinetChatScopeMismatch` (403 chat_mismatch from `dashboard_api.py:1986-1997`). Each carries a `friendly_message` string the handlers return verbatim — operators see "Cabinet API is not running…" / "That meeting belongs to a different chat. Use /cabinet list…" instead of stack traces.
 
 **Config:**

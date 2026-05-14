@@ -2155,11 +2155,17 @@ async def conversation_stream(
 
 from cabinet import (  # noqa: E402, I001
     meeting_channel as _cabinet_channels,
+    room_commands as _cabinet_room_commands,
+    room_state as _cabinet_room_state,
     text_orchestrator as _cabinet_orch,
     title as _cabinet_title,
 )
 
 class CabinetNewBody(BaseModel):
+    chatId: str | None = None
+
+
+class CabinetOpenBody(BaseModel):
     chatId: str | None = None
 
 
@@ -2175,6 +2181,8 @@ class CabinetSendBody(BaseModel):
     # the upstream agent_id selection from warroom/agent_bridge.py:59-66).
     isVoice: bool = False
     targetAgentId: str | None = None
+    audience: str = "auto"
+    targetAgentIds: list[str] | None = None
 
 
 class CabinetMeetingIdBody(BaseModel):
@@ -2183,6 +2191,12 @@ class CabinetMeetingIdBody(BaseModel):
 
 
 class CabinetPinBody(BaseModel):
+    meetingId: int
+    agentId: str
+    chatId: str | None = None
+
+
+class CabinetParticipantBody(BaseModel):
     meetingId: int
     agentId: str
     chatId: str | None = None
@@ -2216,12 +2230,42 @@ def _cabinet_get_meeting(meeting_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def _cabinet_roster_dicts() -> list[dict]:
+def _cabinet_roster_dicts(meeting_id: int | None = None) -> list[dict]:
     """Roster as plain dicts (camelCase wire shape) for SSE/REST responses."""
-    return [
-        {"id": a.id, "name": a.name, "description": a.description}
-        for a in _cabinet_orch.get_roster()
-    ]
+    roster = (
+        _cabinet_room_state.load_meeting_roster(meeting_id)
+        if meeting_id is not None
+        else _cabinet_orch.get_roster()
+    )
+    return _cabinet_room_state.roster_to_wire(roster)
+
+
+def _cabinet_broadcast_order(meeting_id: int) -> list[str]:
+    roster = _cabinet_room_state.load_meeting_roster(meeting_id)
+    return _cabinet_room_state.broadcast_order(roster)
+
+
+def _cabinet_validate_room_request(meeting_id: int, chat_id: str) -> dict:
+    meeting = _cabinet_get_meeting(meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    if meeting.get("ended_at") is not None:
+        raise HTTPException(status_code=410, detail="meeting_ended")
+    if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+    return meeting
+
+
+def _cabinet_room_state_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, _cabinet_room_state.CabinetMeetingNotFound):
+        return HTTPException(status_code=404, detail="meeting_not_found")
+    if isinstance(exc, _cabinet_room_state.CabinetMeetingEnded):
+        return HTTPException(status_code=410, detail="meeting_ended")
+    if isinstance(exc, _cabinet_room_state.CabinetUnknownAgent):
+        return HTTPException(status_code=400, detail="unknown agent")
+    if isinstance(exc, _cabinet_room_state.CabinetDefaultRemovalRejected):
+        return HTTPException(status_code=400, detail="cannot remove default agent")
+    return HTTPException(status_code=400, detail="room_state_error")
 
 
 @router.get("/api/cabinet/list")
@@ -2339,6 +2383,49 @@ def cabinet_new(body: CabinetNewBody | None = None) -> dict:
     return {"ok": True, "meetingId": meeting_id, "autoEnded": stale_ids}
 
 
+@router.post("/api/cabinet/open")
+def cabinet_open(body: CabinetOpenBody | None = None) -> dict:
+    """Open the current Cabinet room for a chat, creating it if needed."""
+    chat_id = (body.chatId.strip() if body and body.chatId else "dashboard")
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """SELECT id, started_at, ended_at, mode, pinned_persona, entry_count,
+                      title, chat_id
+               FROM cabinet_meetings
+               WHERE chat_id = ? AND ended_at IS NULL
+               ORDER BY started_at DESC LIMIT 1""",
+            (chat_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    created = False
+    if row is None:
+        created_body = cabinet_new(CabinetNewBody(chatId=chat_id))
+        meeting_id = int(created_body["meetingId"])
+        created = True
+        meeting = _cabinet_get_meeting(meeting_id)
+    else:
+        meeting = dict(row)
+        meeting_id = int(meeting["id"])
+
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="meeting_not_found")
+    roster = _cabinet_roster_dicts(meeting_id)
+    return {
+        "ok": True,
+        "meetingId": meeting_id,
+        "created": created,
+        "meeting": meeting,
+        "roster": roster,
+        "agents": roster,
+        "broadcastOrder": _cabinet_broadcast_order(meeting_id),
+        "pinnedAgent": meeting.get("pinned_persona"),
+        "status": "open",
+    }
+
+
 @router.post("/api/cabinet/warmup")
 async def cabinet_warmup() -> dict:
     """Port dashboard.ts:843-849 — pre-warm SDK path. Idempotent."""
@@ -2351,7 +2438,10 @@ async def cabinet_warmup() -> dict:
 
 
 @router.get("/api/cabinet/details")
-def cabinet_details(meetingId: int = Query(...)) -> dict:
+def cabinet_details(
+    meetingId: int = Query(...),
+    chatId: str | None = Query(default=None),
+) -> dict:
     """HOMIE DELTA — page-load helper not present upstream.
 
     Returns meeting details + roster + pinned + status for `Cabinet.tsx`.
@@ -2359,13 +2449,91 @@ def cabinet_details(meetingId: int = Query(...)) -> dict:
     meeting = _cabinet_get_meeting(meetingId)
     if meeting is None:
         raise HTTPException(status_code=404, detail="meeting_not_found")
-    roster = _cabinet_roster_dicts()
+    if chatId is not None and not _cabinet_chat_match_or_403(meeting, chatId):
+        raise HTTPException(status_code=403, detail="chat_mismatch")
+    roster = _cabinet_roster_dicts(meetingId)
     return {
         "ok": True,
         "meeting": meeting,
         "roster": roster,
+        "agents": roster,
+        "broadcastOrder": _cabinet_broadcast_order(meetingId),
         "pinnedAgent": meeting.get("pinned_persona"),
         "status": "ended" if meeting.get("ended_at") else "open",
+    }
+
+
+@router.get("/api/cabinet/participants/available")
+def cabinet_participants_available(
+    meetingId: int = Query(...),
+    chatId: str | None = Query(default=None),
+) -> dict:
+    meeting = _cabinet_validate_room_request(meetingId, (chatId or "").strip())
+    available = _cabinet_room_state.list_available_agents(meetingId)
+    _ = meeting
+    return {
+        "ok": True,
+        "meetingId": meetingId,
+        "agents": _cabinet_room_state.roster_to_wire(available),
+    }
+
+
+@router.post("/api/cabinet/participants/add")
+def cabinet_participant_add(body: CabinetParticipantBody) -> dict:
+    chat_id = (body.chatId or "").strip()
+    _cabinet_validate_room_request(body.meetingId, chat_id)
+    agent_id = (body.agentId or "").strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="invalid agentId")
+    _reject_main_translation(agent_id)
+    try:
+        roster = _cabinet_room_state.add_meeting_participant(body.meetingId, agent_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _cabinet_room_state_error(exc) from exc
+    wire_roster = _cabinet_room_state.roster_to_wire(roster)
+    order = _cabinet_room_state.broadcast_order(roster)
+    _cabinet_channels.get_channel(body.meetingId).emit({
+        "type": "meeting_state_update",
+        "agents": wire_roster,
+        "broadcastOrder": order,
+    })
+    return {
+        "ok": True,
+        "meetingId": body.meetingId,
+        "roster": wire_roster,
+        "agents": wire_roster,
+        "broadcastOrder": order,
+    }
+
+
+@router.post("/api/cabinet/participants/remove")
+def cabinet_participant_remove(body: CabinetParticipantBody) -> dict:
+    chat_id = (body.chatId or "").strip()
+    _cabinet_validate_room_request(body.meetingId, chat_id)
+    agent_id = (body.agentId or "").strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="invalid agentId")
+    _reject_main_translation(agent_id)
+    try:
+        roster = _cabinet_room_state.remove_meeting_participant(body.meetingId, agent_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _cabinet_room_state_error(exc) from exc
+    meeting = _cabinet_get_meeting(body.meetingId) or {}
+    wire_roster = _cabinet_room_state.roster_to_wire(roster)
+    order = _cabinet_room_state.broadcast_order(roster)
+    _cabinet_channels.get_channel(body.meetingId).emit({
+        "type": "meeting_state_update",
+        "agents": wire_roster,
+        "broadcastOrder": order,
+        "pinnedAgent": meeting.get("pinned_persona"),
+    })
+    return {
+        "ok": True,
+        "meetingId": body.meetingId,
+        "roster": wire_roster,
+        "agents": wire_roster,
+        "broadcastOrder": order,
+        "pinnedAgent": meeting.get("pinned_persona"),
     }
 
 
@@ -2423,7 +2591,8 @@ def cabinet_transcripts(
         "pinnedAgent": meeting.get("pinned_persona"),
         "meetingStartedAt": meeting.get("started_at"),
         "endedAt": meeting.get("ended_at"),
-        "agents": _cabinet_roster_dicts(),
+        "agents": _cabinet_roster_dicts(meetingId),
+        "broadcastOrder": _cabinet_broadcast_order(meetingId),
         "latestSeq": latest_seq,
     }
 
@@ -2489,7 +2658,8 @@ async def cabinet_stream(
                 "type": "meeting_state",
                 "meetingId": meetingId,
                 "pinnedAgent": meeting.get("pinned_persona"),
-                "agents": _cabinet_roster_dicts(),
+                "agents": _cabinet_roster_dicts(meetingId),
+                "broadcastOrder": _cabinet_broadcast_order(meetingId),
                 "isFresh": meeting.get("ended_at") is None and meeting.get("entry_count", 0) == 0,
             }
             # Use _sse_format_no_id so the snapshot does NOT clobber the
@@ -2578,6 +2748,96 @@ async def cabinet_send(body: CabinetSendBody) -> dict:
     if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
         raise HTTPException(status_code=403, detail="chat_mismatch")
 
+    queued_command_name: str | None = None
+    command = _cabinet_room_commands.parse_room_command(text)
+    if command is not None:
+        channel = _cabinet_channels.get_channel(body.meetingId)
+        if command.name == "help":
+            channel.emit({
+                "type": "system_note",
+                "text": "Commands: /all, /add @agent, /remove @agent, /pin @agent, /unpin, /voice, /end",
+                "tone": "info",
+                "dismissable": True,
+            })
+            return {"ok": True, "command": True, "name": command.name}
+        if command.name == "voice":
+            channel.emit({
+                "type": "system_note",
+                "text": "Voice is available for this Cabinet room from the voice room entrypoint.",
+                "tone": "info",
+                "dismissable": True,
+            })
+            return {"ok": True, "command": True, "name": command.name}
+        if command.name == "add":
+            if not command.agent_id:
+                raise HTTPException(status_code=400, detail="missing agent")
+            result = cabinet_participant_add(CabinetParticipantBody(
+                meetingId=body.meetingId,
+                agentId=command.agent_id,
+                chatId=chat_id or None,
+            ))
+            channel.emit({
+                "type": "system_note",
+                "text": f"Added @{command.agent_id} to the Cabinet room.",
+                "tone": "info",
+                "dismissable": True,
+            })
+            return {"ok": True, "command": True, "name": command.name, **result}
+        if command.name == "remove":
+            if not command.agent_id:
+                raise HTTPException(status_code=400, detail="missing agent")
+            result = cabinet_participant_remove(CabinetParticipantBody(
+                meetingId=body.meetingId,
+                agentId=command.agent_id,
+                chatId=chat_id or None,
+            ))
+            channel.emit({
+                "type": "system_note",
+                "text": f"Removed @{command.agent_id} from the Cabinet room.",
+                "tone": "info",
+                "dismissable": True,
+            })
+            return {"ok": True, "command": True, "name": command.name, **result}
+        if command.name == "pin":
+            if not command.agent_id:
+                raise HTTPException(status_code=400, detail="missing agent")
+            result = cabinet_pin(CabinetPinBody(
+                meetingId=body.meetingId,
+                agentId=command.agent_id,
+                chatId=chat_id or None,
+            ))
+            channel.emit({
+                "type": "system_note",
+                "text": f"Pinned @{command.agent_id}.",
+                "tone": "info",
+                "dismissable": True,
+            })
+            return {"ok": True, "command": True, "name": command.name, **result}
+        if command.name == "unpin":
+            result = cabinet_unpin(CabinetMeetingIdBody(
+                meetingId=body.meetingId,
+                chatId=chat_id or None,
+            ))
+            channel.emit({
+                "type": "system_note",
+                "text": "Cleared Cabinet pin.",
+                "tone": "info",
+                "dismissable": True,
+            })
+            return {"ok": True, "command": True, "name": command.name, **result}
+        if command.name == "end":
+            result = await cabinet_end(CabinetMeetingIdBody(
+                meetingId=body.meetingId,
+                chatId=chat_id or None,
+            ))
+            return {"ok": True, "command": True, "name": command.name, **result}
+        if command.name == "all":
+            text = command.message
+            if not text:
+                raise HTTPException(status_code=400, detail="empty /all message")
+            body.audience = "all"
+            queued_command_name = command.name
+
     # Fire-and-forget — client tracks progress via SSE.
     import asyncio  # noqa: PLC0415
 
@@ -2593,6 +2853,8 @@ async def cabinet_send(body: CabinetSendBody) -> dict:
                 # the dataclass defaults preserve Phase 5a behavior verbatim.
                 is_voice=body.isVoice,
                 target_agent_id=body.targetAgentId,
+                audience=body.audience,
+                target_agent_ids=body.targetAgentIds,
             )
             await handle_text_turn(body.meetingId, text, client_msg_id, opts)
         except Exception as exc:  # noqa: BLE001
@@ -2605,7 +2867,10 @@ async def cabinet_send(body: CabinetSendBody) -> dict:
             })
 
     asyncio.create_task(_run())
-    return {"ok": True, "queued": True}
+    response = {"ok": True, "queued": True}
+    if queued_command_name is not None:
+        response.update({"command": True, "name": queued_command_name})
+    return response
 
 
 @router.post("/api/cabinet/abort")
@@ -2632,9 +2897,6 @@ def cabinet_pin(body: CabinetPinBody) -> dict:
     # rather than relying on the generic "unknown agent" message. Matches the
     # pattern used by every conversation/* endpoint.
     _reject_main_translation(agent_id)
-    roster_ids = {a.id for a in _cabinet_orch.get_roster()}
-    if agent_id not in roster_ids:
-        raise HTTPException(status_code=400, detail="unknown agent")
     meeting = _cabinet_get_meeting(body.meetingId)
     if meeting is None:
         raise HTTPException(status_code=404, detail="meeting_not_found")
@@ -2643,6 +2905,9 @@ def cabinet_pin(body: CabinetPinBody) -> dict:
     chat_id = (body.chatId or "").strip()
     if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
         raise HTTPException(status_code=403, detail="chat_mismatch")
+    roster_ids = {a.id for a in _cabinet_room_state.load_meeting_roster(body.meetingId)}
+    if agent_id not in roster_ids:
+        raise HTTPException(status_code=400, detail="unknown agent")
     conn = get_connection()
     try:
         conn.execute(
@@ -2655,6 +2920,8 @@ def cabinet_pin(body: CabinetPinBody) -> dict:
     _cabinet_channels.get_channel(body.meetingId).emit({
         "type": "meeting_state_update",
         "pinnedAgent": agent_id,
+        "agents": _cabinet_roster_dicts(body.meetingId),
+        "broadcastOrder": _cabinet_broadcast_order(body.meetingId),
     })
     return {"ok": True, "meetingId": body.meetingId, "pinnedAgent": agent_id}
 
@@ -2682,6 +2949,8 @@ def cabinet_unpin(body: CabinetMeetingIdBody) -> dict:
     _cabinet_channels.get_channel(body.meetingId).emit({
         "type": "meeting_state_update",
         "pinnedAgent": None,
+        "agents": _cabinet_roster_dicts(body.meetingId),
+        "broadcastOrder": _cabinet_broadcast_order(body.meetingId),
     })
     return {"ok": True, "meetingId": body.meetingId, "pinnedAgent": None}
 

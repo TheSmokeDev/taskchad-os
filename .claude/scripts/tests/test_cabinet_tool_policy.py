@@ -10,6 +10,7 @@ import pytest
 
 from cabinet.tool_policy import (
     DEFAULT_AGENT_ALLOWLISTS,
+    ROOM_TRANSPORT_TOOLS,
     SAFE_READONLY_TOOLS,
     SIDE_EFFECT_TOOLS,
     cabinet_tool_policy,
@@ -47,8 +48,8 @@ def test_m1_missing_cabinet_tools_yields_empty_allowed() -> None:
     p = cabinet_tool_policy("default", persona_tools=None)
     assert p.allowed_tools == []
     assert p.allowed_mcp_servers == []
-    # disallowed list still contains all SIDE_EFFECT_TOOLS (defense in depth).
-    assert set(p.disallowed_tools) == set(SIDE_EFFECT_TOOLS)
+    # SDK hard-deny marker: empty allowed_tools alone still exposes tools.
+    assert p.disallowed_tools == ["*"]
 
 
 def test_m1_empty_cabinet_tools_yields_empty_allowed() -> None:
@@ -56,6 +57,7 @@ def test_m1_empty_cabinet_tools_yields_empty_allowed() -> None:
     p = cabinet_tool_policy("ops", persona_tools=[])
     assert p.allowed_tools == []
     assert p.allowed_mcp_servers == []
+    assert p.disallowed_tools == ["*"]
 
 
 def test_m1_explicit_opt_in_combines_with_safe_readonly() -> None:
@@ -72,6 +74,13 @@ def test_m1_explicit_opt_in_combines_with_safe_readonly() -> None:
     # Bash explicitly allowed → not in disallowed list.
     assert "Bash" not in p.disallowed_tools
     assert "Write" in p.disallowed_tools
+    assert "SendMessage" in p.disallowed_tools
+    assert "ToolSearch" in p.disallowed_tools
+
+
+def test_room_transport_tools_set() -> None:
+    """Cabinet room participants should speak in-room, not dispatch messages."""
+    assert set(ROOM_TRANSPORT_TOOLS) == {"ToolSearch", "SendMessage", "Agent"}
 
 
 def test_mcp_prefix_opt_in_extracts_server_names() -> None:

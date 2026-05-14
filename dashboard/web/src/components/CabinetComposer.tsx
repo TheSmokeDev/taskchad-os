@@ -22,10 +22,24 @@ interface RosterAgent {
 interface Props {
   meetingId: number;
   roster: RosterAgent[];
+  chatId: string;
   disabled?: boolean;
 }
 
-export function CabinetComposer({ meetingId, roster, disabled }: Props) {
+const MENTION_RE = /(?:^|[\s,([{:;])@([a-z][a-z0-9_-]{0,29})\b/gi;
+
+function audienceForText(text: string, roster: RosterAgent[]): 'auto' | 'all' | 'mentions' {
+  if (text.trim().startsWith('/')) return 'auto';
+  const rosterIds = new Set(roster.map((agent) => agent.id));
+  for (const match of text.matchAll(MENTION_RE)) {
+    if (rosterIds.has(match[1].toLowerCase())) {
+      return 'mentions';
+    }
+  }
+  return 'all';
+}
+
+export function CabinetComposer({ meetingId, roster, chatId, disabled }: Props) {
   const [text, setText] = useState('');
   const [showPicker, setShowPicker] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -54,6 +68,8 @@ export function CabinetComposer({ meetingId, roster, disabled }: Props) {
         meetingId,
         text: t,
         clientMsgId,
+        chatId,
+        audience: audienceForText(t, roster),
       });
       setText('');
     } catch (err) {

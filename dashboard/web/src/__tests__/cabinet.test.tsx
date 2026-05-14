@@ -30,14 +30,19 @@ describe('cabinet UI surface — static contract', () => {
     const src = readFileSync(join(WEB_SRC, 'pages', 'Cabinet.tsx'), 'utf-8');
     expect(src).toContain('<CabinetComposer');
     expect(src).toContain('<CabinetTranscript');
+    expect(src).toContain('/api/cabinet/open');
+    expect(src).toContain('/api/cabinet/participants/add');
+    expect(src).toContain('/api/cabinet/participants/remove');
   });
 
-  it('CabinetComposer dispatches POST /api/cabinet/send with the verbatim upstream body shape', () => {
+  it('CabinetComposer dispatches POST /api/cabinet/send with room audience shape', () => {
     const src = readFileSync(join(WEB_SRC, 'components', 'CabinetComposer.tsx'), 'utf-8');
     expect(src).toContain("/api/cabinet/send");
     expect(src).toContain("meetingId");
     expect(src).toContain("text:");
     expect(src).toContain("clientMsgId");
+    expect(src).toContain("audience:");
+    expect(src).toContain("audienceForText");
   });
 
   it('cabinet-stream.ts handles 410 + X-Refetch-Hint per Phase 3 SSE contract', () => {
@@ -71,6 +76,7 @@ describe('cabinet UI surface — static contract', () => {
     for (const v of variants) {
       expect(src, `CabinetTranscript missing case for ${v}`).toContain(v);
     }
+    expect(src).toContain('No text reply returned.');
   });
 
   it('Cabinet UI is documented as Homie-native (B2/NB3) — NOT a port of WarRoom.tsx', () => {
@@ -108,6 +114,8 @@ describe('cabinet UI behavior — composer dispatch', () => {
       meetingId: 1,
       text: 'hi',
       clientMsgId: 'c_test',
+      chatId: 'cabinet-browser',
+      audience: 'all',
     });
     expect(fetch).toHaveBeenCalled();
     const args = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -115,6 +123,12 @@ describe('cabinet UI behavior — composer dispatch', () => {
     const init = args[1] as RequestInit;
     expect(init.method).toBe('POST');
     const body = JSON.parse(init.body as string);
-    expect(body).toEqual({ meetingId: 1, text: 'hi', clientMsgId: 'c_test' });
+    expect(body).toEqual({
+      meetingId: 1,
+      text: 'hi',
+      clientMsgId: 'c_test',
+      chatId: 'cabinet-browser',
+      audience: 'all',
+    });
   });
 });

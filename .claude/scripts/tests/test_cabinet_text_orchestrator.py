@@ -298,3 +298,108 @@ async def test_handle_text_turn_threads_tool_policy(tmp_dashboard_db: Path) -> N
     assert ops_request.disallowed_tools is not None
     assert "Write" in ops_request.disallowed_tools
     assert ops_request.mcp_servers == ["gmail"]
+
+
+@pytest.mark.asyncio
+async def test_handle_text_turn_allows_text_tool_followup_turns(tmp_dashboard_db: Path) -> None:
+    """Text Cabinet turns need room for tool_use -> final answer."""
+    meeting_id = _make_meeting()
+    captured_max_turns: list[int] = []
+
+    async def fake_run(req):
+        captured_max_turns.append(req.max_turns)
+        return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
+
+    opts = HandleTurnOptions(roster=_test_roster(), audience="mentions")
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        await handle_text_turn(meeting_id, "@seo plan?", "text_max_turns", opts=opts)
+
+    assert captured_max_turns == [3]
+
+
+@pytest.mark.asyncio
+async def test_handle_text_turn_keeps_voice_turn_cap(tmp_dashboard_db: Path) -> None:
+    """Voice remains one-shot so TTS replies stay bounded."""
+    meeting_id = _make_meeting()
+    captured_max_turns: list[int] = []
+
+    async def fake_run(req):
+        captured_max_turns.append(req.max_turns)
+        return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
+
+    opts = HandleTurnOptions(roster=_test_roster(), is_voice=True, target_agent_id="seo")
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        await handle_text_turn(meeting_id, "voice check", "voice_max_turns", opts=opts)
+
+    assert captured_max_turns == [1]
+
+
+@pytest.mark.asyncio
+async def test_handle_text_turn_audience_all_runs_roster_in_order(tmp_dashboard_db: Path) -> None:
+    meeting_id = _make_meeting()
+    captured_personas: list[str] = []
+
+    async def fake_run(req):
+        captured_personas.append(req.metadata.get("persona_id") if req.metadata else "")
+        return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
+
+    opts = HandleTurnOptions(roster=_test_roster(), audience="all")
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        result = await handle_text_turn(
+            meeting_id=meeting_id,
+            user_text="what is everyone seeing?",
+            client_msg_id="audience_all",
+            opts=opts,
+        )
+
+    assert result.accepted is True
+    assert captured_personas == ["default", "seo", "ops"]
+
+
+@pytest.mark.asyncio
+async def test_handle_text_turn_audience_mentions_runs_all_mentions(tmp_dashboard_db: Path) -> None:
+    meeting_id = _make_meeting()
+    captured_personas: list[str] = []
+
+    async def fake_run(req):
+        captured_personas.append(req.metadata.get("persona_id") if req.metadata else "")
+        return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
+
+    opts = HandleTurnOptions(roster=_test_roster(), audience="mentions")
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        result = await handle_text_turn(
+            meeting_id=meeting_id,
+            user_text="@ops @seo compare notes",
+            client_msg_id="audience_mentions",
+            opts=opts,
+        )
+
+    assert result.accepted is True
+    assert captured_personas == ["ops", "seo"]
+
+
+@pytest.mark.asyncio
+async def test_handle_text_turn_audience_targets_bypasses_router(tmp_dashboard_db: Path) -> None:
+    meeting_id = _make_meeting()
+    captured_personas: list[str] = []
+
+    async def fake_run(req):
+        captured_personas.append(req.metadata.get("persona_id") if req.metadata else "")
+        return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
+
+    opts = HandleTurnOptions(
+        roster=_test_roster(),
+        audience="targets",
+        target_agent_ids=["ops", "seo"],
+    )
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_orchestrator.route_message", side_effect=AssertionError("router should not run")):
+        result = await handle_text_turn(
+            meeting_id=meeting_id,
+            user_text="compare notes",
+            client_msg_id="audience_targets",
+            opts=opts,
+        )
+
+    assert result.accepted is True
+    assert captured_personas == ["seo", "ops"]

@@ -46,6 +46,8 @@ apply_persona_override()
 
 # Pipecat optional dep — wrap so AST scans + tests still load.
 try:  # pragma: no cover — exercised by integration only.
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.audio.vad.vad_analyzer import VADParams
     from pipecat.pipeline.runner import PipelineRunner
     from pipecat.serializers.protobuf import ProtobufFrameSerializer
     from pipecat.transports.network.websocket_server import (
@@ -55,6 +57,14 @@ try:  # pragma: no cover — exercised by integration only.
     _PIPECAT_AVAILABLE = True
 except ImportError:  # pragma: no cover — pipecat optional dep.
     _PIPECAT_AVAILABLE = False
+
+    class SileroVADAnalyzer:  # type: ignore[no-redef]
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class VADParams:  # type: ignore[no-redef]
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
 
     class WebsocketServerTransport:  # type: ignore[no-redef]
         def __init__(self, host: str = "127.0.0.1", port: int = 7860, params=None) -> None:
@@ -91,10 +101,24 @@ except ImportError:  # pragma: no cover — pipecat optional dep.
 
 from . import config as voice_config  # noqa: E402
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s",
+)
 logger = logging.getLogger("cabinet.voice.server")
 
 from security import redact as _redact_mod  # noqa: E402
 _redact = _redact_mod.redact
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def make_transport(
@@ -121,6 +145,37 @@ def make_transport(
     Rule 1: ``host=None`` is the sentinel — resolve at call time.
     """
     bind_host = host if host is not None else voice_config.voice_bind()
+    # WS1 — Silero VAD before HomieSTT. Without VAD, HomieSTT's 32 KB byte-count
+    # flush at voice_pipeline.py:169 sends every audio buffer to Whisper, and
+    # Whisper confabulates "Thank you" / "Obrigado" on silence (well-documented
+    # YouTube-training artifact). Pipecat's canonical pattern wires VAD into
+    # WebsocketServerParams.vad_analyzer; the transport then emits
+    # UserStartedSpeakingFrame / UserStoppedSpeakingFrame which HomieSTT can
+    # use for event-driven (not size-driven) flushes. ClaudeClaw's upstream
+    # uses bare SileroVADAnalyzer() in DailyTransport mode
+    # (warroom/daily_agent.py:203); we pass explicit VADParams here so cabinet
+    # can tune sensitivity without code surgery. Rule 1 — sample_rate resolved
+    # from the function arg, not a module-level default.
+    vad_confidence = _env_float("CABINET_VAD_CONFIDENCE", 0.55)
+    vad_start_secs = _env_float("CABINET_VAD_START_SECS", 0.2)
+    vad_stop_secs = _env_float("CABINET_VAD_STOP_SECS", 0.25)
+    vad_min_volume = _env_float("CABINET_VAD_MIN_VOLUME", 0.35)
+    logger.info(
+        "vad_settings confidence=%s start_secs=%s stop_secs=%s min_volume=%s",
+        _redact(str(vad_confidence)),
+        _redact(str(vad_start_secs)),
+        _redact(str(vad_stop_secs)),
+        _redact(str(vad_min_volume)),
+    )
+    vad_analyzer = SileroVADAnalyzer(
+        sample_rate=audio_in_sr,
+        params=VADParams(
+            confidence=vad_confidence,
+            start_secs=vad_start_secs,
+            stop_secs=vad_stop_secs,
+            min_volume=vad_min_volume,
+        ),
+    ) if _PIPECAT_AVAILABLE else None
     return WebsocketServerTransport(
         host=bind_host,
         port=port,
@@ -129,7 +184,7 @@ def make_transport(
             audio_out_enabled=True,
             audio_in_sample_rate=audio_in_sr,
             audio_out_sample_rate=audio_out_sr,
-            vad_analyzer=None,
+            vad_analyzer=vad_analyzer,
             serializer=ProtobufFrameSerializer(),
         ),
     )
@@ -147,6 +202,7 @@ def print_ready(port: int, mode: str = "legacy") -> None:
         "transport": "websocket",
         "mode": mode,
     }
+    print(json.dumps(connection_info), flush=True)
 
 
 def _load_broadcast_order_from_db(meeting_id: int) -> list[str] | None:
@@ -200,7 +256,6 @@ def _load_broadcast_order_from_db(meeting_id: int) -> list[str] | None:
     if not isinstance(parsed, list):
         return None
     return [str(x) for x in parsed if x]
-    print(json.dumps(connection_info), flush=True)
 
 
 # ── Legacy mode entry point — port of warroom/server.py:768-779 ────────

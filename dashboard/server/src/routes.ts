@@ -109,8 +109,12 @@ export const ROUTE_MANIFEST: readonly string[] = [
   // upstream dashboard.ts:802-1254 verbatim).
   '/api/cabinet/list',
   '/api/cabinet/new',
+  '/api/cabinet/open',
   '/api/cabinet/warmup',
   '/api/cabinet/details',
+  '/api/cabinet/participants/available',
+  '/api/cabinet/participants/add',
+  '/api/cabinet/participants/remove',
   '/api/cabinet/transcripts',
   '/api/cabinet/stream',
   '/api/cabinet/send',

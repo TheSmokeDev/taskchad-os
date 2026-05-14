@@ -166,6 +166,28 @@ async def test_name_prefix_emits_single_route_frame(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_name_prefix_uses_meeting_roster_snapshot(monkeypatch):
+    """Dynamic Phase 6 roster names like sales route from the meeting snapshot."""
+    router = voice_router.AgentRouter(agent_names=["default", "sales", "seo_geo"])
+    pushed: list = []
+
+    async def fake_push(frame, direction=None):
+        pushed.append((frame, direction))
+
+    monkeypatch.setattr(router, "push_frame", fake_push)
+
+    frame = voice_router.TranscriptionFrame(text="Sales, what is pipeline state?", user_id="", timestamp="")
+    await router.process_frame(frame, voice_router.FrameDirection.DOWNSTREAM)
+
+    assert len(pushed) == 1
+    f, _ = pushed[0]
+    assert isinstance(f, voice_router.AgentRouteFrame)
+    assert f.agent_id == "sales"
+    assert f.mode == "single"
+    assert f.message == "what is pipeline state?"
+
+
+@pytest.mark.asyncio
 async def test_default_main_emits_single_route_frame(monkeypatch):
     """When no broadcast/prefix/pin matches, route to main."""
     router = voice_router.AgentRouter()

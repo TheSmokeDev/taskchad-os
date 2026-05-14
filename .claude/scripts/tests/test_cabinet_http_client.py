@@ -62,9 +62,13 @@ def test_module_exists() -> None:
     """The module is importable from `integrations`."""
     assert CABINET_API_PATH.exists()
     assert hasattr(cabinet_api, "create_meeting")
+    assert hasattr(cabinet_api, "open_meeting")
     assert hasattr(cabinet_api, "list_meetings")
+    assert hasattr(cabinet_api, "list_available_participants")
     assert hasattr(cabinet_api, "get_transcripts")
     assert hasattr(cabinet_api, "send_message")
+    assert hasattr(cabinet_api, "add_participant")
+    assert hasattr(cabinet_api, "remove_participant")
     assert hasattr(cabinet_api, "end_meeting")
 
 
@@ -72,7 +76,17 @@ def test_httpx_client_pattern() -> None:
     """All helpers accept `client: httpx.AsyncClient | None = None` keyword."""
     import inspect
 
-    for name in ("create_meeting", "list_meetings", "get_transcripts", "send_message", "end_meeting"):
+    for name in (
+        "create_meeting",
+        "open_meeting",
+        "list_meetings",
+        "get_transcripts",
+        "send_message",
+        "list_available_participants",
+        "add_participant",
+        "remove_participant",
+        "end_meeting",
+    ):
         helper = getattr(cabinet_api, name)
         sig = inspect.signature(helper)
         assert "client" in sig.parameters, f"{name} missing `client` param"
@@ -112,6 +126,16 @@ async def test_endpoint_urls_list_meetings() -> None:
 
 
 @pytest.mark.asyncio
+async def test_endpoint_urls_open_meeting() -> None:
+    captured: list[httpx.Request] = []
+    response = httpx.Response(200, json={"ok": True, "meetingId": 1, "created": False})
+    async with _build_client(_capture_handler(captured, response)) as client:
+        await cabinet_api.open_meeting(chat_id="telegram:42", client=client)
+    assert captured[0].method == "POST"
+    assert captured[0].url.path == "/api/cabinet/open"
+
+
+@pytest.mark.asyncio
 async def test_endpoint_urls_send_message() -> None:
     captured: list[httpx.Request] = []
     response = httpx.Response(200, json={"ok": True, "queued": True})
@@ -119,6 +143,21 @@ async def test_endpoint_urls_send_message() -> None:
         await cabinet_api.send_message(1, "hi", chat_id="telegram:42", client=client)
     assert captured[0].method == "POST"
     assert captured[0].url.path == "/api/cabinet/send"
+
+
+@pytest.mark.asyncio
+async def test_endpoint_urls_participants() -> None:
+    captured: list[httpx.Request] = []
+    response = httpx.Response(200, json={"ok": True, "agents": [], "roster": []})
+    async with _build_client(_capture_handler(captured, response)) as client:
+        await cabinet_api.list_available_participants(1, chat_id="telegram:42", client=client)
+        await cabinet_api.add_participant(1, "finance", chat_id="telegram:42", client=client)
+        await cabinet_api.remove_participant(1, "finance", chat_id="telegram:42", client=client)
+    assert [request.url.path for request in captured] == [
+        "/api/cabinet/participants/available",
+        "/api/cabinet/participants/add",
+        "/api/cabinet/participants/remove",
+    ]
 
 
 @pytest.mark.asyncio
@@ -195,6 +234,26 @@ async def test_body_shapes_send_message_includes_required_fields() -> None:
     assert "clientMsgId" in body
     assert isinstance(body["clientMsgId"], str)
     assert len(body["clientMsgId"]) == 32  # uuid.uuid4().hex
+
+
+@pytest.mark.asyncio
+async def test_body_shapes_send_message_audience_and_targets() -> None:
+    import json as _json
+
+    captured: list[httpx.Request] = []
+    response = httpx.Response(200, json={"ok": True, "queued": True})
+    async with _build_client(_capture_handler(captured, response)) as client:
+        await cabinet_api.send_message(
+            7,
+            "hello",
+            client_msg_id="custom",
+            audience="targets",
+            target_agent_ids=["sales", "marketing"],
+            client=client,
+        )
+    body = _json.loads(captured[0].content.decode())
+    assert body["audience"] == "targets"
+    assert body["targetAgentIds"] == ["sales", "marketing"]
 
 
 @pytest.mark.asyncio
@@ -473,7 +532,17 @@ def test_none_sentinel_resolves_in_body() -> None:
     NOT a module-level constant or expression that evaluates at def time.
     """
     module = _parse_module()
-    public_helpers = {"create_meeting", "list_meetings", "get_transcripts", "send_message", "end_meeting"}
+    public_helpers = {
+        "create_meeting",
+        "open_meeting",
+        "list_meetings",
+        "get_transcripts",
+        "send_message",
+        "list_available_participants",
+        "add_participant",
+        "remove_participant",
+        "end_meeting",
+    }
     seen: set[str] = set()
     for node in ast.walk(module):
         if isinstance(node, ast.AsyncFunctionDef) and node.name in public_helpers:

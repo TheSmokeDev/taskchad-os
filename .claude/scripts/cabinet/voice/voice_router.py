@@ -143,6 +143,14 @@ def _build_agent_pattern(names: set[str]) -> re.Pattern:
     )
 
 
+def _normalize_agent_names(names: list[str] | set[str] | None) -> set[str]:
+    normalized = {str(name).lower() for name in (names or []) if str(name).strip()}
+    if "default" in normalized:
+        normalized.add("main")
+    normalized.add("main")
+    return normalized
+
+
 def _refresh_agent_names_from_roster() -> None:
     """Re-read /tmp/cabinet-roster.json if the file's mtime changed.
 
@@ -221,13 +229,30 @@ class AgentRouter(FrameProcessor):  # type: ignore[misc]
     precedence: broadcast trigger → name-prefix → pinned → main.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, agent_names: list[str] | set[str] | None = None, **kwargs):
         super().__init__(**kwargs)
         # mtime-cached read of /tmp/cabinet-voice-pin.json so we don't
         # stat+parse on every single utterance; only re-read when the file
         # changes.
         self._pin_mtime: float = 0.0
         self._pin_agent: Optional[str] = None
+        self._agent_names: set[str] | None = (
+            _normalize_agent_names(agent_names) if agent_names else None
+        )
+        self._instance_agent_pattern: Optional[re.Pattern] = (
+            _build_agent_pattern(self._agent_names) if self._agent_names else None
+        )
+
+    def _known_agent_names(self) -> set[str]:
+        if self._agent_names is not None:
+            return self._agent_names
+        _refresh_agent_names_from_roster()
+        return AGENT_NAMES
+
+    def _get_agent_pattern(self) -> re.Pattern:
+        if self._instance_agent_pattern is not None:
+            return self._instance_agent_pattern
+        return _get_agent_pattern()
 
     def _get_pinned_agent(self) -> Optional[str]:
         """Return the currently pinned agent id, or None.
@@ -258,9 +283,9 @@ class AgentRouter(FrameProcessor):  # type: ignore[misc]
                 # into the pin file. Defend against non-dict top-level values
                 # (strings, lists, numbers) that would otherwise crash .get()
                 # with AttributeError.
-                _refresh_agent_names_from_roster()
+                known_agent_names = self._known_agent_names()
                 agent = data.get("agent") if isinstance(data, dict) else None
-                if isinstance(agent, str) and agent in AGENT_NAMES:
+                if isinstance(agent, str) and agent in known_agent_names:
                     if agent != self._pin_agent:
                         logger.info("pin now: %s", _redact(agent))
                     self._pin_agent = agent
@@ -313,7 +338,7 @@ class AgentRouter(FrameProcessor):  # type: ignore[misc]
 
         # Check for agent name prefix (regex rebuilt lazily when the
         # roster file changes).
-        match = _get_agent_pattern().match(text)
+        match = self._get_agent_pattern().match(text)
         if match:
             agent_id = match.group(1).lower()
             message = match.group(2).strip()
