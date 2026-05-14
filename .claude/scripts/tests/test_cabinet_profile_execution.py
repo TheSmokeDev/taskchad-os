@@ -140,9 +140,19 @@ async def test_named_cabinet_participant_runs_with_target_profile_context(
     )
     assert request.env is not None
     assert request.env["HOMIE_HOME"] == str(profile_root)
+    prompt = request.system_prompt or ""
+    assert f"You are `{persona_id}` ({persona_id.title()})" in prompt
+    assert "Answer directly as this participant only." in prompt
+    assert "Do not say you are Main/default" in prompt
+    assert "voice War Room setup" in prompt
+    assert prompt.index("Cabinet Room Identity Contract") < prompt.index(
+        "Cabinet Participant Profile Context"
+    )
     assert f"{persona_id.upper()}_SOUL_MARKER" in (request.system_prompt or "")
     assert f"{persona_id.upper()}_MEMORY_MARKER" in (request.system_prompt or "")
-    assert request.metadata["system_prompt_source"] == "profile_context"
+    assert request.metadata["system_prompt_source"] == (
+        "cabinet_room_identity+profile_context"
+    )
 
 
 @pytest.mark.asyncio

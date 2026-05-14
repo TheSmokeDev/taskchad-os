@@ -2,6 +2,8 @@
 
 The Homie's cabinet voice feature gives operators a single-user voice meeting with their cabinet personas through a browser. The architecture ports verbatim from ClaudeClaw's war room: a server-rendered HTML page drives a Pipecat WebSocket client that connects to a small Python voice subprocess. The voice subprocess routes turns through the same brain (`text_orchestrator.handle_text_turn`) that powers Telegram cabinet meetings, so persona behavior stays identical across surfaces.
 
+For the broader Cabinet dashboard manual and room-state vertical slice, see `docs/cabinet-room-manual.md`.
+
 ## Architecture at a glance
 
 | Component | Location | Role |

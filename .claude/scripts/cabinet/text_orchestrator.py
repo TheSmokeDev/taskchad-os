@@ -209,10 +209,10 @@ def _profile_execution_context(persona_id: str) -> _ProfileExecutionContext:
     system_prompt = ""
     if profile_context:
         system_prompt = (
-            "## Cabinet Participant Profile\n"
-            f"You are responding as the `{canonical_id}` Homie profile inside "
-            "a shared Cabinet room. Use this profile's own identity, memory, "
-            "tools, and operating context for this turn.\n\n"
+            "## Cabinet Participant Profile Context\n"
+            "Use this profile's memory, tools, and operating context for this "
+            "turn. If this context conflicts with the Cabinet Room Identity "
+            "Contract above, the Identity Contract wins.\n\n"
             f"{profile_context}"
         )
 
@@ -230,6 +230,47 @@ def _merge_system_prompts(*parts: str | None) -> str | None:
         if isinstance(part, str) and part.strip()
     ]
     return "\n\n".join(blocks) if blocks else None
+
+
+def _cabinet_room_identity_prompt(
+    *,
+    persona_id: str,
+    persona_name: str,
+    persona_description: str,
+    role: str,
+    is_voice: bool,
+) -> str:
+    """Hard room identity guard for each Cabinet participant turn."""
+    canonical_id = (persona_id or "default").strip()
+    display_name = (persona_name or canonical_id).strip()
+    channel_name = "voice" if is_voice else "text"
+    participant_line = (
+        f"You are `{canonical_id}` ({display_name}), the `{role}` participant "
+        f"in this Cabinet {channel_name} room turn."
+    )
+    if canonical_id in {"default", "main"}:
+        participant_line = (
+            f"You are the Main Cabinet participant (`default`, {display_name}) "
+            f"for this Cabinet {channel_name} room turn."
+        )
+
+    lines = [
+        "## Cabinet Room Identity Contract",
+        participant_line,
+        "Answer directly as this participant only.",
+        "If multiple participants were mentioned, speak only for yourself; "
+        "the room orchestrator will ask the other participants separately.",
+        "Do not say you are Main/default unless this turn's participant is "
+        "`default`/`main`.",
+        "Do not claim tagged Cabinet participants are unavailable, not live, "
+        "not separate sessions, or only part of a voice War Room setup.",
+        "Do not mention voice rebuilds, handoffs, routing internals, or "
+        "profile/session implementation unless the user explicitly asks about "
+        "system status.",
+    ]
+    if persona_description.strip():
+        lines.append(f"Participant role context: {persona_description.strip()}")
+    return "\n".join(lines)
 
 
 # ── Public turn API ──────────────────────────────────────────────────────
@@ -744,10 +785,23 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
     voice_system_prompt = (
         _resolve_voice_persona_prompt(args.persona_id) if args.is_voice else None
     )
+    identity_system_prompt = _cabinet_room_identity_prompt(
+        persona_id=args.persona_id,
+        persona_name=args.persona.name,
+        persona_description=args.persona.description,
+        role=args.role,
+        is_voice=args.is_voice,
+    )
     persona_system_prompt = _merge_system_prompts(
+        identity_system_prompt,
         profile_context.system_prompt,
         voice_system_prompt,
     )
+    system_prompt_sources = ["cabinet_room_identity"]
+    if profile_context.system_prompt:
+        system_prompt_sources.append("profile_context")
+    if voice_system_prompt:
+        system_prompt_sources.append("voice_persona_prompt")
 
     request = RuntimeRequest(
         prompt=runtime_prompt,
@@ -771,15 +825,7 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
                 "disallowed_count": len(policy.disallowed_tools),
                 "mcp_count": len(mcp_names),
             },
-            "system_prompt_source": (
-                "profile_context"
-                if profile_context.system_prompt and not voice_system_prompt
-                else "profile_context+voice_persona_prompt"
-                if profile_context.system_prompt and voice_system_prompt
-                else "voice_persona_prompt"
-                if voice_system_prompt
-                else "lane_router_default"
-            ),
+            "system_prompt_source": "+".join(system_prompt_sources),
         },
         auth_profile=args.persona.auth_profile,
         env=profile_context.env,

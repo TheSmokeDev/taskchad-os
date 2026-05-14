@@ -360,9 +360,12 @@ async def test_handle_text_turn_audience_all_runs_roster_in_order(tmp_dashboard_
 async def test_handle_text_turn_audience_mentions_runs_all_mentions(tmp_dashboard_db: Path) -> None:
     meeting_id = _make_meeting()
     captured_personas: list[str] = []
+    captured_prompts: dict[str, str] = {}
 
     async def fake_run(req):
-        captured_personas.append(req.metadata.get("persona_id") if req.metadata else "")
+        persona_id = req.metadata.get("persona_id") if req.metadata else ""
+        captured_personas.append(persona_id)
+        captured_prompts[persona_id] = req.system_prompt or ""
         return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
 
     opts = HandleTurnOptions(roster=_test_roster(), audience="mentions")
@@ -376,6 +379,10 @@ async def test_handle_text_turn_audience_mentions_runs_all_mentions(tmp_dashboar
 
     assert result.accepted is True
     assert captured_personas == ["ops", "seo"]
+    assert "You are `ops` (Ops)" in captured_prompts["ops"]
+    assert "speak only for yourself" in captured_prompts["ops"]
+    assert "Do not say you are Main/default" in captured_prompts["ops"]
+    assert "You are `seo` (SEO)" in captured_prompts["seo"]
 
 
 @pytest.mark.asyncio

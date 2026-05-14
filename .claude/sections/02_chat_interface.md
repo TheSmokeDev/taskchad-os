@@ -62,6 +62,8 @@ Three router-typed slash commands let an operator drive multi-persona text meeti
 
 The dashboard Cabinet page is now the text-first room surface. On load it calls `POST /api/cabinet/open` with a stable browser `chatId`, reuses the latest open room for that chat when one exists, and creates one only when needed. Room details, transcript fetches, stream snapshots, pin state, and participant changes all read the meeting roster snapshot from `cabinet_text_meetings.roster_json`; live persona registry reads are fallback behavior only when no usable snapshot exists.
 
+For the full on-demand dashboard manual, vertical-slice architecture, failure-mode table, and validation map, load `docs/cabinet-room-manual.md`.
+
 Browser sends use an additive audience contract:
 
 | Browser input | Send body | Behavior |
