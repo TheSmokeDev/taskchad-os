@@ -4,6 +4,7 @@ import pytest
 
 import runtime.profiles as profiles
 import runtime.registry as registry
+import runtime.routing as routing
 from runtime.base import (
     RUNTIME_LANE_CLAUDE_NATIVE,
     RUNTIME_LANE_GENERIC,
@@ -27,6 +28,7 @@ def test_resolve_runtime_profiles_adds_openai_fallback(monkeypatch: pytest.Monke
     monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
     monkeypatch.setattr(profiles, "OPENAI_API_KEY", "sk-test-key")
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
     monkeypatch.setenv("SECOND_BRAIN_RUNTIME_PROVIDER", "claude")
     monkeypatch.setenv("SECOND_BRAIN_ENABLE_OPENAI_FALLBACK", "true")
     monkeypatch.setenv("SECOND_BRAIN_FALLBACK_PROVIDER", "openai")

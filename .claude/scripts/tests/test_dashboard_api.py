@@ -407,7 +407,7 @@ def test_hard_delete_partial_when_only_config_yaml_missing(isolated_app, tmp_pat
     assert body["partial"] is True
 
 
-def test_hard_delete_real_di<REDACTED-elevenlabs>(isolated_app, tmp_path, monkeypatch):
+def test_hard_delete_real_disk_intact_when_lifecycle_raises_before_any_delete(isolated_app, tmp_path, monkeypatch):
     """REAL filesystem: lifecycle raises BEFORE any delete → 500 lifecycle_error_no_change."""
     homie_home = tmp_path / ".homie"
     profile_root = homie_home / "profiles" / "intact-test"
@@ -428,7 +428,7 @@ def test_hard_delete_real_di<REDACTED-elevenlabs>(isolated_app, tmp_path, monkey
     assert any("lifecycle_error_no_change" in w for w in body["warnings"])
 
 
-def test_hard_delete_real_di<REDACTED-elevenlabs>(isolated_app, tmp_path, monkeypatch):
+def test_hard_delete_real_disk_idempotent_when_already_gone(isolated_app, tmp_path, monkeypatch):
     """REAL filesystem: profile root never existed → 200 deleted (idempotent)."""
     homie_home = tmp_path / ".homie"
     homie_home.mkdir()

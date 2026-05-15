@@ -47,11 +47,18 @@ class DiagnosticsReport:
     runtime_selected_generic_provider: str | None = None
     runtime_generic_text_route: list[str] = field(default_factory=list)
     runtime_generic_tool_route: list[str] = field(default_factory=list)
+    runtime_provider_details: dict[str, str] = field(default_factory=dict)
+    runtime_auth_issues: dict[str, str] = field(default_factory=dict)
 
     # Sessions
     sessions_active: int = 0
     sessions_total_messages: int = 0
     sessions_total_cost_usd: float = 0.0
+
+    # Clear/session lifecycle
+    clear_lifecycle_recent_failures: int = 0
+    clear_lifecycle_last_failure: str | None = None
+    clear_lifecycle_last_failure_at: str | None = None
 
     # Adapters (only populated when called from inside the bot)
     adapters_connected: dict[str, bool] = field(default_factory=dict)
@@ -75,6 +82,7 @@ def collect_diagnostics() -> DiagnosticsReport:
     _check_memory_db(report)
     _check_runtime(report)
     _check_sessions(report)
+    _check_clear_lifecycle(report)
     _check_capabilities(report)
 
     return report
@@ -170,6 +178,7 @@ def _check_memory_db(report: DiagnosticsReport) -> None:
 def _check_runtime(report: DiagnosticsReport) -> None:
     """Check runtime provider health and availability."""
     try:
+        from runtime.auth_profiles import codex_auth_status, resolve_codex_auth_profile
         from runtime.health import is_profile_available
         from runtime.profiles import build_profile_for_provider, normalize_provider
         from runtime.routing import GENERIC_TEXT_ROUTE, GENERIC_TOOL_ROUTE
@@ -199,6 +208,17 @@ def _check_runtime(report: DiagnosticsReport) -> None:
 
         for provider in providers_to_check:
             try:
+                if provider == "openai-codex":
+                    codex_status = codex_auth_status(resolve_codex_auth_profile())
+                    if codex_status.detail:
+                        report.runtime_provider_details[provider] = codex_status.detail
+                    issue = _runtime_auth_issue(provider, codex_status.detail)
+                    if issue:
+                        report.runtime_auth_issues[provider] = issue
+                    if not codex_status.available:
+                        report.runtime_providers[provider] = "OFF"
+                        continue
+
                 profile = build_profile_for_provider(
                     provider, key_prefix="diagnostics"
                 )
@@ -210,6 +230,21 @@ def _check_runtime(report: DiagnosticsReport) -> None:
                 report.runtime_providers[provider] = "OFF"
     except ImportError:
         report.runtime_providers = {"error": "runtime not importable"}
+
+
+def _runtime_auth_issue(provider: str, detail: str) -> str | None:
+    """Return an operator-facing auth issue when a provider has stale credentials."""
+    if provider != "openai-codex":
+        return None
+    detail_lower = detail.lower()
+    stale_markers = ("refresh_token_reused", "token_expired")
+    if not any(marker in detail_lower for marker in stale_markers):
+        return None
+    return (
+        "Codex CLI auth is stale. Run `codex login`, then rerun "
+        "`uv run thehomie doctor`. Detail: "
+        + _short_detail(detail)
+    )
 
 
 def _check_sessions(report: DiagnosticsReport) -> None:
@@ -224,6 +259,43 @@ def _check_sessions(report: DiagnosticsReport) -> None:
         report.sessions_total_cost_usd = sum(s.total_cost_usd for s in sessions)
     except Exception:
         pass
+
+
+def _check_clear_lifecycle(report: DiagnosticsReport) -> None:
+    """Summarize recent /clear lifecycle hook failures from the state log."""
+    log_path = STATE_DIR / "clear-lifecycle-events.jsonl"
+    if not log_path.exists():
+        return
+
+    try:
+        rows = [
+            json_mod.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()[-50:]
+            if line.strip()
+        ]
+    except Exception:
+        return
+
+    failure_count = 0
+    last_failure: tuple[str, str, str] | None = None
+    for row in rows:
+        timestamp = str(row.get("timestamp", ""))
+        for event in row.get("events", []) or []:
+            if not isinstance(event, dict):
+                continue
+            status = str(event.get("status", ""))
+            if status not in {"error", "warn"}:
+                continue
+            failure_count += 1
+            step = str(event.get("step", "unknown"))
+            detail = str(event.get("detail", status))
+            last_failure = (timestamp, step, detail)
+
+    report.clear_lifecycle_recent_failures = failure_count
+    if last_failure:
+        timestamp, step, detail = last_failure
+        report.clear_lifecycle_last_failure_at = timestamp
+        report.clear_lifecycle_last_failure = f"{step}: {_short_detail(detail)}"
 
 
 def _check_capabilities(report: DiagnosticsReport) -> None:
@@ -262,6 +334,13 @@ def _check_capabilities(report: DiagnosticsReport) -> None:
         # Fail-open: leave capabilities=[] and toolsets={} at defaults.
         # No partial state — both fields move together.
         pass
+
+
+def _short_detail(value: str, *, max_chars: int = 220) -> str:
+    text = " ".join(value.strip().split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
 
 
 def check_environment() -> list[tuple[str, str, str]]:

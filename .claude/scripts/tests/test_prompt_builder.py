@@ -11,9 +11,10 @@ def test_tool_reasoning_includes_preamble_and_hints() -> None:
     req = RuntimeRequest(
         prompt="do it", cwd=".", task_name="test", capability=TOOL_REASONING
     )
-    result = render_cli_prompt(req)
+    result = render_cli_prompt(req, framework_tool_map="Framework tool map:\n- skill")
     assert "The Homie runtime layer" in result
     assert "Key integrations" in result
+    assert "Framework tool map" in result
     assert "User task:" in result
 
 
@@ -70,7 +71,7 @@ def test_system_prompt_dict_no_append_key_skipped() -> None:
     assert "System context" not in result
 
 
-def test_ta<REDACTED-elevenlabs>() -> None:
+def test_task_name_and_prompt_always_present() -> None:
     req = RuntimeRequest(prompt="hello world", cwd=".", task_name="my_task")
     result = render_cli_prompt(req)
     assert "Task name: my_task" in result
@@ -90,9 +91,13 @@ def test_custom_integration_hints_override() -> None:
     req = RuntimeRequest(
         prompt="go", cwd=".", task_name="t", capability=TOOL_REASONING
     )
-    result = render_cli_prompt(req, integration_hints="Use custom tools only.")
+    result = render_cli_prompt(
+        req,
+        integration_hints="Use custom tools only.",
+        framework_tool_map="",
+    )
     assert "Use custom tools only." in result
-    assert "YourBusiness" not in result
+    assert "Key integrations" not in result
 
 
 def test_integration_hints_constant_matches_expected_content() -> None:

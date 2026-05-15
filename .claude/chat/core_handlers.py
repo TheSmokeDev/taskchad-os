@@ -172,6 +172,21 @@ async def handle_diagnostics(adapter: Any, incoming: Any, args: str, *, collect_
         lines.append(f"  lane:{lane_name}: {lane_status}")
     for name, status in report.runtime_providers.items():
         lines.append(f"  {name}: {status}")
+    if report.runtime_auth_issues:
+        lines.append("  Auth attention:")
+        for provider, issue in report.runtime_auth_issues.items():
+            lines.append(f"    {provider_display_name(provider)}: {issue}")
+    lines.append("")
+    lines.append("*Lifecycle*:")
+    lines.append(
+        f"  Clear lifecycle warnings/errors (recent): "
+        f"{report.clear_lifecycle_recent_failures}"
+    )
+    if report.clear_lifecycle_last_failure:
+        lines.append(
+            "  Last clear lifecycle warning: "
+            f"{report.clear_lifecycle_last_failure}"
+        )
     lines.append("")
     lines.append("*Sessions*:")
     lines.append(f"  Active: {report.sessions_active}")
@@ -196,7 +211,23 @@ async def handle_clear(adapter: Any, incoming: Any, args: str, *, collect_only: 
     """Clear the current session."""
     store, existing, platform_str, channel_id, thread_id = _get_session(incoming)
     if existing:
-        store.delete(platform_str, channel_id, thread_id)
+        from session_lifecycle_hooks import clear_session_with_lifecycle
+
+        result = clear_session_with_lifecycle(
+            store=store,
+            session=existing,
+            platform=platform_str,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            engine=_ctx.get("engine"),
+            source="clear",
+        )
+        warning = result.warning_summary()
+        if warning:
+            return (
+                "Session cleared. Next message starts fresh.\n"
+                f"Lifecycle warning: {warning}"
+            )
         return "Session cleared. Next message starts fresh."
     return "No active session to clear."
 

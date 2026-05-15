@@ -1,5 +1,6 @@
 """Tests for The Homie diagnostics collector."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -108,6 +109,38 @@ class TestDiagnosticsReport:
         assert isinstance(report.runtime_lanes, dict)
         assert isinstance(report.runtime_providers, dict)
 
+    def test_collect_diagnostics_reports_codex_stale_auth(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import diagnostics as diagnostics_module
+        import runtime.auth_profiles as auth_profiles
+        import runtime.health as runtime_health
+        import runtime.profiles as profiles
+
+        monkeypatch.setattr(
+            auth_profiles,
+            "codex_auth_status",
+            lambda _profile=None: auth_profiles.AuthProfileStatus(
+                False,
+                "refresh_token_reused: refresh token has already been used",
+            ),
+        )
+        monkeypatch.setattr(
+            profiles,
+            "build_profile_for_provider",
+            lambda provider, **_kwargs: object() if provider != "openai-codex" else None,
+        )
+        monkeypatch.setattr(runtime_health, "is_profile_available", lambda _profile: True)
+        monkeypatch.setattr(diagnostics_module, "CHAT_DB_PATH", Path("missing.db"))
+
+        report = collect_diagnostics()
+
+        assert report.runtime_providers["openai-codex"] == "OFF"
+        issue = report.runtime_auth_issues["openai-codex"]
+        assert "Codex CLI auth is stale" in issue
+        assert "codex login" in issue
+        assert "refresh_token_reused" in issue
+
     def test_collect_diagnostics_reports_lane_selection(self, monkeypatch):
         import diagnostics as diagnostics_module
         import runtime.profiles as profiles
@@ -138,6 +171,48 @@ class TestDiagnosticsReport:
     def test_collect_diagnostics_sessions(self):
         report = collect_diagnostics()
         assert isinstance(report.sessions_active, int)
+
+    def test_collect_diagnostics_reports_clear_lifecycle_failures(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import diagnostics as diagnostics_module
+
+        log_path = tmp_path / "clear-lifecycle-events.jsonl"
+        rows = [
+            {
+                "timestamp": "2026-05-14T10:00:00",
+                "session_id": "cli:one:one",
+                "events": [
+                    {"step": "session-end-flush.py", "status": "warn", "detail": "exit 1"},
+                    {"step": "session_delete", "status": "ok", "detail": "deleted"},
+                ],
+            },
+            {
+                "timestamp": "2026-05-14T10:01:00",
+                "session_id": "cli:two:two",
+                "events": [
+                    {
+                        "step": "session-end-flush.py",
+                        "status": "error",
+                        "detail": "RuntimeError: flush hook failed again",
+                    },
+                ],
+            },
+        ]
+        log_path.write_text(
+            "\n".join(json.dumps(row) for row in rows),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(diagnostics_module, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(diagnostics_module, "CHAT_DB_PATH", Path("missing.db"))
+
+        report = collect_diagnostics()
+
+        assert report.clear_lifecycle_recent_failures == 2
+        assert report.clear_lifecycle_last_failure_at == "2026-05-14T10:01:00"
+        assert report.clear_lifecycle_last_failure is not None
+        assert "session-end-flush.py" in report.clear_lifecycle_last_failure
+        assert "flush hook failed again" in report.clear_lifecycle_last_failure
 
     def test_report_serializable(self):
         """Ensure report can be serialized to JSON (for API endpoint)."""

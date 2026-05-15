@@ -142,6 +142,47 @@ class ExtensionManager:
             "give me a rundown", "catch me up", "fill me in",
         ]
 
+        self._discussion_only_patterns: list[re.Pattern[str]] = [
+            re.compile(pattern)
+            for pattern in [
+                r"\bshould\s+(?:we|i)\s+use\b",
+                r"\bdoes\b.{0,100}\bapply\b",
+                r"\bdo\s+not\s+(?:invoke|run|use|call|trigger)\b",
+                r"\bdon't\s+(?:invoke|run|use|call|trigger)\b",
+                r"\bwithout\s+(?:invoking|running|using|calling|triggering)\b",
+                r"\b(?:a|the)?\s*skill\s+like\b",
+                r"\btalking\s+about\b.{0,120}\b(?:skill|command|intent|route)\b",
+                r"\b(?:example|examples|correction|correcting)\b.{0,120}\b(?:skill|command|intent|route)\b",
+                r"\b(?:skill|command|intent|route)\b.{0,120}\b(?:example|examples|correction|correcting)\b",
+                r"\bwhat\s+(?:does|is|are)\b.{0,120}\b(?:skill|command|intent|route)\b",
+                r"\bwhen\s+should\s+(?:we|i)\b.{0,120}\b(?:skill|command|intent|route)\b",
+            ]
+        ]
+        self._external_action_patterns: list[re.Pattern[str]] = [
+            re.compile(pattern)
+            for pattern in [
+                r"\bsend\s+(?:(?:this|the|an?)\s+)?(?:email|text|sms|dm|message|slack)\b",
+                r"\b(?:email|text|sms|dm|message|slack)\s+(?:the\s+)?(?:customer|client|lead|prospect|team|everyone|them|him|her|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})\b",
+                r"\b(?:reply\s+to|forward)\b.{0,80}\b(?:email|message|thread|dm|inbox)\b",
+                r"\b(?:contact|outreach|reach\s+out\s+to)\b",
+                r"\b(?:deploy|ship|publish|release|submit|post|push)\b.{0,120}\b(?:prod|production|live|site|app|form|browser|facebook|twitter|x|linkedin|instagram|tiktok)\b",
+                r"\b(?:buy|purchase|order|book|schedule)\b.{0,120}\b(?:appointment|reservation|flight|hotel|now|for\s+me)\b",
+            ]
+        ]
+        self._authorized_external_action_patterns: list[re.Pattern[str]] = [
+            re.compile(pattern)
+            for pattern in [
+                r"^(?:please\s+)?send\s+(?:this\s+)?(?:email|text|sms|dm|message|slack)\b.*(?:[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|:|\"|')",
+                r"^(?:please\s+)?(?:email|text|sms|dm|message|slack)\s+.+(?:[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|:|\"|')",
+                r"^(?:please\s+)?(?:reply|forward)\b.*(?:now|:|\"|')",
+                r"^(?:please\s+)?(?:deploy|ship|publish|release|submit|post|push)\b.*\b(?:now|approved|confirmed|go\s+ahead|prod|production|live)\b",
+                (
+                    r"\b(?:go\s+ahead|confirmed|approved|yes[, ]+|do\s+it|"
+                    r"send\s+now|deploy\s+now|publish\s+now|submit\s+now|ship\s+it)\b"
+                ),
+            ]
+        ]
+
         # Allow/deny lists (set via config)
         self._allow_list: list[str] = []  # empty = allow all
         self._deny_list: list[str] = []
@@ -452,6 +493,9 @@ class ExtensionManager:
         """
         text_lower = text.lower()
 
+        if self.is_discussion_only(text) or self.has_external_action_signal(text):
+            return []
+
         # Broad status query → return all brief intents
         if any(sig in text_lower for sig in self._broad_query_signals):
             return self.get_brief_intents()
@@ -467,6 +511,50 @@ class ExtensionManager:
         """Check if the message wants AI analysis beyond raw data."""
         text_lower = text.lower()
         return any(sig in text_lower for sig in self._analysis_signals)
+
+    def _normalize_for_gate(self, text: str) -> str:
+        return " ".join(text.lower().split())
+
+    def is_discussion_only(self, text: str) -> bool:
+        """Return True when a command/skill mention is meta-discussion only."""
+        text_lower = self._normalize_for_gate(text)
+        if not text_lower or text_lower.startswith("/"):
+            return False
+        return any(pattern.search(text_lower) for pattern in self._discussion_only_patterns)
+
+    def has_external_action_signal(self, text: str) -> bool:
+        """Return True when natural language may contact people or mutate live state."""
+        text_lower = self._normalize_for_gate(text)
+        if not text_lower or text_lower.startswith("/"):
+            return False
+        return any(pattern.search(text_lower) for pattern in self._external_action_patterns)
+
+    def is_clearly_authorized_external_action(self, text: str) -> bool:
+        """Return True when an external action is phrased as an explicit imperative."""
+        text_lower = self._normalize_for_gate(text)
+        if not text_lower or text_lower.startswith("/"):
+            return False
+        return any(
+            pattern.search(text_lower)
+            for pattern in self._authorized_external_action_patterns
+        )
+
+    def requires_external_action_confirmation(self, text: str) -> bool:
+        """Require confirmation for plausible external actions without clear approval."""
+        if self.is_discussion_only(text):
+            return False
+        if not self.has_external_action_signal(text):
+            return False
+        return not self.is_clearly_authorized_external_action(text)
+
+    def build_external_action_confirmation(self, text: str) -> str:
+        """Build the router reply used when natural language needs confirmation."""
+        return (
+            "That sounds like it may contact a real person or mutate a live "
+            "surface. I won't run that from a conversational mention. "
+            "Reply with a direct instruction such as `send now: ...`, "
+            "`deploy now: ...`, or use the explicit slash command."
+        )
 
     def get_brief_intents(self) -> list[str]:
         """Return command names included in the default /brief set."""

@@ -245,3 +245,49 @@ async def test_handle_diagnostics_omits_legacy_chain(monkeypatch: pytest.MonkeyP
     assert "generic text route: OpenAI" in message
     assert "generic tool route: Codex" in message
     assert "Chain:" not in message
+
+
+@pytest.mark.asyncio
+async def test_handle_diagnostics_surfaces_runtime_and_lifecycle_attention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import core_handlers
+    import diagnostics
+    from diagnostics import DiagnosticsReport
+
+    monkeypatch.setattr(
+        diagnostics,
+        "collect_diagnostics",
+        lambda: DiagnosticsReport(
+            timestamp="2026-05-14T00:00:00",
+            uptime_seconds=1.0,
+            runtime_lanes={"claude_native": "ON", "generic_runtime": "ON"},
+            runtime_providers={"openai-codex": "OFF", "gemini-cli": "ON"},
+            runtime_selected_lane="generic_runtime",
+            runtime_selected_generic_provider="openai-codex",
+            runtime_generic_text_route=["openai-codex", "gemini-cli"],
+            runtime_generic_tool_route=["openai-codex", "gemini-cli"],
+            runtime_auth_issues={
+                "openai-codex": "Codex CLI auth is stale. Run `codex login`.",
+            },
+            clear_lifecycle_recent_failures=2,
+            clear_lifecycle_last_failure="session-end-flush.py: exit 1",
+        ),
+    )
+    monkeypatch.setattr(
+        core_handlers,
+        "provider_display_name",
+        lambda provider: {
+            "openai-codex": "Codex",
+            "gemini-cli": "Gemini",
+        }.get(provider, provider),
+    )
+    monkeypatch.setitem(core_handlers._ctx, "adapters", {})
+
+    message = await core_handlers.handle_diagnostics(None, None, "")
+
+    assert "Auth attention:" in message
+    assert "Codex: Codex CLI auth is stale" in message
+    assert "*Lifecycle*:" in message
+    assert "Clear lifecycle warnings/errors (recent): 2" in message
+    assert "session-end-flush.py: exit 1" in message

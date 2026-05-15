@@ -183,6 +183,38 @@ class TestIntentDetection:
         detected = populated_manager.detect_intents("how are we looking across all boards")
         assert len(detected) >= 2  # brief intents
 
+    def test_discussion_only_skill_mentions_do_not_detect_intents(
+        self, populated_manager: ExtensionManager,
+    ):
+        assert populated_manager.detect_intents(
+            "should we use the email skill for inbox cleanup?"
+        ) == []
+        assert populated_manager.detect_intents(
+            "do not invoke the email skill; just explain when it applies"
+        ) == []
+
+    def test_external_action_mentions_do_not_route_to_data_intents(
+        self, populated_manager: ExtensionManager,
+    ):
+        detected = populated_manager.detect_intents(
+            "send an email to the customer about the quote"
+        )
+
+        assert detected == []
+
+    def test_external_action_confirmation_gate(
+        self, populated_manager: ExtensionManager,
+    ):
+        assert populated_manager.requires_external_action_confirmation(
+            "we should send an outreach email to customers today"
+        )
+        assert not populated_manager.requires_external_action_confirmation(
+            "send this email to bob@example.com now: Hello Bob"
+        )
+        assert not populated_manager.requires_external_action_confirmation(
+            "should we use the email skill before contacting leads?"
+        )
+
     def test_wants_analysis_true(self, populated_manager: ExtensionManager):
         assert populated_manager.wants_analysis("good morning, how are we looking?")
         assert populated_manager.wants_analysis("summarize everything")

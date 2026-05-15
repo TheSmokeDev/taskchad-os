@@ -86,7 +86,7 @@ SECRET_PREFIXES: tuple[str, ...] = tuple(
 # shape at sanitize.py:316). Built in SECRET_PREFIXES order (length-desc) so
 # consumers iterating in tuple order get correct precedence.
 LEAK_PATTERN_REGEX: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(re.escape(prefix) + r"[A-Za-z0-9_.\-]{16,}")
+    re.compile(r"(?<![A-Za-z0-9_])" + re.escape(prefix) + r"[A-Za-z0-9_.\-]{16,}")
     for prefix in SECRET_PREFIXES
 )
 

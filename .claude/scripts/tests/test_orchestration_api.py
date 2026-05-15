@@ -197,7 +197,7 @@ def test_dispatch_unknown_executor_returns_400(client):
     assert "unknown executor" in r.json()["detail"].lower()
 
 
-def test_dispatch_rejects_subta<REDACTED-elevenlabs>(client):
+def test_dispatch_rejects_subtask_from_other_convoy(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -235,7 +235,7 @@ def test_complete_subtask(client):
     assert isinstance(data["newly_ready"], list)
 
 
-def test_complete_rejects_subta<REDACTED-elevenlabs>(client):
+def test_complete_rejects_subtask_from_other_convoy(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -275,7 +275,7 @@ def test_fail_subtask(client):
     assert "convoy_failed" in r.json()
 
 
-def test_fail_rejects_subta<REDACTED-elevenlabs>(client):
+def test_fail_rejects_subtask_from_other_convoy(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -650,7 +650,7 @@ def test_transition_from_terminal_returns_400(client):
     assert r.status_code == 400
 
 
-def test_transition_rejects_subta<REDACTED-elevenlabs>(client):
+def test_transition_rejects_subtask_from_other_convoy(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -687,7 +687,7 @@ def test_update_subtask_fields(client):
     assert data["worktree_branch"] == "feat/task-1"
 
 
-def test_update_subta<REDACTED-elevenlabs>(client):
+def test_update_subtask_fields_terminal_rejects_non_seal(client):
     """Non-seal fields (assigned_agent_id) rejected on terminal subtasks."""
     cid, sid = _make_dispatched_subtask(client)
     client.post(f"/api/convoy/{cid}/subtask/{sid}/transition", json={"status": "cancelled"})
@@ -701,7 +701,7 @@ def test_update_subta<REDACTED-elevenlabs>(client):
     assert "terminal" in r.json()["detail"].lower()
 
 
-def test_update_subta<REDACTED-elevenlabs>(client):
+def test_update_subtask_fields_rejects_other_convoy(client):
     c1 = client.post("/api/convoy", json={"title": "One", "created_by": "sb"}).json()["convoy"][
         "id"
     ]
@@ -896,7 +896,7 @@ def test_callback_unknown_event_type(client):
     assert "unknown event_type" in r.json()["detail"].lower()
 
 
-def test_callback_subta<REDACTED-elevenlabs>(client):
+def test_callback_subtask_completed_no_deps(client):
     """Single subtask with no deps: completed callback → convoy completed."""
     cid, sid = _make_ready_subtask(client)
     client.post(f"/api/convoy/{cid}/subtask/{sid}/dispatch", json={})
@@ -920,7 +920,7 @@ def test_callback_subta<REDACTED-elevenlabs>(client):
     assert convoy["convoy"]["status"] == "completed"
 
 
-def test_callback_subta<REDACTED-elevenlabs>(client):
+def test_callback_subtask_completed_triggers_auto_dispatch(client):
     """A → B chain: completing A auto-dispatches B and returns b_id in newly_dispatched."""
     r = client.post(
         "/api/convoy",
@@ -1080,7 +1080,7 @@ def test_callback_completed_with_merge_commit(client):
     assert s["merge_commit"] == "deadbeef1234"
 
 
-def test_callback_invalid_subta<REDACTED-elevenlabs>(client):
+def test_callback_invalid_subtask_id_deletes_receipt_for_retry(client):
     """Processing error deletes the receipt so the same idempotency_key can be retried."""
     cid = client.post(
         "/api/convoy", json={"title": "Retry", "created_by": "sb"}

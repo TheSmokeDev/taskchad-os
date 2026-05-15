@@ -197,7 +197,7 @@ def test_fallback_with_nondefault_workspace(db, monkeypatch):
     assert receipt.status == "accepted"
 
 
-def test_subta<REDACTED-elevenlabs>(db):
+def test_subtask_status_dispatched_with_nondefault_workspace(db):
     """After dispatch, the subtask status is 'dispatched' in the correct workspace."""
     team_id, subtask_id = _create_team_with_subtask(db, workspace_id=55)
     ts = TeamService(db)

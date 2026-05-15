@@ -356,19 +356,31 @@ def doctor():
         f"\nRuntime providers: "
         f"{len([v for v in report.runtime_providers.values() if v == 'ON'])} active"
     )
+    if report.runtime_auth_issues:
+        click.echo("Runtime auth attention:")
+        for provider, issue in report.runtime_auth_issues.items():
+            click.echo(f"  {provider}: {issue}")
     click.echo(f"Memory DB: {report.memory_doc_count} documents ({report.memory_embedding_status})")
     click.echo(f"Cognition: {'active' if report.cognition_available else 'unavailable'}")
     click.echo(f"Sessions: {report.sessions_active} active")
+    if report.clear_lifecycle_recent_failures:
+        click.echo(
+            "Clear lifecycle warnings/errors (recent): "
+            f"{report.clear_lifecycle_recent_failures}"
+        )
+        if report.clear_lifecycle_last_failure:
+            click.echo(f"Last clear lifecycle warning: {report.clear_lifecycle_last_failure}")
 
     # Check for real failures: env errors OR zero runtime providers
     errors = [i for i in issues if i[0] == "error"]
     active_providers = [v for v in report.runtime_providers.values() if v == "ON"]
+    auth_issue_count = len(report.runtime_auth_issues)
     has_diagnostics_failure = (
         not active_providers and report.runtime_providers  # providers checked but none ON
     )
 
-    if errors or has_diagnostics_failure:
-        problems = len(errors) + (1 if has_diagnostics_failure else 0)
+    if errors or has_diagnostics_failure or auth_issue_count:
+        problems = len(errors) + auth_issue_count + (1 if has_diagnostics_failure else 0)
         if has_diagnostics_failure and not errors:
             click.echo("\nNo runtime providers available — check API keys or CLI installs.")
         click.echo(f"\n{problems} issue(s) found. Fix them and re-run `thehomie doctor`.")

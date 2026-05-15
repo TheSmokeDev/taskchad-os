@@ -296,6 +296,33 @@ class ChatRouter:
 
         # --- Smart intent detection: natural language -> router commands ---
         if not parsed:
+            requires_confirmation = getattr(
+                self.manager, "requires_external_action_confirmation", None
+            )
+            if callable(requires_confirmation) and requires_confirmation(text):
+                build_confirmation = getattr(
+                    self.manager,
+                    "build_external_action_confirmation",
+                    None,
+                )
+                if callable(build_confirmation):
+                    reply = build_confirmation(text)
+                else:
+                    reply = (
+                        "That sounds like it may contact a real person or mutate "
+                        "a live surface. Reply with a clear direct instruction "
+                        "or use the explicit slash command if you want me to proceed."
+                    )
+                await adapter.send(
+                    OutgoingMessage(
+                        text=reply,
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                    )
+                )
+                self._persist_router_turn(incoming, reply)
+                return
+
             intents = self.manager.detect_intents(text)
             if intents:
                 data_parts: list[str] = []

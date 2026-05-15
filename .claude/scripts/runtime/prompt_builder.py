@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .base import RuntimeRequest
 from .capabilities import TOOL_REASONING
+from .framework_registry import render_framework_tool_map
 
 INTEGRATION_HINTS = (
     "Key integrations available via shell commands (run from .claude/scripts/):\n"
@@ -47,6 +48,7 @@ def render_cli_prompt(
     tool_preamble: str = _TOOL_PREAMBLE,
     text_preamble: str = _TEXT_PREAMBLE,
     integration_hints: str = INTEGRATION_HINTS,
+    framework_tool_map: str | None = None,
 ) -> str:
     """Flatten RuntimeRequest into a single text prompt for CLI subprocess stdin.
 
@@ -55,6 +57,13 @@ def render_cli_prompt(
 
     if request.capability == TOOL_REASONING:
         parts: list[str] = [tool_preamble, integration_hints]
+        tool_map = (
+            render_framework_tool_map(request.cwd)
+            if framework_tool_map is None
+            else framework_tool_map.strip()
+        )
+        if tool_map:
+            parts.append(tool_map)
     else:
         parts = [text_preamble]
 
