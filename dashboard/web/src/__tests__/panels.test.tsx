@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/preact';
+import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { Agents } from '@/pages/Agents';
 import { Memories } from '@/pages/Memories';
 import { Scheduled } from '@/pages/Scheduled';
@@ -27,13 +27,70 @@ describe('panels populate from fixture API responses', () => {
   });
 
   test('Memories page renders memory text', async () => {
-    mockFetchOnce({
-      memories: [
-        { id: 'm1', personaId: 'main', text: 'Hello world memory', tags: ['note'], createdAt: Date.now() / 1000 - 60 },
-      ],
-    });
+    globalThis.fetch = vi.fn(async (url: string) => {
+      if (url.includes('/api/brain/graph')) {
+        return new Response(JSON.stringify({
+          nodes: [
+            {
+              id: 'chunk:1',
+              label: 'Mission Control',
+              kind: 'chunk',
+              scope_type: 'global',
+              scope_id: 'main',
+              source_path: 'daily/2026-05-15.md',
+              section_title: 'Mission Control',
+              text: 'Hello world memory',
+              tags: ['vault-chunk'],
+              created_at: Date.now() / 1000 - 60,
+            },
+          ],
+          edges: [],
+          stats: { total_nodes: 1, total_edges: 0, total_chunks: 1 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        memories: [
+          {
+            id: 1,
+            persona_id: 'main',
+            source_path: 'daily/2026-05-15.md',
+            chunk_text: 'Hello world memory',
+            tags: ['vault-chunk'],
+            created_at: Date.now() / 1000 - 60,
+          },
+        ],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as any;
     render(<Memories />);
     await waitFor(() => expect(screen.getByText(/hello world memory/i)).toBeInTheDocument());
+    expect(screen.getByText(/daily\/2026-05-15\.md/i)).toBeInTheDocument();
+  });
+
+  test('Memories list tab renders memory rows', async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      if (url.includes('/api/brain/graph')) {
+        return new Response(JSON.stringify({ nodes: [], edges: [], stats: {} }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({
+        memories: [
+          {
+            id: 1,
+            persona_id: 'main',
+            source_path: 'daily/2026-05-15.md',
+            chunk_text: 'Hello world memory',
+            tags: ['vault-chunk'],
+            created_at: Date.now() / 1000 - 60,
+          },
+        ],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as any;
+    render(<Memories />);
+    fireEvent.click(screen.getByRole('button', { name: /memory list/i }));
+    await waitFor(() => expect(screen.getByText(/hello world memory/i)).toBeInTheDocument());
+    expect(screen.getByText(/daily\/2026-05-15\.md/i)).toBeInTheDocument();
   });
 
   test('Scheduled page renders task prompt', async () => {

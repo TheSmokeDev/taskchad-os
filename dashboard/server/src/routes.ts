@@ -70,7 +70,11 @@ export const ROUTE_MANIFEST: readonly string[] = [
 
   // memories.ts
   '/api/memories',
+  '/api/memory/graph',
   '/api/tokens',
+
+  // brain.ts
+  '/api/brain/graph',
 
   // hive-mind.ts
   '/api/hive-mind/recent',

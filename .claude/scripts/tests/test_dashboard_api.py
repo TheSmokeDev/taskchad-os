@@ -20,6 +20,7 @@ import os
 import sqlite3
 import struct
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -36,6 +37,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def _make_chat_db(path: Path) -> None:
     """Seed a tiny chat.db with chat_sessions + chat_messages."""
+    now = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
+    old = now - timedelta(minutes=120)
     conn = sqlite3.connect(str(path))
     conn.executescript("""
         CREATE TABLE chat_sessions (
@@ -66,6 +69,75 @@ def _make_chat_db(path: Path) -> None:
             created_at TEXT NOT NULL
         );
     """)
+    conn.execute(
+        """INSERT INTO chat_sessions
+           (session_id, runtime_profile_key, runtime_provider, runtime_model, runtime_lane)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("recent-session", "default", "claude", "claude-opus-4-7", "claude_native"),
+    )
+    conn.execute(
+        """INSERT INTO chat_sessions
+           (session_id, runtime_profile_key, runtime_provider, runtime_model, runtime_lane)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("old-session", "sales", "openai-compatible", "gpt-4o", "generic"),
+    )
+    conn.execute(
+        """INSERT INTO chat_messages (session_id, role, content, created_at)
+           VALUES (?, ?, ?, ?)""",
+        ("recent-session", "assistant", "Recent hive activity", now.isoformat(timespec="seconds")),
+    )
+    conn.execute(
+        """INSERT INTO chat_messages (session_id, role, content, created_at)
+           VALUES (?, ?, ?, ?)""",
+        ("old-session", "assistant", "Old hive activity", old.isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _make_memory_db(path: Path) -> None:
+    """Seed current memory.db chunk schema, not the old donor schema."""
+    now_epoch = int(datetime.now(timezone.utc).timestamp())
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE files (
+            path TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL,
+            mtime_ns INTEGER NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            indexed_at_epoch INTEGER NOT NULL
+        );
+        CREATE TABLE chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_path TEXT NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            section_title TEXT DEFAULT '',
+            content TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            created_at_epoch INTEGER NOT NULL
+        );
+    """)
+    conn.execute(
+        """INSERT INTO files
+           (path, content_hash, mtime_ns, size_bytes, indexed_at_epoch)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("daily/2026-05-15.md", "hash-file", 1, 100, now_epoch),
+    )
+    conn.execute(
+        """INSERT INTO chunks
+           (file_path, start_line, end_line, section_title, content, content_hash, created_at_epoch)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "daily/2026-05-15.md",
+            1,
+            6,
+            "Mission Control",
+            "Real vault memory chunk",
+            "hash-chunk",
+            now_epoch,
+        ),
+    )
     conn.commit()
     conn.close()
 
@@ -75,12 +147,15 @@ def isolated_app(tmp_path, monkeypatch):
     """Spawn a fresh orchestration app with isolated dashboard.db + chat.db."""
     dash_db = tmp_path / "dashboard.db"
     chat_db = tmp_path / "chat.db"
+    memory_db = tmp_path / "memory.db"
     orch_db = tmp_path / "orchestration.db"
     _make_chat_db(chat_db)
+    _make_memory_db(memory_db)
 
     import config
     monkeypatch.setattr(config, "DASHBOARD_DB_PATH", dash_db)
     monkeypatch.setattr(config, "CHAT_DB_PATH", chat_db)
+    monkeypatch.setattr(config, "DATABASE_PATH", memory_db)
     monkeypatch.setattr(config, "ORCHESTRATION_DB_PATH", orch_db)
     # Force loopback no-auth for default tests.
     monkeypatch.setenv("ORCHESTRATION_API_TOKEN", "")
@@ -873,6 +948,265 @@ def test_get_memories_returns_paginated(isolated_app):
     assert "memories" in body
     assert "stats" in body
     assert "next_before_id" in body
+    assert body["stats"]["total_chunks"] == 1
+    assert body["stats"]["scope"] == "global_vault"
+    assert body["stats"]["persona_filter_supported"] is False
+
+
+def test_get_memories_maps_current_chunk_schema_to_dashboard_contract(isolated_app):
+    r = isolated_app.get("/api/memories?limit=10")
+    assert r.status_code == 200
+    memory = r.json()["memories"][0]
+    assert memory["source_path"] == "daily/2026-05-15.md"
+    assert memory["sourcePath"] == "daily/2026-05-15.md"
+    assert memory["chunk_text"] == "Real vault memory chunk"
+    assert memory["text"] == "Real vault memory chunk"
+    assert memory["persona_id"] == "default"
+    assert memory["personaId"] == "default"
+    assert memory["kind"] == "vault_chunk"
+    assert "vault-chunk" in memory["tags"]
+
+
+def test_get_memories_non_default_filter_does_not_claim_global_rows(isolated_app):
+    r = isolated_app.get("/api/memories?persona_id=sales&limit=10")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["memories"] == []
+    assert body["stats"]["persona_filter_supported"] is False
+
+
+# ── /api/memory/graph ────────────────────────────────────────────────────
+
+
+def test_memory_graph_returns_unscoped_chunks_as_global_default(isolated_app):
+    r = isolated_app.get("/api/memory/graph?limit=10")
+    assert r.status_code == 200
+    body = r.json()
+    nodes = {node["id"]: node for node in body["nodes"]}
+    assert "chunk:1" in nodes
+    assert "note:daily/2026-05-15.md" in nodes
+    assert nodes["chunk:1"]["scope_type"] == "global"
+    assert nodes["chunk:1"]["scope_id"] == "default"
+    assert nodes["chunk:1"]["kind"] == "chunk"
+    assert nodes["chunk:1"]["text"] == "Real vault memory chunk"
+    assert nodes["note:daily/2026-05-15.md"]["text"] == "## Mission Control\n\nReal vault memory chunk"
+    assert nodes["note:daily/2026-05-15.md"]["preview_source"] == "loaded_chunk_neighbors"
+    assert nodes["note:daily/2026-05-15.md"]["preview_chunk_count"] == 1
+    assert any(edge["kind"] == "source" and edge["source"] == "chunk:1" for edge in body["edges"])
+    assert body["stats"]["total_nodes"] >= 2
+    assert body["stats"]["persona_filter_supported"] is False
+
+
+def test_memory_graph_persona_view_keeps_global_overlay(isolated_app):
+    r = isolated_app.get("/api/memory/graph?scope=persona&scope_id=research&limit=10")
+    assert r.status_code == 200
+    body = r.json()
+    assert any(node["id"] == "chunk:1" for node in body["nodes"])
+    assert body["stats"]["scope"] == "persona"
+    assert body["stats"]["scope_id"] == "research"
+
+
+def test_memory_graph_parses_vault_wikilinks(isolated_app, tmp_path, monkeypatch):
+    import config
+
+    vault = tmp_path / "TheHomie" / "Memory"
+    note = vault / "daily" / "2026-05-15.md"
+    target = vault / "Related Note.md"
+    weekly = vault / "weekly" / "2026-W15.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    weekly.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("Project note links to [[Related Note]]\n", encoding="utf-8")
+    target.write_text("Related note body.\n", encoding="utf-8")
+    weekly.write_text(
+        "---\nrelated:\n  - \"[[Related Note]]\"\nsuperseded_by: \"[[Missing Note]]\"\n---\nWeekly body.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "MEMORY_DIR", vault)
+
+    r = isolated_app.get("/api/memory/graph?limit=10")
+    assert r.status_code == 200
+    body = r.json()
+    node_ids = {node["id"] for node in body["nodes"]}
+    nodes = {node["id"]: node for node in body["nodes"]}
+    assert "note:daily/2026-05-15.md" in node_ids
+    assert "note:Related Note.md" in node_ids
+    assert "note:weekly/2026-W15.md" in node_ids
+    assert nodes["note:Related Note.md"]["text"] == "Related note body."
+    assert nodes["note:Related Note.md"]["preview_source"] == "source_markdown"
+    assert any(
+        edge["kind"] == "wikilink"
+        and edge["source"] == "note:daily/2026-05-15.md"
+        and edge["target"] == "note:Related Note.md"
+        and edge["resolved"] is True
+        for edge in body["edges"]
+    )
+    assert any(
+        edge["kind"] == "related"
+        and edge["source"] == "note:weekly/2026-W15.md"
+        and edge["target"] == "note:Related Note.md"
+        and edge["source_field"] == "related"
+        and edge["resolved"] is True
+        for edge in body["edges"]
+    )
+    assert any(
+        edge["kind"] == "property"
+        and edge["source"] == "note:weekly/2026-W15.md"
+        and edge["target"] == "note:Missing Note.md"
+        and edge["source_field"] == "superseded_by"
+        and edge["resolved"] is False
+        for edge in body["edges"]
+    )
+    assert nodes["note:Missing Note.md"]["tags"] == ["vault-note", "wikilink-target", "unresolved-wikilink"]
+    assert body["stats"]["vault_graph"]["vault_notes"] == 3
+    assert body["stats"]["vault_graph"]["vault_resolved_wikilink_edges"] == 2
+    assert body["stats"]["vault_graph"]["vault_unresolved_wikilink_edges"] == 1
+    assert body["stats"]["vault_graph"]["vault_body_wikilink_edges"] == 1
+    assert body["stats"]["vault_graph"]["vault_related_edges"] == 1
+    assert body["stats"]["vault_graph"]["vault_property_wikilink_edges"] == 1
+
+
+def test_memory_graph_infers_scope_for_file_scanned_vault_notes(isolated_app, tmp_path, monkeypatch):
+    import config
+
+    vault = tmp_path / "TheHomie" / "Memory"
+    agent_note = vault / "agents" / "codex" / "agent-note.md"
+    agent_note.parent.mkdir(parents=True, exist_ok=True)
+    agent_note.write_text("Agent-local vault note.\n", encoding="utf-8")
+    monkeypatch.setattr(config, "MEMORY_DIR", vault)
+
+    r = isolated_app.get("/api/memory/graph?limit=1")
+    assert r.status_code == 200
+    nodes = {node["id"]: node for node in r.json()["nodes"]}
+    assert nodes["note:agents/codex/agent-note.md"]["scope_type"] == "agent"
+    assert nodes["note:agents/codex/agent-note.md"]["scope_id"] == "codex"
+    assert nodes["note:agents/codex/agent-note.md"]["visibility"] == "private"
+
+
+def test_memory_graph_respects_scoped_memory_columns(isolated_app):
+    import config
+
+    conn = sqlite3.connect(str(config.DATABASE_PATH))
+    try:
+        conn.execute("ALTER TABLE chunks ADD COLUMN persona_id TEXT")
+        conn.execute("UPDATE chunks SET persona_id = 'research' WHERE id = 1")
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = isolated_app.get("/api/memory/graph?scope=persona&scope_id=research&limit=10")
+    assert r.status_code == 200
+    nodes = {node["id"]: node for node in r.json()["nodes"]}
+    assert nodes["chunk:1"]["scope_type"] == "persona"
+    assert nodes["chunk:1"]["scope_id"] == "research"
+    assert nodes["chunk:1"]["visibility"] == "private"
+
+
+def test_memory_graph_exposes_pagination_metadata(isolated_app):
+    import config
+
+    conn = sqlite3.connect(str(config.DATABASE_PATH))
+    try:
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        for index in range(2, 5):
+            conn.execute(
+                """INSERT INTO chunks
+                   (file_path, start_line, end_line, section_title, content, content_hash, created_at_epoch)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    f"daily/2026-05-{14 + index}.md",
+                    1,
+                    2,
+                    f"Paged chunk {index}",
+                    f"Memory chunk {index}",
+                    f"hash-chunk-{index}",
+                    now_epoch,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = isolated_app.get("/api/memory/graph?limit=2&offset=0")
+    assert r.status_code == 200
+    page = r.json()["stats"]["page"]
+    assert page["limit"] == 2
+    assert page["offset"] == 0
+    assert page["returned_chunks"] == 2
+    assert page["matching_chunks"] == 4
+    assert page["has_more"] is True
+
+    r2 = isolated_app.get("/api/memory/graph?limit=2&offset=2")
+    assert r2.status_code == 200
+    page2 = r2.json()["stats"]["page"]
+    assert page2["offset"] == 2
+    assert page2["returned_chunks"] == 2
+    assert page2["has_more"] is False
+
+
+def test_memory_graph_models_cabinet_room_as_session_layer(isolated_app):
+    from dashboard_db import get_connection
+
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "INSERT INTO cabinet_meetings (mode, title, chat_id, entry_count) VALUES (?, ?, ?, ?)",
+            ("text", "Strategy room", "chat-123", 7),
+        )
+        meeting_id = int(cur.lastrowid)
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = isolated_app.get(f"/api/memory/graph?scope=room&scope_id=cabinet-{meeting_id}&limit=10")
+    assert r.status_code == 200
+    body = r.json()
+    room = next(node for node in body["nodes"] if node["id"] == f"room:cabinet-{meeting_id}")
+    assert room["kind"] == "session"
+    assert room["scope_type"] == "room"
+    assert room["scope_id"] == f"cabinet-{meeting_id}"
+    assert "7 transcript entries" in room["text"]
+
+
+# ── /api/brain/graph ─────────────────────────────────────────────────────
+
+
+def test_brain_graph_composes_memory_base_and_hive_activity(isolated_app):
+    r = isolated_app.get("/api/brain/graph?limit=10&activity_window_minutes=60")
+    assert r.status_code == 200
+    body = r.json()
+    node_ids = {node["id"] for node in body["nodes"]}
+    assert "chunk:1" in node_ids
+    assert "note:daily/2026-05-15.md" in node_ids
+    assert any(edge["kind"] == "source" for edge in body["edges"])
+    assert body["activity"][0]["type"] == "chat_message"
+    assert body["activity"][0]["details"] == "Recent hive activity"
+    assert body["layers"]["memory"] is True
+    assert body["layers"]["activity"] is True
+    assert "global/default" in body["layers"]["scopes"]
+    assert body["stats"]["total_nodes"] == len(body["nodes"])
+    assert body["stats"]["activity"]["window_minutes"] == 60
+
+
+def test_brain_graph_forwards_memory_pagination_metadata(isolated_app):
+    r = isolated_app.get("/api/brain/graph?limit=1&offset=0")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["stats"]["limit"] == 1
+    assert body["stats"]["offset"] == 0
+    assert body["stats"]["memory"]["page"]["limit"] == 1
+    assert body["stats"]["memory"]["page"]["offset"] == 0
+    assert body["stats"]["memory"]["page"]["returned_chunks"] == 1
+
+
+def test_brain_graph_persona_scope_filters_activity_and_keeps_memory_overlay(isolated_app):
+    r = isolated_app.get("/api/brain/graph?scope=persona&scope_id=default&limit=10")
+    assert r.status_code == 200
+    body = r.json()
+    assert any(node["id"] == "chunk:1" for node in body["nodes"])
+    assert body["stats"]["scope"] == "persona"
+    assert body["stats"]["scope_id"] == "default"
+    assert body["stats"]["activity_filter_persona_id"] == "default"
+    assert [event["persona_id"] for event in body["activity"]] == ["default"]
 
 
 # ── /api/tokens, /api/agents/{id}/tokens (lane-aware) ────────────────────
@@ -965,13 +1299,26 @@ def test_get_conversation_creates_index_idempotent(isolated_app):
 def test_hive_mind_returns_recent_chat_messages(isolated_app):
     r = isolated_app.get("/api/hive-mind/recent")
     assert r.status_code == 200
-    assert "entries" in r.json()
+    body = r.json()
+    assert "entries" in body
+    assert "events" in body
+    assert body["entries"][0]["event_type"] == "chat_message"
+    assert body["events"][0]["personaId"] == "default"
+    assert body["events"][0]["type"] == "chat_message"
 
 
 def test_hive_mind_deterministic_ordering(isolated_app):
     r1 = isolated_app.get("/api/hive-mind/recent")
     r2 = isolated_app.get("/api/hive-mind/recent")
     assert r1.json() == r2.json()
+
+
+def test_hive_mind_window_minutes_excludes_old_messages(isolated_app):
+    r = isolated_app.get("/api/hive-mind/recent?window_minutes=60&limit=10")
+    assert r.status_code == 200
+    body = r.json()
+    assert [entry["excerpt"] for entry in body["entries"]] == ["Recent hive activity"]
+    assert [event["details"] for event in body["events"]] == ["Recent hive activity"]
 
 
 # ── /api/agents/{id}/files (allowlist + redaction) ───────────────────────

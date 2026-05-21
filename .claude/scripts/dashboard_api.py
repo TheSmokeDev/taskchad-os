@@ -44,6 +44,7 @@ import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -1897,6 +1898,764 @@ def delete_scheduled(task_id: int) -> dict:
 # ── /api/memories (paginated read-only proxy) ────────────────────────────
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in rows}
+
+
+def _coerce_unix_seconds(value: Any) -> int:
+    if isinstance(value, (int, float)):
+        return int(value)
+    if value is None:
+        return int(time.time())
+    text = str(value).strip()
+    if not text:
+        return int(time.time())
+    try:
+        return int(float(text))
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return int(time.time())
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
+def _memory_schema_projection(columns: set[str]) -> tuple[str, str, str, str | None] | None:
+    if {"id", "file_path", "content", "created_at_epoch"}.issubset(columns):
+        section = "section_title" if "section_title" in columns else None
+        return "file_path", "content", "created_at_epoch", section
+    if {"id", "source_path", "chunk_text", "created_at"}.issubset(columns):
+        return "source_path", "chunk_text", "created_at", None
+    return None
+
+
+def _memory_scope_column(columns: set[str]) -> str | None:
+    return next((col for col in ("persona_id", "profile_id", "agent_id") if col in columns), None)
+
+
+def _display_source_path(raw_source_path: str, vault_root: Path) -> str:
+    raw = str(raw_source_path or "").strip()
+    if not raw:
+        return ""
+    try:
+        path = Path(raw)
+        if path.is_absolute():
+            try:
+                return path.resolve(strict=False).relative_to(vault_root).as_posix()
+            except ValueError:
+                return path.as_posix()
+    except (OSError, ValueError):
+        pass
+    return raw.replace("\\", "/").lstrip("./")
+
+
+def _note_id(source_path: str) -> str:
+    return "note:" + source_path.replace("\\", "/").strip().lstrip("./")
+
+
+def _chunk_label(source_path: str, section_title: str, text: str) -> str:
+    section = section_title.strip()
+    if section:
+        return section[:80]
+    name = Path(source_path).stem if source_path else ""
+    if name:
+        return name[:80]
+    return "Memory chunk"
+
+
+def _note_label(source_path: str) -> str:
+    stem = Path(source_path).stem
+    return stem[:80] if stem else "Vault note"
+
+
+def _infer_scope_from_source(source_path: str) -> tuple[str, str, str]:
+    parts = [p for p in source_path.replace("\\", "/").split("/") if p]
+    if len(parts) >= 2 and parts[0] == "agents":
+        return "agent", parts[1], "private"
+    if len(parts) >= 2 and parts[0] == "teams":
+        return "team", parts[1], "shared"
+    if len(parts) >= 2 and parts[0] in {"rooms", "cabinet", "warroom"}:
+        return "room", parts[1], "shared"
+    return "global", "default", "shared"
+
+
+def _scope_type_for_column(scope_col: str | None) -> str:
+    if scope_col == "agent_id":
+        return "agent"
+    if scope_col in {"persona_id", "profile_id"}:
+        return "persona"
+    return "global"
+
+
+def _row_scope(scope_col: str | None, raw_scope_id: str, source_path: str) -> tuple[str, str, str]:
+    scope_id = str(raw_scope_id or "").strip()
+    if scope_col and scope_id and scope_id != "default":
+        return _scope_type_for_column(scope_col), scope_id, "private"
+    return _infer_scope_from_source(source_path)
+
+
+def _node_matches_scope(node: dict[str, Any], scope: str, scope_id: str | None) -> bool:
+    if scope == "all":
+        return True
+    node_scope_type = node.get("scope_type")
+    node_scope_id = node.get("scope_id")
+    if node_scope_type == "global":
+        return True
+    if scope == "global":
+        return node_scope_type == "global"
+    if node_scope_type != scope:
+        return False
+    if scope_id:
+        return node_scope_id == scope_id
+    return True
+
+
+def _add_graph_node(nodes: dict[str, dict[str, Any]], node: dict[str, Any]) -> None:
+    node_id = str(node["id"])
+    if node_id in nodes:
+        return
+    nodes[node_id] = node
+
+
+def _add_graph_edge(edges: dict[str, dict[str, Any]], source: str, target: str, kind: str, **attrs: Any) -> None:
+    if not source or not target or source == target:
+        return
+    edge_id = f"{kind}:{source}->{target}"
+    if edge_id in edges:
+        edges[edge_id].update(attrs)
+        return
+    edge = {"id": edge_id, "source": source, "target": target, "kind": kind}
+    edge.update(attrs)
+    edges[edge_id] = edge
+
+
+def _truncate_graph_text(text: str, limit: int) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."
+
+
+def _format_note_preview(chunks: list[dict[str, Any]], max_chunks: int = 3) -> str:
+    parts: list[str] = []
+    for chunk in chunks[:max_chunks]:
+        text = _truncate_graph_text(str(chunk.get("text") or ""), 900)
+        if not text:
+            continue
+        section_title = str(chunk.get("section_title") or "").strip()
+        if section_title:
+            parts.append(f"## {section_title}\n\n{text}")
+        else:
+            parts.append(text)
+    return "\n\n---\n\n".join(parts)
+
+
+def _apply_note_previews(nodes: dict[str, dict[str, Any]], note_chunks: dict[str, list[dict[str, Any]]]) -> None:
+    for note_id, chunks in note_chunks.items():
+        node = nodes.get(note_id)
+        if not node:
+            continue
+        if not str(node.get("text") or "").strip():
+            preview = _format_note_preview(chunks)
+            if preview:
+                node["text"] = preview
+                node["preview_source"] = "loaded_chunk_neighbors"
+                node["preview_chunk_count"] = len(chunks)
+
+
+def _source_note_preview(vault_root: Path, source_path: str) -> str:
+    note_path = _safe_vault_markdown_path(vault_root, source_path)
+    if note_path is None or not note_path.is_file():
+        return ""
+    try:
+        raw = note_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    body = re.sub(r"\A---\s*\n.*?\n---\s*\n", "", raw, flags=re.DOTALL).strip()
+    return _truncate_graph_text(body, 1200)
+
+
+def _apply_source_note_previews(
+    nodes: dict[str, dict[str, Any]],
+    edges: dict[str, dict[str, Any]],
+    vault_root: Path,
+    max_notes: int = 220,
+) -> None:
+    degree: dict[str, int] = {}
+    for edge in edges.values():
+        source = edge.get("source", "")
+        target = edge.get("target", "")
+        degree[source] = degree.get(source, 0) + 1
+        degree[target] = degree.get(target, 0) + 1
+
+    candidates = [
+        node
+        for node in nodes.values()
+        if node.get("kind") == "note"
+        and not str(node.get("text") or "").strip()
+        and str(node.get("source_path") or "").strip()
+    ]
+    candidates.sort(key=lambda node: (degree.get(str(node.get("id") or ""), 0), str(node.get("source_path") or "")), reverse=True)
+
+    for node in candidates[:max_notes]:
+        preview = _source_note_preview(vault_root, str(node.get("source_path") or ""))
+        if not preview:
+            continue
+        node["text"] = preview
+        node["preview_source"] = "source_markdown"
+        node["preview_chunk_count"] = 0
+
+
+def _safe_vault_markdown_path(vault_root: Path, source_path: str) -> Path | None:
+    if not source_path:
+        return None
+    candidate = Path(source_path)
+    if not candidate.is_absolute():
+        candidate = vault_root / source_path
+    try:
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(vault_root)
+    except (OSError, ValueError):
+        return None
+    if resolved.suffix.lower() != ".md":
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+_WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
+_FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.DOTALL)
+_FRONTMATTER_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+\s*:")
+_SKIP_VAULT_GRAPH_DIRS = {
+    ".obsidian",
+    "_templates",
+    "_canvas",
+    "_state",
+    ".conversations",
+    ".conversations-archived",
+    ".nexus",
+    ".workspaces",
+    ".workspaces-archived",
+}
+_WIKILINK_KIND_PRIORITY = {"property": 1, "wikilink": 2, "related": 3}
+
+
+def _split_markdown_frontmatter(text: str) -> tuple[str, str]:
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return "", text
+    return match.group(1), text[match.end() :]
+
+
+def _frontmatter_link_groups(frontmatter: str) -> list[tuple[str, str, str]]:
+    groups: list[tuple[str, str, str]] = []
+    current_key = ""
+    current_lines: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_key, current_lines
+        if not current_key:
+            return
+        kind = "related" if current_key == "related" else "property"
+        groups.append((kind, current_key, "\n".join(current_lines)))
+        current_key = ""
+        current_lines = []
+
+    for line in frontmatter.splitlines():
+        if _FRONTMATTER_KEY_RE.match(line):
+            flush()
+            key, _, rest = line.partition(":")
+            current_key = key.strip()
+            current_lines = [rest]
+            continue
+        if current_key:
+            current_lines.append(line)
+    flush()
+    return groups
+
+
+def _wikilink_target(raw: str) -> str:
+    target = raw.split("|", 1)[0].split("#", 1)[0].split("^", 1)[0].strip()
+    if not target:
+        return ""
+    target = target.replace("\\", "/").strip("/")
+    if not target.lower().endswith(".md"):
+        target += ".md"
+    return target
+
+
+def _vault_markdown_files(vault_root: Path) -> list[Path]:
+    if not vault_root.exists():
+        return []
+    files: list[Path] = []
+    for md_path in vault_root.rglob("*.md"):
+        try:
+            rel_parts = md_path.relative_to(vault_root).parts
+        except ValueError:
+            continue
+        if any(part in _SKIP_VAULT_GRAPH_DIRS for part in rel_parts):
+            continue
+        files.append(md_path)
+    return sorted(files)
+
+
+def _vault_relative_path(vault_root: Path, md_path: Path) -> str | None:
+    try:
+        return md_path.relative_to(vault_root).as_posix()
+    except ValueError:
+        return None
+
+
+def _resolve_vault_wikilink(
+    raw: str,
+    exact_paths: dict[str, str],
+    stem_paths: dict[str, list[str]],
+) -> tuple[str, bool]:
+    target_path = _wikilink_target(raw)
+    if not target_path:
+        return "", False
+    exact = exact_paths.get(target_path.lower())
+    if exact:
+        return exact, True
+    paths = stem_paths.get(Path(target_path).stem.lower())
+    if paths:
+        return min(paths, key=len), True
+    return target_path, False
+
+
+def _add_wikilink_edges(
+    *,
+    nodes: dict[str, dict[str, Any]],
+    edges: dict[str, dict[str, Any]],
+    vault_root: Path,
+    note_scope: dict[str, tuple[str, str, str]],
+) -> dict[str, int]:
+    md_files = _vault_markdown_files(vault_root)
+    exact_paths: dict[str, str] = {}
+    stem_paths: dict[str, list[str]] = {}
+    rel_paths: list[str] = []
+    for md_path in md_files:
+        rel_path = _vault_relative_path(vault_root, md_path)
+        if not rel_path:
+            continue
+        rel_paths.append(rel_path)
+        exact_paths[rel_path.lower()] = rel_path
+        stem_paths.setdefault(Path(rel_path).stem.lower(), []).append(rel_path)
+        note_id = _note_id(rel_path)
+        scope_type, scope_id, visibility = note_scope.get(note_id, _infer_scope_from_source(rel_path))
+        _add_graph_node(
+            nodes,
+            {
+                "id": note_id,
+                "label": _note_label(rel_path),
+                "kind": "note",
+                "scope_type": scope_type,
+                "scope_id": scope_id,
+                "visibility": visibility,
+                "source_path": rel_path,
+                "section_title": "",
+                "text": "",
+                "tags": ["vault-note", "vault-graph"],
+                "created_at": 0,
+            },
+        )
+
+    semantic_edges: dict[tuple[str, str], dict[str, Any]] = {}
+    resolved_mentions = 0
+    unresolved_mentions = 0
+    semantic_counts = {"wikilink": 0, "related": 0, "property": 0}
+    for source_path in rel_paths:
+        note_id = _note_id(source_path)
+        path = _safe_vault_markdown_path(vault_root, source_path)
+        if path is None:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        frontmatter, body = _split_markdown_frontmatter(text)
+        link_groups = [
+            *_frontmatter_link_groups(frontmatter),
+            ("wikilink", "body", body),
+        ]
+        for kind, source_field, link_text in link_groups:
+            for match in _WIKILINK_RE.finditer(link_text):
+                target_path, resolved = _resolve_vault_wikilink(match.group(1), exact_paths, stem_paths)
+                if not target_path:
+                    continue
+                target_id = _note_id(target_path)
+                if target_id not in nodes:
+                    scope_type, scope_id, visibility = note_scope.get(target_id, _infer_scope_from_source(target_path))
+                    _add_graph_node(
+                        nodes,
+                        {
+                            "id": target_id,
+                            "label": _note_label(target_path),
+                            "kind": "note",
+                            "scope_type": scope_type,
+                            "scope_id": scope_id,
+                            "visibility": visibility,
+                            "source_path": target_path,
+                            "section_title": "",
+                            "text": "",
+                            "tags": ["vault-note", "wikilink-target", "unresolved-wikilink"],
+                            "created_at": 0,
+                        },
+                    )
+                pair = (note_id, target_id)
+                existing = semantic_edges.get(pair)
+                if existing is None:
+                    semantic_edges[pair] = {
+                        "kind": kind,
+                        "source_field": source_field,
+                        "resolved": resolved,
+                        "mentions": 1,
+                    }
+                else:
+                    existing["mentions"] = int(existing.get("mentions", 0)) + 1
+                    existing["resolved"] = bool(existing.get("resolved")) or resolved
+                    if _WIKILINK_KIND_PRIORITY[kind] > _WIKILINK_KIND_PRIORITY[str(existing.get("kind", "property"))]:
+                        existing["kind"] = kind
+                        existing["source_field"] = source_field
+                if resolved:
+                    resolved_mentions += 1
+                else:
+                    unresolved_mentions += 1
+    resolved_edges = 0
+    unresolved_edges = 0
+    for (source_id, target_id), meta in semantic_edges.items():
+        kind = str(meta.get("kind") or "wikilink")
+        resolved = bool(meta.get("resolved"))
+        mention_count = int(meta.get("mentions") or 1)
+        semantic_counts[kind] = semantic_counts.get(kind, 0) + 1
+        _add_graph_edge(
+            edges,
+            source_id,
+            target_id,
+            kind,
+            resolved=resolved,
+            mention_count=mention_count,
+            source_field=str(meta.get("source_field") or ("body" if kind == "wikilink" else kind)),
+        )
+        if resolved:
+            resolved_edges += 1
+        else:
+            unresolved_edges += 1
+    return {
+        "vault_notes": len(rel_paths),
+        "vault_wikilink_edges": resolved_edges + unresolved_edges,
+        "vault_resolved_wikilink_edges": resolved_edges,
+        "vault_unresolved_wikilink_edges": unresolved_edges,
+        "vault_wikilink_mentions": resolved_mentions + unresolved_mentions,
+        "vault_body_wikilink_edges": semantic_counts.get("wikilink", 0),
+        "vault_related_edges": semantic_counts.get("related", 0),
+        "vault_property_wikilink_edges": semantic_counts.get("property", 0),
+    }
+
+
+def _add_cabinet_session_nodes(
+    *,
+    nodes: dict[str, dict[str, Any]],
+    edges: dict[str, dict[str, Any]],
+    scope: str,
+    scope_id: str | None,
+    limit: int,
+) -> None:
+    if scope not in {"all", "room"}:
+        return
+    conn = get_connection()
+    try:
+        where = ""
+        params: list[Any] = []
+        if scope == "room" and scope_id:
+            raw_id = scope_id.removeprefix("cabinet-")
+            if raw_id.isdigit():
+                where = "WHERE id = ?"
+                params.append(int(raw_id))
+            else:
+                where = "WHERE 1 = 0"
+        rows = conn.execute(
+            f"""SELECT id, started_at, ended_at, mode, pinned_persona, entry_count,
+                       title, chat_id
+                FROM cabinet_meetings
+                {where}
+                ORDER BY started_at DESC
+                LIMIT ?""",
+            (*params, min(limit, 25)),
+        ).fetchall()
+        for row in rows:
+            meeting_id = int(row["id"])
+            room_scope = f"cabinet-{meeting_id}"
+            title = str(row["title"] or "").strip() or f"Cabinet #{meeting_id}"
+            mode = str(row["mode"] or "text")
+            entry_count = int(row["entry_count"] or 0)
+            node_id = f"room:{room_scope}"
+            _add_graph_node(
+                nodes,
+                {
+                    "id": node_id,
+                    "label": title[:80],
+                    "kind": "session",
+                    "scope_type": "room",
+                    "scope_id": room_scope,
+                    "visibility": "shared",
+                    "source_path": "",
+                    "section_title": "Cabinet session",
+                    "text": f"{mode} room with {entry_count} transcript entries.",
+                    "tags": ["cabinet", "war-room", "session"],
+                    "created_at": int(row["started_at"] or 0),
+                    "ended_at": row["ended_at"],
+                    "chat_id": row["chat_id"],
+                    "pinned_persona": row["pinned_persona"],
+                },
+            )
+            for global_node in list(nodes.values()):
+                if global_node.get("scope_type") == "global" and global_node.get("kind") == "note":
+                    _add_graph_edge(edges, node_id, str(global_node["id"]), "scope")
+                    break
+    finally:
+        conn.close()
+
+
+@router.get("/api/memory/graph")
+def get_memory_graph(
+    scope: str = Query(default="all"),
+    scope_id: str | None = Query(default=None),
+    limit: int = Query(default=120, ge=1, le=300),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """Read-only vault/memory graph. Does NOT call recall_service."""
+    allowed_scopes = {"all", "global", "persona", "agent", "team", "room"}
+    if scope not in allowed_scopes:
+        raise HTTPException(status_code=422, detail=f"invalid scope: {scope}")
+    if scope == "persona" and scope_id is not None:
+        _reject_main_translation(scope_id)
+
+    db_path = Path(config.DATABASE_PATH) if hasattr(config, "DATABASE_PATH") else None
+    vault_root = Path(config.MEMORY_DIR).resolve(strict=False)
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: dict[str, dict[str, Any]] = {}
+    note_scope: dict[str, tuple[str, str, str]] = {}
+    note_chunks: dict[str, list[dict[str, Any]]] = {}
+    stats: dict[str, Any] = {
+        "scope": scope,
+        "scope_id": scope_id,
+        "persona_filter_supported": False,
+        "total_chunks": 0,
+    }
+
+    if db_path is not None and db_path.is_file():
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                columns = _table_columns(conn, "chunks")
+                projection = _memory_schema_projection(columns)
+                if projection is not None:
+                    source_col, text_col, created_col, section_col = projection
+                    scope_col = _memory_scope_column(columns)
+                    stats["persona_filter_supported"] = bool(scope_col)
+                    section_expr = f"{section_col} AS section_title" if section_col else "'' AS section_title"
+                    scope_expr = f"{scope_col} AS row_scope_id" if scope_col else "'default' AS row_scope_id"
+                    sql = (
+                        "SELECT id, "
+                        f"{source_col} AS source_path, "
+                        f"{text_col} AS chunk_text, "
+                        f"{created_col} AS created_at, "
+                        f"{section_expr}, "
+                        f"{scope_expr} "
+                        "FROM chunks"
+                    )
+                    params: list[Any] = []
+                    where_sql = ""
+                    if scope_col:
+                        if scope == "global":
+                            where_sql = f" WHERE ({scope_col} IS NULL OR {scope_col} = '' OR {scope_col} = 'default')"
+                        elif scope in {"persona", "agent"} and scope_id:
+                            # Persona/agent graph views are overlays: include global/default
+                            # memory plus rows owned by the selected scope.
+                            where_sql = (
+                                f" WHERE ({scope_col} = ? OR {scope_col} IS NULL "
+                                f"OR {scope_col} = '' OR {scope_col} = 'default')"
+                            )
+                            params.append(scope_id)
+                    sql += where_sql
+                    count_sql = "SELECT COUNT(*) FROM chunks" + where_sql
+                    matching_chunks = int(conn.execute(count_sql, params).fetchone()[0])
+                    sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+                    params.extend([limit, offset])
+                    rows = conn.execute(sql, params).fetchall()
+                    stats["total_chunks"] = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+                    stats["matching_chunks"] = matching_chunks
+                    stats["returned_chunks"] = len(rows)
+                    for row in rows:
+                        source_path = _display_source_path(str(row["source_path"] or ""), vault_root)
+                        text = str(row["chunk_text"] or "")
+                        section_title = str(row["section_title"] or "").strip()
+                        scope_type, node_scope_id, visibility = _row_scope(
+                            scope_col,
+                            str(row["row_scope_id"] or ""),
+                            source_path,
+                        )
+                        chunk_node = {
+                            "id": f"chunk:{row['id']}",
+                            "label": _chunk_label(source_path, section_title, text),
+                            "kind": "chunk",
+                            "scope_type": scope_type,
+                            "scope_id": node_scope_id,
+                            "visibility": visibility,
+                            "source_path": source_path,
+                            "section_title": section_title,
+                            "text": text,
+                            "tags": ["vault-chunk", scope_type],
+                            "created_at": _coerce_unix_seconds(row["created_at"]),
+                        }
+                        if not _node_matches_scope(chunk_node, scope, scope_id):
+                            continue
+                        _add_graph_node(nodes, chunk_node)
+                        if source_path:
+                            note_id = _note_id(source_path)
+                            if text.strip():
+                                note_chunks.setdefault(note_id, []).append(
+                                    {
+                                        "section_title": section_title,
+                                        "text": text,
+                                        "created_at": _coerce_unix_seconds(row["created_at"]),
+                                    }
+                                )
+                            note_node = {
+                                "id": note_id,
+                                "label": _note_label(source_path),
+                                "kind": "note",
+                                "scope_type": scope_type,
+                                "scope_id": node_scope_id,
+                                "visibility": visibility,
+                                "source_path": source_path,
+                                "section_title": "",
+                                "text": "",
+                                "tags": ["vault-note", scope_type],
+                                "created_at": _coerce_unix_seconds(row["created_at"]),
+                            }
+                            _add_graph_node(nodes, note_node)
+                            note_scope[note_id] = (scope_type, node_scope_id, visibility)
+                            _add_graph_edge(edges, str(chunk_node["id"]), note_id, "source")
+                else:
+                    stats["schema"] = "unsupported"
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            stats["schema"] = "missing"
+
+    _apply_note_previews(nodes, note_chunks)
+    vault_graph_stats = _add_wikilink_edges(nodes=nodes, edges=edges, vault_root=vault_root, note_scope=note_scope)
+    _apply_source_note_previews(nodes=nodes, edges=edges, vault_root=vault_root)
+    _add_cabinet_session_nodes(nodes=nodes, edges=edges, scope=scope, scope_id=scope_id, limit=limit)
+
+    scope_counts: dict[str, int] = {}
+    for node in nodes.values():
+        key = f"{node.get('scope_type', 'global')}:{node.get('scope_id', 'default')}"
+        scope_counts[key] = scope_counts.get(key, 0) + 1
+    stats.update(
+        {
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "returned_nodes": len(nodes),
+            "returned_edges": len(edges),
+            "page": {
+                "limit": limit,
+                "offset": offset,
+                "returned_chunks": int(stats.get("returned_chunks", 0)),
+                "matching_chunks": int(stats.get("matching_chunks", stats.get("total_chunks", 0))),
+                "has_more": offset + int(stats.get("returned_chunks", 0)) < int(stats.get("matching_chunks", 0)),
+            },
+            "scopes": [
+                {"scope_type": key.split(":", 1)[0], "scope_id": key.split(":", 1)[1], "count": count}
+                for key, count in sorted(scope_counts.items())
+            ],
+            "vault_graph": vault_graph_stats,
+        }
+    )
+    return {"nodes": list(nodes.values()), "edges": list(edges.values()), "stats": stats}
+
+
+def _brain_activity_persona_filter(scope: str, scope_id: str | None) -> str | None:
+    """Map a brain scope to the current Hive activity filter, when supported."""
+    if scope in {"persona", "agent"} and scope_id:
+        return scope_id
+    return None
+
+
+@router.get("/api/brain/graph")
+def get_brain_graph(
+    scope: str = Query(default="all"),
+    scope_id: str | None = Query(default=None),
+    activity_window_minutes: int = Query(default=60, ge=1),
+    limit: int = Query(default=120, ge=1, le=300),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """Composed brain graph: durable memory base plus recent Hive activity overlay."""
+    allowed_scopes = {"all", "global", "persona", "agent", "team", "room"}
+    if scope not in allowed_scopes:
+        raise HTTPException(status_code=422, detail=f"invalid scope: {scope}")
+    if scope == "persona" and scope_id is not None:
+        _reject_main_translation(scope_id)
+
+    memory = get_memory_graph(scope=scope, scope_id=scope_id, limit=limit, offset=offset)
+    activity_persona_id = _brain_activity_persona_filter(scope, scope_id)
+    activity_limit = min(limit, 200)
+    hive = get_hive_mind_recent(
+        limit=activity_limit,
+        persona_id=activity_persona_id,
+        window_minutes=activity_window_minutes,
+    )
+    activity = hive.get("events") or hive.get("entries") or []
+    memory_stats = memory.get("stats") if isinstance(memory.get("stats"), dict) else {}
+    scopes = [
+        f"{item.get('scope_type', 'global')}/{item.get('scope_id', 'default')}"
+        for item in memory_stats.get("scopes", [])
+        if isinstance(item, dict)
+    ]
+    if not scopes:
+        scopes = ["global/default"]
+
+    stats = {
+        "scope": scope,
+        "scope_id": scope_id,
+        "total_nodes": len(memory.get("nodes", [])),
+        "total_edges": len(memory.get("edges", [])),
+        "returned_nodes": len(memory.get("nodes", [])),
+        "returned_edges": len(memory.get("edges", [])),
+        "limit": limit,
+        "offset": offset,
+        "activity_count": len(activity),
+        "activity_window_minutes": activity_window_minutes,
+        "activity_filter_persona_id": activity_persona_id,
+        "memory": memory_stats,
+        "activity": {
+            "window_minutes": activity_window_minutes,
+            "limit": activity_limit,
+            "filter_persona_id": activity_persona_id,
+            "total_events": len(activity),
+        },
+    }
+    return {
+        "nodes": memory.get("nodes", []),
+        "edges": memory.get("edges", []),
+        "activity": activity,
+        "layers": {
+            "memory": True,
+            "activity": True,
+            "scopes": scopes,
+        },
+        "stats": stats,
+    }
+
+
 @router.get("/api/memories")
 def get_memories(
     persona_id: str | None = Query(default=None),
@@ -1904,6 +2663,8 @@ def get_memories(
     before_id: int | None = Query(default=None),
 ) -> dict:
     """Paginated memory listing. Does NOT call recall_service (read-only)."""
+    if persona_id is not None:
+        _reject_main_translation(persona_id)
     db_path = Path(config.DATABASE_PATH) if hasattr(config, "DATABASE_PATH") else None
     if db_path is None or not db_path.is_file():
         return {"memories": [], "stats": {}, "next_before_id": None}
@@ -1912,9 +2673,52 @@ def get_memories(
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         try:
-            sql = "SELECT id, source_path, chunk_text, created_at FROM chunks"
+            columns = _table_columns(conn, "chunks")
+            projection = _memory_schema_projection(columns)
+            if projection is None:
+                return {
+                    "memories": [],
+                    "stats": {"total_chunks": 0, "schema": "unsupported"},
+                    "next_before_id": None,
+                }
+
+            source_col, text_col, created_col, section_col = projection
+            scope_col = next(
+                (col for col in ("persona_id", "profile_id", "agent_id") if col in columns),
+                None,
+            )
+            if persona_id and persona_id != "default" and scope_col is None:
+                return {
+                    "memories": [],
+                    "stats": {
+                        "total_chunks": 0,
+                        "returned": 0,
+                        "scope": "global_vault",
+                        "persona_filter_supported": False,
+                    },
+                    "next_before_id": None,
+                }
+
+            section_expr = f"{section_col} AS section_title" if section_col else "'' AS section_title"
+            scope_expr = f"{scope_col} AS persona_id" if scope_col else "'default' AS persona_id"
+            sql = (
+                "SELECT id, "
+                f"{source_col} AS source_path, "
+                f"{text_col} AS chunk_text, "
+                f"{created_col} AS created_at, "
+                f"{section_expr}, "
+                f"{scope_expr} "
+                "FROM chunks"
+            )
             params: list[Any] = []
             wheres: list[str] = []
+            count_wheres: list[str] = []
+            count_params: list[Any] = []
+            if persona_id and scope_col is not None:
+                wheres.append(f"{scope_col} = ?")
+                params.append(persona_id)
+                count_wheres.append(f"{scope_col} = ?")
+                count_params.append(persona_id)
             if before_id is not None:
                 wheres.append("id < ?")
                 params.append(before_id)
@@ -1923,9 +2727,42 @@ def get_memories(
             sql += " ORDER BY id DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
-            memories = [dict(r) for r in rows]
+            count_sql = "SELECT COUNT(*) FROM chunks"
+            if count_wheres:
+                count_sql += " WHERE " + " AND ".join(count_wheres)
+            total_chunks = int(conn.execute(count_sql, count_params).fetchone()[0])
+            memories = []
+            for row in rows:
+                persona = row["persona_id"] or "default"
+                created_at = _coerce_unix_seconds(row["created_at"])
+                section_title = str(row["section_title"] or "").strip()
+                tags = ["vault-chunk"]
+                if section_title:
+                    tags.append(section_title)
+                source_path = str(row["source_path"] or "")
+                text = str(row["chunk_text"] or "")
+                memories.append(
+                    {
+                        "id": row["id"],
+                        "persona_id": persona,
+                        "personaId": persona,
+                        "source_path": source_path,
+                        "sourcePath": source_path,
+                        "chunk_text": text,
+                        "text": text,
+                        "created_at": created_at,
+                        "createdAt": created_at,
+                        "tags": tags,
+                        "kind": "vault_chunk",
+                    }
+                )
             next_before = memories[-1]["id"] if memories and len(memories) >= limit else None
-            stats = {"total_chunks": len(memories)}
+            stats = {
+                "total_chunks": total_chunks,
+                "returned": len(memories),
+                "scope": "profile" if scope_col else "global_vault",
+                "persona_filter_supported": bool(scope_col),
+            }
             return {"memories": memories, "stats": stats, "next_before_id": next_before}
         finally:
             conn.close()
@@ -1962,27 +2799,58 @@ def get_hive_mind_recent(
         conn = sqlite3.connect(str(chat_db_path))
         conn.row_factory = sqlite3.Row
         try:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+            ).replace(tzinfo=None).isoformat(timespec="seconds")
             sql = (
-                "SELECT s.runtime_profile_key AS persona_id, "
+                "SELECT COALESCE(NULLIF(s.runtime_profile_key, ''), 'default') AS persona_id, "
                 "       m.id AS event_id, m.role, "
                 "       substr(m.content, 1, 200) AS excerpt, "
                 "       m.created_at, s.runtime_provider AS provider, "
                 "       s.runtime_model AS model "
                 "FROM chat_messages m "
                 "JOIN chat_sessions s ON m.session_id = s.session_id "
-                "WHERE 1=1 "
+                "WHERE datetime(m.created_at) >= datetime(?) "
             )
-            params: list[Any] = []
+            params: list[Any] = [cutoff]
             if persona_id:
-                sql += "AND s.runtime_profile_key = ? "
-                params.append(persona_id)
+                if persona_id == "default":
+                    sql += "AND (s.runtime_profile_key = ? OR s.runtime_profile_key = '') "
+                    params.append(persona_id)
+                else:
+                    sql += "AND s.runtime_profile_key = ? "
+                    params.append(persona_id)
             sql += "ORDER BY m.id DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
-            entries = [
-                {**dict(r), "event_type": "chat_message"} for r in rows
-            ]
-            return {"entries": entries}
+            entries = []
+            events = []
+            for row in rows:
+                persona = row["persona_id"] or "default"
+                created_at = str(row["created_at"] or "")
+                timestamp = _coerce_unix_seconds(created_at)
+                entry = {
+                    **dict(row),
+                    "persona_id": persona,
+                    "event_type": "chat_message",
+                }
+                event = {
+                    "id": f"chat-{row['event_id']}",
+                    "eventId": row["event_id"],
+                    "persona_id": persona,
+                    "personaId": persona,
+                    "type": "chat_message",
+                    "role": row["role"],
+                    "timestamp": timestamp,
+                    "created_at": created_at,
+                    "createdAt": timestamp,
+                    "details": row["excerpt"] or "",
+                    "provider": row["provider"],
+                    "model": row["model"],
+                }
+                entries.append(entry)
+                events.append(event)
+            return {"entries": entries, "events": events}
         finally:
             conn.close()
     except sqlite3.OperationalError:

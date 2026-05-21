@@ -36,8 +36,10 @@ describe('translate', () => {
   });
 
   it('outboundPersonaDict rewrites id default → main', () => {
-    expect(outboundPersonaDict({ id: 'default', name: 'owner' })).toEqual({
+    expect(outboundPersonaDict({ id: 'default', persona_id: 'default', personaId: 'default', name: 'owner' })).toEqual({
       id: 'main',
+      persona_id: 'main',
+      personaId: 'main',
       name: 'owner',
     });
     expect(outboundPersonaDict({ id: 'sales-homie', name: 'owner' })).toEqual({

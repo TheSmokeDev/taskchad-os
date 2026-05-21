@@ -25,6 +25,7 @@ import { agentsRoute } from './routes/agents.js';
 import { conversationRoute } from './routes/conversation.js';
 import { scheduledRoute } from './routes/scheduled.js';
 import { memoriesRoute } from './routes/memories.js';
+import { brainRoute } from './routes/brain.js';
 import { hiveMindRoute } from './routes/hive-mind.js';
 import { settingsRoute } from './routes/settings.js';
 import { missionRoute } from './routes/mission.js';
@@ -45,6 +46,7 @@ export function buildDashboardApp(): Hono {
   app.route('/', conversationRoute);
   app.route('/', scheduledRoute);
   app.route('/', memoriesRoute);
+  app.route('/', brainRoute);
   app.route('/', hiveMindRoute);
   app.route('/', settingsRoute);
   app.route('/', missionRoute);

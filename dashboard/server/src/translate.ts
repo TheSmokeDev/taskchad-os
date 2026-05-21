@@ -51,14 +51,18 @@ export function outboundPersonaId(personaId: string | undefined | null): string 
  * handlers to translate response bodies before returning to the browser.
  */
 export function outboundPersonaDict<T extends Record<string, unknown>>(dict: T): T {
-  if (dict && typeof dict === 'object' && 'id' in dict && dict.id === 'default') {
-    return { ...dict, id: 'main' };
+  if (!dict || typeof dict !== 'object') {
+    return dict;
   }
-  // Also handle persona_id field (used in some responses).
-  if (dict && typeof dict === 'object' && 'persona_id' in dict && dict.persona_id === 'default') {
-    return { ...dict, persona_id: 'main' };
+  const out: Record<string, unknown> = { ...dict };
+  let changed = false;
+  for (const key of ['id', 'persona_id', 'personaId'] as const) {
+    if (out[key] === 'default') {
+      out[key] = 'main';
+      changed = true;
+    }
   }
-  return dict;
+  return changed ? out as T : dict;
 }
 
 /**
