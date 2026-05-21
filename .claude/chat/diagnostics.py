@@ -28,6 +28,7 @@ class DiagnosticsReport:
     # Cognition
     cognition_available: bool = False
     cognition_moves: dict[str, bool] = field(default_factory=dict)
+    cognitive_loop: dict[str, object] = field(default_factory=dict)
 
     # Recall
     recall_last_query: str | None = None
@@ -78,6 +79,7 @@ def collect_diagnostics() -> DiagnosticsReport:
     )
 
     _check_cognition(report)
+    _check_cognitive_loop(report)
     _check_recall(report)
     _check_memory_db(report)
     _check_runtime(report)
@@ -136,6 +138,30 @@ def _check_cognition(report: DiagnosticsReport) -> None:
 
     report.cognition_moves = moves
     report.cognition_available = any(moves.values())
+
+
+def _check_cognitive_loop(report: DiagnosticsReport) -> None:
+    """Populate code-backed cognitive-loop subsystem status."""
+    try:
+        from cognition.status import collect_cognitive_loop_status
+
+        report.cognitive_loop = collect_cognitive_loop_status()
+    except Exception as exc:
+        report.cognitive_loop = {
+            "overall": "unknown",
+            "state_counts": {"unknown": 1},
+            "subsystems": {
+                "collector": {
+                    "state": "unknown",
+                    "evidence": (
+                        "cognitive-loop status collector failed: "
+                        f"{_short_detail(str(exc))}"
+                    ),
+                    "details": {},
+                }
+            },
+            "next_actions": ["Fix cognitive-loop status collector import/runtime failure."],
+        }
 
 
 def _check_recall(report: DiagnosticsReport) -> None:

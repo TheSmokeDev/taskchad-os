@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from runtime import langfuse_setup
 from runtime.langfuse_setup import init_langfuse
@@ -100,10 +101,21 @@ def _capture_sentry_exception(
         import sentry_sdk
 
         md = _safe_value(metadata or {})
-        with sentry_sdk.push_scope() as scope:
+        scope_factory = getattr(sentry_sdk, "new_scope", None)
+        if scope_factory is None:
+            scope_factory = sentry_sdk.push_scope
+        with scope_factory() as scope:
             scope.set_tag("component", "orchestration")
             scope.set_tag("span_name", span_name)
-            for key in ("team_id", "convoy_id", "subtask_id", "agent_id", "msg_type", "requested_backend", "actual_backend"):
+            for key in (
+                "team_id",
+                "convoy_id",
+                "subtask_id",
+                "agent_id",
+                "msg_type",
+                "requested_backend",
+                "actual_backend",
+            ):
                 value = md.get(key)
                 if value is not None:
                     scope.set_tag(key, str(value))
@@ -252,7 +264,8 @@ def orchestration_span(
             )
         except Exception as exc:
             if isinstance(exc, expected_exceptions):
-                # Expected exception — mark span so operators know Sentry was intentionally suppressed
+                # Expected exception: mark the span so operators know
+                # Sentry was intentionally suppressed.
                 state.update(
                     update_observation(
                         metadata={

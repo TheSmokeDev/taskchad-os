@@ -103,6 +103,7 @@ class TestDiagnosticsReport:
         assert isinstance(report, DiagnosticsReport)
         assert isinstance(report.cognition_moves, dict)
         assert isinstance(report.timestamp, str)
+        assert isinstance(report.cognitive_loop, dict)
 
     def test_collect_diagnostics_runtime_providers(self):
         report = collect_diagnostics()
@@ -226,6 +227,15 @@ class TestDiagnosticsReport:
         parsed = json.loads(json_str)
         assert "timestamp" in parsed
         assert "cognition_available" in parsed
+        assert "cognitive_loop" in parsed
+
+    def test_collect_diagnostics_includes_cognitive_loop_status(self):
+        report = collect_diagnostics()
+
+        assert report.cognitive_loop["overall"] == "partial"
+        subsystems = report.cognitive_loop["subsystems"]
+        assert subsystems["active_inferences"]["state"] == "live"
+        assert subsystems["heartbeat_identity"]["state"] == "drift"
 
 
 class TestEnvironmentCheck:

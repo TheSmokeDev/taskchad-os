@@ -206,8 +206,8 @@ class TestSentryDualLane:
         """_capture_sentry_exception calls sentry_sdk.capture_exception with scope tags."""
         mock_sentry = MagicMock()
         mock_scope = MagicMock()
-        mock_sentry.push_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
-        mock_sentry.push_scope.return_value.__exit__ = MagicMock(return_value=False)
+        mock_sentry.new_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
+        mock_sentry.new_scope.return_value.__exit__ = MagicMock(return_value=False)
         mock_sentry.capture_exception.return_value = "sentry-event-id-123"
 
         with (
@@ -230,6 +230,29 @@ class TestSentryDualLane:
             mock_scope.set_tag.assert_any_call("team_id", "t1")
             mock_scope.set_tag.assert_any_call("convoy_id", "5")
             mock_scope.set_context.assert_called_once()
+
+    def test_capture_sentry_exception_falls_back_to_push_scope(self):
+        """Older sentry-sdk installs still use push_scope."""
+        mock_sentry = MagicMock()
+        del mock_sentry.new_scope
+        mock_scope = MagicMock()
+        mock_sentry.push_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
+        mock_sentry.push_scope.return_value.__exit__ = MagicMock(return_value=False)
+        mock_sentry.capture_exception.return_value = "legacy-event-id"
+
+        with (
+            patch.dict("sys.modules", {"sentry_sdk": mock_sentry}),
+            patch("orchestration.observability.os.getenv", return_value="https://sentry.example.com/1"),
+        ):
+            from orchestration.observability import _capture_sentry_exception
+
+            result = _capture_sentry_exception(
+                RuntimeError("legacy"),
+                span_name="legacy_span",
+            )
+
+            assert result == "legacy-event-id"
+            mock_sentry.push_scope.assert_called_once()
 
     def test_capture_sentry_exception_no_dsn(self):
         """_capture_sentry_exception returns None when SENTRY_DSN is not set."""
@@ -268,7 +291,16 @@ class TestSentryDualLane:
 
             with (
                 patch("orchestration.observability.init_langfuse"),
-                patch("orchestration.observability.os.getenv", side_effect=lambda k, *a: "https://sentry.example.com/1" if k == "SENTRY_DSN" else (a[0] if a else None)),
+                patch(
+                    "orchestration.observability.os.getenv",
+                    side_effect=(
+                        lambda k, *a: (
+                            "https://sentry.example.com/1"
+                            if k == "SENTRY_DSN"
+                            else (a[0] if a else None)
+                        )
+                    ),
+                ),
                 patch.dict("sys.modules", {"sentry_sdk": mock_sentry, "config": MagicMock()}),
             ):
                 obs_mod.init_orchestration_observability()
@@ -305,8 +337,8 @@ class TestSentryDualLane:
         """orchestration_span populates sentry_event_id on unexpected exceptions."""
         mock_sentry = MagicMock()
         mock_scope = MagicMock()
-        mock_sentry.push_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
-        mock_sentry.push_scope.return_value.__exit__ = MagicMock(return_value=False)
+        mock_sentry.new_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
+        mock_sentry.new_scope.return_value.__exit__ = MagicMock(return_value=False)
         mock_sentry.capture_exception.return_value = "sentry-evt-456"
 
         with (

@@ -18,6 +18,7 @@ from cognition.observability import (
 )
 from cognition.recall import RecallTier, classify_tier, run_recall_pipeline
 from cognition.regions import PromptRegion, assemble_regions
+from cognition.status import collect_cognitive_loop_status
 
 # Move 2 modules — guarded import (require runtime layer)
 try:
@@ -68,6 +69,8 @@ __all__ = [
     "log_recall_event",
     # PRD-8 Phase 2 — identity payload shim (WS2)
     "build_identity_payload",
+    # Cognitive-loop truth surface
+    "collect_cognitive_loop_status",
     # Move 2 — observability
     "CompactionEvent",
     "log_compaction_event",

@@ -277,12 +277,17 @@ def status(json_mode):
     ensure_directories()
     from diagnostics import collect_diagnostics
 
-    report = collect_diagnostics()
-    # F5 — expose the per-profile lifecycle contract (pid path, lock path,
-    # mutex name, ports). Operators running ``thehomie -p sales status``
-    # need to see which paths/ports the active profile is using.
-    lifecycle = _collect_profile_lifecycle_contract()
     if json_mode:
+        # Keep stdout machine-clean even when diagnostics imports initialize
+        # optional observability providers that may log connection failures.
+        real_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        try:
+            report = collect_diagnostics()
+            lifecycle = _collect_profile_lifecycle_contract()
+        finally:
+            sys.stdout = real_stdout
+
         import dataclasses
 
         payload = dataclasses.asdict(report)
@@ -292,6 +297,11 @@ def status(json_mode):
         payload["profile_lifecycle"] = lifecycle
         print(json_mod.dumps(payload, indent=2))
     else:
+        report = collect_diagnostics()
+        # F5 — expose the per-profile lifecycle contract (pid path, lock path,
+        # mutex name, ports). Operators running ``thehomie -p sales status``
+        # need to see which paths/ports the active profile is using.
+        lifecycle = _collect_profile_lifecycle_contract()
         _print_status_human(report)
         _print_profile_lifecycle_contract(lifecycle)
 
@@ -362,6 +372,7 @@ def doctor():
             click.echo(f"  {provider}: {issue}")
     click.echo(f"Memory DB: {report.memory_doc_count} documents ({report.memory_embedding_status})")
     click.echo(f"Cognition: {'active' if report.cognition_available else 'unavailable'}")
+    _print_cognitive_loop(report.cognitive_loop)
     click.echo(f"Sessions: {report.sessions_active} active")
     if report.clear_lifecycle_recent_failures:
         click.echo(
@@ -1008,6 +1019,7 @@ def _print_status_human(report):
         click.echo(f"  {name}: {status}")
 
     click.echo(f"\nMemory: {report.memory_doc_count} docs ({report.memory_embedding_status})")
+    _print_cognitive_loop(report.cognitive_loop)
     click.echo(f"Sessions: {report.sessions_active} active")
     click.echo(f"Total cost: ${report.sessions_total_cost_usd:.4f}")
 
@@ -1038,6 +1050,35 @@ def _print_status_human(report):
             if count > 3:
                 preview += ", ..."
             click.echo(f"  | {name:<20} | {count:>5} | {preview[:30]:<30} |")
+
+
+def _print_cognitive_loop(cognitive_loop):
+    """Render the cognitive-loop status compactly for human surfaces."""
+    if not cognitive_loop:
+        return
+
+    overall = str(cognitive_loop.get("overall", "unknown")).upper()
+    click.echo("\nCognitive Loop:")
+    click.echo(f"  Overall: {overall}")
+
+    subsystems = cognitive_loop.get("subsystems", {})
+    if isinstance(subsystems, dict):
+        for name in sorted(subsystems):
+            item = subsystems.get(name) or {}
+            if not isinstance(item, dict):
+                continue
+            state = str(item.get("state", "unknown")).upper()
+            evidence = str(item.get("evidence", "")).strip()
+            line = f"  {name}: {state}"
+            if evidence:
+                line += f" - {evidence}"
+            click.echo(line)
+
+    next_actions = cognitive_loop.get("next_actions", [])
+    if next_actions:
+        click.echo("  Next actions:")
+        for action in next_actions:
+            click.echo(f"    - {action}")
 
 
 def _run_setup_wizard(advanced: bool, headless_google: bool):

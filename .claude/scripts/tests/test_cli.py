@@ -20,6 +20,31 @@ if _SCRIPTS_DIR not in sys.path:
 from cli import main as cli_main  # noqa: E402
 
 
+def _fake_cognitive_loop() -> dict:
+    return {
+        "overall": "partial",
+        "state_counts": {"drift": 1, "live": 1, "planned": 1},
+        "subsystems": {
+            "active_inferences": {
+                "state": "live",
+                "evidence": "ConversationEngine builds user_inferences.",
+                "details": {},
+            },
+            "heartbeat_identity": {
+                "state": "drift",
+                "evidence": "heartbeat.py does not share build_identity_payload().",
+                "details": {},
+            },
+            "self_amendment": {
+                "state": "planned",
+                "evidence": "No proposal ledger detected.",
+                "details": {},
+            },
+        },
+        "next_actions": ["Unify heartbeat identity payload."],
+    }
+
+
 class TestCLIHelp:
     """Click CliRunner tests — fast, in-process."""
 
@@ -440,6 +465,87 @@ class TestDoctorRegression:
         active = [v for v in report.runtime_providers.values() if v == "ON"]
         has_failure = not active and report.runtime_providers
         assert has_failure, "Zero active providers should be flagged as a failure"
+
+
+class TestCognitiveLoopCLI:
+    def test_status_json_includes_cognitive_loop(self, monkeypatch):
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
+        import cli as cli_module
+        import diagnostics as diagnostics_module
+
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            runtime_providers={"claude": "ON"},
+            cognitive_loop=_fake_cognitive_loop(),
+        )
+        monkeypatch.setattr(diagnostics_module, "collect_diagnostics", lambda: report)
+        monkeypatch.setattr(
+            cli_module,
+            "_collect_profile_lifecycle_contract",
+            lambda: {"active_profile": "default"},
+        )
+
+        result = CliRunner().invoke(cli_main, ["status", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["cognitive_loop"]["overall"] == "partial"
+        assert data["cognitive_loop"]["subsystems"]["heartbeat_identity"]["state"] == "drift"
+
+    def test_status_json_stdout_stays_machine_clean(self, monkeypatch):
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
+        import cli as cli_module
+        import diagnostics as diagnostics_module
+
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            runtime_providers={"claude": "ON"},
+            cognitive_loop=_fake_cognitive_loop(),
+        )
+
+        def noisy_collect():
+            print("Langfuse init failed: simulated noise")
+            return report
+
+        monkeypatch.setattr(diagnostics_module, "collect_diagnostics", noisy_collect)
+        monkeypatch.setattr(
+            cli_module,
+            "_collect_profile_lifecycle_contract",
+            lambda: {"active_profile": "default"},
+        )
+
+        result = CliRunner().invoke(cli_main, ["status", "--json"])
+
+        assert result.exit_code == 0
+        stdout = getattr(result, "stdout", result.output)
+        assert stdout.lstrip().startswith("{")
+        assert "Langfuse init failed" not in stdout
+        json.loads(stdout)
+
+    def test_doctor_prints_cognitive_loop_section(self, monkeypatch):
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
+        import diagnostics as diagnostics_module
+
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            runtime_providers={"claude": "ON"},
+            cognitive_loop=_fake_cognitive_loop(),
+        )
+        monkeypatch.setattr(diagnostics_module, "check_environment", lambda: [])
+        monkeypatch.setattr(diagnostics_module, "collect_diagnostics", lambda: report)
+
+        result = CliRunner().invoke(cli_main, ["doctor"])
+
+        assert result.exit_code == 0
+        assert "Cognitive Loop:" in result.output
+        assert "heartbeat_identity: DRIFT" in result.output
+        assert "Unify heartbeat identity payload." in result.output
 
 
 class TestCLISubprocess:
