@@ -54,6 +54,20 @@ NUL
 # Archon worktrees (embedded git repos for parallel agent work)
 /.worktrees/
 
+# Local Codex/agent generated surfaces
+.agents/skills/
+.codex/agents/
+.codex/hooks.json
+.codex/hooks/
+.codex-worktrees/
+.claude/worktrees/
+.claude/scripts/.codex-*/
+PRPs/planning/.clutch-tmp/
+
+# Locally synced vault skills; canonical copies live outside this checkout
+.claude/skills/vault/
+.claude/skills/vault-*/
+
 # Stray entity_extractor output if it ever lands at repo root again
 /concepts/
 /connections/
