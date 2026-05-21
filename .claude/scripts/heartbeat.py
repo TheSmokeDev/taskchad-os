@@ -17,8 +17,10 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import io
+import json
 import os
 import shutil
 import sys
@@ -253,10 +255,6 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
     # Personal Finances — alert on upcoming bills / expiring loans / low balances
     try:
         # finance integration removed — configure separately
-            check_low_balances,
-            get_expiring_loans,
-            get_upcoming_bills,
-        )
 
         bills_due = get_upcoming_bills(days_ahead=3)
         expiring = get_expiring_loans(days_ahead=2)
@@ -1398,16 +1396,31 @@ Your final text response goes directly to {owner}'s phone. Keep it to just bulle
 
 def main() -> None:
     """Main entry point."""
+    parser = argparse.ArgumentParser(description="Heartbeat proactive check")
+    parser.add_argument("--test", action="store_true", help="Test mode")
+    parser.add_argument("--json", action="store_true", help="Emit validation probe JSON")
+    parser.add_argument("--vault", type=Path, default=None, help="Override vault root for validation probe")
+    args = parser.parse_args()
+
+    if args.json:
+        from cognitive_loop_test_harness import build_scheduled_entrypoint_report
+
+        report = build_scheduled_entrypoint_report(
+            "heartbeat",
+            args.vault or MEMORY_DIR,
+            test_mode=args.test,
+        )
+        print(json.dumps(report, indent=2))
+        return
+
     ensure_directories()
 
-    test_mode = "--test" in sys.argv
-
-    if test_mode:
+    if args.test:
         print("Running in TEST MODE (no notifications, ignoring active hours)")
         print(f"Project root: {PROJECT_ROOT}")
         print("Using direct integrations (Phase 5)")
 
-    result = asyncio.run(run_heartbeat(test_mode=test_mode))
+    result = asyncio.run(run_heartbeat(test_mode=args.test))
 
     if result:
         print(f"\nHeartbeat result:\n{result}")

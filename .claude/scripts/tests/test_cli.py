@@ -547,6 +547,27 @@ class TestCognitiveLoopCLI:
         assert "heartbeat_identity: DRIFT" in result.output
         assert "Unify heartbeat identity payload." in result.output
 
+    @pytest.mark.asyncio
+    async def test_router_diagnostics_prints_cognitive_loop_section(self, monkeypatch):
+        from diagnostics import DiagnosticsReport
+        import core_handlers
+        import diagnostics as diagnostics_module
+
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            runtime_providers={"claude": "ON"},
+            cognitive_loop=_fake_cognitive_loop(),
+        )
+        monkeypatch.setattr(diagnostics_module, "collect_diagnostics", lambda: report)
+        monkeypatch.setitem(core_handlers._ctx, "adapters", {})
+
+        message = await core_handlers.handle_diagnostics(None, None, "")
+
+        assert "*Cognitive Loop*:" in message
+        assert "heartbeat_identity: DRIFT" in message
+        assert "Unify heartbeat identity payload." in message
+
 
 class TestCLISubprocess:
     """Subprocess tests — validates installed command (CLI-Anything pattern)."""

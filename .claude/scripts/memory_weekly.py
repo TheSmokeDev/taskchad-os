@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -518,12 +519,25 @@ If there is no real cross-domain signal this week, write: `No cross-domain signa
 
 def main() -> None:
     """Main entry point."""
-    ensure_directories()
-
     parser = argparse.ArgumentParser(description="Weekly memory synthesis")
     parser.add_argument("--test", action="store_true", help="Dry run mode")
+    parser.add_argument("--json", action="store_true", help="Emit validation probe JSON")
+    parser.add_argument("--vault", type=Path, default=None, help="Override vault root for validation probe")
     parser.add_argument("--days", type=int, default=7, help="Days of logs to review (default: 7)")
     args = parser.parse_args()
+
+    if args.json:
+        from cognitive_loop_test_harness import build_scheduled_entrypoint_report
+
+        report = build_scheduled_entrypoint_report(
+            "memory_weekly",
+            args.vault or MEMORY_DIR,
+            test_mode=args.test,
+        )
+        print(json.dumps(report, indent=2))
+        return
+
+    ensure_directories()
 
     if args.test:
         print("Running in TEST MODE (dry run, no file edits)")

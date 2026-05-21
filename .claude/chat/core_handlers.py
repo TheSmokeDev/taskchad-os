@@ -142,6 +142,7 @@ async def handle_diagnostics(adapter: Any, incoming: Any, args: str, *, collect_
     lines.append("*Memory DB*:")
     lines.append(f"  Documents: {report.memory_doc_count}")
     lines.append(f"  Embeddings: {report.memory_embedding_status}")
+    _append_cognitive_loop_lines(lines, report.cognitive_loop)
     lines.append("")
     lines.append("*Runtime*:")
     lines.append(f"  selected lane: {report.runtime_selected_lane}")
@@ -197,6 +198,36 @@ async def handle_diagnostics(adapter: Any, incoming: Any, args: str, *, collect_
     for name, connected in report.adapters_connected.items():
         lines.append(f"  {name}: {'connected' if connected else 'off'}")
     return "\n".join(lines)
+
+
+def _append_cognitive_loop_lines(lines: list[str], cognitive_loop: dict[str, Any]) -> None:
+    """Append compact cognitive-loop status to router diagnostics output."""
+
+    if not cognitive_loop:
+        return
+
+    lines.append("")
+    lines.append("*Cognitive Loop*:")
+    lines.append(f"  Overall: {str(cognitive_loop.get('overall', 'unknown')).upper()}")
+
+    subsystems = cognitive_loop.get("subsystems", {})
+    if isinstance(subsystems, dict):
+        for name in sorted(subsystems):
+            item = subsystems.get(name) or {}
+            if not isinstance(item, dict):
+                continue
+            state = str(item.get("state", "unknown")).upper()
+            evidence = str(item.get("evidence", "")).strip()
+            line = f"  {name}: {state}"
+            if evidence:
+                line += f" - {evidence}"
+            lines.append(line)
+
+    next_actions = cognitive_loop.get("next_actions", [])
+    if next_actions:
+        lines.append("  Next actions:")
+        for action in next_actions:
+            lines.append(f"    - {action}")
 
 
 async def handle_cost(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
