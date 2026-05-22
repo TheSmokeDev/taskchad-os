@@ -32,11 +32,14 @@ try:
         assemble_regions,
         auto_capture_from_turn,
         build_identity_payload,
+        build_initial_working_memory,
         classify_tier,
         log_recall_event,
+        prompt_regions_from_working_memory,
     )
     from cognition.regions import PromptRegion
     from cognition.staging import StagingStore
+    from cognition.working_memory import Memory, WorkingMemory
 
     _COGNITION_AVAILABLE = True
 except ImportError:
@@ -155,56 +158,11 @@ class ConversationEngine:
         # drafted this process lifetime. Keyed by session_key, values are
         # mutable slug sets owned by concept_drafter.create_draft.
         self._drafted_slugs: dict[str, set[str]] = {}
+        self._last_turn_working_memory: Any | None = None
 
-    def _build_frozen_regions(self) -> list[Any]:
-        """Read identity files fresh. Called once per turn before prompt assembly.
+    def _build_active_inference_region(self) -> str:
+        """Render active user inferences as a WorkingMemory system region."""
 
-        PRD-8 Phase 2 (WS4): identity-file reads consolidated through
-        ``cognition.identity_payload.build_identity_payload`` so chat engine
-        and cron pipelines (memory_reflect, memory_weekly, memory_dream) share
-        a single canonical reader. PromptRegion construction + interleaved
-        ``user_inferences`` (between user and durable_memory) and
-        ``procedural_memory`` (after working_memory) regions stay verbatim —
-        the shim only hands back raw identity content keyed by uppercase
-        name. ``REGION_BUDGETS`` resolution remains env-overridable.
-        """
-        if not _COGNITION_AVAILABLE:
-            return []
-
-        from config import MEMORY_DIR, REGION_BUDGETS
-
-        memory_dir = MEMORY_DIR
-        regions: list[Any] = []
-        budgets = REGION_BUDGETS
-
-        # WS4: single canonical identity-file read. Missing files surface as
-        # absent keys — preserved fail-open semantics from read_file_safe.
-        payload = build_identity_payload(memory_dir)
-
-        soul = payload.get("SOUL", "")
-        if soul:
-            regions.append(PromptRegion(
-                "identity", soul, budgets["identity"],
-                frozen=True, source="SOUL.md",
-            ))
-
-        self_model = payload.get("SELF", "")
-        if self_model:
-            regions.append(PromptRegion(
-                "self_model", self_model, budgets["self_model"],
-                frozen=True, source="SELF.md",
-            ))
-
-        user = payload.get("USER", "")
-        if user:
-            regions.append(PromptRegion(
-                "user_model", user, budgets["user_model"],
-                frozen=True, source="USER.md",
-            ))
-
-        # Move 6c: Active inferences (derived beliefs about the user)
-        # Kept separate from USER.md so curated truth and rolling
-        # hypotheses are visibly distinct in the assembled prompt.
         try:
             from cognition.self_model import InferenceTracker
             from config import (
@@ -213,74 +171,120 @@ class ConversationEngine:
                 INFERENCE_STATE_FILE,
             )
         except ImportError:
-            pass
-        else:
-            try:
-                tracker = InferenceTracker(INFERENCE_STATE_FILE)
-                active = tracker.get_active(
-                    min_confidence=INFERENCE_PROMPT_MIN_CONFIDENCE,
-                )
-                if active:
-                    # Stable three-pass sort (reverse priority order so the
-                    # primary key — confirmed-first — wins ties).
-                    active.sort(key=lambda r: r.last_updated or "", reverse=True)
-                    active.sort(key=lambda r: r.confidence, reverse=True)
-                    active.sort(key=lambda r: 0 if r.status == "confirmed" else 1)
+            return ""
 
-                    inference_lines = []
-                    for inf in active[:INFERENCE_PROMPT_CAP]:
-                        status_tag = (
-                            "confirmed" if inf.status == "confirmed"
-                            else f"conf={inf.confidence:.2f}"
-                        )
-                        inference_lines.append(f"- [{status_tag}] {inf.inference}")
-                    inference_text = (
-                        "## Active Beliefs About User\n"
-                        + "\n".join(inference_lines)
-                    )
-                    regions.append(PromptRegion(
-                        "user_inferences",
-                        inference_text,
-                        budgets["user_inferences"],
-                        frozen=True,
-                        source="inference-tracker",
-                    ))
-            except (OSError, json.JSONDecodeError) as exc:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "user_inferences region skipped: %s", exc,
-                )
+        try:
+            tracker = InferenceTracker(INFERENCE_STATE_FILE)
+            active = tracker.get_active(
+                min_confidence=INFERENCE_PROMPT_MIN_CONFIDENCE,
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "user_inferences region skipped: %s", exc,
+            )
+            return ""
 
-        memory = payload.get("MEMORY", "")
-        if memory:
-            regions.append(PromptRegion(
-                "durable_memory", memory, budgets["durable_memory"],
-                frozen=True, source="MEMORY.md",
-            ))
+        if not active:
+            return ""
 
-        # Living Mind Phase 1: cross-session scratchpad
-        working = payload.get("WORKING", "")
-        if working:
-            regions.append(PromptRegion(
-                "working_memory", working, budgets["working_memory"],
-                frozen=True, source="WORKING.md",
-            ))
+        active.sort(key=lambda r: r.last_updated or "", reverse=True)
+        active.sort(key=lambda r: r.confidence, reverse=True)
+        active.sort(key=lambda r: 0 if r.status == "confirmed" else 1)
 
-        # Move 5a: Skill index in procedural_memory on ALL turns
+        inference_lines = []
+        for inf in active[:INFERENCE_PROMPT_CAP]:
+            status_tag = (
+                "confirmed" if inf.status == "confirmed"
+                else f"conf={inf.confidence:.2f}"
+            )
+            inference_lines.append(f"- [{status_tag}] {inf.inference}")
+        return "## Active Beliefs About User\n" + "\n".join(inference_lines)
+
+    def _build_base_working_memory(
+        self,
+        *,
+        prefetched_context: str = "",
+        recent_conversation: list[dict[str, str]] | None = None,
+    ) -> Any:
+        """Build the WorkingMemory object that owns chat prompt context."""
+
+        if not _COGNITION_AVAILABLE:
+            return None
+
+        from config import MEMORY_DIR
+
+        payload = build_identity_payload(MEMORY_DIR)
+        vault_files = {
+            "SOUL.md": payload.get("SOUL", ""),
+            "SELF.md": payload.get("SELF", ""),
+            "USER.md": payload.get("USER", ""),
+            "MEMORY.md": payload.get("MEMORY", ""),
+            "WORKING.md": payload.get("WORKING", ""),
+        }
+
+        skill_text = ""
         if _PROCESSES_AVAILABLE:
             try:
                 skill_text = build_skill_index(
                     self.project_root / ".claude" / "skills",
                 )
-                if skill_text:
-                    regions.append(PromptRegion(
-                        "procedural_memory", skill_text, budgets["procedural_memory"],
-                        frozen=True, source="skills/",
-                    ))
             except Exception:
-                pass
+                skill_text = ""
 
-        return regions
+        return build_initial_working_memory(
+            soul_name="the_homie",
+            vault_files=vault_files,
+            skill_index=skill_text,
+            active_inferences=self._build_active_inference_region(),
+            prefetched_context=prefetched_context,
+            recent_conversation=recent_conversation,
+        )
+
+    def _build_frozen_regions(self) -> list[Any]:
+        """Read identity files fresh through WorkingMemory ownership.
+
+        PRD-8 Phase 2 (WS4): identity-file reads consolidated through
+        ``cognition.identity_payload.build_identity_payload`` so chat engine
+        and cron pipelines (memory_reflect, memory_weekly, memory_dream) share
+        a single canonical reader. The production owner is now the immutable
+        ``WorkingMemory`` object; ``PromptRegion`` rendering is only the
+        runtime compatibility boundary.
+        """
+        if not _COGNITION_AVAILABLE:
+            return []
+
+        from config import REGION_BUDGETS
+
+        wm = self._build_base_working_memory()
+        if wm is None:
+            return []
+        return prompt_regions_from_working_memory(wm, REGION_BUDGETS)
+
+    def _append_turn_to_working_memory(
+        self,
+        wm: Any,
+        user_text: str,
+        assistant_text: str,
+    ) -> Any:
+        """Return WorkingMemory with the just-completed chat turn appended."""
+
+        if wm is None:
+            return None
+        return (
+            wm.with_memory(Memory(
+                role="user",
+                content=user_text,
+                region="recent_conversation",
+                source="conversation",
+            ))
+            .with_memory(Memory(
+                role="assistant",
+                content=assistant_text,
+                region="recent_conversation",
+                source="conversation",
+            ))
+        )
 
     def _build_recent_conversation_region(
         self, session_key: str, budget_tokens: int,
@@ -719,7 +723,21 @@ class ConversationEngine:
 
         # Recall — runs on every turn. recall_service does its own tier classification;
         # TIER_0 short-circuits empty (~ms), TIER_1 runs the full pipeline.
-        current_regions = self._build_frozen_regions() if _COGNITION_AVAILABLE else []
+        prefetched_region_text = ""
+        if message.prefetched_context:
+            prefetched_region_text = (
+                "The data below was already gathered via direct API calls. "
+                "Do NOT run any commands, tools, or scripts to fetch this data again. "
+                "Respond conversationally — summarize what matters, flag anything "
+                "that needs attention, and keep it concise.\n\n"
+                f"{message.prefetched_context}"
+            )
+
+        current_wm = (
+            self._build_base_working_memory(prefetched_context=prefetched_region_text)
+            if _COGNITION_AVAILABLE
+            else None
+        )
         recall_response = None
         if not _RECALL_SERVICE_AVAILABLE and _trace_decisions is not None:
             _trace_decisions["recall"] = {
@@ -759,20 +777,28 @@ class ConversationEngine:
         recent_region_meta = {"messages": 0, "chars": 0}
         if _COGNITION_AVAILABLE:
             budgets = adjusted_budgets if adjusted_budgets else REGION_BUDGETS
-            regions = list(current_regions)
+            turn_wm = current_wm
             # Continuity — inject whenever state carries real content (was gated behind recall before).
             if continuity_state:
                 continuity_text = continuity_state.to_region_text()
                 if continuity_text.strip():
-                    regions.append(PromptRegion(
-                        "continuity", continuity_text, budgets["continuity"],
+                    turn_wm = turn_wm.with_memory(Memory(
+                        role="system",
+                        content=continuity_text,
+                        region="continuity",
+                        source="continuity",
                     ))
             # Recent conversation — the floor against SDK resume hydration drift.
             recent_region = self._build_recent_conversation_region(
                 session_key, budgets.get("recent_conversation", 600),
             )
             if recent_region:
-                regions.append(recent_region)
+                turn_wm = turn_wm.with_memory(Memory(
+                    role="system",
+                    content=recent_region.content,
+                    region="recent_conversation",
+                    source="session_store",
+                ))
                 recent_region_meta = {
                     "messages": recent_region.content.count("\n\n") + 1
                     if recent_region.content else 0,
@@ -780,10 +806,13 @@ class ConversationEngine:
                 }
             # Recalled memory — only when recall pipeline returned results.
             if recall_response and recall_response.formatted_text:
-                regions.append(PromptRegion(
-                    "recalled_memory", recall_response.formatted_text,
-                    budgets["recalled_memory"],
+                turn_wm = turn_wm.with_memory(Memory(
+                    role="system",
+                    content=recall_response.formatted_text,
+                    region="recalled_memory",
+                    source="recall",
                 ))
+            regions = prompt_regions_from_working_memory(turn_wm, budgets)
             if regions:
                 system_prompt["append"] = assemble_regions(regions) + chat_rules
         elif recall_response and recall_response.formatted_text:
@@ -809,16 +838,10 @@ class ConversationEngine:
                 except Exception:
                     pass
 
-        # Pre-fetched data from router — lightweight TEXT_REASONING pass
+        # Pre-fetched data from router — lightweight TEXT_REASONING pass.
+        # Context itself is owned by WorkingMemory above; this block only
+        # constrains runtime behavior for already-loaded data.
         if message.prefetched_context:
-            system_prompt["append"] += (
-                "\n\n# Pre-Fetched Data\n"
-                "The data below was already gathered via direct API calls. "
-                "Do NOT run any commands, tools, or scripts to fetch this data again. "
-                "Respond conversationally — summarize what matters, flag anything "
-                "that needs attention, and keep it concise.\n\n"
-                f"{message.prefetched_context}"
-            )
             allowed_tools = []  # Force no tools — data is pre-loaded
             piv_max_turns = 1   # Single response, no back-and-forth
             piv_max_budget = 0.5  # Cheap ceiling
@@ -909,6 +932,20 @@ class ConversationEngine:
             return
 
         response_text = result.text.strip() or "No response returned."
+        if _COGNITION_AVAILABLE and current_wm is not None:
+            turn_wm_after = self._append_turn_to_working_memory(
+                current_wm,
+                message.text,
+                response_text,
+            )
+            self._last_turn_working_memory = turn_wm_after
+            if _trace_decisions is not None and turn_wm_after is not None:
+                _trace_decisions["working_memory"] = {
+                    "production_owner": True,
+                    "before_memories": current_wm.length,
+                    "after_memories": turn_wm_after.length,
+                    "appended_turn": True,
+                }
         if _final_output is not None:
             _final_output[0] = response_text
         session_id_from_sdk = result.session_id

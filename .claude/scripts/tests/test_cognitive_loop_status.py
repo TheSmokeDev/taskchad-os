@@ -26,10 +26,14 @@ def _seed_status_sources(tmp_path: Path, *, heartbeat_source: str) -> tuple[Path
             "from cognition.identity_payload import build_identity_payload",
             "from cognition.processes import detect_process, get_process_weights",
             "from cognition.regions import apply_process_weights, PromptRegion",
+            "from cognition.regions import build_initial_working_memory",
+            "from cognition.regions import prompt_regions_from_working_memory",
             "from cognition.self_model import InferenceTracker",
             "payload = {}",
             'working = payload.get("WORKING", "")',
-            "PromptRegion('working_memory', working, 1)",
+            "build_initial_working_memory('the_homie', {'WORKING.md': working})",
+            "prompt_regions_from_working_memory(wm, budgets)",
+            "def _append_turn_to_working_memory(): pass",
             "InferenceTracker(None).get_active()",
             "user_inferences = []",
         ]),
@@ -55,24 +59,37 @@ def _seed_status_sources(tmp_path: Path, *, heartbeat_source: str) -> tuple[Path
         "def build_drift_detection_section(): pass\n",
         encoding="utf-8",
     )
+    (cognition_dir / "proactive_brief.py").write_text(
+        "class ProactiveBrief: pass\n"
+        "def build_proactive_brief(): pass\n"
+        "def build_proactive_brief_section(): pass\n",
+        encoding="utf-8",
+    )
     (cognition_dir / "identity_payload.py").write_text("", encoding="utf-8")
     (scripts_dir / "memory_reflect.py").write_text(
-        "from cognition.identity_payload import build_identity_payload\nSELF.md\n",
+        "from cognition.identity_payload import build_identity_payload\n"
+        "from cognition.proactive_brief import build_proactive_brief_section\n"
+        "SELF.md\n",
         encoding="utf-8",
     )
     (scripts_dir / "memory_weekly.py").write_text(
-        "from cognition.identity_payload import build_identity_payload\nSELF.md\n",
+        "from cognition.identity_payload import build_identity_payload\n"
+        "from cognition.proactive_brief import build_proactive_brief_section\n"
+        "SELF.md\n",
         encoding="utf-8",
     )
     (scripts_dir / "memory_dream.py").write_text(
         "from cognition.identity_payload import build_identity_payload\n"
+        "from cognition.proactive_brief import build_proactive_brief_section\n"
         "SELF.md\nResolve contradictions\n",
         encoding="utf-8",
     )
     (scripts_dir / "heartbeat.py").write_text(heartbeat_source, encoding="utf-8")
     (runtime_dir / "bootstrap.py").write_text(
         "def build_session_briefing(): pass\n"
-        "def _extract_working_memory(): pass\n",
+        "def _extract_working_memory(): pass\n"
+        "from cognition.proactive_brief import build_proactive_brief_section\n"
+        "build_proactive_brief_section()\n",
         encoding="utf-8",
     )
     return chat_dir, scripts_dir
@@ -83,7 +100,7 @@ def test_cognitive_loop_status_is_json_serializable() -> None:
 
     payload = json.dumps(status)
     assert isinstance(payload, str)
-    assert status["overall"] == "partial"
+    assert status["overall"] == "live"
     assert isinstance(status["subsystems"], dict)
     assert isinstance(status["next_actions"], list)
 
@@ -106,18 +123,20 @@ def test_cognitive_loop_reports_scheduled_identity_truthfully() -> None:
     assert subsystems["weekly_identity"]["state"] == "live"
     assert subsystems["dream_identity"]["state"] == "live"
     assert subsystems["heartbeat_identity"]["state"] == "live"
-    assert "build_scheduled_cognition_payload" in (
+    assert "shared cognition/proactive brief path" in (
         subsystems["heartbeat_identity"]["evidence"]
     )
 
 
-def test_cognitive_loop_does_not_overclaim_planned_features() -> None:
+def test_cognitive_loop_reports_full_living_loop_when_cutovers_are_wired() -> None:
     status = collect_cognitive_loop_status()
     subsystems = status["subsystems"]
 
-    assert subsystems["working_memory"]["state"] == "shadow_only"
+    assert subsystems["working_memory"]["state"] == "live"
     assert subsystems["self_amendment"]["state"] == "live"
     assert subsystems["contradiction_detection"]["state"] == "live"
+    assert subsystems["proactive_brief"]["state"] == "live"
+    assert subsystems["working_memory"]["details"]["production_owner"] is True
     assert subsystems["self_amendment"]["details"]["proposal_ledger"] is True
     assert subsystems["self_amendment"]["details"]["auto_apply"] is False
     assert subsystems["contradiction_detection"]["details"]["detector"] is True

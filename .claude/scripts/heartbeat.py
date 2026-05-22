@@ -46,10 +46,7 @@ _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
-from cognition.scheduled_payload import (  # noqa: E402
-    build_scheduled_cognition_payload,
-    render_scheduled_cognition_context,
-)
+from cognition.proactive_brief import build_proactive_brief_section  # noqa: E402
 
 from config import (  # noqa: E402
     DRAFT_EXPIRY_HOURS,
@@ -1034,16 +1031,13 @@ def _assemble_heartbeat_cognition_section(
     memory_dir: Path,
     inference_state_file: Path | None = None,
 ) -> str:
-    """Assemble shared identity, active inferences, and WORKING.md for heartbeat."""
+    """Assemble the unified proactive brief for heartbeat."""
 
-    payload = build_scheduled_cognition_payload(
+    return build_proactive_brief_section(
         memory_dir,
         inference_state_file=inference_state_file,
-    )
-    return render_scheduled_cognition_context(
-        payload,
         include_identity=True,
-        header="## Shared Cognition Context",
+        header="## Shared Proactive Brief",
     )
 
 

@@ -34,9 +34,9 @@ if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
 from cognition.amendments import build_amendment_gate_section  # noqa: E402
+from cognition.proactive_brief import build_proactive_brief_section  # noqa: E402
 from cognition.scheduled_payload import (  # noqa: E402
     build_scheduled_cognition_payload,
-    render_scheduled_cognition_context,
 )
 
 from config import (  # noqa: E402
@@ -172,13 +172,14 @@ def _assemble_reflect_cognition_section(
     memory_dir: Path,
     inference_state_file: Path | None = None,
 ) -> str:
-    """Assemble active inferences + WORKING.md for daily reflection."""
+    """Assemble the unified proactive brief for daily reflection."""
 
-    payload = build_scheduled_cognition_payload(
+    return build_proactive_brief_section(
         memory_dir,
         inference_state_file=inference_state_file,
+        include_identity=False,
+        header="## Scheduled Proactive Brief",
     )
-    return render_scheduled_cognition_context(payload)
 
 
 def _assemble_reflect_amendment_section(

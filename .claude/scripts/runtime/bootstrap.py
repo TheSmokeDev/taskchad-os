@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import re
+import sys
 from datetime import timedelta
 from pathlib import Path
 
 from config import DAILY_DIR, MEMORY_DIR, PROJECT_ROOT, now_local
+
+_CHAT_DIR = Path(__file__).resolve().parent.parent.parent / "chat"
+if str(_CHAT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CHAT_DIR))
 
 MAX_DAILY_LOG_LINES = 30
 MAX_CONTEXT_CHARS = 20_000
@@ -218,6 +223,22 @@ def _extract_working_memory(memory_dir: Path) -> str:
         return ""
 
 
+def _build_proactive_brief(memory_dir: Path, daily_dir: Path) -> str:
+    """Build the unified proactive brief for session startup."""
+
+    try:
+        from cognition.proactive_brief import build_proactive_brief_section
+
+        return build_proactive_brief_section(
+            memory_dir,
+            daily_dir=daily_dir,
+            include_identity=False,
+            header="### Proactive Brief",
+        )
+    except Exception:
+        return _extract_working_memory(memory_dir)
+
+
 def _build_memory_index(memory_dir: Path) -> str:
     """Build a topic → path mapping for the memory index."""
     # When the vault lives inside the repo, show repo-relative paths so any
@@ -311,10 +332,10 @@ def build_session_briefing(
 
     # --- Optional sections (graceful degradation) ---
 
-    # 4.5. Working Memory (cross-session scratchpad — Living Mind Phase 1)
-    working_summary = _extract_working_memory(memory_dir)
-    if working_summary:
-        parts.append(working_summary)
+    # 4.5. Unified proactive brief (active inferences + working memory).
+    proactive_brief = _build_proactive_brief(memory_dir, daily_dir)
+    if proactive_brief:
+        parts.append(proactive_brief)
 
     # 5. Active Projects (terse status)
     projects = _extract_project_status(memory) if memory else ""

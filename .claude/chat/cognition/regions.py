@@ -92,6 +92,7 @@ def build_initial_working_memory(
     soul_name: str,
     vault_files: dict[str, str],
     skill_index: str = "",
+    active_inferences: str = "",
     prefetched_context: str = "",
     recent_conversation: list[dict[str, str]] | None = None,
 ) -> WorkingMemory:
@@ -110,6 +111,7 @@ def build_initial_working_memory(
         "self_model": "SELF.md",
         "user_model": "USER.md",
         "durable_memory": "MEMORY.md",
+        "working_memory": "WORKING.md",
     }
 
     for region, filename in region_file_map.items():
@@ -123,12 +125,21 @@ def build_initial_working_memory(
                 name=filename,
             ))
 
+    if active_inferences:
+        wm = wm.with_memory(Memory(
+            role="system",
+            content=active_inferences,
+            region="user_inferences",
+            source="inference-tracker",
+            name="active_inferences",
+        ))
+
     if skill_index:
         wm = wm.with_memory(Memory(
             role="system",
             content=skill_index,
             region="procedural_memory",
-            source="vault",
+            source="skills/",
             name="skill_index",
         ))
 
@@ -150,6 +161,58 @@ def build_initial_working_memory(
             ))
 
     return wm
+
+
+def prompt_regions_from_working_memory(
+    wm: WorkingMemory,
+    budgets: dict[str, int],
+) -> list[PromptRegion]:
+    """Render system memories from WorkingMemory as budgeted prompt regions.
+
+    The runtime still accepts prompt-region text today, but the conversation
+    engine can keep WorkingMemory as the owner of the source state and use this
+    adapter as the single compatibility boundary.
+    """
+
+    grouped: dict[str, list[str]] = {}
+    metadata: dict[str, dict[str, object]] = {}
+
+    for memory in wm.order_regions().memories:
+        if memory.role != "system" or not memory.content.strip():
+            continue
+        region = memory.region or "default"
+        grouped.setdefault(region, []).append(memory.content)
+        meta = metadata.setdefault(
+            region,
+            {"sources": [], "frozen": True},
+        )
+        source = memory.name if memory.source == "vault" and memory.name else memory.source
+        if source and source not in meta["sources"]:
+            meta["sources"].append(source)
+        if memory.source not in {
+            "vault",
+            "inference-tracker",
+            "continuity",
+            "recall",
+            "session_store",
+            "router",
+            "skills/",
+        }:
+            meta["frozen"] = False
+
+    regions: list[PromptRegion] = []
+    for region, chunks in grouped.items():
+        meta = metadata[region]
+        source = ", ".join(str(item) for item in meta["sources"])
+        regions.append(PromptRegion(
+            region,
+            "\n\n".join(chunks),
+            budgets.get(region, DEFAULT_REGION_BUDGETS.get(region, 1000)),
+            frozen=bool(meta["frozen"]),
+            source=source,
+        ))
+
+    return regions
 
 
 def assemble_regions(regions: list[PromptRegion]) -> str:

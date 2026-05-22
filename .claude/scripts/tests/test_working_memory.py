@@ -267,6 +267,41 @@ class TestWMFactory:
         assert wm.length == 0
         assert wm.soul_name == "empty"
 
+    def test_prompt_regions_render_from_working_memory(self):
+        from cognition.regions import (
+            build_initial_working_memory,
+            prompt_regions_from_working_memory,
+        )
+
+        wm = build_initial_working_memory(
+            soul_name="test",
+            vault_files={
+                "SOUL.md": "identity",
+                "USER.md": "user",
+                "WORKING.md": "open thread",
+            },
+            active_inferences="## Active Beliefs About User\n- confirmed thing",
+        )
+
+        regions = {
+            region.name: region
+            for region in prompt_regions_from_working_memory(
+                wm,
+                {
+                    "identity": 10,
+                    "user_model": 10,
+                    "user_inferences": 10,
+                    "working_memory": 10,
+                },
+            )
+        }
+
+        assert regions["identity"].source == "SOUL.md"
+        assert regions["user_model"].source == "USER.md"
+        assert regions["user_inferences"].source == "inference-tracker"
+        assert regions["working_memory"].source == "WORKING.md"
+        assert "open thread" in regions["working_memory"].content
+
 
 # === Integrator ===
 

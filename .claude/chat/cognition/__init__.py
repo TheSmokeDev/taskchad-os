@@ -27,8 +27,18 @@ from cognition.observability import (
     log_compaction_event,
     log_recall_event,
 )
+from cognition.proactive_brief import (
+    ProactiveBrief,
+    build_proactive_brief,
+    build_proactive_brief_section,
+)
 from cognition.recall import RecallTier, classify_tier, run_recall_pipeline
-from cognition.regions import PromptRegion, assemble_regions
+from cognition.regions import (
+    PromptRegion,
+    assemble_regions,
+    build_initial_working_memory,
+    prompt_regions_from_working_memory,
+)
 from cognition.scheduled_payload import (
     ScheduledCognitionPayload,
     build_scheduled_cognition_payload,
@@ -79,6 +89,8 @@ __all__ = [
     "run_recall_pipeline",
     "assemble_regions",
     "PromptRegion",
+    "build_initial_working_memory",
+    "prompt_regions_from_working_memory",
     "auto_capture_from_turn",
     "AmendmentProposal",
     "ProposalLedger",
@@ -90,6 +102,9 @@ __all__ = [
     "sanitize_recalled_content",
     "RecallLog",
     "log_recall_event",
+    "ProactiveBrief",
+    "build_proactive_brief",
+    "build_proactive_brief_section",
     # PRD-8 Phase 2 — identity payload shim (WS2)
     "build_identity_payload",
     "ScheduledCognitionPayload",

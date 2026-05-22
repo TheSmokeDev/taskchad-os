@@ -34,9 +34,9 @@ if str(_CHAT_DIR) not in sys.path:
 
 from cognition.amendments import build_amendment_gate_section  # noqa: E402
 from cognition.contradictions import build_drift_detection_section  # noqa: E402
+from cognition.proactive_brief import build_proactive_brief_section  # noqa: E402
 from cognition.scheduled_payload import (  # noqa: E402
     build_scheduled_cognition_payload,
-    render_scheduled_cognition_context,
 )
 from cognition.status import collect_cognitive_loop_status  # noqa: E402
 
@@ -163,13 +163,14 @@ def _assemble_weekly_cognition_section(
     memory_dir: Path,
     inference_state_file: Path | None = None,
 ) -> str:
-    """Assemble active inferences + WORKING.md for weekly synthesis."""
+    """Assemble the unified proactive brief for weekly synthesis."""
 
-    payload = build_scheduled_cognition_payload(
+    return build_proactive_brief_section(
         memory_dir,
         inference_state_file=inference_state_file,
+        include_identity=False,
+        header="## Scheduled Proactive Brief",
     )
-    return render_scheduled_cognition_context(payload)
 
 
 def _assemble_weekly_amendment_section(

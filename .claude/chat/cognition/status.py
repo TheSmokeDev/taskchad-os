@@ -49,6 +49,7 @@ def collect_cognitive_loop_status(
         "self_model": chat_root / "cognition" / "self_model.py",
         "amendments": chat_root / "cognition" / "amendments.py",
         "contradictions": chat_root / "cognition" / "contradictions.py",
+        "proactive_brief": chat_root / "cognition" / "proactive_brief.py",
         "identity_payload": chat_root / "cognition" / "identity_payload.py",
         "scheduled_payload": chat_root / "cognition" / "scheduled_payload.py",
         "reflect": scripts_root / "memory_reflect.py",
@@ -105,11 +106,27 @@ def collect_cognitive_loop_status(
 
 def _working_memory_status(source: dict[str, str]) -> dict[str, Any]:
     importable = _can_import("cognition.working_memory", ("WorkingMemory", "Memory"))
-    engine_uses_prompt_regions = "PromptRegion(" in source["engine"]
+    engine_uses_wm_builder = "build_initial_working_memory(" in source["engine"]
+    engine_renders_from_wm = "prompt_regions_from_working_memory(" in source["engine"]
+    engine_appends_turn = "_append_turn_to_working_memory" in source["engine"]
     engine_uses_working_file = 'payload.get("WORKING"' in source["engine"]
-    engine_owns_with_wm = "WorkingMemory(" in source["engine"]
 
-    if importable and engine_uses_prompt_regions and not engine_owns_with_wm:
+    if importable and engine_uses_wm_builder and engine_renders_from_wm and engine_appends_turn:
+        return _status(
+            LIVE,
+            (
+                "ConversationEngine builds chat prompt state through "
+                "WorkingMemory, renders PromptRegions only as a runtime "
+                "compatibility boundary, and appends the completed turn back "
+                "into WorkingMemory for traceable before/after proof."
+            ),
+            importable=True,
+            working_file_region=engine_uses_working_file,
+            production_owner=True,
+            runtime_adapter=True,
+            turn_append=True,
+        )
+    if importable:
         return _status(
             SHADOW_ONLY,
             (
@@ -119,23 +136,6 @@ def _working_memory_status(source: dict[str, str]) -> dict[str, Any]:
             ),
             importable=True,
             working_file_region=engine_uses_working_file,
-            production_owner=False,
-        )
-    if importable and engine_owns_with_wm:
-        return _status(
-            LIVE,
-            "WorkingMemory is importable and ConversationEngine source references it directly.",
-            importable=True,
-            production_owner=True,
-        )
-    if importable:
-        return _status(
-            SHADOW_ONLY,
-            (
-                "WorkingMemory is importable, but production ownership was "
-                "not detected in ConversationEngine."
-            ),
-            importable=True,
             production_owner=False,
         )
     return _status(MISSING, "cognition.working_memory is not importable.")
@@ -264,7 +264,10 @@ def _scheduled_identity_status(
 
 
 def _heartbeat_identity_status(source: dict[str, str]) -> dict[str, Any]:
-    scheduled_helper_used = "build_scheduled_cognition_payload" in source["heartbeat"]
+    scheduled_helper_used = (
+        "build_scheduled_cognition_payload" in source["heartbeat"]
+        or "build_proactive_brief_section" in source["heartbeat"]
+    )
     identity_helper_used = "build_identity_payload" in source["heartbeat"]
     recall_used = "caller=\"heartbeat\"" in source["heartbeat"]
     if scheduled_helper_used:
@@ -272,9 +275,9 @@ def _heartbeat_identity_status(source: dict[str, str]) -> dict[str, Any]:
             LIVE,
             (
                 "heartbeat.py assembles identity, active inferences, and "
-                "WORKING.md through build_scheduled_cognition_payload()."
+                "WORKING.md through the shared cognition/proactive brief path."
             ),
-            helper="build_scheduled_cognition_payload",
+            helper="build_proactive_brief_section",
             recall_context=recall_used,
         )
     if identity_helper_used:
@@ -308,7 +311,10 @@ def _scheduled_payload_status(source: dict[str, str]) -> dict[str, Any]:
     has_inferences = "InferenceTracker" in source_text
     has_working = "WORKING" in source_text
     consumers = {
-        name: "build_scheduled_cognition_payload" in source[name]
+        name: (
+            "build_scheduled_cognition_payload" in source[name]
+            or "build_proactive_brief_section" in source[name]
+        )
         for name in ("reflect", "weekly", "dream", "heartbeat")
     }
     if importable and has_identity and has_inferences and has_working and all(consumers.values()):
@@ -450,26 +456,35 @@ def _contradiction_status(source: dict[str, str]) -> dict[str, Any]:
 
 
 def _proactive_brief_status(source: dict[str, str]) -> dict[str, Any]:
-    briefing = "build_session_briefing" in source["bootstrap"]
-    working_memory = "_extract_working_memory" in source["bootstrap"]
-    heartbeat = "run_heartbeat" in source["heartbeat"]
-    if briefing and working_memory and heartbeat:
+    importable = _can_import(
+        "cognition.proactive_brief",
+        ("build_proactive_brief", "build_proactive_brief_section"),
+    )
+    bootstrap = "build_proactive_brief_section" in source["bootstrap"]
+    heartbeat = "build_proactive_brief_section" in source["heartbeat"]
+    scheduled = all(
+        "build_proactive_brief_section" in source[name]
+        for name in ("reflect", "weekly", "dream")
+    )
+    if importable and bootstrap and heartbeat and scheduled:
         return _status(
-            PARTIAL,
+            LIVE,
             (
-                "Session briefing injects working memory and heartbeat can "
-                "notify, but there is no unified proactive brief builder yet."
+                "Unified proactive brief builder is importable and consumed by "
+                "session bootstrap, heartbeat, reflection, weekly, and dream."
             ),
-            session_briefing=True,
-            working_memory_section=True,
+            importable=True,
+            session_bootstrap=True,
             heartbeat=True,
+            scheduled_loops=True,
         )
     return _status(
-        PLANNED,
-        "A complete proactive brief path was not detected.",
-        session_briefing=briefing,
-        working_memory_section=working_memory,
+        PARTIAL,
+        "A complete unified proactive brief path was not detected.",
+        importable=importable,
+        session_bootstrap=bootstrap,
         heartbeat=heartbeat,
+        scheduled_loops=scheduled,
     )
 
 
@@ -531,6 +546,11 @@ def _next_actions(subsystems: dict[str, dict[str, Any]]) -> list[str]:
         actions.append(
             "Keep WorkingMemory shadow-only until a dedicated production-owner "
             "cutover PRP is executed."
+        )
+    if subsystems["proactive_brief"]["state"] != LIVE:
+        actions.append(
+            "Unify session bootstrap, heartbeat, reflection, weekly, and dream "
+            "on the proactive brief builder."
         )
     if subsystems["self_amendment"]["state"] == PLANNED:
         actions.append(

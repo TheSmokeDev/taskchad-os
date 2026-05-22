@@ -207,6 +207,7 @@ def build_scheduled_entrypoint_report(
         "WORKING" in prompt_text or IDENTITY_SENTINELS["WORKING"] in prompt_text
     )
     amendment_gate_present = "Human-Gated Durable Memory Amendments" in prompt_text
+    proactive_brief_present = "Proactive Brief" in prompt_text
     auto_apply_disabled = (
         "Do not directly edit `SELF.md`, `SOUL.md`, `USER.md`, or `MEMORY.md`"
         in prompt_text
@@ -221,6 +222,8 @@ def build_scheduled_entrypoint_report(
         missing.append("active_inferences")
     if not working_memory_present:
         missing.append("working_memory_context")
+    if not proactive_brief_present:
+        missing.append("unified_proactive_brief")
     if entrypoint in {"memory_reflect", "memory_weekly", "memory_dream"}:
         if not amendment_gate_present:
             missing.append("human_gated_amendment_proposals")
@@ -239,6 +242,7 @@ def build_scheduled_entrypoint_report(
         "identity_payload_present": identity_payload_present,
         "active_inferences_present": active_inferences_present,
         "working_memory_present": working_memory_present,
+        "proactive_brief_present": proactive_brief_present,
         "amendment_gate_present": amendment_gate_present,
         "auto_apply_disabled": auto_apply_disabled,
         "drift_detection_present": drift_detection_present,
@@ -263,6 +267,7 @@ def build_scheduled_entrypoint_report(
             "contains_active_inference": ACTIVE_INFERENCE_SENTINEL in prompt_text,
             "contains_amendment_gate": amendment_gate_present,
             "contains_drift_detection": drift_detection_present,
+            "contains_proactive_brief": proactive_brief_present,
         },
     }
 

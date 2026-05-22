@@ -232,11 +232,12 @@ class TestDiagnosticsReport:
     def test_collect_diagnostics_includes_cognitive_loop_status(self):
         report = collect_diagnostics()
 
-        assert report.cognitive_loop["overall"] == "partial"
+        assert report.cognitive_loop["overall"] == "live"
         subsystems = report.cognitive_loop["subsystems"]
         assert subsystems["active_inferences"]["state"] == "live"
         assert subsystems["heartbeat_identity"]["state"] == "live"
-        assert subsystems["working_memory"]["state"] == "shadow_only"
+        assert subsystems["working_memory"]["state"] == "live"
+        assert subsystems["proactive_brief"]["state"] == "live"
 
 
 class TestEnvironmentCheck:
