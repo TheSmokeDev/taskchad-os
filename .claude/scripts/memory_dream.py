@@ -46,13 +46,17 @@ _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
+from cognition.amendments import build_amendment_gate_section  # noqa: E402
+from cognition.contradictions import build_drift_detection_section  # noqa: E402
 from cognition.identity_payload import build_identity_payload  # noqa: E402
 from cognition.scheduled_payload import (  # noqa: E402
     build_scheduled_cognition_payload,
     render_scheduled_cognition_context,
 )
+from cognition.status import collect_cognitive_loop_status  # noqa: E402
 
 from config import (  # noqa: E402
+    AMENDMENT_LEDGER_FILE,
     DAILY_DIR,
     DREAM_MIN_INTERVAL_HOURS,
     DREAM_SIGNAL_THRESHOLD,
@@ -176,6 +180,26 @@ def _assemble_dream_cognition_section(
         inference_state_file=inference_state_file,
     )
     return render_scheduled_cognition_context(payload)
+
+
+def _assemble_dream_amendment_section(
+    ledger_file: Path = AMENDMENT_LEDGER_FILE,
+    *,
+    source: str = "memory_dream",
+) -> str:
+    """Assemble the human-gated amendment proposal instructions."""
+
+    return build_amendment_gate_section(ledger_file, source=source)
+
+
+def _assemble_dream_drift_section(
+    project_root: Path = PROJECT_ROOT,
+    cognitive_loop_status: dict | None = None,
+) -> str:
+    """Assemble deterministic contradiction/roadmap-drift findings."""
+
+    status = cognitive_loop_status or collect_cognitive_loop_status()
+    return build_drift_detection_section(project_root, status)
 
 
 def _assemble_prune_memory_section(memory_dir: Path) -> str:
@@ -392,6 +416,8 @@ async def consolidate(
         MEMORY_DIR, orientation.memory_lines
     )
     cognition_section = _assemble_dream_cognition_section(MEMORY_DIR)
+    amendment_section = _assemble_dream_amendment_section()
+    drift_section = _assemble_dream_drift_section()
 
     today_str = now_local().strftime("%Y-%m-%d")
 
@@ -419,25 +445,29 @@ async def consolidate(
 
 {identity_section}
 {cognition_section}
+{amendment_section}
+{drift_section}
 {post_weekly_note}
 ## Instructions
 
 Today is {today_str}. Consolidate the signal above into memory:
 
-1. **Merge into MEMORY.md** ({MEMORY_FILE}):
-   - Add new lessons, decisions, or important context from the signal
+1. **Propose MEMORY.md amendments** ({MEMORY_FILE}):
+   - Propose new lessons, decisions, or important context from the signal
    - Do NOT duplicate items already present
    - Convert any relative dates ("yesterday", "last week") to absolute dates
    - Keep entries concise (1-2 lines each)
+   - Do not edit MEMORY.md directly
 
-2. **Update SELF.md** ({SELF_FILE}) ONLY if:
+2. **Propose SELF.md amendments** ({SELF_FILE}) ONLY if:
    - 2+ correction signals point to a recurring failure mode
    - A stall reveals a new area of low confidence
    - A repeated entity shows a new capability or pattern
    - Skip if no strong evidence
+   - Do not edit SELF.md directly
 
 3. **Resolve contradictions**: If a new signal contradicts an existing MEMORY.md entry,
-   update the entry to reflect the latest truth. Delete the old version.
+   propose the replacement or deletion through the amendment ledger. Include source evidence.
 
 4. Log a brief summary of changes to today's daily log ({get_today_log_path()}).
 
@@ -490,6 +520,7 @@ async def prune(orientation: OrientResult, test_mode: bool = False) -> str:
     # PRD-8 Phase 2 WS3: assemble MEMORY section via the extracted helper.
     # Header + content locked by parity tests in tests/test_memory_dream.py.
     memory_section = _assemble_prune_memory_section(MEMORY_DIR)
+    amendment_section = _assemble_dream_amendment_section(source="memory_dream_prune")
     # Instruction #2 below references the line count separately; derive it
     # via the same shim so the count and the rendered body never drift.
     _payload = build_identity_payload(MEMORY_DIR, include=("MEMORY",))
@@ -504,26 +535,28 @@ async def prune(orientation: OrientResult, test_mode: bool = False) -> str:
     prompt = f"""Memory dream pruning. Clean up and optimize MEMORY.md.
 {dry_run_note}
 {memory_section}
+{amendment_section}
 
 ## Instructions
 
 Today is {now_local().strftime('%Y-%m-%d')}.
 
-1. **Remove stale entries**: Delete entries about completed work older than 30 days
-   that have no ongoing relevance. Keep decisions and lessons even if old.
+1. **Propose stale-entry removals**: For completed work older than 30 days
+   that has no ongoing relevance, propose a removal through the amendment ledger.
+   Keep decisions and lessons even if old.
 
 2. **Enforce 200-line limit**: If MEMORY.md exceeds 200 lines (currently {memory_lines}),
-   cut the oldest completed-work entries first. Preserve key decisions and lessons.
+   propose cutting the oldest completed-work entries first. Preserve key decisions and lessons.
 
 3. **Demote verbose entries**: If any entry is longer than 2 lines, condense it to 1-2 lines.
-   Move detail to the linked topic file if one exists.
+   Propose the concise replacement through the amendment ledger.
 
-4. **Reorder sections**: Active projects first, then recent decisions, then reference.
+4. **Reorder sections**: If section order should change, propose the reorder through the amendment ledger.
 
 5. **Verify pointers**: Check that all [[wikilink]] references in MEMORY.md point to files
-   that actually exist in {MEMORY_DIR}. Remove broken links.
+   that actually exist in {MEMORY_DIR}. Propose broken-link removals.
 
-Use the Edit tool to modify {MEMORY_FILE}.
+Do not edit {MEMORY_FILE} directly.
 
 If MEMORY.md is already clean and under 200 lines, respond with exactly: PRUNE_OK
 """

@@ -115,6 +115,7 @@ def build_scheduled_entrypoint_report(
     try:
         if entrypoint == "memory_reflect":
             from memory_reflect import (
+                _assemble_reflect_amendment_section,
                 _assemble_reflect_cognition_section,
                 _assemble_reflect_identity_section,
             )
@@ -124,13 +125,18 @@ def build_scheduled_entrypoint_report(
                 vault,
                 inference_state_file,
             )
+            prompt_sections["amendment_gate"] = _assemble_reflect_amendment_section(
+                vault / ".validation" / "amendment-proposals.jsonl",
+            )
             identity_payload_present = _contains_all(
                 prompt_sections["identity"],
                 ("SOUL", "SELF", "USER", "MEMORY", "GOALS"),
             )
         elif entrypoint == "memory_weekly":
             from memory_weekly import (
+                _assemble_weekly_amendment_section,
                 _assemble_weekly_cognition_section,
+                _assemble_weekly_drift_section,
                 _assemble_weekly_identity_section,
             )
 
@@ -139,6 +145,10 @@ def build_scheduled_entrypoint_report(
                 vault,
                 inference_state_file,
             )
+            prompt_sections["amendment_gate"] = _assemble_weekly_amendment_section(
+                vault / ".validation" / "amendment-proposals.jsonl",
+            )
+            prompt_sections["drift_detection"] = _assemble_weekly_drift_section()
             identity_payload_present = _contains_all(
                 prompt_sections["identity"],
                 ("SOUL", "SELF", "USER", "MEMORY", "GOALS"),
@@ -146,7 +156,9 @@ def build_scheduled_entrypoint_report(
         elif entrypoint == "memory_dream":
             from memory_dream import (
                 _assemble_consolidate_identity_section,
+                _assemble_dream_amendment_section,
                 _assemble_dream_cognition_section,
+                _assemble_dream_drift_section,
                 _assemble_prune_memory_section,
             )
 
@@ -159,6 +171,14 @@ def build_scheduled_entrypoint_report(
                 vault,
                 inference_state_file,
             )
+            prompt_sections["amendment_gate"] = _assemble_dream_amendment_section(
+                vault / ".validation" / "amendment-proposals.jsonl",
+            )
+            prompt_sections["prune_amendment_gate"] = _assemble_dream_amendment_section(
+                vault / ".validation" / "amendment-proposals.jsonl",
+                source="memory_dream_prune",
+            )
+            prompt_sections["drift_detection"] = _assemble_dream_drift_section()
             identity_payload_present = _contains_all(
                 prompt_sections["consolidate_identity"],
                 ("SELF", "MEMORY", "GOALS"),
@@ -186,6 +206,12 @@ def build_scheduled_entrypoint_report(
     working_memory_present = (
         "WORKING" in prompt_text or IDENTITY_SENTINELS["WORKING"] in prompt_text
     )
+    amendment_gate_present = "Human-Gated Durable Memory Amendments" in prompt_text
+    auto_apply_disabled = (
+        "Do not directly edit `SELF.md`, `SOUL.md`, `USER.md`, or `MEMORY.md`"
+        in prompt_text
+    )
+    drift_detection_present = "Cognitive Loop Drift Findings" in prompt_text
     heartbeat_drift = entrypoint == "heartbeat" and not identity_payload_present
 
     missing = []
@@ -195,6 +221,13 @@ def build_scheduled_entrypoint_report(
         missing.append("active_inferences")
     if not working_memory_present:
         missing.append("working_memory_context")
+    if entrypoint in {"memory_reflect", "memory_weekly", "memory_dream"}:
+        if not amendment_gate_present:
+            missing.append("human_gated_amendment_proposals")
+        if not auto_apply_disabled:
+            missing.append("durable_memory_auto_apply_disabled")
+    if entrypoint in {"memory_weekly", "memory_dream"} and not drift_detection_present:
+        missing.append("contradiction_drift_detector")
     if heartbeat_drift:
         missing.append("heartbeat_identity_unification")
 
@@ -206,6 +239,9 @@ def build_scheduled_entrypoint_report(
         "identity_payload_present": identity_payload_present,
         "active_inferences_present": active_inferences_present,
         "working_memory_present": working_memory_present,
+        "amendment_gate_present": amendment_gate_present,
+        "auto_apply_disabled": auto_apply_disabled,
+        "drift_detection_present": drift_detection_present,
         "runtime_mode": "fake_deterministic_probe",
         "external_sends": [],
         "errors": errors,
@@ -225,6 +261,8 @@ def build_scheduled_entrypoint_report(
                 for name, sentinel in IDENTITY_SENTINELS.items()
             },
             "contains_active_inference": ACTIVE_INFERENCE_SENTINEL in prompt_text,
+            "contains_amendment_gate": amendment_gate_present,
+            "contains_drift_detection": drift_detection_present,
         },
     }
 

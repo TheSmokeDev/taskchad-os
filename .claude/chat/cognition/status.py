@@ -47,6 +47,8 @@ def collect_cognitive_loop_status(
         "steps": chat_root / "cognition" / "steps.py",
         "processes": chat_root / "cognition" / "processes.py",
         "self_model": chat_root / "cognition" / "self_model.py",
+        "amendments": chat_root / "cognition" / "amendments.py",
+        "contradictions": chat_root / "cognition" / "contradictions.py",
         "identity_payload": chat_root / "cognition" / "identity_payload.py",
         "scheduled_payload": chat_root / "cognition" / "scheduled_payload.py",
         "reflect": scripts_root / "memory_reflect.py",
@@ -334,24 +336,46 @@ def _scheduled_payload_status(source: dict[str, str]) -> dict[str, Any]:
 
 
 def _self_amendment_status(source: dict[str, str]) -> dict[str, Any]:
+    importable = _can_import(
+        "cognition.amendments",
+        (
+            "AmendmentProposal",
+            "ProposalLedger",
+            "build_amendment_gate_section",
+        ),
+    )
     self_prompt_updates = all(
         "SELF.md" in source[name] for name in ("reflect", "weekly", "dream")
     )
-    proposal_ledger = any(
-        token in "\n".join(source.values())
-        for token in (
-            "PROPOSED AMENDMENT",
-            "proposal_ledger",
-            "approval_status",
-            "AWAITING HUMAN REVIEW",
-        )
-    )
-    if proposal_ledger:
+    consumers = {
+        name: "build_amendment_gate_section" in source[name]
+        for name in ("reflect", "weekly", "dream")
+    }
+    if importable and all(consumers.values()):
         return _status(
             LIVE,
-            "Self-amendment proposal/approval markers were detected in code.",
+            (
+                "Human-gated amendment proposal ledger is importable and "
+                "reflection, weekly, and dream prompts consume the gate."
+            ),
             self_update_prompts=self_prompt_updates,
             proposal_ledger=True,
+            human_gate=True,
+            auto_apply=False,
+            consumers=consumers,
+        )
+    if importable:
+        return _status(
+            PARTIAL,
+            (
+                "Amendment proposal ledger is importable, but not every "
+                "scheduled memory loop consumes the human gate."
+            ),
+            self_update_prompts=self_prompt_updates,
+            proposal_ledger=True,
+            human_gate=False,
+            auto_apply=False,
+            consumers=consumers,
         )
     return _status(
         PLANNED,
@@ -361,28 +385,54 @@ def _self_amendment_status(source: dict[str, str]) -> dict[str, Any]:
         ),
         self_update_prompts=self_prompt_updates,
         proposal_ledger=False,
+        human_gate=False,
+        auto_apply=False,
     )
 
 
 def _contradiction_status(source: dict[str, str]) -> dict[str, Any]:
+    importable = _can_import(
+        "cognition.contradictions",
+        (
+            "DriftFinding",
+            "DriftLedger",
+            "detect_cognitive_loop_drift",
+            "build_drift_detection_section",
+        ),
+    )
     primitive = "def contradict(" in source["self_model"]
     dream_prompt_mentions = "Resolve contradictions" in source["dream"]
-    detector = any(
-        token in "\n".join(source.values())
-        for token in (
-            "ContradictionFinding",
-            "detect_contradictions",
-            "drift_findings",
-            "contradiction_ledger",
-        )
-    )
-    if detector:
+    consumers = {
+        name: "build_drift_detection_section" in source[name]
+        for name in ("weekly", "dream")
+    }
+    if importable and all(consumers.values()):
         return _status(
             LIVE,
-            "A bounded contradiction/drift detector was detected in code.",
+            (
+                "Bounded contradiction/roadmap-drift detector is importable "
+                "and weekly/dream prompts consume deterministic findings."
+            ),
             primitive=primitive,
             dream_prompt_mentions=dream_prompt_mentions,
             detector=True,
+            bounded=True,
+            source_paths=True,
+            consumers=consumers,
+        )
+    if importable:
+        return _status(
+            PARTIAL,
+            (
+                "Contradiction/roadmap-drift detector is importable, but "
+                "weekly/dream scheduled consumption is incomplete."
+            ),
+            primitive=primitive,
+            dream_prompt_mentions=dream_prompt_mentions,
+            detector=True,
+            bounded=True,
+            source_paths=True,
+            consumers=consumers,
         )
     return _status(
         PLANNED,
@@ -394,6 +444,8 @@ def _contradiction_status(source: dict[str, str]) -> dict[str, Any]:
         primitive=primitive,
         dream_prompt_mentions=dream_prompt_mentions,
         detector=False,
+        bounded=False,
+        source_paths=False,
     )
 
 

@@ -42,6 +42,19 @@ def _seed_status_sources(tmp_path: Path, *, heartbeat_source: str) -> tuple[Path
         "def contradict(): pass\n",
         encoding="utf-8",
     )
+    (cognition_dir / "amendments.py").write_text(
+        "class AmendmentProposal: pass\n"
+        "class ProposalLedger: pass\n"
+        "def build_amendment_gate_section(): pass\n",
+        encoding="utf-8",
+    )
+    (cognition_dir / "contradictions.py").write_text(
+        "class DriftFinding: pass\n"
+        "class DriftLedger: pass\n"
+        "def detect_cognitive_loop_drift(): pass\n"
+        "def build_drift_detection_section(): pass\n",
+        encoding="utf-8",
+    )
     (cognition_dir / "identity_payload.py").write_text("", encoding="utf-8")
     (scripts_dir / "memory_reflect.py").write_text(
         "from cognition.identity_payload import build_identity_payload\nSELF.md\n",
@@ -103,10 +116,12 @@ def test_cognitive_loop_does_not_overclaim_planned_features() -> None:
     subsystems = status["subsystems"]
 
     assert subsystems["working_memory"]["state"] == "shadow_only"
-    assert subsystems["self_amendment"]["state"] == "planned"
-    assert subsystems["contradiction_detection"]["state"] == "planned"
-    assert subsystems["self_amendment"]["details"]["proposal_ledger"] is False
-    assert subsystems["contradiction_detection"]["details"]["detector"] is False
+    assert subsystems["self_amendment"]["state"] == "live"
+    assert subsystems["contradiction_detection"]["state"] == "live"
+    assert subsystems["self_amendment"]["details"]["proposal_ledger"] is True
+    assert subsystems["self_amendment"]["details"]["auto_apply"] is False
+    assert subsystems["contradiction_detection"]["details"]["detector"] is True
+    assert subsystems["contradiction_detection"]["details"]["source_paths"] is True
 
 
 def test_heartbeat_identity_flips_live_when_helper_is_wired(tmp_path: Path) -> None:

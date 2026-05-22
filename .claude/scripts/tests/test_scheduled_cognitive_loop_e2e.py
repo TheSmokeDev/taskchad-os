@@ -36,6 +36,10 @@ def test_scheduled_identity_probes_use_temp_vault(entrypoint: str, tmp_path: Pat
     assert report["identity_payload_present"] is True
     assert report["active_inferences_present"] is True
     assert report["working_memory_present"] is True
+    assert report["amendment_gate_present"] is True
+    assert report["auto_apply_disabled"] is True
+    if entrypoint in {"memory_weekly", "memory_dream"}:
+        assert report["drift_detection_present"] is True
     assert report["state"] == "live"
 
 
@@ -50,6 +54,8 @@ def test_heartbeat_probe_uses_shared_scheduled_cognition_payload(tmp_path: Path)
     assert report["identity_payload_present"] is True
     assert report["active_inferences_present"] is True
     assert report["working_memory_present"] is True
+    assert report["amendment_gate_present"] is False
+    assert report["drift_detection_present"] is False
     assert report["state"] == "live"
     assert "heartbeat_identity_unification" not in report["missing"]
 
@@ -92,4 +98,9 @@ def test_scheduled_scripts_emit_clean_json_with_vault_override(
     assert data["writes"] == []
     assert data["external_sends"] == []
     assert data["runtime_mode"] == "fake_deterministic_probe"
+    if entrypoint in {"memory_reflect", "memory_weekly", "memory_dream"}:
+        assert data["amendment_gate_present"] is True
+        assert data["auto_apply_disabled"] is True
+    if entrypoint in {"memory_weekly", "memory_dream"}:
+        assert data["drift_detection_present"] is True
     assert data["state"] == "live"

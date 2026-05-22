@@ -33,12 +33,14 @@ _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
+from cognition.amendments import build_amendment_gate_section  # noqa: E402
 from cognition.scheduled_payload import (  # noqa: E402
     build_scheduled_cognition_payload,
     render_scheduled_cognition_context,
 )
 
 from config import (  # noqa: E402
+    AMENDMENT_LEDGER_FILE,
     DAILY_DIR,
     GOALS_FILE,
     MEMORY_DIR,
@@ -179,6 +181,14 @@ def _assemble_reflect_cognition_section(
     return render_scheduled_cognition_context(payload)
 
 
+def _assemble_reflect_amendment_section(
+    ledger_file: Path = AMENDMENT_LEDGER_FILE,
+) -> str:
+    """Assemble the human-gated amendment proposal instructions."""
+
+    return build_amendment_gate_section(ledger_file, source="memory_reflect")
+
+
 # =============================================================================
 # MAIN REFLECTION FUNCTION
 # =============================================================================
@@ -261,6 +271,7 @@ async def _run_reflection_inner(test_mode: bool = False, days: int = 1) -> str |
     # tests/test_memory_reflect.py — production helper is the test target.
     identity_section = _assemble_reflect_identity_section(MEMORY_DIR)
     cognition_section = _assemble_reflect_cognition_section(MEMORY_DIR)
+    amendment_section = _assemble_reflect_amendment_section()
 
     dry_run_note = (
         "\n\nDRY RUN: Do NOT edit any files. Just describe what you would change.\n"
@@ -273,6 +284,7 @@ long-term memory files.
 {dry_run_note}
 {identity_section}
 {cognition_section}
+{amendment_section}
 
 ## Recent Daily Logs
 
@@ -280,10 +292,10 @@ long-term memory files.
 {recalled_section}
 ## Instructions
 
-Review the daily logs carefully and update up to FOUR files as needed:
+Review the daily logs carefully and propose durable memory updates as needed:
 
 ### 1. MEMORY.md ({MEMORY_FILE})
-Promote important items:
+Propose important items:
 - Key decisions and their rationale
 - Lessons learned or mistakes
 - Important facts or configurations
@@ -291,7 +303,7 @@ Promote important items:
 - Upcoming events needing preparation
 
 ### 2. USER.md ({USER_FILE})
-Update when you notice patterns about {OWNER_NAME or "the user"}:
+Propose an update when you notice patterns about {OWNER_NAME or "the user"}:
 - Communication preferences (how they like to interact)
 - Schedule patterns (when they work, meeting patterns, creative time)
 - Content preferences (what topics, formats, or styles they gravitate toward)
@@ -300,28 +312,30 @@ Update when you notice patterns about {OWNER_NAME or "the user"}:
 - New integrations or account info
 
 ### 3. SOUL.md ({SOUL_FILE})
-Update ONLY if you see clear evidence of communication style adaptations:
+Propose an update ONLY if you see clear evidence of communication style adaptations:
 - Tone preferences confirmed through repeated interactions
 - Behavioral patterns that should be codified
 - Changes to how the assistant should operate
 
 ### 4. SELF.md ({SELF_FILE})
-Update ONLY when you see clear evidence in the logs — require 2+ instances or an explicit lesson.
-Do NOT update for one-off mentions.
+Propose an update ONLY when you see clear evidence in the logs — require 2+ instances or an explicit lesson.
+Do NOT propose for one-off mentions.
 
 - **Capabilities** — A new tool or approach confirmed to work
 - **Patterns** — A recurring successful behavior observed this week
 - **Failure Modes** — A mistake that recurred in the logs
 - **Confidence Notes** — An assumption corrected, or a known uncertain area
 
-1-2 sentences per entry. If nothing meets the bar, skip this file.
+1-2 sentences per entry. If nothing meets the bar, skip the proposal.
 
 **Rules:**
-- Use the Edit tool to update files directly
+- Do not edit MEMORY.md, USER.md, SOUL.md, or SELF.md directly
+- Use the amendment proposal ledger for any change to those files
+- You may append a concise run summary to today's daily log ({get_today_log_path()})
 - Do NOT duplicate items already present in a file
 - Keep entries concise
 - Only update USER.md/SOUL.md when there is clear, repeated evidence (not one-off mentions)
-- Log what you changed to today's daily log ({get_today_log_path()})
+- Log only what you proposed to today's daily log ({get_today_log_path()})
 
 If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
 """

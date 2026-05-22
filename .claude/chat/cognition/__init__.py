@@ -8,6 +8,17 @@ continuity tracking, and graph intelligence.
 from __future__ import annotations
 
 from cognition.capture import auto_capture_from_turn
+from cognition.amendments import (
+    AmendmentProposal,
+    ProposalLedger,
+    build_amendment_gate_section,
+)
+from cognition.contradictions import (
+    DriftFinding,
+    DriftLedger,
+    build_drift_detection_section,
+    detect_cognitive_loop_drift,
+)
 from cognition.identity_payload import build_identity_payload
 from cognition.injection import sanitize_recalled_content
 from cognition.observability import (
@@ -69,6 +80,13 @@ __all__ = [
     "assemble_regions",
     "PromptRegion",
     "auto_capture_from_turn",
+    "AmendmentProposal",
+    "ProposalLedger",
+    "build_amendment_gate_section",
+    "DriftFinding",
+    "DriftLedger",
+    "build_drift_detection_section",
+    "detect_cognitive_loop_drift",
     "sanitize_recalled_content",
     "RecallLog",
     "log_recall_event",

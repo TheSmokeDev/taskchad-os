@@ -32,12 +32,16 @@ _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
+from cognition.amendments import build_amendment_gate_section  # noqa: E402
+from cognition.contradictions import build_drift_detection_section  # noqa: E402
 from cognition.scheduled_payload import (  # noqa: E402
     build_scheduled_cognition_payload,
     render_scheduled_cognition_context,
 )
+from cognition.status import collect_cognitive_loop_status  # noqa: E402
 
 from config import (  # noqa: E402
+    AMENDMENT_LEDGER_FILE,
     DAILY_DIR,
     GOALS_FILE,
     MEMORY_DIR,
@@ -168,6 +172,24 @@ def _assemble_weekly_cognition_section(
     return render_scheduled_cognition_context(payload)
 
 
+def _assemble_weekly_amendment_section(
+    ledger_file: Path = AMENDMENT_LEDGER_FILE,
+) -> str:
+    """Assemble the human-gated amendment proposal instructions."""
+
+    return build_amendment_gate_section(ledger_file, source="memory_weekly")
+
+
+def _assemble_weekly_drift_section(
+    project_root: Path = PROJECT_ROOT,
+    cognitive_loop_status: dict | None = None,
+) -> str:
+    """Assemble deterministic contradiction/roadmap-drift findings."""
+
+    status = cognitive_loop_status or collect_cognitive_loop_status()
+    return build_drift_detection_section(project_root, status)
+
+
 # =============================================================================
 # MAIN WEEKLY SYNTHESIS
 # =============================================================================
@@ -247,6 +269,8 @@ async def _run_weekly_inner(test_mode: bool = False, days: int = 7) -> str | Non
     # tests/test_memory_weekly.py — production helper is the test target.
     identity_section = _assemble_weekly_identity_section(MEMORY_DIR)
     cognition_section = _assemble_weekly_cognition_section(MEMORY_DIR)
+    amendment_section = _assemble_weekly_amendment_section()
+    drift_section = _assemble_weekly_drift_section()
     previous_weekly = get_previous_weekly(n=1)
 
     # Determine the week number for the output file
@@ -266,6 +290,8 @@ and produce a weekly summary.
 {dry_run_note}
 {identity_section}
 {cognition_section}
+{amendment_section}
+{drift_section}
 
 ## Previous Weekly Review (for continuity)
 
@@ -288,9 +314,10 @@ Create the file `{weekly_path}` with these sections:
 - **Lessons Learned** — new insights or mistakes to remember
 - **Goals Progress** — how each goal in GOALS.md progressed this week
 
-### 2. Update MEMORY.md ({MEMORY_FILE})
-If daily reflection missed any important items, add them now.
-Remove outdated entries that are no longer relevant.
+### 2. Propose MEMORY.md amendments ({MEMORY_FILE})
+If daily reflection missed any important items, propose them through the
+amendment ledger. If an outdated entry should be removed, propose the removal
+with source evidence. Do not edit MEMORY.md directly.
 
 ### 3. Update GOALS.md ({GOALS_FILE})
 Update the **Status** field for each goal based on this week's progress.
@@ -300,9 +327,9 @@ If a goal needs new key metrics or active projects, update those too.
 ### 4. Log Summary
 Append a brief summary (2-3 sentences) to today's daily log ({get_today_log_path()}).
 
-### 5. Update SELF.md ({SELF_FILE})
+### 5. Propose SELF.md amendments ({SELF_FILE})
 Distill this week's Lessons Learned into the four sections.
-Only update a section if there is clear, new evidence. Do NOT duplicate existing entries.
+Only propose a section if there is clear, new evidence. Do NOT duplicate existing entries.
 
 - **Capabilities** — A new tool, method, or integration confirmed to work this week
 - **Patterns** — A recurring successful approach that appeared 2+ times
@@ -331,7 +358,10 @@ Write 3-5 specific, evidence-backed aha moments. Each one must:
 If there is no real cross-domain signal this week, write: `No cross-domain signal detected this week.`
 
 **Rules:**
-- Use the Edit tool to update existing files, Write tool only for the new weekly file
+- Use the Write tool only for the new weekly file
+- You may update GOALS.md and today's daily log when warranted
+- Do not edit MEMORY.md, USER.md, SOUL.md, or SELF.md directly
+- Use the amendment proposal ledger for any change to those files
 - Do NOT duplicate items already present in MEMORY.md
 - Keep entries concise and actionable
 - Reference specific dates and events from the logs
