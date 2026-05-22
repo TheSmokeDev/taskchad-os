@@ -12,6 +12,10 @@ Usage:
     enabled = get_enabled()            # Only integrations with required config set
     if is_enabled("gmail"):            # Check a specific integration
         ...
+
+Action-level capability policy lives in integrations.capabilities. This
+registry reports availability and exposes declared actions, but policy
+enforcement belongs to require_integration_action().
 """
 
 from __future__ import annotations
@@ -19,6 +23,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from runtime.capabilities import Capability
 
 
 @dataclass
@@ -126,7 +134,11 @@ def _has_google_token() -> bool:
 def _has_personal_gmail_token() -> bool:
     """Check if personal Gmail OAuth token file exists."""
     import os
-    token_path = os.getenv("PERSONAL_GMAIL_TOKEN", str(Path(__file__).parent / "google_token_owner.json"))
+
+    token_path = os.getenv(
+        "PERSONAL_GMAIL_TOKEN",
+        str(Path(__file__).parent / "google_token_owner.json"),
+    )
     return Path(token_path).exists()
 
 
@@ -167,7 +179,19 @@ def is_enabled(name: str) -> bool:
     return name in get_enabled()
 
 
-def _aggregate_integrations() -> "list[Capability]":
+def get_declared_actions(name: str | None = None):
+    """Return canonical action declarations for registered integrations."""
+    from integrations.capabilities import get_integration_actions
+
+    if name is not None:
+        return get_integration_actions(name)
+    return {
+        integration_name: get_integration_actions(integration_name)
+        for integration_name in _REGISTRY
+    }
+
+
+def _aggregate_integrations() -> list[Capability]:
     """Aggregate integrations inner registry into Capability rows.
 
     Snapshot semantics: ``Capability.enabled`` reflects the integration's
@@ -179,6 +203,7 @@ def _aggregate_integrations() -> "list[Capability]":
     invoke ``get_enabled()`` 11 times — 22 stat calls vs. 2).
     """
     try:
+        from integrations.capabilities import get_integration_actions
         from runtime.capabilities import Capability
     except ImportError:
         return []
@@ -186,6 +211,8 @@ def _aggregate_integrations() -> "list[Capability]":
     enabled_set: set[str] = set(get_enabled().keys())
     caps: list[Capability] = []
     for name, info in _REGISTRY.items():
+        actions = get_integration_actions(name)
+        mutators = sum(1 for action in actions if action.is_mutating)
         caps.append(
             Capability(
                 id=f"integration.{name}",
@@ -193,7 +220,10 @@ def _aggregate_integrations() -> "list[Capability]":
                 enabled=name in enabled_set,
                 source="integration",
                 extension_id=None,
-                description="",  # B2 fix: don't overload description with auth taxonomy
+                description=(
+                    f"{len(actions)} declared actions; "
+                    f"{mutators} policy-gated mutating actions"
+                ),
             )
         )
     return caps
@@ -204,5 +234,5 @@ def _aggregate_integrations() -> "list[Capability]":
 # Late import after _aggregate_integrations() is defined so the function
 # reference is valid. This must remain the LAST module-level statement.
 # ---------------------------------------------------------------------------
-from runtime.capabilities import register_aggregator  # noqa: E402
+from runtime.capabilities import register_aggregator  # noqa: E402, I001
 register_aggregator("integrations", _aggregate_integrations)

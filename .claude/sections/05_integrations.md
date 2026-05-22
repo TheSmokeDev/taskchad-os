@@ -9,6 +9,19 @@ Core services: `gmail`, `calendar`, `asana`, `slack`, `sheets`, `docs`, `drive`,
 
 See the `direct-integrations` skill SKILL.md for the full CLI reference.
 
+### Capability Policy
+
+The canonical direct-integration action contract is
+`.claude/scripts/integrations/capabilities.py`.
+
+- `registry.py` reports which integrations are configured/available.
+- `capabilities.py` declares actions, effect levels, exposed surfaces, and the
+  default software policy.
+- Mutating entrypoints call `require_integration_action()` before posting,
+  writing, archiving, or sending.
+- Google OAuth is still shared across Gmail, Calendar, Sheets, Docs, Drive,
+  GSC, and GA4; per-service token/scope segmentation is future hardening.
+
 ### Authentication
 
 | Service | Method | Key Env Vars |
@@ -30,3 +43,5 @@ The heartbeat gathers data from all integrations in Python BEFORE invoking Claud
 heartbeat.py → Python calls APIs → results fed into runtime prompt → runtime reasons
 ```
 Claude no longer needs Skill/MCP tools for heartbeat — data is pre-loaded as context.
+Heartbeat Slack alerts use the same Slack send policy gate as wrapper sends and
+notifications.

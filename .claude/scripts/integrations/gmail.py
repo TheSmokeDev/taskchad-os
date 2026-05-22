@@ -1,7 +1,8 @@
 """
 Gmail Direct Integration for The Homie.
 
-Read-only access to Gmail via Google API. Shares OAuth token with Calendar.
+Gmail access via Google API. Read actions are model-facing; archive actions
+are policy-gated operator/internal mutators.
 
 Usage:
     uv run python -m integrations.gmail list --max 5
@@ -31,6 +32,7 @@ from personas import apply_persona_override  # noqa: E402
 apply_persona_override()
 
 from config import LOCAL_TZ, now_local  # noqa: E402
+from integrations.capabilities import require_integration_action  # noqa: E402
 from shared import with_retry  # noqa: E402
 
 
@@ -460,6 +462,12 @@ def archive_emails(msg_ids: list[str]) -> dict[str, int]:
 
     Returns counts of archived and skipped messages.
     """
+    require_integration_action(
+        "gmail",
+        "archive",
+        surface="operator_confirmed",
+        caller="integrations.gmail.archive_emails",
+    )
     service = get_gmail_service()
     archived = 0
     skipped = 0
@@ -489,6 +497,12 @@ def batch_archive_emails(msg_ids: list[str], batch_size: int = 1000) -> dict[str
 
     Much faster than one-by-one — processes up to 1000 IDs per API call.
     """
+    require_integration_action(
+        "gmail",
+        "archive",
+        surface="operator_confirmed",
+        caller="integrations.gmail.batch_archive_emails",
+    )
     service = get_gmail_service()
     archived = 0
     skipped = 0
@@ -522,6 +536,12 @@ def bulk_archive_by_query(query: str, protect_senders: bool = True) -> dict[str,
 
     Paginates through all results and batch-archives them.
     """
+    require_integration_action(
+        "gmail",
+        "archive",
+        surface="operator_confirmed",
+        caller="integrations.gmail.bulk_archive_by_query",
+    )
     service = get_gmail_service()
     all_ids: list[str] = []
     protected_count = 0
@@ -644,6 +664,13 @@ def cleanup_inbox(dry_run: bool = True, max_results: int = 100) -> str:
     Returns:
         Summary string of results.
     """
+    if not dry_run:
+        require_integration_action(
+            "gmail",
+            "archive",
+            surface="operator_confirmed",
+            caller="integrations.gmail.cleanup_inbox",
+        )
     promos = find_promo_emails(max_results=max_results)
 
     if not promos:

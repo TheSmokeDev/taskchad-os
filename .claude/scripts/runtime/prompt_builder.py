@@ -21,8 +21,9 @@ INTEGRATION_HINTS = (
     "- Memory search: uv run python memory_search.py "
     '"query" --mode keyword --limit 5\n'
     "- Deployment-specific integrations may also be configured. "
-    "Inspect .claude/scripts/integrations/registry.py and "
-    ".claude/skills/direct-integrations/scripts/query.py --help"
+    "Use .claude/scripts/integrations/capabilities.py as the canonical "
+    "action/effect policy; registry.py reports availability and "
+    "query.py --help shows wrapper syntax."
 )
 
 # Default preambles — callers can override via kwargs.

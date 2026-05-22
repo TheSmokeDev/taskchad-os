@@ -7,6 +7,12 @@ description: Query Gmail, Google Calendar, Asana, Slack, Google Sheets, Google D
 
 Query Gmail, Calendar, Asana, Slack, Sheets, Docs, and Drive directly — no Zapier/MCP needed.
 
+Canonical action policy lives in
+`.claude/scripts/integrations/capabilities.py`. Wrapper commands validate
+against that policy before running. Mutating actions such as Slack send,
+Sheets write/append, and Asana task changes are operator-confirmed surfaces,
+not ambient model-facing reads.
+
 ## Script Path
 
 `.claude/skills/direct-integrations/scripts/query.py`
@@ -62,8 +68,11 @@ cd .claude/scripts && uv run python setup_auth.py --check
 
 ## Notes
 
-- Gmail + Calendar + Sheets + Docs + Drive share a single Google OAuth token
-- Sheets has read/write access; Docs and Drive are read-only
+- Gmail + Calendar + Sheets + Docs + Drive share a single Google OAuth token.
+- Gmail reads are model-facing; Gmail archive exists for cleanup paths and is
+  policy-gated as an operator/internal mutator.
+- Sheets has policy-gated read/write access; Docs and Drive are read-only in
+  this wrapper.
 - Asana uses Personal Access Token from .env
 - Slack uses Bot Token from .env
 - Use `drive find` to locate file IDs by name, then pass to `sheets read` or `docs read`

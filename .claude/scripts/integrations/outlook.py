@@ -27,6 +27,7 @@ apply_persona_override()
 # Replaces the prior bare ``load_dotenv()`` call, which always loaded the
 # install-dir .env regardless of HOMIE_HOME.
 import config  # noqa: E402, F401
+from integrations.capabilities import require_integration_action  # noqa: E402
 
 GRAPH_CLIENT_ID = os.getenv("GRAPH_CLIENT_ID", "")
 GRAPH_CLIENT_SECRET = os.getenv("GRAPH_CLIENT_SECRET", "")
@@ -219,6 +220,12 @@ def format_emails_for_context(emails: list[OutlookEmail], max_chars: int = 2000)
 
 def archive_emails(msg_ids: list[str]) -> dict[str, int]:
     """Move messages to the Archive folder. Returns archived/skipped counts."""
+    require_integration_action(
+        "outlook",
+        "archive",
+        surface="operator_confirmed",
+        caller="integrations.outlook.archive_emails",
+    )
     archived = 0
     skipped = 0
     for msg_id in msg_ids:
@@ -233,6 +240,12 @@ def archive_emails(msg_ids: list[str]) -> dict[str, int]:
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
     """Send an email via Microsoft Graph API."""
+    require_integration_action(
+        "outlook",
+        "send_email",
+        surface="operator_confirmed",
+        caller="integrations.outlook.send_email",
+    )
     payload = {
         "message": {
             "subject": subject,

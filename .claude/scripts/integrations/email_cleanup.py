@@ -10,7 +10,6 @@ import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 
 class JunkCategory(Enum):
@@ -285,11 +284,19 @@ def execute_cleanup(
     gmail_report: CleanupReport, outlook_report: CleanupReport,
 ) -> str:
     """Archive all categorized junk from both inboxes."""
+    from integrations.capabilities import require_integration_action
+
     results: list[str] = ["*Cleanup Results*\n"]
 
     # Gmail
     gmail_ids = [e.id for emails in gmail_report.by_category.values() for e in emails]
     if gmail_ids:
+        require_integration_action(
+            "gmail",
+            "archive",
+            surface="operator_confirmed",
+            caller="integrations.email_cleanup.execute_cleanup",
+        )
         from integrations.gmail import batch_archive_emails
         r = batch_archive_emails(gmail_ids)
         results.append(f"*Gmail*: archived {r['archived']}, skipped {r['skipped']}")
@@ -299,6 +306,12 @@ def execute_cleanup(
     # Outlook
     outlook_ids = [e.id for emails in outlook_report.by_category.values() for e in emails]
     if outlook_ids:
+        require_integration_action(
+            "outlook",
+            "archive",
+            surface="operator_confirmed",
+            caller="integrations.email_cleanup.execute_cleanup",
+        )
         from integrations.outlook import archive_emails
         r = archive_emails(outlook_ids)
         results.append(f"*Outlook*: archived {r['archived']}, skipped {r['skipped']}")

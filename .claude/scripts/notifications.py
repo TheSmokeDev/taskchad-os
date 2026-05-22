@@ -10,8 +10,15 @@ from __future__ import annotations
 import platform
 import subprocess
 
+from integrations.capabilities import IntegrationPolicyError, require_integration_action
 
-def send_toast_notification(title: str, message: str) -> dict[str, str] | None:
+
+def send_toast_notification(
+    title: str,
+    message: str,
+    *,
+    caller: str = "notifications.send_toast_notification",
+) -> dict[str, str] | None:
     """
     Send a native desktop notification (cross-platform).
 
@@ -29,7 +36,7 @@ def send_toast_notification(title: str, message: str) -> dict[str, str] | None:
     system = platform.system()
 
     # Also send to Slack as additional channel (fire-and-forget) — full message
-    slack_result = send_slack_notification(title, message)
+    slack_result = send_slack_notification(title, message, caller=caller)
 
     try:
         if system == "Windows":
@@ -72,7 +79,11 @@ def _notify_linux(title: str, message: str) -> bool:
 
 
 def send_slack_notification(
-    title: str, message: str, channel: str | None = None
+    title: str,
+    message: str,
+    channel: str | None = None,
+    *,
+    caller: str = "notifications.send_slack_notification",
 ) -> dict[str, str] | None:
     """
     Send notification to Slack channel.
@@ -86,6 +97,12 @@ def send_slack_notification(
         Dict with 'channel' and 'ts' if sent successfully, None otherwise.
     """
     try:
+        require_integration_action(
+            "slack",
+            "send",
+            surface="internal",
+            caller=caller,
+        )
         from config import SLACK_BOT_TOKEN, SLACK_NOTIFICATION_CHANNEL
         from integrations.slack_api import send_notification
 
@@ -94,7 +111,10 @@ def send_slack_notification(
 
         target = channel or SLACK_NOTIFICATION_CHANNEL
         formatted = f"*{title}*\n{message}"
-        return send_notification(target, formatted)
+        return send_notification(target, formatted, surface="internal", caller=caller)
+    except IntegrationPolicyError as e:
+        print(f"Slack notification blocked by policy: {e}")
+        return None
     except Exception as e:
         print(f"Slack notification failed: {e}")
         return None

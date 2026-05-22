@@ -1379,7 +1379,11 @@ Your final text response goes directly to {owner}'s phone. Keep it to just bulle
         append_to_daily_log(response_text, "Heartbeat")
 
         if not test_mode:
-            slack_result = send_toast_notification("The Homie Alert", response_text)
+            slack_result = send_toast_notification(
+                "The Homie Alert",
+                response_text,
+                caller="heartbeat.run_heartbeat",
+            )
 
             # Record the Slack message so thread replies can start a conversation
             if slack_result and slack_result.get("ts"):

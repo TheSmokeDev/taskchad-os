@@ -26,6 +26,7 @@ from personas import apply_persona_override  # noqa: E402
 
 apply_persona_override()
 
+from integrations.capabilities import require_integration_action  # noqa: E402
 from shared import with_retry  # noqa: E402
 
 
@@ -154,6 +155,12 @@ def write_spreadsheet(
         values: 2D list of values to write
         input_option: How to interpret input (USER_ENTERED or RAW)
     """
+    require_integration_action(
+        "sheets",
+        "write",
+        surface="operator_confirmed",
+        caller="integrations.sheets_api.write_spreadsheet",
+    )
     service = get_sheets_service()
 
     body = {"values": values}
@@ -188,6 +195,12 @@ def append_to_spreadsheet(
         values: 2D list of row values to append
         input_option: How to interpret input (USER_ENTERED or RAW)
     """
+    require_integration_action(
+        "sheets",
+        "append",
+        surface="operator_confirmed",
+        caller="integrations.sheets_api.append_to_spreadsheet",
+    )
     service = get_sheets_service()
 
     body = {"values": values}

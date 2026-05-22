@@ -28,6 +28,7 @@ from personas import apply_persona_override  # noqa: E402
 apply_persona_override()
 
 from config import SLACK_BOT_TOKEN, SLACK_MONITORED_CHANNELS, SLACK_OWNER_USER_ID  # noqa: E402
+from integrations.capabilities import Exposure, require_integration_action  # noqa: E402
 from shared import with_retry  # noqa: E402
 
 # Cache for user name resolution (user_id -> display_name)
@@ -158,7 +159,12 @@ def get_recent_messages(
 
 
 def send_notification(
-    channel: str, text: str, thread_ts: str | None = None
+    channel: str,
+    text: str,
+    thread_ts: str | None = None,
+    *,
+    surface: Exposure = "internal",
+    caller: str = "integrations.slack_api.send_notification",
 ) -> dict[str, Any] | None:
     """
     Send a message to a Slack channel.
@@ -171,6 +177,7 @@ def send_notification(
     Returns:
         Dict with 'channel' (resolved ID) and 'ts' (message timestamp), or None on failure.
     """
+    require_integration_action("slack", "send", surface=surface, caller=caller)
     client = get_slack_client()
 
     # Resolve channel name to ID if needed
@@ -295,7 +302,12 @@ if __name__ == "__main__":
         if not args.channel or not args.message:
             print("Usage: slack_api.py send <channel> <message>")
             sys.exit(1)
-        result = send_notification(args.channel, args.message)
+        result = send_notification(
+            args.channel,
+            args.message,
+            surface="operator_confirmed",
+            caller="integrations.slack_api CLI send",
+        )
         print(f"Sent! (ts={result['ts']})" if result else "Failed to send")
 
     elif args.command == "check":

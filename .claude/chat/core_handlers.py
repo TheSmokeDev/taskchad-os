@@ -882,6 +882,7 @@ async def handle_send(adapter: Any, incoming: Any, args: str, *, collect_only: b
     try:
         import shutil
 
+        from integrations.capabilities import require_integration_action
         from integrations.outlook import send_email
 
         draft_name = args.strip()
@@ -933,7 +934,13 @@ async def handle_send(adapter: Any, incoming: Any, args: str, *, collect_only: b
             if not to_email:
                 return f"Draft '{draft_path.name}' has no 'to' address in frontmatter."
 
-            ok = send_email(to=to_email, subject=subject, body=body)
+            require_integration_action(
+                "outlook",
+                "send_email",
+                surface="operator_confirmed",
+                caller="chat.core_handlers.handle_send",
+            )
+            ok = send_email(to_email=to_email, subject=subject, body=body)
             if ok:
                 DRAFTS_SENT_DIR.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(draft_path), str(DRAFTS_SENT_DIR / draft_path.name))

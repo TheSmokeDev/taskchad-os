@@ -25,9 +25,45 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+from integrations.capabilities import (  # noqa: E402, I001
+    normalize_action_name,
+    normalize_integration_id,
+    require_integration_action,
+)
+
+
+_OPERATOR_CONFIRMED_CLI_ACTIONS = {
+    ("asana", "complete"),
+    ("asana", "create"),
+    ("asana", "comment"),
+    ("asana", "move"),
+    ("slack", "send"),
+    ("sheets", "write"),
+    ("sheets", "append"),
+}
+
+
+def _require_cli_action(service: str, action: str) -> None:
+    """Validate a wrapper action against the canonical capability policy."""
+    integration = normalize_integration_id(service)
+    action_name = normalize_action_name(action)
+    surface = (
+        "operator_confirmed"
+        if (integration, action_name) in _OPERATOR_CONFIRMED_CLI_ACTIONS
+        else "model"
+    )
+    require_integration_action(
+        integration,
+        action_name,
+        surface=surface,
+        caller=f"direct-integrations query.py {service} {action}",
+    )
+
 
 def cmd_gmail(args: argparse.Namespace) -> None:
     """Handle Gmail commands."""
+    _require_cli_action("gmail", args.action)
+
     from integrations.gmail import (
         check_for_urgent_emails,
         format_emails_for_context,
@@ -79,6 +115,8 @@ def cmd_gmail(args: argparse.Namespace) -> None:
 
 def cmd_calendar(args: argparse.Namespace) -> None:
     """Handle Calendar commands."""
+    _require_cli_action("calendar", args.action)
+
     from integrations.calendar_api import (
         check_for_upcoming_meetings,
         format_events_for_context,
@@ -101,6 +139,8 @@ def cmd_calendar(args: argparse.Namespace) -> None:
 
 def cmd_asana(args: argparse.Namespace) -> None:
     """Handle Asana commands."""
+    _require_cli_action("asana", args.action)
+
     from integrations.asana_api import (
         add_comment,
         complete_task,
@@ -186,6 +226,8 @@ def cmd_asana(args: argparse.Namespace) -> None:
 
 def cmd_slack(args: argparse.Namespace) -> None:
     """Handle Slack commands."""
+    _require_cli_action("slack", args.action)
+
     from integrations.slack_api import (
         check_for_important_messages,
         format_messages_for_context,
@@ -216,7 +258,12 @@ def cmd_slack(args: argparse.Namespace) -> None:
         if not args.channel or not args.message:
             print("Error: channel and message required")
             sys.exit(1)
-        result = send_notification(args.channel, args.message)
+        result = send_notification(
+            args.channel,
+            args.message,
+            surface="operator_confirmed",
+            caller="direct-integrations query.py slack send",
+        )
         print(f"Sent! (ts={result['ts']})" if result else "Failed to send")
 
     elif args.action == "check":
@@ -230,6 +277,8 @@ def cmd_slack(args: argparse.Namespace) -> None:
 
 def cmd_sheets(args: argparse.Namespace) -> None:
     """Handle Google Sheets commands."""
+    _require_cli_action("sheets", args.action)
+
     from integrations.sheets_api import (
         append_to_spreadsheet,
         format_spreadsheet_for_context,
@@ -275,6 +324,8 @@ def cmd_sheets(args: argparse.Namespace) -> None:
 
 def cmd_docs(args: argparse.Namespace) -> None:
     """Handle Google Docs commands."""
+    _require_cli_action("docs", args.action)
+
     from integrations.docs_api import (
         format_document_for_context,
         get_document_info,
@@ -302,6 +353,8 @@ def cmd_docs(args: argparse.Namespace) -> None:
 
 def cmd_personal_gmail(args: argparse.Namespace) -> None:
     """Handle personal Gmail commands (read-only)."""
+    _require_cli_action("personal-gmail", args.action)
+
     from integrations.personal_gmail import (
         format_personal_emails_for_context,
         get_personal_email,
@@ -340,6 +393,8 @@ def cmd_personal_gmail(args: argparse.Namespace) -> None:
 
 def cmd_circle(args: argparse.Namespace) -> None:
     """Handle Circle commands (read-only)."""
+    _require_cli_action("circle", args.action)
+
     from integrations.circle_api import (
         format_chat_rooms_for_context,
         format_messages_for_context,
@@ -406,6 +461,8 @@ def cmd_circle(args: argparse.Namespace) -> None:
 
 def cmd_search_console(args: argparse.Namespace) -> None:
     """Handle Google Search Console commands."""
+    _require_cli_action("search-console", args.action)
+
     from integrations.search_console_api import (
         format_pages_for_context,
         format_queries_for_context,
@@ -428,6 +485,8 @@ def cmd_search_console(args: argparse.Namespace) -> None:
 
 def cmd_analytics(args: argparse.Namespace) -> None:
     """Handle Google Analytics (GA4) commands."""
+    _require_cli_action("analytics", args.action)
+
     from integrations.analytics_api import (
         format_overview_for_context,
         format_pages_for_context,
@@ -455,6 +514,8 @@ def cmd_analytics(args: argparse.Namespace) -> None:
 
 def cmd_drive(args: argparse.Namespace) -> None:
     """Handle Google Drive commands."""
+    _require_cli_action("drive", args.action)
+
     from integrations.drive_api import (
         find_files,
         format_files_for_context,
