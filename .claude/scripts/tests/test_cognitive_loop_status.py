@@ -88,11 +88,12 @@ def test_cognitive_loop_reports_scheduled_identity_truthfully() -> None:
     status = collect_cognitive_loop_status()
     subsystems = status["subsystems"]
 
+    assert subsystems["scheduled_cognition_payload"]["state"] == "live"
     assert subsystems["reflection_identity"]["state"] == "live"
     assert subsystems["weekly_identity"]["state"] == "live"
     assert subsystems["dream_identity"]["state"] == "live"
-    assert subsystems["heartbeat_identity"]["state"] == "drift"
-    assert "does not share the canonical identity payload helper" in (
+    assert subsystems["heartbeat_identity"]["state"] == "live"
+    assert "build_scheduled_cognition_payload" in (
         subsystems["heartbeat_identity"]["evidence"]
     )
 
@@ -112,8 +113,8 @@ def test_heartbeat_identity_flips_live_when_helper_is_wired(tmp_path: Path) -> N
     chat_dir, scripts_dir = _seed_status_sources(
         tmp_path,
         heartbeat_source=(
-            "from cognition.identity_payload import build_identity_payload\n"
-            "build_identity_payload(memory_dir)\n"
+            "from cognition.scheduled_payload import build_scheduled_cognition_payload\n"
+            "build_scheduled_cognition_payload(memory_dir)\n"
             'caller="heartbeat"\n'
         ),
     )

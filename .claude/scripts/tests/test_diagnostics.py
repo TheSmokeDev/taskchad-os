@@ -235,7 +235,8 @@ class TestDiagnosticsReport:
         assert report.cognitive_loop["overall"] == "partial"
         subsystems = report.cognitive_loop["subsystems"]
         assert subsystems["active_inferences"]["state"] == "live"
-        assert subsystems["heartbeat_identity"]["state"] == "drift"
+        assert subsystems["heartbeat_identity"]["state"] == "live"
+        assert subsystems["working_memory"]["state"] == "shadow_only"
 
 
 class TestEnvironmentCheck:

@@ -18,6 +18,11 @@ from cognition.observability import (
 )
 from cognition.recall import RecallTier, classify_tier, run_recall_pipeline
 from cognition.regions import PromptRegion, assemble_regions
+from cognition.scheduled_payload import (
+    ScheduledCognitionPayload,
+    build_scheduled_cognition_payload,
+    render_scheduled_cognition_context,
+)
 from cognition.status import collect_cognitive_loop_status
 
 # Move 2 modules — guarded import (require runtime layer)
@@ -69,6 +74,9 @@ __all__ = [
     "log_recall_event",
     # PRD-8 Phase 2 — identity payload shim (WS2)
     "build_identity_payload",
+    "ScheduledCognitionPayload",
+    "build_scheduled_cognition_payload",
+    "render_scheduled_cognition_context",
     # Cognitive-loop truth surface
     "collect_cognitive_loop_status",
     # Move 2 — observability

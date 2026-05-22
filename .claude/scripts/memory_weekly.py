@@ -32,7 +32,10 @@ _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
-from cognition.identity_payload import build_identity_payload  # noqa: E402
+from cognition.scheduled_payload import (  # noqa: E402
+    build_scheduled_cognition_payload,
+    render_scheduled_cognition_context,
+)
 
 from config import (  # noqa: E402
     DAILY_DIR,
@@ -124,7 +127,7 @@ def _assemble_weekly_identity_section(memory_dir: Path) -> str:
     Order MEMORY/GOALS/USER/SOUL/SELF and ``## Current X.md`` headers are
     contract-locked by ``tests/test_memory_weekly.py``.
     """
-    payload = build_identity_payload(memory_dir)
+    payload = build_scheduled_cognition_payload(memory_dir).identity
     current_memory = payload.get("MEMORY", "")
     current_goals = payload.get("GOALS", "")
     current_user = payload.get("USER", "")
@@ -150,6 +153,19 @@ def _assemble_weekly_identity_section(memory_dir: Path) -> str:
 ## Current SELF.md
 
 {current_self}"""
+
+
+def _assemble_weekly_cognition_section(
+    memory_dir: Path,
+    inference_state_file: Path | None = None,
+) -> str:
+    """Assemble active inferences + WORKING.md for weekly synthesis."""
+
+    payload = build_scheduled_cognition_payload(
+        memory_dir,
+        inference_state_file=inference_state_file,
+    )
+    return render_scheduled_cognition_context(payload)
 
 
 # =============================================================================
@@ -230,6 +246,7 @@ async def _run_weekly_inner(test_mode: bool = False, days: int = 7) -> str | Non
     # Order MEMORY/GOALS/USER/SOUL/SELF + headers locked by parity tests in
     # tests/test_memory_weekly.py — production helper is the test target.
     identity_section = _assemble_weekly_identity_section(MEMORY_DIR)
+    cognition_section = _assemble_weekly_cognition_section(MEMORY_DIR)
     previous_weekly = get_previous_weekly(n=1)
 
     # Determine the week number for the output file
@@ -248,6 +265,7 @@ async def _run_weekly_inner(test_mode: bool = False, days: int = 7) -> str | Non
 and produce a weekly summary.
 {dry_run_note}
 {identity_section}
+{cognition_section}
 
 ## Previous Weekly Review (for continuity)
 

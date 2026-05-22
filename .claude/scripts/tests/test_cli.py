@@ -23,7 +23,7 @@ from cli import main as cli_main  # noqa: E402
 def _fake_cognitive_loop() -> dict:
     return {
         "overall": "partial",
-        "state_counts": {"drift": 1, "live": 1, "planned": 1},
+        "state_counts": {"live": 2, "planned": 1, "shadow_only": 1},
         "subsystems": {
             "active_inferences": {
                 "state": "live",
@@ -31,8 +31,13 @@ def _fake_cognitive_loop() -> dict:
                 "details": {},
             },
             "heartbeat_identity": {
-                "state": "drift",
-                "evidence": "heartbeat.py does not share build_identity_payload().",
+                "state": "live",
+                "evidence": "heartbeat.py uses build_scheduled_cognition_payload().",
+                "details": {},
+            },
+            "working_memory": {
+                "state": "shadow_only",
+                "evidence": "WorkingMemory is prompt context, not production owner.",
                 "details": {},
             },
             "self_amendment": {
@@ -41,7 +46,7 @@ def _fake_cognitive_loop() -> dict:
                 "details": {},
             },
         },
-        "next_actions": ["Unify heartbeat identity payload."],
+        "next_actions": ["Keep WorkingMemory shadow-only until production cutover."],
     }
 
 
@@ -492,7 +497,7 @@ class TestCognitiveLoopCLI:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["cognitive_loop"]["overall"] == "partial"
-        assert data["cognitive_loop"]["subsystems"]["heartbeat_identity"]["state"] == "drift"
+        assert data["cognitive_loop"]["subsystems"]["heartbeat_identity"]["state"] == "live"
 
     def test_status_json_stdout_stays_machine_clean(self, monkeypatch):
         from click.testing import CliRunner
@@ -544,8 +549,9 @@ class TestCognitiveLoopCLI:
 
         assert result.exit_code == 0
         assert "Cognitive Loop:" in result.output
-        assert "heartbeat_identity: DRIFT" in result.output
-        assert "Unify heartbeat identity payload." in result.output
+        assert "heartbeat_identity: LIVE" in result.output
+        assert "working_memory: SHADOW_ONLY" in result.output
+        assert "Keep WorkingMemory shadow-only until production cutover." in result.output
 
     @pytest.mark.asyncio
     async def test_router_diagnostics_prints_cognitive_loop_section(self, monkeypatch):
@@ -565,8 +571,9 @@ class TestCognitiveLoopCLI:
         message = await core_handlers.handle_diagnostics(None, None, "")
 
         assert "*Cognitive Loop*:" in message
-        assert "heartbeat_identity: DRIFT" in message
-        assert "Unify heartbeat identity payload." in message
+        assert "heartbeat_identity: LIVE" in message
+        assert "working_memory: SHADOW_ONLY" in message
+        assert "Keep WorkingMemory shadow-only until production cutover." in message
 
 
 class TestCLISubprocess:

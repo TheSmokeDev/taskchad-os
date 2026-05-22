@@ -48,6 +48,7 @@ def collect_cognitive_loop_status(
         "processes": chat_root / "cognition" / "processes.py",
         "self_model": chat_root / "cognition" / "self_model.py",
         "identity_payload": chat_root / "cognition" / "identity_payload.py",
+        "scheduled_payload": chat_root / "cognition" / "scheduled_payload.py",
         "reflect": scripts_root / "memory_reflect.py",
         "weekly": scripts_root / "memory_weekly.py",
         "dream": scripts_root / "memory_dream.py",
@@ -70,6 +71,7 @@ def collect_cognitive_loop_status(
         "mental_processes": _mental_process_status(source),
         "identity_payload": _identity_payload_status(source),
         "active_inferences": _active_inference_status(source),
+        "scheduled_cognition_payload": _scheduled_payload_status(source),
         "reflection_identity": _scheduled_identity_status(
             source, "reflect", "memory_reflect.py"
         ),
@@ -170,12 +172,18 @@ def _identity_payload_status(source: dict[str, str]) -> dict[str, Any]:
     importable = _can_import("cognition.identity_payload", ("build_identity_payload",))
     consumers = [
         name for name in ("engine", "reflect", "weekly", "dream")
-        if "build_identity_payload" in source[name]
+        if (
+            "build_identity_payload" in source[name]
+            or "build_scheduled_cognition_payload" in source[name]
+        )
     ]
     if importable and {"engine", "reflect", "weekly", "dream"}.issubset(consumers):
         return _status(
             LIVE,
-            "Chat, reflection, weekly, and dream code all call build_identity_payload().",
+            (
+                "Chat, reflection, weekly, and dream code all consume the "
+                "canonical identity payload path."
+            ),
             importable=True,
             consumers=consumers,
         )
@@ -229,8 +237,15 @@ def _scheduled_identity_status(
     source_key: str,
     filename: str,
 ) -> dict[str, Any]:
-    helper_used = "build_identity_payload" in source[source_key]
-    if helper_used:
+    scheduled_helper_used = "build_scheduled_cognition_payload" in source[source_key]
+    identity_helper_used = "build_identity_payload" in source[source_key]
+    if scheduled_helper_used:
+        return _status(
+            LIVE,
+            f"{filename} assembles scheduled context through build_scheduled_cognition_payload().",
+            helper="build_scheduled_cognition_payload",
+        )
+    if identity_helper_used:
         return _status(
             LIVE,
             f"{filename} assembles identity context through build_identity_payload().",
@@ -247,9 +262,20 @@ def _scheduled_identity_status(
 
 
 def _heartbeat_identity_status(source: dict[str, str]) -> dict[str, Any]:
-    helper_used = "build_identity_payload" in source["heartbeat"]
+    scheduled_helper_used = "build_scheduled_cognition_payload" in source["heartbeat"]
+    identity_helper_used = "build_identity_payload" in source["heartbeat"]
     recall_used = "caller=\"heartbeat\"" in source["heartbeat"]
-    if helper_used:
+    if scheduled_helper_used:
+        return _status(
+            LIVE,
+            (
+                "heartbeat.py assembles identity, active inferences, and "
+                "WORKING.md through build_scheduled_cognition_payload()."
+            ),
+            helper="build_scheduled_cognition_payload",
+            recall_context=recall_used,
+        )
+    if identity_helper_used:
         return _status(
             LIVE,
             "heartbeat.py calls build_identity_payload() for its prompt identity context.",
@@ -264,6 +290,46 @@ def _heartbeat_identity_status(source: dict[str, str]) -> dict[str, Any]:
         ),
         helper="not_detected",
         recall_context=recall_used,
+    )
+
+
+def _scheduled_payload_status(source: dict[str, str]) -> dict[str, Any]:
+    importable = _can_import(
+        "cognition.scheduled_payload",
+        (
+            "build_scheduled_cognition_payload",
+            "render_scheduled_cognition_context",
+        ),
+    )
+    source_text = source["scheduled_payload"]
+    has_identity = "build_identity_payload" in source_text
+    has_inferences = "InferenceTracker" in source_text
+    has_working = "WORKING" in source_text
+    consumers = {
+        name: "build_scheduled_cognition_payload" in source[name]
+        for name in ("reflect", "weekly", "dream", "heartbeat")
+    }
+    if importable and has_identity and has_inferences and has_working and all(consumers.values()):
+        return _status(
+            LIVE,
+            (
+                "Scheduled cognition payload helper is importable and all "
+                "scheduled loop entrypoints consume it."
+            ),
+            importable=True,
+            identity_payload=True,
+            active_inferences=True,
+            working_memory_context=True,
+            consumers=consumers,
+        )
+    return _status(
+        PARTIAL,
+        "Scheduled cognition payload helper is not fully wired across scheduled loops.",
+        importable=importable,
+        identity_payload=has_identity,
+        active_inferences=has_inferences,
+        working_memory_context=has_working,
+        consumers=consumers,
     )
 
 
@@ -407,7 +473,7 @@ def _next_actions(subsystems: dict[str, dict[str, Any]]) -> list[str]:
     if subsystems["heartbeat_identity"]["state"] == DRIFT:
         actions.append(
             "Unify heartbeat prompt identity/cognition assembly with "
-            "build_identity_payload()."
+            "build_scheduled_cognition_payload()."
         )
     if subsystems["working_memory"]["state"] == SHADOW_ONLY:
         actions.append(

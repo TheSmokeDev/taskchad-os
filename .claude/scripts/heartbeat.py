@@ -42,6 +42,15 @@ from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 
+_CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
+if str(_CHAT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CHAT_DIR))
+
+from cognition.scheduled_payload import (  # noqa: E402
+    build_scheduled_cognition_payload,
+    render_scheduled_cognition_context,
+)
+
 from config import (  # noqa: E402
     DRAFT_EXPIRY_HOURS,
     DRAFTS_ACTIVE_DIR,
@@ -1021,6 +1030,23 @@ def _build_heartbeat_recall_query(context: str) -> str:
     return context[:200]
 
 
+def _assemble_heartbeat_cognition_section(
+    memory_dir: Path,
+    inference_state_file: Path | None = None,
+) -> str:
+    """Assemble shared identity, active inferences, and WORKING.md for heartbeat."""
+
+    payload = build_scheduled_cognition_payload(
+        memory_dir,
+        inference_state_file=inference_state_file,
+    )
+    return render_scheduled_cognition_context(
+        payload,
+        include_identity=True,
+        header="## Shared Cognition Context",
+    )
+
+
 # =============================================================================
 # MAIN HEARTBEAT FUNCTION
 # =============================================================================
@@ -1133,6 +1159,7 @@ async def run_heartbeat(test_mode: bool = False) -> str | None:
 
     # Build the heartbeat prompt with pre-fetched context
     owner = OWNER_NAME or "the user"
+    cognition_section = _assemble_heartbeat_cognition_section(MEMORY_DIR)
     heartbeat_prompt = f"""
 This is a HEARTBEAT check. You are {owner}'s personal AI assistant running a proactive check.
 
@@ -1158,6 +1185,8 @@ No reasoning, no "let me assess", no analysis — just the bullets {owner} needs
 Current time: {now_local().strftime("%Y-%m-%d %H:%M:%S %Z")}
 Last heartbeat: {last_run or "Never"}
 Timezone: {HEARTBEAT_TIMEZONE}. All times in the context below should be interpreted in this timezone.
+
+{cognition_section}
 
 ## Pre-Fetched Context
 

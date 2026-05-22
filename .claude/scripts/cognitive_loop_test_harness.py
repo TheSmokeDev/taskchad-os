@@ -7,6 +7,7 @@ vault root, and they report missing/drift states instead of papering over them.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 import sys
@@ -23,6 +24,13 @@ IDENTITY_SENTINELS = {
     "GOALS": "COG_E2E_GOALS_SENTINEL",
     "WORKING": "COG_E2E_WORKING_SENTINEL",
 }
+ACTIVE_INFERENCE_SENTINEL = "COG_E2E_ACTIVE_INFERENCE_SENTINEL"
+
+
+def get_cognitive_loop_inference_state_file(vault_root: Path) -> Path:
+    """Return the temp inference-state file used by validation probes."""
+
+    return Path(vault_root) / ".validation" / "self-model-inferences.json"
 
 
 def seed_cognitive_loop_temp_vault(vault_root: Path) -> Path:
@@ -42,6 +50,30 @@ def seed_cognitive_loop_temp_vault(vault_root: Path) -> Path:
             f"# {name}\n\n- {sentinel}\n",
             encoding="utf-8",
         )
+
+    inference_state = get_cognitive_loop_inference_state_file(vault)
+    inference_state.parent.mkdir(parents=True, exist_ok=True)
+    inference_state.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "validation-active-inference",
+                    "inference": ACTIVE_INFERENCE_SENTINEL,
+                    "observation": "Seeded by cognitive-loop E2E harness.",
+                    "confidence": 0.95,
+                    "evidence_count": 3,
+                    "contradiction_count": 0,
+                    "first_seen": "2026-05-21T00:00:00+00:00",
+                    "last_updated": "2026-05-21T00:00:00+00:00",
+                    "source": "validation_harness",
+                    "status": "confirmed",
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     (vault / "HEARTBEAT.md").write_text(
         "# HEARTBEAT\n\n- Validation heartbeat checklist\n",
@@ -70,6 +102,7 @@ def build_scheduled_entrypoint_report(
     errors: list[str] = []
     prompt_sections: dict[str, str] = {}
     identity_payload_present = False
+    inference_state_file = get_cognitive_loop_inference_state_file(vault)
 
     try:
         from cognition.identity_payload import build_identity_payload
@@ -81,17 +114,31 @@ def build_scheduled_entrypoint_report(
 
     try:
         if entrypoint == "memory_reflect":
-            from memory_reflect import _assemble_reflect_identity_section
+            from memory_reflect import (
+                _assemble_reflect_cognition_section,
+                _assemble_reflect_identity_section,
+            )
 
             prompt_sections["identity"] = _assemble_reflect_identity_section(vault)
+            prompt_sections["scheduled_cognition"] = _assemble_reflect_cognition_section(
+                vault,
+                inference_state_file,
+            )
             identity_payload_present = _contains_all(
                 prompt_sections["identity"],
                 ("SOUL", "SELF", "USER", "MEMORY", "GOALS"),
             )
         elif entrypoint == "memory_weekly":
-            from memory_weekly import _assemble_weekly_identity_section
+            from memory_weekly import (
+                _assemble_weekly_cognition_section,
+                _assemble_weekly_identity_section,
+            )
 
             prompt_sections["identity"] = _assemble_weekly_identity_section(vault)
+            prompt_sections["scheduled_cognition"] = _assemble_weekly_cognition_section(
+                vault,
+                inference_state_file,
+            )
             identity_payload_present = _contains_all(
                 prompt_sections["identity"],
                 ("SOUL", "SELF", "USER", "MEMORY", "GOALS"),
@@ -99,6 +146,7 @@ def build_scheduled_entrypoint_report(
         elif entrypoint == "memory_dream":
             from memory_dream import (
                 _assemble_consolidate_identity_section,
+                _assemble_dream_cognition_section,
                 _assemble_prune_memory_section,
             )
 
@@ -107,25 +155,34 @@ def build_scheduled_entrypoint_report(
                 _assemble_consolidate_identity_section(vault, memory_lines)
             )
             prompt_sections["prune_memory"] = _assemble_prune_memory_section(vault)
+            prompt_sections["scheduled_cognition"] = _assemble_dream_cognition_section(
+                vault,
+                inference_state_file,
+            )
             identity_payload_present = _contains_all(
                 prompt_sections["consolidate_identity"],
                 ("SELF", "MEMORY", "GOALS"),
             )
         elif entrypoint == "heartbeat":
-            heartbeat_source = (Path(__file__).resolve().parent / "heartbeat.py").read_text(
-                encoding="utf-8",
+            from heartbeat import _assemble_heartbeat_cognition_section
+
+            prompt_sections["scheduled_cognition"] = (
+                _assemble_heartbeat_cognition_section(
+                    vault,
+                    inference_state_file,
+                )
             )
-            prompt_sections["source_probe"] = heartbeat_source
-            identity_payload_present = "build_identity_payload" in heartbeat_source
+            identity_payload_present = _contains_all(
+                prompt_sections["scheduled_cognition"],
+                ("SOUL", "SELF", "USER", "MEMORY", "GOALS"),
+            )
         else:
             errors.append(f"unknown_entrypoint: {entrypoint}")
     except Exception as exc:  # pragma: no cover - defensive reporting path
         errors.append(f"entrypoint_probe_error: {exc}")
 
     prompt_text = "\n\n".join(prompt_sections.values())
-    active_inferences_present = (
-        "InferenceTracker" in prompt_text or "user_inferences" in prompt_text
-    )
+    active_inferences_present = ACTIVE_INFERENCE_SENTINEL in prompt_text
     working_memory_present = (
         "WORKING" in prompt_text or IDENTITY_SENTINELS["WORKING"] in prompt_text
     )
@@ -157,8 +214,8 @@ def build_scheduled_entrypoint_report(
         "test_mode": test_mode,
         "prompt_capture": {
             "scope": (
-                "source_probe"
-                if entrypoint == "heartbeat"
+                "scheduled_cognition_sections"
+                if "scheduled_cognition" in prompt_sections
                 else "scheduled_identity_sections"
             ),
             "sections": sorted(prompt_sections.keys()),
@@ -167,6 +224,7 @@ def build_scheduled_entrypoint_report(
                 name: sentinel in prompt_text
                 for name, sentinel in IDENTITY_SENTINELS.items()
             },
+            "contains_active_inference": ACTIVE_INFERENCE_SENTINEL in prompt_text,
         },
     }
 

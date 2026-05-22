@@ -47,6 +47,10 @@ if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
 from cognition.identity_payload import build_identity_payload  # noqa: E402
+from cognition.scheduled_payload import (  # noqa: E402
+    build_scheduled_cognition_payload,
+    render_scheduled_cognition_context,
+)
 
 from config import (  # noqa: E402
     DAILY_DIR,
@@ -143,7 +147,7 @@ def _assemble_consolidate_identity_section(
     Order MEMORY/SELF/GOALS and the ``({N} lines)`` MEMORY-header annotation
     are contract-locked by ``tests/test_memory_dream.py``.
     """
-    payload = build_identity_payload(memory_dir)
+    payload = build_scheduled_cognition_payload(memory_dir).identity
     memory_content = payload.get("MEMORY", "")
     self_content = payload.get("SELF", "")
     goals_content = payload.get("GOALS", "")
@@ -159,6 +163,19 @@ def _assemble_consolidate_identity_section(
 ## Current GOALS.md (read-only — reference only, do NOT edit)
 
 {goals_content}"""
+
+
+def _assemble_dream_cognition_section(
+    memory_dir: Path,
+    inference_state_file: Path | None = None,
+) -> str:
+    """Assemble active inferences + WORKING.md for dream consolidation."""
+
+    payload = build_scheduled_cognition_payload(
+        memory_dir,
+        inference_state_file=inference_state_file,
+    )
+    return render_scheduled_cognition_context(payload)
 
 
 def _assemble_prune_memory_section(memory_dir: Path) -> str:
@@ -374,6 +391,7 @@ async def consolidate(
     identity_section = _assemble_consolidate_identity_section(
         MEMORY_DIR, orientation.memory_lines
     )
+    cognition_section = _assemble_dream_cognition_section(MEMORY_DIR)
 
     today_str = now_local().strftime("%Y-%m-%d")
 
@@ -400,6 +418,7 @@ async def consolidate(
 {signal.digest}
 
 {identity_section}
+{cognition_section}
 {post_weekly_note}
 ## Instructions
 

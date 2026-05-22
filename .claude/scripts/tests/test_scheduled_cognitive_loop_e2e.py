@@ -34,12 +34,12 @@ def test_scheduled_identity_probes_use_temp_vault(entrypoint: str, tmp_path: Pat
     assert report["external_sends"] == []
     assert report["runtime_mode"] == "fake_deterministic_probe"
     assert report["identity_payload_present"] is True
-    assert report["active_inferences_present"] is False
-    assert report["working_memory_present"] is False
-    assert report["state"] == "partial"
+    assert report["active_inferences_present"] is True
+    assert report["working_memory_present"] is True
+    assert report["state"] == "live"
 
 
-def test_heartbeat_probe_reports_identity_drift(tmp_path: Path) -> None:
+def test_heartbeat_probe_uses_shared_scheduled_cognition_payload(tmp_path: Path) -> None:
     vault = seed_cognitive_loop_temp_vault(tmp_path / "TheHomie" / "Memory")
 
     report = build_scheduled_entrypoint_report("heartbeat", vault)
@@ -47,9 +47,11 @@ def test_heartbeat_probe_reports_identity_drift(tmp_path: Path) -> None:
     assert report["success"] is True
     assert report["writes"] == []
     assert report["external_sends"] == []
-    assert report["identity_payload_present"] is False
-    assert report["state"] == "drift"
-    assert "heartbeat_identity_unification" in report["missing"]
+    assert report["identity_payload_present"] is True
+    assert report["active_inferences_present"] is True
+    assert report["working_memory_present"] is True
+    assert report["state"] == "live"
+    assert "heartbeat_identity_unification" not in report["missing"]
 
 
 @pytest.mark.parametrize(
@@ -90,3 +92,4 @@ def test_scheduled_scripts_emit_clean_json_with_vault_override(
     assert data["writes"] == []
     assert data["external_sends"] == []
     assert data["runtime_mode"] == "fake_deterministic_probe"
+    assert data["state"] == "live"
