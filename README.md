@@ -26,7 +26,7 @@ Instead of *"Hi, how can I help you today?"* — you get:
 
 You didn't set up a notification. You didn't write a morning brief. The Homie was watching. Its memory isn't a static file you load — it's a living record tended between sessions. Its identity isn't a document you edit — it's a self that amends when the evidence is strong enough.
 
-That's the target. Most of the load-bearing walls are already up: vault, recall, daily reflection, weekly synthesis, dream consolidation, working-memory scratchpad, and the self-evolution replay loop ship today. Ambient monitoring is the last layer — heartbeat is live, reliability hardening is in flight.
+That's the target. Most of the load-bearing walls are already up: vault, recall, daily reflection, weekly synthesis, dream consolidation, WorkingMemory-owned prompt state, unified proactive briefs across chat and scheduled loops, and the self-evolution replay loop ship today. Ambient monitoring is live through heartbeat; automatic durable-memory amendments remain human-gated.
 
 ---
 
@@ -36,11 +36,11 @@ That's the target. Most of the load-bearing walls are already up: vault, recall,
 <tr><td><b>Monitors your world proactively</b></td><td>Heartbeat every 30 min checks your email, calendar, tasks, and metrics. Daily reflection at 8 AM promotes decisions to long-term memory. Weekly synthesis every Sunday detects patterns and updates goals — all running whether you're talking to it or not.</td></tr>
 <tr><td><b>Remembers across every session</b></td><td>Local-first Obsidian-compatible vault (SOUL.md, USER.md, MEMORY.md, daily + weekly logs). Hybrid search — FTS5 keyword + FastEmbed ONNX vector (BGE-base-en-v1.5, 768-dim) + LLM re-ranking (haiku, Tier 1). Memory graph with PageRank + betweenness centrality. Proactive recall injected on every message. WORKING.md scratchpad carries open threads across sessions.</td></tr>
 <tr><td><b>Compiles knowledge like code</b></td><td>Entity compilation engine (Karpathy LLM Wiki port): ingest a source → extract entities → create/update concept pages → detect connections → flag contradictions. Concept pages in <code>concepts/</code> accumulate claims from multiple sources. Connection articles in <code>connections/</code> link related concepts. Q&A answers filed via <code>/file</code> persist in <code>qa/</code>. Raw sources preserved immutably in <code>raw/</code>. Build log tracks every compilation. 8 entry points — fires automatically during ingest, daily reflection, weekly synthesis, and on-demand via <code>/file</code> or CLI.</td></tr>
-<tr><td><b>Gets smarter from experience</b></td><td>Per-turn auto-capture (6 regex triggers) → staging store → batch promotion in daily reflection. Auto-skill generation after 5+ tool calls. InferenceTracker with confidence decay and contradiction detection. Theory of mind built on USER.md.</td></tr>
+<tr><td><b>Gets smarter from experience</b></td><td>Per-turn auto-capture (6 regex triggers) → staging store → batch promotion in daily reflection. Auto-skill generation after 5+ tool calls. InferenceTracker with confidence decay and contradiction detection. Theory of mind built on USER.md. Human-gated amendment proposals can target SELF/SOUL/USER/MEMORY without auto-applying durable identity changes.</td></tr>
 <tr><td><b>One brain, six channels</b></td><td>Telegram, Slack, Discord, WhatsApp, Web relay, CLI — all enter through a single canonical ingress. One session model, one recall service, one runtime. Transport identity is separated from conversation identity so sessions survive reconnects.</td></tr>
 <tr><td><b>Any model, no lock-in</b></td><td>Claude SDK, OpenAI Codex, Gemini CLI, OpenRouter, OpenAI-compatible — with health-aware fallback, manual <code>/provider</code> + <code>/model</code> control, lane-first runtime (<code>selection.py</code>, <code>lane_router.py</code>), cost tracking, and automatic retry on transient failures.</td></tr>
 <tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs for multi-subtask dependency tracking. Typed mailbox for agent-to-agent messaging. Team sessions with typed roles, backend fallback, and shared memory. All exposed via a local API on port 4322.</td></tr>
-<tr><td><b>Full observability</b></td><td>Every message → single nested Langfuse trace with 9 spans: session lookup → process detection → recall (tier + pipeline) → region assembly → runtime (auto-instrumented) → post-response. Cost, provider, model, and tool calls per trace.</td></tr>
+<tr><td><b>Full observability</b></td><td>Every message → one nested Langfuse trace: session lookup → process detection → recall (tier + pipeline) → region assembly → runtime where supported → post-response. Cost, provider, model, and tool calls are tracked when the active runtime exposes them. Sentry/GlitchTip captures unexpected orchestration errors when a DSN is configured.</td></tr>
 </table>
 
 ---
@@ -400,11 +400,11 @@ chat_message (ROOT)
   ├─ process_detection
   ├─ recall (classify_tier + recall_pipeline)
   ├─ region_assembly
-  ├─ run_with_fallback  ← auto-instrumented SDK, cost + model tracked
+  ├─ runtime execution  ← model/provider/cost tracked where the active runtime exposes it
   └─ post_response
 ```
 
-Set `LANGFUSE_ENABLED=true` in `.env` and point `LANGFUSE_BASE_URL` at your instance.
+Set `LANGFUSE_ENABLED=true` in `.env` and point `LANGFUSE_BASE_URL` at your instance. The cognitive-loop smoke was validated locally with trace `c14af2029d3188b8a6f7526cda68946d`, which captured root `chat_message` plus `session_lookup`, `process_detection`, `region_assembly`, `recall`, `recall_pipeline`, `classify_tier`, and `post_response`. With `SENTRY_DSN` configured, the SDK also returned an event id for an isolated controlled exception.
 
 ---
 
@@ -424,11 +424,14 @@ Identity files (`SOUL.md`, `USER.md`) don't update by hand. The self-evolution l
 | └─ `veto.py` | | Configurable veto rules (schema in `veto_rules.schema.json`) |
 | └─ `compare.py` / `statistics.py` | | Side-by-side replay comparison with confidence intervals |
 
-**Status (as of 2026-04-25):**
-- ✅ Tasks 1+2 shipped: skills conflict guard + InferenceTracker wired into engine
+**Status (as of 2026-05-22):**
+- ✅ Skills conflict guard + InferenceTracker wired into engine
+- ✅ WorkingMemory owns production chat prompt state and completed turns append back into WorkingMemory for before/after proof
+- ✅ Unified proactive brief feeds session bootstrap, heartbeat, reflection, weekly synthesis, and dream consolidation
+- ✅ Human-gated amendment proposal ledger + bounded contradiction/roadmap-drift findings
 - ✅ Phase 2.4: opt-in Langfuse replay tracing (default off, `EVOLVE_TRACE_REPLAYS` env var)
 - ✅ Phase 2.6: stratified goldens + bootstrap CIs + regression hard-veto
-- ⏳ Tasks 3–5 (SOUL/USER auto-amendments): unlock 2026-04-28 after 2-week trace-accumulation clock
+- ⏳ Automatic durable-memory apply remains intentionally gated behind human approval
 
 **Two-phase ship rhythm:** every Evolve increment goes through ship → adversarial Codex review → harden → claim done. This pattern caught five class-of-bug fixes in one week that unit tests missed (codified in `CLAUDE.md` → Code Review Patterns).
 
@@ -443,7 +446,7 @@ Identity files (`SOUL.md`, `USER.md`) don't update by hand. The self-evolution l
 | **Knowledge graph** | No | No | Entity compilation engine (Karpathy port) — concept pages, connections, contradictions, Q&A filing, LLM re-ranking |
 | **Cognition** | None | Prompt assembly stack | Mental process state machine + theory of mind + region-weighted assembly |
 | **Proactive** | No | In-process cron | Heartbeat (30 min) + daily reflection + weekly synthesis — all via unified recall |
-| **Observability** | Usage tracking | Basic | Full Langfuse depth — 9 nested spans per message, cost per trace |
+| **Observability** | Usage tracking | Basic | Langfuse trace tree per message + Sentry/GlitchTip error capture when configured |
 | **Multi-agent** | No | Subagents | Convoy DAGs + typed mailbox + team sessions with backend fallback |
 
 ---
