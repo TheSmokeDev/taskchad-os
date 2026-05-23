@@ -1236,7 +1236,8 @@ def _switch_provider(choice: str) -> str:
             "  /model opus - Claude Opus 4.6\n"
             "  /model codex - generic runtime lane via Codex\n"
             "  /model codex:default - Codex plan default (no --model passed)\n"
-            "  /model codex:gpt-5.5 - Codex pinned model\n"
+            "  /model gpt5.5 - Codex pinned model shortcut\n"
+            "  /model codex 5.5 - Codex pinned model shortcut\n"
             "  /model gemini - generic runtime lane via Gemini\n"
             "  /model openrouter - generic runtime lane via OpenRouter\n"
             "  /model openai - generic runtime lane via OpenAI-compatible\n"
@@ -1283,7 +1284,7 @@ def _switch_provider(choice: str) -> str:
         return (
             "Unknown runtime selection: "
             f"{choice}. Use: claude, sonnet, opus, codex, codex:default, "
-            "codex:<model>, gemini, openrouter, openai, or auto"
+            "codex:<model>, gpt5.5, gpt 5.5, codex 5.5, gemini, openrouter, openai, or auto"
         )
     except Exception as e:
         return f"Failed to switch provider: {e}"

@@ -7,6 +7,7 @@ provider-model layer used by `/model provider:model` and status reporting.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 
@@ -69,6 +70,14 @@ _CODEX_DEFAULT_ALIASES = {
     "plan-default",
     CODEX_PLAN_DEFAULT_MODEL,
 }
+_BARE_CODEX_SHORTHAND_RE = re.compile(
+    r"^(?:codex|codec|gpt|gbt)\s*[-_: ]?\s*(\d+(?:\.\d+)?(?:[-_][a-z0-9.]+)*)$",
+    re.IGNORECASE,
+)
+_CODEX_MODEL_SHORTHAND_RE = re.compile(
+    r"^(?:(?:gpt|gbt)-?)?(\d+(?:\.\d+)?(?:-[a-z0-9.]+)*)$",
+    re.IGNORECASE,
+)
 
 
 def resolve_runtime_model_choice(raw_choice: str) -> RuntimeModelChoice | None:
@@ -93,6 +102,10 @@ def resolve_runtime_model_choice(raw_choice: str) -> RuntimeModelChoice | None:
             used_default=False,
             input_value=raw,
         )
+
+    bare_codex_model = _bare_codex_model_shorthand(raw)
+    if bare_codex_model is not None:
+        return _choice_for_provider_model(MODEL_CONFIGS["openai-codex"], bare_codex_model)
 
     parsed = _split_provider_model(raw)
     if parsed is None:
@@ -253,7 +266,7 @@ def _choice_for_provider_model(
             used_default=False,
             input_value=model_token,
         )
-    model = model_token.strip()
+    model = _normalize_model_token(config, model_token)
     return RuntimeModelChoice(
         provider=config.provider,
         model=model,
@@ -262,3 +275,22 @@ def _choice_for_provider_model(
         used_default=False,
         input_value=model_token,
     )
+
+
+def _bare_codex_model_shorthand(raw: str) -> str | None:
+    match = _BARE_CODEX_SHORTHAND_RE.fullmatch(raw.strip())
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _normalize_model_token(config: RuntimeModelConfig, model_token: str) -> str:
+    model = model_token.strip()
+    if config.provider != "openai-codex":
+        return model
+
+    normalized = re.sub(r"[\s_]+", "-", model.lower())
+    match = _CODEX_MODEL_SHORTHAND_RE.fullmatch(normalized)
+    if match:
+        return f"gpt-{match.group(1)}"
+    return model

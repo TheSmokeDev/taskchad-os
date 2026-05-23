@@ -90,7 +90,7 @@ GENERIC_PROVIDER_REGISTRY: dict[str, GenericProviderOverlay] = {
         default_model="chatgpt-plan-default",
         text_route_priority=2,
         tool_route_priority=0,
-        aliases=("codex", "openai_codex", "openai-codex", "chatgpt", "gpt"),
+        aliases=("codex", "codec", "openai_codex", "openai-codex", "chatgpt", "gpt", "gbt"),
         legacy_write_key="openai_codex",
     ),
     "gemini-cli": GenericProviderOverlay(

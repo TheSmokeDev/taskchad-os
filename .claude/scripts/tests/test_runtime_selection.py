@@ -136,6 +136,47 @@ def test_apply_runtime_model_choice_writes_explicit_codex_pin() -> None:
     assert removals == []
 
 
+@pytest.mark.parametrize(
+    "raw_choice",
+    [
+        "gpt5.5",
+        "gpt 5.5",
+        "gbt 5.5",
+        "codex 5.5",
+        "codec 5.5",
+        "codex:gpt 5.5",
+    ],
+)
+def test_apply_runtime_model_choice_normalizes_codex_shortcuts(raw_choice: str) -> None:
+    env: dict[str, str] = {}
+
+    choice = apply_runtime_model_choice(raw_choice, environ=env)
+
+    assert choice.provider == "openai-codex"
+    assert choice.model == "gpt-5.5"
+    assert env[RUNTIME_LANE_ENV_KEY] == RUNTIME_LANE_GENERIC
+    assert env[GENERIC_PROVIDER_ENV_KEY] == "openai-codex"
+    assert env[LEGACY_RUNTIME_PROVIDER_KEY] == "openai_codex"
+    assert env["SECOND_BRAIN_CODEX_MODEL"] == "gpt-5.5"
+
+
+def test_apply_runtime_model_choice_codex_latest_shortcut_clears_model_pin() -> None:
+    removals: list[str] = []
+    env = {"SECOND_BRAIN_CODEX_MODEL": "gpt-5.5"}
+
+    choice = apply_runtime_model_choice(
+        "gpt latest",
+        environ=env,
+        delete_key=removals.append,
+    )
+
+    assert choice.provider == "openai-codex"
+    assert choice.model == CODEX_PLAN_DEFAULT_MODEL
+    assert choice.persist_model is None
+    assert "SECOND_BRAIN_CODEX_MODEL" not in env
+    assert "SECOND_BRAIN_CODEX_MODEL" in removals
+
+
 def test_apply_runtime_model_choice_codex_default_clears_model_pin() -> None:
     writes: list[tuple[str, str]] = []
     removals: list[str] = []
