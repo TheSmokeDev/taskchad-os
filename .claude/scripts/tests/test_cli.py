@@ -244,6 +244,24 @@ class TestCLIAdapter:
         assert data["lane"] == "claude_native"
         assert data["provider"] == "claude"
 
+    def test_quiet_output_preserves_codex_sentinel_model(self):
+        from adapters.cli_adapter import CLIAdapter
+
+        adapter = CLIAdapter(query="test", quiet=True)
+        output = adapter.format_final_output(
+            "sess123",
+            {
+                "lane": "generic_runtime",
+                "provider": "openai-codex",
+                "model": "chatgpt-plan-default",
+                "cost_usd": 0.0,
+                "tool_calls": 0,
+            },
+        )
+        data = json.loads(output)
+        assert data["provider"] == "openai-codex"
+        assert data["model"] == "chatgpt-plan-default"
+
     def test_normal_output_format(self):
         from adapters.cli_adapter import CLIAdapter
 
@@ -498,6 +516,36 @@ class TestCognitiveLoopCLI:
         data = json.loads(result.output)
         assert data["cognitive_loop"]["overall"] == "partial"
         assert data["cognitive_loop"]["subsystems"]["heartbeat_identity"]["state"] == "live"
+
+    def test_status_json_includes_runtime_model_warning(self, monkeypatch):
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
+        import cli as cli_module
+        import diagnostics as diagnostics_module
+
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            runtime_providers={"openai-codex": "ON"},
+            runtime_selected_lane="generic_runtime",
+            runtime_selected_generic_provider="openai-codex",
+            runtime_selected_model="chatgpt-plan-default",
+            runtime_configured_models={"openai-codex": "chatgpt-plan-default"},
+            runtime_model_warnings=["Codex hidden model warning"],
+        )
+        monkeypatch.setattr(diagnostics_module, "collect_diagnostics", lambda: report)
+        monkeypatch.setattr(
+            cli_module,
+            "_collect_profile_lifecycle_contract",
+            lambda: {"active_profile": "default"},
+        )
+
+        result = CliRunner().invoke(cli_main, ["status", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["runtime_selected_model"] == "chatgpt-plan-default"
+        assert data["runtime_model_warnings"] == ["Codex hidden model warning"]
 
     def test_status_json_stdout_stays_machine_clean(self, monkeypatch):
         from click.testing import CliRunner

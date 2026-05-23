@@ -285,6 +285,18 @@ Your agent's persistent memory lives in `vault/memory/` by default — override 
 | `weekly/YYYY-WNN.md` | Weekly summaries — patterns, progress, decisions |
 | `concepts/`, `connections/`, `qa/`, `raw/` | Auto-compiled knowledge graph (see [Knowledge Compilation](#knowledge-compilation)) |
 
+### Runtime Model Control
+
+Runtime selection is lane-first: `/model claude`, `/model codex`, `/model gemini`, `/model openrouter`, `/model openai`, and `/model auto` choose where the next request runs. Provider-specific model pins use `provider:model`, for example:
+
+```bash
+uv run thehomie chat -q "/model codex:default" -Q   # Codex plan default; no --model flag passed
+uv run thehomie chat -q "/model codex:gpt-5.5" -Q   # Pin a concrete Codex model
+uv run thehomie chat -m codex:gpt-5.5 -q "Reply OK" -Q
+```
+
+`/provider`, `/diagnostics`, and `thehomie status --json` report the configured model. When Codex is set to `chatgpt-plan-default`, the CLI/ChatGPT plan chooses the concrete backend model and The Homie reports that backend as unobserved.
+
 ### Key Config (`.env`)
 
 | Variable | Description |

@@ -161,6 +161,7 @@ async def test_openai_codex_runtime_skips_explicit_model_for_plan_default(
 
     assert result.text == "ok"
     assert result.runtime_lane == RUNTIME_LANE_GENERIC
+    assert result.model == "chatgpt-plan-default"
     assert "--model" not in captured["args"]
 
 

@@ -51,6 +51,10 @@ from config import (  # noqa: E402
     PROJECT_ROOT,
     ensure_directories,
 )
+from runtime.model_control import (  # noqa: E402
+    apply_runtime_model_choice,
+    resolve_runtime_model_choice,
+)
 from runtime.selection import (  # noqa: E402
     apply_runtime_selection_choice,
     provider_display_name,
@@ -75,7 +79,7 @@ main.add_command(session_group)
 @main.command()
 @click.option("-q", "--query", default=None, help="Single query (non-interactive)")
 @click.option("-Q", "--quiet", is_flag=True, help="Quiet/JSON output (for Paperclip)")
-@click.option("-m", "--model", default=None, help="Select runtime lane/provider (claude/codex/gemini/openrouter/openai/auto)")
+@click.option("-m", "--model", default=None, help="Select runtime lane/provider/model (claude/codex/gemini/openrouter/openai/auto or provider:model)")
 @click.option("-t", "--toolsets", default=None, help="Filter tool access (reserved for future)")
 @click.option("--resume", "-r", "resume_id", default=None, help="Resume session by ID")
 @click.option("--continue", "-c", "continue_last", is_flag=True, help="Resume most recent session")
@@ -115,7 +119,11 @@ def chat(query, quiet, model, toolsets, resume_id, continue_last, voice_path, vo
 
     # -m: Apply an in-process runtime selection override for this CLI session.
     if model:
-        apply_runtime_selection_choice(model.lower().strip(), environ=os.environ)
+        model_arg = model.strip()
+        if resolve_runtime_model_choice(model_arg):
+            apply_runtime_model_choice(model_arg, environ=os.environ)
+        else:
+            apply_runtime_selection_choice(model_arg.lower(), environ=os.environ)
 
     # -t: Toolset filtering is NOT yet wired into the engine
     if toolsets and not quiet:
@@ -997,6 +1005,12 @@ def _print_status_human(report):
         else "auto"
     )
     click.echo(f"Generic preferred provider: {preferred_generic}")
+    click.echo(
+        "Configured model: "
+        f"{report.runtime_selected_model or 'auto (route-dependent)'}"
+    )
+    for warning in report.runtime_model_warnings:
+        click.echo(f"Runtime model warning: {warning}")
     if report.runtime_generic_text_route:
         click.echo(
             "Generic text route: "

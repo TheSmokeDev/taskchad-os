@@ -41,7 +41,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("execute", "Alias for /go — enable execute mode", "router", "viewer"),
     ("mode", "Show current mode (plan or execute)", "router", "viewer"),
     ("provider", "Show runtime lane status - selection, routes, provider health", "router", "admin"),
-    ("model", "Select runtime lane/provider - /model claude, sonnet, opus, codex, gemini, openrouter, openai, auto", "router", "admin"),
+    ("model", "Select runtime lane/provider/model - /model claude, sonnet, opus, codex, codex:default, codex:<model>, gemini, openrouter, openai, auto", "router", "admin"),
     ("reload", "Reload bot config without restarting", "router", "admin"),
     ("restart", "Restart myself — kill this process and start fresh", "router", "admin"),
     ("help", "Show all available commands", "router", "viewer"),

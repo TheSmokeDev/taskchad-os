@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,13 @@ from runtime.selection import (  # noqa: E402
     apply_runtime_selection_choice,
     resolve_runtime_selection,
     runtime_env_updates_for_choice,
+)
+from runtime.model_control import (  # noqa: E402
+    CODEX_PLAN_DEFAULT_MODEL,
+    apply_runtime_model_choice,
+    configured_model_for_provider,
+    model_observability_warning,
+    resolve_runtime_model_choice,
 )
 
 
@@ -97,6 +105,66 @@ def test_apply_runtime_selection_choice_updates_environ_and_callbacks() -> None:
     assert removals == []
 
 
+def test_resolve_runtime_model_choice_maps_bare_claude_alias() -> None:
+    choice = resolve_runtime_model_choice("sonnet")
+
+    assert choice is not None
+    assert choice.provider == "claude"
+    assert choice.model == "claude-sonnet-4-6"
+    assert choice.persist_model == "claude-sonnet-4-6"
+
+
+def test_apply_runtime_model_choice_writes_explicit_codex_pin() -> None:
+    writes: list[tuple[str, str]] = []
+    removals: list[str] = []
+    env: dict[str, str] = {}
+
+    choice = apply_runtime_model_choice(
+        "codex:gpt-5.5",
+        environ=env,
+        write_key=lambda key, value: writes.append((key, value)),
+        delete_key=removals.append,
+    )
+
+    assert choice.provider == "openai-codex"
+    assert choice.model == "gpt-5.5"
+    assert env[RUNTIME_LANE_ENV_KEY] == RUNTIME_LANE_GENERIC
+    assert env[GENERIC_PROVIDER_ENV_KEY] == "openai-codex"
+    assert env[LEGACY_RUNTIME_PROVIDER_KEY] == "openai_codex"
+    assert env["SECOND_BRAIN_CODEX_MODEL"] == "gpt-5.5"
+    assert ("SECOND_BRAIN_CODEX_MODEL", "gpt-5.5") in writes
+    assert removals == []
+
+
+def test_apply_runtime_model_choice_codex_default_clears_model_pin() -> None:
+    writes: list[tuple[str, str]] = []
+    removals: list[str] = []
+    env = {"SECOND_BRAIN_CODEX_MODEL": "gpt-5.5"}
+
+    choice = apply_runtime_model_choice(
+        "codex:default",
+        environ=env,
+        write_key=lambda key, value: writes.append((key, value)),
+        delete_key=removals.append,
+    )
+
+    assert choice.provider == "openai-codex"
+    assert choice.model == CODEX_PLAN_DEFAULT_MODEL
+    assert choice.persist_model is None
+    assert "SECOND_BRAIN_CODEX_MODEL" not in env
+    assert "SECOND_BRAIN_CODEX_MODEL" in removals
+    assert ("SECOND_BRAIN_CODEX_MODEL", CODEX_PLAN_DEFAULT_MODEL) not in writes
+
+
+def test_configured_model_for_provider_uses_codex_sentinel_default() -> None:
+    model = configured_model_for_provider("codex", {})
+
+    assert model == CODEX_PLAN_DEFAULT_MODEL
+    warning = model_observability_warning("openai-codex", model)
+    assert warning is not None
+    assert "hidden model" in warning
+
+
 def test_switch_provider_writes_lane_aware_env(monkeypatch: pytest.MonkeyPatch) -> None:
     import config
     import core_handlers
@@ -117,6 +185,41 @@ def test_switch_provider_writes_lane_aware_env(monkeypatch: pytest.MonkeyPatch) 
         (LEGACY_RUNTIME_PROVIDER_KEY, "openai_codex"),
     ]
     assert removals == []
+
+
+def test_switch_provider_codex_default_warns_and_clears_model_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import config
+    import core_handlers
+
+    writes: list[tuple[str, str]] = []
+    removals: list[str] = []
+
+    monkeypatch.setenv("SECOND_BRAIN_CODEX_MODEL", "gpt-5.5")
+    monkeypatch.setattr(core_handlers, "_write_env_var", lambda _path, key, value: writes.append((key, value)))
+    monkeypatch.setattr(core_handlers, "_delete_env_var", lambda _path, key: removals.append(key))
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+
+    message = core_handlers._switch_provider("codex:default")
+
+    assert "Codex configured model: chatgpt-plan-default (default)" in message
+    assert "hidden model" in message
+    assert (GENERIC_PROVIDER_ENV_KEY, "openai-codex") in writes
+    assert "SECOND_BRAIN_CODEX_MODEL" in removals
+    assert "SECOND_BRAIN_CODEX_MODEL" not in os.environ
+
+
+def test_write_env_var_creates_missing_profile_env(tmp_path: Path) -> None:
+    import core_handlers
+
+    env_path = tmp_path / "profile" / ".env"
+
+    core_handlers._write_env_var(env_path, "SECOND_BRAIN_RUNTIME_LANE", "generic_runtime")
+
+    assert env_path.read_text(encoding="utf-8").strip() == (
+        "SECOND_BRAIN_RUNTIME_LANE=generic_runtime"
+    )
 
 
 def test_switch_provider_claude_clears_generic_preference(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -21,6 +21,14 @@ from session_keys import build_session_key, resolve_thread_id
 
 from runtime import routing as runtime_routing
 from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE
+from runtime.model_control import (
+    apply_runtime_model_choice,
+    format_model_choice,
+    model_observability_warning,
+    resolve_runtime_model_choice,
+    runtime_model_warnings,
+    selected_runtime_model,
+)
 from runtime.selection import (
     apply_runtime_selection_choice,
     describe_runtime_selection,
@@ -153,6 +161,12 @@ async def handle_diagnostics(adapter: Any, incoming: Any, args: str, *, collect_
         )
     else:
         lines.append("  generic preferred provider: auto")
+    lines.append(
+        "  configured model: "
+        f"{report.runtime_selected_model or 'auto (route-dependent)'}"
+    )
+    for warning in report.runtime_model_warnings:
+        lines.append(f"  warning: {warning}")
     if report.runtime_generic_text_route:
         lines.append(
             "  generic text route: "
@@ -368,7 +382,7 @@ async def handle_provider(adapter: Any, incoming: Any, args: str, *, collect_onl
 
 async def handle_model(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Switch runtime provider."""
-    return _switch_provider(args.strip().lower() if args else "")
+    return _switch_provider(args.strip() if args else "")
 
 
 async def handle_restart(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
@@ -1082,18 +1096,8 @@ async def handle_extensions(adapter: Any, incoming: Any, args: str, *, collect_o
 # Provider helpers (moved from router.py module level)
 # ---------------------------------------------------------------------------
 
-_PROVIDER_ALIASES = {
-    "claude": "claude", "anthropic": "claude",
-    "codex": "codex", "chatgpt": "codex", "gpt": "codex",
-    "gemini": "gemini", "google": "gemini",
-    "openrouter": "openrouter",
-    "openai": "openai",
-    "auto": "auto",
-}
-
-_CLAUDE_MODEL_OVERRIDES = {
-    "sonnet": "claude-sonnet-4-6",
-    "opus": "claude-opus-4-6",
+_LANE_SELECTION_ALIASES = {
+    "anthropic": "claude",
 }
 
 
@@ -1115,18 +1119,17 @@ def _get_provider_status() -> str:
         lines.append("Selection:")
         lines.append(f"  lane: {selection.lane or 'auto'}")
         lines.append(f"  mode: {describe_runtime_selection(selection)}")
-        if selection.lane == RUNTIME_LANE_CLAUDE_NATIVE:
-            lines.append(
-                "  claude model: "
-                + os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6").strip()
-            )
-        else:
+        if selection.lane != RUNTIME_LANE_CLAUDE_NATIVE:
             preferred = (
                 provider_display_name(selection.generic_provider)
                 if selection.generic_provider
                 else "auto"
             )
             lines.append(f"  generic preferred provider: {preferred}")
+        model = selected_runtime_model(selection)
+        lines.append(f"  configured model: {model or 'auto (route-dependent)'}")
+        for warning in runtime_model_warnings(selection):
+            lines.append(f"  warning: {warning}")
         lines.append("")
         lines.append(
             "Generic text route: "
@@ -1186,7 +1189,8 @@ def _write_env_var(env_path: Path, key: str, value: str) -> None:
     """Update or append a key=value pair in the .env file."""
     import re
 
-    content = env_path.read_text(encoding="utf-8")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     pattern = rf"^{re.escape(key)}=.*$"
     if re.search(pattern, content, flags=re.MULTILINE):
         content = re.sub(pattern, f"{key}={value}", content, flags=re.MULTILINE)
@@ -1199,6 +1203,8 @@ def _delete_env_var(env_path: Path, key: str) -> None:
     """Delete a key=value pair from the .env file if present."""
     import re
 
+    if not env_path.exists():
+        return
     content = env_path.read_text(encoding="utf-8")
     pattern = rf"^{re.escape(key)}=.*(?:\r?\n)?"
     updated = re.sub(pattern, "", content, flags=re.MULTILINE)
@@ -1207,55 +1213,59 @@ def _delete_env_var(env_path: Path, key: str) -> None:
 
 def _switch_provider(choice: str) -> str:
     """Switch the runtime lane/provider or Claude model by updating .env."""
+    choice = (choice or "").strip()
     if not choice:
         selection = resolve_runtime_selection()
-        current_model = os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6").strip()
-        model_info = ""
-        if selection.lane == RUNTIME_LANE_CLAUDE_NATIVE:
-            model_info = f" | Claude model: {current_model}"
-        elif selection.generic_provider:
-            model_info = (
-                " | Preferred generic provider: "
-                f"{provider_display_name(selection.generic_provider)}"
-            )
+        model = selected_runtime_model(selection)
+        preferred = (
+            provider_display_name(selection.generic_provider)
+            if selection.generic_provider
+            else "auto"
+        )
+        model_info = f" | configured model: {model or 'auto (route-dependent)'}"
+        if selection.lane != RUNTIME_LANE_CLAUDE_NATIVE:
+            model_info += f" | preferred generic provider: {preferred}"
+        warnings = "\n".join(f"Warning: {warning}" for warning in runtime_model_warnings(selection))
+        warning_block = f"\n{warnings}\n" if warnings else ""
         return (
-            f"Current selection: {describe_runtime_selection(selection)}{model_info}\n\n"
-            "Usage: /model <lane|provider|model>\n"
+            f"Current selection: {describe_runtime_selection(selection)}{model_info}\n"
+            f"{warning_block}\n"
+            "Usage: /model <lane|provider|provider:model|model>\n"
             "  /model claude - Claude native lane\n"
             "  /model sonnet - Claude Sonnet 4.6\n"
             "  /model opus - Claude Opus 4.6\n"
             "  /model codex - generic runtime lane via Codex\n"
+            "  /model codex:default - Codex plan default (no --model passed)\n"
+            "  /model codex:gpt-5.5 - Codex pinned model\n"
             "  /model gemini - generic runtime lane via Gemini\n"
             "  /model openrouter - generic runtime lane via OpenRouter\n"
             "  /model openai - generic runtime lane via OpenAI-compatible\n"
             "  /model auto - automatic lane/provider routing"
         )
 
-    if choice in _CLAUDE_MODEL_OVERRIDES:
-        model_name = _CLAUDE_MODEL_OVERRIDES[choice]
+    if resolve_runtime_model_choice(choice):
         try:
             from config import ENV_FILE as env_path
             from config import reload_config
 
-            apply_runtime_selection_choice(
-                "claude",
+            model_choice = apply_runtime_model_choice(
+                choice,
                 environ=os.environ,
                 write_key=lambda key, value: _write_env_var(env_path, key, value),
                 delete_key=lambda key: _delete_env_var(env_path, key),
             )
-            _write_env_var(env_path, "SECOND_BRAIN_CLAUDE_MODEL", model_name)
-            os.environ["SECOND_BRAIN_CLAUDE_MODEL"] = model_name
             reload_config()
-            return f"Switched to {model_name}. Next message uses the Claude native lane."
+            warning = model_observability_warning(model_choice.provider, model_choice.model)
+            warning_text = f"\nWarning: {warning}" if warning else ""
+            return (
+                f"Switched to {format_model_choice(model_choice)}. "
+                "Next message uses this runtime selection."
+                f"{warning_text}"
+            )
         except Exception as e:
             return f"Failed to switch model: {e}"
 
-    normalized = _PROVIDER_ALIASES.get(choice, choice)
-    if normalized not in ("claude", "codex", "gemini", "openrouter", "openai", "auto"):
-        return (
-            "Unknown runtime selection: "
-            f"{choice}. Use: claude, sonnet, opus, codex, gemini, openrouter, openai, or auto"
-        )
+    normalized = _LANE_SELECTION_ALIASES.get(choice.lower(), choice.lower())
 
     try:
         from config import ENV_FILE as env_path
@@ -1269,6 +1279,12 @@ def _switch_provider(choice: str) -> str:
         )
         reload_config()
         return f"Switched to {describe_runtime_selection(selection)}. Next message uses this runtime selection."
+    except ValueError:
+        return (
+            "Unknown runtime selection: "
+            f"{choice}. Use: claude, sonnet, opus, codex, codex:default, "
+            "codex:<model>, gemini, openrouter, openai, or auto"
+        )
     except Exception as e:
         return f"Failed to switch provider: {e}"
 

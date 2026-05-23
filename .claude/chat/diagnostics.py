@@ -46,6 +46,9 @@ class DiagnosticsReport:
     runtime_providers: dict[str, str] = field(default_factory=dict)
     runtime_selected_lane: str = "auto"
     runtime_selected_generic_provider: str | None = None
+    runtime_selected_model: str | None = None
+    runtime_configured_models: dict[str, str] = field(default_factory=dict)
+    runtime_model_warnings: list[str] = field(default_factory=list)
     runtime_generic_text_route: list[str] = field(default_factory=list)
     runtime_generic_tool_route: list[str] = field(default_factory=list)
     runtime_provider_details: dict[str, str] = field(default_factory=dict)
@@ -206,6 +209,11 @@ def _check_runtime(report: DiagnosticsReport) -> None:
     try:
         from runtime.auth_profiles import codex_auth_status, resolve_codex_auth_profile
         from runtime.health import is_profile_available
+        from runtime.model_control import (
+            configured_runtime_models,
+            runtime_model_warnings,
+            selected_runtime_model,
+        )
         from runtime.profiles import build_profile_for_provider, normalize_provider
         from runtime.routing import GENERIC_TEXT_ROUTE, GENERIC_TOOL_ROUTE
         from runtime.selection import resolve_runtime_selection
@@ -217,6 +225,9 @@ def _check_runtime(report: DiagnosticsReport) -> None:
         }
         report.runtime_selected_lane = selection.lane or "auto"
         report.runtime_selected_generic_provider = selection.generic_provider
+        report.runtime_selected_model = selected_runtime_model(selection)
+        report.runtime_configured_models = configured_runtime_models()
+        report.runtime_model_warnings = runtime_model_warnings(selection)
         report.runtime_generic_text_route = [
             normalize_provider(provider)
             for provider in GENERIC_TEXT_ROUTE
