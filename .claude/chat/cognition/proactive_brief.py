@@ -9,6 +9,7 @@ from cognition.scheduled_payload import (
     build_scheduled_cognition_payload,
     render_identity_context,
 )
+from cognition.self_model import build_self_model_state, render_self_model_state_section
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,10 @@ def build_proactive_brief(
         sections.append(payload.active_inference_section)
     if payload.working_memory_section:
         sections.append(payload.working_memory_section)
+
+    if inference_state_file is not None:
+        self_model_state = build_self_model_state(Path(inference_state_file))
+        sections.append(render_self_model_state_section(self_model_state))
 
     daily_signal = _read_recent_daily_signal(daily_root, max_daily_chars)
     if daily_signal:

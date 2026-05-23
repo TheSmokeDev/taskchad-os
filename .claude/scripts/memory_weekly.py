@@ -32,7 +32,11 @@ _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
-from cognition.amendments import build_amendment_gate_section  # noqa: E402
+from cognition.amendments import (  # noqa: E402
+    ProposalLedger,
+    build_amendment_gate_section,
+    process_amendment_output,
+)
 from cognition.contradictions import build_drift_detection_section  # noqa: E402
 from cognition.proactive_brief import build_proactive_brief_section  # noqa: E402
 from cognition.scheduled_payload import (  # noqa: E402
@@ -57,7 +61,13 @@ from config import (  # noqa: E402
 from runtime.base import RuntimeRequest  # noqa: E402
 from runtime.capabilities import TOOL_REASONING  # noqa: E402
 from runtime.lane_router import run_with_runtime_lanes  # noqa: E402
-from shared import append_to_daily_log, file_lock, load_state, save_state, validate_bash_command  # noqa: E402
+from shared import (  # noqa: E402
+    append_to_daily_log,
+    file_lock,
+    load_state,
+    save_state,
+    validate_bash_command,
+)
 
 # =============================================================================
 # LOG HELPERS
@@ -403,6 +413,16 @@ If there is no real cross-domain signal this week, write: `No cross-domain signa
             f"[{now_local()}] Weekly synthesis completed via {result.provider}:{result.model}"
             + (f" cost=${result.cost_usd:.4f}" if result.cost_usd else "")
         )
+        if not test_mode:
+            apply_results = process_amendment_output(
+                response_text,
+                ProposalLedger(AMENDMENT_LEDGER_FILE),
+                MEMORY_DIR,
+                default_source="memory_weekly",
+            )
+            applied = [item for item in apply_results if item.status == "applied"]
+            if applied:
+                print(f"[{now_local()}] Auto-applied {len(applied)} weekly amendment(s)")
 
     except Exception as e:
         # PRD-8 Phase 7a WS4 R2 NM2 — detect kill-switch and exit cleanly

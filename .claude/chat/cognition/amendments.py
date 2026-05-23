@@ -1,27 +1,43 @@
-"""Human-gated amendment proposals for durable memory files.
+"""Policy-gated durable-memory amendments for the cognitive loop.
 
-This module deliberately stops at proposal capture. It does not apply edits to
-SELF.md, SOUL.md, USER.md, or MEMORY.md. Applying a proposal is an explicit
-operator workflow and is outside this slice.
+Scheduled cognition emits small structured amendment records. This module is
+the machine policy gate that decides whether those records are safe to apply to
+durable cognitive files, writes rollback snapshots, and preserves an audit
+ledger. It intentionally allows bounded self-evolution while rejecting secrets,
+large rewrites, destructive edits, and low-evidence identity changes.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 AMENDMENT_TARGETS = frozenset({"SELF.md", "SOUL.md", "USER.md", "MEMORY.md"})
-PROPOSAL_STATUSES = frozenset({"pending", "approved", "rejected", "applied"})
+PROPOSAL_STATUSES = frozenset({
+    "pending",
+    "approved",
+    "rejected",
+    "applied",
+    "policy_rejected",
+    "skipped",
+})
+_SECRET_RE = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password|passwd|bearer\s+[a-z0-9._-]{12,}|"
+    r"sk-[a-z0-9_-]{12,}|xox[baprs]-[a-z0-9-]{12,})"
+)
+_DESTRUCTIVE_RE = re.compile(r"(?i)\b(delete|remove|erase|drop|wipe|truncate)\b")
 
 
 @dataclass
 class AmendmentProposal:
-    """A durable-memory amendment waiting for human review."""
+    """A durable-memory amendment and its policy/apply audit state."""
 
     id: str = ""
     created_at: str = ""
@@ -36,6 +52,13 @@ class AmendmentProposal:
     reviewed_at: str | None = None
     review_note: str | None = None
     dedupe_key: str = ""
+    confidence_score: float = 0.0
+    policy_decision: str = ""
+    policy_reason: str = ""
+    before_hash: str = ""
+    after_hash: str = ""
+    rollback_snapshot_path: str = ""
+    applied_at: str | None = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -45,6 +68,10 @@ class AmendmentProposal:
         self.target_file = normalize_target_file(self.target_file)
         self.status = self.status if self.status in PROPOSAL_STATUSES else "pending"
         self.evidence_paths = [str(path) for path in self.evidence_paths]
+        try:
+            self.confidence_score = float(self.confidence_score or 0.0)
+        except (TypeError, ValueError):
+            self.confidence_score = 0.0
         if not self.dedupe_key:
             self.dedupe_key = _dedupe_key(
                 self.source,
@@ -55,7 +82,7 @@ class AmendmentProposal:
 
 
 class ProposalLedger:
-    """Append-only JSONL store for human-gated amendment proposals."""
+    """JSONL store for amendment proposals and policy/apply audit fields."""
 
     def __init__(self, path: Path | str) -> None:
         self._path = Path(path)
@@ -65,7 +92,7 @@ class ProposalLedger:
         return self._path
 
     def append(self, proposal: AmendmentProposal) -> bool:
-        """Append a proposal if its target is valid and not already pending."""
+        """Append a proposal if its target is valid and not already active."""
 
         if proposal.target_file not in AMENDMENT_TARGETS:
             return False
@@ -89,7 +116,7 @@ class ProposalLedger:
         return proposals
 
     def read_pending(self) -> list[AmendmentProposal]:
-        """Return proposals still waiting on human review."""
+        """Return proposals still waiting on policy/apply processing."""
 
         return [proposal for proposal in self.read_all() if proposal.status == "pending"]
 
@@ -158,8 +185,32 @@ class ProposalLedger:
         return {
             proposal.dedupe_key
             for proposal in self.read_all()
-            if proposal.status in {"pending", "approved"}
+            if proposal.status in {"pending", "approved", "applied"}
         }
+
+
+@dataclass(frozen=True)
+class AmendmentPolicy:
+    """Machine policy thresholds for autonomous amendment application."""
+
+    min_confidence: float = 0.75
+    min_evidence_paths: int = 1
+    max_content_chars: int = 1200
+    allow_destructive: bool = False
+
+
+@dataclass(frozen=True)
+class AmendmentApplyResult:
+    """Result for one policy/apply attempt."""
+
+    proposal_id: str
+    target_file: str
+    status: str
+    policy_decision: str
+    policy_reason: str
+    before_hash: str = ""
+    after_hash: str = ""
+    rollback_snapshot_path: str = ""
 
 
 def build_amendment_gate_section(
@@ -168,18 +219,19 @@ def build_amendment_gate_section(
     source: str,
     targets: Iterable[str] = AMENDMENT_TARGETS,
 ) -> str:
-    """Return prompt instructions for proposal-only durable memory changes."""
+    """Return prompt instructions for policy-gated durable-memory changes."""
 
     target_list = ", ".join(sorted(normalize_target_file(target) for target in targets))
-    return f"""## Human-Gated Durable Memory Amendments
+    return f"""## Policy-Gated Durable Memory Amendments
 
-Durable identity and memory file changes are proposal-only in this lane.
-Do not directly edit `SELF.md`, `SOUL.md`, `USER.md`, or `MEMORY.md`.
-
-If a change is warranted for one of those files, append one JSON object per
-line to this proposal ledger instead:
+Durable identity and memory file changes are autonomous only through the
+machine policy gate. Do not directly edit `SELF.md`, `SOUL.md`, `USER.md`, or
+`MEMORY.md`; emit bounded JSON amendment records for this ledger instead:
 
 `{Path(ledger_file)}`
+
+The policy engine may automatically apply records that have enough evidence,
+safe content, a valid target, rollback coverage, and no duplicate dedupe key.
 
 Required JSON keys:
 - `source`: `{source}`
@@ -188,10 +240,172 @@ Required JSON keys:
 - `rationale`: why the change is justified
 - `evidence_paths`: source files or logs supporting the proposal
 - `proposed_content`: the exact concise text or patch-style note to review
+- `confidence_score`: 0.0-1.0 confidence in the amendment
 - `status`: `pending`
 
-No proposal means no ledger write. Never mark a proposal approved, rejected, or
-applied yourself."""
+No proposal means no ledger write. Never include secrets, credentials, account
+tokens, or broad deletion instructions. Keep each amendment under 1200 chars."""
+
+
+def parse_amendment_records(
+    text: str,
+    *,
+    default_source: str = "scheduled_cognition",
+) -> list[AmendmentProposal]:
+    """Parse JSON object or JSON-array amendment records from model output."""
+
+    proposals: list[AmendmentProposal] = []
+    for record in _iter_json_records(text):
+        if not isinstance(record, dict):
+            continue
+        data = dict(record)
+        data.setdefault("source", default_source)
+        data.setdefault("status", "pending")
+        proposal = _coerce_dataclass(AmendmentProposal, data)
+        if proposal is not None:
+            proposals.append(proposal)
+    return proposals
+
+
+def process_amendment_output(
+    text: str,
+    ledger: ProposalLedger,
+    memory_dir: Path | str,
+    *,
+    default_source: str = "scheduled_cognition",
+    auto_apply: bool = True,
+    policy: AmendmentPolicy | None = None,
+) -> list[AmendmentApplyResult]:
+    """Capture structured amendments from output and optionally apply them."""
+
+    for proposal in parse_amendment_records(text, default_source=default_source):
+        ledger.append(proposal)
+    if not auto_apply:
+        return []
+    return apply_policy_approved_amendments(
+        ledger,
+        memory_dir,
+        policy=policy,
+    )
+
+
+def apply_policy_approved_amendments(
+    ledger: ProposalLedger,
+    memory_dir: Path | str,
+    *,
+    policy: AmendmentPolicy | None = None,
+    limit: int | None = None,
+) -> list[AmendmentApplyResult]:
+    """Apply pending/approved amendments that pass policy evaluation."""
+
+    active_policy = policy or AmendmentPolicy()
+    results: list[AmendmentApplyResult] = []
+    candidates = [
+        proposal for proposal in ledger.read_all()
+        if proposal.status in {"pending", "approved"}
+    ]
+    if limit is not None:
+        candidates = candidates[:limit]
+
+    for proposal in candidates:
+        result = apply_amendment_if_allowed(
+            proposal,
+            ledger,
+            memory_dir,
+            policy=active_policy,
+        )
+        results.append(result)
+    return results
+
+
+def apply_amendment_if_allowed(
+    proposal: AmendmentProposal,
+    ledger: ProposalLedger,
+    memory_dir: Path | str,
+    *,
+    policy: AmendmentPolicy | None = None,
+) -> AmendmentApplyResult:
+    """Evaluate and apply one amendment proposal if machine policy allows."""
+
+    active_policy = policy or AmendmentPolicy()
+    allowed, reason = evaluate_amendment_policy(proposal, active_policy)
+    if not allowed:
+        ledger._update_record(
+            proposal.id,
+            {
+                "status": "policy_rejected",
+                "policy_decision": "reject",
+                "policy_reason": reason,
+                "reviewed_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        return AmendmentApplyResult(
+            proposal_id=proposal.id,
+            target_file=proposal.target_file,
+            status="policy_rejected",
+            policy_decision="reject",
+            policy_reason=reason,
+        )
+
+    memory_root = Path(memory_dir)
+    target = memory_root / proposal.target_file
+    before = _read_text(target)
+    before_hash = _sha256(before)
+    rollback = _write_rollback_snapshot(ledger.path, proposal, before)
+    after = _append_autonomous_amendment(before, proposal)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(after, encoding="utf-8")
+    after_hash = _sha256(after)
+    applied_at = datetime.now(UTC).isoformat()
+    ledger._update_record(
+        proposal.id,
+        {
+            "status": "applied",
+            "policy_decision": "apply",
+            "policy_reason": reason,
+            "before_hash": before_hash,
+            "after_hash": after_hash,
+            "rollback_snapshot_path": str(rollback),
+            "applied_at": applied_at,
+            "reviewed_at": applied_at,
+            "reviewer": "machine_policy",
+        },
+    )
+    return AmendmentApplyResult(
+        proposal_id=proposal.id,
+        target_file=proposal.target_file,
+        status="applied",
+        policy_decision="apply",
+        policy_reason=reason,
+        before_hash=before_hash,
+        after_hash=after_hash,
+        rollback_snapshot_path=str(rollback),
+    )
+
+
+def evaluate_amendment_policy(
+    proposal: AmendmentProposal,
+    policy: AmendmentPolicy | None = None,
+) -> tuple[bool, str]:
+    """Return whether a proposal is allowed and a stable reason string."""
+
+    active_policy = policy or AmendmentPolicy()
+    content = proposal.proposed_content.strip()
+    if proposal.target_file not in AMENDMENT_TARGETS:
+        return False, "target_not_allowed"
+    if not content:
+        return False, "empty_content"
+    if len(content) > active_policy.max_content_chars:
+        return False, "content_too_large"
+    if proposal.confidence_score < active_policy.min_confidence:
+        return False, "low_confidence"
+    if len(proposal.evidence_paths) < active_policy.min_evidence_paths:
+        return False, "insufficient_evidence"
+    if _SECRET_RE.search(content):
+        return False, "secret_like_content"
+    if not active_policy.allow_destructive and _DESTRUCTIVE_RE.search(content):
+        return False, "destructive_change_requires_manual_review"
+    return True, "policy_allowed"
 
 
 def normalize_target_file(value: str) -> str:
@@ -214,11 +428,84 @@ def _coerce_dataclass(cls, record: dict[str, Any]):
         return None
 
 
+def _iter_json_records(text: str) -> list[Any]:
+    records: list[Any] = []
+    cleaned_lines = [
+        line.strip() for line in str(text).splitlines()
+        if line.strip() and not line.strip().startswith("```")
+    ]
+    joined = "\n".join(cleaned_lines)
+    try:
+        decoded = json.loads(joined)
+    except json.JSONDecodeError:
+        decoded = None
+    if isinstance(decoded, list):
+        return decoded
+    if isinstance(decoded, dict):
+        return [decoded]
+
+    for line in cleaned_lines:
+        if not line.startswith("{"):
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_rollback_snapshot(
+    ledger_path: Path,
+    proposal: AmendmentProposal,
+    before: str,
+) -> Path:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    safe_id = proposal.id.replace("-", "")[:12]
+    rollback_dir = ledger_path.parent / "rollback"
+    rollback_dir.mkdir(parents=True, exist_ok=True)
+    rollback_path = rollback_dir / f"{proposal.target_file}.{timestamp}.{safe_id}.bak"
+    rollback_path.write_text(before, encoding="utf-8")
+    return rollback_path
+
+
+def _append_autonomous_amendment(before: str, proposal: AmendmentProposal) -> str:
+    content = proposal.proposed_content.strip()
+    marker = f"<!-- HOMIE_AUTO_AMENDMENT:{proposal.id} -->"
+    block = (
+        f"{marker}\n"
+        f"- {content}\n"
+        f"  - source: {proposal.source}\n"
+        f"  - evidence: {', '.join(proposal.evidence_paths)}\n"
+    )
+    base = before.rstrip()
+    if "## Autonomous Amendments" not in base:
+        return f"{base}\n\n## Autonomous Amendments\n\n{block}".lstrip()
+    return f"{base}\n\n{block}"
+
+
 __all__ = (
     "AMENDMENT_TARGETS",
+    "AmendmentApplyResult",
+    "AmendmentPolicy",
     "PROPOSAL_STATUSES",
     "AmendmentProposal",
     "ProposalLedger",
+    "apply_amendment_if_allowed",
+    "apply_policy_approved_amendments",
     "build_amendment_gate_section",
+    "evaluate_amendment_policy",
     "normalize_target_file",
+    "parse_amendment_records",
+    "process_amendment_output",
 )

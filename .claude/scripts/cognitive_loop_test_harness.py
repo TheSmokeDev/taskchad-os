@@ -8,9 +8,9 @@ vault root, and they report missing/drift states instead of papering over them.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
-import sys
 
 _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
@@ -25,6 +25,7 @@ IDENTITY_SENTINELS = {
     "WORKING": "COG_E2E_WORKING_SENTINEL",
 }
 ACTIVE_INFERENCE_SENTINEL = "COG_E2E_ACTIVE_INFERENCE_SENTINEL"
+FUTURE_BEHAVIOR_SENTINEL = "COG_E2E_FUTURE_BEHAVIOR_SENTINEL"
 
 
 def get_cognitive_loop_inference_state_file(vault_root: Path) -> Path:
@@ -206,11 +207,18 @@ def build_scheduled_entrypoint_report(
     working_memory_present = (
         "WORKING" in prompt_text or IDENTITY_SENTINELS["WORKING"] in prompt_text
     )
-    amendment_gate_present = "Human-Gated Durable Memory Amendments" in prompt_text
+    amendment_gate_present = (
+        "Human-Gated Durable Memory Amendments" in prompt_text
+        or "Policy-Gated Durable Memory Amendments" in prompt_text
+    )
     proactive_brief_present = "Proactive Brief" in prompt_text
+    auto_apply_enabled = (
+        "policy engine may automatically apply" in prompt_text.lower()
+        or "machine policy gate" in prompt_text.lower()
+    )
     auto_apply_disabled = (
-        "Do not directly edit `SELF.md`, `SOUL.md`, `USER.md`, or `MEMORY.md`"
-        in prompt_text
+        "proposal-only" in prompt_text
+        or "Never mark a proposal approved, rejected, or\napplied yourself." in prompt_text
     )
     drift_detection_present = "Cognitive Loop Drift Findings" in prompt_text
     heartbeat_drift = entrypoint == "heartbeat" and not identity_payload_present
@@ -226,9 +234,9 @@ def build_scheduled_entrypoint_report(
         missing.append("unified_proactive_brief")
     if entrypoint in {"memory_reflect", "memory_weekly", "memory_dream"}:
         if not amendment_gate_present:
-            missing.append("human_gated_amendment_proposals")
-        if not auto_apply_disabled:
-            missing.append("durable_memory_auto_apply_disabled")
+            missing.append("policy_gated_amendment_proposals")
+        if not auto_apply_enabled:
+            missing.append("durable_memory_auto_apply_enabled")
     if entrypoint in {"memory_weekly", "memory_dream"} and not drift_detection_present:
         missing.append("contradiction_drift_detector")
     if heartbeat_drift:
@@ -244,6 +252,7 @@ def build_scheduled_entrypoint_report(
         "working_memory_present": working_memory_present,
         "proactive_brief_present": proactive_brief_present,
         "amendment_gate_present": amendment_gate_present,
+        "auto_apply_enabled": auto_apply_enabled,
         "auto_apply_disabled": auto_apply_disabled,
         "drift_detection_present": drift_detection_present,
         "runtime_mode": "fake_deterministic_probe",
@@ -266,9 +275,94 @@ def build_scheduled_entrypoint_report(
             },
             "contains_active_inference": ACTIVE_INFERENCE_SENTINEL in prompt_text,
             "contains_amendment_gate": amendment_gate_present,
+            "contains_auto_apply_policy": auto_apply_enabled,
             "contains_drift_detection": drift_detection_present,
             "contains_proactive_brief": proactive_brief_present,
         },
+    }
+
+
+def build_future_behavior_autonomy_report(vault_root: Path) -> dict[str, Any]:
+    """Prove amendment apply changes future prompt-visible behavior."""
+
+    vault = seed_cognitive_loop_temp_vault(Path(vault_root))
+    ledger_path = vault / ".validation" / "amendment-proposals.jsonl"
+    action_queue_path = vault / ".validation" / "proactive-actions.jsonl"
+    before = (vault / "SELF.md").read_text(encoding="utf-8")
+    before_contains = FUTURE_BEHAVIOR_SENTINEL in before
+
+    try:
+        from cognition.amendments import (
+            AmendmentProposal,
+            ProposalLedger,
+            apply_policy_approved_amendments,
+        )
+        from cognition.identity_payload import build_identity_payload
+        from cognition.proactive_actions import ProactiveAction, ProactiveActionQueue
+
+        ledger = ProposalLedger(ledger_path)
+        proposal = AmendmentProposal(
+            source="validation_harness",
+            target_file="SELF.md",
+            summary="Prove future behavior loading",
+            rationale="Validation harness needs a deterministic before/after marker.",
+            evidence_paths=["validation://seeded-turn"],
+            proposed_content=FUTURE_BEHAVIOR_SENTINEL,
+            confidence_score=0.95,
+        )
+        ledger.append(proposal)
+        proposals = ledger.read_all()
+        applied = apply_policy_approved_amendments(ledger, vault)
+        payload = build_identity_payload(vault)
+        after_self = payload.get("SELF", "")
+        after_contains = FUTURE_BEHAVIOR_SENTINEL in after_self
+
+        queue = ProactiveActionQueue(action_queue_path)
+        action = ProactiveAction(
+            source="validation_harness",
+            reason="Auto-applied amendment changed future self-model context.",
+            urgency=3,
+            message="Future behavior proof is ready for operator review.",
+            evidence_paths=["validation://future-behavior"],
+        )
+        queued = queue.append(action)
+        dispatched = queue.dispatch_console(action.id)
+        errors: list[str] = []
+    except Exception as exc:  # pragma: no cover - defensive report path
+        proposals = []
+        applied = []
+        after_contains = False
+        queued = False
+        dispatched = False
+        errors = [str(exc)]
+
+    writes = [
+        str(vault / "SELF.md"),
+        str(ledger_path),
+        str(action_queue_path),
+    ]
+    rollback_paths = [
+        item.rollback_snapshot_path for item in applied
+        if item.rollback_snapshot_path
+    ]
+    writes.extend(rollback_paths)
+
+    return {
+        "success": not errors,
+        "entrypoint": "future_behavior_autonomy",
+        "vault_root": str(vault.resolve()),
+        "before_contains_directive": before_contains,
+        "after_contains_directive": after_contains,
+        "future_behavior_changed": (not before_contains) and after_contains,
+        "amendments_seen": len(proposals),
+        "applied_count": len([item for item in applied if item.status == "applied"]),
+        "rollback_paths": rollback_paths,
+        "proactive_action_queued": queued,
+        "proactive_action_dispatched": dispatched,
+        "writes": writes,
+        "external_sends": [],
+        "errors": errors,
+        "state": "live" if (after_contains and dispatched and not errors) else "partial",
     }
 
 

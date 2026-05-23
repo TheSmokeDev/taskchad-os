@@ -138,9 +138,23 @@ def test_cognitive_loop_reports_full_living_loop_when_cutovers_are_wired() -> No
     assert subsystems["proactive_brief"]["state"] == "live"
     assert subsystems["working_memory"]["details"]["production_owner"] is True
     assert subsystems["self_amendment"]["details"]["proposal_ledger"] is True
-    assert subsystems["self_amendment"]["details"]["auto_apply"] is False
+    assert subsystems["self_amendment"]["details"]["machine_policy_gate"] is True
+    assert subsystems["self_amendment"]["details"]["auto_apply"] is True
     assert subsystems["contradiction_detection"]["details"]["detector"] is True
     assert subsystems["contradiction_detection"]["details"]["source_paths"] is True
+
+
+def test_cognitive_loop_reports_autonomous_loop_truth_surface() -> None:
+    status = collect_cognitive_loop_status()
+    autonomous = status["autonomous_loop"]
+
+    assert status["source_wiring_overall"] == "live"
+    assert status["autonomy_overall"] == "live"
+    assert autonomous["overall"] == "live"
+    assert autonomous["subsystems"]["durable_memory_auto_apply"]["state"] == "live"
+    assert autonomous["subsystems"]["self_model_evolution"]["state"] == "live"
+    assert autonomous["subsystems"]["proactive_agency"]["state"] == "live"
+    assert autonomous["subsystems"]["future_behavior_feedback"]["state"] == "live"
 
 
 def test_heartbeat_identity_flips_live_when_helper_is_wired(tmp_path: Path) -> None:

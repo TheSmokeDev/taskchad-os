@@ -46,7 +46,11 @@ _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
-from cognition.amendments import build_amendment_gate_section  # noqa: E402
+from cognition.amendments import (  # noqa: E402
+    ProposalLedger,
+    build_amendment_gate_section,
+    process_amendment_output,
+)
 from cognition.contradictions import build_drift_detection_section  # noqa: E402
 from cognition.identity_payload import build_identity_payload  # noqa: E402
 from cognition.proactive_brief import build_proactive_brief_section  # noqa: E402
@@ -501,6 +505,16 @@ If nothing in the signal warrants changes, respond with exactly: CONSOLIDATION_O
         f"[{now_local()}] Consolidation completed via {result.provider}:{result.model}"
         + (f" cost=${result.cost_usd:.4f}" if result.cost_usd else "")
     )
+    if not test_mode:
+        apply_results = process_amendment_output(
+            result.text,
+            ProposalLedger(AMENDMENT_LEDGER_FILE),
+            MEMORY_DIR,
+            default_source="memory_dream",
+        )
+        applied = [item for item in apply_results if item.status == "applied"]
+        if applied:
+            print(f"[{now_local()}] Auto-applied {len(applied)} dream amendment(s)")
     return result.text
 
 
@@ -588,6 +602,16 @@ If MEMORY.md is already clean and under 200 lines, respond with exactly: PRUNE_O
         f"[{now_local()}] Pruning completed via {result.provider}:{result.model}"
         + (f" cost=${result.cost_usd:.4f}" if result.cost_usd else "")
     )
+    if not test_mode:
+        apply_results = process_amendment_output(
+            result.text,
+            ProposalLedger(AMENDMENT_LEDGER_FILE),
+            MEMORY_DIR,
+            default_source="memory_dream_prune",
+        )
+        applied = [item for item in apply_results if item.status == "applied"]
+        if applied:
+            print(f"[{now_local()}] Auto-applied {len(applied)} dream prune amendment(s)")
     return result.text
 
 

@@ -50,6 +50,7 @@ def collect_cognitive_loop_status(
         "amendments": chat_root / "cognition" / "amendments.py",
         "contradictions": chat_root / "cognition" / "contradictions.py",
         "proactive_brief": chat_root / "cognition" / "proactive_brief.py",
+        "proactive_actions": chat_root / "cognition" / "proactive_actions.py",
         "identity_payload": chat_root / "cognition" / "identity_payload.py",
         "scheduled_payload": chat_root / "cognition" / "scheduled_payload.py",
         "reflect": scripts_root / "memory_reflect.py",
@@ -57,6 +58,7 @@ def collect_cognitive_loop_status(
         "dream": scripts_root / "memory_dream.py",
         "heartbeat": scripts_root / "heartbeat.py",
         "bootstrap": scripts_root / "runtime" / "bootstrap.py",
+        "harness": scripts_root / "cognitive_loop_test_harness.py",
     }
     source = {name: _read_text(path) for name, path in paths.items()}
 
@@ -94,12 +96,24 @@ def collect_cognitive_loop_status(
         item["state"] for item in subsystems.values()
         if item.get("state") in STATE_VALUES
     )
+    autonomous_loop = _autonomous_loop_status(source)
+    autonomy_state_counts = Counter(
+        item["state"] for item in autonomous_loop["subsystems"].values()
+        if item.get("state") in STATE_VALUES
+    )
 
     return {
         "overall": _overall_state(state_counts),
+        "source_wiring_overall": _overall_state(state_counts),
+        "autonomy_overall": _overall_state(autonomy_state_counts),
         "generated_at": datetime.now(UTC).isoformat(),
         "state_counts": dict(sorted(state_counts.items())),
         "subsystems": subsystems,
+        "autonomous_loop": {
+            "overall": _overall_state(autonomy_state_counts),
+            "state_counts": dict(sorted(autonomy_state_counts.items())),
+            "subsystems": autonomous_loop["subsystems"],
+        },
         "next_actions": _next_actions(subsystems),
     }
 
@@ -346,7 +360,9 @@ def _self_amendment_status(source: dict[str, str]) -> dict[str, Any]:
         "cognition.amendments",
         (
             "AmendmentProposal",
+            "AmendmentPolicy",
             "ProposalLedger",
+            "apply_policy_approved_amendments",
             "build_amendment_gate_section",
         ),
     )
@@ -361,13 +377,15 @@ def _self_amendment_status(source: dict[str, str]) -> dict[str, Any]:
         return _status(
             LIVE,
             (
-                "Human-gated amendment proposal ledger is importable and "
-                "reflection, weekly, and dream prompts consume the gate."
+                "Policy-gated amendment ledger is importable; reflection, "
+                "weekly, and dream consume the gate and can auto-apply safe "
+                "durable-memory amendments."
             ),
             self_update_prompts=self_prompt_updates,
             proposal_ledger=True,
-            human_gate=True,
-            auto_apply=False,
+            human_gate=False,
+            machine_policy_gate=True,
+            auto_apply=True,
             consumers=consumers,
         )
     if importable:
@@ -380,6 +398,7 @@ def _self_amendment_status(source: dict[str, str]) -> dict[str, Any]:
             self_update_prompts=self_prompt_updates,
             proposal_ledger=True,
             human_gate=False,
+            machine_policy_gate=False,
             auto_apply=False,
             consumers=consumers,
         )
@@ -392,6 +411,7 @@ def _self_amendment_status(source: dict[str, str]) -> dict[str, Any]:
         self_update_prompts=self_prompt_updates,
         proposal_ledger=False,
         human_gate=False,
+        machine_policy_gate=False,
         auto_apply=False,
     )
 
@@ -486,6 +506,65 @@ def _proactive_brief_status(source: dict[str, str]) -> dict[str, Any]:
         heartbeat=heartbeat,
         scheduled_loops=scheduled,
     )
+
+
+def _autonomous_loop_status(source: dict[str, str]) -> dict[str, Any]:
+    subsystems = {
+        "dream_runtime": _status(
+            LIVE if "process_amendment_output" in source["dream"] else PARTIAL,
+            "Dream runtime post-processes scheduled amendment output through the policy gate."
+            if "process_amendment_output" in source["dream"]
+            else "Dream prompt exists, but policy-gated amendment post-processing is not wired.",
+            post_process_wired="process_amendment_output" in source["dream"],
+        ),
+        "self_model_evolution": _status(
+            LIVE
+            if (
+                "SelfModelState" in source["self_model"]
+                and "render_self_model_state_section" in source["proactive_brief"]
+            )
+            else PARTIAL,
+            "Active inference records build a first-class self-model / psyche state."
+            if "SelfModelState" in source["self_model"]
+            else "Self-model remains inference records without a first-class psyche state.",
+            state_object="SelfModelState" in source["self_model"],
+            prompt_surface="render_self_model_state_section" in source["proactive_brief"],
+        ),
+        "durable_memory_auto_apply": _status(
+            LIVE
+            if (
+                "apply_policy_approved_amendments" in source["amendments"]
+                and "rollback_snapshot_path" in source["amendments"]
+            )
+            else PLANNED,
+            (
+                "Durable-memory amendments can auto-apply after machine policy "
+                "with rollback snapshots."
+            ),
+            policy_engine="apply_policy_approved_amendments" in source["amendments"],
+            rollback_snapshots="rollback_snapshot_path" in source["amendments"],
+        ),
+        "proactive_agency": _status(
+            LIVE
+            if _can_import(
+                "cognition.proactive_actions",
+                ("ProactiveAction", "ProactiveActionQueue", "evaluate_action_policy"),
+            )
+            else PLANNED,
+            "Proactive action queue is available for cognition-selected follow-ups.",
+            action_queue="ProactiveActionQueue" in source["proactive_actions"],
+        ),
+        "future_behavior_feedback": _status(
+            LIVE
+            if "build_future_behavior_autonomy_report" in source["harness"]
+            else PLANNED,
+            "Deterministic harness proves auto-applied amendments load into future behavior."
+            if "build_future_behavior_autonomy_report" in source["harness"]
+            else "Future behavior proof harness is not wired yet.",
+            harness="build_future_behavior_autonomy_report" in source["harness"],
+        ),
+    }
+    return {"subsystems": subsystems}
 
 
 def _import_status(

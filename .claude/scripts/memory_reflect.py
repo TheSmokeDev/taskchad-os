@@ -33,7 +33,11 @@ _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
-from cognition.amendments import build_amendment_gate_section  # noqa: E402
+from cognition.amendments import (  # noqa: E402
+    ProposalLedger,
+    build_amendment_gate_section,
+    process_amendment_output,
+)
 from cognition.proactive_brief import build_proactive_brief_section  # noqa: E402
 from cognition.scheduled_payload import (  # noqa: E402
     build_scheduled_cognition_payload,
@@ -58,7 +62,13 @@ from config import (  # noqa: E402
 from runtime.base import RuntimeRequest  # noqa: E402
 from runtime.capabilities import TOOL_REASONING  # noqa: E402
 from runtime.lane_router import run_with_runtime_lanes  # noqa: E402
-from shared import append_to_daily_log, file_lock, load_state, save_state, validate_bash_command  # noqa: E402
+from shared import (  # noqa: E402
+    append_to_daily_log,
+    file_lock,
+    load_state,
+    save_state,
+    validate_bash_command,
+)
 
 # =============================================================================
 # LOG HELPERS
@@ -374,6 +384,18 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
             f"[{now_local()}] Reflection completed via {result.provider}:{result.model}"
             + (f" cost=${result.cost_usd:.4f}" if result.cost_usd else "")
         )
+        if not test_mode:
+            apply_results = process_amendment_output(
+                response_text,
+                ProposalLedger(AMENDMENT_LEDGER_FILE),
+                MEMORY_DIR,
+                default_source="memory_reflect",
+            )
+            applied = [item for item in apply_results if item.status == "applied"]
+            if applied:
+                print(
+                    f"[{now_local()}] Auto-applied {len(applied)} reflection amendment(s)"
+                )
 
     except Exception as e:
         # PRD-8 Phase 7a WS4 R2 NM2 — detect kill-switch and exit cleanly
@@ -539,8 +561,8 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
             print(f"[{now_local()}] Sweep after reflection failed (non-blocking): {e}")
 
         try:
-            from vault_lint import run_lint
             from entity_extractor import load_schema
+            from vault_lint import run_lint
 
             schema = load_schema(MEMORY_DIR)
             issues = run_lint(MEMORY_DIR, schema=schema)

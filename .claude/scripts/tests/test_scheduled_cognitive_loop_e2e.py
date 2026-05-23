@@ -14,6 +14,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from cognitive_loop_test_harness import (  # noqa: E402
+    build_future_behavior_autonomy_report,
     build_scheduled_entrypoint_report,
     seed_cognitive_loop_temp_vault,
 )
@@ -38,7 +39,8 @@ def test_scheduled_identity_probes_use_temp_vault(entrypoint: str, tmp_path: Pat
     assert report["working_memory_present"] is True
     assert report["proactive_brief_present"] is True
     assert report["amendment_gate_present"] is True
-    assert report["auto_apply_disabled"] is True
+    assert report["auto_apply_enabled"] is True
+    assert report["auto_apply_disabled"] is False
     if entrypoint in {"memory_weekly", "memory_dream"}:
         assert report["drift_detection_present"] is True
     assert report["state"] == "live"
@@ -102,8 +104,24 @@ def test_scheduled_scripts_emit_clean_json_with_vault_override(
     assert data["runtime_mode"] == "fake_deterministic_probe"
     if entrypoint in {"memory_reflect", "memory_weekly", "memory_dream"}:
         assert data["amendment_gate_present"] is True
-        assert data["auto_apply_disabled"] is True
+        assert data["auto_apply_enabled"] is True
+        assert data["auto_apply_disabled"] is False
     assert data["proactive_brief_present"] is True
     if entrypoint in {"memory_weekly", "memory_dream"}:
         assert data["drift_detection_present"] is True
     assert data["state"] == "live"
+
+
+def test_future_behavior_autonomy_report_applies_and_reloads_temp_vault(tmp_path: Path) -> None:
+    report = build_future_behavior_autonomy_report(tmp_path / "TheHomie" / "Memory")
+
+    assert report["success"] is True
+    assert report["before_contains_directive"] is False
+    assert report["after_contains_directive"] is True
+    assert report["future_behavior_changed"] is True
+    assert report["applied_count"] == 1
+    assert report["rollback_paths"]
+    assert report["proactive_action_queued"] is True
+    assert report["proactive_action_dispatched"] is True
+    assert report["external_sends"] == []
+    assert report["state"] == "live"

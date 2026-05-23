@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -32,6 +32,19 @@ class InferenceRecord:
     last_updated: str = ""
     source: str = "auto_capture"  # auto_capture | explicit | reflection
     status: str = "active"  # active | decayed | confirmed
+
+
+@dataclass
+class SelfModelState:
+    """First-class psyche snapshot built from active inference evidence."""
+
+    generated_at: str
+    operator_beliefs: list[str] = field(default_factory=list)
+    homie_beliefs: list[str] = field(default_factory=list)
+    drives: list[str] = field(default_factory=list)
+    recurring_mistakes: list[str] = field(default_factory=list)
+    open_loops: list[str] = field(default_factory=list)
+    evidence: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _similar(a: str, b: str) -> bool:
@@ -158,3 +171,56 @@ class InferenceTracker:
             r for r in self.load()
             if r.status != "decayed" and r.confidence >= min_confidence
         ]
+
+
+def build_self_model_state(
+    state_file: Path,
+    *,
+    min_confidence: float = 0.3,
+) -> SelfModelState:
+    """Build a structured psyche state from active inference records."""
+
+    records = InferenceTracker(state_file).get_active(min_confidence=min_confidence)
+    state = SelfModelState(generated_at=datetime.now(UTC).isoformat())
+    for record in records:
+        text = record.inference.strip()
+        if not text:
+            continue
+        category = _classify_self_model_record(text)
+        getattr(state, category).append(text)
+        state.evidence.setdefault(category, []).append(record.id)
+    return state
+
+
+def render_self_model_state_section(state: SelfModelState) -> str:
+    """Render the psyche state for prompts/status debug surfaces."""
+
+    sections = ["## Active Self-Model / Psyche State"]
+    groups = (
+        ("Operator Beliefs", state.operator_beliefs),
+        ("Homie Self-Beliefs", state.homie_beliefs),
+        ("Current Drives", state.drives),
+        ("Recurring Mistakes", state.recurring_mistakes),
+        ("Open Loops", state.open_loops),
+    )
+    for title, items in groups:
+        if not items:
+            continue
+        sections.append(f"### {title}")
+        sections.extend(f"- {item}" for item in items[:8])
+    if len(sections) == 1:
+        sections.append("No active self-model inferences above threshold.")
+    return "\n\n".join(sections)
+
+
+def _classify_self_model_record(text: str) -> str:
+    normalized = text.lower()
+    if any(token in normalized for token in ("mistake", "failure", "wrong", "timeout", "broke")):
+        return "recurring_mistakes"
+    if any(token in normalized for token in ("follow up", "open loop", "needs", "next", "pending")):
+        return "open_loops"
+    if any(token in normalized for token in ("priority", "goal", "focus", "drive", "p0", "lane")):
+        return "drives"
+    if any(token in normalized for token in ("homie", "assistant", "self", "i should", "i need")):
+        return "homie_beliefs"
+    return "operator_beliefs"
