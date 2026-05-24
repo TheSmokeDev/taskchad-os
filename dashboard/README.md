@@ -121,9 +121,9 @@ Hono SSE; anywhere else it is forbidden.
 
 ---
 
-## Browser Routing Map (14 routes)
+## Browser Routing Map (15 routes)
 
-The Vite + Preact bundle uses `wouter` for routing. The 14 routes are:
+The Vite + Preact bundle uses `wouter` for routing. The 15 routes are:
 
 | Route | Page | Purpose |
 |---|---|---|
@@ -136,6 +136,7 @@ The Vite + Preact bundle uses `wouter` for routing. The 14 routes are:
 | `/memories` | `Memories` | Memory search proxying `recall_service`. |
 | `/hive` | `HiveMind` | 3D Hive Mind brain visualization (Three.js). |
 | `/usage` | `Usage` | Lane-aware token/cost rollups. |
+| `/jarvis` | `Jarvis` | Runtime, autonomy, memory, channel, and observability proof surface. |
 | `/audit` | `Audit` | Append-only audit log viewer (placeholder for Phase 7). |
 | `/cabinet` | `Cabinet` | Multi-persona War Room shell (placeholder for Phase 5). |
 | `/voices` | `Voices` | Voice cascade configuration (placeholder for Phase 4). |
