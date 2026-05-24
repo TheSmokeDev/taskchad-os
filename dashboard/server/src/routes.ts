@@ -35,6 +35,9 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/health',
   '/api/info',
 
+  // jarvis.ts
+  '/api/jarvis/status',
+
   // agents.ts — list / create
   '/api/agents',
 

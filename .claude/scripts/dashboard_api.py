@@ -75,6 +75,10 @@ from personas.lifecycle import (
 
 logger = logging.getLogger(__name__)
 
+_CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
+if str(_CHAT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CHAT_DIR))
+
 # PRD-8 Phase 7b WS1 (codex post-build F1) — log-message redaction at every
 # persona-mutation/avatar/file/auth log emit site. Module-attribute import
 # (Rule 3); redact() is unconditional (NOT kill-switch gated — see
@@ -501,6 +505,240 @@ def get_health() -> dict:
         "lane_status": lane_status,
         "killSwitches": _get_kill_switch_health_snapshot(),
     }
+
+
+# ── /api/jarvis/status (auth required) ───────────────────────────────────
+
+
+def _safe_call(fn) -> Any:
+    try:
+        return fn()
+    except Exception as exc:
+        return f"<error: {_redact(str(exc))}>"
+
+
+def _collect_profile_lifecycle_summary() -> dict[str, Any]:
+    """Return operator-relevant runtime ports without exposing local paths."""
+    from personas import activity as _activity
+    from personas import services as _services
+
+    return {
+        "active_profile": _safe_call(_activity.get_active_profile_name),
+        "orchestration_api_port": _safe_call(_services.get_orchestration_api_port),
+        "health_check_port": _safe_call(_services.get_health_check_port),
+        "whatsapp_webhook_port": _safe_call(_services.get_whatsapp_webhook_port),
+    }
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_channel_health(port: Any) -> dict[str, Any]:
+    health_port = _as_int(port)
+    if health_port is None:
+        return {"status": "unknown", "reachable": False, "error": "invalid health port"}
+    try:
+        response = httpx.get(f"http://127.0.0.1:{health_port}/health", timeout=1.5)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return {"status": "unknown", "reachable": False, "error": "non-object health payload"}
+        payload["reachable"] = True
+        return payload
+    except Exception as exc:
+        return {"status": "unreachable", "reachable": False, "error": _redact(str(exc))}
+
+
+def _source_counts(items: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        source = str(item.get("source") or "unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
+def _enabled_capabilities(items: list[dict]) -> list[dict[str, Any]]:
+    enabled = []
+    for item in items:
+        if not item.get("enabled"):
+            continue
+        enabled.append({
+            "id": item.get("id"),
+            "display_name": item.get("display_name"),
+            "source": item.get("source"),
+        })
+    return enabled
+
+
+def _collect_documented_proofs() -> dict[str, Any]:
+    """Best-effort extraction of local proof IDs from private proof docs."""
+    root = Path(__file__).resolve().parents[2]
+    candidates = (
+        root / "WORKBOARD.md",
+        root / "PRPs" / "active" / "TRACKER.md",
+        root / "PRPs" / "README.md",
+        root / "PRDs" / "README.md",
+    )
+    proof: dict[str, Any] = {
+        "langfuse_trace_id": None,
+        "sentry_event_id": None,
+        "self_amendment_proposal_id": None,
+        "sources": [],
+        "lookup_status": "not_found",
+    }
+    hex_re = re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)
+    uuid_re = re.compile(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        re.IGNORECASE,
+    )
+
+    def first_hex_after(keyword: str, line: str, lower_line: str) -> str | None:
+        start = lower_line.find(keyword)
+        segment = line[start:] if start >= 0 else line
+        match = hex_re.search(segment)
+        return match.group(0) if match else None
+
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            continue
+        for line_no, line in enumerate(lines, start=1):
+            lower = line.lower()
+            if proof["langfuse_trace_id"] is None and "langfuse" in lower:
+                value = first_hex_after("langfuse", line, lower)
+                if value:
+                    proof["langfuse_trace_id"] = value
+                    proof["sources"].append({
+                        "kind": "langfuse_trace_id",
+                        "path": str(path.relative_to(root)),
+                        "line": line_no,
+                    })
+            if proof["sentry_event_id"] is None and "sentry" in lower:
+                value = first_hex_after("sentry", line, lower)
+                if value:
+                    proof["sentry_event_id"] = value
+                    proof["sources"].append({
+                        "kind": "sentry_event_id",
+                        "path": str(path.relative_to(root)),
+                        "line": line_no,
+                    })
+            if proof["self_amendment_proposal_id"] is None and "proposal" in lower:
+                match = uuid_re.search(line)
+                if match:
+                    proof["self_amendment_proposal_id"] = match.group(0)
+                    proof["sources"].append({
+                        "kind": "self_amendment_proposal_id",
+                        "path": str(path.relative_to(root)),
+                        "line": line_no,
+                    })
+    if proof["sources"]:
+        proof["lookup_status"] = "documented_local_proof"
+    return proof
+
+
+def _build_jarvis_status() -> dict[str, Any]:
+    import dataclasses
+    from diagnostics import collect_diagnostics
+
+    report = collect_diagnostics()
+    report_dict = dataclasses.asdict(report)
+    cognitive_loop = report.cognitive_loop if isinstance(report.cognitive_loop, dict) else {}
+    autonomous_loop = cognitive_loop.get("autonomous_loop", {})
+    if not isinstance(autonomous_loop, dict):
+        autonomous_loop = {}
+    lifecycle = _collect_profile_lifecycle_summary()
+    channel_health = _read_channel_health(lifecycle.get("health_check_port"))
+    enabled_capabilities = _enabled_capabilities(report.capabilities)
+
+    telegram_adapters = channel_health.get("adapters") if isinstance(channel_health, dict) else {}
+    if not isinstance(telegram_adapters, dict):
+        telegram_adapters = {}
+    telegram_memory_count = channel_health.get("memory_doc_count")
+    telegram_runtime_providers = channel_health.get("runtime_providers")
+    if not isinstance(telegram_runtime_providers, dict):
+        telegram_runtime_providers = {}
+
+    return {
+        "status": "ok" if cognitive_loop.get("overall") == "live" else "degraded",
+        "timestamp": report.timestamp,
+        "uptime_seconds": report.uptime_seconds,
+        "runtime": {
+            "selected_lane": report.runtime_selected_lane,
+            "selected_generic_provider": report.runtime_selected_generic_provider,
+            "selected_model": report.runtime_selected_model,
+            "lanes": report.runtime_lanes,
+            "providers": report.runtime_providers,
+            "configured_models": report.runtime_configured_models,
+            "model_warnings": report.runtime_model_warnings,
+            "generic_text_route": report.runtime_generic_text_route,
+            "generic_tool_route": report.runtime_generic_tool_route,
+            "provider_details": report.runtime_provider_details,
+            "auth_issues": report.runtime_auth_issues,
+        },
+        "autonomy": {
+            "cognitive_loop_overall": cognitive_loop.get("overall", "unknown"),
+            "source_wiring_overall": cognitive_loop.get("source_wiring_overall", "unknown"),
+            "autonomy_overall": cognitive_loop.get("autonomy_overall", "unknown"),
+            "autonomous_loop_overall": autonomous_loop.get("overall", "unknown"),
+            "state_counts": cognitive_loop.get("state_counts", {}),
+            "subsystems": cognitive_loop.get("subsystems", {}),
+            "autonomous_subsystems": autonomous_loop.get("subsystems", {}),
+            "next_actions": cognitive_loop.get("next_actions", []),
+        },
+        "memory": {
+            "doc_count": report.memory_doc_count,
+            "embedding_status": report.memory_embedding_status,
+            "last_indexed": report.memory_last_indexed,
+        },
+        "capabilities": {
+            "enabled_count": len(enabled_capabilities),
+            "total_count": len(report.capabilities),
+            "sources": _source_counts(report.capabilities),
+            "toolsets": sorted(report.toolsets.keys()),
+            "enabled": enabled_capabilities,
+        },
+        "channels": {
+            "cli": {
+                "status": "live",
+                "source": "collect_diagnostics",
+                "sessions_active": report.sessions_active,
+            },
+            "telegram": {
+                "status": channel_health.get("status", "unknown"),
+                "reachable": bool(channel_health.get("reachable")),
+                "connected": bool(telegram_adapters.get("telegram")),
+                "sessions_active": channel_health.get("sessions_active", 0),
+                "runtime_providers": telegram_runtime_providers,
+                "memory_doc_count": telegram_memory_count,
+                "memory_embedding_status": channel_health.get("memory_embedding_status", ""),
+                "metadata_alignment": {
+                    "runtime_providers_populated": bool(telegram_runtime_providers),
+                    "memory_doc_count_matches_cli": telegram_memory_count == report.memory_doc_count,
+                },
+            },
+            "mission_control_relay": {
+                "orchestration_api_port": lifecycle.get("orchestration_api_port"),
+                "health_check_port": lifecycle.get("health_check_port"),
+                "whatsapp_webhook_port": lifecycle.get("whatsapp_webhook_port"),
+                "active_profile": lifecycle.get("active_profile"),
+            },
+        },
+        "observability": _collect_documented_proofs(),
+        "diagnostics": report_dict,
+    }
+
+
+@router.get("/api/jarvis/status")
+def get_jarvis_status() -> dict:
+    """Read-only Jarvis proof surface for Mission Control and dashboards."""
+    return _build_jarvis_status()
 
 
 _START_TIME = time.time()

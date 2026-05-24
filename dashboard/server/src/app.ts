@@ -8,7 +8,7 @@
  *   3. CSRF (mutation origin allowlist)
  *   4. auth (Bearer or SSE-query token, exempts /api/health)
  *   5. routes (health, agents, conversation, scheduled, memories,
- *      hive-mind, settings, mission)
+ *      hive-mind, settings, mission, jarvis)
  *
  * The factory is split from index.ts so vitest can mount the app in
  * a node test environment without binding a network port.
@@ -30,6 +30,7 @@ import { hiveMindRoute } from './routes/hive-mind.js';
 import { settingsRoute } from './routes/settings.js';
 import { missionRoute } from './routes/mission.js';
 import { cabinetRoute } from './routes/cabinet.js';
+import { jarvisRoute } from './routes/jarvis.js';
 
 export function buildDashboardApp(): Hono {
   const app = new Hono();
@@ -51,6 +52,7 @@ export function buildDashboardApp(): Hono {
   app.route('/', settingsRoute);
   app.route('/', missionRoute);
   app.route('/', cabinetRoute);
+  app.route('/', jarvisRoute);
 
   return app;
 }

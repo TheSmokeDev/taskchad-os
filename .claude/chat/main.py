@@ -602,12 +602,30 @@ def main() -> None:
             adapters_status = {
                 p.value: True for p in router.adapters.keys()
             }
+            runtime_providers: dict[str, str] = {}
+            memory_doc_count = 0
+            memory_embedding_status = ""
+            cognition_available = True
+            try:
+                from diagnostics import collect_diagnostics
+
+                report = collect_diagnostics()
+                runtime_providers = report.runtime_providers
+                memory_doc_count = report.memory_doc_count
+                memory_embedding_status = report.memory_embedding_status
+                cognition_available = report.cognition_available
+            except Exception:
+                # Health must remain available even if diagnostics has a transient failure.
+                pass
             return HealthStatus(
                 status="ok" if adapters_status else "degraded",
                 uptime_seconds=0.0,  # filled by HealthServer
                 adapters=adapters_status,
                 sessions_active=len(store.list_active()),
-                cognition_available=True,
+                cognition_available=cognition_available,
+                runtime_providers=runtime_providers,
+                memory_doc_count=memory_doc_count,
+                memory_embedding_status=memory_embedding_status,
             )
 
         health_srv = HealthServer(HEALTH_CHECK_PORT, _build_health_status)
