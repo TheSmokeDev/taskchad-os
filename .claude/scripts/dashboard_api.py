@@ -134,6 +134,30 @@ class PatchScheduledBody(BaseModel):
     status: str | None = None
 
 
+class CreateWorkTaskBody(BaseModel):
+    title: str = Field(min_length=1, max_length=180)
+    description: str | None = None
+    convoy_id: int | None = None
+    created_by: str = "dashboard"
+    assigned_agent_id: str | None = None
+    assigned_agent_name: str | None = None
+    priority: str = "medium"
+    tags: list[str] = Field(default_factory=list)
+    target_session: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PatchWorkTaskBody(BaseModel):
+    status: str | None = None
+    assigned_agent_id: str | None = None
+    assigned_agent_name: str | None = None
+    error_message: str | None = None
+
+
+class DispatchWorkTaskBody(BaseModel):
+    paperclip_issue_id: str | None = None
+
+
 class PatchSettingsBody(BaseModel):
     # Either a single key/value pair or a partial dict merged into settings.
     key: str | None = None
@@ -2042,6 +2066,337 @@ def get_agent_tasks(persona_id: str) -> dict:
         return {"tasks": tasks}
     except ValueError:
         return {"tasks": []}
+    finally:
+        db.close()
+
+
+# ── /api/work/tasks (dashboard work queue over orchestration subtasks) ───
+
+
+_WORK_COLUMNS: tuple[dict[str, str], ...] = (
+    {"id": "pending", "label": "Pending"},
+    {"id": "ready", "label": "Ready"},
+    {"id": "dispatched", "label": "Dispatched"},
+    {"id": "running", "label": "Running"},
+    {"id": "stalled", "label": "Stalled"},
+    {"id": "completed", "label": "Completed"},
+    {"id": "failed", "label": "Failed"},
+    {"id": "cancelled", "label": "Cancelled"},
+)
+_WORK_STATUS_IDS = {c["id"] for c in _WORK_COLUMNS}
+
+
+def _open_work_orchestration_db(*, create: bool) -> Any | None:
+    from orchestration.db import OrchestrationDB
+
+    db_path = Path(config.ORCHESTRATION_DB_PATH)
+    if not create and not db_path.is_file():
+        return None
+    if create:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    return OrchestrationDB(str(db_path))
+
+
+def _safe_json_object(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _clean_work_tags(tags: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for tag in tags:
+        text = str(tag).strip()
+        if text and text not in cleaned:
+            cleaned.append(text[:40])
+    return cleaned[:12]
+
+
+def _work_metadata(body: CreateWorkTaskBody) -> str:
+    meta = dict(body.metadata or {})
+    meta["source"] = "dashboard_work_queue"
+    meta["priority"] = (body.priority or "medium").strip()[:40] or "medium"
+    meta["tags"] = _clean_work_tags(body.tags)
+    if body.target_session:
+        meta["target_session"] = body.target_session.strip()[:160]
+    return json.dumps(meta, sort_keys=True)
+
+
+def _work_convoy_payload(convoy: Any | None) -> dict[str, Any] | None:
+    if convoy is None:
+        return None
+    return {
+        "id": convoy.id,
+        "title": convoy.title,
+        "description": convoy.description,
+        "status": convoy.status,
+        "created_by": convoy.created_by,
+        "total_subtasks": convoy.total_subtasks,
+        "completed_subtasks": convoy.completed_subtasks,
+        "failed_subtasks": convoy.failed_subtasks,
+        "started_at": convoy.started_at,
+        "completed_at": convoy.completed_at,
+        "created_at": convoy.created_at,
+        "updated_at": convoy.updated_at,
+    }
+
+
+def _work_task_payload(subtask: Any, convoy: Any | None) -> dict[str, Any]:
+    meta = _safe_json_object(subtask.metadata)
+    priority = str(meta.get("priority") or "medium")
+    tags = meta.get("tags")
+    if not isinstance(tags, list):
+        tags = []
+    return {
+        "id": subtask.id,
+        "task_id": subtask.id,
+        "convoy_id": subtask.convoy_id,
+        "convoy_title": convoy.title if convoy else None,
+        "title": subtask.title,
+        "description": subtask.description,
+        "status": subtask.status,
+        "assigned_agent_id": subtask.assigned_agent_id,
+        "assigned_agent_name": subtask.assigned_agent_name,
+        "paperclip_issue_id": subtask.paperclip_issue_id,
+        "remaining_dependencies": subtask.remaining_dependencies,
+        "priority": priority,
+        "tags": [str(t) for t in tags[:12]],
+        "target_session": meta.get("target_session"),
+        "metadata": meta,
+        "error_message": subtask.error_message,
+        "dispatched_at": subtask.dispatched_at,
+        "started_at": subtask.started_at,
+        "stall_detected_at": subtask.stall_detected_at,
+        "completed_at": subtask.completed_at,
+        "created_at": subtask.created_at,
+        "updated_at": subtask.updated_at,
+    }
+
+
+def _work_summary(tasks: list[dict[str, Any]]) -> dict[str, int]:
+    summary = {c["id"]: 0 for c in _WORK_COLUMNS}
+    summary["total"] = len(tasks)
+    for task in tasks:
+        status = str(task.get("status") or "")
+        if status in summary:
+            summary[status] += 1
+    return summary
+
+
+def _work_get_subtask_payload(svc: Any, subtask: Any) -> dict[str, Any]:
+    convoy = svc.get_convoy(subtask.convoy_id)
+    return _work_task_payload(subtask, convoy.convoy if convoy else None)
+
+
+def _work_apply_status(
+    svc: Any,
+    subtask: Any,
+    status: str,
+    error_message: str | None,
+) -> Any:
+    if status not in _WORK_STATUS_IDS:
+        raise HTTPException(status_code=422, detail=f"invalid work status: {status}")
+    if status == subtask.status:
+        return subtask
+    if status == "completed":
+        svc.handle_subtask_completion(subtask.id)
+        updated = svc.get_subtask(subtask.id)
+    elif status == "failed":
+        svc.handle_subtask_failure(subtask.id, error_message=error_message)
+        updated = svc.get_subtask(subtask.id)
+    elif status in {"running", "stalled", "cancelled"}:
+        updated = svc.transition_subtask(subtask.id, status)
+    elif status == "dispatched":
+        raise HTTPException(
+            status_code=409,
+            detail="use /api/work/tasks/{task_id}/dispatch to dispatch work",
+        )
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot manually transition work from {subtask.status} to {status}",
+        )
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"task {subtask.id} not found")
+    return updated
+
+
+@router.get("/api/work/tasks")
+def list_work_tasks(
+    status: str | None = Query(default=None),
+    assigned_agent_id: str | None = Query(default=None),
+) -> dict:
+    if status is not None and status not in _WORK_STATUS_IDS:
+        raise HTTPException(status_code=422, detail=f"invalid work status: {status}")
+
+    db = _open_work_orchestration_db(create=False)
+    if db is None:
+        return {
+            "tasks": [],
+            "convoys": [],
+            "columns": list(_WORK_COLUMNS),
+            "summary": _work_summary([]),
+        }
+
+    from orchestration.convoy_service import ConvoyService
+
+    try:
+        svc = ConvoyService(db)
+        tasks: list[dict[str, Any]] = []
+        convoys: list[dict[str, Any]] = []
+        for convoy_row in svc.list_convoys():
+            convoy_full = svc.get_convoy(convoy_row.id)
+            if not convoy_full:
+                continue
+            convoys.append(_work_convoy_payload(convoy_full.convoy))
+            for subtask in convoy_full.subtasks:
+                task = _work_task_payload(subtask, convoy_full.convoy)
+                if status and task["status"] != status:
+                    continue
+                if assigned_agent_id and task["assigned_agent_id"] != assigned_agent_id:
+                    continue
+                tasks.append(task)
+        return {
+            "tasks": tasks,
+            "convoys": [c for c in convoys if c is not None],
+            "columns": list(_WORK_COLUMNS),
+            "summary": _work_summary(tasks),
+        }
+    finally:
+        db.close()
+
+
+@router.post("/api/work/tasks")
+def create_work_task(body: CreateWorkTaskBody) -> dict:
+    from orchestration.convoy_service import ConvoyService
+    from orchestration.models import AddSubtaskInput, CreateConvoyInput, CreateSubtaskInput
+
+    db = _open_work_orchestration_db(create=True)
+    try:
+        svc = ConvoyService(db)
+        metadata = _work_metadata(body)
+        if body.convoy_id is not None:
+            subtasks = svc.add_subtasks(
+                body.convoy_id,
+                [
+                    AddSubtaskInput(
+                        title=body.title.strip(),
+                        description=body.description,
+                        assigned_agent_id=body.assigned_agent_id,
+                        assigned_agent_name=body.assigned_agent_name,
+                        metadata=metadata,
+                    )
+                ],
+            )
+            subtask = subtasks[0]
+            convoy = svc.get_convoy(body.convoy_id)
+        else:
+            created = svc.create_convoy(
+                CreateConvoyInput(
+                    title=body.title.strip(),
+                    description=body.description,
+                    created_by=body.created_by or "dashboard",
+                    subtasks=[
+                        CreateSubtaskInput(
+                            title=body.title.strip(),
+                            description=body.description,
+                            assigned_agent_id=body.assigned_agent_id,
+                            assigned_agent_name=body.assigned_agent_name,
+                            metadata=metadata,
+                        )
+                    ],
+                )
+            )
+            subtask = created.subtasks[0]
+            convoy = created
+        return {
+            "task": _work_get_subtask_payload(svc, subtask),
+            "convoy": _work_convoy_payload(convoy.convoy if convoy else None),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        db.close()
+
+
+@router.patch("/api/work/tasks/{task_id}")
+def patch_work_task(task_id: int, body: PatchWorkTaskBody) -> dict:
+    from orchestration.convoy_service import ConvoyService
+
+    db = _open_work_orchestration_db(create=False)
+    if db is None:
+        raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+
+    try:
+        svc = ConvoyService(db)
+        subtask = svc.get_subtask(task_id)
+        if subtask is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+
+        fields: dict[str, str | None] = {}
+        patch = body.model_dump(exclude_unset=True)
+        for key in ("assigned_agent_id", "assigned_agent_name", "error_message"):
+            if key in patch:
+                fields[key] = patch[key]
+        if fields:
+            subtask = svc.update_subtask_fields(task_id, fields)
+
+        requested_status = patch.get("status")
+        if requested_status is not None:
+            subtask = _work_apply_status(
+                svc,
+                subtask,
+                str(requested_status),
+                body.error_message,
+            )
+        return {"task": _work_get_subtask_payload(svc, subtask)}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        db.close()
+
+
+@router.post("/api/work/tasks/{task_id}/dispatch")
+def dispatch_work_task(task_id: int, body: DispatchWorkTaskBody | None = None) -> dict:
+    from orchestration.convoy_service import ConvoyService
+
+    db = _open_work_orchestration_db(create=False)
+    if db is None:
+        raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+
+    try:
+        svc = ConvoyService(db)
+        subtask = svc.get_subtask(task_id)
+        if subtask is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        receipt = svc.dispatch_subtask(
+            task_id,
+            paperclip_issue_id=body.paperclip_issue_id if body else None,
+        )
+        updated = svc.get_subtask(task_id)
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        return {
+            "task": _work_get_subtask_payload(svc, updated),
+            "receipt": {
+                "status": receipt.status,
+                "external_ref": receipt.external_ref,
+                "executor_name": receipt.executor_name,
+                "error": receipt.error,
+                "metadata": receipt.metadata,
+                "timestamp": receipt.timestamp,
+            },
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         db.close()
 

@@ -106,6 +106,32 @@ class TestLangfuseSetup:
             finally:
                 lf_mod._initialized = orig
 
+    def test_otel_export_timeout_defaults_are_short(self, monkeypatch):
+        """Langfuse export failures should not consume chat runtime budget."""
+        import runtime.langfuse_setup as lf_mod
+
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_TIMEOUT", raising=False)
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", raising=False)
+        monkeypatch.setenv("LANGFUSE_OTEL_TIMEOUT_SECONDS", "0.75")
+
+        lf_mod._configure_otel_export_timeout()
+
+        assert os.environ["OTEL_EXPORTER_OTLP_TIMEOUT"] == "0.75"
+        assert os.environ["OTEL_EXPORTER_OTLP_TRACES_TIMEOUT"] == "0.75"
+
+    def test_otel_export_timeout_preserves_operator_override(self, monkeypatch):
+        """Explicit OTEL timeout env vars win over Langfuse defaults."""
+        import runtime.langfuse_setup as lf_mod
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "4")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "5")
+        monkeypatch.setenv("LANGFUSE_OTEL_TIMEOUT_SECONDS", "0.75")
+
+        lf_mod._configure_otel_export_timeout()
+
+        assert os.environ["OTEL_EXPORTER_OTLP_TIMEOUT"] == "4"
+        assert os.environ["OTEL_EXPORTER_OTLP_TRACES_TIMEOUT"] == "5"
+
 
 class TestRecallObserve:
     """Tests for @observe decoration on recall functions."""

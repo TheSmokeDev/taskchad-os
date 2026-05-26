@@ -625,7 +625,12 @@ class TelegramAdapter:
             return
         except Exception as e:
             print(f"[{datetime.now()}] Transcription failed: {e}")
-            await msg.reply_text(f"Transcription failed: {e}")
+            user_message = (
+                e.user_message()
+                if isinstance(e, getattr(voice_mod, "VoiceTranscriptionError", ()))
+                else "Voice transcription failed. Check the bot logs for provider details."
+            )
+            await msg.reply_text(user_message)
             return
         finally:
             try:

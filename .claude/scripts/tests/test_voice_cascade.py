@@ -217,8 +217,55 @@ def test_edge_in_cascade():
     """EdgeTtsProvider wired into synthesize() cascade after KittenTTS."""
     src = inspect.getsource(voice.synthesize)
     assert "EdgeTtsProvider" in src
-    # Edge appears AFTER KittenTTS in source order.
-    assert src.index("KittenTTS") < src.index("EdgeTtsProvider")
+    assert voice._TTS_CASCADE_ORDER.index("kittentts") < voice._TTS_CASCADE_ORDER.index("edge")
+    assert "_configured_tts_engine" in src
+
+
+def test_configured_edge_tts_runs_before_openai(monkeypatch):
+    """VOICE_TTS_ENGINE=edge must not spend OpenAI TTS quota."""
+    _clear_voice_env(monkeypatch)
+    monkeypatch.setenv("VOICE_TTS_ENGINE", "edge")
+    monkeypatch.setenv("VOICE_TTS_VOICE_EDGE", "en-US-AriaNeural")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-runtime-key")
+    monkeypatch.setattr(voice, "_edge_tts_installed", lambda: True)
+
+    edge_audio = b"EDGE_AUDIO"
+
+    async def _fake_edge(self, text):
+        assert self.voice == "en-US-AriaNeural"
+        return edge_audio
+
+    async def _should_not_run(self, text):
+        raise AssertionError("OpenAI TTS should not run when VOICE_TTS_ENGINE=edge")
+
+    async def _run():
+        with patch.object(voice.EdgeTtsProvider, "synthesize", _fake_edge), \
+             patch.object(voice.OpenAITtsProvider, "synthesize", _should_not_run):
+            assert await voice.synthesize("hello") == edge_audio
+
+    asyncio.run(_run())
+
+
+def test_configured_edge_tts_failure_does_not_fall_through_to_openai(monkeypatch):
+    """Explicit free TTS mode should degrade to adapter text fallback, not paid TTS."""
+    _clear_voice_env(monkeypatch)
+    monkeypatch.setenv("VOICE_TTS_ENGINE", "edge")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-runtime-key")
+    monkeypatch.setattr(voice, "_edge_tts_installed", lambda: True)
+
+    async def _edge_failure(self, text):
+        raise RuntimeError("edge unavailable")
+
+    async def _should_not_run(self, text):
+        raise AssertionError("OpenAI TTS should not run after configured Edge failure")
+
+    async def _run():
+        with patch.object(voice.EdgeTtsProvider, "synthesize", _edge_failure), \
+             patch.object(voice.OpenAITtsProvider, "synthesize", _should_not_run):
+            with pytest.raises(RuntimeError, match="edge unavailable"):
+                await voice.synthesize("hello")
+
+    asyncio.run(_run())
 
 
 def test_openai_tts_in_cascade():
@@ -244,6 +291,7 @@ def _clear_voice_env(monkeypatch):
     """Helper — unset all voice-related env vars."""
     for var in (
         "GROQ_API_KEY", "WHISPER_MODEL_PATH", "OPENAI_API_KEY",
+        "VOICE_STT_PROVIDERS", "VOICE_STT_ENABLE_OPENAI",
         "MISTRAL_API_KEY", "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID",
         "GRADIUM_API_KEY", "GRADIUM_VOICE_ID", "KOKORO_URL",
         "GEMINI_API_KEY", "GOOGLE_API_KEY",
@@ -318,11 +366,19 @@ def test_voice_capabilities_homie_extension_layer(monkeypatch):
     monkeypatch.setattr(voice, "_edge_tts_installed", lambda: False)
     monkeypatch.setattr(voice.platform, "system", lambda: "Linux")
 
-    # OPENAI_API_KEY → both STT + TTS true (Homie extension)
+    # OPENAI_API_KEY → TTS true, but not STT without explicit opt-in.
+    # The same key powers runtime lanes, so it must not imply voice-spend
+    # consent for Telegram voice-note transcription.
     monkeypatch.setenv("OPENAI_API_KEY", "x")
     caps = voice.voice_capabilities()
-    assert caps["stt"] is True
+    assert caps["stt"] is False
     assert caps["tts"] is True
+    monkeypatch.setenv("VOICE_STT_ENABLE_OPENAI", "1")
+    assert voice.voice_capabilities()["stt"] is True
+    monkeypatch.delenv("VOICE_STT_ENABLE_OPENAI")
+    monkeypatch.setenv("VOICE_STT_PROVIDERS", "openai")
+    assert voice.voice_capabilities()["stt"] is True
+    monkeypatch.delenv("VOICE_STT_PROVIDERS")
     monkeypatch.delenv("OPENAI_API_KEY")
 
     # MISTRAL_API_KEY → both STT + TTS true (Homie extension)
@@ -355,6 +411,76 @@ def test_voice_capabilities_homie_extension_layer(monkeypatch):
     # faster-whisper installed → STT true
     monkeypatch.setattr(voice, "_faster_whisper_installed", lambda: True)
     assert voice.voice_capabilities()["stt"] is True
+
+
+def test_transcribe_skips_openai_without_explicit_stt_opt_in(monkeypatch, tmp_path):
+    """A generic OPENAI_API_KEY must not send Telegram voice notes to Whisper."""
+    _clear_voice_env(monkeypatch)
+    monkeypatch.setattr(voice, "_faster_whisper_installed", lambda: False)
+    monkeypatch.setattr(voice, "_kittentts_installed", lambda: False)
+    monkeypatch.setattr(voice, "_edge_tts_installed", lambda: False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-runtime-key")
+
+    fake_audio = tmp_path / "x.ogg"
+    fake_audio.write_bytes(b"fake")
+
+    async def _should_not_run(self, audio):
+        raise AssertionError("OpenAI Whisper should require explicit STT opt-in")
+
+    async def _run():
+        with patch.object(voice.OpenAIWhisperProvider, "transcribe", _should_not_run):
+            with pytest.raises(voice.VoiceTranscriptionError) as exc_info:
+                await voice.transcribe_audio_file(str(fake_audio))
+        summary = exc_info.value.provider_summary(max_items=8)
+        assert "openai skipped" in summary
+        assert "not selected for STT" in summary
+
+    asyncio.run(_run())
+
+
+def test_transcribe_uses_openai_when_explicitly_enabled(monkeypatch, tmp_path):
+    """OpenAI STT remains available, but only as an explicit provider choice."""
+    _clear_voice_env(monkeypatch)
+    monkeypatch.setattr(voice, "_faster_whisper_installed", lambda: False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-runtime-key")
+    monkeypatch.setenv("VOICE_STT_PROVIDERS", "openai")
+
+    fake_audio = tmp_path / "x.ogg"
+    fake_audio.write_bytes(b"fake")
+
+    async def _fake_transcribe(self, audio):
+        return "explicit openai transcript"
+
+    async def _run():
+        with patch.object(voice.OpenAIWhisperProvider, "transcribe", _fake_transcribe):
+            assert await voice.transcribe_audio_file(str(fake_audio)) == "explicit openai transcript"
+
+    asyncio.run(_run())
+
+
+def test_transcribe_failure_reports_local_stt_before_openai_skip(monkeypatch, tmp_path):
+    """Provider failures should explain the local/free path, not just final quota errors."""
+    _clear_voice_env(monkeypatch)
+    monkeypatch.setattr(voice, "_faster_whisper_installed", lambda: True)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-runtime-key")
+    monkeypatch.setenv("VOICE_STT_PROVIDERS", "faster_whisper")
+
+    fake_audio = tmp_path / "x.ogg"
+    fake_audio.write_bytes(b"fake")
+
+    async def _local_failure(self, path):
+        raise RuntimeError("local model unavailable")
+
+    async def _run():
+        with patch.object(voice._FasterWhisperProvider, "transcribe", _local_failure):
+            with pytest.raises(voice.VoiceTranscriptionError) as exc_info:
+                await voice.transcribe_audio_file(str(fake_audio))
+        summary = exc_info.value.provider_summary(max_items=8)
+        assert "faster_whisper failed" in summary
+        assert "local model unavailable" in summary
+        assert "openai skipped" in summary
+
+    asyncio.run(_run())
 
 
 # ─── Per-provider char limits dict ────────────────────────────────────────

@@ -553,6 +553,105 @@ _STT_CASCADE_ORDER: Final[tuple[str, ...]] = (
     "openai",          # back-compat
 )
 
+_STT_DEFAULT_PROVIDERS: Final[tuple[str, ...]] = (
+    "groq",
+    "faster_whisper",
+    "whisper_cpp",
+    "mistral",
+)
+_STT_PROVIDER_ALIASES: Final[dict[str, str]] = {
+    "faster-whisper": "faster_whisper",
+    "fasterwhisper": "faster_whisper",
+    "whisper-cpp": "whisper_cpp",
+    "whispercpp": "whisper_cpp",
+}
+_STT_LOCAL_PROVIDER_GROUP: Final[tuple[str, ...]] = ("faster_whisper", "whisper_cpp")
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceProviderAttempt:
+    provider: str
+    status: str
+    detail: str = ""
+
+
+class VoiceTranscriptionError(RuntimeError):
+    """Structured STT failure for adapters and operator-facing diagnostics."""
+
+    def __init__(self, attempts: list[VoiceProviderAttempt]):
+        self.attempts = tuple(attempts)
+        super().__init__(
+            "All STT providers failed (or no provider configured). "
+            f"{self.provider_summary(max_items=8)}"
+        )
+
+    def provider_summary(self, *, max_items: int = 5) -> str:
+        parts: list[str] = []
+        for attempt in self.attempts[:max_items]:
+            detail = f": {attempt.detail}" if attempt.detail else ""
+            parts.append(f"{attempt.provider} {attempt.status}{detail}")
+        remaining = len(self.attempts) - len(parts)
+        if remaining > 0:
+            parts.append(f"+{remaining} more")
+        return "; ".join(parts) if parts else "No providers were selected."
+
+    def user_message(self) -> str:
+        return (
+            "Voice transcription failed. "
+            f"Provider status: {self.provider_summary(max_items=6)}"
+        )
+
+
+def _env_truthy(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_stt_provider_name(name: str) -> str:
+    return _STT_PROVIDER_ALIASES.get(name.strip().lower().replace(" ", "_"), name.strip().lower())
+
+
+def _parse_stt_provider_list(raw: str) -> tuple[str, ...]:
+    selected: list[str] = []
+    for token in raw.replace(";", ",").split(","):
+        provider = _normalize_stt_provider_name(token)
+        if not provider:
+            continue
+        if provider in {"all", "*"}:
+            selected.extend(_STT_CASCADE_ORDER)
+        elif provider in {"free", "local"}:
+            selected.extend(_STT_LOCAL_PROVIDER_GROUP)
+        else:
+            selected.append(provider)
+
+    deduped: list[str] = []
+    for provider in selected:
+        if provider in deduped:
+            continue
+        deduped.append(provider)
+    return tuple(deduped)
+
+
+def _selected_stt_providers() -> tuple[str, ...]:
+    """Resolve STT provider policy without treating OPENAI_API_KEY as consent.
+
+    ``OPENAI_API_KEY`` is also used by runtime lanes. Using it as implicit STT
+    permission caused Telegram voice notes to spend quota after the local/free
+    path was missing. OpenAI STT now requires either explicit provider ordering
+    via ``VOICE_STT_PROVIDERS`` or the compatibility opt-in
+    ``VOICE_STT_ENABLE_OPENAI``.
+    """
+    configured = os.environ.get("VOICE_STT_PROVIDERS", "").strip()
+    if configured:
+        selected = _parse_stt_provider_list(configured)
+    else:
+        selected = _STT_DEFAULT_PROVIDERS
+
+    if _env_truthy("VOICE_STT_ENABLE_OPENAI") and "openai" not in selected:
+        selected = (*selected, "openai")
+
+    return selected
+
 
 # WS1 — Whisper hallucination patterns. When fed silence or low-information
 # audio, Whisper confabulates politeness phrases from its YouTube training set
@@ -615,18 +714,23 @@ def _filter_whisper_hallucination(text: str) -> str:
 
 
 async def transcribe_audio_file(file_path: str | Path) -> str:
-    """STT cascade: Groq → faster-whisper local → whisper-cpp local → Mistral → OpenAI.
+    """STT cascade: Groq → faster-whisper local → whisper-cpp local → Mistral.
 
     NEW canonical cascade entrypoint per R1 B6 (avoids signature collision with
     legacy `transcribe(audio_bytes, api_key, model)` at voice.py:104-107 which
     is preserved verbatim for back-compat).
 
-    Port voice.ts:262-276 verbatim. Provider order:
+    Provider order defaults to:
       1. Groq Whisper (cloud, fastest) if GROQ_API_KEY set
       2. faster-whisper local (Hermes extras) — runs offline
       3. whisper-cpp local (voice.ts:231-254) if WHISPER_MODEL_PATH set
       4. Mistral Voxtral (Hermes extras) — multilingual fallback
-      5. OpenAI Whisper (back-compat) if OPENAI_API_KEY set
+
+    OpenAI Whisper is preserved for back-compat, but no longer selected just
+    because OPENAI_API_KEY exists. That key also powers runtime lanes, and using
+    it as implicit STT permission made Telegram voice notes hit OpenAI quota
+    after the free/local path was missing. Select it explicitly with
+    VOICE_STT_PROVIDERS=openai or VOICE_STT_ENABLE_OPENAI=1.
 
     On exception per provider, log warn and try next. If all fail, raise.
 
@@ -640,76 +744,120 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
     kill_switches.requireEnabled("voice", caller="voice_cascade_transcribe")
 
     path_str = str(file_path)
-    last_err: Exception | None = None
+    selected = _selected_stt_providers()
+    attempts: list[VoiceProviderAttempt] = []
 
-    # 1. Groq Whisper (cloud, primary)
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if groq_key:
-        try:
-            text = await _GroqWhisperProvider(api_key=groq_key).transcribe(path_str)
-            logger.info("stt_provider provider=groq")
-            return _filter_whisper_hallucination(text)
-        except Exception as e:
-            logger.warning("Groq Whisper failed, trying faster-whisper local: %s", _redact(str(e)))
-            last_err = e
+    for provider in selected:
+        if provider not in _STT_CASCADE_ORDER:
+            attempts.append(VoiceProviderAttempt(provider, "invalid", "unknown STT provider"))
+            continue
 
-    # 2. faster-whisper local (Hermes extras)
-    if _faster_whisper_installed():
-        try:
-            model_size = os.environ.get("FASTER_WHISPER_MODEL", "base")
-            text = await _FasterWhisperProvider(model_size=model_size).transcribe(path_str)
-            logger.info("stt_provider provider=faster_whisper model=%s", _redact(model_size))
-            return _filter_whisper_hallucination(text)
-        except ImportError as e:
-            logger.warning("faster-whisper import failed, trying next: %s", _redact(str(e)))
-            last_err = e
-        except Exception as e:
-            logger.warning("faster-whisper local failed, trying next: %s", _redact(str(e)))
-            last_err = e
+        if provider == "groq":
+            groq_key = os.environ.get("GROQ_API_KEY")
+            if not groq_key:
+                attempts.append(VoiceProviderAttempt(provider, "skipped", "GROQ_API_KEY not set"))
+                continue
+            try:
+                text = await _GroqWhisperProvider(api_key=groq_key).transcribe(path_str)
+                logger.info("stt_provider provider=groq")
+                return _filter_whisper_hallucination(text)
+            except Exception as e:
+                detail = f"{type(e).__name__}: {_redact(str(e))}"
+                logger.warning("Groq Whisper failed, trying next STT provider: %s", detail)
+                attempts.append(VoiceProviderAttempt(provider, "failed", detail))
+                continue
 
-    # 3. whisper-cpp local (voice.ts:231-254)
-    whisper_model = os.environ.get("WHISPER_MODEL_PATH")
-    if whisper_model:
-        whisper_bin = os.environ.get("WHISPER_CPP_PATH", "whisper-cpp")
-        try:
-            text = await _WhisperCppProvider(
-                binary_path=whisper_bin,
-                model_path=whisper_model,
-            ).transcribe(path_str)
-            logger.info("stt_provider provider=whisper_cpp")
-            return _filter_whisper_hallucination(text)
-        except Exception as e:
-            logger.warning("whisper-cpp local failed, trying Mistral: %s", _redact(str(e)))
-            last_err = e
+        if provider == "faster_whisper":
+            if not _faster_whisper_installed():
+                attempts.append(
+                    VoiceProviderAttempt(
+                        provider,
+                        "skipped",
+                        "faster-whisper package not installed in this runtime",
+                    )
+                )
+                continue
+            try:
+                model_size = os.environ.get("FASTER_WHISPER_MODEL", "base")
+                text = await _FasterWhisperProvider(model_size=model_size).transcribe(path_str)
+                logger.info("stt_provider provider=faster_whisper model=%s", _redact(model_size))
+                return _filter_whisper_hallucination(text)
+            except ImportError as e:
+                detail = f"{type(e).__name__}: {_redact(str(e))}"
+                logger.warning("faster-whisper import failed, trying next STT provider: %s", detail)
+                attempts.append(VoiceProviderAttempt(provider, "failed", detail))
+                continue
+            except Exception as e:
+                detail = f"{type(e).__name__}: {_redact(str(e))}"
+                logger.warning("faster-whisper local failed, trying next STT provider: %s", detail)
+                attempts.append(VoiceProviderAttempt(provider, "failed", detail))
+                continue
 
-    # 4. Mistral Voxtral (Hermes extras)
-    mistral_key = os.environ.get("MISTRAL_API_KEY")
-    if mistral_key:
-        try:
-            text = await _MistralVoxtralSttProvider(api_key=mistral_key).transcribe(path_str)
-            logger.info("stt_provider provider=mistral")
-            return _filter_whisper_hallucination(text)
-        except ImportError as e:
-            logger.warning("mistralai SDK unavailable, trying OpenAI Whisper: %s", _redact(str(e)))
-            last_err = e
-        except Exception as e:
-            logger.warning("Mistral Voxtral STT failed, trying OpenAI Whisper: %s", _redact(str(e)))
-            last_err = e
+        if provider == "whisper_cpp":
+            whisper_model = os.environ.get("WHISPER_MODEL_PATH")
+            if not whisper_model:
+                attempts.append(VoiceProviderAttempt(provider, "skipped", "WHISPER_MODEL_PATH not set"))
+                continue
+            whisper_bin = os.environ.get("WHISPER_CPP_PATH", "whisper-cpp")
+            try:
+                text = await _WhisperCppProvider(
+                    binary_path=whisper_bin,
+                    model_path=whisper_model,
+                ).transcribe(path_str)
+                logger.info("stt_provider provider=whisper_cpp")
+                return _filter_whisper_hallucination(text)
+            except Exception as e:
+                detail = f"{type(e).__name__}: {_redact(str(e))}"
+                logger.warning("whisper-cpp local failed, trying next STT provider: %s", detail)
+                attempts.append(VoiceProviderAttempt(provider, "failed", detail))
+                continue
 
-    # 5. OpenAI Whisper (back-compat)
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    if openai_key:
-        try:
-            text = await OpenAIWhisperProvider(api_key=openai_key).transcribe(path_str)
-            logger.info("stt_provider provider=openai")
-            return _filter_whisper_hallucination(text)
-        except Exception as e:
-            logger.warning("OpenAI Whisper failed: %s", _redact(str(e)))
-            last_err = e
+        if provider == "mistral":
+            mistral_key = os.environ.get("MISTRAL_API_KEY")
+            if not mistral_key:
+                attempts.append(VoiceProviderAttempt(provider, "skipped", "MISTRAL_API_KEY not set"))
+                continue
+            try:
+                text = await _MistralVoxtralSttProvider(api_key=mistral_key).transcribe(path_str)
+                logger.info("stt_provider provider=mistral")
+                return _filter_whisper_hallucination(text)
+            except ImportError as e:
+                detail = f"{type(e).__name__}: {_redact(str(e))}"
+                logger.warning("mistralai SDK unavailable, trying next STT provider: %s", detail)
+                attempts.append(VoiceProviderAttempt(provider, "failed", detail))
+                continue
+            except Exception as e:
+                detail = f"{type(e).__name__}: {_redact(str(e))}"
+                logger.warning("Mistral Voxtral STT failed, trying next STT provider: %s", detail)
+                attempts.append(VoiceProviderAttempt(provider, "failed", detail))
+                continue
 
-    raise RuntimeError(
-        f"All STT providers failed (or no provider configured). Last error: {last_err}"
-    )
+        if provider == "openai":
+            openai_key = os.environ.get("OPENAI_API_KEY")
+            if not openai_key:
+                attempts.append(VoiceProviderAttempt(provider, "skipped", "OPENAI_API_KEY not set"))
+                continue
+            try:
+                text = await OpenAIWhisperProvider(api_key=openai_key).transcribe(path_str)
+                logger.info("stt_provider provider=openai")
+                return _filter_whisper_hallucination(text)
+            except Exception as e:
+                detail = f"{type(e).__name__}: {_redact(str(e))}"
+                logger.warning("OpenAI Whisper failed: %s", detail)
+                attempts.append(VoiceProviderAttempt(provider, "failed", detail))
+                continue
+
+    if "openai" not in selected and os.environ.get("OPENAI_API_KEY"):
+        attempts.append(
+            VoiceProviderAttempt(
+                "openai",
+                "skipped",
+                "not selected for STT; set VOICE_STT_PROVIDERS=openai or "
+                "VOICE_STT_ENABLE_OPENAI=1 to opt in",
+            )
+        )
+
+    raise VoiceTranscriptionError(attempts)
 
 
 # Legacy back-compat — DO NOT REMOVE. Kept verbatim from voice.py:104-107.
@@ -1102,6 +1250,10 @@ async def _try_provider(
     return await provider.synthesize(text_to_send)
 
 
+def _configured_tts_engine() -> str:
+    return os.environ.get("VOICE_TTS_ENGINE", "").strip().lower().replace("-", "_")
+
+
 async def synthesize(
     text: str,
     tts_config: dict | None = None,
@@ -1148,6 +1300,44 @@ async def synthesize(
         voice_overrides = {}
 
     last_err: Exception | None = None
+
+    # Explicit single-provider TTS mode. Telegram/operator config defaults to
+    # VOICE_TTS_ENGINE=edge for free voice replies. Honor that before the
+    # provider cascade so OPENAI_API_KEY, which is also a runtime credential,
+    # does not become implicit permission to spend on OpenAI TTS.
+    configured_engine = _configured_tts_engine()
+    if configured_engine == "edge":
+        if not _edge_tts_installed():
+            raise RuntimeError("Configured TTS engine edge is unavailable: edge-tts not installed")
+        edge_voice = (
+            voice_overrides.get("edge")
+            or os.environ.get("VOICE_TTS_VOICE_EDGE")
+            or os.environ.get("EDGE_TTS_VOICE")
+            or "en-US-GuyNeural"
+        )
+        return await _try_provider(
+            "edge",
+            EdgeTtsProvider(voice=edge_voice),
+            text,
+            tts_config,
+        )
+
+    if configured_engine == "openai":
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_key:
+            raise RuntimeError("Configured TTS engine openai is unavailable: OPENAI_API_KEY not set")
+        openai_voice = (
+            voice_overrides.get("openai")
+            or os.environ.get("VOICE_TTS_VOICE_OPENAI")
+            or os.environ.get("OPENAI_TTS_VOICE")
+            or "alloy"
+        )
+        return await _try_provider(
+            "openai",
+            OpenAITtsProvider(api_key=openai_key, voice=openai_voice),
+            text,
+            tts_config,
+        )
 
     # 0. Preferred-provider short-circuit (cabinet voice / meeting-#6 fix).
     #
@@ -1352,21 +1542,24 @@ def voice_capabilities() -> dict[str, bool]:
 
     Returns dict {'stt': bool, 'tts': bool}.
 
-    STT true if any of: GROQ_API_KEY, WHISPER_MODEL_PATH, OPENAI_API_KEY,
-    MISTRAL_API_KEY set, OR faster_whisper installed.
+    STT true if any selected provider is configured. ``OPENAI_API_KEY`` does
+    not enable STT by itself because it is also a runtime-lane credential; use
+    ``VOICE_STT_PROVIDERS=openai`` or ``VOICE_STT_ENABLE_OPENAI=1`` to opt in.
 
     TTS true if any of: ElevenLabs (BOTH key+voice_id), Gradium (BOTH),
     MISTRAL_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY,
     KOKORO_URL set, OR kittentts/edge_tts installed, OR Darwin platform.
     """
+    selected_stt = _selected_stt_providers()
+    stt_available = (
+        ("groq" in selected_stt and bool(os.environ.get("GROQ_API_KEY")))
+        or ("faster_whisper" in selected_stt and _faster_whisper_installed())
+        or ("whisper_cpp" in selected_stt and bool(os.environ.get("WHISPER_MODEL_PATH")))
+        or ("mistral" in selected_stt and bool(os.environ.get("MISTRAL_API_KEY")))
+        or ("openai" in selected_stt and bool(os.environ.get("OPENAI_API_KEY")))
+    )
     return {
-        "stt": (
-            bool(os.environ.get("GROQ_API_KEY"))
-            or bool(os.environ.get("WHISPER_MODEL_PATH"))
-            or bool(os.environ.get("OPENAI_API_KEY"))
-            or bool(os.environ.get("MISTRAL_API_KEY"))
-            or _faster_whisper_installed()
-        ),
+        "stt": stt_available,
         "tts": (
             (bool(os.environ.get("ELEVENLABS_API_KEY")) and bool(os.environ.get("ELEVENLABS_VOICE_ID")))
             or (bool(os.environ.get("GRADIUM_API_KEY")) and bool(os.environ.get("GRADIUM_VOICE_ID")))
@@ -1432,6 +1625,8 @@ __all__ = [
     "transcribe_audio_file",
     "synthesize",
     "voice_capabilities",
+    "VoiceProviderAttempt",
+    "VoiceTranscriptionError",
     # Legacy back-compat
     "transcribe",
     "synthesize_edge",

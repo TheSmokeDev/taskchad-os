@@ -26,7 +26,43 @@ _VAULT_INGEST_URL_RE = re.compile(
     r"^/vault-ingest\s+(https?://\S+)\s*$", re.IGNORECASE
 )
 
-ENGINE_TIMEOUT_SECONDS = 90
+DEFAULT_ENGINE_TIMEOUT_SECONDS = 180.0
+# Test/legacy override. Normal runtime reads config.CHAT_ENGINE_TIMEOUT_SECONDS
+# at call time so /reload can update the guard without restarting the process.
+ENGINE_TIMEOUT_SECONDS: float | None = None
+
+
+def _engine_timeout_seconds() -> float:
+    """Return the configured whole-turn engine timeout in seconds."""
+
+    if ENGINE_TIMEOUT_SECONDS is not None:
+        try:
+            return max(0.001, float(ENGINE_TIMEOUT_SECONDS))
+        except (TypeError, ValueError):
+            return DEFAULT_ENGINE_TIMEOUT_SECONDS
+
+    try:
+        from config import CHAT_ENGINE_TIMEOUT_SECONDS
+        return max(0.001, float(CHAT_ENGINE_TIMEOUT_SECONDS))
+    except Exception:
+        return DEFAULT_ENGINE_TIMEOUT_SECONDS
+
+
+def _format_seconds(seconds: float) -> str:
+    seconds = float(seconds)
+    if seconds.is_integer():
+        return str(int(seconds))
+    return f"{seconds:.3f}".rstrip("0").rstrip(".")
+
+
+def _engine_timeout_message(timeout_seconds: float) -> str:
+    formatted = _format_seconds(timeout_seconds)
+    return (
+        f"I hit the chat runtime timeout after {formatted}s before the model "
+        "returned. I did not finish that turn or make changes from it. "
+        "The bot is still online; send the concrete next action again, or use "
+        "Codex/Mission Control for longer code-editing work."
+    )
 
 
 class ChatRouter:
@@ -434,14 +470,14 @@ class ChatRouter:
                 if yielded_components:
                     final_components = list(yielded_components)
 
+        timeout_seconds = _engine_timeout_seconds()
+
         try:
-            await asyncio.wait_for(_run_engine(), timeout=ENGINE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(_run_engine(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
-            print(f"[{datetime.now()}] Engine timed out after {ENGINE_TIMEOUT_SECONDS}s")
-            final_text = (
-                f"That took too long (>{ENGINE_TIMEOUT_SECONDS}s). "
-                "Try a more specific question or break it into smaller queries."
-            )
+            formatted_timeout = _format_seconds(timeout_seconds)
+            print(f"[{datetime.now()}] Engine timed out after {formatted_timeout}s")
+            final_text = _engine_timeout_message(timeout_seconds)
             final_is_error = True
         except Exception as e:
             print(f"[{datetime.now()}] Engine error: {e}")
@@ -499,6 +535,9 @@ class ChatRouter:
                 )
         except Exception as e:
             print(f"[{datetime.now()}] Failed to send response: {e}")
+
+        if final_is_error:
+            self._persist_router_turn(incoming, final_text)
 
     async def _handle_file_subcommand(self, sub: str, auto_id: str) -> str:
         """Dispatch /file accept|diff <id> to the concept_drafter module.

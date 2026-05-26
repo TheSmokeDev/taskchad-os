@@ -950,6 +950,82 @@ def team_ping(team_id, agent_id):
         click.echo(f"Pinged team #{team_id}{target}.")
 
 
+@team.command("tick")
+@click.argument("team_id", type=int)
+@click.option("--agent", "agent_id", default=None, help="Prefer a specific active member")
+@click.option("--runtime", "use_runtime", is_flag=True, default=False, help="Use runtime lane reply")
+@click.option("--runtime-lane", default=None, help="Optional runtime lane/provider")
+@click.option("--complete-running", is_flag=True, default=False, help="Allow completing running subtasks")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def team_tick(team_id, agent_id, use_runtime, runtime_lane, complete_running, json_mode):
+    """Run one autonomous team scheduler tick."""
+    from orchestration.observability import orchestration_span, update_observation
+    from orchestration.team_loop import TeamTickService, tick_result_to_dict
+
+    with orchestration_span(
+        "team_cli.tick",
+        metadata={
+            "team_id": team_id,
+            "agent_id": agent_id,
+            "use_runtime": use_runtime,
+            "runtime_lane": runtime_lane,
+            "complete_running": complete_running,
+            "surface": "cli",
+        },
+        trace_metadata={"surface": "cli", "feature_phase": 9, "team_id": team_id},
+        expected_exceptions=(SystemExit,),
+    ):
+        db, _ts, _ms = _get_team_services()
+        try:
+            result = TeamTickService(db).run_team_tick(
+                team_id,
+                agent_id=agent_id,
+                use_runtime=use_runtime,
+                runtime_lane=runtime_lane,
+                complete_running=complete_running,
+            )
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        finally:
+            db.close()
+
+        payload = tick_result_to_dict(result)
+        update_observation(
+            metadata={
+                "team_id": team_id,
+                "selected_action": result.selected_action,
+                "agent_id": result.agent_id,
+                "waited": result.waited,
+                "has_error": bool(result.error),
+            }
+        )
+        if json_mode:
+            print(json_mod.dumps(payload, indent=2))
+            return
+
+        click.echo(f"Team #{team_id} tick: {result.selected_action}")
+        if result.agent_id:
+            click.echo(f"  Agent: {result.agent_id}")
+        if result.subtask_id:
+            click.echo(f"  Subtask: #{result.subtask_id}")
+        click.echo(f"  Reason: {result.reason}")
+        if result.error:
+            click.echo(f"  Error: {result.error}")
+        elif result.waited:
+            click.echo("  Result: waited")
+        elif result.step:
+            after = result.step.subtask_after.status if result.step.subtask_after else "unknown"
+            click.echo(
+                f"  Step: {result.step.action}; claimed {len(result.step.claimed)}; status {after}"
+            )
+            if result.step.runtime:
+                click.echo(
+                    "  Runtime: "
+                    f"{result.step.runtime.runtime_lane} / {result.step.runtime.provider}"
+                )
+
+
 @team.command("close")
 @click.argument("team_id", type=int)
 def team_close(team_id):

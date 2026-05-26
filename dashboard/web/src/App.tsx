@@ -7,6 +7,8 @@ import { KillSwitchBanner } from '@/components/KillSwitchBanner';
 import { sidebarOpen, closeSidebar } from '@/lib/sidebar';
 import { Placeholder } from '@/pages/Placeholder';
 import { MissionControl } from '@/pages/MissionControl';
+import { WorkQueue } from '@/pages/WorkQueue';
+import { Convoy } from '@/pages/Convoy';
 import { Memories } from '@/pages/Memories';
 import { HiveMind } from '@/pages/HiveMind';
 import { Agents } from '@/pages/Agents';
@@ -18,6 +20,7 @@ import { Settings } from '@/pages/Settings';
 import { Voices } from '@/pages/Voices';
 import { Chat } from '@/pages/Chat';
 import { Cabinet } from '@/pages/Cabinet';
+import { Teams } from '@/pages/Teams';
 import { StandupConfig } from '@/pages/StandupConfig';
 import { AgentFiles } from '@/pages/AgentFiles';
 import { Jarvis } from '@/pages/Jarvis';
@@ -50,6 +53,8 @@ export function App() {
         <KillSwitchBanner />
         <Switch>
           <Route path="/mission"><MissionControl /></Route>
+          <Route path="/work"><WorkQueue /></Route>
+          <Route path="/convoy"><Convoy /></Route>
           <Route path="/scheduled"><Scheduled /></Route>
           <Route path="/agents"><Agents /></Route>
           <Route path="/agents/:id" component={AgentDetail} />
@@ -60,6 +65,7 @@ export function App() {
           <Route path="/usage"><Usage /></Route>
           <Route path="/audit"><Audit /></Route>
           <Route path="/cabinet"><Cabinet /></Route>
+          <Route path="/teams"><Teams /></Route>
           <Route path="/voices"><Voices /></Route>
           <Route path="/standup"><StandupConfig /></Route>
           <Route path="/jarvis"><Jarvis /></Route>
@@ -69,6 +75,8 @@ export function App() {
           <Route path="/hive-mind"><Redirect to="/hive" /></Route>
           <Route path="/hivemind"><Redirect to="/hive" /></Route>
           <Route path="/memory"><Redirect to="/memories" /></Route>
+          <Route path="/tasks"><Redirect to="/work" /></Route>
+          <Route path="/team"><Redirect to="/teams" /></Route>
           <Route path="/warroom"><Redirect to="/cabinet" /></Route>
 
           <Route path="/"><Redirect to={DEFAULT_ROUTE} /></Route>

@@ -51,3 +51,11 @@ def test_telegram_imports_voice_module():
     src = _read_adapter_source("telegram")
     assert "import voice as voice_mod" in src or "import voice" in src
     assert "voice_mod.synthesize" in src or "voice.synthesize" in src or "voice_mod.transcribe_audio_file" in src
+
+
+def test_telegram_voice_transcription_uses_structured_error_message():
+    """Telegram should not echo raw provider exceptions such as OpenAI quota JSON."""
+    src = _read_adapter_source("telegram")
+    assert "VoiceTranscriptionError" in src
+    assert "user_message()" in src
+    assert "Check the bot logs for provider details" in src

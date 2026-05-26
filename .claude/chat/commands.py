@@ -74,6 +74,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("cabinet", "Multi-persona meeting — create|list|send <id> <text>|end <id>", "router", "admin"),
     ("standup", "Send a standup question to the cabinet — /standup [question]", "router", "admin"),
     ("discuss", "Start a discussion — /discuss <topic>", "router", "admin"),
+    ("teamtick", "Run one autonomous team scheduler tick — /teamtick <team_id>", "router", "admin"),
     ("send", "Send a draft email via Outlook (e.g. /send draft-01)", "router", "operator"),
     ("brief", "Quick briefing — /brief all for full dashboard", "router", "operator"),
     # -- Memory & Search --
@@ -123,7 +124,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ("Analytics & Monitoring", ["gsc", "analytics"]),
     ("Personal Finance", ["budget"]),
     # Cabinet (Phase 5b) — chat-routed cabinet operator surface.
-    ("Cabinet", ["cabinet", "standup", "discuss"]),
+    ("Cabinet", ["cabinet", "standup", "discuss", "teamtick"]),
     ("Communication", ["send", "brief"]),
     ("Memory", ["search", "file", "working"]),
     ("Content Creation", ["blog", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts"]),
@@ -151,6 +152,7 @@ CORE_INTENTS: list[tuple[list[str], str, bool]] = [
     (["group chat", "all agents discuss", "cabinet meeting"], "cabinet", False),
     (["standup", "team standup", "rotating speakers"], "standup", False),
     (["debate", "discuss this with the team", "open debate"], "discuss", False),
+    (["team tick", "team scheduler", "run team scheduler"], "teamtick", False),
 ]
 
 

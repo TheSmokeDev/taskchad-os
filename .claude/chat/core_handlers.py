@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import subprocess
 import time
 from datetime import datetime
@@ -891,6 +892,107 @@ async def handle_discuss(
         return e.friendly_message
 
 
+def _parse_teamtick_args(args: str) -> tuple[int, dict[str, Any]] | str:
+    try:
+        tokens = shlex.split(args or "")
+    except ValueError as exc:
+        return f"Usage: /teamtick <team_id> [--agent <id>] [--runtime] [--lane <lane>] [--complete]\nParse error: {exc}"
+    if not tokens:
+        return "Usage: /teamtick <team_id> [--agent <id>] [--runtime] [--lane <lane>] [--complete]"
+    try:
+        team_id = int(tokens[0])
+    except ValueError:
+        return "Usage: /teamtick <team_id> [--agent <id>] [--runtime] [--lane <lane>] [--complete]"
+
+    opts: dict[str, Any] = {
+        "agent_id": None,
+        "use_runtime": False,
+        "runtime_lane": None,
+        "complete_running": False,
+    }
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--runtime":
+            opts["use_runtime"] = True
+            i += 1
+            continue
+        if token in ("--complete", "--complete-running"):
+            opts["complete_running"] = True
+            i += 1
+            continue
+        if token in ("--agent", "--lane", "--runtime-lane"):
+            if i + 1 >= len(tokens):
+                return f"Missing value for {token}"
+            value = tokens[i + 1]
+            if token == "--agent":
+                opts["agent_id"] = value
+            else:
+                opts["runtime_lane"] = value
+                opts["use_runtime"] = True
+            i += 2
+            continue
+        return f"Unknown option: {token}"
+    return team_id, opts
+
+
+def _teamtick_code(value: Any) -> str:
+    text = str(value).replace("`", "'")
+    return f"`{text}`"
+
+
+def _format_team_tick_reply(result: Any) -> str:
+    lines = [f"*Team Tick #{result.team_id}*", f"Action: {_teamtick_code(result.selected_action)}"]
+    if result.agent_id:
+        lines.append(f"Agent: {_teamtick_code(result.agent_id)}")
+    if result.subtask_id:
+        lines.append(f"Subtask: {_teamtick_code(f'#{result.subtask_id}')}")
+    lines.append(f"Reason: {result.reason}")
+    if result.error:
+        lines.append(f"Error: {result.error}")
+        return "\n".join(lines)
+    if result.waited:
+        lines.append("Result: waited")
+        return "\n".join(lines)
+    if result.step:
+        after = result.step.subtask_after.status if result.step.subtask_after else "unknown"
+        lines.append(
+            f"Step: {_teamtick_code(result.step.action)}; claimed {len(result.step.claimed)}; "
+            f"status {_teamtick_code(after)}"
+        )
+        if result.step.runtime:
+            lines.append(
+                "Runtime: "
+                f"{_teamtick_code(result.step.runtime.runtime_lane)} / "
+                f"{_teamtick_code(result.step.runtime.provider)}"
+            )
+    return "\n".join(lines)
+
+
+async def handle_teamtick(
+    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
+) -> str:
+    """Run one autonomous team scheduler tick from a chat channel."""
+    parsed = _parse_teamtick_args(args)
+    if isinstance(parsed, str):
+        return parsed
+    team_id, opts = parsed
+
+    from config import ORCHESTRATION_DB_PATH, ensure_directories
+    from orchestration.db import OrchestrationDB
+    from orchestration.observability import init_orchestration_observability
+    from orchestration.team_loop import TeamTickService
+
+    ensure_directories()
+    init_orchestration_observability()
+    db = OrchestrationDB(ORCHESTRATION_DB_PATH)
+    try:
+        result = TeamTickService(db).run_team_tick(team_id, **opts)
+    finally:
+        db.close()
+    return _format_team_tick_reply(result)
+
+
 async def handle_send(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Send an email draft from the drafts folder."""
     try:
@@ -1323,6 +1425,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "cabinet": handle_cabinet,
     "standup": handle_standup,
     "discuss": handle_discuss,
+    "teamtick": handle_teamtick,
     "send": handle_send,
     "brief": handle_brief,
     "working": handle_working,

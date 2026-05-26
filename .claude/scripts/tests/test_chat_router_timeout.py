@@ -9,10 +9,12 @@ import pytest
 import router as router_module
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, User
 from router import ChatRouter
+from session import SQLiteSessionStore
 
 
 class _SlowEngine:
-    session_store = None
+    def __init__(self, session_store=None) -> None:
+        self.session_store = session_store
 
     async def handle_message(self, incoming: IncomingMessage, progress: dict[str, Any]):
         await asyncio.sleep(60)
@@ -51,9 +53,13 @@ class _CaptureAdapter:
 
 
 @pytest.mark.asyncio
-async def test_engine_timeout_updates_placeholder(monkeypatch: pytest.MonkeyPatch):
+async def test_engine_timeout_updates_placeholder_and_persists_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
     monkeypatch.setattr(router_module, "ENGINE_TIMEOUT_SECONDS", 0.01)
 
+    store = SQLiteSessionStore(tmp_path / "chat.db")
     channel = Channel(platform=Platform.CLI, platform_id="test-channel")
     incoming = IncomingMessage(
         text="please do a slow thing",
@@ -62,12 +68,17 @@ async def test_engine_timeout_updates_placeholder(monkeypatch: pytest.MonkeyPatc
         platform=Platform.CLI,
     )
     adapter = _CaptureAdapter()
-    router = ChatRouter(_SlowEngine(), _NoopManager())  # type: ignore[arg-type]
+    router = ChatRouter(_SlowEngine(store), _NoopManager())  # type: ignore[arg-type]
 
     await router._handle_inner(adapter, incoming)
 
     assert adapter.sent[0].text == "Thinking..."
     assert adapter.updates
     assert adapter.updates[-1].is_error is True
-    assert "That took too long" in adapter.updates[-1].text
-    assert "specific question" in adapter.updates[-1].text
+    assert "chat runtime timeout" in adapter.updates[-1].text
+    assert "I did not finish that turn" in adapter.updates[-1].text
+
+    messages = store.list_messages("cli:test-channel:test-channel")
+    assert [msg.role for msg in messages] == ["user", "assistant"]
+    assert messages[0].content == "please do a slow thing"
+    assert "chat runtime timeout" in messages[1].content

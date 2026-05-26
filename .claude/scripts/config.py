@@ -205,6 +205,7 @@ DASHBOARD_DB_PATH = Path(
 DASHBOARD_BOT_GRACE_SECONDS = int(os.getenv("DASHBOARD_BOT_GRACE_SECONDS", "5"))
 CHAT_MAX_TURNS = int(os.getenv("CHAT_MAX_TURNS", "25"))
 CHAT_MAX_BUDGET_USD = float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0"))
+CHAT_ENGINE_TIMEOUT_SECONDS = float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "180"))
 CHAT_ALLOWED_USERS = os.getenv("CHAT_ALLOWED_USERS", SLACK_OWNER_USER_ID).split(",")
 
 # Telegram
@@ -217,6 +218,8 @@ TELEGRAM_ALLOWED_USER_IDS: list[int] = [
 # Voice (STT + TTS)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 VOICE_STT_MODEL = os.getenv("VOICE_STT_MODEL", "whisper-1")
+VOICE_STT_PROVIDERS = os.getenv("VOICE_STT_PROVIDERS", "")
+VOICE_STT_ENABLE_OPENAI = os.getenv("VOICE_STT_ENABLE_OPENAI", "")
 VOICE_TTS_ENGINE = os.getenv("VOICE_TTS_ENGINE", "edge")  # "edge" or "openai"
 VOICE_TTS_VOICE_EDGE = os.getenv("VOICE_TTS_VOICE_EDGE", "en-US-GuyNeural")
 VOICE_TTS_VOICE_OPENAI = os.getenv("VOICE_TTS_VOICE_OPENAI", "alloy")
@@ -418,9 +421,10 @@ def reload_config() -> dict[str, tuple[str, str]]:
     Token changes (TELEGRAM_BOT_TOKEN, SLACK_*) require full restart.
     """
     reloadable_keys = [
-        "OPENAI_API_KEY", "VOICE_STT_MODEL", "VOICE_TTS_ENGINE",
-        "VOICE_TTS_VOICE_EDGE", "VOICE_TTS_VOICE_OPENAI",
-        "CHAT_MAX_TURNS", "CHAT_MAX_BUDGET_USD",
+        "OPENAI_API_KEY", "VOICE_STT_MODEL", "VOICE_STT_PROVIDERS",
+        "VOICE_STT_ENABLE_OPENAI", "VOICE_TTS_ENGINE", "VOICE_TTS_VOICE_EDGE",
+        "VOICE_TTS_VOICE_OPENAI",
+        "CHAT_MAX_TURNS", "CHAT_MAX_BUDGET_USD", "CHAT_ENGINE_TIMEOUT_SECONDS",
         "GOOGLE_CALENDAR_ID", "HEARTBEAT_INTERVAL_MINUTES",
         "HEARTBEAT_ACTIVE_START", "HEARTBEAT_ACTIVE_END",
     ]
@@ -438,11 +442,14 @@ def reload_config() -> dict[str, tuple[str, str]]:
     new_map: dict[str, str | int | float] = {
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
         "VOICE_STT_MODEL": os.getenv("VOICE_STT_MODEL", "whisper-1"),
+        "VOICE_STT_PROVIDERS": os.getenv("VOICE_STT_PROVIDERS", ""),
+        "VOICE_STT_ENABLE_OPENAI": os.getenv("VOICE_STT_ENABLE_OPENAI", ""),
         "VOICE_TTS_ENGINE": os.getenv("VOICE_TTS_ENGINE", "edge"),
         "VOICE_TTS_VOICE_EDGE": os.getenv("VOICE_TTS_VOICE_EDGE", "en-US-GuyNeural"),
         "VOICE_TTS_VOICE_OPENAI": os.getenv("VOICE_TTS_VOICE_OPENAI", "alloy"),
         "CHAT_MAX_TURNS": int(os.getenv("CHAT_MAX_TURNS", "25")),
         "CHAT_MAX_BUDGET_USD": float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0")),
+        "CHAT_ENGINE_TIMEOUT_SECONDS": float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "180")),
         "GOOGLE_CALENDAR_ID": os.getenv("GOOGLE_CALENDAR_ID", ""),
         "HEARTBEAT_INTERVAL_MINUTES": int(os.getenv("HEARTBEAT_INTERVAL_MINUTES", "30")),
         "HEARTBEAT_ACTIVE_START": os.getenv("HEARTBEAT_ACTIVE_HOURS_START", "08:00"),

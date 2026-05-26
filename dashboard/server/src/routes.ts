@@ -15,7 +15,7 @@
  *     manifest test normalizes both `${...}` and `:id` shapes to `:id`
  *     before checking membership.
  *   - The list is kept in declaration order across files: health, agents,
- *     conversation, scheduled, memories, hive-mind, settings, mission.
+ *     conversation, scheduled, memories, hive-mind, settings, mission, work.
  *   - Mission proxy routes are mounted as wildcards on the Hono side
  *     (`/api/convoy/*` etc) — those framework endpoints are documented
  *     in `docs/mc-profile-contract.md` § 3.2 but the wildcards are listed
@@ -105,12 +105,20 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/mailbox/inbox/:agent',
   '/api/mailbox/claim/:agent',
   '/api/mailbox/ack/:delivery_id',
+  '/api/mailbox/convoy/:id',
   '/api/team',
   '/api/team/:id',
   '/api/team/:id/members',
   '/api/team/:id/shutdown',
+  '/api/team/:id/loop-step',
+  '/api/team/:id/tick',
   '/api/team/:id/memory',
   '/api/executor/callback',
+
+  // work.ts — dashboard work queue over the framework orchestration API.
+  '/api/work/tasks',
+  '/api/work/tasks/:taskId',
+  '/api/work/tasks/:taskId/dispatch',
 
   // cabinet.ts — PRD-8 Phase 5a (action/query-shaped, NOT RESTful per
   // upstream dashboard.ts:802-1254 verbatim).

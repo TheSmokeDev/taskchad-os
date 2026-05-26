@@ -32,6 +32,7 @@ from orchestration.models import (
     SendMessageInput,
 )
 from orchestration.observability import orchestration_span, update_observation
+from orchestration.team_loop import TeamLoopService, TeamTickService, result_to_dict, tick_result_to_dict
 from orchestration.team_service import TeamService
 
 logger = logging.getLogger(__name__)
@@ -242,6 +243,22 @@ class AddTeamMemberBody(BaseModel):
 
 class TeamPingBody(BaseModel):
     agent_id: str | None = None
+
+
+class TeamLoopStepBody(BaseModel):
+    agent_id: str
+    subtask_id: int | None = None
+    reply_body: str | None = None
+    use_runtime: bool = False
+    runtime_lane: str | None = None
+    complete: bool = False
+
+
+class TeamTickBody(BaseModel):
+    agent_id: str | None = None
+    use_runtime: bool = False
+    runtime_lane: str | None = None
+    complete_running: bool = False
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────
@@ -797,6 +814,102 @@ def ping_team(team_id: int, request: Request, body: TeamPingBody | None = None):
             update_observation(level="WARNING", status_message=str(e), metadata={"error_type": "team_validation"})
             raise HTTPException(status_code=404, detail=str(e))
         return {"ok": True}
+
+
+@app.post("/api/team/{team_id}/loop-step")
+def run_team_loop_step(team_id: int, request: Request, body: TeamLoopStepBody):
+    surface = _operator_surface(request)
+    with orchestration_span(
+        "orchestration.api.team_loop_step",
+        metadata={
+            "surface": surface,
+            "team_id": team_id,
+            "agent_id": body.agent_id,
+            "subtask_id": body.subtask_id,
+            "use_runtime": body.use_runtime,
+            "runtime_lane": body.runtime_lane,
+            "complete": body.complete,
+        },
+        trace_metadata={"surface": surface, "feature_phase": 8, "team_id": team_id},
+        expected_exceptions=(HTTPException,),
+    ):
+        try:
+            result = TeamLoopService(_db).run_member_step(
+                team_id,
+                body.agent_id,
+                subtask_id=body.subtask_id,
+                reply_body=body.reply_body,
+                use_runtime=body.use_runtime,
+                runtime_lane=body.runtime_lane,
+                complete=body.complete,
+            )
+        except ValueError as e:
+            update_observation(
+                level="WARNING",
+                status_message=str(e),
+                metadata={"error_type": "team_loop_validation"},
+            )
+            status = 404 if "not found" in str(e).lower() else 400
+            raise HTTPException(status_code=status, detail=str(e))
+        payload = result_to_dict(result)
+        update_observation(
+            metadata={
+                "team_id": team_id,
+                "agent_id": body.agent_id,
+                "action": payload["action"],
+                "claimed_count": payload["claimed_count"],
+                "subtask_status": payload["subtask_after"]["status"]
+                if payload["subtask_after"]
+                else None,
+            }
+        )
+        return payload
+
+
+@app.post("/api/team/{team_id}/tick")
+def run_team_tick(team_id: int, request: Request, body: TeamTickBody | None = None):
+    surface = _operator_surface(request)
+    payload_body = body or TeamTickBody()
+    with orchestration_span(
+        "orchestration.api.team_tick",
+        metadata={
+            "surface": surface,
+            "team_id": team_id,
+            "agent_id": payload_body.agent_id,
+            "use_runtime": payload_body.use_runtime,
+            "runtime_lane": payload_body.runtime_lane,
+            "complete_running": payload_body.complete_running,
+        },
+        trace_metadata={"surface": surface, "feature_phase": 9, "team_id": team_id},
+        expected_exceptions=(HTTPException,),
+    ):
+        try:
+            result = TeamTickService(_db).run_team_tick(
+                team_id,
+                agent_id=payload_body.agent_id,
+                use_runtime=payload_body.use_runtime,
+                runtime_lane=payload_body.runtime_lane,
+                complete_running=payload_body.complete_running,
+            )
+        except ValueError as e:
+            update_observation(
+                level="WARNING",
+                status_message=str(e),
+                metadata={"error_type": "team_tick_validation"},
+            )
+            status = 404 if "not found" in str(e).lower() else 400
+            raise HTTPException(status_code=status, detail=str(e))
+        payload = tick_result_to_dict(result)
+        update_observation(
+            metadata={
+                "team_id": team_id,
+                "agent_id": payload["agent_id"],
+                "selected_action": payload["selected_action"],
+                "waited": payload["waited"],
+                "has_error": bool(payload["error"]),
+            }
+        )
+        return payload
 
 
 # ── Team Memory (Phase 7) ─────────────────────────────────────────────────

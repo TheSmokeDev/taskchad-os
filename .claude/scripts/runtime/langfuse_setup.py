@@ -19,6 +19,7 @@ import os
 
 _logger = logging.getLogger(__name__)
 _initialized = False
+_DEFAULT_OTEL_EXPORT_TIMEOUT_SECONDS = "1"
 
 
 def is_langfuse_enabled() -> bool:
@@ -26,6 +27,17 @@ def is_langfuse_enabled() -> bool:
     if os.getenv("LANGFUSE_ENABLED", "true").lower() == "false":
         return False
     return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
+
+
+def _configure_otel_export_timeout() -> None:
+    """Keep observability export failures from consuming chat runtime budget."""
+
+    timeout = os.getenv(
+        "LANGFUSE_OTEL_TIMEOUT_SECONDS",
+        _DEFAULT_OTEL_EXPORT_TIMEOUT_SECONDS,
+    )
+    os.environ.setdefault("OTEL_EXPORTER_OTLP_TIMEOUT", timeout)
+    os.environ.setdefault("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", timeout)
 
 
 def init_langfuse() -> bool:
@@ -42,6 +54,8 @@ def init_langfuse() -> bool:
         return False
 
     try:
+        _configure_otel_export_timeout()
+
         # Set OTEL service.name so traces show "thehomie" instead of "unknown_service"
         try:
             from opentelemetry import trace as ot
@@ -97,6 +111,7 @@ def flush_langfuse() -> None:
         from opentelemetry import trace as ot
         tp = ot.get_tracer_provider()
         if hasattr(tp, "force_flush"):
-            tp.force_flush(timeout_millis=5000)
+            timeout_seconds = float(os.getenv("LANGFUSE_OTEL_TIMEOUT_SECONDS", "1"))
+            tp.force_flush(timeout_millis=int(timeout_seconds * 1000))
     except Exception:
         pass

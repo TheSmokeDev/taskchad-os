@@ -1276,6 +1276,62 @@ def test_get_agent_tasks_scoped_to_persona(isolated_app):
     assert r.json()["tasks"] == []
 
 
+# ── /api/work/tasks (dashboard work queue over orchestration) ─────────────
+
+
+def test_work_queue_create_list_patch_dispatch_lifecycle(isolated_app):
+    r = isolated_app.get("/api/work/tasks")
+    assert r.status_code == 200
+    assert r.json()["tasks"] == []
+
+    r = isolated_app.post(
+        "/api/work/tasks",
+        json={
+            "title": "Wire task board",
+            "description": "Expose orchestration subtasks in the dashboard",
+            "assigned_agent_id": "codex",
+            "assigned_agent_name": "Codex",
+            "priority": "high",
+            "tags": ["dashboard", "work"],
+            "target_session": "session-alpha",
+        },
+    )
+    assert r.status_code == 200
+    created = r.json()["task"]
+    assert created["status"] == "ready"
+    assert created["priority"] == "high"
+    assert created["tags"] == ["dashboard", "work"]
+    assert created["target_session"] == "session-alpha"
+    task_id = created["id"]
+
+    r = isolated_app.get("/api/work/tasks")
+    assert r.status_code == 200
+    listed = r.json()
+    assert listed["summary"]["ready"] == 1
+    assert any(t["id"] == task_id for t in listed["tasks"])
+
+    r = isolated_app.patch(
+        f"/api/work/tasks/{task_id}",
+        json={"assigned_agent_id": "gemini", "assigned_agent_name": "Gemini"},
+    )
+    assert r.status_code == 200
+    assert r.json()["task"]["assigned_agent_id"] == "gemini"
+
+    r = isolated_app.post(f"/api/work/tasks/{task_id}/dispatch", json={})
+    assert r.status_code == 200
+    dispatched = r.json()
+    assert dispatched["receipt"]["status"] == "accepted"
+    assert dispatched["task"]["status"] == "dispatched"
+
+    r = isolated_app.patch(f"/api/work/tasks/{task_id}", json={"status": "running"})
+    assert r.status_code == 200
+    assert r.json()["task"]["status"] == "running"
+
+    r = isolated_app.patch(f"/api/work/tasks/{task_id}", json={"status": "completed"})
+    assert r.status_code == 200
+    assert r.json()["task"]["status"] == "completed"
+
+
 # ── /api/conversation history (paginated) ────────────────────────────────
 
 

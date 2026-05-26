@@ -33,6 +33,9 @@ dependencies = [
     # Phase 8: Voice Support (STT + TTS)
     "openai>=1.0.0",
     "edge-tts>=7.0.0",
+    # Free/local Telegram voice-note transcription. Without this explicit dep,
+    # STT silently falls through to paid cloud providers in clean worktrees.
+    "faster-whisper>=1.1.0",
     # Phase 9: Dashboard Backend
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",

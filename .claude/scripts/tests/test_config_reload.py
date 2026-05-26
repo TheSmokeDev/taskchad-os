@@ -171,6 +171,25 @@ class TestReloadConfigFunction:
 
             rc()
 
+    def test_detects_engine_timeout_change(self) -> None:
+        """reload_config detects and reports a changed CHAT_ENGINE_TIMEOUT_SECONDS."""
+        import config
+
+        original = config.CHAT_ENGINE_TIMEOUT_SECONDS
+
+        try:
+            os.environ["CHAT_ENGINE_TIMEOUT_SECONDS"] = "240"
+            from config import reload_config
+
+            changes = reload_config()
+            assert "CHAT_ENGINE_TIMEOUT_SECONDS" in changes
+            assert config.CHAT_ENGINE_TIMEOUT_SECONDS == 240.0
+        finally:
+            os.environ["CHAT_ENGINE_TIMEOUT_SECONDS"] = str(original)
+            from config import reload_config as rc
+
+            rc()
+
     def test_sensitive_values_masked(self) -> None:
         """API keys should be masked in the change report."""
         import config
