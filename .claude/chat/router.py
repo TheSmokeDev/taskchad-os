@@ -807,29 +807,60 @@ class ChatRouter:
         if existing:
             existing.message_count += 1
             existing.updated_at = now
+            self._apply_router_runtime_metadata(incoming, existing)
             store.update(existing)
         else:
             # PRP-7d R1 B2: read source from incoming; set-once on create
             # (the `if existing:` UPDATE branch above MUST NOT touch source).
             message_source = getattr(incoming, "source", "interactive")
-            store.create(
-                Session(
-                    session_id=session_id,
-                    agent_session_id="",
-                    platform=platform_str,
-                    channel_id=channel_id,
-                    thread_id=thread_id,
-                    user_id=incoming.user.platform_id,
-                    created_at=now,
-                    updated_at=now,
-                    message_count=1,
-                    source=message_source,
-                )
+            session = Session(
+                session_id=session_id,
+                agent_session_id="",
+                platform=platform_str,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                user_id=incoming.user.platform_id,
+                created_at=now,
+                updated_at=now,
+                message_count=1,
+                source=message_source,
             )
+            self._apply_router_runtime_metadata(incoming, session)
+            store.create(session)
 
         timestamp = getattr(incoming, "timestamp", now)
         store.add_message(session_id, "user", incoming.text, timestamp)
         store.add_message(session_id, "assistant", reply, now)
+
+    def _apply_router_runtime_metadata(self, incoming: Any, session: Session) -> None:
+        """Keep router-command quiet metadata aligned with current selection."""
+
+        parsed = self._parse_command((getattr(incoming, "text", "") or "").strip())
+        if not parsed or parsed[0] not in {"model", "provider"}:
+            return
+
+        try:
+            from runtime.model_control import selected_runtime_model
+            from runtime.selection import provider_display_name, resolve_runtime_selection
+
+            selection = resolve_runtime_selection()
+            session.runtime_lane = selection.lane or "auto"
+            if selection.lane == "claude_native":
+                session.runtime_provider = "claude"
+            else:
+                session.runtime_provider = selection.generic_provider or ""
+                session.runtime_session_id = ""
+            session.runtime_model = selected_runtime_model(selection) or ""
+            session.runtime_profile_key = (
+                f"configured-{provider_display_name(session.runtime_provider)}"
+                if session.runtime_provider
+                else ""
+            )
+        except Exception as e:
+            print(
+                f"[{datetime.now()}] Failed to snapshot router runtime metadata: {e}",
+                flush=True,
+            )
 
     async def shutdown(self) -> None:
         """Disconnect all adapters gracefully."""

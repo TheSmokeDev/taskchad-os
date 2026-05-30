@@ -10,7 +10,12 @@ from engine import ConversationEngine
 from models import Channel, IncomingMessage, Platform, Thread, User
 from session import Session, SQLiteSessionStore
 
-from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE, RuntimeResult, RuntimeToolCall
+from runtime.base import (
+    RUNTIME_LANE_CLAUDE_NATIVE,
+    RUNTIME_LANE_GENERIC,
+    RuntimeResult,
+    RuntimeToolCall,
+)
 
 
 def _make_message(text: str = "Need a summary") -> IncomingMessage:
@@ -164,6 +169,101 @@ async def test_engine_uses_runtime_session_for_resume(
     outputs = [out async for out in convo.handle_message(_make_message("Continue"))]
     assert outputs[-1].text == "Resumed successfully"
     assert captured["resume"] == "runtime-session-existing"
+
+
+@pytest.mark.asyncio
+async def test_engine_clears_stale_claude_session_after_generic_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    session = Session(
+        session_id="telegram:chat-1:thread-1",
+        agent_session_id="claude-session-existing",
+        platform="telegram",
+        channel_id="chat-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        created_at=engine_module.datetime.now(),
+        updated_at=engine_module.datetime.now(),
+        runtime_lane=RUNTIME_LANE_CLAUDE_NATIVE,
+        runtime_provider="claude",
+        runtime_profile_key="primary-claude",
+    )
+    store.create(session)
+
+    async def fake_run(_request):
+        return RuntimeResult(
+            text="OK",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [out async for out in convo.handle_message(_make_message("Reply with exactly OK"))]
+
+    assert outputs[-1].text == "OK"
+    persisted = store.get("telegram", "chat-1", "thread-1")
+    assert persisted is not None
+    assert persisted.runtime_session_id == ""
+    assert persisted.runtime_lane == RUNTIME_LANE_GENERIC
+    assert persisted.runtime_provider == "openai-codex"
+
+
+@pytest.mark.asyncio
+async def test_engine_does_not_reuse_stale_claude_session_after_generic_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    store.create(
+        Session(
+            session_id="telegram:chat-1:thread-1",
+            agent_session_id="claude-session-existing",
+            platform="telegram",
+            channel_id="chat-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            created_at=engine_module.datetime.now(),
+            updated_at=engine_module.datetime.now(),
+            runtime_lane=RUNTIME_LANE_CLAUDE_NATIVE,
+            runtime_provider="claude",
+            runtime_profile_key="primary-claude",
+        )
+    )
+    captured_resumes: list[str | None] = []
+
+    async def fake_run(request):
+        captured_resumes.append(request.resume)
+        return RuntimeResult(
+            text="OK",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    first_outputs = [
+        out async for out in convo.handle_message(_make_message("Reply with exactly OK"))
+    ]
+    second_outputs = [
+        out async for out in convo.handle_message(_make_message("Reply with exactly OK again"))
+    ]
+
+    assert first_outputs[-1].text == "OK"
+    assert second_outputs[-1].text == "OK"
+    assert captured_resumes == ["claude-session-existing", None]
 
 
 @pytest.mark.asyncio

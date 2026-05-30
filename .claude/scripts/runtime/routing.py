@@ -146,14 +146,16 @@ def _provider_order_for_request(request: RuntimeRequest) -> tuple[str, ...]:
 
 
 def _generic_provider_order_for_request(request: RuntimeRequest) -> tuple[str, ...]:
+    preferred_provider = _preferred_generic_provider(request)
+    if preferred_provider:
+        return (preferred_provider,)
+
     override = _generic_route_override_for_task(
         request.task_name,
         capability=request.capability,
     ) or _generic_route_override_for_capability(request.capability)
-    preferred_provider = _preferred_generic_provider(request)
     base_order = list(
-        override
-        or ([preferred_provider] if preferred_provider else _generic_default_route(request))
+        override or _generic_default_route(request)
     )
 
     if _can_fallback(request):

@@ -176,6 +176,70 @@ def test_generic_tool_route_uses_only_tool_capable_profiles(
     ]
 
 
+def test_pinned_generic_provider_does_not_append_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", "generic_runtime")
+    monkeypatch.setenv("SECOND_BRAIN_GENERIC_PROVIDER", "openai-codex")
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_FALLBACK_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        routing,
+        "build_profile_for_provider",
+        lambda provider, *, key_prefix, request=None: _profile(provider, key_prefix),
+    )
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+
+    resolved = routing.resolve_generic_runtime_profiles(
+        RuntimeRequest(prompt="hi", cwd=".", task_name="chat_turn")
+    )
+
+    assert [profile.provider for profile in resolved] == ["openai-codex"]
+
+
+def test_pinned_generic_provider_beats_route_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", "generic_runtime")
+    monkeypatch.setenv("SECOND_BRAIN_GENERIC_PROVIDER", "openai-codex")
+    monkeypatch.setenv("SECOND_BRAIN_ROUTE_TEXT", "gemini")
+    monkeypatch.setattr(
+        routing,
+        "build_profile_for_provider",
+        lambda provider, *, key_prefix, request=None: _profile(provider, key_prefix),
+    )
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+
+    resolved = routing.resolve_generic_runtime_profiles(
+        RuntimeRequest(prompt="hi", cwd=".", task_name="chat_turn")
+    )
+
+    assert [profile.provider for profile in resolved] == ["openai-codex"]
+
+
+def test_unavailable_pinned_generic_provider_does_not_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", "generic_runtime")
+    monkeypatch.setenv("SECOND_BRAIN_GENERIC_PROVIDER", "openai-codex")
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_FALLBACK_PROVIDER", raising=False)
+
+    def fake_build(provider, *, key_prefix, request=None):
+        if provider == "openai-codex":
+            return None
+        return _profile(provider, key_prefix)
+
+    monkeypatch.setattr(routing, "build_profile_for_provider", fake_build)
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+
+    resolved = routing.resolve_generic_runtime_profiles(
+        RuntimeRequest(prompt="hi", cwd=".", task_name="chat_turn")
+    )
+
+    assert resolved == []
+
+
 def test_generic_route_ignores_legacy_claude_pin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

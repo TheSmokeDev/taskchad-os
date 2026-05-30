@@ -15,6 +15,8 @@ monkeypatch propagation in tests.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from security import kill_switches
 
 from .base import (
@@ -48,11 +50,11 @@ def resolve_runtime_lane(request: RuntimeRequest) -> str:
 
     if request.runtime_lane:
         return request.runtime_lane
-    if request.resume is not None:
-        return RUNTIME_LANE_CLAUDE_NATIVE
     selection = resolve_runtime_selection()
     if selection.lane:
         return selection.lane
+    if request.resume is not None:
+        return RUNTIME_LANE_CLAUDE_NATIVE
     return RUNTIME_LANE_GENERIC
 
 
@@ -92,16 +94,23 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
     kill_switches.requireEnabled("llm", caller="lane_router")
 
     lane = resolve_runtime_lane(request)
+    effective_request = request
+    if lane != RUNTIME_LANE_CLAUDE_NATIVE and request.resume is not None:
+        # Runtime resume IDs are Claude-specific. A user-selected generic lane
+        # must not be forced back to Claude by a stale Telegram/CLI session.
+        effective_request = replace(request, resume=None)
     errors: list[str] = []
 
-    for profile in _resolve_lane_profiles(request):
+    for profile in _resolve_lane_profiles(effective_request):
         adapter = _adapter_for(profile)
-        if not adapter.supports(request):
-            errors.append(f"{profile.key}: unsupported capability {request.capability}")
+        if not adapter.supports(effective_request):
+            errors.append(
+                f"{profile.key}: unsupported capability {effective_request.capability}"
+            )
             continue
 
         try:
-            result = await adapter.run(request)
+            result = await adapter.run(effective_request)
             mark_profile_success(profile)
             result.runtime_lane = lane
             return result

@@ -28,16 +28,20 @@ class _RouterOnlyManager:
     command_regex = re.compile(r"^/(\w+)\b(.*)$")
 
     def get_router_commands(self):
-        return {"status", "clear"}
+        return {"status", "clear", "model", "provider"}
 
     def get_all_command_names(self):
-        return ["status", "clear"]
+        return ["status", "clear", "model", "provider"]
 
     async def dispatch(self, command, adapter, incoming, args, collect_only=False):
         if command == "clear":
             return "Session cleared. Next message starts fresh."
         if command == "status":
             return "Session Status"
+        if command == "model":
+            return "Switched runtime"
+        if command == "provider":
+            return "Runtime Provider Status"
         return None
 
     def detect_intents(self, text):
@@ -99,3 +103,62 @@ async def test_clear_command_does_not_recreate_transcript_rows(tmp_path):
 
     assert store.get("cli", "cli-test", "cli-test") is None
     assert store.list_messages("cli:cli-test:cli-test") == []
+
+
+@pytest.mark.asyncio
+async def test_model_command_persists_current_codex_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", "generic_runtime")
+    monkeypatch.setenv("SECOND_BRAIN_GENERIC_PROVIDER", "openai-codex")
+    monkeypatch.setenv("SECOND_BRAIN_CODEX_MODEL", "gpt-5.5")
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    router = ChatRouter(_FakeEngine(store), _RouterOnlyManager())
+    adapter = _RecordingAdapter()
+
+    incoming = IncomingMessage(
+        text="/model codex",
+        user=User(Platform.CLI, "cli-user", "User"),
+        channel=Channel(Platform.CLI, "cli-test", is_dm=True),
+        platform=Platform.CLI,
+        timestamp=datetime.now(),
+    )
+
+    await router._handle(adapter, incoming)
+
+    session = store.get("cli", "cli-test", "cli-test")
+    assert session is not None
+    assert session.runtime_lane == "generic_runtime"
+    assert session.runtime_provider == "openai-codex"
+    assert session.runtime_model == "gpt-5.5"
+    assert session.runtime_session_id == ""
+
+
+@pytest.mark.asyncio
+async def test_provider_command_persists_current_claude_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", "claude_native")
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
+    monkeypatch.setenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-opus-4-6")
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    router = ChatRouter(_FakeEngine(store), _RouterOnlyManager())
+    adapter = _RecordingAdapter()
+
+    incoming = IncomingMessage(
+        text="/provider",
+        user=User(Platform.CLI, "cli-user", "User"),
+        channel=Channel(Platform.CLI, "cli-test", is_dm=True),
+        platform=Platform.CLI,
+        timestamp=datetime.now(),
+    )
+
+    await router._handle(adapter, incoming)
+
+    session = store.get("cli", "cli-test", "cli-test")
+    assert session is not None
+    assert session.runtime_lane == "claude_native"
+    assert session.runtime_provider == "claude"
+    assert session.runtime_model == "claude-opus-4-6"

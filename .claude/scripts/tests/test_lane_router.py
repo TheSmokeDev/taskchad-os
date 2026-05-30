@@ -25,11 +25,30 @@ def test_resolve_runtime_lane_defaults_to_generic(
     assert lane == RUNTIME_LANE_GENERIC
 
 
-def test_resolve_runtime_lane_uses_claude_for_resume() -> None:
+def test_resolve_runtime_lane_uses_claude_for_auto_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
+
     lane = lane_router.resolve_runtime_lane(
         RuntimeRequest(prompt="continue", cwd=".", task_name="chat_turn", resume="sess-1")
     )
     assert lane == RUNTIME_LANE_CLAUDE_NATIVE
+
+
+def test_resolve_runtime_lane_honors_generic_selection_with_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", RUNTIME_LANE_GENERIC)
+    monkeypatch.setenv("SECOND_BRAIN_GENERIC_PROVIDER", "openai-codex")
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
+
+    lane = lane_router.resolve_runtime_lane(
+        RuntimeRequest(prompt="continue", cwd=".", task_name="chat_turn", resume="sess-1")
+    )
+    assert lane == RUNTIME_LANE_GENERIC
 
 
 def test_resolve_runtime_lane_honors_explicit_override() -> None:
@@ -92,6 +111,9 @@ def test_explicit_runtime_lane_beats_legacy_provider_pin(
 
 @pytest.mark.asyncio
 async def test_run_with_runtime_lanes_sets_lane_on_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
     request = RuntimeRequest(prompt="continue", cwd=".", task_name="chat_turn", resume="sess-1")
 
     monkeypatch.setattr(
@@ -124,3 +146,95 @@ async def test_run_with_runtime_lanes_sets_lane_on_result(monkeypatch: pytest.Mo
 
     assert result.runtime_lane == RUNTIME_LANE_CLAUDE_NATIVE
     assert result.provider == "claude"
+
+
+@pytest.mark.asyncio
+async def test_run_with_runtime_lanes_drops_resume_for_generic_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", RUNTIME_LANE_GENERIC)
+    monkeypatch.setenv("SECOND_BRAIN_GENERIC_PROVIDER", "openai-codex")
+    request = RuntimeRequest(prompt="continue", cwd=".", task_name="chat_turn", resume="sess-1")
+    captured: dict[str, str | None] = {}
+
+    monkeypatch.setattr(
+        lane_router,
+        "_resolve_lane_profiles",
+        lambda _request: [
+            RuntimeProfile(
+                key="primary-openai-codex",
+                provider="openai-codex",
+                model="gpt-5.5",
+            )
+        ],
+    )
+
+    class SuccessAdapter:
+        def supports(self, runtime_request: RuntimeRequest) -> bool:
+            captured["supports_resume"] = runtime_request.resume
+            return runtime_request.resume is None
+
+        async def run(self, runtime_request: RuntimeRequest) -> RuntimeResult:
+            captured["run_resume"] = runtime_request.resume
+            return RuntimeResult(
+                text="ok",
+                runtime_lane=RUNTIME_LANE_GENERIC,
+                provider="openai-codex",
+                model="gpt-5.5",
+            )
+
+    monkeypatch.setattr(lane_router, "_adapter_for", lambda _profile: SuccessAdapter())
+
+    result = await lane_router.run_with_runtime_lanes(request)
+
+    assert result.runtime_lane == RUNTIME_LANE_GENERIC
+    assert result.provider == "openai-codex"
+    assert captured == {"supports_resume": None, "run_resume": None}
+
+
+@pytest.mark.asyncio
+async def test_run_with_runtime_lanes_drops_resume_for_explicit_generic_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = RuntimeRequest(
+        prompt="continue",
+        cwd=".",
+        task_name="chat_turn",
+        resume="sess-1",
+        runtime_lane=RUNTIME_LANE_GENERIC,
+    )
+    captured: dict[str, str | None] = {}
+
+    monkeypatch.setattr(
+        lane_router,
+        "_resolve_lane_profiles",
+        lambda _request: [
+            RuntimeProfile(
+                key="primary-openai-codex",
+                provider="openai-codex",
+                model="gpt-5.5",
+            )
+        ],
+    )
+
+    class SuccessAdapter:
+        def supports(self, runtime_request: RuntimeRequest) -> bool:
+            captured["supports_resume"] = runtime_request.resume
+            return runtime_request.resume is None
+
+        async def run(self, runtime_request: RuntimeRequest) -> RuntimeResult:
+            captured["run_resume"] = runtime_request.resume
+            return RuntimeResult(
+                text="ok",
+                runtime_lane=RUNTIME_LANE_GENERIC,
+                provider="openai-codex",
+                model="gpt-5.5",
+            )
+
+    monkeypatch.setattr(lane_router, "_adapter_for", lambda _profile: SuccessAdapter())
+
+    result = await lane_router.run_with_runtime_lanes(request)
+
+    assert result.runtime_lane == RUNTIME_LANE_GENERIC
+    assert result.provider == "openai-codex"
+    assert captured == {"supports_resume": None, "run_resume": None}

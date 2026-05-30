@@ -19,7 +19,7 @@ from session_keys import build_session_key, resolve_thread_id
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from runtime.base import RuntimeRequest
+from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE, RuntimeRequest
 from runtime.bootstrap import build_second_brain_identity_context
 from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
 from runtime.errors import RuntimeExecutionError
@@ -1101,7 +1101,10 @@ class ConversationEngine:
                 print(f"[{datetime.now()}] [Continuity] Update failed (non-blocking): {e}")
 
         # Persist session metadata with runtime-neutral fields.
-        persisted_runtime_session_id = session_id_from_sdk or resume_session_id
+        if result.runtime_lane == RUNTIME_LANE_CLAUDE_NATIVE:
+            persisted_runtime_session_id = session_id_from_sdk or resume_session_id
+        else:
+            persisted_runtime_session_id = session_id_from_sdk or ""
         normalized_tool_calls = [asdict(tool_call) for tool_call in (result.tool_calls or [])]
         now = datetime.now()
         if existing:
