@@ -54,6 +54,13 @@ export interface FetchResult {
   json: () => unknown;
 }
 
+export interface FetchBinaryResult {
+  status: number;
+  ok: boolean;
+  headers: Headers;
+  body: ArrayBuffer;
+}
+
 /**
  * Authenticated fetch helper — adds Bearer header, never `?token=`.
  *
@@ -151,6 +158,36 @@ export async function authedFetchJson(
     ok: result.ok,
     json: result.json(),
     headers: result.headers,
+  };
+}
+
+/**
+ * Binary fetch helper — used for framework-owned image endpoints.
+ */
+export async function authedFetchBinary(
+  path: string,
+  options: FetchOptions = {},
+): Promise<FetchBinaryResult> {
+  const url = `${getFrameworkUrl()}${path}`;
+  const headers: Record<string, string> = {
+    ...(options.headers ?? {}),
+  };
+
+  const bearer = resolveBearerToken(options.token);
+  if (bearer) {
+    headers['Authorization'] = `Bearer ${bearer}`;
+  }
+
+  const resp = await fetch(url, {
+    method: options.method ?? 'GET',
+    headers,
+  });
+  const body = await resp.arrayBuffer();
+  return {
+    status: resp.status,
+    ok: resp.ok,
+    headers: resp.headers,
+    body,
   };
 }
 

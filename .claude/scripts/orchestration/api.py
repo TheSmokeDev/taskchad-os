@@ -32,7 +32,14 @@ from orchestration.models import (
     SendMessageInput,
 )
 from orchestration.observability import orchestration_span, update_observation
-from orchestration.team_loop import TeamLoopService, TeamTickService, result_to_dict, tick_result_to_dict
+from orchestration.team_drill import TaskChadTeamDrillService, taskchad_drill_result_to_dict
+from orchestration.team_executor import TeamExecutorService, executor_result_to_dict
+from orchestration.team_loop import (
+    TeamLoopService,
+    TeamTickService,
+    result_to_dict,
+    tick_result_to_dict,
+)
 from orchestration.team_service import TeamService
 
 logger = logging.getLogger(__name__)
@@ -245,6 +252,12 @@ class TeamPingBody(BaseModel):
     agent_id: str | None = None
 
 
+class TaskChadDrillBody(BaseModel):
+    target_url: str = "https://www.taskchad.com/"
+    use_runtime: bool = False
+    runtime_lane: str | None = None
+
+
 class TeamLoopStepBody(BaseModel):
     agent_id: str
     subtask_id: int | None = None
@@ -259,6 +272,19 @@ class TeamTickBody(BaseModel):
     use_runtime: bool = False
     runtime_lane: str | None = None
     complete_running: bool = False
+    execute_running: bool = False
+    executor_command: str = "git_status"
+    executor_cwd: str | None = None
+    complete_on_executor_success: bool = False
+
+
+class TeamExecutorStepBody(BaseModel):
+    agent_id: str
+    subtask_id: int | None = None
+    command_key: str = "git_status"
+    cwd: str | None = None
+    timeout_seconds: int | None = None
+    complete_on_success: bool = False
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────
@@ -707,6 +733,46 @@ def list_teams(request: Request, status: str | None = None):
         return [dataclasses.asdict(t) for t in teams]
 
 
+@app.post("/api/team/taskchad-drill")
+def run_taskchad_drill(request: Request, body: TaskChadDrillBody | None = None):
+    surface = _operator_surface(request)
+    payload_body = body or TaskChadDrillBody()
+    with orchestration_span(
+        "orchestration.api.taskchad_drill",
+        metadata={
+            "surface": surface,
+            "target_url": payload_body.target_url,
+            "use_runtime": payload_body.use_runtime,
+            "runtime_lane": payload_body.runtime_lane,
+        },
+        trace_metadata={"surface": surface, "feature_phase": 11},
+        expected_exceptions=(HTTPException,),
+    ):
+        try:
+            result = TaskChadTeamDrillService(_db).run_taskchad_drill(
+                target_url=payload_body.target_url,
+                use_runtime=payload_body.use_runtime,
+                runtime_lane=payload_body.runtime_lane,
+            )
+        except ValueError as e:
+            update_observation(
+                level="WARNING",
+                status_message=str(e),
+                metadata={"error_type": "taskchad_drill_validation"},
+            )
+            raise HTTPException(status_code=400, detail=str(e))
+        payload = taskchad_drill_result_to_dict(result)
+        update_observation(
+            metadata={
+                "team_id": payload["team_id"],
+                "convoy_id": payload["convoy_id"],
+                "role_turn_count": len(payload["role_turns"]),
+            },
+            output={"final_plan_chars": len(payload["final_plan"])},
+        )
+        return payload
+
+
 @app.get("/api/team/{team_id}")
 def get_team(team_id: int, request: Request):
     surface = _operator_surface(request)
@@ -879,6 +945,9 @@ def run_team_tick(team_id: int, request: Request, body: TeamTickBody | None = No
             "use_runtime": payload_body.use_runtime,
             "runtime_lane": payload_body.runtime_lane,
             "complete_running": payload_body.complete_running,
+            "execute_running": payload_body.execute_running,
+            "executor_command": payload_body.executor_command,
+            "complete_on_executor_success": payload_body.complete_on_executor_success,
         },
         trace_metadata={"surface": surface, "feature_phase": 9, "team_id": team_id},
         expected_exceptions=(HTTPException,),
@@ -890,6 +959,10 @@ def run_team_tick(team_id: int, request: Request, body: TeamTickBody | None = No
                 use_runtime=payload_body.use_runtime,
                 runtime_lane=payload_body.runtime_lane,
                 complete_running=payload_body.complete_running,
+                execute_running=payload_body.execute_running,
+                executor_command=payload_body.executor_command,
+                executor_cwd=payload_body.executor_cwd,
+                complete_on_executor_success=payload_body.complete_on_executor_success,
             )
         except ValueError as e:
             update_observation(
@@ -907,6 +980,53 @@ def run_team_tick(team_id: int, request: Request, body: TeamTickBody | None = No
                 "selected_action": payload["selected_action"],
                 "waited": payload["waited"],
                 "has_error": bool(payload["error"]),
+            }
+        )
+        return payload
+
+
+@app.post("/api/team/{team_id}/executor-step")
+def run_team_executor_step(team_id: int, request: Request, body: TeamExecutorStepBody):
+    surface = _operator_surface(request)
+    with orchestration_span(
+        "orchestration.api.team_executor_step",
+        metadata={
+            "surface": surface,
+            "team_id": team_id,
+            "agent_id": body.agent_id,
+            "subtask_id": body.subtask_id,
+            "command_key": body.command_key,
+            "complete_on_success": body.complete_on_success,
+        },
+        trace_metadata={"surface": surface, "feature_phase": 10, "team_id": team_id},
+        expected_exceptions=(HTTPException,),
+    ):
+        try:
+            result = TeamExecutorService(_db).run_executor_step(
+                team_id,
+                agent_id=body.agent_id,
+                subtask_id=body.subtask_id,
+                command_key=body.command_key,
+                cwd=body.cwd,
+                timeout_seconds=body.timeout_seconds,
+                complete_on_success=body.complete_on_success,
+            )
+        except ValueError as e:
+            update_observation(
+                level="WARNING",
+                status_message=str(e),
+                metadata={"error_type": "team_executor_validation"},
+            )
+            status = 404 if "not found" in str(e).lower() else 400
+            raise HTTPException(status_code=status, detail=str(e))
+        payload = executor_result_to_dict(result)
+        update_observation(
+            metadata={
+                "team_id": team_id,
+                "agent_id": payload["agent_id"],
+                "command_key": payload["command_key"],
+                "success": payload["success"],
+                "exit_code": payload["exit_code"],
             }
         )
         return payload

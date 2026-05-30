@@ -6,6 +6,7 @@ and assert the new capabilities and toolsets sections are rendered.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +23,71 @@ from cli import main  # noqa: E402
 
 
 class TestStatusHumanRender:
+    def test_status_json_contains_url_free_browser_envelope(self, monkeypatch):
+        from diagnostics import DiagnosticsReport
+
+        def _fake_report():
+            return DiagnosticsReport(
+                timestamp="2026-05-28T00:00:00",
+                uptime_seconds=0.0,
+                runtime_providers={"openai-codex": "ON"},
+                browser={
+                    "enabled": True,
+                    "status": "ready",
+                    "cdp_port": 9222,
+                    "cdp_reachable": True,
+                    "browser": "Chrome/126",
+                    "visible_guard": "visible",
+                    "tab_count": 3,
+                    "agent_browser_command_source": "path",
+                    "reason": "ready",
+                },
+            )
+
+        monkeypatch.setattr("diagnostics.collect_diagnostics", _fake_report)
+
+        result = CliRunner().invoke(main, ["status", "--json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["browser"]["status"] == "ready"
+        assert payload["browser"]["tab_count"] == 3
+        assert "https://" not in json.dumps(payload["browser"])
+        assert "tabs" not in payload["browser"]
+
+    def test_doctor_surfaces_browser_attention_without_failing(
+        self, monkeypatch,
+    ):
+        from diagnostics import DiagnosticsReport
+
+        def _fake_report():
+            return DiagnosticsReport(
+                timestamp="2026-05-28T00:00:00",
+                uptime_seconds=0.0,
+                runtime_providers={"openai-codex": "ON"},
+                memory_embedding_status="ready",
+                browser={
+                    "enabled": False,
+                    "status": "attention",
+                    "cdp_port": 9222,
+                    "cdp_reachable": False,
+                    "browser": "unknown",
+                    "visible_guard": "unknown",
+                    "tab_count": 0,
+                    "agent_browser_command_source": "path",
+                    "reason": "connection refused",
+                },
+            )
+
+        monkeypatch.setattr("diagnostics.check_environment", lambda: [])
+        monkeypatch.setattr("diagnostics.collect_diagnostics", _fake_report)
+
+        result = CliRunner().invoke(main, ["doctor"])
+
+        assert result.exit_code == 0
+        assert "Browser: attention" in result.output
+        assert "CDP: unreachable on 9222" in result.output
+
     def test_status_human_renders_capabilities_section(self):
         """``thehomie status`` (default mode) renders a "Capabilities"
         section header and at least one ``runtime.overlay.`` row.

@@ -59,6 +59,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 import config
@@ -85,11 +86,168 @@ if str(_CHAT_DIR) not in sys.path:
 # security/redact.py docstring). Wrap dynamic args (exception strings, paths,
 # tokens-in-URLs, JWTs in error bodies) so secrets get scrubbed before logs land.
 from security import redact as _redact_mod  # noqa: E402
+from browser_audit import append_browser_audit_record  # noqa: E402
+from browser_control import (  # noqa: E402
+    browser_stream_disable,
+    browser_stream_enable,
+    browser_viewer_status as collect_browser_viewer_status,
+    capture_browser_screenshot_png,
+    redact_text_urls,
+)
+from browser_workflows import (  # noqa: E402
+    get_browser_workflow,
+    require_browser_workflow_permission,
+)
 _redact = _redact_mod.redact
 
 # ── Router ───────────────────────────────────────────────────────────────
 
 router = APIRouter()
+
+
+# ── Browser Viewer (read-only) ───────────────────────────────────────────
+
+
+def _browser_viewer_audit(
+    *,
+    command: str,
+    workflow_id: str,
+    outcome: str,
+    reason: str,
+    status: dict[str, Any] | None = None,
+) -> None:
+    workflow = get_browser_workflow(workflow_id)
+    readiness = status.get("readiness", {}) if status else {}
+    append_browser_audit_record(
+        command=command,
+        workflow_id=workflow_id,
+        action=workflow.audit_action if workflow else None,
+        outcome=outcome,
+        reason=redact_text_urls(reason),
+        cdp_port=readiness.get("cdp_port") if isinstance(readiness, dict) else None,
+        cdp_reachable=readiness.get("cdp_reachable") if isinstance(readiness, dict) else None,
+        surface="dashboard",
+    )
+
+
+def _require_browser_viewer_workflow(workflow_id: str, command: str) -> None:
+    decision = require_browser_workflow_permission(workflow_id, command)
+    if decision.allowed:
+        return
+    _browser_viewer_audit(
+        command=command,
+        workflow_id=workflow_id,
+        outcome=decision.outcome,
+        reason=decision.reason,
+    )
+    raise HTTPException(status_code=403, detail=decision.reason)
+
+
+@router.get("/api/browser-viewer/status")
+def get_browser_viewer_status() -> dict[str, Any]:
+    command = "GET /api/browser-viewer/status"
+    workflow_id = "browser.viewer.status"
+    _require_browser_viewer_workflow(workflow_id, command)
+    status = collect_browser_viewer_status()
+    _browser_viewer_audit(
+        command=command,
+        workflow_id=workflow_id,
+        outcome="succeeded",
+        reason="status rendered",
+        status=status,
+    )
+    return status
+
+
+@router.get("/api/browser-viewer/screenshot")
+def get_browser_viewer_screenshot() -> Response:
+    command = "GET /api/browser-viewer/screenshot"
+    workflow_id = "browser.viewer.screenshot"
+    _require_browser_viewer_workflow(workflow_id, command)
+    status: dict[str, Any] | None = None
+    try:
+        content = capture_browser_screenshot_png()
+        status = collect_browser_viewer_status()
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason="screenshot captured",
+            status=status,
+        )
+    except Exception as exc:
+        reason = redact_text_urls(str(exc))
+        try:
+            status = collect_browser_viewer_status()
+        except Exception:
+            status = None
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=reason,
+            status=status,
+        )
+        raise HTTPException(status_code=503, detail=reason) from exc
+    return Response(
+        content=content,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/api/browser-viewer/stream/enable")
+def post_browser_viewer_stream_enable() -> dict[str, Any]:
+    command = "POST /api/browser-viewer/stream/enable"
+    workflow_id = "browser.viewer.stream_enable"
+    _require_browser_viewer_workflow(workflow_id, command)
+    try:
+        browser_stream_enable()
+        status = collect_browser_viewer_status()
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason="stream enabled",
+            status=status,
+        )
+        return status
+    except Exception as exc:
+        reason = redact_text_urls(str(exc))
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=reason,
+        )
+        raise HTTPException(status_code=503, detail=reason) from exc
+
+
+@router.post("/api/browser-viewer/stream/disable")
+def post_browser_viewer_stream_disable() -> dict[str, Any]:
+    command = "POST /api/browser-viewer/stream/disable"
+    workflow_id = "browser.viewer.stream_disable"
+    _require_browser_viewer_workflow(workflow_id, command)
+    try:
+        browser_stream_disable()
+        status = collect_browser_viewer_status()
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason="stream disabled",
+            status=status,
+        )
+        return status
+    except Exception as exc:
+        reason = redact_text_urls(str(exc))
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=reason,
+        )
+        raise HTTPException(status_code=503, detail=reason) from exc
 
 
 # ── Pydantic request bodies ──────────────────────────────────────────────

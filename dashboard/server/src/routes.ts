@@ -38,6 +38,12 @@ export const ROUTE_MANIFEST: readonly string[] = [
   // jarvis.ts
   '/api/jarvis/status',
 
+  // browser-viewer.ts — read-only visible CDP observer surface.
+  '/api/browser-viewer/status',
+  '/api/browser-viewer/screenshot',
+  '/api/browser-viewer/stream/enable',
+  '/api/browser-viewer/stream/disable',
+
   // agents.ts — list / create
   '/api/agents',
 
@@ -107,11 +113,13 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/mailbox/ack/:delivery_id',
   '/api/mailbox/convoy/:id',
   '/api/team',
+  '/api/team/taskchad-drill',
   '/api/team/:id',
   '/api/team/:id/members',
   '/api/team/:id/shutdown',
   '/api/team/:id/loop-step',
   '/api/team/:id/tick',
+  '/api/team/:id/executor-step',
   '/api/team/:id/memory',
   '/api/executor/callback',
 

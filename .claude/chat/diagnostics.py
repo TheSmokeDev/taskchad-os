@@ -54,6 +54,9 @@ class DiagnosticsReport:
     runtime_provider_details: dict[str, str] = field(default_factory=dict)
     runtime_auth_issues: dict[str, str] = field(default_factory=dict)
 
+    # Browser readiness
+    browser: dict[str, object] = field(default_factory=dict)
+
     # Sessions
     sessions_active: int = 0
     sessions_total_messages: int = 0
@@ -86,6 +89,7 @@ def collect_diagnostics() -> DiagnosticsReport:
     _check_recall(report)
     _check_memory_db(report)
     _check_runtime(report)
+    _check_browser(report)
     _check_sessions(report)
     _check_clear_lifecycle(report)
     _check_capabilities(report)
@@ -282,6 +286,27 @@ def _runtime_auth_issue(provider: str, detail: str) -> str | None:
         "`uv run thehomie doctor`. Detail: "
         + _short_detail(detail)
     )
+
+
+def _check_browser(report: DiagnosticsReport) -> None:
+    """Populate URL-free visible-browser readiness for operator surfaces."""
+
+    try:
+        from browser_control import browser_readiness
+
+        report.browser = browser_readiness()
+    except Exception as exc:
+        report.browser = {
+            "enabled": False,
+            "status": "attention",
+            "cdp_port": None,
+            "cdp_reachable": False,
+            "browser": "unknown",
+            "visible_guard": "unknown",
+            "tab_count": 0,
+            "agent_browser_command_source": "unknown",
+            "reason": _short_detail(str(exc)),
+        }
 
 
 def _check_sessions(report: DiagnosticsReport) -> None:

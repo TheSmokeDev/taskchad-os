@@ -54,9 +54,11 @@ class _RecordingEngine:
 
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.prefetched_contexts: list[str] = []
 
     async def handle_message(self, incoming: IncomingMessage, progress=None):
         self.messages.append(incoming.text)
+        self.prefetched_contexts.append(getattr(incoming, "prefetched_context", ""))
         yield OutgoingMessage(
             text="engine handled",
             channel=incoming.channel,
@@ -129,6 +131,27 @@ async def test_authorized_external_action_with_context_reaches_engine():
     await router._handle_inner(adapter, _incoming(text))
 
     assert engine.messages == [text]
+    assert adapter.sent[0].text == "Thinking..."
+    assert adapter.updates[-1].text == "engine handled"
+
+
+@pytest.mark.asyncio
+async def test_browserops_natural_language_prefetches_context_and_reaches_engine():
+    async def fake_browserops(adapter, incoming, args, *, collect_only=False):
+        assert collect_only is True
+        return "BrowserOps context loaded"
+
+    manager = _build_manager()
+    manager._commands["browserops"].handler = fake_browserops
+    engine = _RecordingEngine()
+    router = ChatRouter(engine, manager)
+    adapter = _RecordingAdapter()
+    text = "open up your browser and go to LinkedIn"
+
+    await router._handle_inner(adapter, _incoming(text))
+
+    assert engine.messages == [text]
+    assert "BrowserOps context loaded" in engine.prefetched_contexts[0]
     assert adapter.sent[0].text == "Thinking..."
     assert adapter.updates[-1].text == "engine handled"
 

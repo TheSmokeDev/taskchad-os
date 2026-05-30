@@ -202,6 +202,26 @@ class TestIntentDetection:
 
         assert detected == []
 
+    def test_browserops_intent_detects_browser_work(
+        self, populated_manager: ExtensionManager,
+    ):
+        detected = populated_manager.detect_intents(
+            "open up your browser and go to LinkedIn"
+        )
+
+        assert detected == ["browserops"]
+
+    def test_browserops_intent_can_prefetch_for_authorized_external_browser_work(
+        self, populated_manager: ExtensionManager,
+    ):
+        assert not populated_manager.requires_external_action_confirmation(
+            "post this to LinkedIn now"
+        )
+
+        assert populated_manager.detect_intents("post this to LinkedIn now") == [
+            "browserops"
+        ]
+
     def test_external_action_confirmation_gate(
         self, populated_manager: ExtensionManager,
     ):

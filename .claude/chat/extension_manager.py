@@ -493,15 +493,18 @@ class ExtensionManager:
         """
         text_lower = text.lower()
 
-        if self.is_discussion_only(text) or self.has_external_action_signal(text):
+        if self.is_discussion_only(text):
             return []
+        external_action = self.has_external_action_signal(text)
 
         # Broad status query → return all brief intents
-        if any(sig in text_lower for sig in self._broad_query_signals):
+        if not external_action and any(sig in text_lower for sig in self._broad_query_signals):
             return self.get_brief_intents()
 
         detected: list[str] = []
         for intent in self._intents:
+            if external_action and intent.command != "browserops":
+                continue
             if any(kw in text_lower for kw in intent.keywords):
                 if intent.command not in detected:
                     detected.append(intent.command)

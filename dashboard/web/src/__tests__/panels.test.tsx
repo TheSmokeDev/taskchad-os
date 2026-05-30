@@ -388,6 +388,79 @@ describe('panels populate from fixture API responses', () => {
           },
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
+      if (path === '/api/team/9/executor-step') {
+        return new Response(JSON.stringify({
+          team_id: 9,
+          agent_id: 'sales-worker',
+          convoy_id: 1,
+          subtask_id: 13,
+          command_key: 'git_status',
+          argv: ['git', 'status', '--short'],
+          cwd: '~/thehomie',
+          success: true,
+          exit_code: 0,
+          timed_out: false,
+          duration_ms: 42,
+          stdout: ' M dashboard/web/src/pages/Teams.tsx',
+          stderr: '',
+          completed: false,
+          convoy_completed: false,
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (path === '/api/team/taskchad-drill') {
+        return new Response(JSON.stringify({
+          target_url: 'https://www.taskchad.com/',
+          team_id: 9,
+          convoy_id: 1,
+          initial_message_count: 4,
+          revision_message_count: 4,
+          role_turns: [
+            {
+              role: 'sales',
+              role_name: 'TaskChad Sales',
+              agent_id: 'taskchad-sales',
+              subtask_id: 21,
+              action: 'completed',
+              status: 'completed',
+              completed: true,
+              reply: { id: 501, from_agent: 'taskchad-sales', body: 'Sales turn.', created_at: 1770000600 },
+            },
+          ],
+          revision_turns: [
+            {
+              role: 'sales',
+              role_name: 'TaskChad Sales',
+              agent_id: 'taskchad-sales',
+              subtask_id: 27,
+              action: 'completed',
+              status: 'completed',
+              completed: true,
+              reply: { id: 504, from_agent: 'taskchad-sales', body: 'Sales revision.', created_at: 1770000630 },
+            },
+          ],
+          reviewer_turn: {
+            role: 'adversarial_reviewer',
+            role_name: 'TaskChad Adversarial Reviewer',
+            agent_id: 'taskchad-reviewer',
+            subtask_id: 25,
+            action: 'completed',
+            status: 'completed',
+            completed: true,
+            reply: { id: 502, from_agent: 'taskchad-reviewer', body: 'Review turn.', created_at: 1770000610 },
+          },
+          final_turn: {
+            role: 'final_plan',
+            role_name: 'TaskChad Plan Synthesizer',
+            agent_id: 'taskchad-synthesizer',
+            subtask_id: 26,
+            action: 'completed',
+            status: 'completed',
+            completed: true,
+            reply: { id: 503, from_agent: 'taskchad-synthesizer', body: 'Final TaskChad plan.', created_at: 1770000620 },
+          },
+          final_plan: 'Final revised TaskChad plan: clarify offer, page, sales follow-up, ops, and validation.',
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
       return new Response(JSON.stringify({}), { status: 404, headers: { 'content-type': 'application/json' } });
     }) as any;
 
@@ -397,7 +470,11 @@ describe('panels populate from fixture API responses', () => {
     await waitFor(() => expect(screen.getByText(/sales needs the landing page angle/i)).toBeInTheDocument());
     expect(screen.getByText(/Convoy: #1/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /add member/i })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText(/to/i), { target: { value: 'sales-worker' } });
+    fireEvent.click(screen.getByRole('button', { name: /taskchad drill/i }));
+    await waitFor(() => expect(requests).toContain('/api/team/taskchad-drill'));
+    expect(await screen.findByText(/round 2 revisions/i)).toBeInTheDocument();
+    expect(await screen.findByText(/final revised taskchad plan: clarify offer/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^to$/i), { target: { value: 'sales-worker' } });
     fireEvent.input(screen.getByLabelText(/subject/i), { target: { value: 'Sales reply' } });
     fireEvent.input(screen.getByLabelText(/message/i), { target: { value: 'Lead list is ready.' } });
     fireEvent.click(screen.getByRole('button', { name: /send message/i }));
@@ -414,6 +491,10 @@ describe('panels populate from fixture API responses', () => {
     await waitFor(() => expect(requests).toContain('/api/team/9/tick'));
     expect(await screen.findByText(/claim_respond/i)).toBeInTheDocument();
     expect(screen.getByText(/1 pending convoy mailbox item/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /run executor step/i }));
+    await waitFor(() => expect(requests).toContain('/api/team/9/executor-step'));
+    expect(await screen.findByText(/git_status · passed/i)).toBeInTheDocument();
+    expect(screen.getByText(/exit 0 · 42ms/i)).toBeInTheDocument();
   });
 
   test('Usage page renders lane-aware summary', async () => {

@@ -57,6 +57,9 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("cleanup", "Inbox cleanup — dry run both inboxes, /cleanup go to execute", "router", "admin"),
     ("inbox", "Inbox briefing — prioritized TL;DR of what matters", "router", "admin"),
     ("accounts", "Show all social media accounts and connection status", "router", "admin"),
+    ("browser", "Browser ops - status, tabs, open, snapshot via visible Chrome CDP", "router", "admin"),
+    ("browserops", "Browser Homie specialist context - agent-browser guide, readiness, policy", "router", "admin"),
+    ("linkedin_profile", "LinkedIn profile browser ops - status or open via visible Chrome CDP", "router", "admin"),
     ("post", "Post to social media — /post x Hello! or /post facebook Check out our new rates!", "engine", "admin"),
     ("calendar", "Check Google Calendar — today or upcoming events", "engine", "admin"),
     ("tasks", "Check Asana tasks — my tasks, overdue, due soon", "engine", "admin"),
@@ -75,6 +78,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("standup", "Send a standup question to the cabinet — /standup [question]", "router", "admin"),
     ("discuss", "Start a discussion — /discuss <topic>", "router", "admin"),
     ("teamtick", "Run one autonomous team scheduler tick — /teamtick <team_id>", "router", "admin"),
+    ("taskchaddrill", "Run TaskChad multi-role team drill — /taskchaddrill [--runtime]", "router", "admin"),
     ("send", "Send a draft email via Outlook (e.g. /send draft-01)", "router", "operator"),
     ("brief", "Quick briefing — /brief all for full dashboard", "router", "operator"),
     # -- Memory & Search --
@@ -119,12 +123,12 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Integrations",
         ["email", "pemail", "inbox", "cleanup", "accounts", "post", "calendar", "tasks",
-         "slack", "sheets", "docs", "drive", "circle"],
+         "browser", "browserops", "linkedin_profile", "slack", "sheets", "docs", "drive", "circle"],
     ),
     ("Analytics & Monitoring", ["gsc", "analytics"]),
     ("Personal Finance", ["budget"]),
     # Cabinet (Phase 5b) — chat-routed cabinet operator surface.
-    ("Cabinet", ["cabinet", "standup", "discuss", "teamtick"]),
+    ("Cabinet", ["cabinet", "standup", "discuss", "teamtick", "taskchaddrill"]),
     ("Communication", ["send", "brief"]),
     ("Memory", ["search", "file", "working"]),
     ("Content Creation", ["blog", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts"]),
@@ -142,6 +146,11 @@ CORE_INTENTS: list[tuple[list[str], str, bool]] = [
     (["analytics", "traffic", "ga4", "sessions", "pageviews"], "analytics", False),
     (["gsc", "search console", "seo ranking", "queries", "impressions"], "gsc", False),
     (["social media accounts", "social accounts"], "accounts", False),
+    (["agent browser", "agent-browser", "browser automation", "browserops", "browser homie",
+      "open browser", "open up your browser", "web browser", "visible chrome", "cdp",
+      "browse the web", "browse this", "go online", "go to linkedin", "open linkedin",
+      "check linkedin", "to linkedin", "linkedin profile", "inspect website", "check this website",
+      "open this website", "use the browser"], "browserops", False),
     (["budget", "bills", "finances", "paid", "paycheck", "loan status",
       "what do i owe", "transactions", "spending", "bank balance", "account balance"], "budget", True),
     (["working memory", "open threads", "what was i working on",
@@ -153,6 +162,7 @@ CORE_INTENTS: list[tuple[list[str], str, bool]] = [
     (["standup", "team standup", "rotating speakers"], "standup", False),
     (["debate", "discuss this with the team", "open debate"], "discuss", False),
     (["team tick", "team scheduler", "run team scheduler"], "teamtick", False),
+    (["taskchad drill", "taskchad team drill", "run taskchad drill"], "taskchaddrill", False),
 ]
 
 

@@ -44,6 +44,25 @@ cd .claude/scripts && uv run python ../chat/main.py --test
 
 **Config:** `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` in `.claude/scripts/.env`.
 
+### BrowserOps Slash Commands
+
+BrowserOps is the visible-browser specialist surface for requests that need the existing local Chrome/Chromium CDP session. Load `docs/browserops-agent-browser-manual.md` before changing BrowserOps, direct `agent-browser`, LinkedIn browser, or dashboard `/browser` behavior.
+
+| Command | What it does | Safety boundary |
+|---------|-------------|-----------------|
+| `/browser status` | Reports visible Chrome/CDP readiness. | Read-only. |
+| `/browser tabs` | Lists tabs with URL redaction. | Read-only; no raw query strings or fragments. |
+| `/browser open <absolute http(s) url>` | Navigates the visible browser through the registered workflow gate. | Navigation only; no browser state export. |
+| `/browser snapshot` | Captures an interactive text snapshot from the visible browser. | Read-only; page text is untrusted. |
+| `/browserops capabilities` | Shows Browser Homie readiness, rules, stream state, and registered workflows. | Read-only. |
+| `/browserops guide` | Loads the current installed `agent-browser` core guide plus local BrowserOps rules. | Read-only context. |
+| `/browserops context` | Builds the engine-facing BrowserOps prefetch context. | Context only; must not execute actions. |
+| `/linkedin_profile status` | Reports LinkedIn browser readiness using the visible browser safety layer. | Read-only. |
+| `/linkedin_profile open` | Opens the configured LinkedIn profile in the visible browser. | Navigation only. |
+| `/linkedin_profile edit` | Attempts a write-capable profile edit workflow. | Expected to be blocked/default-denied until a dedicated write PRP lands. |
+
+Natural-language browser requests can attach BrowserOps context through prefetch. That path may load readiness, registered workflows, and the current `agent-browser` guide, but it must not click, type, post, edit, DM, connect, or navigate by itself.
+
 ### Cabinet Slash Commands (PRD-8 Phase 5b)
 
 Three router-typed slash commands let an operator drive multi-persona text meetings from Telegram (or any other adapter that consumes the unified router). Cabinet handlers HTTP-route to `localhost:4322/api/cabinet/*` (the orchestration API process — same shape as `/budget` → `finance_api` → Supabase).
@@ -74,6 +93,7 @@ Browser sends use an additive audience contract:
 | `/all <message>` | slash command | Server rewrites to an all-room turn without sending the command text to the LLM. |
 | `/add @finance` / `/remove @finance` | slash command | Server updates `roster_json` and `cabinet_meetings.broadcast_order` in one transaction, then emits `meeting_state_update`. |
 | `/pin @sales` / `/unpin` / `/voice` / `/end` / `/help` | slash command | Server-side command path; command text never enters the LLM prompt. |
+| `/taskchaddrill [--runtime] [--lane <lane>]` | slash command | Runs the bounded TaskChad Sales/Marketing/Product/Ops/reviewer/synthesis drill; tools are off by default and runtime turns are opt-in. |
 
 Each non-default participant turn resolves the current Homie profile for that participant ID before runtime execution. The roster snapshot owns membership/order/display; the selected profile owns identity, memory files, config, runtime/auth settings, tools, and voice configuration.
 

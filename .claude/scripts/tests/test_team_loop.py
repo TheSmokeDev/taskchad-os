@@ -282,7 +282,22 @@ def test_teamtick_chat_command_is_registered_and_parses_options():
         "use_runtime": True,
         "runtime_lane": "generic_runtime",
         "complete_running": True,
+        "execute_running": False,
+        "executor_command": "git_status",
+        "executor_cwd": None,
+        "complete_on_executor_success": False,
     }
+
+    parsed = _parse_teamtick_args(
+        "9 --agent sales-worker --execute-running --command git_status --complete-on-success"
+    )
+    assert not isinstance(parsed, str)
+    team_id, opts = parsed
+    assert team_id == 9
+    assert opts["agent_id"] == "sales-worker"
+    assert opts["execute_running"] is True
+    assert opts["executor_command"] == "git_status"
+    assert opts["complete_on_executor_success"] is True
 
     reply = _format_team_tick_reply(
         SimpleNamespace(
@@ -304,6 +319,26 @@ def test_teamtick_chat_command_is_registered_and_parses_options():
     assert "Action: `claim_respond`" in reply
     assert "Agent: `sales_worker`" in reply
     assert "Step: `mailbox_reply`; claimed 1; status `running`" in reply
+
+    executor_reply = _format_team_tick_reply(
+        SimpleNamespace(
+            team_id=9,
+            selected_action="executor_step",
+            agent_id="sales_worker",
+            subtask_id=12,
+            reason="subtask #12 is running and executor policy is enabled",
+            error=None,
+            waited=False,
+            step=None,
+            executor=SimpleNamespace(
+                command_key="git_status",
+                exit_code=0,
+                success=True,
+            ),
+        )
+    )
+    assert "Action: `executor_step`" in executor_reply
+    assert "Executor: `git_status`; exit `0`; success `True`" in executor_reply
 
 
 @pytest.fixture

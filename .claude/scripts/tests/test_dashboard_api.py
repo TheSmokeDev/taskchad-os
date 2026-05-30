@@ -240,6 +240,135 @@ def test_get_health_response_has_no_secrets_or_pii(isolated_app):
         assert needle not in body_text, f"health leaked '{needle}': {body_text}"
 
 
+# ── /api/browser-viewer ─────────────────────────────────────────────────
+
+
+def _browser_viewer_payload() -> dict:
+    return {
+        "mode": "read_only",
+        "readiness": {
+            "status": "ready",
+            "cdp_port": 9222,
+            "cdp_reachable": True,
+            "browser": "Chrome/126",
+            "visible_guard": "visible",
+            "tab_count": 2,
+            "reason": "ready",
+        },
+        "stream": {
+            "enabled": True,
+            "connected": True,
+            "port": 31137,
+            "screencasting": False,
+            "reason": "ready",
+        },
+        "controls": {
+            "browser_input": False,
+            "navigation": False,
+        },
+    }
+
+
+def test_browser_viewer_status_is_read_only_and_audited(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits: list[dict] = []
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
+    monkeypatch.setattr(
+        dashboard_api,
+        "append_browser_audit_record",
+        lambda **kwargs: audits.append(kwargs) or {},
+    )
+
+    r = isolated_app.get("/api/browser-viewer/status")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "read_only"
+    assert body["controls"] == {"browser_input": False, "navigation": False}
+    assert "direct_ws_url" not in body["stream"]
+    assert audits[0]["workflow_id"] == "browser.viewer.status"
+    assert audits[0]["action"] == "browser_viewer_status"
+    assert audits[0]["surface"] == "dashboard"
+    assert audits[0]["cdp_port"] == 9222
+    assert audits[0]["cdp_reachable"] is True
+
+
+def test_browser_viewer_screenshot_returns_png_no_store(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits: list[dict] = []
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
+    monkeypatch.setattr(
+        dashboard_api,
+        "capture_browser_screenshot_png",
+        lambda: b"\x89PNG\r\n\x1a\nviewer",
+    )
+    monkeypatch.setattr(
+        dashboard_api,
+        "append_browser_audit_record",
+        lambda **kwargs: audits.append(kwargs) or {},
+    )
+
+    r = isolated_app.get("/api/browser-viewer/screenshot")
+
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.headers["cache-control"] == "no-store"
+    assert r.content.startswith(b"\x89PNG\r\n\x1a\n")
+    assert audits[0]["workflow_id"] == "browser.viewer.screenshot"
+    assert audits[0]["outcome"] == "succeeded"
+
+
+def test_browser_viewer_stream_enable_uses_read_only_workflow(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits: list[dict] = []
+    enabled: list[bool] = []
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
+    monkeypatch.setattr(dashboard_api, "browser_stream_enable", lambda: enabled.append(True))
+    monkeypatch.setattr(
+        dashboard_api,
+        "append_browser_audit_record",
+        lambda **kwargs: audits.append(kwargs) or {},
+    )
+
+    r = isolated_app.post("/api/browser-viewer/stream/enable")
+
+    assert r.status_code == 200
+    assert enabled == [True]
+    assert r.json()["controls"] == {"browser_input": False, "navigation": False}
+    assert audits[0]["workflow_id"] == "browser.viewer.stream_enable"
+    assert audits[0]["action"] == "browser_viewer_stream_enable"
+
+
+def test_browser_viewer_error_redacts_urls(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits: list[dict] = []
+
+    def fail_screenshot():
+        raise RuntimeError("failed at https://example.com/path?token=secret#frag")
+
+    monkeypatch.setattr(dashboard_api, "capture_browser_screenshot_png", fail_screenshot)
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
+    monkeypatch.setattr(
+        dashboard_api,
+        "append_browser_audit_record",
+        lambda **kwargs: audits.append(kwargs) or {},
+    )
+
+    r = isolated_app.get("/api/browser-viewer/screenshot")
+
+    assert r.status_code == 503
+    body = r.text
+    assert "https://example.com/path" in body
+    assert "secret" not in body
+    assert "#frag" not in body
+    assert audits[0]["outcome"] == "failed"
+    assert audits[0]["reason"] == "failed at https://example.com/path"
+
+
 # ── /api/info ────────────────────────────────────────────────────────────
 
 

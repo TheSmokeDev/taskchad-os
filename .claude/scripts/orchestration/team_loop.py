@@ -18,6 +18,11 @@ from orchestration.db import OrchestrationDB
 from orchestration.mailbox_service import MailboxService
 from orchestration.models import AgentMessage, MessageWithDeliveries, SendMessageInput, Subtask
 from orchestration.observability import orchestration_span, update_observation
+from orchestration.team_executor import (
+    TeamExecutorService,
+    TeamExecutorStepResult,
+    executor_result_to_dict,
+)
 from orchestration.team_service import TeamService
 from runtime.base import RuntimeResult
 from runtime.capabilities import TEXT_REASONING
@@ -51,6 +56,7 @@ class TeamTickResult:
     convoy_id: int | None = None
     subtask_id: int | None = None
     step: TeamLoopStepResult | None = None
+    executor: TeamExecutorStepResult | None = None
     waited: bool = False
     error: str | None = None
 
@@ -389,12 +395,18 @@ class TeamLoopService:
 class TeamTickService:
     """Select and run at most one bounded team action."""
 
-    def __init__(self, db: OrchestrationDB):
+    def __init__(
+        self,
+        db: OrchestrationDB,
+        *,
+        executor_svc: TeamExecutorService | None = None,
+    ):
         self.db = db
         self.team_svc = TeamService(db)
         self.mailbox_svc = MailboxService(db)
         self.convoy_svc = ConvoyService(db)
         self.loop_svc = TeamLoopService(db)
+        self.executor_svc = executor_svc or TeamExecutorService(db)
 
     def run_team_tick(
         self,
@@ -404,6 +416,10 @@ class TeamTickService:
         use_runtime: bool = False,
         runtime_lane: str | None = None,
         complete_running: bool = False,
+        execute_running: bool = False,
+        executor_command: str = "git_status",
+        executor_cwd: str | None = None,
+        complete_on_executor_success: bool = False,
         workspace_id: int = DEFAULT_WORKSPACE_ID,
     ) -> TeamTickResult:
         """Choose one claim/respond/advance/complete action, or wait."""
@@ -415,6 +431,9 @@ class TeamTickService:
                 "use_runtime": use_runtime,
                 "runtime_lane": runtime_lane,
                 "complete_running": complete_running,
+                "execute_running": execute_running,
+                "executor_command": executor_command,
+                "complete_on_executor_success": complete_on_executor_success,
             },
             trace_metadata={"feature_phase": 9, "team_id": team_id},
             expected_exceptions=(ValueError,),
@@ -484,6 +503,18 @@ class TeamTickService:
             for member in members:
                 subtask = self._member_subtask(member.subtask_id, workspace_id)
                 if subtask and subtask.convoy_id == team.session.convoy_id and subtask.status == "running":
+                    if execute_running:
+                        return self._run_executor_selected(
+                            reason=f"subtask #{subtask.id} is running and executor policy is enabled",
+                            team_id=team_id,
+                            member_agent_id=member.agent_id,
+                            subtask_id=subtask.id,
+                            convoy_id=team.session.convoy_id,
+                            command_key=executor_command,
+                            cwd=executor_cwd,
+                            complete_on_success=complete_on_executor_success,
+                            workspace_id=workspace_id,
+                        )
                     if not complete_running:
                         return self._wait(
                             team_id=team_id,
@@ -566,6 +597,61 @@ class TeamTickService:
             step=step,
         )
 
+    def _run_executor_selected(
+        self,
+        *,
+        reason: str,
+        team_id: int,
+        member_agent_id: str,
+        subtask_id: int,
+        convoy_id: int,
+        command_key: str,
+        cwd: str | None,
+        complete_on_success: bool,
+        workspace_id: int,
+    ) -> TeamTickResult:
+        try:
+            executor = self.executor_svc.run_executor_step(
+                team_id,
+                agent_id=member_agent_id,
+                subtask_id=subtask_id,
+                command_key=command_key,
+                cwd=cwd,
+                complete_on_success=complete_on_success,
+                workspace_id=workspace_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - tick results must stay bounded.
+            update_observation(
+                level="WARNING",
+                status_message=str(exc),
+                metadata={
+                    "team_id": team_id,
+                    "agent_id": member_agent_id,
+                    "subtask_id": subtask_id,
+                    "selected_action": "executor_step",
+                    "executor_command": command_key,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return TeamTickResult(
+                team_id=team_id,
+                selected_action="executor_step",
+                reason=reason,
+                agent_id=member_agent_id,
+                convoy_id=convoy_id,
+                subtask_id=subtask_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return TeamTickResult(
+            team_id=team_id,
+            selected_action="executor_step",
+            reason=reason,
+            agent_id=member_agent_id,
+            convoy_id=convoy_id,
+            subtask_id=subtask_id,
+            executor=executor,
+        )
+
     def _wait(
         self,
         *,
@@ -642,6 +728,7 @@ def tick_result_to_dict(result: TeamTickResult) -> dict:
         "convoy_id": result.convoy_id,
         "subtask_id": result.subtask_id,
         "step": result_to_dict(result.step) if result.step else None,
+        "executor": executor_result_to_dict(result.executor) if result.executor else None,
         "waited": result.waited,
         "error": result.error,
     }

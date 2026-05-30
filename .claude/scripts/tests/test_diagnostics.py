@@ -110,6 +110,53 @@ class TestDiagnosticsReport:
         assert isinstance(report.runtime_lanes, dict)
         assert isinstance(report.runtime_providers, dict)
 
+    def test_collect_diagnostics_includes_url_free_browser_readiness(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import browser_control
+
+        monkeypatch.setattr(
+            browser_control,
+            "resolve_agent_browser_command",
+            lambda: browser_control.AgentBrowserResolution(("agent-browser",), "path"),
+        )
+        monkeypatch.setattr(
+            browser_control,
+            "get_cdp_version",
+            lambda _port: {
+                "reachable": True,
+                "port": 9222,
+                "browser": "Chrome/126",
+            },
+        )
+        monkeypatch.setattr(
+            browser_control,
+            "chrome_visibility_guard",
+            lambda _port: {"status": "visible", "ok": True, "detail": "visible"},
+        )
+        monkeypatch.setattr(
+            browser_control,
+            "list_cdp_tabs",
+            lambda _port: {
+                "reachable": True,
+                "tabs": [
+                    {
+                        "title": "Sensitive",
+                        "url": "https://www.linkedin.com/feed/?token=secret#top",
+                    }
+                ],
+            },
+        )
+
+        report = collect_diagnostics()
+
+        assert report.browser["enabled"] is True
+        assert report.browser["cdp_reachable"] is True
+        assert report.browser["tab_count"] == 1
+        serialized = json.dumps(report.browser)
+        assert "https://www.linkedin.com" not in serialized
+        assert "token=secret" not in serialized
+
     def test_collect_diagnostics_reports_codex_stale_auth(
         self, monkeypatch: pytest.MonkeyPatch,
     ):

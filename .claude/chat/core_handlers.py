@@ -585,6 +585,611 @@ async def handle_accounts(adapter: Any, incoming: Any, args: str, *, collect_onl
         return f"Error loading accounts: {e}"
 
 
+def _browser_actor_surface(adapter: Any, incoming: Any) -> str:
+    from browser_audit import normalize_surface
+
+    platform = getattr(incoming, "platform", None) or getattr(adapter, "platform", None)
+    value = getattr(platform, "value", None) or str(platform or "")
+    return normalize_surface(value)
+
+
+def _browser_session_id(incoming: Any) -> str | None:
+    if incoming is None:
+        return None
+    try:
+        platform = getattr(incoming.platform, "value", str(incoming.platform))
+        channel_id = incoming.channel.platform_id
+        thread_id = resolve_thread_id(
+            channel_id,
+            incoming.thread.thread_id if incoming.thread else None,
+        )
+        return build_session_key(platform, channel_id, thread_id)
+    except Exception:
+        return None
+
+
+def _audit_browser_action(
+    *,
+    adapter: Any,
+    incoming: Any,
+    command: str,
+    workflow_id: str | None,
+    outcome: str,
+    reason: str = "",
+    readiness: dict[str, Any] | None = None,
+    cdp_port: int | None = None,
+    target_url: str | None = None,
+) -> None:
+    from browser_audit import append_browser_audit_record
+    from browser_workflows import get_browser_workflow
+
+    workflow = get_browser_workflow(workflow_id) if workflow_id else None
+    append_browser_audit_record(
+        command=command,
+        workflow_id=workflow_id,
+        action=workflow.audit_action if workflow else None,
+        outcome=outcome,
+        reason=reason,
+        cdp_port=cdp_port if cdp_port is not None else (readiness or {}).get("cdp_port"),
+        cdp_reachable=(readiness or {}).get("cdp_reachable"),
+        surface=_browser_actor_surface(adapter, incoming),
+        session_id=_browser_session_id(incoming),
+        target_url=target_url,
+    )
+
+
+def _format_browser_blocked(decision: Any) -> str:
+    return (
+        "Browser workflow blocked.\n"
+        f"  workflow: {decision.workflow_id}\n"
+        f"  reason: {decision.reason}\n"
+        f"  next: {decision.next_action}"
+    )
+
+
+async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Framework-owned browser automation checks over visible Chrome CDP."""
+
+    from browser_control import (
+        browser_readiness,
+        browser_status,
+        format_browser_status,
+        format_tabs,
+        list_cdp_tabs,
+        redact_text_urls,
+        redact_url,
+        resolve_cdp_port,
+        run_agent_browser,
+    )
+    from browser_workflows import require_browser_workflow_permission
+
+    raw = (args or "").strip()
+    if not raw or raw.lower() in {"help", "-h", "--help"}:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser help",
+            workflow_id=None,
+            outcome="succeeded",
+            reason="help displayed",
+        )
+        return (
+            "*Browser Commands*\n"
+            "  /browser status\n"
+            "  /browser tabs\n"
+            "  /browser open <url>\n"
+            "  /browser snapshot\n"
+            "  /browser capabilities\n"
+            "  /browser guide\n\n"
+            "Uses the persistent visible Chrome/Chromium CDP session. "
+            "No headless/test browser fallback."
+        )
+
+    try:
+        parts = shlex.split(raw)
+    except ValueError as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser",
+            workflow_id=None,
+            outcome="failed",
+            reason=f"command parse error: {exc}",
+        )
+        return f"Browser command parse error: {exc}"
+    subcommand = parts[0].lower()
+    rest = parts[1:]
+
+    if subcommand in {"capabilities", "guide", "context", "specialist", "ops", "browserops"}:
+        delegated = "capabilities" if subcommand in {"ops", "browserops", "specialist"} else subcommand
+        return await handle_browserops(adapter, incoming, delegated, collect_only=collect_only)
+
+    try:
+        port = resolve_cdp_port()
+    except ValueError as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/browser {subcommand}",
+            workflow_id=None,
+            outcome="failed",
+            reason=str(exc),
+        )
+        return f"Browser config error: {exc}"
+
+    readiness = browser_readiness(port=port)
+
+    if subcommand == "status":
+        workflow_id = "browser.status"
+        decision = require_browser_workflow_permission(workflow_id, raw)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser status",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        output = format_browser_status(browser_status(port=port))
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser status",
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason="status rendered",
+            readiness=readiness,
+        )
+        return output
+
+    if subcommand == "tabs":
+        workflow_id = "browser.tabs"
+        decision = require_browser_workflow_permission(workflow_id, raw)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser tabs",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        tabs = list_cdp_tabs(port)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser tabs",
+            workflow_id=workflow_id,
+            outcome="succeeded" if tabs.get("reachable") else "failed",
+            reason=str(tabs.get("error") or "tabs rendered"),
+            readiness=readiness,
+        )
+        return format_tabs(tabs)
+
+    if subcommand == "open":
+        workflow_id = "browser.open"
+        if not rest:
+            decision = require_browser_workflow_permission(workflow_id, raw)
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/browser open",
+                workflow_id=workflow_id,
+                outcome=decision.outcome,
+                reason=decision.reason,
+                readiness=readiness,
+            )
+            return _format_browser_blocked(decision)
+        url = rest[0]
+        decision = require_browser_workflow_permission(workflow_id, raw, target_url=url)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser open",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+            target_url=url,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        try:
+            result = run_agent_browser(["open", url], port=port)
+        except Exception as exc:
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/browser open",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason=str(exc),
+                readiness=readiness,
+                target_url=url,
+            )
+            return f"Browser open failed: {redact_text_urls(str(exc))}"
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser open",
+            workflow_id=workflow_id,
+            outcome="succeeded" if result.ok else "failed",
+            reason=result.output[:1200] if not result.ok else "opened",
+            readiness=readiness,
+            target_url=url,
+        )
+        if result.ok:
+            return f"Opened in visible browser: {redact_url(url)}"
+        return (
+            "Browser open failed.\n"
+            f"  command: {redact_text_urls(result.command_label)}\n"
+            f"  exit: {result.returncode}\n"
+            f"  output: {redact_text_urls(result.output[:1200]) or '(no output)'}"
+        )
+
+    if subcommand == "snapshot":
+        workflow_id = "browser.snapshot"
+        decision = require_browser_workflow_permission(workflow_id, raw)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser snapshot",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        try:
+            result = run_agent_browser(["snapshot", "-i", "-c"], port=port)
+        except Exception as exc:
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/browser snapshot",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason=str(exc),
+                readiness=readiness,
+            )
+            return f"Browser snapshot failed: {redact_text_urls(str(exc))}"
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser snapshot",
+            workflow_id=workflow_id,
+            outcome="succeeded" if result.ok else "failed",
+            reason=result.output[:1200] if not result.ok else "snapshot completed",
+            readiness=readiness,
+        )
+        if result.ok:
+            return redact_text_urls(result.output[:4000]) or "Snapshot completed with no output."
+        return (
+            "Browser snapshot failed.\n"
+            f"  command: {redact_text_urls(result.command_label)}\n"
+            f"  exit: {result.returncode}\n"
+            f"  output: {redact_text_urls(result.output[:1200]) or '(no output)'}"
+        )
+
+    _audit_browser_action(
+        adapter=adapter,
+        incoming=incoming,
+        command=f"/browser {subcommand}",
+        workflow_id=None,
+        outcome="failed",
+        reason="unknown browser command",
+        readiness=readiness,
+    )
+    return "Unknown browser command. Use: /browser status, tabs, open <url>, snapshot"
+
+
+async def handle_browserops(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
+    """Load Browser Homie context and agent-browser best practices on demand."""
+
+    from browser_control import browser_readiness
+    from browser_ops import (
+        build_browserops_capability_pack,
+        build_browserops_prefetch_context,
+        format_browserops_capabilities,
+        format_browserops_guide,
+    )
+    from browser_workflows import require_browser_workflow_permission
+
+    raw = (args or "").strip()
+    subcommand = raw.lower().split()[0] if raw else ("context" if collect_only else "capabilities")
+    if subcommand in {"status", "capability", "capabilities", "specialist"}:
+        workflow_id = "browserops.capabilities"
+        decision = require_browser_workflow_permission(workflow_id, raw or "capabilities")
+        readiness = browser_readiness()
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browserops capabilities",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        pack = build_browserops_capability_pack(raw, include_core_guide=False)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browserops capabilities",
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason="capabilities rendered",
+            readiness=pack.get("readiness"),
+        )
+        return format_browserops_capabilities(pack)
+
+    if subcommand == "guide":
+        workflow_id = "browserops.guide"
+        decision = require_browser_workflow_permission(workflow_id, raw)
+        readiness = browser_readiness()
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browserops guide",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        pack = build_browserops_capability_pack(raw, include_core_guide=True)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browserops guide",
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason=str(pack.get("guide", {}).get("reason") or "guide rendered"),
+            readiness=pack.get("readiness"),
+        )
+        return format_browserops_guide(pack)
+
+    if subcommand in {"context", "prefetch"}:
+        workflow_id = "browserops.context"
+        decision = require_browser_workflow_permission(workflow_id, raw)
+        readiness = browser_readiness()
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browserops context",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        context = build_browserops_prefetch_context(raw)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browserops context",
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason="context rendered",
+            readiness=readiness,
+        )
+        return context
+
+    _audit_browser_action(
+        adapter=adapter,
+        incoming=incoming,
+        command=f"/browserops {subcommand}",
+        workflow_id=None,
+        outcome="failed",
+        reason="unknown browserops command",
+    )
+    return "Unknown BrowserOps command. Use: /browserops capabilities, guide, or context"
+
+
+async def handle_linkedin_profile(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
+    """LinkedIn-specific wrapper over the shared browser helper."""
+
+    from browser_control import (
+        browser_readiness,
+        browser_status,
+        format_browser_status,
+        redact_text_urls,
+        redact_url,
+        resolve_cdp_port,
+        resolve_linkedin_profile_url,
+        run_agent_browser,
+    )
+    from browser_workflows import require_browser_workflow_permission
+
+    raw = (args or "status").strip()
+    try:
+        parts = shlex.split(raw)
+    except ValueError as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/linkedin_profile",
+            workflow_id=None,
+            outcome="failed",
+            reason=f"command parse error: {exc}",
+        )
+        return f"LinkedIn profile command parse error: {exc}"
+    subcommand = parts[0].lower() if parts else "status"
+    try:
+        port = resolve_cdp_port(
+            env_names=(
+                "HOMIE_LINKEDIN_CDP_PORT",
+                "LINKEDIN_BROWSER_CDP_PORT",
+                "HOMIE_BROWSER_CDP_PORT",
+                "AGENT_BROWSER_CDP_PORT",
+            )
+        )
+    except ValueError as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/linkedin_profile {subcommand}",
+            workflow_id=None,
+            outcome="failed",
+            reason=str(exc),
+        )
+        return f"LinkedIn browser config error: {exc}"
+
+    readiness = browser_readiness(port=port)
+
+    if subcommand in {"", "status"}:
+        workflow_id = "browser.status"
+        decision = require_browser_workflow_permission(workflow_id, raw)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/linkedin_profile status",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        output = format_browser_status(browser_status(port=port), label="LinkedIn Browser")
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/linkedin_profile status",
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason="status rendered",
+            readiness=readiness,
+        )
+        return output
+
+    if subcommand == "open":
+        workflow_id = "linkedin.profile.open"
+        url = resolve_linkedin_profile_url()
+        if not url:
+            reason = "LinkedIn profile URL is not configured."
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/linkedin_profile open",
+                workflow_id=workflow_id,
+                outcome="blocked",
+                reason=reason,
+                readiness=readiness,
+            )
+            return (
+                f"{reason} Set HOMIE_LINKEDIN_PROFILE_URL or LINKEDIN_PROFILE_URL, "
+                "then retry."
+            )
+        decision = require_browser_workflow_permission(workflow_id, raw, target_url=url)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/linkedin_profile open",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+            target_url=url,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        try:
+            result = run_agent_browser(["open", url], port=port)
+        except Exception as exc:
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/linkedin_profile open",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason=str(exc),
+                readiness=readiness,
+                target_url=url,
+            )
+            return f"LinkedIn profile open failed: {redact_text_urls(str(exc))}"
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/linkedin_profile open",
+            workflow_id=workflow_id,
+            outcome="succeeded" if result.ok else "failed",
+            reason=result.output[:1200] if not result.ok else "opened",
+            readiness=readiness,
+            target_url=url,
+        )
+        if result.ok:
+            return f"Opened LinkedIn profile in visible browser: {redact_url(url)}"
+        return (
+            "LinkedIn profile open failed.\n"
+            f"  command: {redact_text_urls(result.command_label)}\n"
+            f"  exit: {result.returncode}\n"
+            f"  output: {redact_text_urls(result.output[:1200]) or '(no output)'}"
+        )
+
+    if subcommand == "edit":
+        workflow_id = "linkedin.profile.edit"
+        decision = require_browser_workflow_permission(workflow_id, raw)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/linkedin_profile edit",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        url = resolve_linkedin_profile_url()
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/linkedin_profile edit",
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason="write workflow registered but not implemented in Phase 2",
+            readiness=readiness,
+            target_url=url,
+        )
+        return (
+            "LinkedIn profile edit is permissioned but not implemented in Phase 2. "
+            "No browser write action was performed."
+        )
+
+    _audit_browser_action(
+        adapter=adapter,
+        incoming=incoming,
+        command=f"/linkedin_profile {subcommand}",
+        workflow_id=None,
+        outcome="failed",
+        reason="unknown LinkedIn profile command",
+        readiness=readiness,
+    )
+    return "Unknown LinkedIn profile command. Use: /linkedin_profile status or /linkedin_profile open"
+
+
 async def handle_inbox(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Scan inbox for triage briefing."""
     try:
@@ -893,22 +1498,31 @@ async def handle_discuss(
 
 
 def _parse_teamtick_args(args: str) -> tuple[int, dict[str, Any]] | str:
+    usage = (
+        "Usage: /teamtick <team_id> [--agent <id>] [--runtime] [--lane <lane>] "
+        "[--complete] [--execute-running] [--command <preset>] [--cwd <path>] "
+        "[--complete-on-success]"
+    )
     try:
         tokens = shlex.split(args or "")
     except ValueError as exc:
-        return f"Usage: /teamtick <team_id> [--agent <id>] [--runtime] [--lane <lane>] [--complete]\nParse error: {exc}"
+        return f"{usage}\nParse error: {exc}"
     if not tokens:
-        return "Usage: /teamtick <team_id> [--agent <id>] [--runtime] [--lane <lane>] [--complete]"
+        return usage
     try:
         team_id = int(tokens[0])
     except ValueError:
-        return "Usage: /teamtick <team_id> [--agent <id>] [--runtime] [--lane <lane>] [--complete]"
+        return usage
 
     opts: dict[str, Any] = {
         "agent_id": None,
         "use_runtime": False,
         "runtime_lane": None,
         "complete_running": False,
+        "execute_running": False,
+        "executor_command": "git_status",
+        "executor_cwd": None,
+        "complete_on_executor_success": False,
     }
     i = 1
     while i < len(tokens):
@@ -921,15 +1535,40 @@ def _parse_teamtick_args(args: str) -> tuple[int, dict[str, Any]] | str:
             opts["complete_running"] = True
             i += 1
             continue
-        if token in ("--agent", "--lane", "--runtime-lane"):
+        if token in ("--execute", "--execute-running", "--executor"):
+            opts["execute_running"] = True
+            i += 1
+            continue
+        if token in ("--complete-on-success", "--complete-on-executor-success"):
+            opts["complete_on_executor_success"] = True
+            i += 1
+            continue
+        if token in (
+            "--agent",
+            "--lane",
+            "--runtime-lane",
+            "--command",
+            "--executor-command",
+            "--cwd",
+            "--executor-cwd",
+        ):
             if i + 1 >= len(tokens):
                 return f"Missing value for {token}"
             value = tokens[i + 1]
             if token == "--agent":
                 opts["agent_id"] = value
-            else:
+            elif token in ("--lane", "--runtime-lane"):
                 opts["runtime_lane"] = value
                 opts["use_runtime"] = True
+            elif token in ("--command", "--executor-command"):
+                opts["executor_command"] = value
+                opts["execute_running"] = True
+            elif token == "--cwd":
+                opts["executor_cwd"] = value
+                opts["execute_running"] = True
+            elif token == "--executor-cwd":
+                opts["executor_cwd"] = value
+                opts["execute_running"] = True
             i += 2
             continue
         return f"Unknown option: {token}"
@@ -966,6 +1605,13 @@ def _format_team_tick_reply(result: Any) -> str:
                 f"{_teamtick_code(result.step.runtime.runtime_lane)} / "
                 f"{_teamtick_code(result.step.runtime.provider)}"
             )
+    if getattr(result, "executor", None):
+        lines.append(
+            "Executor: "
+            f"{_teamtick_code(result.executor.command_key)}; "
+            f"exit {_teamtick_code(result.executor.exit_code if result.executor.exit_code is not None else 'timeout')}; "
+            f"success {_teamtick_code(result.executor.success)}"
+        )
     return "\n".join(lines)
 
 
@@ -991,6 +1637,99 @@ async def handle_teamtick(
     finally:
         db.close()
     return _format_team_tick_reply(result)
+
+
+def _parse_taskchad_drill_args(args: str) -> dict[str, Any] | str:
+    usage = "Usage: /taskchaddrill [--runtime] [--lane <lane>] [--target-url <url>]"
+    try:
+        tokens = shlex.split(args or "")
+    except ValueError as exc:
+        return f"{usage}\nParse error: {exc}"
+
+    opts: dict[str, Any] = {
+        "target_url": "https://www.taskchad.com/",
+        "use_runtime": False,
+        "runtime_lane": None,
+    }
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--runtime":
+            opts["use_runtime"] = True
+            i += 1
+            continue
+        if token in ("--lane", "--runtime-lane", "--target-url", "--url"):
+            if i + 1 >= len(tokens):
+                return f"Missing value for {token}"
+            value = tokens[i + 1].strip()
+            if token in ("--lane", "--runtime-lane"):
+                opts["runtime_lane"] = value
+                opts["use_runtime"] = True
+            else:
+                if not value.startswith(("http://", "https://")):
+                    return "TaskChad drill target URL must be absolute http(s)."
+                opts["target_url"] = value
+            i += 2
+            continue
+        return f"Unknown option: {token}\n{usage}"
+    return opts
+
+
+def _clip_taskchad_drill_text(text: str, *, max_chars: int = 1800) -> str:
+    stripped = (text or "").strip()
+    if len(stripped) <= max_chars:
+        return stripped
+    return stripped[: max_chars - 14].rstrip() + "\n...[truncated]"
+
+
+def _format_taskchad_drill_reply(result: Any, *, use_runtime: bool, runtime_lane: str | None) -> str:
+    convoy = result.convoy.convoy
+    final_plan = _clip_taskchad_drill_text(result.final_plan)
+    lines = [
+        "*TaskChad Team Drill*",
+        f"Target: {_teamtick_code(result.target_url)}",
+        f"Team: {_teamtick_code(f'#{result.team.session.id}')}",
+        f"Convoy: {_teamtick_code(f'#{convoy.id}')}",
+        f"Progress: {_teamtick_code(f'{convoy.completed_subtasks}/{convoy.total_subtasks}')} subtasks",
+        (
+            "Turns: "
+            f"{len(result.role_turns)} proposals, "
+            "1 adversarial critique, "
+            f"{len(result.revision_turns)} revisions, 1 final synthesis"
+        ),
+        f"Runtime turns: {_teamtick_code('on' if use_runtime else 'off')}",
+    ]
+    if runtime_lane:
+        lines.append(f"Runtime lane: {_teamtick_code(runtime_lane)}")
+    lines.extend(["", "*Final Plan*", final_plan])
+    return "\n".join(lines)
+
+
+async def handle_taskchaddrill(
+    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
+) -> str:
+    """Run the bounded TaskChad role/review/revision team drill."""
+    parsed = _parse_taskchad_drill_args(args)
+    if isinstance(parsed, str):
+        return parsed
+
+    from config import ORCHESTRATION_DB_PATH, ensure_directories
+    from orchestration.db import OrchestrationDB
+    from orchestration.observability import init_orchestration_observability
+    from orchestration.team_drill import TaskChadTeamDrillService
+
+    ensure_directories()
+    init_orchestration_observability()
+    db = OrchestrationDB(ORCHESTRATION_DB_PATH)
+    try:
+        result = TaskChadTeamDrillService(db).run_taskchad_drill(**parsed)
+    finally:
+        db.close()
+    return _format_taskchad_drill_reply(
+        result,
+        use_runtime=bool(parsed["use_runtime"]),
+        runtime_lane=parsed["runtime_lane"],
+    )
 
 
 async def handle_send(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
@@ -1416,6 +2155,9 @@ CORE_HANDLERS: dict[str, Any] = {
     "personal-email": handle_personal_email,
     "pemail": handle_personal_email,
     "accounts": handle_accounts,
+    "browser": handle_browser,
+    "browserops": handle_browserops,
+    "linkedin_profile": handle_linkedin_profile,
     "inbox": handle_inbox,
     "cleanup": handle_cleanup,
     "analytics": handle_analytics,
@@ -1426,6 +2168,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "standup": handle_standup,
     "discuss": handle_discuss,
     "teamtick": handle_teamtick,
+    "taskchaddrill": handle_taskchaddrill,
     "send": handle_send,
     "brief": handle_brief,
     "working": handle_working,

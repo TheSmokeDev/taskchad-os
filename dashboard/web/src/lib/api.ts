@@ -65,6 +65,15 @@ export async function apiGet<T = unknown>(path: string): Promise<T> {
   return res.json();
 }
 
+export async function apiGetBlob(path: string): Promise<Blob> {
+  const res = await fetch(path, { method: 'GET', headers: bearerHeaders() });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body, `GET ${path} failed: ${res.status}`);
+  }
+  return res.blob();
+}
+
 export async function apiPost<T = unknown>(path: string, body?: unknown): Promise<T> {
   const headers = bearerHeaders(body ? { 'content-type': 'application/json' } : undefined);
   const res = await fetch(path, {

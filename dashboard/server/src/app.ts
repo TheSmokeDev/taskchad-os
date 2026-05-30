@@ -32,6 +32,7 @@ import { missionRoute } from './routes/mission.js';
 import { workRoute } from './routes/work.js';
 import { cabinetRoute } from './routes/cabinet.js';
 import { jarvisRoute } from './routes/jarvis.js';
+import { browserViewerRoute } from './routes/browser-viewer.js';
 
 export function buildDashboardApp(): Hono {
   const app = new Hono();
@@ -55,6 +56,7 @@ export function buildDashboardApp(): Hono {
   app.route('/', workRoute);
   app.route('/', cabinetRoute);
   app.route('/', jarvisRoute);
+  app.route('/', browserViewerRoute);
 
   return app;
 }

@@ -18,11 +18,13 @@ describe('mission orchestration route', () => {
     expect(ROUTE_MANIFEST).toContain('/api/mailbox/claim/:agent');
     expect(ROUTE_MANIFEST).toContain('/api/mailbox/convoy/:id');
     expect(ROUTE_MANIFEST).toContain('/api/team');
+    expect(ROUTE_MANIFEST).toContain('/api/team/taskchad-drill');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id/members');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id/shutdown');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id/loop-step');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id/tick');
+    expect(ROUTE_MANIFEST).toContain('/api/team/:id/executor-step');
   });
 
   it('keeps Convoy and Team as thin pass-throughs to Python orchestration', () => {

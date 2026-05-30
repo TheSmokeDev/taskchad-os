@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
-import { Bot, Inbox, MessageSquare, Play, Plus, RefreshCw, Send, ShieldAlert, Trash2, UserPlus } from 'lucide-preact';
+import { Bot, ClipboardList, Inbox, MessageSquare, Play, Plus, RefreshCw, Send, ShieldAlert, Terminal, Trash2, UserPlus } from 'lucide-preact';
 import { TopBar } from '@/components/TopBar';
 import { Empty } from '@/components/Empty';
 import { Spinner } from '@/components/Spinner';
@@ -90,8 +90,51 @@ interface TeamTickResponse {
   convoy_id?: number | null;
   subtask_id?: number | null;
   step?: TeamLoopStepResponse | null;
+  executor?: TeamExecutorStepResponse | null;
   waited: boolean;
   error?: string | null;
+}
+
+interface TeamExecutorStepResponse {
+  team_id: number;
+  agent_id: string;
+  convoy_id: number;
+  subtask_id: number;
+  command_key: string;
+  argv: string[];
+  cwd: string;
+  success: boolean;
+  exit_code?: number | null;
+  timed_out: boolean;
+  duration_ms: number;
+  stdout: string;
+  stderr: string;
+  completed: boolean;
+  convoy_completed: boolean;
+}
+
+interface TaskChadDrillTurnResponse {
+  role: string;
+  role_name: string;
+  agent_id: string;
+  subtask_id: number;
+  action: string;
+  status?: string | null;
+  completed: boolean;
+  reply?: AgentMessage | null;
+}
+
+interface TaskChadDrillResponse {
+  target_url: string;
+  team_id: number;
+  convoy_id: number;
+  initial_message_count: number;
+  revision_message_count?: number;
+  role_turns: TaskChadDrillTurnResponse[];
+  reviewer_turn: TaskChadDrillTurnResponse;
+  revision_turns?: TaskChadDrillTurnResponse[];
+  final_turn: TaskChadDrillTurnResponse;
+  final_plan: string;
 }
 
 const STATUS_TONE: Record<string, string> = {
@@ -101,6 +144,18 @@ const STATUS_TONE: Record<string, string> = {
   closed: 'bg-[var(--color-elevated)] text-[var(--color-text-muted)]',
   failed: 'bg-red-500/10 text-red-300',
 };
+
+const EXECUTOR_COMMANDS = [
+  ['git_status', 'git status'],
+  ['git_diff_stat', 'git diff stat'],
+  ['npm_build', 'npm build'],
+  ['npm_lint', 'npm lint'],
+  ['npm_test', 'npm test'],
+  ['pnpm_build', 'pnpm build'],
+  ['pnpm_lint', 'pnpm lint'],
+  ['pnpm_test', 'pnpm test'],
+  ['uv_pytest', 'uv pytest'],
+] as const;
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -180,7 +235,17 @@ export function Teams() {
   const [lastLoopStep, setLastLoopStep] = useState<TeamLoopStepResponse | null>(null);
   const [tickUseRuntime, setTickUseRuntime] = useState(false);
   const [tickCompleteRunning, setTickCompleteRunning] = useState(false);
+  const [tickExecuteRunning, setTickExecuteRunning] = useState(false);
+  const [tickExecutorCommand, setTickExecutorCommand] = useState('git_status');
+  const [tickCompleteOnExecutorSuccess, setTickCompleteOnExecutorSuccess] = useState(false);
   const [lastTeamTick, setLastTeamTick] = useState<TeamTickResponse | null>(null);
+  const [executorAgent, setExecutorAgent] = useState('');
+  const [executorCommand, setExecutorCommand] = useState('git_status');
+  const [executorCwd, setExecutorCwd] = useState('');
+  const [executorCompleteOnSuccess, setExecutorCompleteOnSuccess] = useState(false);
+  const [lastExecutorStep, setLastExecutorStep] = useState<TeamExecutorStepResponse | null>(null);
+  const [lastTaskChadDrill, setLastTaskChadDrill] = useState<TaskChadDrillResponse | null>(null);
+  const [drillUseRuntime, setDrillUseRuntime] = useState(false);
 
   useEffect(() => {
     const agentIds = agentOptions.map((member) => member.agent_id);
@@ -190,7 +255,8 @@ export function Teams() {
     if (!agentIds.includes(mailTo)) setMailTo(secondAgent);
     if (!agentIds.includes(claimAgent)) setClaimAgent(secondAgent);
     if (!agentIds.includes(loopAgent)) setLoopAgent(secondAgent);
-  }, [agentOptions, mailFrom, mailTo, claimAgent, loopAgent]);
+    if (!agentIds.includes(executorAgent)) setExecutorAgent(secondAgent);
+  }, [agentOptions, mailFrom, mailTo, claimAgent, loopAgent, executorAgent]);
 
   function refreshAll() {
     teamsFetch.refresh();
@@ -366,12 +432,64 @@ export function Teams() {
       const result = await apiPost<TeamTickResponse>(`/api/team/${session.id}/tick`, {
         use_runtime: tickUseRuntime,
         complete_running: tickCompleteRunning,
+        execute_running: tickExecuteRunning,
+        executor_command: tickExecutorCommand,
+        complete_on_executor_success: tickCompleteOnExecutorSuccess,
       });
       setLastTeamTick(result);
       pushToast({ tone: result.error ? 'error' : 'success', title: 'Team tick ran', description: `${result.selected_action}: ${result.reason}` });
       refreshAll();
     } catch (err: unknown) {
       pushToast({ tone: 'error', title: 'Team tick failed', description: errorMessage(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runExecutorStep() {
+    if (!session || !executorAgent) {
+      pushToast({ tone: 'error', title: 'Executor agent required' });
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await apiPost<TeamExecutorStepResponse>(`/api/team/${session.id}/executor-step`, {
+        agent_id: executorAgent,
+        command_key: executorCommand,
+        cwd: executorCwd.trim() || null,
+        complete_on_success: executorCompleteOnSuccess,
+      });
+      setLastExecutorStep(result);
+      pushToast({
+        tone: result.success ? 'success' : 'error',
+        title: 'Executor step ran',
+        description: `${result.command_key}: exit ${result.exit_code ?? 'timeout'}`,
+      });
+      refreshAll();
+    } catch (err: unknown) {
+      pushToast({ tone: 'error', title: 'Executor step failed', description: errorMessage(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runTaskChadDrill() {
+    setBusy(true);
+    try {
+      const result = await apiPost<TaskChadDrillResponse>('/api/team/taskchad-drill', {
+        target_url: 'https://www.taskchad.com/',
+        use_runtime: drillUseRuntime,
+      });
+      setLastTaskChadDrill(result);
+      setSelectedId(result.team_id);
+      pushToast({
+        tone: 'success',
+        title: 'TaskChad drill complete',
+        description: `Team #${result.team_id} · Convoy #${result.convoy_id}`,
+      });
+      refreshAll();
+    } catch (err: unknown) {
+      pushToast({ tone: 'error', title: 'TaskChad drill failed', description: errorMessage(err) });
     } finally {
       setBusy(false);
     }
@@ -390,6 +508,22 @@ export function Teams() {
               class="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[12px] text-[var(--color-text)] hover:border-[var(--color-accent)]"
             >
               <RefreshCw size={14} /> Refresh
+            </button>
+            <label class="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[12px] text-[var(--color-text-muted)]">
+              <input
+                type="checkbox"
+                checked={drillUseRuntime}
+                onChange={(event) => setDrillUseRuntime((event.target as HTMLInputElement).checked)}
+              />
+              Runtime turns
+            </label>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={runTaskChadDrill}
+              class="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[12px] text-[var(--color-text)] hover:border-[var(--color-accent)] disabled:opacity-60"
+            >
+              <ClipboardList size={14} /> TaskChad Drill
             </button>
             <button
               type="button"
@@ -498,6 +632,49 @@ export function Teams() {
                   </div>
                 </div>
               </div>
+
+              {lastTaskChadDrill && lastTaskChadDrill.team_id === session.id && (
+                <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex min-w-0 items-center gap-2 text-[13px] font-medium text-[var(--color-text)]">
+                      <ClipboardList size={15} /> TaskChad Drill Result
+                    </div>
+                    <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                      Convoy #{lastTaskChadDrill.convoy_id}
+                    </Badge>
+                  </div>
+                  <div class="mt-3 text-[12px] font-medium text-[var(--color-text)]">Round 1 Proposals</div>
+                  <div class="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                    {lastTaskChadDrill.role_turns.map((turn) => (
+                      <div key={turn.agent_id} class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2 text-[11px] text-[var(--color-text-muted)]">
+                        <div class="truncate font-medium text-[var(--color-text)]">{turn.role_name}</div>
+                        <div class="mt-1 break-words">{turn.role} · subtask #{turn.subtask_id}</div>
+                        <div>{turn.status || 'unknown'} · {turn.completed ? 'complete' : 'open'}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {lastTaskChadDrill.revision_turns && lastTaskChadDrill.revision_turns.length > 0 && (
+                    <>
+                      <div class="mt-3 text-[12px] font-medium text-[var(--color-text)]">Round 2 Revisions</div>
+                      <div class="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                        {lastTaskChadDrill.revision_turns.map((turn) => (
+                          <div key={`${turn.agent_id}-revision`} class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2 text-[11px] text-[var(--color-text-muted)]">
+                            <div class="truncate font-medium text-[var(--color-text)]">{turn.role_name}</div>
+                            <div class="mt-1 break-words">{turn.role} · revised subtask #{turn.subtask_id}</div>
+                            <div>{turn.status || 'unknown'} · {turn.completed ? 'complete' : 'open'}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <div class="mt-3 rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                    <div class="mb-2 text-[12px] font-medium text-[var(--color-text)]">Final Plan</div>
+                    <div class="whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--color-text-muted)]">
+                      {lastTaskChadDrill.final_plan}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)]">
                 <div class="border-b border-[var(--color-border)] px-4 py-3 text-[13px] font-medium text-[var(--color-text)]">
@@ -665,6 +842,34 @@ export function Teams() {
                           />
                           Complete running subtask
                         </label>
+                        <label class="flex items-center gap-2 text-[12px] text-[var(--color-text-muted)]">
+                          <input
+                            type="checkbox"
+                            checked={tickExecuteRunning}
+                            onChange={(event) => setTickExecuteRunning((event.target as HTMLInputElement).checked)}
+                          />
+                          Executor step
+                        </label>
+                        <label class="grid gap-1 text-[12px] text-[var(--color-text-muted)]">
+                          Tick command
+                          <select
+                            value={tickExecutorCommand}
+                            onChange={(event) => setTickExecutorCommand((event.target as HTMLSelectElement).value)}
+                            class="rounded border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+                          >
+                            {EXECUTOR_COMMANDS.map(([value, label]) => (
+                              <option key={value} value={value}>{label}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label class="flex items-center gap-2 text-[12px] text-[var(--color-text-muted)]">
+                          <input
+                            type="checkbox"
+                            checked={tickCompleteOnExecutorSuccess}
+                            onChange={(event) => setTickCompleteOnExecutorSuccess((event.target as HTMLInputElement).checked)}
+                          />
+                          Complete after executor success
+                        </label>
                         <button
                           type="button"
                           disabled={busy || !session.convoy_id}
@@ -688,8 +893,84 @@ export function Teams() {
                             {lastTeamTick.step?.runtime && (
                               <div class="break-words">{lastTeamTick.step.runtime.runtime_lane || 'runtime'} · {lastTeamTick.step.runtime.provider || 'provider'}</div>
                             )}
+                            {lastTeamTick.executor && (
+                              <div class="break-words">
+                                executor {lastTeamTick.executor.command_key} · exit {lastTeamTick.executor.exit_code ?? 'timeout'} · {lastTeamTick.executor.success ? 'passed' : 'failed'}
+                              </div>
+                            )}
                             {lastTeamTick.waited && <div>waited</div>}
                             {lastTeamTick.error && <div class="break-words text-red-300">{lastTeamTick.error}</div>}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                      <div class="mb-3 flex items-center gap-2 text-[12px] font-medium text-[var(--color-text)]">
+                        <Terminal size={13} /> Executor Step
+                      </div>
+                      <div class="grid gap-3">
+                        <label class="grid gap-1 text-[12px] text-[var(--color-text-muted)]">
+                          Run as
+                          <select
+                            value={executorAgent}
+                            onChange={(event) => setExecutorAgent((event.target as HTMLSelectElement).value)}
+                            class="rounded border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+                          >
+                            {agentOptions.map((member) => (
+                              <option key={member.agent_id} value={member.agent_id}>{member.agent_name || member.agent_id}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label class="grid gap-1 text-[12px] text-[var(--color-text-muted)]">
+                          Command
+                          <select
+                            value={executorCommand}
+                            onChange={(event) => setExecutorCommand((event.target as HTMLSelectElement).value)}
+                            class="rounded border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+                          >
+                            {EXECUTOR_COMMANDS.map(([value, label]) => (
+                              <option key={value} value={value}>{label}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label class="grid gap-1 text-[12px] text-[var(--color-text-muted)]">
+                          Cwd override
+                          <input
+                            value={executorCwd}
+                            onInput={(event) => setExecutorCwd((event.target as HTMLInputElement).value)}
+                            class="rounded border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+                            placeholder="convoy repo path"
+                          />
+                        </label>
+                        <label class="flex items-center gap-2 text-[12px] text-[var(--color-text-muted)]">
+                          <input
+                            type="checkbox"
+                            checked={executorCompleteOnSuccess}
+                            onChange={(event) => setExecutorCompleteOnSuccess((event.target as HTMLInputElement).checked)}
+                          />
+                          Complete on success
+                        </label>
+                        <button
+                          type="button"
+                          disabled={busy || !executorAgent || !session.convoy_id}
+                          onClick={runExecutorStep}
+                          class="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--color-accent)] px-3 py-2 text-[12px] font-medium text-white disabled:opacity-60"
+                        >
+                          <Terminal size={13} /> Run Executor Step
+                        </button>
+                        {lastExecutorStep && (
+                          <div class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+                            <div class="font-medium text-[var(--color-text)]">
+                              {lastExecutorStep.command_key} · {lastExecutorStep.success ? 'passed' : 'failed'}
+                            </div>
+                            <div class="break-words">{lastExecutorStep.agent_id} · subtask #{lastExecutorStep.subtask_id}</div>
+                            <div>exit {lastExecutorStep.exit_code ?? 'timeout'} · {lastExecutorStep.duration_ms}ms</div>
+                            <div class="break-words">{lastExecutorStep.cwd}</div>
+                            {(lastExecutorStep.stdout || lastExecutorStep.stderr) && (
+                              <pre class="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--color-elevated)] p-2 text-[10px] text-[var(--color-text)]">
+                                {lastExecutorStep.stdout || lastExecutorStep.stderr}
+                              </pre>
+                            )}
                           </div>
                         )}
                       </div>

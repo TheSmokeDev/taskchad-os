@@ -381,6 +381,7 @@ def doctor():
     click.echo(f"Memory DB: {report.memory_doc_count} documents ({report.memory_embedding_status})")
     click.echo(f"Cognition: {'active' if report.cognition_available else 'unavailable'}")
     _print_cognitive_loop(report.cognitive_loop)
+    _print_browser_readiness(report.browser)
     click.echo(f"Sessions: {report.sessions_active} active")
     if report.clear_lifecycle_recent_failures:
         click.echo(
@@ -956,8 +957,23 @@ def team_ping(team_id, agent_id):
 @click.option("--runtime", "use_runtime", is_flag=True, default=False, help="Use runtime lane reply")
 @click.option("--runtime-lane", default=None, help="Optional runtime lane/provider")
 @click.option("--complete-running", is_flag=True, default=False, help="Allow completing running subtasks")
+@click.option("--execute-running", is_flag=True, default=False, help="Run an approved executor command for a running subtask")
+@click.option("--executor-command", default="git_status", help="Approved executor command preset")
+@click.option("--executor-cwd", default=None, help="Optional executor working directory")
+@click.option("--complete-on-executor-success", is_flag=True, default=False, help="Complete subtask after successful executor command")
 @click.option("--json", "json_mode", is_flag=True, help="JSON output")
-def team_tick(team_id, agent_id, use_runtime, runtime_lane, complete_running, json_mode):
+def team_tick(
+    team_id,
+    agent_id,
+    use_runtime,
+    runtime_lane,
+    complete_running,
+    execute_running,
+    executor_command,
+    executor_cwd,
+    complete_on_executor_success,
+    json_mode,
+):
     """Run one autonomous team scheduler tick."""
     from orchestration.observability import orchestration_span, update_observation
     from orchestration.team_loop import TeamTickService, tick_result_to_dict
@@ -970,6 +986,9 @@ def team_tick(team_id, agent_id, use_runtime, runtime_lane, complete_running, js
             "use_runtime": use_runtime,
             "runtime_lane": runtime_lane,
             "complete_running": complete_running,
+            "execute_running": execute_running,
+            "executor_command": executor_command,
+            "complete_on_executor_success": complete_on_executor_success,
             "surface": "cli",
         },
         trace_metadata={"surface": "cli", "feature_phase": 9, "team_id": team_id},
@@ -983,6 +1002,10 @@ def team_tick(team_id, agent_id, use_runtime, runtime_lane, complete_running, js
                 use_runtime=use_runtime,
                 runtime_lane=runtime_lane,
                 complete_running=complete_running,
+                execute_running=execute_running,
+                executor_command=executor_command,
+                executor_cwd=executor_cwd,
+                complete_on_executor_success=complete_on_executor_success,
             )
         except ValueError as e:
             click.echo(f"Error: {e}", err=True)
@@ -1024,6 +1047,13 @@ def team_tick(team_id, agent_id, use_runtime, runtime_lane, complete_running, js
                     "  Runtime: "
                     f"{result.step.runtime.runtime_lane} / {result.step.runtime.provider}"
                 )
+        elif result.executor:
+            click.echo(
+                "  Executor: "
+                f"{result.executor.command_key}; exit {result.executor.exit_code}; "
+                f"success={result.executor.success}"
+            )
+            click.echo(f"  Cwd: {result.executor.cwd}")
 
 
 @team.command("close")
@@ -1108,6 +1138,8 @@ def _print_status_human(report):
     for name, status in report.runtime_providers.items():
         click.echo(f"  {name}: {status}")
 
+    _print_browser_readiness(report.browser)
+
     click.echo(f"\nMemory: {report.memory_doc_count} docs ({report.memory_embedding_status})")
     _print_cognitive_loop(report.cognitive_loop)
     click.echo(f"Sessions: {report.sessions_active} active")
@@ -1140,6 +1172,21 @@ def _print_status_human(report):
             if count > 3:
                 preview += ", ..."
             click.echo(f"  | {name:<20} | {count:>5} | {preview[:30]:<30} |")
+
+
+def _print_browser_readiness(browser):
+    """Render the URL-free browser readiness envelope."""
+    if not browser:
+        return
+    try:
+        from browser_control import format_browser_readiness
+
+        click.echo("")
+        click.echo(format_browser_readiness(browser))
+    except Exception as exc:  # pragma: no cover - defensive render fallback
+        click.echo("")
+        click.echo("Browser: attention")
+        click.echo(f"  Attention: {exc}")
 
 
 def _print_cognitive_loop(cognitive_loop):

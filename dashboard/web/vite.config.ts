@@ -6,6 +6,8 @@ import path from 'node:path';
 // Hono dashboard server on :3141 (set by DASHBOARD_PORT). Production
 // builds emit to dist/ and Hono serves them same-origin.
 
+const dashboardProxyTarget = process.env.DASHBOARD_PROXY_TARGET || 'http://127.0.0.1:3141';
+
 export default defineConfig({
   plugins: [preact()],
   resolve: {
@@ -17,7 +19,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:3141',
+        target: dashboardProxyTarget,
         changeOrigin: true,
         // SSE needs raw streaming.
         ws: false,

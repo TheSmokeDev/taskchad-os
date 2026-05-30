@@ -30,6 +30,7 @@ DEFAULT_ENGINE_TIMEOUT_SECONDS = 180.0
 # Test/legacy override. Normal runtime reads config.CHAT_ENGINE_TIMEOUT_SECONDS
 # at call time so /reload can update the guard without restarting the process.
 ENGINE_TIMEOUT_SECONDS: float | None = None
+PREFETCH_ONLY_INTENTS = {"browserops"}
 
 
 def _engine_timeout_seconds() -> float:
@@ -361,33 +362,35 @@ class ChatRouter:
 
             intents = self.manager.detect_intents(text)
             if intents:
-                data_parts: list[str] = []
+                intent_parts: list[tuple[str, str]] = []
                 for cmd in intents:
                     try:
                         r = await self.manager.dispatch(
                             cmd, adapter, incoming, "", collect_only=True,
                         )
                         if r:
-                            data_parts.append(f"## /{cmd}\n{r}")
+                            intent_parts.append((cmd, f"## /{cmd}\n{r}"))
                     except Exception as e:
-                        data_parts.append(f"## /{cmd}\nError: {e}")
+                        intent_parts.append((cmd, f"## /{cmd}\nError: {e}"))
 
                 # Drop pure-error results — let them fall through to the engine
-                data_parts = [
-                    p for p in data_parts
-                    if not p.split("\n", 1)[-1].strip().startswith("Error ")
+                intent_parts = [
+                    (cmd, part) for cmd, part in intent_parts
+                    if not part.split("\n", 1)[-1].strip().startswith("Error ")
                 ]
 
-                if data_parts:
-                    if self.manager.wants_analysis(text):
+                if intent_parts:
+                    has_prefetch_only = any(cmd in PREFETCH_ONLY_INTENTS for cmd, _ in intent_parts)
+                    data_parts = [part for _, part in intent_parts]
+                    if self.manager.wants_analysis(text) or has_prefetch_only:
                         incoming.prefetched_context = "\n\n".join(data_parts)
                     else:
-                        if len(intents) == 1:
+                        if len(intent_parts) == 1:
                             reply = data_parts[0].split("\n", 1)[1]
                         else:
                             reply = "\n\n━━━━━━━━━━━━━━━\n\n".join(
                                 f"*/{cmd}*\n{p.split(chr(10), 1)[1]}"
-                                for cmd, p in zip(intents, data_parts)
+                                for cmd, p in intent_parts
                             )
                         await adapter.send(
                             OutgoingMessage(
