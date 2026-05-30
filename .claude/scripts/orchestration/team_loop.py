@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import asyncio
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,8 @@ class TeamLoopStepResult:
     claimed: list[MessageWithDeliveries] = field(default_factory=list)
     reply: AgentMessage | None = None
     runtime: RuntimeResult | None = None
+    runtime_execution_time_ms: int | None = None
+    runtime_error: str | None = None
     subtask_before: Subtask | None = None
     subtask_after: Subtask | None = None
     action: str = "noop"
@@ -126,14 +129,40 @@ class TeamLoopService:
                 limit=10,
             )
             runtime_result: RuntimeResult | None = None
+            runtime_execution_time_ms: int | None = None
+            runtime_error: str | None = None
             if use_runtime:
-                runtime_result = self._run_runtime_turn(
-                    team_id=team_id,
-                    agent_id=agent_id,
-                    convoy_id=team.session.convoy_id,
-                    subtask=before,
-                    claimed=claimed,
-                    runtime_lane=runtime_lane,
+                runtime_started = time.perf_counter()
+                try:
+                    runtime_result = self._run_runtime_turn(
+                        team_id=team_id,
+                        agent_id=agent_id,
+                        convoy_id=team.session.convoy_id,
+                        subtask=before,
+                        claimed=claimed,
+                        runtime_lane=runtime_lane,
+                    )
+                except Exception as exc:
+                    runtime_execution_time_ms = int(
+                        (time.perf_counter() - runtime_started) * 1000
+                    )
+                    runtime_error = f"{type(exc).__name__}: {exc}"
+                    update_observation(
+                        level="WARNING",
+                        status_message=runtime_error,
+                        metadata={
+                            "team_id": team_id,
+                            "agent_id": agent_id,
+                            "convoy_id": team.session.convoy_id,
+                            "subtask_id": effective_subtask_id,
+                            "runtime_lane": runtime_lane,
+                            "runtime_error_type": type(exc).__name__,
+                        },
+                        output={"runtime_execution_time_ms": runtime_execution_time_ms},
+                    )
+                    raise
+                runtime_execution_time_ms = int(
+                    (time.perf_counter() - runtime_started) * 1000
                 )
                 reply_body = self._bounded_runtime_text(runtime_result.text)
             reply = self._send_loop_reply(
@@ -200,6 +229,8 @@ class TeamLoopService:
                 claimed=claimed,
                 reply=reply,
                 runtime=runtime_result,
+                runtime_execution_time_ms=runtime_execution_time_ms,
+                runtime_error=runtime_error,
                 subtask_before=before,
                 subtask_after=current,
                 action=action,
@@ -702,7 +733,10 @@ def result_to_dict(result: TeamLoopStepResult) -> dict:
             "provider": result.runtime.provider,
             "model": result.runtime.model,
             "session_id": result.runtime.session_id,
+            "cost_usd": result.runtime.cost_usd,
+            "execution_time_ms": result.runtime_execution_time_ms,
             "tool_call_count": result.runtime.tool_call_count,
+            "error": result.runtime_error,
         }
         if result.runtime
         else None,

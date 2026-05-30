@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shlex
 import time
 from datetime import datetime
 from typing import Any
@@ -836,21 +837,33 @@ class ChatRouter:
         """Keep router-command quiet metadata aligned with current selection."""
 
         parsed = self._parse_command((getattr(incoming, "text", "") or "").strip())
-        if not parsed or parsed[0] not in {"model", "provider"}:
+        if not parsed or parsed[0] not in {"model", "provider", "taskchaddrill"}:
             return
+        command, args = parsed
+        taskchad_runtime_lane: str | None = None
+        if command == "taskchaddrill":
+            runtime_requested, taskchad_runtime_lane = self._taskchad_runtime_request(args)
+            if not runtime_requested:
+                return
 
         try:
-            from runtime.model_control import selected_runtime_model
+            from runtime.model_control import configured_model_for_provider
             from runtime.selection import provider_display_name, resolve_runtime_selection
 
             selection = resolve_runtime_selection()
-            session.runtime_lane = selection.lane or "auto"
-            if selection.lane == "claude_native":
+            selected_lane = taskchad_runtime_lane or selection.lane or "auto"
+            session.runtime_lane = selected_lane
+            if selected_lane == "claude_native":
                 session.runtime_provider = "claude"
+                session.runtime_model = configured_model_for_provider("claude") or ""
             else:
-                session.runtime_provider = selection.generic_provider or ""
+                session.runtime_provider = selection.generic_provider or "auto"
                 session.runtime_session_id = ""
-            session.runtime_model = selected_runtime_model(selection) or ""
+                session.runtime_model = (
+                    configured_model_for_provider(session.runtime_provider)
+                    if session.runtime_provider != "auto"
+                    else ""
+                ) or ""
             session.runtime_profile_key = (
                 f"configured-{provider_display_name(session.runtime_provider)}"
                 if session.runtime_provider
@@ -861,6 +874,29 @@ class ChatRouter:
                 f"[{datetime.now()}] Failed to snapshot router runtime metadata: {e}",
                 flush=True,
             )
+
+    @staticmethod
+    def _taskchad_runtime_request(args: str) -> tuple[bool, str | None]:
+        try:
+            tokens = shlex.split(args or "")
+        except ValueError:
+            return False, None
+        runtime_requested = False
+        runtime_lane: str | None = None
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token == "--runtime":
+                runtime_requested = True
+                i += 1
+                continue
+            if token in {"--lane", "--runtime-lane"} and i + 1 < len(tokens):
+                runtime_requested = True
+                runtime_lane = tokens[i + 1].strip() or None
+                i += 2
+                continue
+            i += 1
+        return runtime_requested, runtime_lane
 
     async def shutdown(self) -> None:
         """Disconnect all adapters gracefully."""

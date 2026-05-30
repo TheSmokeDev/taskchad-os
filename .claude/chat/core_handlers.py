@@ -1685,6 +1685,7 @@ def _clip_taskchad_drill_text(text: str, *, max_chars: int = 1800) -> str:
 def _format_taskchad_drill_reply(result: Any, *, use_runtime: bool, runtime_lane: str | None) -> str:
     convoy = result.convoy.convoy
     final_plan = _clip_taskchad_drill_text(result.final_plan)
+    runtime_summary = _summarize_taskchad_runtime(result)
     lines = [
         "*TaskChad Team Drill*",
         f"Target: {_teamtick_code(result.target_url)}",
@@ -1701,8 +1702,74 @@ def _format_taskchad_drill_reply(result: Any, *, use_runtime: bool, runtime_lane
     ]
     if runtime_lane:
         lines.append(f"Runtime lane: {_teamtick_code(runtime_lane)}")
+    if use_runtime:
+        lines.append(
+            "Runtime metadata: "
+            f"{_teamtick_code(str(runtime_summary['turn_count']))} turns; "
+            f"lanes {_teamtick_code(', '.join(runtime_summary['lanes']) or 'unknown')}; "
+            f"providers {_teamtick_code(', '.join(runtime_summary['providers']) or 'unknown')}; "
+            f"models {_teamtick_code(', '.join(runtime_summary['models']) or 'unknown')}; "
+            f"tools {_teamtick_code(str(runtime_summary['tool_call_count']))}; "
+            f"cost {_teamtick_code(_format_taskchad_cost(runtime_summary['cost_usd']))}; "
+            f"elapsed {_teamtick_code(str(runtime_summary['execution_time_ms'] or 0) + 'ms')}"
+        )
+        if runtime_summary["errors"]:
+            clipped_errors = "; ".join(runtime_summary["errors"])[:280]
+            lines.append(f"Runtime errors: {_teamtick_code(clipped_errors)}")
     lines.extend(["", "*Final Plan*", final_plan])
     return "\n".join(lines)
+
+
+def _summarize_taskchad_runtime(result: Any) -> dict[str, Any]:
+    turns = [
+        *getattr(result, "role_turns", []),
+        getattr(result, "reviewer_turn", None),
+        *getattr(result, "revision_turns", []),
+        getattr(result, "final_turn", None),
+    ]
+    runtime_steps = [
+        turn.step
+        for turn in turns
+        if turn is not None and getattr(turn.step, "runtime", None) is not None
+    ]
+    costs = [
+        step.runtime.cost_usd
+        for step in runtime_steps
+        if isinstance(step.runtime.cost_usd, (int, float))
+    ]
+    elapsed = [
+        step.runtime_execution_time_ms
+        for step in runtime_steps
+        if isinstance(step.runtime_execution_time_ms, int)
+    ]
+    return {
+        "turn_count": len(runtime_steps),
+        "lanes": sorted(
+            {step.runtime.runtime_lane for step in runtime_steps if step.runtime.runtime_lane}
+        ),
+        "providers": sorted(
+            {step.runtime.provider for step in runtime_steps if step.runtime.provider}
+        ),
+        "models": sorted(
+            {step.runtime.model for step in runtime_steps if step.runtime.model}
+        ),
+        "tool_call_count": sum(
+            int(step.runtime.tool_call_count or 0) for step in runtime_steps
+        ),
+        "cost_usd": round(sum(costs), 6) if costs else (0.0 if runtime_steps else None),
+        "execution_time_ms": sum(elapsed) if elapsed else (0 if runtime_steps else None),
+        "errors": [
+            str(step.runtime_error)
+            for step in runtime_steps
+            if getattr(step, "runtime_error", None)
+        ],
+    }
+
+
+def _format_taskchad_cost(cost: Any) -> str:
+    if not isinstance(cost, (int, float)):
+        return "n/a"
+    return f"${cost:.6f}"
 
 
 async def handle_taskchaddrill(
@@ -1718,13 +1785,19 @@ async def handle_taskchaddrill(
     from orchestration.observability import init_orchestration_observability
     from orchestration.team_drill import TaskChadTeamDrillService
 
-    ensure_directories()
-    init_orchestration_observability()
-    db = OrchestrationDB(ORCHESTRATION_DB_PATH)
-    try:
-        result = TaskChadTeamDrillService(db).run_taskchad_drill(**parsed)
-    finally:
-        db.close()
+    def _run_drill() -> Any:
+        ensure_directories()
+        init_orchestration_observability()
+        db = OrchestrationDB(ORCHESTRATION_DB_PATH)
+        try:
+            return TaskChadTeamDrillService(db).run_taskchad_drill(**parsed)
+        finally:
+            db.close()
+
+    if parsed["use_runtime"]:
+        result = await asyncio.to_thread(_run_drill)
+    else:
+        result = _run_drill()
     return _format_taskchad_drill_reply(
         result,
         use_runtime=bool(parsed["use_runtime"]),
