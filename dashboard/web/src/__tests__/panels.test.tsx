@@ -407,6 +407,132 @@ describe('panels populate from fixture API responses', () => {
           convoy_completed: false,
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
+      if (path === '/api/team/room/run') {
+        return new Response(JSON.stringify({
+          workflow_id: 'growth_boardroom',
+          meeting_mode: 'facilitated_boardroom',
+          max_rounds: 2,
+          goal: 'How do we get TaskChad to one million dollars?',
+          context_excerpt: null,
+          team_id: 9,
+          convoy_id: 1,
+          runtime: {
+            enabled: false,
+            turn_count: 0,
+            lanes: [],
+            providers: [],
+            models: [],
+            tool_call_count: 0,
+            cost_usd: null,
+            execution_time_ms: null,
+            errors: [],
+          },
+          progress: { completed: 21, total: 21, status: 'completed' },
+          lead_frame_excerpt: 'Frame the goal, call departments, and force owner-level decisions.',
+          message_counts: { facilitator: 3, proposal: 4, crosstalk: 8, revision: 4, reviewer: 1, synthesis: 1 },
+          turn_summary: '3 facilitator, 4 proposals, 8 cross-talk, 1 adversarial critique, 4 revisions, 1 final synthesis',
+          discussion_rounds: [
+            {
+              round_number: 1,
+              facilitator_message: {
+                id: 601,
+                from_agent: 'teamroom-facilitator',
+                subject: 'Round 1',
+                body: 'Sales, marketing, product, and ops should pitch the highest-leverage wedge.',
+                message_type: 'facilitator',
+                created_at: 1770000700,
+              },
+              facilitator_turn: {
+                phase: 'facilitator',
+                role: 'facilitator',
+                role_name: 'Facilitator',
+                agent_id: 'teamroom-facilitator',
+                subtask_id: 31,
+                action: 'completed',
+                status: 'completed',
+                completed: true,
+                reply: {
+                  id: 601,
+                  from_agent: 'teamroom-facilitator',
+                  subject: 'Round 1',
+                  body: 'Sales, marketing, product, and ops should pitch the highest-leverage wedge.',
+                  message_type: 'facilitator',
+                  created_at: 1770000700,
+                },
+                runtime: null,
+              },
+              crosstalk_messages: [],
+              crosstalk_turns: [
+                {
+                  phase: 'crosstalk',
+                  role: 'sales',
+                  role_name: 'Sales',
+                  agent_id: 'teamroom-sales',
+                  subtask_id: 35,
+                  action: 'completed',
+                  status: 'completed',
+                  completed: true,
+                  reply: {
+                    id: 602,
+                    from_agent: 'teamroom-sales',
+                    subject: 'Sales cross-talk',
+                    body: 'Marketing angle works if sales owns qualified outreach and measures booked audits.',
+                    message_type: 'team_message',
+                    created_at: 1770000710,
+                  },
+                  runtime: null,
+                },
+              ],
+            },
+          ],
+          decision_ledger: {
+            decisions: ['Validate demand before building the next heavy feature.'],
+            accepted_bets: ['Sales-led audit wedge.'],
+            rejected_bets: ['Broad generic productivity positioning.'],
+            owner_actions: [
+              {
+                owner: 'Sales',
+                action: 'Sales owns qualified outreach and booked audit targets.',
+                validation_signal: 'Ten qualified audit calls booked.',
+              },
+            ],
+            open_questions: ['Which buyer segment repeats the pain fastest?'],
+            strongest_objection: 'The plan can still mistake activity for proof.',
+            next_meeting_trigger: 'Reconvene after the first two-week readout.',
+          },
+          phase_results: {
+            facilitator: [],
+            proposal: [],
+            crosstalk: [],
+            adversarial_review: {
+              phase: 'review',
+              role: 'adversarial_reviewer',
+              role_name: 'Adversarial Reviewer',
+              agent_id: 'teamroom-reviewer',
+              subtask_id: 39,
+              action: 'completed',
+              status: 'completed',
+              completed: true,
+              reply: null,
+              runtime: null,
+            },
+            revision: [],
+            synthesis: {
+              phase: 'synthesis',
+              role: 'synthesis',
+              role_name: 'Synthesizer',
+              agent_id: 'teamroom-synthesizer',
+              subtask_id: 40,
+              action: 'completed',
+              status: 'completed',
+              completed: true,
+              reply: null,
+              runtime: null,
+            },
+          },
+          final_brief: 'Final Team Room brief: pick the sales-led audit wedge, measure booked audits, and revise after the two-week readout.',
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
       if (path === '/api/team/taskchad-drill') {
         return new Response(JSON.stringify({
           target_url: 'https://www.taskchad.com/',
@@ -474,6 +600,15 @@ describe('panels populate from fixture API responses', () => {
     await waitFor(() => expect(requests).toContain('/api/team/taskchad-drill'));
     expect(await screen.findByText(/round 2 revisions/i)).toBeInTheDocument();
     expect(await screen.findByText(/final revised taskchad plan: clarify offer/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /run team room/i }));
+    await waitFor(() => expect(requests).toContain('/api/team/room/run'));
+    expect(await screen.findByText(/team room result/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/facilitated_boardroom/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/21\/21 · completed/i)).toBeInTheDocument();
+    expect(screen.getByText(/3 facilitator, 4 proposals/i)).toBeInTheDocument();
+    expect(screen.getByText(/Decision: Validate demand before building/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Sales owns qualified outreach/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Final Team Room brief: pick the sales-led audit wedge/i)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(/^to$/i), { target: { value: 'sales-worker' } });
     fireEvent.input(screen.getByLabelText(/subject/i), { target: { value: 'Sales reply' } });
     fireEvent.input(screen.getByLabelText(/message/i), { target: { value: 'Lead list is ready.' } });

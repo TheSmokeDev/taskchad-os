@@ -137,6 +137,94 @@ interface TaskChadDrillResponse {
   final_plan: string;
 }
 
+interface TeamRoomRuntimeMetadata {
+  runtime_lane?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  profile_key?: string | null;
+  cost_usd?: number | null;
+  execution_time_ms?: number | null;
+  tool_call_count?: number | null;
+  error?: string | null;
+}
+
+interface TeamRoomTurnResponse {
+  phase: string;
+  role: string;
+  role_name: string;
+  agent_id: string;
+  subtask_id: number;
+  action: string;
+  status?: string | null;
+  completed: boolean;
+  reply?: AgentMessage | null;
+  runtime?: TeamRoomRuntimeMetadata | null;
+}
+
+interface TeamRoomRuntimeSummary {
+  enabled: boolean;
+  turn_count: number;
+  lanes: string[];
+  providers: string[];
+  models: string[];
+  tool_call_count: number;
+  cost_usd?: number | null;
+  execution_time_ms?: number | null;
+  errors: string[];
+}
+
+interface TeamRoomDiscussionRound {
+  round_number: number;
+  facilitator_message?: AgentMessage | null;
+  facilitator_turn?: TeamRoomTurnResponse | null;
+  crosstalk_messages?: AgentMessage[];
+  crosstalk_turns: TeamRoomTurnResponse[];
+}
+
+interface TeamRoomDecisionLedger {
+  decisions: string[];
+  accepted_bets: string[];
+  rejected_bets: string[];
+  owner_actions: Array<{
+    owner: string;
+    action: string;
+    validation_signal: string;
+  }>;
+  open_questions: string[];
+  strongest_objection: string;
+  next_meeting_trigger: string;
+}
+
+interface TeamRoomRunResponse {
+  workflow_id: string;
+  meeting_mode: string;
+  max_rounds: number;
+  goal: string;
+  context_excerpt?: string | null;
+  team_id: number;
+  convoy_id: number;
+  runtime: TeamRoomRuntimeSummary;
+  progress: {
+    completed: number;
+    total: number;
+    status: string;
+  };
+  lead_frame_excerpt?: string | null;
+  message_counts?: Record<string, number>;
+  turn_summary: string;
+  discussion_rounds: TeamRoomDiscussionRound[];
+  decision_ledger: TeamRoomDecisionLedger;
+  phase_results: {
+    facilitator: TeamRoomTurnResponse[];
+    proposal: TeamRoomTurnResponse[];
+    crosstalk: TeamRoomTurnResponse[];
+    adversarial_review: TeamRoomTurnResponse;
+    revision: TeamRoomTurnResponse[];
+    synthesis: TeamRoomTurnResponse;
+  };
+  final_brief: string;
+}
+
 const STATUS_TONE: Record<string, string> = {
   active: 'bg-emerald-500/10 text-emerald-300',
   idle: 'bg-sky-500/10 text-sky-300',
@@ -164,6 +252,20 @@ function errorMessage(err: unknown): string {
 function formatTime(value?: number | null): string {
   if (!value) return 'never';
   return new Date(value * 1000).toLocaleString();
+}
+
+function clipText(value?: string | null, maxChars = 260): string {
+  const text = (value ?? '').trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 3).trimEnd()}...`;
+}
+
+function formatList(values?: string[]): string {
+  return values && values.length > 0 ? values.join(', ') : 'none';
+}
+
+function formatCost(value?: number | null): string {
+  return typeof value === 'number' ? `$${value.toFixed(6)}` : 'n/a';
 }
 
 function Badge({ children, className = '' }: { children: ComponentChildren; className?: string }) {
@@ -246,6 +348,13 @@ export function Teams() {
   const [lastExecutorStep, setLastExecutorStep] = useState<TeamExecutorStepResponse | null>(null);
   const [lastTaskChadDrill, setLastTaskChadDrill] = useState<TaskChadDrillResponse | null>(null);
   const [drillUseRuntime, setDrillUseRuntime] = useState(false);
+  const [lastTeamRoomRun, setLastTeamRoomRun] = useState<TeamRoomRunResponse | null>(null);
+  const [teamRoomGoal, setTeamRoomGoal] = useState('How do we get TaskChad to one million dollars?');
+  const [teamRoomContext, setTeamRoomContext] = useState('');
+  const [teamRoomUseV2, setTeamRoomUseV2] = useState(true);
+  const [teamRoomUseRuntime, setTeamRoomUseRuntime] = useState(false);
+  const [teamRoomRuntimeLane, setTeamRoomRuntimeLane] = useState('generic_runtime');
+  const [teamRoomMaxRounds, setTeamRoomMaxRounds] = useState('2');
 
   useEffect(() => {
     const agentIds = agentOptions.map((member) => member.agent_id);
@@ -495,6 +604,42 @@ export function Teams() {
     }
   }
 
+  async function runTeamRoom(event: Event) {
+    event.preventDefault();
+    const goal = teamRoomGoal.trim();
+    if (!goal) {
+      pushToast({ tone: 'error', title: 'Team Room goal required' });
+      return;
+    }
+    const parsedRounds = Number(teamRoomMaxRounds);
+    const maxRounds = Number.isFinite(parsedRounds)
+      ? Math.min(4, Math.max(1, Math.trunc(parsedRounds)))
+      : 2;
+    setBusy(true);
+    try {
+      const result = await apiPost<TeamRoomRunResponse>('/api/team/room/run', {
+        goal,
+        context: teamRoomContext.trim() || null,
+        v2: teamRoomUseV2,
+        max_rounds: teamRoomUseV2 ? maxRounds : null,
+        use_runtime: teamRoomUseRuntime,
+        runtime_lane: teamRoomUseRuntime ? (teamRoomRuntimeLane.trim() || null) : null,
+      });
+      setLastTeamRoomRun(result);
+      setSelectedId(result.team_id);
+      pushToast({
+        tone: 'success',
+        title: 'Team Room complete',
+        description: `Team #${result.team_id} · ${result.progress.completed}/${result.progress.total}`,
+      });
+      refreshAll();
+    } catch (err: unknown) {
+      pushToast({ tone: 'error', title: 'Team Room failed', description: errorMessage(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div class="flex h-full flex-col">
       <TopBar
@@ -632,6 +777,201 @@ export function Teams() {
                   </div>
                 </div>
               </div>
+
+              <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
+                <form class="grid gap-3" onSubmit={runTeamRoom}>
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex min-w-0 items-center gap-2 text-[13px] font-medium text-[var(--color-text)]">
+                      <MessageSquare size={15} /> Team Room
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                        {teamRoomUseV2 ? 'facilitated_boardroom' : 'classic_boardroom'}
+                      </Badge>
+                      <Badge className={teamRoomUseRuntime ? 'bg-emerald-500/10 text-emerald-300' : 'bg-[var(--color-elevated)] text-[var(--color-text-muted)]'}>
+                        runtime {teamRoomUseRuntime ? 'on' : 'off'}
+                      </Badge>
+                    </div>
+                  </div>
+                  <label class="grid gap-1 text-[12px] text-[var(--color-text-muted)]">
+                    Goal
+                    <input
+                      value={teamRoomGoal}
+                      onInput={(event) => setTeamRoomGoal((event.target as HTMLInputElement).value)}
+                      class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] px-3 py-2 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+                    />
+                  </label>
+                  <label class="grid gap-1 text-[12px] text-[var(--color-text-muted)]">
+                    Context
+                    <textarea
+                      value={teamRoomContext}
+                      onInput={(event) => setTeamRoomContext((event.target as HTMLTextAreaElement).value)}
+                      class="min-h-[84px] resize-y rounded border border-[var(--color-border)] bg-[var(--color-elevated)] px-3 py-2 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+                    />
+                  </label>
+                  <div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(120px,160px)_minmax(150px,220px)_auto]">
+                    <div class="flex flex-wrap items-end gap-3">
+                      <label class="inline-flex items-center gap-2 rounded border border-[var(--color-border)] px-3 py-2 text-[12px] text-[var(--color-text-muted)]">
+                        <input
+                          type="checkbox"
+                          checked={teamRoomUseV2}
+                          onChange={(event) => setTeamRoomUseV2((event.target as HTMLInputElement).checked)}
+                        />
+                        Facilitated V2
+                      </label>
+                      <label class="inline-flex items-center gap-2 rounded border border-[var(--color-border)] px-3 py-2 text-[12px] text-[var(--color-text-muted)]">
+                        <input
+                          type="checkbox"
+                          checked={teamRoomUseRuntime}
+                          onChange={(event) => setTeamRoomUseRuntime((event.target as HTMLInputElement).checked)}
+                        />
+                        Runtime turns
+                      </label>
+                    </div>
+                    <label class="grid gap-1 text-[12px] text-[var(--color-text-muted)]">
+                      Max rounds
+                      <input
+                        type="number"
+                        min="1"
+                        max="4"
+                        disabled={!teamRoomUseV2}
+                        value={teamRoomMaxRounds}
+                        onInput={(event) => setTeamRoomMaxRounds((event.target as HTMLInputElement).value)}
+                        class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] px-3 py-2 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)] disabled:opacity-60"
+                      />
+                    </label>
+                    <label class="grid gap-1 text-[12px] text-[var(--color-text-muted)]">
+                      Runtime lane
+                      <input
+                        disabled={!teamRoomUseRuntime}
+                        value={teamRoomRuntimeLane}
+                        onInput={(event) => setTeamRoomRuntimeLane((event.target as HTMLInputElement).value)}
+                        class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] px-3 py-2 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)] disabled:opacity-60"
+                      />
+                    </label>
+                    <button
+                      type="submit"
+                      disabled={busy || !teamRoomGoal.trim()}
+                      class="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--color-accent)] px-3 py-2 text-[12px] font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
+                    >
+                      <Play size={14} /> Run Team Room
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {lastTeamRoomRun && lastTeamRoomRun.team_id === session.id && (
+                <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex min-w-0 items-center gap-2 text-[13px] font-medium text-[var(--color-text)]">
+                      <MessageSquare size={15} /> Team Room Result
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                        Team #{lastTeamRoomRun.team_id}
+                      </Badge>
+                      <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                        Convoy #{lastTeamRoomRun.convoy_id}
+                      </Badge>
+                      <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                        {lastTeamRoomRun.meeting_mode}
+                      </Badge>
+                    </div>
+                  </div>
+                  <div class="mt-3 grid gap-2 text-[11px] text-[var(--color-text-muted)] sm:grid-cols-2 xl:grid-cols-4">
+                    <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
+                      <div class="font-medium text-[var(--color-text)]">Progress</div>
+                      <div>{lastTeamRoomRun.progress.completed}/{lastTeamRoomRun.progress.total} · {lastTeamRoomRun.progress.status}</div>
+                    </div>
+                    <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
+                      <div class="font-medium text-[var(--color-text)]">Turn Summary</div>
+                      <div>{lastTeamRoomRun.turn_summary}</div>
+                    </div>
+                    <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
+                      <div class="font-medium text-[var(--color-text)]">Runtime</div>
+                      <div>{lastTeamRoomRun.runtime.enabled ? 'on' : 'off'} · {lastTeamRoomRun.runtime.turn_count} turns · tools {lastTeamRoomRun.runtime.tool_call_count}</div>
+                      <div>{formatList(lastTeamRoomRun.runtime.lanes)} · {formatList(lastTeamRoomRun.runtime.providers)}</div>
+                    </div>
+                    <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
+                      <div class="font-medium text-[var(--color-text)]">Cost / Time</div>
+                      <div>{formatCost(lastTeamRoomRun.runtime.cost_usd)}</div>
+                      <div>{lastTeamRoomRun.runtime.execution_time_ms ?? 0}ms</div>
+                    </div>
+                  </div>
+                  <div class="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.8fr)]">
+                    <div class="grid gap-3">
+                      <div>
+                        <div class="text-[12px] font-medium text-[var(--color-text)]">Discussion Rounds</div>
+                        <div class="mt-2 grid gap-2">
+                          {lastTeamRoomRun.discussion_rounds.map((round) => (
+                            <div key={round.round_number} class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                              <div class="flex flex-wrap items-center justify-between gap-2">
+                                <div class="text-[12px] font-medium text-[var(--color-text)]">Round {round.round_number}</div>
+                                <Badge className="bg-[var(--color-card)] text-[var(--color-text-muted)]">
+                                  {(round.crosstalk_turns ?? []).length} cross-talk
+                                </Badge>
+                              </div>
+                              {(round.facilitator_turn || round.facilitator_message) && (
+                                <div class="mt-2 rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+                                  <div class="font-medium text-[var(--color-text)]">
+                                    {round.facilitator_turn?.role_name ?? round.facilitator_message?.from_agent ?? 'Facilitator'}
+                                  </div>
+                                  <div class="mt-1 whitespace-pre-wrap break-words">
+                                    {clipText(round.facilitator_turn?.reply?.body ?? round.facilitator_message?.body, 320)}
+                                  </div>
+                                </div>
+                              )}
+                              <div class="mt-2 grid gap-2 md:grid-cols-2">
+                                {(round.crosstalk_turns ?? []).map((turn) => (
+                                  <div key={`${round.round_number}-${turn.agent_id}-${turn.subtask_id}`} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+                                    <div class="flex flex-wrap items-center justify-between gap-2">
+                                      <span class="font-medium text-[var(--color-text)]">{turn.role_name}</span>
+                                      <span>{turn.status || 'unknown'} · {turn.completed ? 'complete' : 'open'}</span>
+                                    </div>
+                                    <div class="mt-1 whitespace-pre-wrap break-words">
+                                      {clipText(turn.reply?.body, 220)}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                        <div class="mb-2 text-[12px] font-medium text-[var(--color-text)]">Final Brief</div>
+                        <div class="whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--color-text-muted)]">
+                          {lastTeamRoomRun.final_brief}
+                        </div>
+                      </div>
+                    </div>
+                    <div class="grid content-start gap-3">
+                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                        <div class="text-[12px] font-medium text-[var(--color-text)]">Decision Ledger</div>
+                        <div class="mt-2 grid gap-2 text-[11px] text-[var(--color-text-muted)]">
+                          {lastTeamRoomRun.decision_ledger.decisions.map((decision) => (
+                            <div key={decision} class="break-words">Decision: {decision}</div>
+                          ))}
+                          <div class="break-words">Strongest objection: {lastTeamRoomRun.decision_ledger.strongest_objection}</div>
+                          <div class="break-words">Next trigger: {lastTeamRoomRun.decision_ledger.next_meeting_trigger}</div>
+                        </div>
+                      </div>
+                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                        <div class="text-[12px] font-medium text-[var(--color-text)]">Owner Actions</div>
+                        <div class="mt-2 grid gap-2">
+                          {lastTeamRoomRun.decision_ledger.owner_actions.map((item) => (
+                            <div key={`${item.owner}-${item.action}`} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+                              <div class="font-medium text-[var(--color-text)]">{item.owner}</div>
+                              <div class="mt-1 break-words">{item.action}</div>
+                              <div class="mt-1 break-words">Signal: {item.validation_signal}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {lastTaskChadDrill && lastTaskChadDrill.team_id === session.id && (
                 <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
