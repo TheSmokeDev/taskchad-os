@@ -1056,6 +1056,131 @@ def team_tick(
             click.echo(f"  Cwd: {result.executor.cwd}")
 
 
+@team.group("room")
+def team_room():
+    """Run bounded team-room workflows."""
+    pass
+
+
+def _clip_team_room_cli_text(text: str, *, max_chars: int = 1800) -> str:
+    value = (text or "").strip()
+    if len(value) <= max_chars:
+        return value
+    return value[: max_chars - 14].rstrip() + "\n...[truncated]"
+
+
+@team_room.command("run")
+@click.option("--workflow", "workflow_id", default="growth_boardroom", help="Workflow ID")
+@click.option("--goal", default=None, help="Goal for the team room")
+@click.option("--context", default=None, help="Optional short context")
+@click.option("--runtime", "use_runtime", is_flag=True, default=False, help="Use runtime lane replies")
+@click.option("--lane", "runtime_lane", default=None, help="Optional runtime lane/provider")
+@click.option("--runtime-lane", "runtime_lane_alias", default=None, help="Optional runtime lane/provider")
+@click.option("--max-rounds", default=1, type=int, help="Cross-talk rounds; v1 supports 1")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+@click.argument("goal_words", nargs=-1)
+def team_room_run(
+    workflow_id,
+    goal,
+    context,
+    use_runtime,
+    runtime_lane,
+    runtime_lane_alias,
+    max_rounds,
+    json_mode,
+    goal_words,
+):
+    """Run a Homie-native team room workflow."""
+    from orchestration.observability import orchestration_span, update_observation
+    from orchestration.team_room import (
+        TeamRoomWorkflowService,
+        team_room_workflow_result_to_dict,
+    )
+
+    if runtime_lane_alias:
+        runtime_lane = runtime_lane_alias
+    if runtime_lane:
+        use_runtime = True
+    goal_text = (goal or " ".join(goal_words)).strip()
+    if not goal_text:
+        click.echo("Error: --goal or goal text is required.", err=True)
+        sys.exit(1)
+
+    with orchestration_span(
+        "team_cli.room_run",
+        metadata={
+            "workflow_id": workflow_id,
+            "use_runtime": use_runtime,
+            "runtime_lane": runtime_lane,
+            "max_rounds": max_rounds,
+            "surface": "cli",
+        },
+        trace_metadata={"surface": "cli", "feature_phase": 12},
+        expected_exceptions=(SystemExit,),
+    ):
+        db, _ts, _ms = _get_team_services()
+        try:
+            result = TeamRoomWorkflowService(db).run_team_room(
+                goal=goal_text,
+                workflow_id=workflow_id,
+                context=context,
+                use_runtime=use_runtime,
+                runtime_lane=runtime_lane,
+                max_rounds=max_rounds,
+            )
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        finally:
+            db.close()
+
+        payload = team_room_workflow_result_to_dict(result)
+        update_observation(
+            metadata={
+                "team_id": payload["team_id"],
+                "convoy_id": payload["convoy_id"],
+                "workflow_id": payload["workflow_id"],
+                "progress": (
+                    f"{payload['progress']['completed']}/"
+                    f"{payload['progress']['total']}"
+                ),
+            },
+            output={"final_brief_chars": len(payload["final_brief"])},
+        )
+        if json_mode:
+            print(json_mod.dumps(payload, indent=2))
+            return
+
+        runtime_summary = payload["runtime"]
+        click.echo("Team Room Workflow")
+        click.echo(f"  Workflow: {payload['workflow_id']}")
+        click.echo(f"  Goal: {payload['goal']}")
+        click.echo(f"  Team: #{payload['team_id']}")
+        click.echo(f"  Convoy: #{payload['convoy_id']}")
+        click.echo(
+            "  Progress: "
+            f"{payload['progress']['completed']}/{payload['progress']['total']} subtasks"
+        )
+        click.echo(
+            "  Turns: 4 proposals, 4 cross-talk, 1 adversarial critique, "
+            "4 revisions, 1 final synthesis"
+        )
+        click.echo(f"  Runtime turns: {'on' if use_runtime else 'off'}")
+        if runtime_lane:
+            click.echo(f"  Runtime lane: {runtime_lane}")
+        if use_runtime:
+            click.echo(
+                "  Runtime metadata: "
+                f"{runtime_summary['turn_count']} turns; "
+                f"lanes {', '.join(runtime_summary['lanes']) or 'unknown'}; "
+                f"providers {', '.join(runtime_summary['providers']) or 'unknown'}; "
+                f"models {', '.join(runtime_summary['models']) or 'unknown'}; "
+                f"tools {runtime_summary['tool_call_count']}"
+            )
+        click.echo("\nFinal Brief")
+        click.echo(_clip_team_room_cli_text(payload["final_brief"]))
+
+
 @team.command("close")
 @click.argument("team_id", type=int)
 def team_close(team_id):

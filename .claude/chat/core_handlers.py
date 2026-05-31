@@ -1805,6 +1805,143 @@ async def handle_taskchaddrill(
     )
 
 
+def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
+    usage = (
+        "Usage: /teamroom [--runtime] [--lane <lane>] [--workflow growth_boardroom] "
+        "[--context <text>] [--max-rounds 1] <goal>"
+    )
+    try:
+        tokens = shlex.split(args or "")
+    except ValueError as exc:
+        return f"{usage}\nParse error: {exc}"
+
+    opts: dict[str, Any] = {
+        "goal": None,
+        "workflow_id": "growth_boardroom",
+        "context": None,
+        "use_runtime": False,
+        "runtime_lane": None,
+        "max_rounds": 1,
+    }
+    goal_parts: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--runtime":
+            opts["use_runtime"] = True
+            i += 1
+            continue
+        if token in ("--lane", "--runtime-lane", "--workflow", "--workflow-id", "--context", "--goal", "--max-rounds"):
+            if i + 1 >= len(tokens):
+                return f"Missing value for {token}"
+            value = tokens[i + 1].strip()
+            if token in ("--lane", "--runtime-lane"):
+                opts["runtime_lane"] = value
+                opts["use_runtime"] = True
+            elif token in ("--workflow", "--workflow-id"):
+                opts["workflow_id"] = value
+            elif token == "--context":
+                opts["context"] = value
+            elif token == "--goal":
+                opts["goal"] = value
+            elif token == "--max-rounds":
+                try:
+                    opts["max_rounds"] = int(value)
+                except ValueError:
+                    return "--max-rounds must be an integer"
+            i += 2
+            continue
+        if token.startswith("--"):
+            return f"Unknown option: {token}\n{usage}"
+        goal_parts.append(token)
+        i += 1
+    if goal_parts:
+        extra_goal = " ".join(goal_parts).strip()
+        opts["goal"] = f"{opts['goal']} {extra_goal}".strip() if opts["goal"] else extra_goal
+    if not opts["goal"]:
+        return usage
+    return opts
+
+
+def _clip_team_room_text(text: str, *, max_chars: int = 1800) -> str:
+    stripped = (text or "").strip()
+    if len(stripped) <= max_chars:
+        return stripped
+    return stripped[: max_chars - 14].rstrip() + "\n...[truncated]"
+
+
+def _format_team_room_reply(result: Any, *, use_runtime: bool, runtime_lane: str | None) -> str:
+    from orchestration.team_room import team_room_runtime_summary
+
+    convoy = result.convoy.convoy
+    final_brief = _clip_team_room_text(result.final_brief)
+    runtime_summary = team_room_runtime_summary(result)
+    lines = [
+        "*Team Room Workflow*",
+        f"Workflow: {_teamtick_code(result.workflow_id)}",
+        f"Goal: {_teamtick_code(_clip_team_room_text(result.goal, max_chars=180))}",
+        f"Team: {_teamtick_code(f'#{result.team.session.id}')}",
+        f"Convoy: {_teamtick_code(f'#{convoy.id}')}",
+        f"Progress: {_teamtick_code(f'{convoy.completed_subtasks}/{convoy.total_subtasks}')} subtasks",
+        (
+            "Turns: 4 proposals, 4 cross-talk, 1 adversarial critique, "
+            "4 revisions, 1 final synthesis"
+        ),
+        f"Runtime turns: {_teamtick_code('on' if use_runtime else 'off')}",
+    ]
+    if runtime_lane:
+        lines.append(f"Runtime lane: {_teamtick_code(runtime_lane)}")
+    if use_runtime:
+        lines.append(
+            "Runtime metadata: "
+            f"{_teamtick_code(str(runtime_summary['turn_count']))} turns; "
+            f"lanes {_teamtick_code(', '.join(runtime_summary['lanes']) or 'unknown')}; "
+            f"providers {_teamtick_code(', '.join(runtime_summary['providers']) or 'unknown')}; "
+            f"models {_teamtick_code(', '.join(runtime_summary['models']) or 'unknown')}; "
+            f"tools {_teamtick_code(str(runtime_summary['tool_call_count']))}; "
+            f"cost {_teamtick_code(_format_taskchad_cost(runtime_summary['cost_usd']))}; "
+            f"elapsed {_teamtick_code(str(runtime_summary['execution_time_ms'] or 0) + 'ms')}"
+        )
+        if runtime_summary["errors"]:
+            clipped_errors = "; ".join(runtime_summary["errors"])[:280]
+            lines.append(f"Runtime errors: {_teamtick_code(clipped_errors)}")
+    lines.extend(["", "*Final Brief*", final_brief])
+    return "\n".join(lines)
+
+
+async def handle_teamroom(
+    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
+) -> str:
+    """Run the bounded Growth Boardroom team room workflow."""
+    parsed = _parse_teamroom_args(args)
+    if isinstance(parsed, str):
+        return parsed
+
+    from config import ORCHESTRATION_DB_PATH, ensure_directories
+    from orchestration.db import OrchestrationDB
+    from orchestration.observability import init_orchestration_observability
+    from orchestration.team_room import TeamRoomWorkflowService
+
+    def _run_team_room() -> Any:
+        ensure_directories()
+        init_orchestration_observability()
+        db = OrchestrationDB(ORCHESTRATION_DB_PATH)
+        try:
+            return TeamRoomWorkflowService(db).run_team_room(**parsed)
+        finally:
+            db.close()
+
+    if parsed["use_runtime"]:
+        result = await asyncio.to_thread(_run_team_room)
+    else:
+        result = _run_team_room()
+    return _format_team_room_reply(
+        result,
+        use_runtime=bool(parsed["use_runtime"]),
+        runtime_lane=parsed["runtime_lane"],
+    )
+
+
 async def handle_send(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Send an email draft from the drafts folder."""
     try:
@@ -2242,6 +2379,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "discuss": handle_discuss,
     "teamtick": handle_teamtick,
     "taskchaddrill": handle_taskchaddrill,
+    "teamroom": handle_teamroom,
     "send": handle_send,
     "brief": handle_brief,
     "working": handle_working,

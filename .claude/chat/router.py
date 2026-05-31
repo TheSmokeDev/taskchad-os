@@ -837,12 +837,12 @@ class ChatRouter:
         """Keep router-command quiet metadata aligned with current selection."""
 
         parsed = self._parse_command((getattr(incoming, "text", "") or "").strip())
-        if not parsed or parsed[0] not in {"model", "provider", "taskchaddrill"}:
+        if not parsed or parsed[0] not in {"model", "provider", "taskchaddrill", "teamroom"}:
             return
         command, args = parsed
-        taskchad_runtime_lane: str | None = None
-        if command == "taskchaddrill":
-            runtime_requested, taskchad_runtime_lane = self._taskchad_runtime_request(args)
+        requested_runtime_lane: str | None = None
+        if command in {"taskchaddrill", "teamroom"}:
+            runtime_requested, requested_runtime_lane = self._router_runtime_request(args)
             if not runtime_requested:
                 return
 
@@ -851,7 +851,7 @@ class ChatRouter:
             from runtime.selection import provider_display_name, resolve_runtime_selection
 
             selection = resolve_runtime_selection()
-            selected_lane = taskchad_runtime_lane or selection.lane or "auto"
+            selected_lane = requested_runtime_lane or selection.lane or "auto"
             session.runtime_lane = selected_lane
             if selected_lane == "claude_native":
                 session.runtime_provider = "claude"
@@ -876,7 +876,7 @@ class ChatRouter:
             )
 
     @staticmethod
-    def _taskchad_runtime_request(args: str) -> tuple[bool, str | None]:
+    def _router_runtime_request(args: str) -> tuple[bool, str | None]:
         try:
             tokens = shlex.split(args or "")
         except ValueError:

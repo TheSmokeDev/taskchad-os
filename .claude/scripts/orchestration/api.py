@@ -40,6 +40,7 @@ from orchestration.team_loop import (
     result_to_dict,
     tick_result_to_dict,
 )
+from orchestration.team_room import TeamRoomWorkflowService, team_room_workflow_result_to_dict
 from orchestration.team_service import TeamService
 
 logger = logging.getLogger(__name__)
@@ -256,6 +257,15 @@ class TaskChadDrillBody(BaseModel):
     target_url: str = "https://www.taskchad.com/"
     use_runtime: bool = False
     runtime_lane: str | None = None
+
+
+class TeamRoomRunBody(BaseModel):
+    goal: str
+    workflow_id: str = "growth_boardroom"
+    context: str | None = None
+    use_runtime: bool = False
+    runtime_lane: str | None = None
+    max_rounds: int = 1
 
 
 class TeamLoopStepBody(BaseModel):
@@ -769,6 +779,53 @@ def run_taskchad_drill(request: Request, body: TaskChadDrillBody | None = None):
                 "role_turn_count": len(payload["role_turns"]),
             },
             output={"final_plan_chars": len(payload["final_plan"])},
+        )
+        return payload
+
+
+@app.post("/api/team/room/run")
+def run_team_room(request: Request, body: TeamRoomRunBody):
+    surface = _operator_surface(request)
+    with orchestration_span(
+        "orchestration.api.team_room_run",
+        metadata={
+            "surface": surface,
+            "workflow_id": body.workflow_id,
+            "use_runtime": body.use_runtime,
+            "runtime_lane": body.runtime_lane,
+            "max_rounds": body.max_rounds,
+        },
+        trace_metadata={"surface": surface, "feature_phase": 12},
+        expected_exceptions=(HTTPException,),
+    ):
+        try:
+            result = TeamRoomWorkflowService(_db).run_team_room(
+                goal=body.goal,
+                workflow_id=body.workflow_id,
+                context=body.context,
+                use_runtime=body.use_runtime,
+                runtime_lane=body.runtime_lane,
+                max_rounds=body.max_rounds,
+            )
+        except ValueError as e:
+            update_observation(
+                level="WARNING",
+                status_message=str(e),
+                metadata={"error_type": "team_room_validation"},
+            )
+            raise HTTPException(status_code=400, detail=str(e))
+        payload = team_room_workflow_result_to_dict(result)
+        update_observation(
+            metadata={
+                "team_id": payload["team_id"],
+                "convoy_id": payload["convoy_id"],
+                "workflow_id": payload["workflow_id"],
+                "progress": (
+                    f"{payload['progress']['completed']}/"
+                    f"{payload['progress']['total']}"
+                ),
+            },
+            output={"final_brief_chars": len(payload["final_brief"])},
         )
         return payload
 

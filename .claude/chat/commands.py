@@ -79,6 +79,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("discuss", "Start a discussion — /discuss <topic>", "router", "admin"),
     ("teamtick", "Run one autonomous team scheduler tick — /teamtick <team_id>", "router", "admin"),
     ("taskchaddrill", "Run TaskChad multi-role team drill — /taskchaddrill [--runtime]", "router", "admin"),
+    ("teamroom", "Run Growth Boardroom team workflow — /teamroom [--runtime] <goal>", "router", "admin"),
     ("send", "Send a draft email via Outlook (e.g. /send draft-01)", "router", "operator"),
     ("brief", "Quick briefing — /brief all for full dashboard", "router", "operator"),
     # -- Memory & Search --
@@ -128,7 +129,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ("Analytics & Monitoring", ["gsc", "analytics"]),
     ("Personal Finance", ["budget"]),
     # Cabinet (Phase 5b) — chat-routed cabinet operator surface.
-    ("Cabinet", ["cabinet", "standup", "discuss", "teamtick", "taskchaddrill"]),
+    ("Cabinet", ["cabinet", "standup", "discuss", "teamtick", "taskchaddrill", "teamroom"]),
     ("Communication", ["send", "brief"]),
     ("Memory", ["search", "file", "working"]),
     ("Content Creation", ["blog", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts"]),
@@ -163,6 +164,7 @@ CORE_INTENTS: list[tuple[list[str], str, bool]] = [
     (["debate", "discuss this with the team", "open debate"], "discuss", False),
     (["team tick", "team scheduler", "run team scheduler"], "teamtick", False),
     (["taskchad drill", "taskchad team drill", "run taskchad drill"], "taskchaddrill", False),
+    (["team room", "growth boardroom", "boardroom workflow"], "teamroom", False),
 ]
 
 
