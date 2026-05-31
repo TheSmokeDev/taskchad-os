@@ -79,7 +79,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("discuss", "Start a discussion — /discuss <topic>", "router", "admin"),
     ("teamtick", "Run one autonomous team scheduler tick — /teamtick <team_id>", "router", "admin"),
     ("taskchaddrill", "Run TaskChad multi-role team drill — /taskchaddrill [--runtime]", "router", "admin"),
-    ("teamroom", "Run Growth Boardroom team workflow — /teamroom [--runtime] <goal>", "router", "admin"),
+    ("teamroom", "Run Growth Boardroom team workflow — /teamroom [--v2] [--runtime] <goal>", "router", "admin"),
     ("send", "Send a draft email via Outlook (e.g. /send draft-01)", "router", "operator"),
     ("brief", "Quick briefing — /brief all for full dashboard", "router", "operator"),
     # -- Memory & Search --

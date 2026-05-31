@@ -1807,8 +1807,8 @@ async def handle_taskchaddrill(
 
 def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
     usage = (
-        "Usage: /teamroom [--runtime] [--lane <lane>] [--workflow growth_boardroom] "
-        "[--context <text>] [--max-rounds 1] <goal>"
+        "Usage: /teamroom [--v2] [--runtime] [--lane <lane>] "
+        "[--workflow growth_boardroom] [--context <text>] [--max-rounds <n>] <goal>"
     )
     try:
         tokens = shlex.split(args or "")
@@ -1821,7 +1821,8 @@ def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
         "context": None,
         "use_runtime": False,
         "runtime_lane": None,
-        "max_rounds": 1,
+        "max_rounds": None,
+        "meeting_mode": None,
     }
     goal_parts: list[str] = []
     i = 0
@@ -1831,7 +1832,21 @@ def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
             opts["use_runtime"] = True
             i += 1
             continue
-        if token in ("--lane", "--runtime-lane", "--workflow", "--workflow-id", "--context", "--goal", "--max-rounds"):
+        if token == "--v2":
+            opts["meeting_mode"] = "facilitated_boardroom"
+            i += 1
+            continue
+        if token in (
+            "--lane",
+            "--runtime-lane",
+            "--workflow",
+            "--workflow-id",
+            "--context",
+            "--goal",
+            "--max-rounds",
+            "--meeting-mode",
+            "--mode",
+        ):
             if i + 1 >= len(tokens):
                 return f"Missing value for {token}"
             value = tokens[i + 1].strip()
@@ -1849,6 +1864,8 @@ def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
                     opts["max_rounds"] = int(value)
                 except ValueError:
                     return "--max-rounds must be an integer"
+            elif token in ("--meeting-mode", "--mode"):
+                opts["meeting_mode"] = value
             i += 2
             continue
         if token.startswith("--"):
@@ -1871,7 +1888,7 @@ def _clip_team_room_text(text: str, *, max_chars: int = 1800) -> str:
 
 
 def _format_team_room_reply(result: Any, *, use_runtime: bool, runtime_lane: str | None) -> str:
-    from orchestration.team_room import team_room_runtime_summary
+    from orchestration.team_room import team_room_runtime_summary, team_room_turn_summary
 
     convoy = result.convoy.convoy
     final_brief = _clip_team_room_text(result.final_brief)
@@ -1879,14 +1896,13 @@ def _format_team_room_reply(result: Any, *, use_runtime: bool, runtime_lane: str
     lines = [
         "*Team Room Workflow*",
         f"Workflow: {_teamtick_code(result.workflow_id)}",
+        f"Mode: {_teamtick_code(result.meeting_mode)}",
+        f"Rounds: {_teamtick_code(str(result.max_rounds))}",
         f"Goal: {_teamtick_code(_clip_team_room_text(result.goal, max_chars=180))}",
         f"Team: {_teamtick_code(f'#{result.team.session.id}')}",
         f"Convoy: {_teamtick_code(f'#{convoy.id}')}",
         f"Progress: {_teamtick_code(f'{convoy.completed_subtasks}/{convoy.total_subtasks}')} subtasks",
-        (
-            "Turns: 4 proposals, 4 cross-talk, 1 adversarial critique, "
-            "4 revisions, 1 final synthesis"
-        ),
+        f"Turns: {team_room_turn_summary(result)}",
         f"Runtime turns: {_teamtick_code('on' if use_runtime else 'off')}",
     ]
     if runtime_lane:

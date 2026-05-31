@@ -265,7 +265,9 @@ class TeamRoomRunBody(BaseModel):
     context: str | None = None
     use_runtime: bool = False
     runtime_lane: str | None = None
-    max_rounds: int = 1
+    max_rounds: int | None = None
+    meeting_mode: str | None = None
+    v2: bool = False
 
 
 class TeamLoopStepBody(BaseModel):
@@ -791,6 +793,8 @@ def run_team_room(request: Request, body: TeamRoomRunBody):
         metadata={
             "surface": surface,
             "workflow_id": body.workflow_id,
+            "meeting_mode": body.meeting_mode,
+            "v2": body.v2,
             "use_runtime": body.use_runtime,
             "runtime_lane": body.runtime_lane,
             "max_rounds": body.max_rounds,
@@ -806,6 +810,11 @@ def run_team_room(request: Request, body: TeamRoomRunBody):
                 use_runtime=body.use_runtime,
                 runtime_lane=body.runtime_lane,
                 max_rounds=body.max_rounds,
+                meeting_mode=(
+                    "facilitated_boardroom"
+                    if body.v2 and not body.meeting_mode
+                    else body.meeting_mode
+                ),
             )
         except ValueError as e:
             update_observation(

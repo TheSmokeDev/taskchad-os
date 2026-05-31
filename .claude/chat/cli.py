@@ -1076,7 +1076,9 @@ def _clip_team_room_cli_text(text: str, *, max_chars: int = 1800) -> str:
 @click.option("--runtime", "use_runtime", is_flag=True, default=False, help="Use runtime lane replies")
 @click.option("--lane", "runtime_lane", default=None, help="Optional runtime lane/provider")
 @click.option("--runtime-lane", "runtime_lane_alias", default=None, help="Optional runtime lane/provider")
-@click.option("--max-rounds", default=1, type=int, help="Cross-talk rounds; v1 supports 1")
+@click.option("--max-rounds", default=None, type=int, help="Cross-talk rounds; >1 enables facilitated V2")
+@click.option("--meeting-mode", default=None, help="classic_boardroom or facilitated_boardroom")
+@click.option("--v2", "use_v2", is_flag=True, default=False, help="Run the facilitated V2 meeting")
 @click.option("--json", "json_mode", is_flag=True, help="JSON output")
 @click.argument("goal_words", nargs=-1)
 def team_room_run(
@@ -1087,6 +1089,8 @@ def team_room_run(
     runtime_lane,
     runtime_lane_alias,
     max_rounds,
+    meeting_mode,
+    use_v2,
     json_mode,
     goal_words,
 ):
@@ -1110,6 +1114,8 @@ def team_room_run(
         "team_cli.room_run",
         metadata={
             "workflow_id": workflow_id,
+            "meeting_mode": meeting_mode,
+            "v2": use_v2,
             "use_runtime": use_runtime,
             "runtime_lane": runtime_lane,
             "max_rounds": max_rounds,
@@ -1127,6 +1133,11 @@ def team_room_run(
                 use_runtime=use_runtime,
                 runtime_lane=runtime_lane,
                 max_rounds=max_rounds,
+                meeting_mode=(
+                    "facilitated_boardroom"
+                    if use_v2 and not meeting_mode
+                    else meeting_mode
+                ),
             )
         except ValueError as e:
             click.echo(f"Error: {e}", err=True)
@@ -1154,6 +1165,8 @@ def team_room_run(
         runtime_summary = payload["runtime"]
         click.echo("Team Room Workflow")
         click.echo(f"  Workflow: {payload['workflow_id']}")
+        click.echo(f"  Mode: {payload['meeting_mode']}")
+        click.echo(f"  Rounds: {payload['max_rounds']}")
         click.echo(f"  Goal: {payload['goal']}")
         click.echo(f"  Team: #{payload['team_id']}")
         click.echo(f"  Convoy: #{payload['convoy_id']}")
@@ -1161,10 +1174,7 @@ def team_room_run(
             "  Progress: "
             f"{payload['progress']['completed']}/{payload['progress']['total']} subtasks"
         )
-        click.echo(
-            "  Turns: 4 proposals, 4 cross-talk, 1 adversarial critique, "
-            "4 revisions, 1 final synthesis"
-        )
+        click.echo(f"  Turns: {payload['turn_summary']}")
         click.echo(f"  Runtime turns: {'on' if use_runtime else 'off'}")
         if runtime_lane:
             click.echo(f"  Runtime lane: {runtime_lane}")

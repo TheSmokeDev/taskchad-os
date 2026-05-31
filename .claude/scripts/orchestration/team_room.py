@@ -34,6 +34,10 @@ from orchestration.team_service import TeamService
 TEAM_ROOM_WORKFLOW_ID = "growth_boardroom"
 TEAM_ROOM_LEAD_AGENT_ID = "teamroom-lead"
 TEAM_ROOM_LEAD_AGENT_NAME = "Team Room Lead"
+TEAM_ROOM_MODE_CLASSIC = "classic_boardroom"
+TEAM_ROOM_MODE_FACILITATED = "facilitated_boardroom"
+TEAM_ROOM_FACILITATED_DEFAULT_ROUNDS = 2
+TEAM_ROOM_MAX_ROUNDS = 4
 
 
 @dataclass(frozen=True)
@@ -55,23 +59,49 @@ class TeamRoomTurn:
 
 
 @dataclass
+class TeamRoomDiscussionRound:
+    round_number: int
+    facilitator_message: AgentMessage | None
+    facilitator_turn: TeamRoomTurn | None
+    crosstalk_messages: list[AgentMessage]
+    crosstalk_turns: list[TeamRoomTurn]
+
+
+@dataclass(frozen=True)
+class TeamRoomDecisionLedger:
+    decisions: list[str]
+    accepted_bets: list[str]
+    rejected_bets: list[str]
+    owner_actions: list[dict[str, str]]
+    open_questions: list[str]
+    strongest_objection: str
+    next_meeting_trigger: str
+
+
+@dataclass
 class TeamRoomWorkflowResult:
     workflow_id: str
+    meeting_mode: str
+    max_rounds: int
     goal: str
     context: str | None
     lead_frame: str
     convoy: ConvoyWithSubtasks
     team: TeamSessionWithMembers
+    facilitator_messages: list[AgentMessage]
+    facilitator_turns: list[TeamRoomTurn]
     proposal_messages: list[AgentMessage]
     proposal_turns: list[TeamRoomTurn]
     crosstalk_messages: list[AgentMessage]
     crosstalk_turns: list[TeamRoomTurn]
+    discussion_rounds: list[TeamRoomDiscussionRound]
     reviewer_message: AgentMessage
     reviewer_turn: TeamRoomTurn
     revision_messages: list[AgentMessage]
     revision_turns: list[TeamRoomTurn]
     synthesis_message: AgentMessage
     final_turn: TeamRoomTurn
+    decision_ledger: TeamRoomDecisionLedger
     final_brief: str
 
 
@@ -163,6 +193,22 @@ TEAM_ROOM_REVIEWER = TeamRoomRoleSpec(
     revision_prompt="",
 )
 
+TEAM_ROOM_FACILITATOR = TeamRoomRoleSpec(
+    key="facilitator",
+    agent_id="teamroom-facilitator",
+    agent_name="Facilitator",
+    subtask_title="Facilitated boardroom agenda",
+    proposal_prompt=(
+        "Open the meeting with the agenda, decision criteria, speaking order, "
+        "and what would justify another round."
+    ),
+    crosstalk_prompt=(
+        "Review the room so far, choose the next cross-talk focus, name the "
+        "weakest consensus point, and direct departments to answer one peer."
+    ),
+    revision_prompt="",
+)
+
 TEAM_ROOM_SYNTHESIZER = TeamRoomRoleSpec(
     key="synthesizer",
     agent_id="teamroom-synthesizer",
@@ -195,7 +241,8 @@ class TeamRoomWorkflowService:
         context: str | None = None,
         use_runtime: bool = False,
         runtime_lane: str | None = None,
-        max_rounds: int = 1,
+        max_rounds: int | None = None,
+        meeting_mode: str | None = None,
         workspace_id: int = DEFAULT_WORKSPACE_ID,
     ) -> TeamRoomWorkflowResult:
         """Run the Growth Boardroom workflow and return a bounded final brief."""
@@ -204,17 +251,20 @@ class TeamRoomWorkflowService:
             raise ValueError("goal is required")
         if workflow_id != TEAM_ROOM_WORKFLOW_ID:
             raise ValueError(f"Unsupported team room workflow: {workflow_id}")
-        if max_rounds != 1:
-            raise ValueError("growth_boardroom v1 supports max_rounds=1")
+        resolved_mode, resolved_rounds = self._resolve_meeting_shape(
+            meeting_mode=meeting_mode,
+            max_rounds=max_rounds,
+        )
         normalized_context = (context or "").strip() or None
 
         with orchestration_span(
             "team_room.run_team_room",
             metadata={
                 "workflow_id": workflow_id,
+                "meeting_mode": resolved_mode,
                 "use_runtime": use_runtime,
                 "runtime_lane": runtime_lane,
-                "max_rounds": max_rounds,
+                "max_rounds": resolved_rounds,
             },
             trace_metadata={"feature_phase": 12, "workflow_id": workflow_id},
             expected_exceptions=(ValueError,),
@@ -224,14 +274,53 @@ class TeamRoomWorkflowService:
                 normalized_goal,
                 normalized_context,
                 workflow_id=workflow_id,
+                meeting_mode=resolved_mode,
+                max_rounds=resolved_rounds,
                 workspace_id=workspace_id,
             )
             team = self._create_team(
                 convoy,
                 goal=normalized_goal,
                 workflow_id=workflow_id,
+                meeting_mode=resolved_mode,
                 workspace_id=workspace_id,
             )
+
+            facilitator_messages: list[AgentMessage] = []
+            facilitator_turns: list[TeamRoomTurn] = []
+            if resolved_mode == TEAM_ROOM_MODE_FACILITATED:
+                facilitator_messages.append(
+                    self._send_facilitator_opening_brief(
+                        lead_frame=lead_frame,
+                        convoy_id=convoy.convoy.id,
+                        max_rounds=resolved_rounds,
+                        workspace_id=workspace_id,
+                    )
+                )
+                opening_subtask = self._subtask_for_phase(
+                    convoy.subtasks,
+                    "facilitator_open",
+                )
+                opening_step = self.loop_svc.run_member_step(
+                    team.session.id,
+                    TEAM_ROOM_FACILITATOR.agent_id,
+                    subtask_id=opening_subtask.id,
+                    reply_body=self._default_facilitator_opening_reply(
+                        normalized_goal,
+                        resolved_rounds,
+                    ),
+                    use_runtime=use_runtime,
+                    runtime_lane=runtime_lane,
+                    complete=True,
+                    workspace_id=workspace_id,
+                )
+                facilitator_turns.append(
+                    TeamRoomTurn(
+                        phase="facilitator_open",
+                        role=TEAM_ROOM_FACILITATOR,
+                        step=opening_step,
+                    )
+                )
 
             proposal_messages = self._seed_proposal_briefs(
                 lead_frame=lead_frame,
@@ -240,7 +329,7 @@ class TeamRoomWorkflowService:
             )
             proposal_turns = self._run_department_phase(
                 team.session.id,
-                convoy.subtasks[:4],
+                self._subtasks_for_department_phase(convoy.subtasks, "proposal"),
                 phase="proposal",
                 reply_builder=lambda role: self._default_proposal_reply(role, normalized_goal),
                 use_runtime=use_runtime,
@@ -248,21 +337,89 @@ class TeamRoomWorkflowService:
                 workspace_id=workspace_id,
             )
 
-            crosstalk_messages = self._send_crosstalk_briefs(
-                lead_frame=lead_frame,
-                convoy_id=convoy.convoy.id,
-                proposal_turns=proposal_turns,
-                workspace_id=workspace_id,
-            )
-            crosstalk_turns = self._run_department_phase(
-                team.session.id,
-                convoy.subtasks[4:8],
-                phase="crosstalk",
-                reply_builder=lambda role: self._default_crosstalk_reply(role, normalized_goal),
-                use_runtime=use_runtime,
-                runtime_lane=runtime_lane,
-                workspace_id=workspace_id,
-            )
+            crosstalk_messages: list[AgentMessage] = []
+            crosstalk_turns: list[TeamRoomTurn] = []
+            discussion_rounds: list[TeamRoomDiscussionRound] = []
+            for round_number in range(1, resolved_rounds + 1):
+                round_facilitator_message: AgentMessage | None = None
+                round_facilitator_turn: TeamRoomTurn | None = None
+                if resolved_mode == TEAM_ROOM_MODE_FACILITATED:
+                    round_facilitator_message = self._send_facilitator_round_brief(
+                        lead_frame=lead_frame,
+                        convoy_id=convoy.convoy.id,
+                        round_number=round_number,
+                        proposal_turns=proposal_turns,
+                        crosstalk_turns=crosstalk_turns,
+                        workspace_id=workspace_id,
+                    )
+                    facilitator_messages.append(round_facilitator_message)
+                    facilitator_subtask = self._subtask_for_phase(
+                        convoy.subtasks,
+                        "facilitator_round",
+                        round_number=round_number,
+                    )
+                    facilitator_step = self.loop_svc.run_member_step(
+                        team.session.id,
+                        TEAM_ROOM_FACILITATOR.agent_id,
+                        subtask_id=facilitator_subtask.id,
+                        reply_body=self._default_facilitator_round_reply(
+                            normalized_goal,
+                            round_number,
+                            resolved_rounds,
+                        ),
+                        use_runtime=use_runtime,
+                        runtime_lane=runtime_lane,
+                        complete=True,
+                        workspace_id=workspace_id,
+                    )
+                    round_facilitator_turn = TeamRoomTurn(
+                        phase=f"facilitator_round_{round_number}",
+                        role=TEAM_ROOM_FACILITATOR,
+                        step=facilitator_step,
+                    )
+                    facilitator_turns.append(round_facilitator_turn)
+
+                round_messages = self._send_crosstalk_briefs(
+                    lead_frame=lead_frame,
+                    convoy_id=convoy.convoy.id,
+                    proposal_turns=proposal_turns,
+                    prior_crosstalk_turns=crosstalk_turns,
+                    facilitator_turn=round_facilitator_turn,
+                    round_number=round_number,
+                    workspace_id=workspace_id,
+                )
+                round_turns = self._run_department_phase(
+                    team.session.id,
+                    self._subtasks_for_department_phase(
+                        convoy.subtasks,
+                        "crosstalk",
+                        round_number=round_number,
+                    ),
+                    phase=(
+                        f"crosstalk_round_{round_number}"
+                        if resolved_mode == TEAM_ROOM_MODE_FACILITATED
+                        else "crosstalk"
+                    ),
+                    reply_builder=lambda role, rn=round_number: self._default_crosstalk_reply(
+                        role,
+                        normalized_goal,
+                        round_number=rn,
+                    ),
+                    use_runtime=use_runtime,
+                    runtime_lane=runtime_lane,
+                    workspace_id=workspace_id,
+                )
+                crosstalk_messages.extend(round_messages)
+                crosstalk_turns.extend(round_turns)
+                discussion_rounds.append(
+                    TeamRoomDiscussionRound(
+                        round_number=round_number,
+                        facilitator_message=round_facilitator_message,
+                        facilitator_turn=round_facilitator_turn,
+                        crosstalk_messages=round_messages,
+                        crosstalk_turns=round_turns,
+                    )
+                )
 
             reviewer_message = self._send_reviewer_brief(
                 lead_frame=lead_frame,
@@ -274,7 +431,10 @@ class TeamRoomWorkflowService:
             reviewer_step = self.loop_svc.run_member_step(
                 team.session.id,
                 TEAM_ROOM_REVIEWER.agent_id,
-                subtask_id=convoy.subtasks[8].id,
+                subtask_id=self._subtask_for_phase(
+                    convoy.subtasks,
+                    "adversarial_review",
+                ).id,
                 reply_body=self._default_reviewer_reply(normalized_goal),
                 use_runtime=use_runtime,
                 runtime_lane=runtime_lane,
@@ -297,7 +457,7 @@ class TeamRoomWorkflowService:
             )
             revision_turns = self._run_department_phase(
                 team.session.id,
-                convoy.subtasks[9:13],
+                self._subtasks_for_department_phase(convoy.subtasks, "revision"),
                 phase="revision",
                 reply_builder=lambda role: self._default_revision_reply(role, normalized_goal),
                 use_runtime=use_runtime,
@@ -317,7 +477,7 @@ class TeamRoomWorkflowService:
             final_step = self.loop_svc.run_member_step(
                 team.session.id,
                 TEAM_ROOM_SYNTHESIZER.agent_id,
-                subtask_id=convoy.subtasks[13].id,
+                subtask_id=self._subtask_for_phase(convoy.subtasks, "synthesis").id,
                 reply_body=self._default_final_brief(normalized_goal),
                 use_runtime=use_runtime,
                 runtime_lane=runtime_lane,
@@ -342,12 +502,15 @@ class TeamRoomWorkflowService:
                 raise RuntimeError("Team room workflow state disappeared after run")
 
             final_brief = final_step.reply.body if final_step.reply else ""
+            decision_ledger = self._build_decision_ledger(normalized_goal)
             update_observation(
                 metadata={
                     "workflow_id": workflow_id,
+                    "meeting_mode": resolved_mode,
                     "convoy_id": refreshed_convoy.convoy.id,
                     "team_id": refreshed_team.session.id,
                     "convoy_status": refreshed_convoy.convoy.status,
+                    "facilitator_count": len(facilitator_turns),
                     "proposal_count": len(proposal_turns),
                     "crosstalk_count": len(crosstalk_turns),
                     "revision_count": len(revision_turns),
@@ -356,21 +519,27 @@ class TeamRoomWorkflowService:
             )
             return TeamRoomWorkflowResult(
                 workflow_id=workflow_id,
+                meeting_mode=resolved_mode,
+                max_rounds=resolved_rounds,
                 goal=normalized_goal,
                 context=normalized_context,
                 lead_frame=lead_frame,
                 convoy=refreshed_convoy,
                 team=refreshed_team,
+                facilitator_messages=facilitator_messages,
+                facilitator_turns=facilitator_turns,
                 proposal_messages=proposal_messages,
                 proposal_turns=proposal_turns,
                 crosstalk_messages=crosstalk_messages,
                 crosstalk_turns=crosstalk_turns,
+                discussion_rounds=discussion_rounds,
                 reviewer_message=reviewer_message,
                 reviewer_turn=reviewer_turn,
                 revision_messages=revision_messages,
                 revision_turns=revision_turns,
                 synthesis_message=synthesis_message,
                 final_turn=final_turn,
+                decision_ledger=decision_ledger,
                 final_brief=final_brief,
             )
 
@@ -380,45 +549,113 @@ class TeamRoomWorkflowService:
         context: str | None,
         *,
         workflow_id: str,
+        meeting_mode: str,
+        max_rounds: int,
         workspace_id: int,
     ) -> ConvoyWithSubtasks:
         metadata_base = {
             "workflow": "team_room",
             "workflow_id": workflow_id,
+            "meeting_mode": meeting_mode,
+            "max_rounds": max_rounds,
             "goal_excerpt": _clip_text(goal, max_chars=180),
             "has_context": bool(context),
         }
-        proposal_subtasks = [
-            CreateSubtaskInput(
+        subtasks: list[CreateSubtaskInput] = []
+
+        def _append_subtask(
+            *,
+            title: str,
+            role: TeamRoomRoleSpec,
+            prompt: str,
+            phase: str,
+            depends_on: list[int] | None = None,
+            round_number: int | None = None,
+            role_order: int | None = None,
+        ) -> int:
+            metadata = {
+                **metadata_base,
+                "phase": phase,
+                "role": role.key,
+            }
+            if round_number is not None:
+                metadata["round"] = round_number
+            if role_order is not None:
+                metadata["role_order"] = role_order
+            subtasks.append(
+                CreateSubtaskInput(
+                    title=title,
+                    description=self._subtask_description(
+                        goal,
+                        context,
+                        prompt,
+                        phase=phase,
+                    ),
+                    assigned_agent_id=role.agent_id,
+                    assigned_agent_name=role.agent_name,
+                    depends_on_subtask_indexes=depends_on or [],
+                    metadata=json.dumps(metadata, sort_keys=True),
+                )
+            )
+            return len(subtasks) - 1
+
+        opening_index: int | None = None
+        if meeting_mode == TEAM_ROOM_MODE_FACILITATED:
+            opening_index = _append_subtask(
+                title=TEAM_ROOM_FACILITATOR.subtask_title,
+                role=TEAM_ROOM_FACILITATOR,
+                prompt=TEAM_ROOM_FACILITATOR.proposal_prompt,
+                phase="facilitator_open",
+            )
+
+        proposal_indexes = [
+            _append_subtask(
                 title=role.subtask_title,
-                description=self._subtask_description(
-                    goal,
-                    context,
-                    role.proposal_prompt,
-                    phase="proposal",
-                ),
-                assigned_agent_id=role.agent_id,
-                assigned_agent_name=role.agent_name,
-                metadata=json.dumps({**metadata_base, "phase": "proposal", "role": role.key}, sort_keys=True),
+                role=role,
+                prompt=role.proposal_prompt,
+                phase="proposal",
+                depends_on=[opening_index] if opening_index is not None else None,
+                role_order=idx,
             )
-            for role in TEAM_ROOM_DEPARTMENT_ROLES
+            for idx, role in enumerate(TEAM_ROOM_DEPARTMENT_ROLES)
         ]
-        crosstalk_subtasks = [
-            CreateSubtaskInput(
-                title=f"{role.agent_name} cross-talk response",
-                description=self._subtask_description(
-                    goal,
-                    context,
-                    role.crosstalk_prompt,
+
+        previous_round_indexes = proposal_indexes
+        for round_number in range(1, max_rounds + 1):
+            facilitator_index: int | None = None
+            if meeting_mode == TEAM_ROOM_MODE_FACILITATED:
+                facilitator_index = _append_subtask(
+                    title=f"Facilitator round {round_number} direction",
+                    role=TEAM_ROOM_FACILITATOR,
+                    prompt=TEAM_ROOM_FACILITATOR.crosstalk_prompt,
+                    phase="facilitator_round",
+                    depends_on=previous_round_indexes,
+                    round_number=round_number,
+                )
+
+            crosstalk_depends = (
+                [facilitator_index]
+                if facilitator_index is not None
+                else list(previous_round_indexes)
+            )
+            round_indexes = [
+                _append_subtask(
+                    title=(
+                        f"{role.agent_name} cross-talk response"
+                        if max_rounds == 1
+                        else f"{role.agent_name} cross-talk round {round_number}"
+                    ),
+                    role=role,
+                    prompt=role.crosstalk_prompt,
                     phase="crosstalk",
-                ),
-                assigned_agent_id=role.agent_id,
-                assigned_agent_name=role.agent_name,
-                depends_on_subtask_indexes=[0, 1, 2, 3],
-                metadata=json.dumps({**metadata_base, "phase": "crosstalk", "role": role.key}, sort_keys=True),
-            )
-            for role in TEAM_ROOM_DEPARTMENT_ROLES
-        ]
+                    depends_on=crosstalk_depends,
+                    round_number=round_number,
+                    role_order=idx,
+                )
+                for idx, role in enumerate(TEAM_ROOM_DEPARTMENT_ROLES)
+            ]
+            previous_round_indexes = round_indexes
+
         reviewer_subtask = CreateSubtaskInput(
             title=TEAM_ROOM_REVIEWER.subtask_title,
             description=self._subtask_description(
@@ -429,12 +666,19 @@ class TeamRoomWorkflowService:
             ),
             assigned_agent_id=TEAM_ROOM_REVIEWER.agent_id,
             assigned_agent_name=TEAM_ROOM_REVIEWER.agent_name,
-            depends_on_subtask_indexes=[4, 5, 6, 7],
+            depends_on_subtask_indexes=previous_round_indexes,
             metadata=json.dumps(
-                {**metadata_base, "phase": "adversarial_review", "role": TEAM_ROOM_REVIEWER.key},
+                {
+                    **metadata_base,
+                    "phase": "adversarial_review",
+                    "role": TEAM_ROOM_REVIEWER.key,
+                },
                 sort_keys=True,
             ),
         )
+        reviewer_index = len(subtasks)
+        subtasks.append(reviewer_subtask)
+
         revision_subtasks = [
             CreateSubtaskInput(
                 title=f"{role.agent_name} revised plan",
@@ -446,11 +690,22 @@ class TeamRoomWorkflowService:
                 ),
                 assigned_agent_id=role.agent_id,
                 assigned_agent_name=role.agent_name,
-                depends_on_subtask_indexes=[8],
-                metadata=json.dumps({**metadata_base, "phase": "revision", "role": role.key}, sort_keys=True),
+                depends_on_subtask_indexes=[reviewer_index],
+                metadata=json.dumps(
+                    {
+                        **metadata_base,
+                        "phase": "revision",
+                        "role": role.key,
+                        "role_order": idx,
+                    },
+                    sort_keys=True,
+                ),
             )
-            for role in TEAM_ROOM_DEPARTMENT_ROLES
+            for idx, role in enumerate(TEAM_ROOM_DEPARTMENT_ROLES)
         ]
+        revision_indexes = list(range(len(subtasks), len(subtasks) + len(revision_subtasks)))
+        subtasks.extend(revision_subtasks)
+
         synthesis_subtask = CreateSubtaskInput(
             title=TEAM_ROOM_SYNTHESIZER.subtask_title,
             description=self._subtask_description(
@@ -461,29 +716,25 @@ class TeamRoomWorkflowService:
             ),
             assigned_agent_id=TEAM_ROOM_SYNTHESIZER.agent_id,
             assigned_agent_name=TEAM_ROOM_SYNTHESIZER.agent_name,
-            depends_on_subtask_indexes=[9, 10, 11, 12],
+            depends_on_subtask_indexes=revision_indexes,
             metadata=json.dumps(
                 {**metadata_base, "phase": "synthesis", "role": TEAM_ROOM_SYNTHESIZER.key},
                 sort_keys=True,
             ),
         )
+        subtasks.append(synthesis_subtask)
+
         return self.convoy_svc.create_convoy(
             CreateConvoyInput(
                 title=f"Team Room: {_clip_text(goal, max_chars=80)}",
                 description=(
                     "Homie-native Growth Boardroom workflow: department proposals, "
-                    "cross-talk, adversarial review, revisions, and synthesis."
+                    "facilitated cross-talk, adversarial review, revisions, and synthesis."
                 ),
                 created_by=TEAM_ROOM_LEAD_AGENT_ID,
                 repo_path=None,
                 decomposition_mode="manual",
-                subtasks=[
-                    *proposal_subtasks,
-                    *crosstalk_subtasks,
-                    reviewer_subtask,
-                    *revision_subtasks,
-                    synthesis_subtask,
-                ],
+                subtasks=subtasks,
             ),
             workspace_id=workspace_id,
         )
@@ -494,6 +745,7 @@ class TeamRoomWorkflowService:
         *,
         goal: str,
         workflow_id: str,
+        meeting_mode: str,
         workspace_id: int,
     ) -> TeamSessionWithMembers:
         team = self.team_svc.create_team_session(
@@ -507,6 +759,7 @@ class TeamRoomWorkflowService:
                     {
                         "workflow": "team_room",
                         "workflow_id": workflow_id,
+                        "meeting_mode": meeting_mode,
                         "goal_excerpt": _clip_text(goal, max_chars=180),
                     },
                     sort_keys=True,
@@ -519,6 +772,8 @@ class TeamRoomWorkflowService:
             TEAM_ROOM_REVIEWER,
             TEAM_ROOM_SYNTHESIZER,
         ]
+        if meeting_mode == TEAM_ROOM_MODE_FACILITATED:
+            all_roles.insert(0, TEAM_ROOM_FACILITATOR)
         for role in all_roles:
             subtask = self._first_subtask_for_agent(convoy.subtasks, role.agent_id)
             self.team_svc.add_member(
@@ -535,6 +790,64 @@ class TeamRoomWorkflowService:
         if refreshed is None:
             raise RuntimeError(f"Failed to read back team session {team.session.id}")
         return refreshed
+
+    def _send_facilitator_opening_brief(
+        self,
+        *,
+        lead_frame: str,
+        convoy_id: int,
+        max_rounds: int,
+        workspace_id: int,
+    ) -> AgentMessage:
+        return self.mailbox_svc.send_message(
+            SendMessageInput(
+                from_agent=TEAM_ROOM_LEAD_AGENT_ID,
+                recipients=[TEAM_ROOM_FACILITATOR.agent_id],
+                convoy_id=convoy_id,
+                subject="Facilitator opening brief",
+                body=(
+                    f"{lead_frame}\n\n"
+                    f"{TEAM_ROOM_FACILITATOR.proposal_prompt}\n\n"
+                    f"This meeting has up to {max_rounds} cross-talk round(s). "
+                    "Keep the room moving toward one decision, named owners, and "
+                    "validation signals."
+                ),
+                message_type="message",
+                msg_type="task_assignment",
+            ),
+            workspace_id=workspace_id,
+        )
+
+    def _send_facilitator_round_brief(
+        self,
+        *,
+        lead_frame: str,
+        convoy_id: int,
+        round_number: int,
+        proposal_turns: list[TeamRoomTurn],
+        crosstalk_turns: list[TeamRoomTurn],
+        workspace_id: int,
+    ) -> AgentMessage:
+        prior = self._format_turns(crosstalk_turns) or "No prior cross-talk yet."
+        return self.mailbox_svc.send_message(
+            SendMessageInput(
+                from_agent=TEAM_ROOM_LEAD_AGENT_ID,
+                recipients=[TEAM_ROOM_FACILITATOR.agent_id],
+                convoy_id=convoy_id,
+                subject=f"Facilitator round {round_number} brief",
+                body=(
+                    f"{lead_frame}\n\n"
+                    f"{TEAM_ROOM_FACILITATOR.crosstalk_prompt}\n\n"
+                    "Department proposals:\n"
+                    f"{self._format_turns(proposal_turns)}\n\n"
+                    "Prior cross-talk:\n"
+                    f"{prior}"
+                ),
+                message_type="message",
+                msg_type="work_handoff",
+            ),
+            workspace_id=workspace_id,
+        )
 
     def _seed_proposal_briefs(
         self,
@@ -572,23 +885,45 @@ class TeamRoomWorkflowService:
         lead_frame: str,
         convoy_id: int,
         proposal_turns: list[TeamRoomTurn],
+        prior_crosstalk_turns: list[TeamRoomTurn],
+        facilitator_turn: TeamRoomTurn | None,
+        round_number: int,
         workspace_id: int,
     ) -> list[AgentMessage]:
         peer_context = self._format_turns(proposal_turns)
+        prior_context = self._format_turns(prior_crosstalk_turns)
+        facilitator_context = (
+            facilitator_turn.step.reply.body
+            if facilitator_turn is not None and facilitator_turn.step.reply
+            else ""
+        )
         messages: list[AgentMessage] = []
         for role in TEAM_ROOM_DEPARTMENT_ROLES:
+            subject = (
+                f"Cross-talk round: {role.agent_name}"
+                if round_number == 1 and not facilitator_context
+                else f"Cross-talk round {round_number}: {role.agent_name}"
+            )
+            extra_context = ""
+            if facilitator_context:
+                extra_context += f"\n\nFacilitator direction:\n{facilitator_context}"
+            if prior_context:
+                extra_context += f"\n\nPrior cross-talk:\n{prior_context}"
             messages.append(
                 self.mailbox_svc.send_message(
                     SendMessageInput(
                         from_agent=TEAM_ROOM_LEAD_AGENT_ID,
                         recipients=[role.agent_id],
                         convoy_id=convoy_id,
-                        subject=f"Cross-talk round: {role.agent_name}",
+                        subject=subject,
                         body=(
                             f"{lead_frame}\n\n"
                             f"{role.crosstalk_prompt}\n\n"
+                            "Address one named peer directly when you have a useful "
+                            "build, objection, or dependency request.\n\n"
                             "Department proposals:\n"
                             f"{peer_context}"
+                            f"{extra_context}"
                         ),
                         message_type="message",
                         msg_type="work_handoff",
@@ -726,6 +1061,100 @@ class TeamRoomWorkflowService:
         return turns
 
     @staticmethod
+    def _resolve_meeting_shape(
+        *,
+        meeting_mode: str | None,
+        max_rounds: int | None,
+    ) -> tuple[str, int]:
+        normalized_mode = (meeting_mode or "").strip().lower()
+        if normalized_mode in ("", "classic", "v1", TEAM_ROOM_MODE_CLASSIC):
+            mode = TEAM_ROOM_MODE_CLASSIC
+        elif normalized_mode in ("facilitated", "v2", TEAM_ROOM_MODE_FACILITATED):
+            mode = TEAM_ROOM_MODE_FACILITATED
+        else:
+            raise ValueError(
+                "meeting_mode must be classic_boardroom or facilitated_boardroom"
+            )
+
+        if max_rounds is None:
+            rounds = (
+                TEAM_ROOM_FACILITATED_DEFAULT_ROUNDS
+                if mode == TEAM_ROOM_MODE_FACILITATED
+                else 1
+            )
+        else:
+            rounds = max_rounds
+            if meeting_mode is None and rounds > 1:
+                mode = TEAM_ROOM_MODE_FACILITATED
+
+        if rounds < 1:
+            raise ValueError("max_rounds must be at least 1")
+        if rounds > TEAM_ROOM_MAX_ROUNDS:
+            raise ValueError(f"max_rounds cannot exceed {TEAM_ROOM_MAX_ROUNDS}")
+        if mode == TEAM_ROOM_MODE_CLASSIC and rounds != 1:
+            raise ValueError("classic_boardroom supports max_rounds=1")
+        return mode, rounds
+
+    def _subtasks_for_department_phase(
+        self,
+        subtasks: list[Subtask],
+        phase: str,
+        *,
+        round_number: int | None = None,
+    ) -> list[Subtask]:
+        phase_subtasks = [
+            subtask
+            for subtask in subtasks
+            if self._subtask_metadata(subtask).get("phase") == phase
+            and (
+                round_number is None
+                or self._subtask_metadata(subtask).get("round") == round_number
+            )
+            and self._subtask_metadata(subtask).get("role")
+            in {role.key for role in TEAM_ROOM_DEPARTMENT_ROLES}
+        ]
+        phase_subtasks.sort(
+            key=lambda subtask: int(
+                self._subtask_metadata(subtask).get("role_order", 999)
+            )
+        )
+        if len(phase_subtasks) != len(TEAM_ROOM_DEPARTMENT_ROLES):
+            raise ValueError(
+                f"Expected {len(TEAM_ROOM_DEPARTMENT_ROLES)} {phase} subtasks"
+            )
+        return phase_subtasks
+
+    def _subtask_for_phase(
+        self,
+        subtasks: list[Subtask],
+        phase: str,
+        *,
+        round_number: int | None = None,
+    ) -> Subtask:
+        matches = [
+            subtask
+            for subtask in subtasks
+            if self._subtask_metadata(subtask).get("phase") == phase
+            and (
+                round_number is None
+                or self._subtask_metadata(subtask).get("round") == round_number
+            )
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"Expected one {phase} subtask, found {len(matches)}")
+        return matches[0]
+
+    @staticmethod
+    def _subtask_metadata(subtask: Subtask) -> dict:
+        if not subtask.metadata:
+            return {}
+        try:
+            data = json.loads(subtask.metadata)
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
     def _subtask_description(
         goal: str,
         context: str | None,
@@ -795,7 +1224,67 @@ class TeamRoomWorkflowService:
         return replies.get(role.key, role.proposal_prompt)
 
     @staticmethod
-    def _default_crosstalk_reply(role: TeamRoomRoleSpec, goal: str) -> str:
+    def _default_facilitator_opening_reply(goal: str, max_rounds: int) -> str:
+        return (
+            f"Facilitator opening for {goal}: run up to {max_rounds} focused "
+            "cross-talk round(s). Decision criteria: one buyer, one offer, one "
+            "owner per department, one validation signal, and no false consensus. "
+            "Speaking order starts with department proposals, then peer challenges."
+        )
+
+    @staticmethod
+    def _default_facilitator_round_reply(
+        goal: str,
+        round_number: int,
+        max_rounds: int,
+    ) -> str:
+        if round_number >= max_rounds:
+            close_instruction = "This is the final cross-talk round before review."
+        else:
+            close_instruction = "Continue only if a peer objection changes the plan."
+        return (
+            f"Facilitator round {round_number} for {goal}: answer the strongest "
+            "peer dependency directly. Sales must pressure buyer proof, Marketing "
+            "must pressure message proof, Product/Frontend must pressure shippable "
+            f"conversion work, and Ops must pressure execution cadence. {close_instruction}"
+        )
+
+    @staticmethod
+    def _default_crosstalk_reply(
+        role: TeamRoomRoleSpec,
+        goal: str,
+        *,
+        round_number: int = 1,
+    ) -> str:
+        if round_number > 1:
+            replies = {
+                "sales": (
+                    f"Sales to Marketing and Product/Frontend for {goal}: the campaign "
+                    "and page must prove one buyer will book the audit. Sales accepts "
+                    "Ops' daily objection log, but rejects broad messaging until the "
+                    "first buyer segment repeats the same pain."
+                ),
+                "marketing": (
+                    f"Marketing to Sales and Product/Frontend for {goal}: sales needs "
+                    "to supply exact buyer language, and product needs to turn the proof "
+                    "asset into the conversion path. Marketing will not launch extra "
+                    "channels until one proof-backed hook wins."
+                ),
+                "product_frontend": (
+                    f"Product/Frontend to Sales and Ops for {goal}: the first shippable "
+                    "change is a narrow proof-to-CTA path, not a platform rebuild. "
+                    "Sales must define the objection we design against, and Ops must "
+                    "confirm tracking is live before launch."
+                ),
+                "ops": (
+                    f"Ops to all departments for {goal}: the plan is blocked unless each "
+                    "owner names one deliverable, one due date, and one metric. Ops "
+                    "accepts the narrow audit motion and rejects parallel experiments "
+                    "until the two-week readout says otherwise."
+                ),
+            }
+            return replies.get(role.key, "Pass: no useful second-round delta.")
+
         replies = {
             "sales": (
                 f"Build: marketing's promise should be tested in live sales calls for {goal}. "
@@ -873,6 +1362,62 @@ class TeamRoomWorkflowService:
             "runs the daily readout and the two-week stop/go review."
         )
 
+    @staticmethod
+    def _build_decision_ledger(goal: str) -> TeamRoomDecisionLedger:
+        return TeamRoomDecisionLedger(
+            decisions=[
+                f"Run one narrow, proof-backed growth bet for {goal}.",
+                "Use the audit-style CTA as the first revenue validation motion.",
+                "Hold broad campaigns and product expansion until the first buyer proof loop is visible.",
+            ],
+            accepted_bets=[
+                "One buyer segment.",
+                "One proof-backed campaign hook.",
+                "One scan-friendly proof-to-CTA product path.",
+                "One daily operating readout.",
+            ],
+            rejected_bets=[
+                "Multiple unfocused channels before offer proof.",
+                "Broad platform polish before conversion proof.",
+                "Consensus without named owners and validation signals.",
+            ],
+            owner_actions=[
+                {
+                    "owner": "Sales",
+                    "action": "Run 20 targeted conversations and log repeated objections.",
+                    "validation_signal": "Qualified calls and repeated buyer pain.",
+                },
+                {
+                    "owner": "Marketing",
+                    "action": "Ship the proof asset and first campaign hook around the audit CTA.",
+                    "validation_signal": "Click-through, audit requests, and proof gaps.",
+                },
+                {
+                    "owner": "Product/Frontend",
+                    "action": "Ship the narrow proof-to-CTA path with tracking.",
+                    "validation_signal": "CTA rate and drop-off points.",
+                },
+                {
+                    "owner": "Ops",
+                    "action": "Run the two-week cadence, handoffs, QA, and daily metric readout.",
+                    "validation_signal": "Owners ship on cadence and stop/go review has data.",
+                },
+            ],
+            open_questions=[
+                "Which buyer segment repeats the pain fastest?",
+                "Which proof asset removes the biggest objection?",
+                "What threshold ends the experiment or earns a second round of investment?",
+            ],
+            strongest_objection=(
+                "The team can still confuse activity with proof if it launches "
+                "before the buyer, CTA, owner, and metric fit in one sentence."
+            ),
+            next_meeting_trigger=(
+                "Reconvene after the first two-week readout or sooner if sales "
+                "cannot book qualified audit conversations."
+            ),
+        )
+
 
 def _clip_text(text: str | None, *, max_chars: int = 600) -> str:
     value = (text or "").strip()
@@ -938,6 +1483,7 @@ def _team_room_safe_subtask_dict(subtask: Subtask) -> dict:
 
 def team_room_runtime_summary(result: TeamRoomWorkflowResult) -> dict:
     turns = [
+        *result.facilitator_turns,
         *result.proposal_turns,
         *result.crosstalk_turns,
         result.reviewer_turn,
@@ -986,9 +1532,53 @@ def team_room_runtime_summary(result: TeamRoomWorkflowResult) -> dict:
     }
 
 
+def team_room_discussion_round_to_dict(round_result: TeamRoomDiscussionRound) -> dict:
+    return {
+        "round_number": round_result.round_number,
+        "facilitator_message": (
+            dataclasses.asdict(round_result.facilitator_message)
+            if round_result.facilitator_message
+            else None
+        ),
+        "facilitator_turn": (
+            team_room_turn_to_dict(round_result.facilitator_turn)
+            if round_result.facilitator_turn
+            else None
+        ),
+        "crosstalk_messages": [
+            dataclasses.asdict(message)
+            for message in round_result.crosstalk_messages
+        ],
+        "crosstalk_turns": [
+            team_room_turn_to_dict(turn)
+            for turn in round_result.crosstalk_turns
+        ],
+    }
+
+
+def team_room_turn_summary(result: TeamRoomWorkflowResult) -> str:
+    parts: list[str] = []
+    if result.facilitator_turns:
+        parts.append(f"{len(result.facilitator_turns)} facilitator")
+    parts.extend(
+        [
+            f"{len(result.proposal_turns)} proposals",
+            f"{len(result.crosstalk_turns)} cross-talk",
+            "1 adversarial critique",
+            f"{len(result.revision_turns)} revisions",
+            "1 final synthesis",
+        ]
+    )
+    return ", ".join(parts)
+
+
 def team_room_workflow_result_to_dict(result: TeamRoomWorkflowResult) -> dict:
     convoy = result.convoy.convoy
     phase_results = {
+        "facilitator": [
+            team_room_turn_to_dict(turn)
+            for turn in result.facilitator_turns
+        ],
         "proposal": [team_room_turn_to_dict(turn) for turn in result.proposal_turns],
         "crosstalk": [team_room_turn_to_dict(turn) for turn in result.crosstalk_turns],
         "adversarial_review": team_room_turn_to_dict(result.reviewer_turn),
@@ -997,6 +1587,8 @@ def team_room_workflow_result_to_dict(result: TeamRoomWorkflowResult) -> dict:
     }
     return {
         "workflow_id": result.workflow_id,
+        "meeting_mode": result.meeting_mode,
+        "max_rounds": result.max_rounds,
         "goal": result.goal,
         "context_excerpt": _clip_text(result.context, max_chars=600) if result.context else None,
         "team_id": result.team.session.id,
@@ -1021,12 +1613,19 @@ def team_room_workflow_result_to_dict(result: TeamRoomWorkflowResult) -> dict:
         },
         "lead_frame_excerpt": _clip_text(result.lead_frame, max_chars=600),
         "message_counts": {
+            "facilitator": len(result.facilitator_messages),
             "proposal": len(result.proposal_messages),
             "crosstalk": len(result.crosstalk_messages),
             "revision": len(result.revision_messages),
             "reviewer": 1,
             "synthesis": 1,
         },
+        "turn_summary": team_room_turn_summary(result),
+        "discussion_rounds": [
+            team_room_discussion_round_to_dict(round_result)
+            for round_result in result.discussion_rounds
+        ],
+        "decision_ledger": dataclasses.asdict(result.decision_ledger),
         "phase_results": phase_results,
         "final_brief": result.final_brief,
     }
