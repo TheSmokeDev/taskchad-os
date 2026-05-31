@@ -68,6 +68,54 @@ class TeamRoomDiscussionRound:
 
 
 @dataclass(frozen=True)
+class TeamRoomMeetingControls:
+    agenda: list[str]
+    facilitator_authority: list[str]
+    decision_rules: list[str]
+    round_controls: list[dict[str, str | int]]
+    stop_conditions: list[str]
+
+
+@dataclass(frozen=True)
+class TeamRoomVote:
+    role: str
+    role_name: str
+    recommendation: str
+    confidence: float
+    rationale: str
+    blocking_issue: str | None
+
+
+@dataclass(frozen=True)
+class TeamRoomInterrupt:
+    from_role: str
+    from_role_name: str
+    target_role: str
+    target_role_name: str
+    severity: str
+    challenge: str
+    required_response: str
+
+
+@dataclass(frozen=True)
+class TeamRoomRoleMemory:
+    role: str
+    role_name: str
+    previous_meeting_id: int | None
+    carried_forward: list[str]
+    current_commitment: str
+    watch_item: str
+
+
+@dataclass(frozen=True)
+class TeamRoomSynthesis:
+    decision_summary: str
+    confidence: float
+    agreements: list[str]
+    disagreements: list[str]
+
+
+@dataclass(frozen=True)
 class TeamRoomDecisionLedger:
     decisions: list[str]
     accepted_bets: list[str]
@@ -101,6 +149,11 @@ class TeamRoomWorkflowResult:
     revision_turns: list[TeamRoomTurn]
     synthesis_message: AgentMessage
     final_turn: TeamRoomTurn
+    meeting_controls: TeamRoomMeetingControls
+    vote_board: list[TeamRoomVote]
+    interrupts: list[TeamRoomInterrupt]
+    role_memory: list[TeamRoomRoleMemory]
+    synthesis: TeamRoomSynthesis
     decision_ledger: TeamRoomDecisionLedger
     final_brief: str
 
@@ -269,7 +322,20 @@ class TeamRoomWorkflowService:
             trace_metadata={"feature_phase": 12, "workflow_id": workflow_id},
             expected_exceptions=(ValueError,),
         ):
-            lead_frame = self._build_lead_frame(normalized_goal, normalized_context)
+            prior_role_memory = self._load_prior_role_memory(
+                workflow_id=workflow_id,
+                workspace_id=workspace_id,
+            )
+            meeting_controls = self._build_meeting_controls(
+                normalized_goal,
+                max_rounds=resolved_rounds,
+            )
+            lead_frame = self._build_lead_frame(
+                normalized_goal,
+                normalized_context,
+                prior_role_memory=prior_role_memory,
+                meeting_controls=meeting_controls,
+            )
             convoy = self._create_convoy(
                 normalized_goal,
                 normalized_context,
@@ -465,6 +531,24 @@ class TeamRoomWorkflowService:
                 workspace_id=workspace_id,
             )
 
+            vote_board = self._build_vote_board(normalized_goal, revision_turns)
+            interrupts = self._build_interrupt_register(
+                normalized_goal,
+                crosstalk_turns=crosstalk_turns,
+                reviewer_turn=reviewer_turn,
+            )
+            role_memory = self._build_role_memory(
+                normalized_goal,
+                prior_role_memory=prior_role_memory,
+                revision_turns=revision_turns,
+                vote_board=vote_board,
+            )
+            synthesis = self._build_synthesis(
+                normalized_goal,
+                vote_board=vote_board,
+                interrupts=interrupts,
+            )
+
             synthesis_message = self._send_synthesis_brief(
                 lead_frame=lead_frame,
                 convoy_id=convoy.convoy.id,
@@ -472,13 +556,16 @@ class TeamRoomWorkflowService:
                 crosstalk_turns=crosstalk_turns,
                 reviewer_turn=reviewer_turn,
                 revision_turns=revision_turns,
+                vote_board=vote_board,
+                interrupts=interrupts,
+                synthesis=synthesis,
                 workspace_id=workspace_id,
             )
             final_step = self.loop_svc.run_member_step(
                 team.session.id,
                 TEAM_ROOM_SYNTHESIZER.agent_id,
                 subtask_id=self._subtask_for_phase(convoy.subtasks, "synthesis").id,
-                reply_body=self._default_final_brief(normalized_goal),
+                reply_body=self._default_final_brief(normalized_goal, synthesis=synthesis),
                 use_runtime=use_runtime,
                 runtime_lane=runtime_lane,
                 complete=True,
@@ -488,6 +575,13 @@ class TeamRoomWorkflowService:
                 phase="synthesis",
                 role=TEAM_ROOM_SYNTHESIZER,
                 step=final_step,
+            )
+            self._persist_role_memory(
+                team.session.id,
+                role_memory=role_memory,
+                vote_board=vote_board,
+                synthesis=synthesis,
+                workspace_id=workspace_id,
             )
 
             refreshed_convoy = self.convoy_svc.get_convoy(
@@ -514,6 +608,9 @@ class TeamRoomWorkflowService:
                     "proposal_count": len(proposal_turns),
                     "crosstalk_count": len(crosstalk_turns),
                     "revision_count": len(revision_turns),
+                    "vote_count": len(vote_board),
+                    "interrupt_count": len(interrupts),
+                    "meeting_confidence": synthesis.confidence,
                 },
                 output={"final_brief_chars": len(final_brief)},
             )
@@ -539,6 +636,11 @@ class TeamRoomWorkflowService:
                 revision_turns=revision_turns,
                 synthesis_message=synthesis_message,
                 final_turn=final_turn,
+                meeting_controls=meeting_controls,
+                vote_board=vote_board,
+                interrupts=interrupts,
+                role_memory=role_memory,
+                synthesis=synthesis,
                 decision_ledger=decision_ledger,
                 final_brief=final_brief,
             )
@@ -1008,6 +1110,9 @@ class TeamRoomWorkflowService:
         crosstalk_turns: list[TeamRoomTurn],
         reviewer_turn: TeamRoomTurn,
         revision_turns: list[TeamRoomTurn],
+        vote_board: list[TeamRoomVote],
+        interrupts: list[TeamRoomInterrupt],
+        synthesis: TeamRoomSynthesis,
         workspace_id: int,
     ) -> AgentMessage:
         reviewer_body = reviewer_turn.step.reply.body if reviewer_turn.step.reply else ""
@@ -1026,7 +1131,13 @@ class TeamRoomWorkflowService:
                     f"{self._format_turns(crosstalk_turns)}\n\n"
                     f"Adversarial review:\n{reviewer_body}\n\n"
                     "Revised department plans:\n"
-                    f"{self._format_turns(revision_turns)}"
+                    f"{self._format_turns(revision_turns)}\n\n"
+                    "Vote/confidence board:\n"
+                    f"{self._format_votes(vote_board)}\n\n"
+                    "Interrupt register:\n"
+                    f"{self._format_interrupts(interrupts)}\n\n"
+                    "Agreement/disagreement synthesis:\n"
+                    f"{self._format_synthesis(synthesis)}"
                 ),
                 message_type="message",
                 msg_type="work_handoff",
@@ -1154,6 +1265,392 @@ class TeamRoomWorkflowService:
             return {}
         return data if isinstance(data, dict) else {}
 
+    def _load_prior_role_memory(
+        self,
+        *,
+        workflow_id: str,
+        workspace_id: int,
+    ) -> list[TeamRoomRoleMemory]:
+        rows = self.db.conn.execute(
+            """SELECT id, metadata FROM team_sessions
+               WHERE workspace_id = ?
+               ORDER BY id DESC
+               LIMIT 20""",
+            (workspace_id,),
+        ).fetchall()
+        for row in rows:
+            metadata = self._json_metadata(row["metadata"])
+            if metadata.get("workflow") != "team_room":
+                continue
+            if metadata.get("workflow_id") != workflow_id:
+                continue
+            role_items = metadata.get("role_memory")
+            if isinstance(role_items, list):
+                return self._coerce_prior_role_memory(
+                    role_items,
+                    previous_meeting_id=int(row["id"]),
+                )
+            return self._empty_role_memory(
+                previous_meeting_id=int(row["id"]),
+                carried_forward="Previous Team Room did not persist role memory yet.",
+            )
+        return self._empty_role_memory(
+            previous_meeting_id=None,
+            carried_forward="No prior meeting memory yet.",
+        )
+
+    def _persist_role_memory(
+        self,
+        team_id: int,
+        *,
+        role_memory: list[TeamRoomRoleMemory],
+        vote_board: list[TeamRoomVote],
+        synthesis: TeamRoomSynthesis,
+        workspace_id: int,
+    ) -> None:
+        row = self.db.conn.execute(
+            "SELECT metadata FROM team_sessions WHERE id = ? AND workspace_id = ?",
+            (team_id, workspace_id),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Team session {team_id} disappeared before memory persist")
+        metadata = self._json_metadata(row["metadata"])
+        metadata.update(
+            {
+                "meeting_behavior_version": "v3",
+                "role_memory": [dataclasses.asdict(item) for item in role_memory],
+                "vote_board": [dataclasses.asdict(item) for item in vote_board],
+                "synthesis": dataclasses.asdict(synthesis),
+            }
+        )
+        with self.db.conn:
+            self.db.conn.execute(
+                """UPDATE team_sessions
+                   SET metadata = ?, updated_at = strftime('%s', 'now')
+                   WHERE id = ? AND workspace_id = ?""",
+                (json.dumps(metadata, sort_keys=True), team_id, workspace_id),
+            )
+
+    @staticmethod
+    def _json_metadata(raw: str | None) -> dict:
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _empty_role_memory(
+        *,
+        previous_meeting_id: int | None,
+        carried_forward: str,
+    ) -> list[TeamRoomRoleMemory]:
+        return [
+            TeamRoomRoleMemory(
+                role=role.key,
+                role_name=role.agent_name,
+                previous_meeting_id=previous_meeting_id,
+                carried_forward=[carried_forward],
+                current_commitment="",
+                watch_item="",
+            )
+            for role in TEAM_ROOM_DEPARTMENT_ROLES
+        ]
+
+    @staticmethod
+    def _coerce_prior_role_memory(
+        items: list,
+        *,
+        previous_meeting_id: int,
+    ) -> list[TeamRoomRoleMemory]:
+        by_role = {
+            str(item.get("role")): item
+            for item in items
+            if isinstance(item, dict) and item.get("role")
+        }
+        memory: list[TeamRoomRoleMemory] = []
+        for role in TEAM_ROOM_DEPARTMENT_ROLES:
+            raw = by_role.get(role.key, {})
+            carried: list[str] = []
+            current_commitment = str(raw.get("current_commitment") or "").strip()
+            watch_item = str(raw.get("watch_item") or "").strip()
+            if current_commitment:
+                carried.append(_clip_text(current_commitment, max_chars=180))
+            if watch_item:
+                carried.append(f"Watch: {_clip_text(watch_item, max_chars=140)}")
+            prior_carried = raw.get("carried_forward")
+            if isinstance(prior_carried, list):
+                for item in prior_carried[:1]:
+                    if isinstance(item, str) and item.strip():
+                        carried.append(_clip_text(item, max_chars=140))
+            if not carried:
+                carried.append("Prior meeting had no role-specific carry-forward.")
+            memory.append(
+                TeamRoomRoleMemory(
+                    role=role.key,
+                    role_name=role.agent_name,
+                    previous_meeting_id=previous_meeting_id,
+                    carried_forward=carried[:3],
+                    current_commitment="",
+                    watch_item="",
+                )
+            )
+        return memory
+
+    @staticmethod
+    def _build_meeting_controls(
+        goal: str,
+        *,
+        max_rounds: int,
+    ) -> TeamRoomMeetingControls:
+        round_controls: list[dict[str, str | int]] = []
+        for round_number in range(1, max_rounds + 1):
+            if round_number == 1:
+                focus = "Expose peer dependencies and name the riskiest assumption."
+            elif round_number == max_rounds:
+                focus = "Convert remaining disagreement into owner commitments."
+            else:
+                focus = "Resolve any objection that changes the plan."
+            round_controls.append(
+                {
+                    "round_number": round_number,
+                    "focus": focus,
+                    "interrupt_rule": "Interrupt only for a blocker, false consensus, or missing owner.",
+                    "exit_criteria": "Each department has a decision, owner, validation signal, and confidence.",
+                }
+            )
+        return TeamRoomMeetingControls(
+            agenda=[
+                f"Frame the decision for {goal}.",
+                "Collect department proposals before debate.",
+                "Run bounded cross-talk with named peer responses.",
+                "Force adversarial review before revisions.",
+                "Close with votes, confidence, agreements, disagreements, and owner actions.",
+            ],
+            facilitator_authority=[
+                "Cut off repetition and ask for a vote when debate stops changing the plan.",
+                "Require every objection to name the owner who can answer it.",
+                "Mark unresolved disagreement in the final brief instead of smoothing it away.",
+            ],
+            decision_rules=[
+                "One buyer, one offer, one CTA, one validation loop.",
+                "No consensus counts unless every department gives confidence.",
+                "A blocker must produce a required response, not just a concern.",
+            ],
+            round_controls=round_controls,
+            stop_conditions=[
+                "All departments have owner actions and confidence above 0.70.",
+                "The strongest objection is captured with a response owner.",
+                "A follow-up meeting trigger is explicit.",
+            ],
+        )
+
+    @staticmethod
+    def _build_vote_board(
+        goal: str,
+        revision_turns: list[TeamRoomTurn],
+    ) -> list[TeamRoomVote]:
+        revision_roles = {turn.role.key for turn in revision_turns}
+        vote_data = {
+            "sales": (
+                "Approve the narrow audit-style sales motion.",
+                0.78,
+                "Sales has a concrete conversation target and objection loop.",
+                "Buyer segment proof still has to come from live calls.",
+            ),
+            "marketing": (
+                "Approve with proof-backed campaign gating.",
+                0.74,
+                "Marketing can test one promise and reuse sales language.",
+                "The first proof asset must be strong enough to carry the CTA.",
+            ),
+            "product_frontend": (
+                "Approve the smallest proof-to-CTA path.",
+                0.72,
+                "Product work is scoped to conversion proof instead of platform polish.",
+                "Tracking must show where the proof path leaks.",
+            ),
+            "ops": (
+                "Approve if the two-week readout owns the stop/go call.",
+                0.82,
+                "Ops has owner, cadence, metric, and handoff control.",
+                "Parallel experiments must stay blocked until the readout has data.",
+            ),
+        }
+        votes: list[TeamRoomVote] = []
+        for role in TEAM_ROOM_DEPARTMENT_ROLES:
+            recommendation, confidence, rationale, blocker = vote_data[role.key]
+            if role.key not in revision_roles:
+                confidence = min(confidence, 0.5)
+                blocker = "Role did not complete a revision turn."
+            votes.append(
+                TeamRoomVote(
+                    role=role.key,
+                    role_name=role.agent_name,
+                    recommendation=recommendation,
+                    confidence=confidence,
+                    rationale=rationale,
+                    blocking_issue=blocker,
+                )
+            )
+        return votes
+
+    @staticmethod
+    def _build_interrupt_register(
+        goal: str,
+        *,
+        crosstalk_turns: list[TeamRoomTurn],
+        reviewer_turn: TeamRoomTurn,
+    ) -> list[TeamRoomInterrupt]:
+        active_roles = {turn.role.key for turn in crosstalk_turns}
+        interrupts = [
+            TeamRoomInterrupt(
+                from_role="sales",
+                from_role_name="Sales",
+                target_role="marketing",
+                target_role_name="Marketing",
+                severity="challenge",
+                challenge=(
+                    "Do not scale channels until sales calls prove the buyer language."
+                ),
+                required_response="Marketing must use the objection log in the first hook.",
+            ),
+            TeamRoomInterrupt(
+                from_role="marketing",
+                from_role_name="Marketing",
+                target_role="product_frontend",
+                target_role_name="Product/Frontend",
+                severity="dependency",
+                challenge=(
+                    "The proof asset has to become a visible conversion path, not a detached artifact."
+                ),
+                required_response="Product/Frontend must ship the proof-to-CTA path first.",
+            ),
+            TeamRoomInterrupt(
+                from_role="product_frontend",
+                from_role_name="Product/Frontend",
+                target_role="ops",
+                target_role_name="Ops",
+                severity="blocker",
+                challenge="The meeting cannot call the bet measurable until tracking is live.",
+                required_response="Ops must verify CTA, drop-off, and follow-up metrics before launch.",
+            ),
+            TeamRoomInterrupt(
+                from_role="ops",
+                from_role_name="Ops",
+                target_role="all",
+                target_role_name="Full Team",
+                severity="control",
+                challenge="Every workstream needs an owner, due date, and stop/go metric.",
+                required_response="Departments must enter the readout with one committed deliverable.",
+            ),
+            TeamRoomInterrupt(
+                from_role=TEAM_ROOM_REVIEWER.key,
+                from_role_name=TEAM_ROOM_REVIEWER.agent_name,
+                target_role="all",
+                target_role_name="Full Team",
+                severity="review",
+                challenge=(
+                    f"False consensus is still the main failure mode for {goal}."
+                ),
+                required_response="The final brief must name disagreements instead of hiding them.",
+            ),
+        ]
+        if not active_roles and reviewer_turn.step.reply is None:
+            return interrupts[-1:]
+        return interrupts
+
+    @staticmethod
+    def _build_role_memory(
+        goal: str,
+        *,
+        prior_role_memory: list[TeamRoomRoleMemory],
+        revision_turns: list[TeamRoomTurn],
+        vote_board: list[TeamRoomVote],
+    ) -> list[TeamRoomRoleMemory]:
+        goal_excerpt = _clip_text(goal, max_chars=120)
+        prior_by_role = {item.role: item for item in prior_role_memory}
+        vote_by_role = {item.role: item for item in vote_board}
+        revised_roles = {turn.role.key for turn in revision_turns}
+        commitments = {
+            "sales": (
+                f"For {goal_excerpt}, carry forward the buyer-segment audit motion and objection log.",
+                "Confirm the buyer segment from live calls before changing the offer.",
+            ),
+            "marketing": (
+                f"For {goal_excerpt}, carry forward one proof-backed campaign around the audit CTA.",
+                "Keep the campaign tied to sales language instead of generic positioning.",
+            ),
+            "product_frontend": (
+                f"For {goal_excerpt}, carry forward the proof-to-CTA conversion path and tracking.",
+                "Avoid platform polish until CTA and drop-off data justify it.",
+            ),
+            "ops": (
+                f"For {goal_excerpt}, carry forward the two-week cadence and stop/go readout.",
+                "Block parallel experiments until owner metrics are visible.",
+            ),
+        }
+        memory: list[TeamRoomRoleMemory] = []
+        for role in TEAM_ROOM_DEPARTMENT_ROLES:
+            prior = prior_by_role.get(role.key)
+            vote = vote_by_role.get(role.key)
+            current_commitment, watch_item = commitments[role.key]
+            if role.key not in revised_roles:
+                watch_item = "Role missed revision; facilitator must reopen this lane next meeting."
+            if vote and vote.blocking_issue:
+                watch_item = vote.blocking_issue
+            carried_forward = list(prior.carried_forward) if prior else ["No prior meeting memory yet."]
+            memory.append(
+                TeamRoomRoleMemory(
+                    role=role.key,
+                    role_name=role.agent_name,
+                    previous_meeting_id=prior.previous_meeting_id if prior else None,
+                    carried_forward=carried_forward[:3],
+                    current_commitment=current_commitment,
+                    watch_item=watch_item,
+                )
+            )
+        return memory
+
+    @staticmethod
+    def _build_synthesis(
+        goal: str,
+        *,
+        vote_board: list[TeamRoomVote],
+        interrupts: list[TeamRoomInterrupt],
+    ) -> TeamRoomSynthesis:
+        goal_excerpt = _clip_text(goal, max_chars=120)
+        confidence = 0.0
+        if vote_board:
+            confidence = round(
+                sum(vote.confidence for vote in vote_board) / len(vote_board),
+                2,
+            )
+        disagreements = [
+            "Sales and Marketing still need live buyer language before scaling the campaign.",
+            "Product/Frontend wants the path narrow; Marketing will want more surface area if proof is weak.",
+            "Ops is blocking parallel experiments until the two-week readout has data.",
+        ]
+        if interrupts:
+            disagreements.append(
+                "The adversarial reviewer requires the final brief to keep false consensus visible."
+            )
+        return TeamRoomSynthesis(
+            decision_summary=(
+                f"Run one narrow growth bet for {goal_excerpt} with department votes, "
+                "owner actions, and a two-week confidence check."
+            ),
+            confidence=confidence,
+            agreements=[
+                "The first motion should be a narrow audit-style CTA, not broad positioning.",
+                "Sales, Marketing, Product/Frontend, and Ops each have one owner action.",
+                "The team will use proof and metrics to decide whether to continue.",
+            ],
+            disagreements=disagreements,
+        )
+
     @staticmethod
     def _subtask_description(
         goal: str,
@@ -1168,7 +1665,13 @@ class TeamRoomWorkflowService:
         return "\n\n".join(parts)
 
     @staticmethod
-    def _build_lead_frame(goal: str, context: str | None) -> str:
+    def _build_lead_frame(
+        goal: str,
+        context: str | None,
+        *,
+        prior_role_memory: list[TeamRoomRoleMemory],
+        meeting_controls: TeamRoomMeetingControls,
+    ) -> str:
         frame = (
             "Lead frame:\n"
             f"Goal: {goal}\n"
@@ -1178,6 +1681,14 @@ class TeamRoomWorkflowService:
         )
         if context:
             frame += f"\nContext: {context}"
+        frame += "\n\nFacilitator controls:\n" + "\n".join(
+            f"- {item}" for item in meeting_controls.decision_rules
+        )
+        memory_lines = []
+        for memory in prior_role_memory:
+            carried = "; ".join(memory.carried_forward) or "No prior meeting memory yet."
+            memory_lines.append(f"- {memory.role_name}: {carried}")
+        frame += "\n\nRole memory carried into this meeting:\n" + "\n".join(memory_lines)
         return frame
 
     @staticmethod
@@ -1194,6 +1705,39 @@ class TeamRoomWorkflowService:
             body = turn.step.reply.body if turn.step.reply else ""
             lines.append(f"- {turn.role.agent_name} ({turn.phase}): {body}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_votes(votes: list[TeamRoomVote]) -> str:
+        return "\n".join(
+            (
+                f"- {vote.role_name}: {vote.recommendation} "
+                f"(confidence {vote.confidence:.2f}); blocker: "
+                f"{vote.blocking_issue or 'none'}"
+            )
+            for vote in votes
+        )
+
+    @staticmethod
+    def _format_interrupts(interrupts: list[TeamRoomInterrupt]) -> str:
+        return "\n".join(
+            (
+                f"- {interrupt.from_role_name} -> {interrupt.target_role_name} "
+                f"[{interrupt.severity}]: {interrupt.challenge} "
+                f"Required response: {interrupt.required_response}"
+            )
+            for interrupt in interrupts
+        )
+
+    @staticmethod
+    def _format_synthesis(synthesis: TeamRoomSynthesis) -> str:
+        agreements = "\n".join(f"- {item}" for item in synthesis.agreements)
+        disagreements = "\n".join(f"- {item}" for item in synthesis.disagreements)
+        return (
+            f"Decision: {synthesis.decision_summary}\n"
+            f"Confidence: {synthesis.confidence:.2f}\n"
+            f"Agreements:\n{agreements}\n"
+            f"Disagreements:\n{disagreements}"
+        )
 
     @staticmethod
     def _default_proposal_reply(role: TeamRoomRoleSpec, goal: str) -> str:
@@ -1346,10 +1890,17 @@ class TeamRoomWorkflowService:
         return replies.get(role.key, role.revision_prompt)
 
     @staticmethod
-    def _default_final_brief(goal: str) -> str:
+    def _default_final_brief(
+        goal: str,
+        *,
+        synthesis: TeamRoomSynthesis,
+    ) -> str:
+        agreements = "\n".join(f"- {item}" for item in synthesis.agreements)
+        disagreements = "\n".join(f"- {item}" for item in synthesis.disagreements)
         return (
             f"Final Team Room brief for {goal}:\n"
             "Decision: run one narrow growth boardroom bet instead of scattering into broad work.\n"
+            f"Meeting confidence: {synthesis.confidence:.2f}\n"
             "Bets: one buyer segment, one audit-style CTA, one proof-backed campaign, one "
             "small product/frontend conversion path, and one daily ops readout.\n"
             "Risks: false consensus, vague buyer language, overbuilt product work, and "
@@ -1357,6 +1908,8 @@ class TeamRoomWorkflowService:
             "Objections: if the buyer will not book the audit, the offer is weak; if the "
             "page does not explain the audit, the product path is weak; if follow-up is not "
             "tracked, ops is weak.\n"
+            f"Agreements:\n{agreements}\n"
+            f"Disagreements:\n{disagreements}\n"
             "Next actions: Sales books 20 targeted conversations; Marketing ships the proof "
             "asset and campaign copy; Product/Frontend ships the CTA path and tracking; Ops "
             "runs the daily readout and the two-week stop/go review."
@@ -1621,10 +2174,21 @@ def team_room_workflow_result_to_dict(result: TeamRoomWorkflowResult) -> dict:
             "synthesis": 1,
         },
         "turn_summary": team_room_turn_summary(result),
+        "meeting_controls": dataclasses.asdict(result.meeting_controls),
         "discussion_rounds": [
             team_room_discussion_round_to_dict(round_result)
             for round_result in result.discussion_rounds
         ],
+        "vote_board": [dataclasses.asdict(vote) for vote in result.vote_board],
+        "interrupts": [
+            dataclasses.asdict(interrupt)
+            for interrupt in result.interrupts
+        ],
+        "role_memory": [
+            dataclasses.asdict(memory)
+            for memory in result.role_memory
+        ],
+        "synthesis": dataclasses.asdict(result.synthesis),
         "decision_ledger": dataclasses.asdict(result.decision_ledger),
         "phase_results": phase_results,
         "final_brief": result.final_brief,

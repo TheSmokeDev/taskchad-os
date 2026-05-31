@@ -104,6 +104,20 @@ def test_team_room_v2_runs_facilitated_multi_round_workflow() -> None:
         assert payload["discussion_rounds"][1]["facilitator_turn"]["role"] == "facilitator"
         assert payload["decision_ledger"]["decisions"]
         assert payload["decision_ledger"]["owner_actions"][0]["owner"] == "Sales"
+        assert payload["meeting_controls"]["decision_rules"]
+        assert len(payload["meeting_controls"]["round_controls"]) == 2
+        assert len(payload["vote_board"]) == 4
+        assert payload["vote_board"][0]["role"] == "sales"
+        assert payload["vote_board"][0]["confidence"] > 0.7
+        assert len(payload["interrupts"]) == 5
+        assert payload["interrupts"][0]["severity"] == "challenge"
+        assert len(payload["role_memory"]) == 4
+        assert payload["role_memory"][0]["previous_meeting_id"] is None
+        assert payload["synthesis"]["confidence"] > 0.7
+        assert payload["synthesis"]["agreements"]
+        assert payload["synthesis"]["disagreements"]
+        assert "Agreements:" in result.final_brief
+        assert "Disagreements:" in result.final_brief
 
         messages = MailboxService(db).get_convoy_messages(result.convoy.convoy.id)
         subjects = [entry.message.subject for entry in messages]
@@ -111,6 +125,33 @@ def test_team_room_v2_runs_facilitated_multi_round_workflow() -> None:
         assert "Facilitator round 1 brief" in subjects
         assert "Facilitator round 2 brief" in subjects
         assert "Cross-talk round 2: Sales" in subjects
+    finally:
+        db.close()
+
+
+def test_team_room_v3_role_memory_persists_between_meetings() -> None:
+    db = OrchestrationDB(":memory:")
+    try:
+        first = TeamRoomWorkflowService(db).run_team_room(
+            goal="Get TaskChad to one million dollars",
+            meeting_mode="facilitated_boardroom",
+        )
+        second = TeamRoomWorkflowService(db).run_team_room(
+            goal="Get TaskChad to one million dollars",
+            meeting_mode="facilitated_boardroom",
+        )
+        payload = team_room_workflow_result_to_dict(second)
+
+        assert payload["role_memory"][0]["previous_meeting_id"] == first.team.session.id
+        assert any(
+            "audit motion" in item
+            for item in payload["role_memory"][0]["carried_forward"]
+        )
+        metadata = json.loads(second.team.session.metadata or "{}")
+        assert metadata["meeting_behavior_version"] == "v3"
+        assert metadata["role_memory"][0]["role"] == "sales"
+        assert metadata["vote_board"][0]["role"] == "sales"
+        assert "session_id" not in json.dumps(metadata)
     finally:
         db.close()
 
@@ -283,6 +324,10 @@ def test_team_room_api_runs_v2_facilitated_workflow(tmp_path) -> None:
             assert len(body["phase_results"]["facilitator"]) == 3
             assert len(body["discussion_rounds"]) == 2
             assert body["decision_ledger"]["strongest_objection"]
+            assert len(body["vote_board"]) == 4
+            assert len(body["interrupts"]) == 5
+            assert body["synthesis"]["confidence"] > 0.7
+            assert body["role_memory"][0]["current_commitment"]
         finally:
             db.close()
 
@@ -336,6 +381,10 @@ def test_teamroom_chat_v2_command_runs_facilitated_meeting(monkeypatch, tmp_path
         "3 facilitator, 4 proposals, 8 cross-talk, 1 adversarial critique, "
         "4 revisions, 1 final synthesis"
     ) in reply
+    assert "Confidence: `" in reply
+    assert "Votes: `4` roles; interrupts `5`" in reply
+    assert "Agreement:" in reply
+    assert "Disagreement:" in reply
     assert "Final Team Room brief" in reply
 
 

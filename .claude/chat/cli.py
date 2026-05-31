@@ -1175,6 +1175,12 @@ def team_room_run(
             f"{payload['progress']['completed']}/{payload['progress']['total']} subtasks"
         )
         click.echo(f"  Turns: {payload['turn_summary']}")
+        synthesis = payload.get("synthesis") or {}
+        click.echo(f"  Confidence: {float(synthesis.get('confidence') or 0.0):.2f}")
+        click.echo(
+            "  Votes / interrupts: "
+            f"{len(payload.get('vote_board') or [])} / {len(payload.get('interrupts') or [])}"
+        )
         click.echo(f"  Runtime turns: {'on' if use_runtime else 'off'}")
         if runtime_lane:
             click.echo(f"  Runtime lane: {runtime_lane}")

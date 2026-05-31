@@ -1903,8 +1903,15 @@ def _format_team_room_reply(result: Any, *, use_runtime: bool, runtime_lane: str
         f"Convoy: {_teamtick_code(f'#{convoy.id}')}",
         f"Progress: {_teamtick_code(f'{convoy.completed_subtasks}/{convoy.total_subtasks}')} subtasks",
         f"Turns: {team_room_turn_summary(result)}",
+        f"Confidence: {_teamtick_code(f'{result.synthesis.confidence:.2f}')}",
+        f"Votes: {_teamtick_code(str(len(result.vote_board)))} roles; "
+        f"interrupts {_teamtick_code(str(len(result.interrupts)))}",
         f"Runtime turns: {_teamtick_code('on' if use_runtime else 'off')}",
     ]
+    if result.synthesis.agreements:
+        lines.append(f"Agreement: {result.synthesis.agreements[0]}")
+    if result.synthesis.disagreements:
+        lines.append(f"Disagreement: {result.synthesis.disagreements[0]}")
     if runtime_lane:
         lines.append(f"Runtime lane: {_teamtick_code(runtime_lane)}")
     if use_runtime:

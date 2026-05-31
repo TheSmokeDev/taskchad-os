@@ -181,6 +181,54 @@ interface TeamRoomDiscussionRound {
   crosstalk_turns: TeamRoomTurnResponse[];
 }
 
+interface TeamRoomMeetingControls {
+  agenda: string[];
+  facilitator_authority: string[];
+  decision_rules: string[];
+  round_controls: Array<{
+    round_number: number;
+    focus: string;
+    interrupt_rule: string;
+    exit_criteria: string;
+  }>;
+  stop_conditions: string[];
+}
+
+interface TeamRoomVote {
+  role: string;
+  role_name: string;
+  recommendation: string;
+  confidence: number;
+  rationale: string;
+  blocking_issue?: string | null;
+}
+
+interface TeamRoomInterrupt {
+  from_role: string;
+  from_role_name: string;
+  target_role: string;
+  target_role_name: string;
+  severity: string;
+  challenge: string;
+  required_response: string;
+}
+
+interface TeamRoomRoleMemory {
+  role: string;
+  role_name: string;
+  previous_meeting_id?: number | null;
+  carried_forward: string[];
+  current_commitment: string;
+  watch_item: string;
+}
+
+interface TeamRoomSynthesis {
+  decision_summary: string;
+  confidence: number;
+  agreements: string[];
+  disagreements: string[];
+}
+
 interface TeamRoomDecisionLedger {
   decisions: string[];
   accepted_bets: string[];
@@ -212,7 +260,12 @@ interface TeamRoomRunResponse {
   lead_frame_excerpt?: string | null;
   message_counts?: Record<string, number>;
   turn_summary: string;
+  meeting_controls: TeamRoomMeetingControls;
   discussion_rounds: TeamRoomDiscussionRound[];
+  vote_board: TeamRoomVote[];
+  interrupts: TeamRoomInterrupt[];
+  role_memory: TeamRoomRoleMemory[];
+  synthesis: TeamRoomSynthesis;
   decision_ledger: TeamRoomDecisionLedger;
   phase_results: {
     facilitator: TeamRoomTurnResponse[];
@@ -878,7 +931,7 @@ export function Teams() {
                       </Badge>
                     </div>
                   </div>
-                  <div class="mt-3 grid gap-2 text-[11px] text-[var(--color-text-muted)] sm:grid-cols-2 xl:grid-cols-4">
+                  <div class="mt-3 grid gap-2 text-[11px] text-[var(--color-text-muted)] sm:grid-cols-2 xl:grid-cols-5">
                     <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
                       <div class="font-medium text-[var(--color-text)]">Progress</div>
                       <div>{lastTeamRoomRun.progress.completed}/{lastTeamRoomRun.progress.total} · {lastTeamRoomRun.progress.status}</div>
@@ -886,6 +939,11 @@ export function Teams() {
                     <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
                       <div class="font-medium text-[var(--color-text)]">Turn Summary</div>
                       <div>{lastTeamRoomRun.turn_summary}</div>
+                    </div>
+                    <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
+                      <div class="font-medium text-[var(--color-text)]">Confidence</div>
+                      <div>{(lastTeamRoomRun.synthesis?.confidence ?? 0).toFixed(2)}</div>
+                      <div>{(lastTeamRoomRun.vote_board ?? []).length} votes · {(lastTeamRoomRun.interrupts ?? []).length} interrupts</div>
                     </div>
                     <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
                       <div class="font-medium text-[var(--color-text)]">Runtime</div>
@@ -900,6 +958,19 @@ export function Teams() {
                   </div>
                   <div class="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.8fr)]">
                     <div class="grid gap-3">
+                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                        <div class="text-[12px] font-medium text-[var(--color-text)]">Facilitator Controls</div>
+                        <div class="mt-2 grid gap-2 text-[11px] text-[var(--color-text-muted)] md:grid-cols-2">
+                          {(lastTeamRoomRun.meeting_controls?.decision_rules ?? []).map((rule) => (
+                            <div key={rule} class="break-words">Rule: {rule}</div>
+                          ))}
+                          {(lastTeamRoomRun.meeting_controls?.round_controls ?? []).map((round) => (
+                            <div key={`round-control-${round.round_number}`} class="break-words">
+                              Round {round.round_number}: {round.focus}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                       <div>
                         <div class="text-[12px] font-medium text-[var(--color-text)]">Discussion Rounds</div>
                         <div class="mt-2 grid gap-2">
@@ -939,6 +1010,23 @@ export function Teams() {
                         </div>
                       </div>
                       <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                        <div class="mb-2 text-[12px] font-medium text-[var(--color-text)]">Synthesis</div>
+                        <div class="grid gap-2 text-[11px] text-[var(--color-text-muted)] md:grid-cols-2">
+                          <div>
+                            <div class="font-medium text-[var(--color-text)]">Agreements</div>
+                            {(lastTeamRoomRun.synthesis?.agreements ?? []).map((item) => (
+                              <div key={item} class="mt-1 break-words">{item}</div>
+                            ))}
+                          </div>
+                          <div>
+                            <div class="font-medium text-[var(--color-text)]">Disagreements</div>
+                            {(lastTeamRoomRun.synthesis?.disagreements ?? []).map((item) => (
+                              <div key={item} class="mt-1 break-words">{item}</div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
                         <div class="mb-2 text-[12px] font-medium text-[var(--color-text)]">Final Brief</div>
                         <div class="whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--color-text-muted)]">
                           {lastTeamRoomRun.final_brief}
@@ -964,6 +1052,43 @@ export function Teams() {
                               <div class="font-medium text-[var(--color-text)]">{item.owner}</div>
                               <div class="mt-1 break-words">{item.action}</div>
                               <div class="mt-1 break-words">Signal: {item.validation_signal}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                        <div class="text-[12px] font-medium text-[var(--color-text)]">Vote Board</div>
+                        <div class="mt-2 grid gap-2">
+                          {(lastTeamRoomRun.vote_board ?? []).map((vote) => (
+                            <div key={vote.role} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+                              <div class="flex items-center justify-between gap-2">
+                                <span class="font-medium text-[var(--color-text)]">{vote.role_name}</span>
+                                <span>{vote.confidence.toFixed(2)}</span>
+                              </div>
+                              <div class="mt-1 break-words">{vote.recommendation}</div>
+                              {vote.blocking_issue && <div class="mt-1 break-words">Blocker: {vote.blocking_issue}</div>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                        <div class="text-[12px] font-medium text-[var(--color-text)]">Interrupts</div>
+                        <div class="mt-2 grid gap-2 text-[11px] text-[var(--color-text-muted)]">
+                          {(lastTeamRoomRun.interrupts ?? []).map((interrupt) => (
+                            <div key={`${interrupt.from_role}-${interrupt.target_role}-${interrupt.severity}`} class="break-words">
+                              {interrupt.from_role_name} to {interrupt.target_role_name}: {interrupt.challenge}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                        <div class="text-[12px] font-medium text-[var(--color-text)]">Role Memory</div>
+                        <div class="mt-2 grid gap-2">
+                          {(lastTeamRoomRun.role_memory ?? []).map((memory) => (
+                            <div key={memory.role} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+                              <div class="font-medium text-[var(--color-text)]">{memory.role_name}</div>
+                              <div class="mt-1 break-words">{memory.current_commitment || 'No current commitment recorded.'}</div>
+                              <div class="mt-1 break-words">Watch: {memory.watch_item || 'none'}</div>
                             </div>
                           ))}
                         </div>

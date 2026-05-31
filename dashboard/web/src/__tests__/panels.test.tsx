@@ -431,6 +431,20 @@ describe('panels populate from fixture API responses', () => {
           lead_frame_excerpt: 'Frame the goal, call departments, and force owner-level decisions.',
           message_counts: { facilitator: 3, proposal: 4, crosstalk: 8, revision: 4, reviewer: 1, synthesis: 1 },
           turn_summary: '3 facilitator, 4 proposals, 8 cross-talk, 1 adversarial critique, 4 revisions, 1 final synthesis',
+          meeting_controls: {
+            agenda: ['Frame the decision.', 'Close with votes.'],
+            facilitator_authority: ['Cut off repetition.'],
+            decision_rules: ['No consensus without confidence.'],
+            round_controls: [
+              {
+                round_number: 1,
+                focus: 'Expose peer dependencies.',
+                interrupt_rule: 'Interrupt for blockers.',
+                exit_criteria: 'Owners and confidence named.',
+              },
+            ],
+            stop_conditions: ['Follow-up trigger is explicit.'],
+          },
           discussion_rounds: [
             {
               round_number: 1,
@@ -485,6 +499,43 @@ describe('panels populate from fixture API responses', () => {
               ],
             },
           ],
+          vote_board: [
+            {
+              role: 'sales',
+              role_name: 'Sales',
+              recommendation: 'Approve the sales-led audit wedge.',
+              confidence: 0.78,
+              rationale: 'Sales owns qualified outreach.',
+              blocking_issue: 'Buyer segment proof still has to come from live calls.',
+            },
+          ],
+          interrupts: [
+            {
+              from_role: 'sales',
+              from_role_name: 'Sales',
+              target_role: 'marketing',
+              target_role_name: 'Marketing',
+              severity: 'challenge',
+              challenge: 'Do not scale channels until calls prove the buyer language.',
+              required_response: 'Use the objection log in the first hook.',
+            },
+          ],
+          role_memory: [
+            {
+              role: 'sales',
+              role_name: 'Sales',
+              previous_meeting_id: 8,
+              carried_forward: ['Carry forward the audit motion.'],
+              current_commitment: 'Carry forward the buyer-segment audit motion.',
+              watch_item: 'Buyer segment proof still has to come from live calls.',
+            },
+          ],
+          synthesis: {
+            decision_summary: 'Run the sales-led audit wedge with owner actions.',
+            confidence: 0.78,
+            agreements: ['The first motion should be a narrow audit-style CTA.'],
+            disagreements: ['Sales and Marketing need live buyer language before scaling.'],
+          },
           decision_ledger: {
             decisions: ['Validate demand before building the next heavy feature.'],
             accepted_bets: ['Sales-led audit wedge.'],
@@ -606,6 +657,12 @@ describe('panels populate from fixture API responses', () => {
     expect(screen.getAllByText(/facilitated_boardroom/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/21\/21 · completed/i)).toBeInTheDocument();
     expect(screen.getByText(/3 facilitator, 4 proposals/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/0.78/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Rule: No consensus without confidence/i)).toBeInTheDocument();
+    expect(screen.getByText(/Approve the sales-led audit wedge/i)).toBeInTheDocument();
+    expect(screen.getByText(/Do not scale channels until calls prove/i)).toBeInTheDocument();
+    expect(screen.getByText(/Carry forward the buyer-segment audit motion/i)).toBeInTheDocument();
+    expect(screen.getByText(/Sales and Marketing need live buyer language/i)).toBeInTheDocument();
     expect(screen.getByText(/Decision: Validate demand before building/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Sales owns qualified outreach/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Final Team Room brief: pick the sales-led audit wedge/i)).toBeInTheDocument();
