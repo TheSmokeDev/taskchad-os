@@ -81,8 +81,8 @@ Current local proof, 2026-05-31:
 
 - Visible Chrome CDP `9222` had a persistent Telegram Web session already
   logged in.
-- `agent-browser --cdp 9222` sent a real `/teamroom --v2 ...` message to
-  `@YourBot`; the live bot returned Team Room V3 proof with team `#24`,
+- `agent-browser --cdp 9222` sent a real `/teamroom --v2 ...` message to the
+  configured Telegram bot; the live bot returned Team Room V3 proof with team `#24`,
   convoy `#34`, `21/21`, confidence `0.77`, four votes, five interrupts, and
   runtime off.
 - Dashboard `/browser` then observed that same CDP session as read-only/live.
