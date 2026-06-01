@@ -40,6 +40,7 @@ import logging
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -3608,7 +3609,176 @@ def get_hive_mind_recent(
         return {"entries": []}
 
 
-# ── /api/dashboard/settings ──────────────────────────────────────────────
+# ── /api/dashboard/mobile-access + settings ──────────────────────────────
+
+
+def _sanitize_command_error(value: object) -> str:
+    text = str(value).strip() or "command failed"
+    return _redact(text[:300])
+
+
+def _run_json_command(args: list[str], timeout_s: float = 2.0) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout_s,
+        )
+    except FileNotFoundError:
+        return None, f"{args[0]} not found"
+    except subprocess.TimeoutExpired:
+        return None, f"{args[0]} timed out"
+    except Exception as exc:
+        return None, _sanitize_command_error(exc)
+
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"{args[0]} exited {proc.returncode}"
+        return None, _sanitize_command_error(detail)
+
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except ValueError as exc:
+        return None, _sanitize_command_error(exc)
+    if not isinstance(payload, dict):
+        return None, "command returned non-object JSON"
+    return payload, None
+
+
+def _clean_dns_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    clean = value.strip().rstrip(".")
+    return clean or None
+
+
+def _tailscale_ips_from_status(status: dict[str, Any] | None) -> list[str]:
+    if not isinstance(status, dict):
+        return []
+    self_node = status.get("Self")
+    raw = status.get("TailscaleIPs")
+    if not isinstance(raw, list) and isinstance(self_node, dict):
+        raw = self_node.get("TailscaleIPs")
+    if not isinstance(raw, list):
+        return []
+    return [ip for ip in raw if isinstance(ip, str) and ip.strip()]
+
+
+def _primary_tailnet_ip(ips: list[str]) -> str | None:
+    for ip in ips:
+        if ip.startswith("100."):
+            return ip
+    for ip in ips:
+        if ":" not in ip:
+            return ip
+    return ips[0] if ips else None
+
+
+def _dashboard_web_port() -> int:
+    raw = os.environ.get("DASHBOARD_WEB_PORT") or os.environ.get("VITE_PORT") or "5173"
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        return 5173
+    if 1 <= port <= 65535:
+        return port
+    return 5173
+
+
+def _dashboard_url_map(host: str | None, port: int) -> dict[str, str | None]:
+    if not host:
+        return {"root": None, "browser": None, "teams": None, "mobile": None}
+    origin = f"http://{host}:{port}"
+    return {
+        "root": f"{origin}/",
+        "browser": f"{origin}/browser",
+        "teams": f"{origin}/teams",
+        "mobile": f"{origin}/mobile",
+    }
+
+
+def _extract_serve_summary(payload: dict[str, Any] | None, error: str | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "enabled": False,
+            "http": False,
+            "https": False,
+            "hosts": [],
+            "ports": [],
+            "error": error,
+        }
+
+    tcp = payload.get("TCP")
+    web = payload.get("Web")
+    tcp_map = tcp if isinstance(tcp, dict) else {}
+    web_map = web if isinstance(web, dict) else {}
+    ports: list[dict[str, Any]] = []
+    for key, value in sorted(tcp_map.items(), key=lambda item: str(item[0])):
+        cfg = value if isinstance(value, dict) else {}
+        ports.append(
+            {
+                "port": str(key),
+                "http": bool(cfg.get("HTTP")),
+                "https": bool(cfg.get("HTTPS")),
+            }
+        )
+    return {
+        "available": True,
+        "enabled": bool(tcp_map or web_map),
+        "http": any(bool(p.get("http")) for p in ports),
+        "https": any(bool(p.get("https")) for p in ports),
+        "hosts": sorted(str(host) for host in web_map.keys())[:8],
+        "ports": ports,
+        "error": None,
+    }
+
+
+@router.get("/api/dashboard/mobile-access")
+def get_mobile_access_status(request: Request) -> dict[str, Any]:
+    status_payload, status_error = _run_json_command(["tailscale", "status", "--json"])
+    serve_payload, serve_error = _run_json_command(["tailscale", "serve", "status", "--json"])
+
+    self_node = status_payload.get("Self") if isinstance(status_payload, dict) else {}
+    if not isinstance(self_node, dict):
+        self_node = {}
+    ips = _tailscale_ips_from_status(status_payload)
+    primary_ip = _primary_tailnet_ip(ips)
+    dns_name = _clean_dns_name(self_node.get("DNSName"))
+    web_port = _dashboard_web_port()
+    urls = _dashboard_url_map(primary_ip, web_port)
+    request_host = (
+        request.headers.get("x-dashboard-request-host")
+        or request.headers.get("x-forwarded-host")
+        or request.headers.get("host")
+    )
+
+    ready = bool(primary_ip and status_payload and not status_error)
+    return {
+        "status": "ready" if ready else "unavailable",
+        "mode": "read_only",
+        "tailscale": {
+            "available": bool(status_payload and not status_error),
+            "backend_state": status_payload.get("BackendState") if isinstance(status_payload, dict) else None,
+            "hostname": self_node.get("HostName") if isinstance(self_node.get("HostName"), str) else None,
+            "dns_name": dns_name,
+            "ips": ips,
+            "primary_ip": primary_ip,
+            "error": status_error,
+        },
+        "dashboard": {
+            "web_port": web_port,
+            "request_host": request_host,
+            "urls": urls,
+            "bind_hint": f"npm run dev -- --host {primary_ip or '0.0.0.0'}",
+        },
+        "serve": _extract_serve_summary(serve_payload, serve_error),
+        "controls": {
+            "mutates_tailscale": False,
+            "mutates_browser": False,
+        },
+    }
 
 
 @router.get("/api/dashboard/settings")

@@ -77,6 +77,23 @@ http://127.0.0.1:5173/browser
 
 Expected viewer behavior: read-only status, manual screenshot capture, optional local stream start/stop, and viewport image rendering. There must be no URL open field, tab URL list, mouse control, keyboard control, profile edit control, post control, DM control, or connection request control.
 
+Current local proof, 2026-05-31:
+
+- Visible Chrome CDP `9222` had a persistent Telegram Web session already
+  logged in.
+- `agent-browser --cdp 9222` sent a real `/teamroom --v2 ...` message to
+  `@YourBot`; the live bot returned Team Room V3 proof with team `#24`,
+  convoy `#34`, `21/21`, confidence `0.77`, four votes, five interrupts, and
+  runtime off.
+- Dashboard `/browser` then observed that same CDP session as read-only/live.
+- Proof image: `.claude/data/dashboard-browser-page-proof.png`.
+
+Important login boundary: dashboard `/browser` is not the Telegram login or
+input surface. If Telegram Web needs phone-code login, do it through the visible
+CDP browser with `agent-browser --cdp 9222`; then use dashboard `/browser` to
+observe the already-authenticated session. Do not export cookies, tokens, or
+browser state files unless the user explicitly asks.
+
 ## 3. Current Scope
 
 Shipped:
@@ -91,6 +108,9 @@ Shipped:
 - Dashboard-owned read-only browser viewer API
 - Hono thin proxy with loopback-only `direct_ws_url`
 - Dashboard `/browser` page with WebSocket frame rendering and screenshot fallback
+- Persistent visible CDP proof path for Telegram Web observation: direct
+  `agent-browser --cdp 9222` controls the authorized browser session, while
+  dashboard `/browser` observes it read-only.
 
 Not shipped:
 
@@ -98,6 +118,7 @@ Not shipped:
 - Dashboard browser input, navigation, or tab URL inspection
 - Hotbox clone or external viewer fork
 - Browser state storage, profile copying, cookie export, token export, query-string export, or fragment export
+- Dashboard-based Telegram login or browser input
 - Mission Control consumer for this viewer API
 
 ## 4. Vertical Slice Architecture
@@ -315,6 +336,15 @@ Telegram Homie seems stale after merge:
 - Check the live process PID and checkout path.
 - Restart from a clean updated main checkout.
 - Verify with CLI first, then Telegram.
+
+Telegram Web login/session mismatch:
+
+- If an isolated `agent-browser` session shows a Telegram QR login, do not use
+  that session for proof unless the user explicitly wants to log it in.
+- Prefer the existing visible Chrome CDP session on `9222` when it is
+  authenticated and visible.
+- Dashboard `/browser` can prove the authenticated session is observable, but
+  it cannot enter phone numbers, verification codes, or messages.
 
 Duplicate Telegram pollers:
 

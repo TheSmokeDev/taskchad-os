@@ -25,6 +25,7 @@ import { StandupConfig } from '@/pages/StandupConfig';
 import { AgentFiles } from '@/pages/AgentFiles';
 import { Jarvis } from '@/pages/Jarvis';
 import { BrowserViewer } from '@/pages/BrowserViewer';
+import { MobileAccess } from '@/pages/MobileAccess';
 import { DEFAULT_ROUTE } from '@/lib/routes';
 
 export function App() {
@@ -71,6 +72,7 @@ export function App() {
           <Route path="/standup"><StandupConfig /></Route>
           <Route path="/jarvis"><Jarvis /></Route>
           <Route path="/browser"><BrowserViewer /></Route>
+          <Route path="/mobile"><MobileAccess /></Route>
           <Route path="/settings"><Settings /></Route>
 
           {/* Common alt slugs */}

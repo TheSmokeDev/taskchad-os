@@ -248,6 +248,50 @@ describe('panels populate from fixture API responses', () => {
             status: 'active',
             backend_type: 'local',
             updated_at: 1770000000,
+            metadata: JSON.stringify({
+              workflow: 'team_room',
+              workflow_id: 'growth_boardroom',
+              meeting_behavior_version: 'v3',
+              meeting_mode: 'facilitated_boardroom',
+              goal_excerpt: 'Persisted dashboard artifact proof',
+              vote_board: [
+                {
+                  role: 'sales',
+                  role_name: 'Sales',
+                  recommendation: 'Persisted vote backs the audit wedge.',
+                  confidence: 0.81,
+                  rationale: 'Persisted rationale keeps the session useful after reload.',
+                  blocking_issue: 'Persisted blocker must stay visible.',
+                },
+              ],
+              interrupts: [
+                {
+                  from_role: 'ops',
+                  from_role_name: 'Ops',
+                  target_role: 'sales',
+                  target_role_name: 'Sales',
+                  severity: 'control',
+                  challenge: 'Persisted interrupt keeps owner pressure visible.',
+                  required_response: 'Persisted required response must be shown.',
+                },
+              ],
+              role_memory: [
+                {
+                  role: 'sales',
+                  role_name: 'Sales',
+                  previous_meeting_id: 8,
+                  carried_forward: ['Persisted carry-forward survives reload.'],
+                  current_commitment: 'Persisted commitment survives reload.',
+                  watch_item: 'Persisted watch item survives reload.',
+                },
+              ],
+              synthesis: {
+                decision_summary: 'Persisted summary survives reload.',
+                confidence: 0.81,
+                agreements: ['Persisted agreement survives reload.'],
+                disagreements: ['Persisted disagreement survives reload.'],
+              },
+            }),
           },
         ]), { status: 200, headers: { 'content-type': 'application/json' } });
       }
@@ -262,6 +306,50 @@ describe('panels populate from fixture API responses', () => {
             status: 'active',
             backend_type: 'local',
             updated_at: 1770000000,
+            metadata: JSON.stringify({
+              workflow: 'team_room',
+              workflow_id: 'growth_boardroom',
+              meeting_behavior_version: 'v3',
+              meeting_mode: 'facilitated_boardroom',
+              goal_excerpt: 'Persisted dashboard artifact proof',
+              vote_board: [
+                {
+                  role: 'sales',
+                  role_name: 'Sales',
+                  recommendation: 'Persisted vote backs the audit wedge.',
+                  confidence: 0.81,
+                  rationale: 'Persisted rationale keeps the session useful after reload.',
+                  blocking_issue: 'Persisted blocker must stay visible.',
+                },
+              ],
+              interrupts: [
+                {
+                  from_role: 'ops',
+                  from_role_name: 'Ops',
+                  target_role: 'sales',
+                  target_role_name: 'Sales',
+                  severity: 'control',
+                  challenge: 'Persisted interrupt keeps owner pressure visible.',
+                  required_response: 'Persisted required response must be shown.',
+                },
+              ],
+              role_memory: [
+                {
+                  role: 'sales',
+                  role_name: 'Sales',
+                  previous_meeting_id: 8,
+                  carried_forward: ['Persisted carry-forward survives reload.'],
+                  current_commitment: 'Persisted commitment survives reload.',
+                  watch_item: 'Persisted watch item survives reload.',
+                },
+              ],
+              synthesis: {
+                decision_summary: 'Persisted summary survives reload.',
+                confidence: 0.81,
+                agreements: ['Persisted agreement survives reload.'],
+                disagreements: ['Persisted disagreement survives reload.'],
+              },
+            }),
           },
           members: [
             {
@@ -646,6 +734,12 @@ describe('panels populate from fixture API responses', () => {
     await waitFor(() => expect(screen.getAllByText(/team worker/i).length).toBeGreaterThan(0));
     await waitFor(() => expect(screen.getByText(/sales needs the landing page angle/i)).toBeInTheDocument());
     expect(screen.getByText(/Convoy: #1/i)).toBeInTheDocument();
+    expect(screen.getByText(/team room v3 artifacts/i)).toBeInTheDocument();
+    expect(screen.getByText(/Persisted dashboard artifact proof/i)).toBeInTheDocument();
+    expect(screen.getByText(/Persisted vote backs the audit wedge/i)).toBeInTheDocument();
+    expect(screen.getByText(/Persisted interrupt keeps owner pressure visible/i)).toBeInTheDocument();
+    expect(screen.getByText(/Persisted carry-forward survives reload/i)).toBeInTheDocument();
+    expect(screen.getByText(/Persisted summary survives reload/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /add member/i })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /taskchad drill/i }));
     await waitFor(() => expect(requests).toContain('/api/team/taskchad-drill'));
@@ -658,11 +752,21 @@ describe('panels populate from fixture API responses', () => {
     expect(screen.getByText(/21\/21 · completed/i)).toBeInTheDocument();
     expect(screen.getByText(/3 facilitator, 4 proposals/i)).toBeInTheDocument();
     expect(screen.getAllByText(/0.78/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/v3 meeting artifacts/i)).toBeInTheDocument();
+    expect(screen.getByText(/vote \+ confidence board/i)).toBeInTheDocument();
+    expect(screen.getByText(/role memory/i)).toBeInTheDocument();
+    expect(screen.getByText(/interrupts \+ challenges/i)).toBeInTheDocument();
+    expect(screen.getByText(/agreements \/ disagreements/i)).toBeInTheDocument();
     expect(screen.getByText(/Rule: No consensus without confidence/i)).toBeInTheDocument();
     expect(screen.getByText(/Approve the sales-led audit wedge/i)).toBeInTheDocument();
+    expect(screen.getByText(/Rationale: Sales owns qualified outreach/i)).toBeInTheDocument();
     expect(screen.getByText(/Do not scale channels until calls prove/i)).toBeInTheDocument();
+    expect(screen.getByText(/Required: Use the objection log in the first hook/i)).toBeInTheDocument();
+    expect(screen.getByText(/Prior meeting #8/i)).toBeInTheDocument();
+    expect(screen.getByText(/Carry-forward: Carry forward the audit motion/i)).toBeInTheDocument();
     expect(screen.getByText(/Carry forward the buyer-segment audit motion/i)).toBeInTheDocument();
     expect(screen.getByText(/Sales and Marketing need live buyer language/i)).toBeInTheDocument();
+    expect(screen.getByText(/Decision Summary/i)).toBeInTheDocument();
     expect(screen.getByText(/Decision: Validate demand before building/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Sales owns qualified outreach/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Final Team Room brief: pick the sales-led audit wedge/i)).toBeInTheDocument();

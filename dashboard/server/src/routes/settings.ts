@@ -1,5 +1,5 @@
 /**
- * /api/dashboard/settings — KV settings store proxy.
+ * /api/dashboard/settings — dashboard settings and read-only operator status.
  */
 
 import { Hono } from 'hono';
@@ -10,6 +10,15 @@ void inboundPersonaId;
 void outboundPersonaId;
 
 export const settingsRoute = new Hono();
+
+settingsRoute.get('/api/dashboard/mobile-access', async (c) => {
+  const result = await authedFetchJson('/api/dashboard/mobile-access', {
+    headers: {
+      'X-Dashboard-Request-Host': c.req.header('host') ?? '',
+    },
+  });
+  return c.json(result.json as Record<string, unknown>, result.status as 200);
+});
 
 settingsRoute.get('/api/dashboard/settings', async (c) => {
   const result = await authedFetchJson('/api/dashboard/settings');

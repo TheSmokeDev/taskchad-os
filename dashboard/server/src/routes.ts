@@ -89,6 +89,7 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/hive-mind/recent',
 
   // settings.ts
+  '/api/dashboard/mobile-access',
   '/api/dashboard/settings',
 
   // mission.ts — wildcard pass-throughs to the orchestration framework

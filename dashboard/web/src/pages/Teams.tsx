@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
-import { Bot, ClipboardList, Inbox, MessageSquare, Play, Plus, RefreshCw, Send, ShieldAlert, Terminal, Trash2, UserPlus } from 'lucide-preact';
+import { Bot, Brain, CheckCircle2, CircleAlert, ClipboardList, Inbox, MessageSquare, Play, Plus, RefreshCw, Scale, Send, ShieldAlert, Terminal, Trash2, UserPlus, Vote } from 'lucide-preact';
 import { TopBar } from '@/components/TopBar';
 import { Empty } from '@/components/Empty';
 import { Spinner } from '@/components/Spinner';
@@ -20,6 +20,7 @@ interface TeamSession {
   last_activity_at?: number | null;
   shutdown_requested_at?: number | null;
   closed_at?: number | null;
+  metadata?: string | Record<string, unknown> | null;
   created_at?: number;
   updated_at?: number;
 }
@@ -229,6 +230,16 @@ interface TeamRoomSynthesis {
   disagreements: string[];
 }
 
+interface TeamRoomArtifacts {
+  meeting_behavior_version?: string | null;
+  meeting_mode?: string | null;
+  goal_excerpt?: string | null;
+  vote_board: TeamRoomVote[];
+  interrupts: TeamRoomInterrupt[];
+  role_memory: TeamRoomRoleMemory[];
+  synthesis?: TeamRoomSynthesis | null;
+}
+
 interface TeamRoomDecisionLedger {
   decisions: string[];
   accepted_bets: string[];
@@ -321,6 +332,15 @@ function formatCost(value?: number | null): string {
   return typeof value === 'number' ? `$${value.toFixed(6)}` : 'n/a';
 }
 
+function formatConfidence(value?: number | null): string {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '0.00';
+}
+
+function confidencePercent(value?: number | null): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value * 100)));
+}
+
 function Badge({ children, className = '' }: { children: ComponentChildren; className?: string }) {
   return (
     <span class={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] leading-4 ${className}`}>
@@ -336,6 +356,199 @@ function statusTone(status: string): string {
 function agentLabel(agentId: string, members: TeamMember[]): string {
   const member = members.find((m) => m.agent_id === agentId);
   return member?.agent_name || agentId;
+}
+
+function interruptTone(severity: string): string {
+  if (severity === 'blocker') return 'bg-red-500/10 text-red-300';
+  if (severity === 'control') return 'bg-sky-500/10 text-sky-300';
+  if (severity === 'review') return 'bg-amber-500/10 text-amber-300';
+  return 'bg-orange-500/10 text-orange-300';
+}
+
+function TeamRoomArtifactPanel({
+  title,
+  icon,
+  meta,
+  children,
+}: {
+  title: string;
+  icon: ComponentChildren;
+  meta?: ComponentChildren;
+  children: ComponentChildren;
+}) {
+  return (
+    <section class="min-w-0 rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex min-w-0 items-center gap-2 text-[12px] font-medium text-[var(--color-text)]">
+          {icon}
+          <span class="min-w-0 truncate">{title}</span>
+        </div>
+        {meta && <div class="text-[11px] text-[var(--color-text-muted)]">{meta}</div>}
+      </div>
+      <div class="mt-3">{children}</div>
+    </section>
+  );
+}
+
+function metadataObject(value?: string | Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTeamRoomArtifacts(value: Partial<TeamRoomArtifacts> | null | undefined): TeamRoomArtifacts | null {
+  if (!value) return null;
+  const voteBoard = Array.isArray(value.vote_board) ? value.vote_board : [];
+  const interrupts = Array.isArray(value.interrupts) ? value.interrupts : [];
+  const roleMemory = Array.isArray(value.role_memory) ? value.role_memory : [];
+  const synthesis = value.synthesis && typeof value.synthesis === 'object' ? value.synthesis : null;
+  if (voteBoard.length === 0 && interrupts.length === 0 && roleMemory.length === 0 && !synthesis) {
+    return null;
+  }
+  return {
+    meeting_behavior_version: value.meeting_behavior_version ?? null,
+    meeting_mode: value.meeting_mode ?? null,
+    goal_excerpt: value.goal_excerpt ?? null,
+    vote_board: voteBoard,
+    interrupts,
+    role_memory: roleMemory,
+    synthesis,
+  };
+}
+
+function teamRoomArtifactsFromSession(session: TeamSession | null): TeamRoomArtifacts | null {
+  const metadata = metadataObject(session?.metadata);
+  if (!metadata) return null;
+  const workflow = typeof metadata.workflow === 'string' ? metadata.workflow : null;
+  const version = typeof metadata.meeting_behavior_version === 'string' ? metadata.meeting_behavior_version : null;
+  if (workflow !== 'team_room' && version !== 'v3') return null;
+  return normalizeTeamRoomArtifacts({
+    meeting_behavior_version: version,
+    meeting_mode: typeof metadata.meeting_mode === 'string' ? metadata.meeting_mode : null,
+    goal_excerpt: typeof metadata.goal_excerpt === 'string' ? metadata.goal_excerpt : null,
+    vote_board: metadata.vote_board as TeamRoomVote[] | undefined,
+    interrupts: metadata.interrupts as TeamRoomInterrupt[] | undefined,
+    role_memory: metadata.role_memory as TeamRoomRoleMemory[] | undefined,
+    synthesis: metadata.synthesis as TeamRoomSynthesis | undefined,
+  });
+}
+
+function TeamRoomArtifactsGrid({ artifacts }: { artifacts: TeamRoomArtifacts }) {
+  return (
+    <div class="mt-2 grid gap-3 xl:grid-cols-2">
+      <TeamRoomArtifactPanel
+        title="Vote + Confidence Board"
+        icon={<Vote size={14} />}
+        meta={`Overall ${formatConfidence(artifacts.synthesis?.confidence)}`}
+      >
+        <div class="grid gap-2">
+          {artifacts.vote_board.map((vote) => (
+            <div key={vote.role} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="font-medium text-[var(--color-text)]">{vote.role_name}</div>
+                <div>{formatConfidence(vote.confidence)}</div>
+              </div>
+              <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--color-border)]">
+                <div
+                  class="h-full rounded-full bg-[var(--color-accent)]"
+                  style={{ width: `${confidencePercent(vote.confidence)}%` }}
+                />
+              </div>
+              <div class="mt-2 break-words">{vote.recommendation}</div>
+              <div class="mt-1 break-words">Rationale: {vote.rationale}</div>
+              {vote.blocking_issue && <div class="mt-1 break-words">Blocker: {vote.blocking_issue}</div>}
+            </div>
+          ))}
+        </div>
+      </TeamRoomArtifactPanel>
+      <TeamRoomArtifactPanel
+        title="Role Memory"
+        icon={<Brain size={14} />}
+        meta={`${artifacts.role_memory.length} roles`}
+      >
+        <div class="grid gap-2">
+          {artifacts.role_memory.map((memory) => (
+            <div key={memory.role} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="font-medium text-[var(--color-text)]">{memory.role_name}</div>
+                <div>{memory.previous_meeting_id ? `Prior meeting #${memory.previous_meeting_id}` : 'No prior meeting'}</div>
+              </div>
+              <div class="mt-2 break-words">Commitment: {memory.current_commitment || 'No current commitment recorded.'}</div>
+              <div class="mt-1 break-words">Watch: {memory.watch_item || 'none'}</div>
+              {(memory.carried_forward ?? []).length > 0 && (
+                <div class="mt-2 grid gap-1">
+                  {(memory.carried_forward ?? []).map((item) => (
+                    <div key={`${memory.role}-${item}`} class="break-words">Carry-forward: {item}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </TeamRoomArtifactPanel>
+      <TeamRoomArtifactPanel
+        title="Interrupts + Challenges"
+        icon={<CircleAlert size={14} />}
+        meta={`${artifacts.interrupts.length} logged`}
+      >
+        <div class="grid gap-2">
+          {artifacts.interrupts.map((interrupt) => (
+            <div key={`${interrupt.from_role}-${interrupt.target_role}-${interrupt.severity}-${interrupt.challenge}`} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="font-medium text-[var(--color-text)]">
+                  {interrupt.from_role_name} to {interrupt.target_role_name}
+                </div>
+                <Badge className={interruptTone(interrupt.severity)}>
+                  {interrupt.severity}
+                </Badge>
+              </div>
+              <div class="mt-2 break-words">{interrupt.challenge}</div>
+              <div class="mt-1 break-words">Required: {interrupt.required_response}</div>
+            </div>
+          ))}
+        </div>
+      </TeamRoomArtifactPanel>
+      <TeamRoomArtifactPanel
+        title="Agreements / Disagreements"
+        icon={<Scale size={14} />}
+        meta="synthesis"
+      >
+        <div class="grid gap-3 text-[11px] text-[var(--color-text-muted)] md:grid-cols-2">
+          <div class="min-w-0">
+            <div class="flex items-center gap-1.5 font-medium text-[var(--color-text)]">
+              <CheckCircle2 size={13} /> Agreements
+            </div>
+            <div class="mt-2 grid gap-1">
+              {(artifacts.synthesis?.agreements ?? []).map((item) => (
+                <div key={item} class="break-words">{item}</div>
+              ))}
+            </div>
+          </div>
+          <div class="min-w-0">
+            <div class="flex items-center gap-1.5 font-medium text-[var(--color-text)]">
+              <ShieldAlert size={13} /> Disagreements
+            </div>
+            <div class="mt-2 grid gap-1">
+              {(artifacts.synthesis?.disagreements ?? []).map((item) => (
+                <div key={item} class="break-words">{item}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div class="mt-3 rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
+          <div class="font-medium text-[var(--color-text)]">Decision Summary</div>
+          <div class="mt-1 break-words">{artifacts.synthesis?.decision_summary ?? 'No decision summary recorded.'}</div>
+        </div>
+      </TeamRoomArtifactPanel>
+    </div>
+  );
 }
 
 export function Teams() {
@@ -408,6 +621,13 @@ export function Teams() {
   const [teamRoomUseRuntime, setTeamRoomUseRuntime] = useState(false);
   const [teamRoomRuntimeLane, setTeamRoomRuntimeLane] = useState('generic_runtime');
   const [teamRoomMaxRounds, setTeamRoomMaxRounds] = useState('2');
+  const currentTeamRoomRun = lastTeamRoomRun && session && lastTeamRoomRun.team_id === session.id
+    ? lastTeamRoomRun
+    : null;
+  const currentTeamRoomArtifacts = currentTeamRoomRun
+    ? normalizeTeamRoomArtifacts(currentTeamRoomRun)
+    : null;
+  const selectedTeamRoomArtifacts = teamRoomArtifactsFromSession(session);
 
   useEffect(() => {
     const agentIds = agentOptions.map((member) => member.agent_id);
@@ -913,7 +1133,33 @@ export function Teams() {
                 </form>
               </div>
 
-              {lastTeamRoomRun && lastTeamRoomRun.team_id === session.id && (
+              {!currentTeamRoomRun && selectedTeamRoomArtifacts && (
+                <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex min-w-0 items-center gap-2 text-[13px] font-medium text-[var(--color-text)]">
+                      <Brain size={15} /> Team Room V3 Artifacts
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                        persisted
+                      </Badge>
+                      {selectedTeamRoomArtifacts.meeting_mode && (
+                        <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                          {selectedTeamRoomArtifacts.meeting_mode}
+                        </Badge>
+                      )}
+                      {selectedTeamRoomArtifacts.goal_excerpt && (
+                        <Badge className="max-w-full truncate bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                          {clipText(selectedTeamRoomArtifacts.goal_excerpt, 80)}
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                  <TeamRoomArtifactsGrid artifacts={selectedTeamRoomArtifacts} />
+                </div>
+              )}
+
+              {currentTeamRoomRun && currentTeamRoomArtifacts && (
                 <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
                   <div class="flex flex-wrap items-center justify-between gap-2">
                     <div class="flex min-w-0 items-center gap-2 text-[13px] font-medium text-[var(--color-text)]">
@@ -921,50 +1167,67 @@ export function Teams() {
                     </div>
                     <div class="flex flex-wrap gap-2">
                       <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
-                        Team #{lastTeamRoomRun.team_id}
+                        Team #{currentTeamRoomRun.team_id}
                       </Badge>
                       <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
-                        Convoy #{lastTeamRoomRun.convoy_id}
+                        Convoy #{currentTeamRoomRun.convoy_id}
                       </Badge>
                       <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
-                        {lastTeamRoomRun.meeting_mode}
+                        {currentTeamRoomRun.meeting_mode}
                       </Badge>
                     </div>
                   </div>
                   <div class="mt-3 grid gap-2 text-[11px] text-[var(--color-text-muted)] sm:grid-cols-2 xl:grid-cols-5">
                     <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
                       <div class="font-medium text-[var(--color-text)]">Progress</div>
-                      <div>{lastTeamRoomRun.progress.completed}/{lastTeamRoomRun.progress.total} · {lastTeamRoomRun.progress.status}</div>
+                      <div>{currentTeamRoomRun.progress.completed}/{currentTeamRoomRun.progress.total} · {currentTeamRoomRun.progress.status}</div>
                     </div>
                     <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
                       <div class="font-medium text-[var(--color-text)]">Turn Summary</div>
-                      <div>{lastTeamRoomRun.turn_summary}</div>
+                      <div>{currentTeamRoomRun.turn_summary}</div>
                     </div>
                     <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
                       <div class="font-medium text-[var(--color-text)]">Confidence</div>
-                      <div>{(lastTeamRoomRun.synthesis?.confidence ?? 0).toFixed(2)}</div>
-                      <div>{(lastTeamRoomRun.vote_board ?? []).length} votes · {(lastTeamRoomRun.interrupts ?? []).length} interrupts</div>
+                      <div>{formatConfidence(currentTeamRoomRun.synthesis?.confidence)}</div>
+                      <div>{(currentTeamRoomRun.vote_board ?? []).length} votes · {(currentTeamRoomRun.interrupts ?? []).length} interrupts</div>
                     </div>
                     <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
                       <div class="font-medium text-[var(--color-text)]">Runtime</div>
-                      <div>{lastTeamRoomRun.runtime.enabled ? 'on' : 'off'} · {lastTeamRoomRun.runtime.turn_count} turns · tools {lastTeamRoomRun.runtime.tool_call_count}</div>
-                      <div>{formatList(lastTeamRoomRun.runtime.lanes)} · {formatList(lastTeamRoomRun.runtime.providers)}</div>
+                      <div>{currentTeamRoomRun.runtime.enabled ? 'on' : 'off'} · {currentTeamRoomRun.runtime.turn_count} turns · tools {currentTeamRoomRun.runtime.tool_call_count}</div>
+                      <div>{formatList(currentTeamRoomRun.runtime.lanes)} · {formatList(currentTeamRoomRun.runtime.providers)}</div>
                     </div>
                     <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
                       <div class="font-medium text-[var(--color-text)]">Cost / Time</div>
-                      <div>{formatCost(lastTeamRoomRun.runtime.cost_usd)}</div>
-                      <div>{lastTeamRoomRun.runtime.execution_time_ms ?? 0}ms</div>
+                      <div>{formatCost(currentTeamRoomRun.runtime.cost_usd)}</div>
+                      <div>{currentTeamRoomRun.runtime.execution_time_ms ?? 0}ms</div>
                     </div>
+                  </div>
+                  <div class="mt-4">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <div class="text-[12px] font-medium text-[var(--color-text)]">V3 Meeting Artifacts</div>
+                      <div class="flex flex-wrap gap-2">
+                        <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                          {formatConfidence(currentTeamRoomArtifacts.synthesis?.confidence)} confidence
+                        </Badge>
+                        <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                          {currentTeamRoomArtifacts.vote_board.length} votes
+                        </Badge>
+                        <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                          {currentTeamRoomArtifacts.interrupts.length} interrupts
+                        </Badge>
+                      </div>
+                    </div>
+                    <TeamRoomArtifactsGrid artifacts={currentTeamRoomArtifacts} />
                   </div>
                   <div class="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.8fr)]">
                     <div class="grid gap-3">
                       <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
                         <div class="text-[12px] font-medium text-[var(--color-text)]">Facilitator Controls</div>
                         <div class="mt-2 grid gap-2 text-[11px] text-[var(--color-text-muted)] md:grid-cols-2">
-                          {(lastTeamRoomRun.meeting_controls?.decision_rules ?? []).map((rule) => (
+                          {(currentTeamRoomRun.meeting_controls?.decision_rules ?? []).map((rule) => (
                             <div key={rule} class="break-words">Rule: {rule}</div>
                           ))}
-                          {(lastTeamRoomRun.meeting_controls?.round_controls ?? []).map((round) => (
+                          {(currentTeamRoomRun.meeting_controls?.round_controls ?? []).map((round) => (
                             <div key={`round-control-${round.round_number}`} class="break-words">
                               Round {round.round_number}: {round.focus}
                             </div>
@@ -974,7 +1237,7 @@ export function Teams() {
                       <div>
                         <div class="text-[12px] font-medium text-[var(--color-text)]">Discussion Rounds</div>
                         <div class="mt-2 grid gap-2">
-                          {lastTeamRoomRun.discussion_rounds.map((round) => (
+                          {currentTeamRoomRun.discussion_rounds.map((round) => (
                             <div key={round.round_number} class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
                               <div class="flex flex-wrap items-center justify-between gap-2">
                                 <div class="text-[12px] font-medium text-[var(--color-text)]">Round {round.round_number}</div>
@@ -1010,26 +1273,9 @@ export function Teams() {
                         </div>
                       </div>
                       <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
-                        <div class="mb-2 text-[12px] font-medium text-[var(--color-text)]">Synthesis</div>
-                        <div class="grid gap-2 text-[11px] text-[var(--color-text-muted)] md:grid-cols-2">
-                          <div>
-                            <div class="font-medium text-[var(--color-text)]">Agreements</div>
-                            {(lastTeamRoomRun.synthesis?.agreements ?? []).map((item) => (
-                              <div key={item} class="mt-1 break-words">{item}</div>
-                            ))}
-                          </div>
-                          <div>
-                            <div class="font-medium text-[var(--color-text)]">Disagreements</div>
-                            {(lastTeamRoomRun.synthesis?.disagreements ?? []).map((item) => (
-                              <div key={item} class="mt-1 break-words">{item}</div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
                         <div class="mb-2 text-[12px] font-medium text-[var(--color-text)]">Final Brief</div>
                         <div class="whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--color-text-muted)]">
-                          {lastTeamRoomRun.final_brief}
+                          {currentTeamRoomRun.final_brief}
                         </div>
                       </div>
                     </div>
@@ -1037,58 +1283,21 @@ export function Teams() {
                       <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
                         <div class="text-[12px] font-medium text-[var(--color-text)]">Decision Ledger</div>
                         <div class="mt-2 grid gap-2 text-[11px] text-[var(--color-text-muted)]">
-                          {lastTeamRoomRun.decision_ledger.decisions.map((decision) => (
+                          {currentTeamRoomRun.decision_ledger.decisions.map((decision) => (
                             <div key={decision} class="break-words">Decision: {decision}</div>
                           ))}
-                          <div class="break-words">Strongest objection: {lastTeamRoomRun.decision_ledger.strongest_objection}</div>
-                          <div class="break-words">Next trigger: {lastTeamRoomRun.decision_ledger.next_meeting_trigger}</div>
+                          <div class="break-words">Strongest objection: {currentTeamRoomRun.decision_ledger.strongest_objection}</div>
+                          <div class="break-words">Next trigger: {currentTeamRoomRun.decision_ledger.next_meeting_trigger}</div>
                         </div>
                       </div>
                       <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
                         <div class="text-[12px] font-medium text-[var(--color-text)]">Owner Actions</div>
                         <div class="mt-2 grid gap-2">
-                          {lastTeamRoomRun.decision_ledger.owner_actions.map((item) => (
+                          {currentTeamRoomRun.decision_ledger.owner_actions.map((item) => (
                             <div key={`${item.owner}-${item.action}`} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
                               <div class="font-medium text-[var(--color-text)]">{item.owner}</div>
                               <div class="mt-1 break-words">{item.action}</div>
                               <div class="mt-1 break-words">Signal: {item.validation_signal}</div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
-                        <div class="text-[12px] font-medium text-[var(--color-text)]">Vote Board</div>
-                        <div class="mt-2 grid gap-2">
-                          {(lastTeamRoomRun.vote_board ?? []).map((vote) => (
-                            <div key={vote.role} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
-                              <div class="flex items-center justify-between gap-2">
-                                <span class="font-medium text-[var(--color-text)]">{vote.role_name}</span>
-                                <span>{vote.confidence.toFixed(2)}</span>
-                              </div>
-                              <div class="mt-1 break-words">{vote.recommendation}</div>
-                              {vote.blocking_issue && <div class="mt-1 break-words">Blocker: {vote.blocking_issue}</div>}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
-                        <div class="text-[12px] font-medium text-[var(--color-text)]">Interrupts</div>
-                        <div class="mt-2 grid gap-2 text-[11px] text-[var(--color-text-muted)]">
-                          {(lastTeamRoomRun.interrupts ?? []).map((interrupt) => (
-                            <div key={`${interrupt.from_role}-${interrupt.target_role}-${interrupt.severity}`} class="break-words">
-                              {interrupt.from_role_name} to {interrupt.target_role_name}: {interrupt.challenge}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
-                        <div class="text-[12px] font-medium text-[var(--color-text)]">Role Memory</div>
-                        <div class="mt-2 grid gap-2">
-                          {(lastTeamRoomRun.role_memory ?? []).map((memory) => (
-                            <div key={memory.role} class="rounded border border-[var(--color-border)] bg-[var(--color-card)] p-2 text-[11px] text-[var(--color-text-muted)]">
-                              <div class="font-medium text-[var(--color-text)]">{memory.role_name}</div>
-                              <div class="mt-1 break-words">{memory.current_commitment || 'No current commitment recorded.'}</div>
-                              <div class="mt-1 break-words">Watch: {memory.watch_item || 'none'}</div>
                             </div>
                           ))}
                         </div>

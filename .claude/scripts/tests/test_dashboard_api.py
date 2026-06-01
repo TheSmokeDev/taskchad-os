@@ -1024,6 +1024,73 @@ def test_patch_dashboard_settings_partial_dict_merges(isolated_app):
     assert settings.get("b") == 2
 
 
+def test_get_dashboard_mobile_access_returns_sanitized_tailnet_status(isolated_app, monkeypatch):
+    import dashboard_api
+
+    def fake_run_json_command(args, timeout_s=2.0):
+        if args == ["tailscale", "status", "--json"]:
+            return {
+                "BackendState": "Running",
+                "TailscaleIPs": ["100.64.0.10", "fd7a:115c:a1e0::1"],
+                "Self": {
+                    "HostName": "Smoke",
+                    "DNSName": "homie.tailnet.test.",
+                    "PublicKey": "nodekey:redacted",
+                    "UserID": 123,
+                },
+                "Peer": {"nodekey:peer": {"HostName": "Phone"}},
+                "User": {"123": {"LoginName": "private@example.com"}},
+            }, None
+        if args == ["tailscale", "serve", "status", "--json"]:
+            return {
+                "TCP": {"80": {"HTTP": True}, "443": {"HTTPS": True}},
+                "Web": {
+                    "homie.tailnet.test:80": {
+                        "Handlers": {"/": {"Proxy": "http://127.0.0.1:5173"}}
+                    }
+                },
+            }, None
+        raise AssertionError(args)
+
+    monkeypatch.setattr(dashboard_api, "_run_json_command", fake_run_json_command)
+
+    r = isolated_app.get(
+        "/api/dashboard/mobile-access",
+        headers={"x-dashboard-request-host": "100.64.0.10:5173"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ready"
+    assert body["mode"] == "read_only"
+    assert body["tailscale"]["primary_ip"] == "100.64.0.10"
+    assert body["tailscale"]["dns_name"] == "homie.tailnet.test"
+    assert body["dashboard"]["urls"]["browser"] == "http://100.64.0.10:5173/browser"
+    assert body["dashboard"]["request_host"] == "100.64.0.10:5173"
+    assert body["serve"]["http"] is True
+    assert body["serve"]["https"] is True
+    assert body["controls"] == {"mutates_tailscale": False, "mutates_browser": False}
+    assert "Peer" not in body["tailscale"]
+    assert "private@example.com" not in json.dumps(body)
+
+
+def test_get_dashboard_mobile_access_handles_missing_tailscale(isolated_app, monkeypatch):
+    import dashboard_api
+
+    def fake_run_json_command(args, timeout_s=2.0):
+        return None, "tailscale not found"
+
+    monkeypatch.setattr(dashboard_api, "_run_json_command", fake_run_json_command)
+
+    r = isolated_app.get("/api/dashboard/mobile-access")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "unavailable"
+    assert body["tailscale"]["available"] is False
+    assert body["tailscale"]["error"] == "tailscale not found"
+    assert body["dashboard"]["urls"]["browser"] is None
+    assert body["serve"]["enabled"] is False
+
+
 # ── /api/scheduled CRUD ──────────────────────────────────────────────────
 
 

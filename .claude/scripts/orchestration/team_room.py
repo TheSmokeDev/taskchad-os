@@ -580,6 +580,7 @@ class TeamRoomWorkflowService:
                 team.session.id,
                 role_memory=role_memory,
                 vote_board=vote_board,
+                interrupts=interrupts,
                 synthesis=synthesis,
                 workspace_id=workspace_id,
             )
@@ -1305,6 +1306,7 @@ class TeamRoomWorkflowService:
         *,
         role_memory: list[TeamRoomRoleMemory],
         vote_board: list[TeamRoomVote],
+        interrupts: list[TeamRoomInterrupt],
         synthesis: TeamRoomSynthesis,
         workspace_id: int,
     ) -> None:
@@ -1320,6 +1322,7 @@ class TeamRoomWorkflowService:
                 "meeting_behavior_version": "v3",
                 "role_memory": [dataclasses.asdict(item) for item in role_memory],
                 "vote_board": [dataclasses.asdict(item) for item in vote_board],
+                "interrupts": [dataclasses.asdict(item) for item in interrupts],
                 "synthesis": dataclasses.asdict(synthesis),
             }
         )

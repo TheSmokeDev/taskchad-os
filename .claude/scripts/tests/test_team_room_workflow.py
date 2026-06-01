@@ -151,6 +151,7 @@ def test_team_room_v3_role_memory_persists_between_meetings() -> None:
         assert metadata["meeting_behavior_version"] == "v3"
         assert metadata["role_memory"][0]["role"] == "sales"
         assert metadata["vote_board"][0]["role"] == "sales"
+        assert metadata["interrupts"][0]["severity"] == "challenge"
         assert "session_id" not in json.dumps(metadata)
     finally:
         db.close()
