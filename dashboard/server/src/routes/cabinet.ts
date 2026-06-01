@@ -32,7 +32,7 @@
  */
 
 import { Hono } from 'hono';
-import { authedFetch, authedFetchStream } from '../framework-client.js';
+import { authedFetch, authedFetchBinary, authedFetchStream } from '../framework-client.js';
 import { inboundPersonaId, outboundPersonaId } from '../translate.js';
 
 export const cabinetRoute = new Hono();
@@ -414,4 +414,53 @@ cabinetRoute.post('/api/cabinet/end', async (c) => {
     return c.json(translatePersonaFieldsOutbound(parsed as Record<string, unknown>), upstream.status as 200);
   }
   return c.body(upstream.body, upstream.status as 200);
+});
+
+// Cabinet voice V1 launcher proxy. Python owns the voice document, bundle,
+// source reference, and avatar resolution; Hono only forwards the GETs.
+cabinetRoute.get('/api/cabinet/voice/ui', async (c) => {
+  const url = new URL(c.req.url);
+  const upstream = await authedFetch(`/api/cabinet/voice/ui${url.search}`);
+  return c.body(upstream.body, upstream.status as 200, {
+    'Content-Type': upstream.headers.get('content-type') ?? 'text/html; charset=utf-8',
+    'Cache-Control': upstream.headers.get('cache-control') ?? 'no-store',
+    'Referrer-Policy': 'no-referrer',
+  });
+});
+
+cabinetRoute.get('/api/cabinet/voice/client.bundle.js', async (c) => {
+  const url = new URL(c.req.url);
+  const upstream = await authedFetch(`/api/cabinet/voice/client.bundle.js${url.search}`);
+  return c.body(upstream.body, upstream.status as 200, {
+    'Content-Type': upstream.headers.get('content-type') ?? 'application/javascript',
+    'Cache-Control': upstream.headers.get('cache-control') ?? 'public, max-age=86400',
+    'Referrer-Policy': 'no-referrer',
+  });
+});
+
+cabinetRoute.get('/api/cabinet/voice/client.js', async (c) => {
+  const upstream = await authedFetch('/api/cabinet/voice/client.js');
+  return c.body(upstream.body, upstream.status as 200, {
+    'Content-Type': upstream.headers.get('content-type') ?? 'application/javascript',
+    'Cache-Control': upstream.headers.get('cache-control') ?? 'public, max-age=86400',
+    'Referrer-Policy': 'no-referrer',
+  });
+});
+
+cabinetRoute.get('/api/cabinet/voice/avatars/:persona_file', async (c) => {
+  const personaFile = c.req.param('persona_file') ?? '';
+  if (!personaFile.endsWith('.png')) {
+    return c.json({ error: 'avatar_not_found' }, 404);
+  }
+  const personaId = personaFile.slice(0, -4);
+  const url = new URL(c.req.url);
+  const upstream = await authedFetchBinary(
+    `/api/cabinet/voice/avatars/${encodeURIComponent(personaId)}.png${url.search}`,
+    { headers: { Accept: 'image/png' } },
+  );
+  return c.body(upstream.body, upstream.status as 200, {
+    'Content-Type': upstream.headers.get('content-type') ?? 'image/png',
+    'Cache-Control': upstream.headers.get('cache-control') ?? 'public, max-age=3600',
+    'Referrer-Policy': 'no-referrer',
+  });
 });

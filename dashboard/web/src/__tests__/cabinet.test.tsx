@@ -35,6 +35,28 @@ describe('cabinet UI surface — static contract', () => {
     expect(src).toContain('/api/cabinet/participants/remove');
   });
 
+  it('Cabinet.tsx mic button opens the shared Cabinet voice URL', () => {
+    const src = readFileSync(join(WEB_SRC, 'pages', 'Cabinet.tsx'), 'utf-8');
+    expect(src).toContain('cabinetVoiceUrl');
+    expect(src).toContain('openCabinetVoiceUrl');
+    expect(src).toContain('activeVoiceUrl');
+  });
+
+  it('Voices.tsx is the Cabinet voice launcher, not a placeholder', () => {
+    const src = readFileSync(join(WEB_SRC, 'pages', 'Voices.tsx'), 'utf-8');
+    expect(src).not.toContain('Placeholder');
+    expect(src).toContain('/api/cabinet/open');
+    expect(src).toContain('cabinetVoiceUrl');
+    expect(src).toContain('Open Voice');
+    expect(src).toContain('Lifecycle');
+  });
+
+  it('cabinet-voice-url builds the Python-owned voice URL', async () => {
+    const { cabinetVoiceUrl } = await import('../lib/cabinet-voice-url');
+    const url = cabinetVoiceUrl(42, 'chat space', 'tok&en');
+    expect(url).toBe('/api/cabinet/voice/ui?meetingId=42&chatId=chat+space&token=tok%26en');
+  });
+
   it('CabinetComposer dispatches POST /api/cabinet/send with room audience shape', () => {
     const src = readFileSync(join(WEB_SRC, 'components', 'CabinetComposer.tsx'), 'utf-8');
     expect(src).toContain("/api/cabinet/send");

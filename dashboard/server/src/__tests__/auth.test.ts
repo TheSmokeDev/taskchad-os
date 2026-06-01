@@ -71,6 +71,28 @@ describe('auth: 4-branch boot policy (R4 NM1)', () => {
     expect(reject.status).toBe(401);
   });
 
+  it('query token is accepted for Cabinet voice document/static GETs only', async () => {
+    _resetAuthPolicyForTest();
+    setAuthPolicy({
+      mode: 'token-equal',
+      expectedToken: 'voice-token',
+      warnPerRequest: false,
+      bind: '127.0.0.1',
+    });
+    const app = new Hono();
+    app.use('*', buildAuthMiddleware());
+    app.get('/api/cabinet/voice/ui', (c) => c.json({ ok: true }));
+    app.get('/api/cabinet/voice/client.bundle.js', (c) => c.text('js'));
+    app.get('/api/cabinet/voice/avatars/:id.png', (c) => c.text('png'));
+    app.post('/api/cabinet/voice/ui', (c) => c.json({ ok: true }));
+
+    expect((await app.request('/api/cabinet/voice/ui?token=voice-token')).status).toBe(200);
+    expect((await app.request('/api/cabinet/voice/client.bundle.js?token=voice-token')).status).toBe(200);
+    expect((await app.request('/api/cabinet/voice/avatars/main.png?token=voice-token')).status).toBe(200);
+    expect((await app.request('/api/cabinet/voice/ui?token=wrong')).status).toBe(401);
+    expect((await app.request('/api/cabinet/voice/ui?token=voice-token', { method: 'POST' })).status).toBe(401);
+  });
+
   it('token-to-Bearer translation: query token must match expectedToken', async () => {
     _resetAuthPolicyForTest();
     setAuthPolicy({

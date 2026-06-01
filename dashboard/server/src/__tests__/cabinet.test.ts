@@ -10,10 +10,12 @@
  *   - Route mount: ROUTE_MANIFEST contains every /api/cabinet/* path.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Hono } from 'hono';
 import { ROUTE_MANIFEST } from '../routes.js';
+import { cabinetRoute } from '../routes/cabinet.js';
 
 const CABINET_ROUTE = join(__dirname, '..', 'routes', 'cabinet.ts');
 
@@ -94,9 +96,67 @@ describe('cabinet route — static invariants', () => {
       '/api/cabinet/unpin',
       '/api/cabinet/clear',
       '/api/cabinet/end',
+      '/api/cabinet/voice/ui',
+      '/api/cabinet/voice/client.bundle.js',
+      '/api/cabinet/voice/client.js',
+      '/api/cabinet/voice/avatars/:persona_id.png',
     ];
     for (const path of expected) {
       expect(ROUTE_MANIFEST).toContain(path);
     }
+  });
+
+  it('proxies Cabinet voice document/static routes through Python', () => {
+    const src = readFileSync(CABINET_ROUTE, 'utf-8');
+    expect(src).toContain("/api/cabinet/voice/ui");
+    expect(src).toContain("/api/cabinet/voice/client.bundle.js");
+    expect(src).toContain("/api/cabinet/voice/client.js");
+    expect(src).toContain("/api/cabinet/voice/avatars/:persona_file");
+    expect(src).toContain("authedFetchBinary(");
+    expect(src).toContain("Referrer-Policy");
+  });
+});
+
+describe('cabinet route — voice proxy behavior', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetAllMocks();
+  });
+
+  it('preserves the voice UI query string when forwarding to Python', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response('<html>voice</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const app = new Hono();
+    app.route('/', cabinetRoute);
+
+    const res = await app.request('/api/cabinet/voice/ui?meetingId=7&chatId=cabinet-browser&token=secret');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('voice');
+    const upstreamUrl = String(fetchMock.mock.calls[0]?.[0] ?? '');
+    expect(upstreamUrl).toContain('/api/cabinet/voice/ui?meetingId=7&chatId=cabinet-browser&token=secret');
+    expect(res.headers.get('Referrer-Policy')).toBe('no-referrer');
+  });
+
+  it('proxies Cabinet voice avatar PNGs with the persona id intact', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(new Uint8Array([137, 80, 78, 71]), {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const app = new Hono();
+    app.route('/', cabinetRoute);
+
+    const res = await app.request('/api/cabinet/voice/avatars/main.png?token=secret');
+    expect(res.status).toBe(200);
+    const upstreamUrl = String(fetchMock.mock.calls[0]?.[0] ?? '');
+    expect(upstreamUrl).toContain('/api/cabinet/voice/avatars/main.png?token=secret');
+    expect(res.headers.get('Content-Type')).toContain('image/png');
   });
 });

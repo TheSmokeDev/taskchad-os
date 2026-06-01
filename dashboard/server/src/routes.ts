@@ -148,4 +148,9 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/cabinet/unpin',
   '/api/cabinet/clear',
   '/api/cabinet/end',
+  '/api/cabinet/voice/ui',
+  '/api/cabinet/voice/client.bundle.js',
+  '/api/cabinet/voice/client.js',
+  '/api/cabinet/voice/avatars/:persona_file',
+  '/api/cabinet/voice/avatars/:persona_id.png',
 ] as const;

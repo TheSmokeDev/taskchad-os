@@ -2,13 +2,14 @@
  * Auth middleware — Bearer header check on every /api/* request EXCEPT
  * /api/health.
  *
- * SSE token via query (owner Decision 4 / R1 M4):
+ * Query-token fallback:
  *   - Browser EventSource API CANNOT set custom headers, so SSE endpoints
- *     accept `?token=...` query param BUT only:
- *       (a) browser → Hono — never forwarded to Python.
- *       (b) Hono access logs scrub the token from the URL before write.
- *       (c) `Referrer-Policy: no-referrer` set on SSE responses.
- *     framework-client.ts MUST never include `?token=` in upstream URL.
+ *     accept `?token=...` query param.
+ *   - Cabinet voice document/static GETs also accept `?token=...` because
+ *     they are opened as browser documents/resources, not fetch() calls.
+ *   - Hono access logs scrub the token from the URL before write.
+ *   - `Referrer-Policy: no-referrer` is set on stream/document responses.
+ *   - framework-client.ts MUST never construct `?token=` itself.
  *
  * 4-branch boot policy (R4 NM1):
  *   - Resolved at boot (auth-policy.ts) — middleware reads AUTH_POLICY,
@@ -23,18 +24,19 @@ import { logger } from '../logger.js';
 const HEALTH_PATH = '/api/health';
 
 /**
- * Extract the bearer token from Authorization header OR the SSE query token.
+ * Extract the bearer token from Authorization header OR an approved query token.
  *
- * The SSE query token is permitted ONLY for SSE endpoints (path matches
- * /api/conversation/<id>/stream). Other paths must use Authorization header.
+ * Query tokens are permitted ONLY for stream endpoints and Cabinet voice
+ * document/static GET endpoints. Other paths must use Authorization header.
  */
 function extractToken(c: Context, urlPathname: string): string | null {
   const authHeader = c.req.header('authorization') || c.req.header('Authorization');
   if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
     return authHeader.slice(7).trim();
   }
-  // SSE query token fallback — only allowed for stream endpoints.
-  if (isSseStreamPath(urlPathname)) {
+  // Query token fallback — only allowed for stream endpoints and Cabinet
+  // voice document/static GET endpoints.
+  if (isQueryTokenPath(urlPathname, c.req.method)) {
     const queryToken = c.req.query('token');
     if (queryToken) {
       return queryToken;
@@ -43,11 +45,16 @@ function extractToken(c: Context, urlPathname: string): string | null {
   return null;
 }
 
-function isSseStreamPath(pathname: string): boolean {
+function isQueryTokenPath(pathname: string, method: string): boolean {
   // Matches /api/conversation/<persona_id>/stream and /api/cabinet/stream
   // (Phase 5a, action/query-shaped — meetingId is in the query string).
   if (/^\/api\/conversation\/[^/]+\/stream$/.test(pathname)) return true;
   if (pathname === '/api/cabinet/stream') return true;
+  if (method.toUpperCase() !== 'GET') return false;
+  if (pathname === '/api/cabinet/voice/ui') return true;
+  if (pathname === '/api/cabinet/voice/client.bundle.js') return true;
+  if (pathname === '/api/cabinet/voice/client.js') return true;
+  if (/^\/api\/cabinet\/voice\/avatars\/[^/]+\.png$/.test(pathname)) return true;
   return false;
 }
 

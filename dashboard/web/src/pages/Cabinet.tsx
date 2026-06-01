@@ -11,6 +11,7 @@ import { Mic, Pin, PinOff, Plus, Trash2 } from 'lucide-preact';
 import { apiGet, apiPost, chatId as dashboardChatId } from '@/lib/api';
 import { CabinetComposer } from '@/components/CabinetComposer';
 import { CabinetTranscript } from '@/components/CabinetTranscript';
+import { cabinetVoiceUrl, openCabinetVoiceUrl } from '@/lib/cabinet-voice-url';
 import {
   fetchCabinetTranscripts,
   openCabinetStream,
@@ -91,6 +92,7 @@ export function Cabinet() {
   const roster = details?.roster ?? [];
   const pinnedAgent = details?.pinnedAgent ?? null;
   const isEnded = details?.status === 'ended';
+  const activeVoiceUrl = activeId !== null ? cabinetVoiceUrl(activeId, CABINET_CHAT_ID) : '';
   const selectedAvailable = useMemo(
     () => available.find((agent) => agent.id === selectedAgent) ?? available[0],
     [available, selectedAgent],
@@ -329,9 +331,12 @@ export function Cabinet() {
             <div class="flex items-center gap-2">
               <button
                 type="button"
+                onClick={() => {
+                  if (activeVoiceUrl) openCabinetVoiceUrl(activeVoiceUrl);
+                }}
                 class="w-9 h-8 inline-flex items-center justify-center rounded-md border border-[var(--color-border)]"
                 title="Voice"
-                disabled={!activeId}
+                disabled={!activeId || isEnded}
               >
                 <Mic size={15} />
               </button>

@@ -86,6 +86,13 @@ thehomie cabinet voice
 
 (Mirrors the Telegram surface; see `.claude/chat/cli.py` for the wrapper.)
 
+### From the dashboard
+
+Open `/voices` to create or reuse the current Cabinet room and launch the
+Python-owned voice URL. The mic button on `/cabinet` opens voice for the
+selected room. This is a V1 launcher only; voice subprocess start/status
+controls are a separate follow-up.
+
 ### Direct browser URL
 
 ```

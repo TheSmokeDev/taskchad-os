@@ -2,7 +2,7 @@
 
 Status: shipped baseline with deep manual
 Owner: Python orchestration and Cabinet room state
-Last updated: 2026-05-31
+Last updated: 2026-06-01
 
 ## What It Does
 
@@ -25,7 +25,7 @@ chat-routed operator commands for meetings, standups, and discussions.
 | Hono/dashboard server | `dashboard/server/src/routes/cabinet.ts`, `dashboard/server/src/routes.ts` |
 | Dashboard web | `dashboard/web/src/pages/Cabinet.tsx`, `dashboard/web/src/lib/cabinet-stream.ts` |
 | Tests | `.claude/scripts/tests/test_cabinet_*.py`, `dashboard/server/src/__tests__/cabinet.test.ts`, `dashboard/web/src/__tests__/cabinet.test.tsx` |
-| Docs/proof | `docs/cabinet-room-manual.md`, `docs/cabinet-voice-setup.md` |
+| Docs/proof | `docs/cabinet-room-manual.md`, `docs/cabinet-voice-setup.md`, `docs/manual/features/cabinet-voice.md` |
 
 ## Safety Boundaries
 
@@ -70,13 +70,15 @@ npm run typecheck
 ## Latest Live Proof
 
 See `docs/cabinet-room-manual.md` and tracker entries for the current Cabinet
-baseline. This manual page is a routing/index page; the deep Cabinet manual
-remains authoritative for room-state details.
+baseline. Cabinet Voice now has a V1 launcher/control-plane page at
+`docs/manual/features/cabinet-voice.md`; the deep Cabinet manual remains
+authoritative for room-state details.
 
 ## Related Handoffs
 
 - `docs/cabinet-room-manual.md`
 - `docs/cabinet-voice-setup.md`
+- `docs/manual/features/cabinet-voice.md`
 
 ## Public Export Status
 
@@ -86,4 +88,5 @@ by slice and should be checked in tracker/handoffs before claiming current.
 ## Next Slices
 
 - Keep the deep Cabinet manual updated when Cabinet behavior changes.
-- Fold Cabinet voice proof into this feature page during the next manual pass.
+- Add Python-owned Cabinet voice status/start controls as the next bounded
+  voice slice.
