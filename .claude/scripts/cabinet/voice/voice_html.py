@@ -503,6 +503,13 @@ let pipecatClient = null;
 let currentTransport = null;
 let meetingActive = false;
 let micActive = false;
+let connectTimer = null;
+let connectAttemptId = 0;
+let meetingStartedNoticeShown = false;
+window.__cabinetVoiceDebug = {{
+  states: [],
+  errors: [],
+}};
 
 // Verbatim port of warroom-html.ts:810-813 — token+chatId encoded into ws url.
 function buildWsUrl() {{
@@ -514,6 +521,177 @@ function buildWsUrl() {{
        + '?token=' + encodeURIComponent(TOKEN)
        + '&meetingId=' + encodeURIComponent(MEETING_ID)
        + '&chatId=' + encodeURIComponent(CHAT_ID);
+}}
+
+class CabinetSimpleMediaManager {{
+  constructor() {{
+    this._audioCallback = null;
+    this._clientOptions = {{}};
+    this._micEnabled = false;
+    this._initialized = false;
+    this._connected = false;
+    this._stream = null;
+    this._inputContext = null;
+    this._source = null;
+    this._processor = null;
+    this._zeroGain = null;
+    this._playbackContext = null;
+    this._nextPlayTime = 0;
+    this._recorderSampleRate = 16000;
+    this._playbackSampleRate = 24000;
+  }}
+
+  setUserAudioCallback(callback) {{
+    this._audioCallback = callback;
+  }}
+
+  setClientOptions(options) {{
+    this._clientOptions = options || {{}};
+    this._micEnabled = !!this._clientOptions.enableMic;
+  }}
+
+  async initialize() {{
+    this._initialized = true;
+  }}
+
+  async connect() {{
+    this._connected = true;
+    if (this._micEnabled) await this._startMic();
+  }}
+
+  async disconnect() {{
+    await this._stopMic();
+    this._connected = false;
+    this._initialized = false;
+  }}
+
+  async getAllMics() {{
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return [];
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter(function(device) {{ return device.kind === 'audioinput'; }});
+  }}
+
+  async getAllCams() {{ return []; }}
+  async getAllSpeakers() {{ return []; }}
+  async updateMic() {{}}
+  updateCam() {{}}
+  updateSpeaker() {{}}
+  get selectedMic() {{ return null; }}
+  get selectedSpeaker() {{ return null; }}
+  get isMicEnabled() {{ return this._micEnabled; }}
+  tracks() {{ return this._stream ? this._stream.getTracks() : []; }}
+
+  async enableMic(enabled) {{
+    this._micEnabled = !!enabled;
+    if (this._micEnabled) {{
+      await this._startMic();
+    }} else {{
+      await this._stopMic();
+    }}
+  }}
+
+  async _startMic() {{
+    if (this._stream) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+      throw new Error('browser microphone API is unavailable');
+    }}
+
+    this._stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error('browser audio context is unavailable');
+    this._inputContext = new AudioContextClass();
+    if (this._inputContext.state === 'suspended') await this._inputContext.resume();
+
+    this._source = this._inputContext.createMediaStreamSource(this._stream);
+    this._processor = this._inputContext.createScriptProcessor(4096, 1, 1);
+    this._zeroGain = this._inputContext.createGain();
+    this._zeroGain.gain.value = 0;
+    this._processor.onaudioprocess = (event) => {{
+      if (!this._micEnabled || !this._audioCallback) return;
+      const input = event.inputBuffer.getChannelData(0);
+      const frame = this._downsampleToInt16(input, this._inputContext.sampleRate, this._recorderSampleRate);
+      if (frame.length > 0) this._audioCallback(frame);
+    }};
+    this._source.connect(this._processor);
+    this._processor.connect(this._zeroGain);
+    this._zeroGain.connect(this._inputContext.destination);
+  }}
+
+  async _stopMic() {{
+    if (this._processor) {{
+      this._processor.onaudioprocess = null;
+      try {{ this._processor.disconnect(); }} catch (e) {{ /* ignore */ }}
+      this._processor = null;
+    }}
+    if (this._source) {{
+      try {{ this._source.disconnect(); }} catch (e) {{ /* ignore */ }}
+      this._source = null;
+    }}
+    if (this._zeroGain) {{
+      try {{ this._zeroGain.disconnect(); }} catch (e) {{ /* ignore */ }}
+      this._zeroGain = null;
+    }}
+    if (this._stream) {{
+      this._stream.getTracks().forEach(function(track) {{ track.stop(); }});
+      this._stream = null;
+    }}
+    if (this._inputContext) {{
+      try {{ await this._inputContext.close(); }} catch (e) {{ /* ignore */ }}
+      this._inputContext = null;
+    }}
+  }}
+
+  _downsampleToInt16(input, inputSampleRate, outputSampleRate) {{
+    if (!input || input.length === 0) return new Int16Array(0);
+    const ratio = inputSampleRate / outputSampleRate;
+    const outputLength = Math.max(1, Math.round(input.length / ratio));
+    const output = new Int16Array(outputLength);
+    let inputOffset = 0;
+    for (let outputOffset = 0; outputOffset < outputLength; outputOffset++) {{
+      const nextInputOffset = Math.min(input.length, Math.round((outputOffset + 1) * ratio));
+      let sum = 0;
+      let count = 0;
+      for (let i = inputOffset; i < nextInputOffset; i++) {{
+        sum += input[i];
+        count++;
+      }}
+      const sample = Math.max(-1, Math.min(1, count ? sum / count : 0));
+      output[outputOffset] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      inputOffset = nextInputOffset;
+    }}
+    return output;
+  }}
+
+  bufferBotAudio(audio) {{
+    this._playAudio(audio).catch(function(e) {{
+      console.warn('[Cabinet] bot audio playback failed', e);
+    }});
+  }}
+
+  async _playAudio(audio) {{
+    if (!audio || audio.length === 0) return;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    if (!this._playbackContext) {{
+      this._playbackContext = new AudioContextClass({{ sampleRate: this._playbackSampleRate }});
+      this._nextPlayTime = this._playbackContext.currentTime;
+    }}
+    if (this._playbackContext.state === 'suspended') {{
+      await this._playbackContext.resume();
+    }}
+    const samples = audio instanceof Int16Array ? audio : new Int16Array(audio.buffer || audio);
+    const buffer = this._playbackContext.createBuffer(1, samples.length, this._playbackSampleRate);
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < samples.length; i++) {{
+      channel[i] = Math.max(-1, Math.min(1, samples[i] / 32768));
+    }}
+    const source = this._playbackContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this._playbackContext.destination);
+    const startAt = Math.max(this._playbackContext.currentTime, this._nextPlayTime);
+    source.start(startAt);
+    this._nextPlayTime = startAt + buffer.duration;
+  }}
 }}
 
 function enterCabinet() {{
@@ -616,6 +794,74 @@ function setAgentSpeaking(agentId) {{
   if (card) card.classList.add('speaking');
 }}
 
+function clearConnectTimer() {{
+  if (connectTimer) {{
+    clearTimeout(connectTimer);
+    connectTimer = null;
+  }}
+}}
+
+function setStatusText(text) {{
+  const el = document.getElementById('statusText');
+  if (el) el.textContent = text;
+}}
+
+function activateMeeting(source) {{
+  clearConnectTimer();
+  const btn = document.getElementById('meetingBtn');
+  const micBtn = document.getElementById('micBtn');
+  meetingActive = true;
+  btn.textContent = 'End Meeting';
+  btn.className = 'btn end';
+  btn.disabled = false;
+  micBtn.disabled = false;
+  micActive = false;
+  micBtn.classList.remove('recording');
+  setStatusText(source === 'transport' ? 'transport ready - mic off' : 'meeting active - mic off');
+  document.querySelectorAll('.agent-indicator').forEach(function(s) {{ s.classList.add('online'); }});
+  if (!meetingStartedNoticeShown) {{
+    meetingStartedNoticeShown = true;
+    addTranscriptEntry('system', 'Meeting connected. Press the mic button to talk.');
+  }}
+}}
+
+function resetMeetingStart(status, message, isError) {{
+  clearConnectTimer();
+  const btn = document.getElementById('meetingBtn');
+  const micBtn = document.getElementById('micBtn');
+  meetingActive = false;
+  micActive = false;
+  btn.textContent = 'Start Meeting';
+  btn.className = 'btn start';
+  btn.disabled = false;
+  micBtn.disabled = true;
+  micBtn.classList.remove('recording');
+  document.querySelectorAll('.agent-indicator').forEach(function(s) {{ s.classList.remove('online'); }});
+  setStatusText(status);
+  if (message) addTranscriptEntry('system', message, null, !!isError);
+}}
+
+function scheduleConnectTimeout(attemptId) {{
+  clearConnectTimer();
+  connectTimer = setTimeout(function() {{
+    if (attemptId !== connectAttemptId || meetingActive) return;
+    window.__cabinetVoiceDebug.errors.push({{
+      type: 'connect_timeout',
+      at: new Date().toISOString(),
+    }});
+    try {{
+      if (pipecatClient) pipecatClient.disconnect();
+    }} catch (e) {{ /* ignore */ }}
+    pipecatClient = null;
+    currentTransport = null;
+    resetMeetingStart(
+      'connect timeout',
+      'Connection timed out while starting browser audio. Reload the page, then press Start Meeting again.',
+      true
+    );
+  }}, 15000);
+}}
+
 // Port of warroom-html.ts:1712-2053 toggleMeeting (trimmed — no fetch
 // to upstream's start route since we have a direct ws_url from template).
 async function toggleMeeting() {{
@@ -624,10 +870,14 @@ async function toggleMeeting() {{
     btn.textContent = 'Connecting...';
     btn.disabled = true;
     btn.className = 'btn';
-    document.getElementById('statusText').textContent = 'connecting...';
+    setStatusText('connecting...');
+    const attemptId = ++connectAttemptId;
+    meetingStartedNoticeShown = false;
+    scheduleConnectTimeout(attemptId);
 
     if (!window.PipecatWarRoom || !window.PipecatWarRoom.PipecatClient) {{
-      document.getElementById('statusText').textContent = 'pipecat client failed to load';
+      clearConnectTimer();
+      setStatusText('pipecat client failed to load');
       addTranscriptEntry('system', 'Pipecat client bundle did not load. Check /api/cabinet/voice/client.bundle.js.', null, true);
       btn.textContent = 'Start Meeting';
       btn.className = 'btn start';
@@ -639,34 +889,30 @@ async function toggleMeeting() {{
       const wsUrl = buildWsUrl();
       const WebSocketTransport = window.PipecatWarRoom.WebSocketTransport;
       const PipecatClient = window.PipecatWarRoom.PipecatClient;
-      currentTransport = new WebSocketTransport({{ wsUrl: wsUrl }});
+      currentTransport = new WebSocketTransport({{
+        wsUrl: wsUrl,
+        mediaManager: new CabinetSimpleMediaManager(),
+      }});
       pipecatClient = new PipecatClient({{
         transport: currentTransport,
-        enableMic: true,
+        enableMic: false,
         enableCam: false,
         callbacks: {{
           onConnected: function() {{
             console.log('[Cabinet] Connected');
-            meetingActive = true;
-            btn.textContent = 'End Meeting';
-            btn.className = 'btn end';
-            btn.disabled = false;
-            document.getElementById('micBtn').disabled = false;
-            micActive = true;
-            document.getElementById('micBtn').classList.add('recording');
-            document.getElementById('statusText').textContent = 'meeting active';
-            document.querySelectorAll('.agent-indicator').forEach(function(s) {{ s.classList.add('online'); }});
-            addTranscriptEntry('system', 'Meeting started. Speak now.');
+            window.__cabinetVoiceDebug.states.push({{ state: 'connected_callback', at: new Date().toISOString() }});
+            activateMeeting('connected');
+          }},
+          onTransportStateChanged: function(state) {{
+            console.log('[Cabinet] transport state', state);
+            window.__cabinetVoiceDebug.states.push({{ state: state, at: new Date().toISOString() }});
+            if (!meetingActive) setStatusText(state || 'connecting...');
+            if (state === 'ready' || state === 'connected') activateMeeting('transport');
           }},
           onDisconnected: function() {{
             console.log('[Cabinet] Disconnected');
-            meetingActive = false;
-            btn.textContent = 'Start Meeting';
-            btn.className = 'btn start';
-            btn.disabled = false;
-            document.getElementById('micBtn').disabled = true;
-            document.getElementById('micBtn').classList.remove('recording');
-            document.getElementById('statusText').textContent = 'disconnected';
+            window.__cabinetVoiceDebug.states.push({{ state: 'disconnected_callback', at: new Date().toISOString() }});
+            resetMeetingStart('disconnected', null, false);
           }},
           onUserTranscript: function(data) {{
             if (data && data.final) addTranscriptEntry('You', data.text);
@@ -678,51 +924,69 @@ async function toggleMeeting() {{
           onError: function(err) {{
             console.error('[Cabinet] error', err);
             const m = (err && err.message) ? err.message : 'connection error';
+            window.__cabinetVoiceDebug.errors.push({{ message: m, at: new Date().toISOString() }});
             addTranscriptEntry('system', 'Error: ' + m, null, true);
           }},
         }},
       }});
       await pipecatClient.connect({{ wsUrl: wsUrl }});
+      if (!meetingActive) activateMeeting('connect');
     }} catch (e) {{
       console.error('[Cabinet] connect failed', e);
-      addTranscriptEntry('system', 'Connect failed: ' + ((e && e.message) || 'unknown'), null, true);
-      btn.textContent = 'Start Meeting';
-      btn.className = 'btn start';
-      btn.disabled = false;
+      window.__cabinetVoiceDebug.errors.push({{
+        message: (e && e.message) || 'unknown',
+        at: new Date().toISOString(),
+      }});
+      resetMeetingStart('connect failed', 'Connect failed: ' + ((e && e.message) || 'unknown'), true);
     }}
   }} else {{
     // End meeting.
     btn.textContent = 'Ending...';
     btn.disabled = true;
+    clearConnectTimer();
     try {{
       if (pipecatClient) {{ await pipecatClient.disconnect(); pipecatClient = null; }}
     }} catch (e) {{ /* ignore */ }}
     currentTransport = null;
-    meetingActive = false;
-    btn.textContent = 'Start Meeting';
-    btn.className = 'btn start';
-    btn.disabled = false;
-    document.getElementById('micBtn').disabled = true;
-    document.getElementById('micBtn').classList.remove('recording');
-    document.querySelectorAll('.agent-indicator').forEach(function(s) {{ s.classList.remove('online'); }});
-    document.getElementById('statusText').textContent = 'ended';
-    addTranscriptEntry('system', 'Meeting ended.');
+    resetMeetingStart('ended', 'Meeting ended.', false);
   }}
 }}
 
-function toggleMic() {{
+async function toggleMic() {{
   if (!pipecatClient) return;
-  micActive = !micActive;
+  const nextMicActive = !micActive;
   const btn = document.getElementById('micBtn');
+  setStatusText(nextMicActive ? 'starting mic...' : 'muting...');
   try {{
-    pipecatClient.enableMic(micActive);
-  }} catch (e) {{ /* ignore */ }}
+    const mediaManager = currentTransport && currentTransport._mediaManager;
+    const enableMic = mediaManager && mediaManager.enableMic
+      ? mediaManager.enableMic.bind(mediaManager)
+      : pipecatClient.enableMic.bind(pipecatClient);
+    await Promise.race([
+      Promise.resolve(enableMic(nextMicActive)),
+      new Promise(function(resolve, reject) {{
+        setTimeout(function() {{ reject(new Error('microphone activation timed out')); }}, 10000);
+      }}),
+    ]);
+    micActive = nextMicActive;
+  }} catch (e) {{
+    const m = (e && e.message) ? e.message : 'microphone error';
+    const name = (e && e.name) ? e.name : '';
+    const permissionDenied = /permission|notallowed/i.test(m + ' ' + name);
+    const detail = permissionDenied
+      ? 'Microphone permission denied. Allow microphone for this page, then press the mic button again.'
+      : m;
+    window.__cabinetVoiceDebug.errors.push({{ message: m, at: new Date().toISOString() }});
+    setStatusText(permissionDenied ? 'mic permission blocked' : 'mic error');
+    addTranscriptEntry('system', 'Microphone failed: ' + detail, null, true);
+    return;
+  }}
   if (micActive) {{
     btn.classList.add('recording');
-    document.getElementById('statusText').textContent = 'listening...';
+    setStatusText('listening...');
   }} else {{
     btn.classList.remove('recording');
-    document.getElementById('statusText').textContent = 'muted';
+    setStatusText('muted');
   }}
 }}
 

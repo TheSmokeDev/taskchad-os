@@ -76,6 +76,60 @@ def test_pipecat_websocket_transport_constructed():
     assert "window.PipecatWarRoom" in html
 
 
+def test_transport_ready_activates_meeting_ui():
+    """WebSocket transport readiness is enough to move the page out of
+    Connecting... for the cabinet voice legacy WebSocket path.
+
+    The Pipecat WebSocket server can receive ``client-ready`` and audio
+    frames before the old ``onConnected`` UI path resolves, so the page must
+    not wait forever on that callback.
+    """
+    html = _render_default()
+    assert "onTransportStateChanged" in html
+    assert "state === 'ready' || state === 'connected'" in html
+    assert "activateMeeting('transport')" in html
+
+
+def test_connect_timeout_resets_start_button():
+    """A browser audio startup hang should become an operator-visible timeout
+    instead of leaving Start Meeting disabled forever.
+    """
+    html = _render_default()
+    assert "scheduleConnectTimeout" in html
+    assert "connect timeout" in html
+    assert "Connection timed out while starting browser audio" in html
+    assert "Start Meeting" in html
+
+
+def test_start_meeting_connects_with_microphone_off():
+    """Start Meeting should not block on browser mic capture.
+
+    The explicit mic button is the browser-permission step. That keeps the
+    control plane usable when the room transport is ready but media capture is
+    delayed or denied.
+    """
+    html = _render_default()
+    assert "enableMic: false" in html
+    assert "Meeting connected. Press the mic button to talk." in html
+    assert "starting mic..." in html
+    assert "microphone activation timed out" in html
+    assert "Microphone permission denied. Allow microphone for this page" in html
+
+
+def test_voice_page_uses_page_local_media_manager():
+    """The Cabinet page must not let Daily device initialization block the
+    WebSocket handshake.
+
+    The page-local media manager keeps room connect separate from explicit
+    microphone capture while preserving Pipecat's WebSocket protocol.
+    """
+    html = _render_default()
+    assert "class CabinetSimpleMediaManager" in html
+    assert "mediaManager: new CabinetSimpleMediaManager()" in html
+    assert "navigator.mediaDevices.getUserMedia" in html
+    assert "createScriptProcessor" in html
+
+
 def test_handle_server_message_renders_agent_error():
     """R1 v2 B2 — kill-switch refusals from SSE error events surface as
     transcript entries via the agent_error event handler."""
