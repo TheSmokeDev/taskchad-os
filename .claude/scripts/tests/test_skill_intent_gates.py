@@ -178,6 +178,26 @@ async def test_linkedin_operator_language_prefetches_browserops_context():
 
 
 @pytest.mark.asyncio
+async def test_linkedin_slash_command_uses_deterministic_operator_prompt():
+    engine = _RecordingEngine()
+    router = ChatRouter(engine, _build_manager())
+    adapter = _RecordingAdapter()
+
+    await router._handle_inner(
+        adapter,
+        _incoming("/linkedin draft a post about multi-persona AI operators"),
+    )
+
+    assert len(engine.messages) == 1
+    assert "LinkedIn/Social Homie" in engine.messages[0]
+    assert "draft a post about multi-persona AI operators" in engine.messages[0]
+    assert "must not" in engine.messages[0]
+    assert "publish, DM, edit a profile" in engine.messages[0]
+    assert adapter.sent[0].text == "Thinking..."
+    assert adapter.updates[-1].text == "engine handled"
+
+
+@pytest.mark.asyncio
 async def test_explicit_slash_commands_bypass_natural_language_gates():
     engine = _RecordingEngine()
     router = ChatRouter(engine, _SlashOnlyManager())  # type: ignore[arg-type]

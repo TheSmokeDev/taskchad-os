@@ -100,6 +100,8 @@ Shipped:
 
 - `/browser status`, `/browser tabs`, `/browser open <absolute http(s) url>`, `/browser snapshot`
 - `/linkedin_profile status`, `/linkedin_profile open`
+- `/linkedin` as the LinkedIn/Social Homie draft-only command for ideas,
+  drafts, and revisions
 - Natural LinkedIn operator requests such as "work on my LinkedIn account" or
   "boost my LinkedIn" prefetch Browser Homie context before engine handling.
 - `/linkedin_profile edit` default-denied and not implemented
@@ -170,7 +172,7 @@ User asks for browser work in natural language
 That prefetch path must not click, type, post, edit, DM, connect, or navigate by itself.
 
 LinkedIn operator requests use the same prefetch-only path. The intended model is
-draft -> explicit owner approval -> exact write execution -> audit. Heartbeat may
+draft -> explicit user approval -> exact write execution -> audit. Heartbeat may
 later propose LinkedIn ideas or queues, but it must not publish, DM, edit, or
 connect unless a later bounded-autopilot PRP adds an explicit opt-in policy.
 
@@ -178,6 +180,11 @@ Persona split: LinkedIn/Social Homie owns social strategy, voice, drafts, queue
 review, and approval prompts. Browser Homie owns visible Chrome execution,
 snapshot/ref loops, redaction, and audit evidence. `browser_workflows.py` stays
 the final write gate under both.
+
+The Telegram native menu is curated. `/linkedin` should stay visible as the
+draft-only social operator entrypoint, while advanced browser commands remain
+typed/manual unless included in the curated menu. Use `/commands native` and
+`/commands all` to inspect what Telegram shows versus what Homie can dispatch.
 
 ## 6. Dashboard Viewer Flow
 

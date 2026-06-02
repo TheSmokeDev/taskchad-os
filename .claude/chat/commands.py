@@ -12,6 +12,7 @@ from pathlib import Path
 
 # Global slash command instruction files
 _COMMANDS_DIR = Path.home() / ".claude" / "commands"
+_REPO_COMMANDS_DIR = Path(__file__).resolve().parent.parent / "commands"
 
 # PIV command -> instruction file path (relative to _COMMANDS_DIR)
 PIV_INSTRUCTIONS: dict[str, str] = {
@@ -29,6 +30,7 @@ PIV_INSTRUCTIONS: dict[str, str] = {
     "clutch": "SKILL",                    # uses Skill tool, not a raw file
     "blog": "blog.md",                    # blog pipeline via Skill("blog-pipeline")
     "quote": "SKILL",                     # TurboRater quote via Skill("turborater-quote")
+    "linkedin": "linkedin.md",            # deterministic LinkedIn/Social Homie prompt
 }
 
 # Each command: (name, description, type, min_role)
@@ -45,6 +47,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("reload", "Reload bot config without restarting", "router", "admin"),
     ("restart", "Restart myself — kill this process and start fresh", "router", "admin"),
     ("help", "Show all available commands", "router", "viewer"),
+    ("commands", "Browse native Telegram commands or the full Homie command registry", "router", "viewer"),
     ("status", "Show session info — messages, cost, uptime", "router", "viewer"),
     ("diagnostics", "Full system health report — cognition, recall, runtime, sessions, adapters", "router", "admin"),
     ("cost", "Show current session cost in USD", "router", "viewer"),
@@ -89,7 +92,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
     ("quote", "Generate an insurance quote via TurboRater using the turborater-quote skill", "engine", "admin"),
-    ("linkedin", "Draft a LinkedIn post", "engine", "admin"),
+    ("linkedin", "LinkedIn/Social Homie - draft posts, ideas, and revisions only", "engine", "admin"),
     ("tweet", "Draft an X (Twitter) post or thread", "engine", "admin"),
     ("instagram", "Create Instagram content — carousel or caption", "engine", "admin"),
     ("yt_script", "Write a YouTube video script", "engine", "admin"),
@@ -119,7 +122,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Session & Mode",
         ["plan", "go", "execute", "mode", "provider", "model", "reload", "restart",
-         "help", "status", "cost", "clear", "new", "extensions"],
+         "help", "commands", "status", "diagnostics", "cost", "clear", "new", "extensions"],
     ),
     (
         "Integrations",
@@ -140,6 +143,39 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ),
     ("Dev Tools", ["diagram", "pdf", "slides", "sop"]),
 ]
+
+TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
+    "help",
+    "commands",
+    "status",
+    "brief",
+    "clear",
+    "new",
+    "provider",
+    "model",
+    "restart",
+    "diagnostics",
+    "working",
+    "email",
+    "inbox",
+    "send",
+    "budget",
+    "calendar",
+    "tasks",
+    "browser",
+    "browserops",
+    "linkedin",
+    "linkedin_profile",
+    "cabinet",
+    "standup",
+    "discuss",
+    "teamroom",
+    "search",
+    "file",
+    "blog",
+    "tweet",
+    "instagram",
+)
 
 # Core data intents: (keywords, command, included_in_brief)
 CORE_INTENTS: list[tuple[list[str], str, bool]] = [
@@ -207,10 +243,33 @@ def get_all_command_names() -> list[str]:
 
 def get_telegram_bot_commands() -> list[tuple[str, str]]:
     """Return list of (command, description) tuples for Telegram's setMyCommands."""
+    commands, _hidden_count = get_telegram_command_menu()
+    return commands
+
+
+def _command_descriptions() -> dict[str, str]:
     mgr = _try_manager()
     if mgr:
-        return [(n, s.description) for n, s in mgr._commands.items()]
-    return [(name, desc) for name, desc, _, _ in COMMANDS]
+        return {name: spec.description for name, spec in mgr._commands.items()}
+    return {name: desc for name, desc, _, _ in COMMANDS}
+
+
+def get_telegram_command_menu(
+    *,
+    max_commands: int | None = None,
+) -> tuple[list[tuple[str, str]], int]:
+    """Return the curated Telegram-native command menu and hidden count."""
+
+    descriptions = _command_descriptions()
+    menu: list[tuple[str, str]] = []
+    for name in TELEGRAM_NATIVE_COMMANDS:
+        desc = descriptions.get(name)
+        if desc is not None:
+            menu.append((name, desc))
+    if max_commands is not None:
+        menu = menu[:max_commands]
+    hidden_count = max(0, len(descriptions) - len(menu))
+    return menu, hidden_count
 
 
 def get_engine_command_description(name: str) -> str | None:
@@ -240,8 +299,13 @@ def get_piv_instruction(name: str, args: str = "") -> str | None:
     rel_path = PIV_INSTRUCTIONS.get(name)
     if not rel_path or rel_path == "SKILL":
         return None
-    filepath = _COMMANDS_DIR / rel_path
-    if not filepath.exists():
+    filepath = None
+    for base_dir in (_COMMANDS_DIR, _REPO_COMMANDS_DIR):
+        candidate = base_dir / rel_path
+        if candidate.exists():
+            filepath = candidate
+            break
+    if filepath is None:
         return None
     content = filepath.read_text(encoding="utf-8")
     if content.startswith("---"):

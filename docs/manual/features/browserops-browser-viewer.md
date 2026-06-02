@@ -15,7 +15,7 @@ sanitized audit rows, and exposes a read-only dashboard Browser Viewer at
 
 - Chat/Telegram: `/browser status`, `/browser tabs`, `/browser snapshot`,
   `/browserops capabilities`, `/browserops guide`, `/browserops context`,
-  `/linkedin_profile status`, `/linkedin_profile open`
+  `/linkedin_profile status`, `/linkedin_profile open`, `/linkedin`
 - Natural-language LinkedIn operator requests such as "work on my LinkedIn
   account" prefetch Browser Homie context before engine handling.
 - Dashboard: `/browser`
@@ -50,6 +50,8 @@ sanitized audit rows, and exposes a read-only dashboard Browser Viewer at
 - LinkedIn/Social Homie owns strategy, voice, drafts, queue review, and approval
   prompts. Browser Homie owns visible Chrome execution, snapshot/ref loops,
   redaction, and audit evidence.
+- `/linkedin` is draft-only. Browser writes still require separate approved
+  BrowserOps/social workflows.
 
 ## How To Run It
 

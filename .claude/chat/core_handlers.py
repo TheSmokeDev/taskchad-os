@@ -100,6 +100,38 @@ async def handle_help(adapter: Any, incoming: Any, args: str, *, collect_only: b
     return get_manager().get_help_text(user_role=user_role)
 
 
+async def handle_commands(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Show the curated Telegram menu or the full command registry."""
+    from commands import get_telegram_command_menu
+    from extension_manager import get_manager
+
+    view = (args or "native").strip().lower()
+    user_role = getattr(incoming, "user_role", "admin")
+
+    if view in {"", "native", "menu", "telegram"}:
+        menu, hidden_count = get_telegram_command_menu()
+        lines = [
+            "*Native Telegram Commands*",
+            "These are the commands shown in Telegram's slash menu. Hidden commands still work when typed.",
+            "",
+        ]
+        for name, desc in menu:
+            lines.append(f"  /{name} - {desc}")
+        lines.extend(
+            [
+                "",
+                f"Hidden registered commands: {hidden_count}",
+                "Use `/commands all` for the full registry.",
+            ]
+        )
+        return "\n".join(lines)
+
+    if view in {"all", "full", "registry"}:
+        return get_manager().get_help_text(user_role=user_role)
+
+    return "Unknown commands view. Use: /commands native or /commands all"
+
+
 async def handle_status(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Show session and bot status."""
     store, existing, *_ = _get_session(incoming)
@@ -2370,6 +2402,7 @@ def _switch_provider(choice: str) -> str:
 
 CORE_HANDLERS: dict[str, Any] = {
     "help": handle_help,
+    "commands": handle_commands,
     "status": handle_status,
     "diagnostics": handle_diagnostics,
     "cost": handle_cost,
