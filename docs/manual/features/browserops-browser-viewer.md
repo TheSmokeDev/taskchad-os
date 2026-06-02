@@ -2,7 +2,7 @@
 
 Status: shipped and live-proven
 Owner: `.claude/chat/` browser policy plus Python dashboard API
-Last updated: 2026-05-31
+Last updated: 2026-06-02
 
 ## What It Does
 
@@ -16,6 +16,8 @@ sanitized audit rows, and exposes a read-only dashboard Browser Viewer at
 - Chat/Telegram: `/browser status`, `/browser tabs`, `/browser snapshot`,
   `/browserops capabilities`, `/browserops guide`, `/browserops context`,
   `/linkedin_profile status`, `/linkedin_profile open`
+- Natural-language LinkedIn operator requests such as "work on my LinkedIn
+  account" prefetch Browser Homie context before engine handling.
 - Dashboard: `/browser`
 - API: `/api/browser-viewer/status`, `/api/browser-viewer/screenshot`,
   `/api/browser-viewer/stream/enable`, `/api/browser-viewer/stream/disable`
@@ -42,6 +44,12 @@ sanitized audit rows, and exposes a read-only dashboard Browser Viewer at
   workflow, not the dashboard viewer.
 - Browser writes such as LinkedIn edits/posts/DMs remain default-denied until a
   dedicated PRP defines approval UX, audit, tests, and proof.
+- Heartbeat may propose LinkedIn work only after a dedicated queue/proposal
+  slice; it must not publish, DM, edit, or connect without later explicit
+  bounded-autopilot opt-in.
+- LinkedIn/Social Homie owns strategy, voice, drafts, queue review, and approval
+  prompts. Browser Homie owns visible Chrome execution, snapshot/ref loops,
+  redaction, and audit evidence.
 
 ## How To Run It
 
@@ -57,6 +65,18 @@ Dashboard:
 ```text
 http://127.0.0.1:5173/browser
 ```
+
+Windows local notes:
+
+- Chrome 136+ requires a non-default local profile for CDP. If `9222` is
+  unreachable despite the Chrome process showing `--remote-debugging-port=9222`,
+  relaunch with a dedicated profile such as
+  `%USERPROFILE%\.codex\browser-profiles\chrome-cdp-9222`.
+- Homie Telegram owns health port `8787`; TaskChad voice owns `8765`. Do not
+  leave Homie on a temporary alternate port when an extra local helper squats on
+  `8787`.
+- Keep `.claude/chat/run_chat.bat` CRLF with no BOM so Windows `cmd.exe` can
+  restart Telegram cleanly.
 
 ## How To Test It
 
@@ -79,6 +99,13 @@ npm run typecheck
 
 ## Latest Live Proof
 
+- Date: 2026-06-02
+- Surface: visible Chrome CDP `9222`, dashboard `/browser`, and Telegram
+  health process ownership.
+- Result: Browser Viewer readiness `ready`, controls remained read-only,
+  Homie Telegram restored to `8787`, TaskChad voice stayed on `8765`, and
+  temporary `8788` was cleared.
+
 - Date: 2026-05-31
 - Surface: dashboard `/browser` observing the same visible Chrome CDP `9222`
   Telegram Web session used for Team Room V3 proof.
@@ -98,4 +125,6 @@ was shipped through the framework path in earlier BrowserOps phases.
 ## Next Slices
 
 - Mission Control / Hub consumer for the same read-only viewer API.
-- Separate BrowserOps write-workflow PRP only when explicitly requested.
+- Close PR #35 for the first approved LinkedIn connection-request workflow.
+- Implement the LinkedIn Operator post/queue/proposal phases from
+  `PRPs/active/PRP-linkedin-operator-workflows-2026-06-02.md`.

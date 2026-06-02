@@ -61,9 +61,11 @@ def test_capability_pack_is_safe_and_policy_rich(monkeypatch) -> None:
     assert pack["readiness"]["cdp_port"] == 9222
     assert pack["stream"]["port"] == 31137
     assert pack["controls"]["headless_fallback"] is False
+    assert pack["linkedin_operator"]["mode"] == "draft_approve_execute"
     assert any(workflow["workflow_id"] == "browserops.context" for workflow in pack["workflows"])
     assert "agent-browser skills get core" in dumped
     assert "snapshot -i -c" in dumped
+    assert "Heartbeat may propose LinkedIn ideas" in dumped
     assert "secret" not in dumped
     assert "#frag" not in dumped
 
@@ -91,6 +93,8 @@ def test_prefetch_context_loads_browser_best_practices(monkeypatch) -> None:
     assert "Browser Homie" in context
     assert "agent-browser skills get core" in context
     assert "snapshot -i -c" in context
+    assert "LinkedIn operator model" in context
+    assert "`/linkedin` for LinkedIn post drafting" in context
     assert "explicit approval" in context
     assert "headless" in context
 

@@ -36,6 +36,20 @@ _CORE_RULES = (
     "LinkedIn writes require explicit approval and unimplemented writes remain blocked.",
 )
 
+_LINKEDIN_OPERATOR_RULES = (
+    "LinkedIn/Social Homie owns strategy, voice, content drafts, target criteria, "
+    "and approval prompts; Browser Homie owns visible-browser execution safety.",
+    "Drafting LinkedIn content is allowed as planning/content work; posting is a "
+    "separate write workflow.",
+    "Use the progressive operator loop: draft, show owner, wait for explicit "
+    "approval, execute only the approved write, then audit the result.",
+    "Connection requests, posts, DMs, and profile edits must stay explicit-approval "
+    "browser or integration workflows.",
+    "Heartbeat may propose LinkedIn ideas or queue operator notifications, but it "
+    "must not publish, DM, edit, or connect unless a later bounded-autopilot PRP "
+    "adds an explicit opt-in policy.",
+)
+
 
 def load_agent_browser_core_guide(
     *,
@@ -131,6 +145,10 @@ def build_browserops_capability_pack(
         "stream": _safe_stream(stream),
         "guide": guide,
         "rules": list(_CORE_RULES),
+        "linkedin_operator": {
+            "mode": "draft_approve_execute",
+            "rules": list(_LINKEDIN_OPERATOR_RULES),
+        },
         "workflows": [_workflow_summary(workflow) for workflow in list_browser_workflows()],
         "controls": {
             "browser_input": False,
@@ -168,6 +186,10 @@ def format_browserops_capabilities(pack: dict[str, Any]) -> str:
     lines.append("")
     lines.append("*Hard Rules*")
     for rule in pack.get("rules", []):
+        lines.append(f"  - {rule}")
+    lines.append("")
+    lines.append("*LinkedIn Operator*")
+    for rule in pack.get("linkedin_operator", {}).get("rules", []):
         lines.append(f"  - {rule}")
     lines.append("")
     lines.append("*Registered Workflows*")
@@ -238,12 +260,23 @@ def build_browserops_prefetch_context(user_text: str = "") -> str:
     lines.extend(
         [
             "",
+            "LinkedIn operator model:",
+        ]
+    )
+    lines.extend(
+        f"- {rule}"
+        for rule in pack.get("linkedin_operator", {}).get("rules", [])
+    )
+    lines.extend(
+        [
+            "",
             "Useful command shapes:",
             "- `/browser status` for visible Chrome/CDP readiness.",
             "- `/browser tabs` for URL-redacted tab inventory.",
             "- `/browser open <absolute http(s) url>` for navigation.",
             "- `/browser snapshot` for interactive text snapshot refs.",
             "- `/linkedin_profile status` for LinkedIn browser readiness.",
+            "- `/linkedin` for LinkedIn post drafting through the content engine.",
             "- `/linkedin_profile edit` is write-capable and remains default-denied/not implemented.",
             "",
             "Registered workflow policy:",

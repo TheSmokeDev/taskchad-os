@@ -100,6 +100,8 @@ Shipped:
 
 - `/browser status`, `/browser tabs`, `/browser open <absolute http(s) url>`, `/browser snapshot`
 - `/linkedin_profile status`, `/linkedin_profile open`
+- Natural LinkedIn operator requests such as "work on my LinkedIn account" or
+  "boost my LinkedIn" prefetch Browser Homie context before engine handling.
 - `/linkedin_profile edit` default-denied and not implemented
 - `/browserops capabilities`, `/browserops guide`, `/browserops context`
 - Browser readiness in `thehomie status --json`, human `status`, and `thehomie doctor`
@@ -115,6 +117,7 @@ Shipped:
 Not shipped:
 
 - Live LinkedIn posting, profile edits, DMs, or connection requests
+- Autonomous LinkedIn growth loops from heartbeat
 - Dashboard browser input, navigation, or tab URL inspection
 - Hotbox clone or external viewer fork
 - Browser state storage, profile copying, cookie export, token export, query-string export, or fragment export
@@ -165,6 +168,16 @@ User asks for browser work in natural language
 ```
 
 That prefetch path must not click, type, post, edit, DM, connect, or navigate by itself.
+
+LinkedIn operator requests use the same prefetch-only path. The intended model is
+draft -> explicit owner approval -> exact write execution -> audit. Heartbeat may
+later propose LinkedIn ideas or queues, but it must not publish, DM, edit, or
+connect unless a later bounded-autopilot PRP adds an explicit opt-in policy.
+
+Persona split: LinkedIn/Social Homie owns social strategy, voice, drafts, queue
+review, and approval prompts. Browser Homie owns visible Chrome execution,
+snapshot/ref loops, redaction, and audit evidence. `browser_workflows.py` stays
+the final write gate under both.
 
 ## 6. Dashboard Viewer Flow
 
@@ -254,7 +267,19 @@ Hard rules:
 - Do not print, persist, or audit cookies, tokens, auth headers, tab query strings, URL fragments, or sensitive form values.
 - Do not expose raw tab URL lists in dashboard UI.
 - Do not perform live LinkedIn posts, DMs, connection requests, or profile edits until a dedicated PRP implements explicit approval, audit, tests, and proof.
+- Do not let heartbeat execute LinkedIn writes until a dedicated bounded-autopilot
+  PRP adds limits, cooldowns, opt-in policy, tests, and audit proof.
 - Keep browser state deployment-local.
+
+Chrome 136+ note:
+
+- If Chrome shows `--remote-debugging-port=9222` in the process command line
+  but `http://127.0.0.1:9222/json/version` refuses or times out, the default
+  Chrome profile is probably rejecting remote debugging.
+- Relaunch visible Chrome with a dedicated local CDP profile such as
+  `%USERPROFILE%\.codex\browser-profiles\chrome-cdp-9222`.
+- Keep that profile local to the deployment. Do not copy cookies, tokens, or
+  browser state into the repo or public framework export.
 
 ## 9. Validation Checklist
 
@@ -308,6 +333,8 @@ Existing CRLF warnings can be accepted only when they match the unchanged baseli
 CDP unreachable:
 
 - Verify the visible Chrome/Chromium process was started with remote debugging.
+- On Chrome 136+, verify it was started with a non-default `--user-data-dir`;
+  a process can show `--remote-debugging-port=9222` while no CDP socket binds.
 - Use `uv run thehomie chat -q "/browser status" -Q` before direct browser work.
 - Do not start a fresh hidden browser to hide the failure.
 
@@ -336,6 +363,14 @@ Telegram Homie seems stale after merge:
 - Check the live process PID and checkout path.
 - Restart from a clean updated main checkout.
 - Verify with CLI first, then Telegram.
+- Homie Telegram owns the default health port `8787`. If another local helper
+  is using `8787`, move that helper instead of leaving Homie on a temporary
+  alternate health port.
+- TaskChad voice's documented local health/server port is `8765`; an extra
+  TaskChad tools process on `8787` is not the main voice service.
+- On Windows, keep `.claude/chat/run_chat.bat` CRLF with no BOM. If `cmd.exe`
+  prints chopped comment text as commands, normalize the batch file line
+  endings before restarting Telegram.
 
 Telegram Web login/session mismatch:
 
@@ -383,7 +418,7 @@ Next likely slice:
 
 Possible future write slice:
 
-- LinkedIn or social writes require a separate PRP with explicit approval UX, workflow registry updates, audit proof, tests, and live-proof boundaries. Keep default-deny until that lands.
+- LinkedIn or social writes require explicit approval UX, workflow registry updates, audit proof, tests, and live-proof boundaries. Current controlling plan: `PRPs/active/PRP-linkedin-operator-workflows-2026-06-02.md`; PR #35 remains the first connection-request dependency. Keep default-deny until each bounded workflow lands.
 
 Non-goals for this manual:
 

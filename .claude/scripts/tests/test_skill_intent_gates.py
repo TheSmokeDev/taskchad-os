@@ -157,6 +157,27 @@ async def test_browserops_natural_language_prefetches_context_and_reaches_engine
 
 
 @pytest.mark.asyncio
+async def test_linkedin_operator_language_prefetches_browserops_context():
+    async def fake_browserops(adapter, incoming, args, *, collect_only=False):
+        assert collect_only is True
+        return "BrowserOps LinkedIn operator context loaded"
+
+    manager = _build_manager()
+    manager._commands["browserops"].handler = fake_browserops
+    engine = _RecordingEngine()
+    router = ChatRouter(engine, manager)
+    adapter = _RecordingAdapter()
+    text = "I want to work on my LinkedIn account and build content"
+
+    await router._handle_inner(adapter, _incoming(text))
+
+    assert engine.messages == [text]
+    assert "BrowserOps LinkedIn operator context loaded" in engine.prefetched_contexts[0]
+    assert adapter.sent[0].text == "Thinking..."
+    assert adapter.updates[-1].text == "engine handled"
+
+
+@pytest.mark.asyncio
 async def test_explicit_slash_commands_bypass_natural_language_gates():
     engine = _RecordingEngine()
     router = ChatRouter(engine, _SlashOnlyManager())  # type: ignore[arg-type]
