@@ -18,6 +18,15 @@ def svc():
     db.close()
 
 
+def test_orchestration_db_creates_parent_dir(tmp_path):
+    db_path = tmp_path / "missing" / "state" / "orchestration.db"
+    db = OrchestrationDB(db_path)
+    try:
+        assert db_path.is_file()
+    finally:
+        db.close()
+
+
 # ── Create ─────────────────────────────────────────────────────────────────
 
 

@@ -49,6 +49,11 @@ describe('cabinet UI surface — static contract', () => {
     expect(src).toContain('cabinetVoiceUrl');
     expect(src).toContain('Open Voice');
     expect(src).toContain('Lifecycle');
+    expect(src).toContain('/api/cabinet/voice/status');
+    expect(src).toContain('/api/cabinet/voice/start');
+    expect(src).toContain('/api/cabinet/voice/stop');
+    expect(src).toContain('/api/cabinet/voice/restart');
+    expect(src).toContain('Voice Subprocess');
   });
 
   it('cabinet-voice-url builds the Python-owned voice URL', async () => {
@@ -151,6 +156,23 @@ describe('cabinet UI behavior — composer dispatch', () => {
       clientMsgId: 'c_test',
       chatId: 'cabinet-browser',
       audience: 'all',
+    });
+  });
+
+  it('apiPost helper sends the expected /api/cabinet/voice/start body shape', async () => {
+    const { apiPost } = await import('../lib/api');
+    await apiPost('/api/cabinet/voice/start', {
+      meetingId: 7,
+      chatId: 'cabinet-browser',
+    });
+    const calls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const voiceCall = calls.find((call) => call[0] === '/api/cabinet/voice/start');
+    expect(voiceCall).toBeTruthy();
+    const init = voiceCall![1] as RequestInit;
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({
+      meetingId: 7,
+      chatId: 'cabinet-browser',
     });
   });
 });

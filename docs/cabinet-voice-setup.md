@@ -11,6 +11,7 @@ For the broader Cabinet dashboard manual and room-state vertical slice, see `doc
 | Browser HTML page | `GET /api/cabinet/voice/ui?token=&meetingId=&chatId=` | Server-rendered page, served by the orchestration API on port 4322. |
 | Pipecat client bundle | `GET /api/cabinet/voice/client.bundle.js` | Vendored from ClaudeClaw's `warroom/client.bundle.js` (BSD-2 attributed). |
 | Voice subprocess | `python -m cabinet.voice.voice_server --meeting-id N` | Pipecat `WebsocketServerTransport`, default port 7860. |
+| Lifecycle supervisor | `.claude/scripts/cabinet/voice/lifecycle.py` | Python-owned single-session status/start/stop/restart process control. |
 | Voice pipeline | `transport.input → HomieSTT → AgentRouter → HomieAgentBridge → HomieTTS → transport.output` | Verbatim port of ClaudeClaw `warroom/server.py:751-758` legacy mode. |
 | Persona reasoning | Phase 5a `text_orchestrator.handle_text_turn` over HTTP | Voice never invokes an LLM directly; it consumes the Phase 5a SSE stream. |
 
@@ -33,6 +34,7 @@ For the broader Cabinet dashboard manual and room-state vertical slice, see `doc
 |---|---|---|
 | `CABINET_VOICE_PORT` | `7860` | WebSocket transport port for the voice subprocess. |
 | `CABINET_VOICE_BIND` | `127.0.0.1` | Bind interface. Set to `0.0.0.0` to expose on LAN (operator opt-in; matches Phase 7a default-bind-loopback rule). |
+| `CABINET_VOICE_START_TIMEOUT_S` | `10` | Seconds the supervisor waits for the subprocess ready handshake before marking start failed. |
 | `CABINET_VOICE_BRIDGE_TIMEOUT_S` | `60` | Per-turn timeout before the bridge surfaces a friendly fallback. |
 | `CABINET_VOICE_ROSTER_PATH` | `<tempdir>/cabinet-roster.json` | Optional override for the file-IPC roster path used by `AgentRouter` for name-prefix routing. Default resolves via `tempfile.gettempdir()` (cross-platform: `/tmp` on POSIX, `%TEMP%` on Windows). |
 | `CABINET_VOICE_PIN_PATH` | `<tempdir>/cabinet-voice-pin.json` | Optional override for the click-to-pin file. Same `tempfile.gettempdir()` resolution as above. |
@@ -88,10 +90,39 @@ thehomie cabinet voice
 
 ### From the dashboard
 
-Open `/voices` to create or reuse the current Cabinet room and launch the
-Python-owned voice URL. The mic button on `/cabinet` opens voice for the
-selected room. This is a V1 launcher only; voice subprocess start/status
-controls are a separate follow-up.
+Open `/voices` to create or reuse the current Cabinet room. The page polls
+`/api/cabinet/voice/status`, exposes Start, Stop, and Restart controls, and
+enables Open Voice after the Python supervisor reports the subprocess ready for
+that meeting. The mic button on `/cabinet` opens voice for the selected room.
+
+Lifecycle endpoints are mounted on the Python orchestration API and proxied by
+Hono:
+
+```text
+GET  /api/cabinet/voice/status?meetingId=42&chatId=YOUR_CHAT_ID
+POST /api/cabinet/voice/start
+POST /api/cabinet/voice/stop
+POST /api/cabinet/voice/restart
+```
+
+The POST body is:
+
+```json
+{"meetingId": 42, "chatId": "YOUR_CHAT_ID"}
+```
+
+`start` and `restart` validate that the Cabinet meeting exists and is open.
+`stop` validates scope when a meeting id is supplied, but can stop an ended
+meeting's tracked voice process. The lifecycle supervisor is deliberately
+single-session: a different active meeting returns a conflict instead of
+allocating another port.
+
+For phone testing, open the dashboard over the machine's Tailscale URL and
+include the Cabinet chat scope, for example:
+
+```text
+http://<TAILSCALE_IP>:5173/voices?chatId=cabinet-browser
+```
 
 ### Direct browser URL
 
@@ -123,7 +154,13 @@ Synchronous endpoints (`/api/cabinet/new`, `/api/cabinet/end`) raise HTTP 503 on
 
 ## Logs and diagnostics
 
-Voice subprocess logs go to stderr (visible when run in the foreground). Every log call sites that touch dynamic args wraps them in the `redact()` helper so secrets in URLs / exception messages get scrubbed before they land. `HOMIE_REDACT_SECRETS=false` disables redaction for triage scenarios.
+Voice subprocess logs go to stderr when run in the foreground. When started by
+the lifecycle supervisor, logs are written under the active profile log
+directory at `cabinet-voice/cabinet-voice-<meetingId>.log` and surfaced in the
+status payload as `logPath`. Every log call site that touches dynamic args
+wraps them in the `redact()` helper so secrets in URLs / exception messages get
+scrubbed before they land. `HOMIE_REDACT_SECRETS=false` disables redaction for
+triage scenarios.
 
 The voice subprocess emits a JSON handshake on stdout when it's ready:
 
@@ -133,10 +170,16 @@ The voice subprocess emits a JSON handshake on stdout when it's ready:
 
 Operators or supervisors can parse this to confirm the subprocess is listening before opening the browser page.
 
+The lifecycle status payload also reports `status`, `active`, `matchesMeeting`,
+`pid`, `port`, `bind`, `wsUrl`, `startedAt`, `readyAt`, `stoppedAt`,
+`uptimeS`, `lastError`, `logPath`, and capability flags for Pipecat, ffmpeg,
+STT, and TTS.
+
 ## Troubleshooting
 
 * **"Pipecat client bundle did not load"** — verify `GET /api/cabinet/voice/client.bundle.js` returns 200. The bundle is in `.claude/scripts/cabinet/voice/static/client.bundle.js`. If missing, re-vendor from upstream.
-* **Browser can't reach WebSocket** — check `CABINET_VOICE_PORT` is open and `CABINET_VOICE_BIND` matches the host the browser hits. Default is loopback only.
+* **Browser can't reach WebSocket** — check `CABINET_VOICE_PORT` is open and `CABINET_VOICE_BIND` matches the host the browser hits. Default is loopback only. If `/voices` says the subprocess is stopped, start it from the page first.
+* **Start returns conflict** — another Cabinet meeting owns the single active local voice subprocess. Stop that session or restart for the intended meeting.
 * **Mic permission blocked** — Chrome only grants mic access on `https://` or `http://localhost`. If accessing from a remote machine, use SSH port-forwarding or set up TLS.
 * **"The X agent took too long to respond"** — the bridge timeout fired before Phase 5a returned an `agent_done` event. Either Phase 5a is slow (check its logs), or the SSE stream got disconnected. Increase `CABINET_VOICE_BRIDGE_TIMEOUT_S` or restart the orchestration API.
 * **"Cabinet declined this turn"** — kill switch refusal. Check `HOMIE_KILLSWITCH_CABINET` env state and the audit log.
@@ -148,7 +191,8 @@ Operators or supervisors can parse this to confirm the subprocess is listening b
 * External participant adapter (Phase 6d).
 * Hermes push-to-talk + VAD desktop mode.
 * Cinematic intro music asset.
-* Live React management UI (Phase 6 follow-up).
+* Multiple simultaneous local voice subprocesses.
+* Per-meeting dynamic port allocation.
 
 These are tracked as separate sub-PRDs.
 

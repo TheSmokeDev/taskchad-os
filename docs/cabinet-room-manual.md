@@ -202,15 +202,17 @@ The Claude SDK adapter also passes the no-tools base set so the CLI does not exp
 
 Voice is not a parallel Cabinet brain. It is an ingress/egress adapter over the same room model.
 
-The dashboard V1 control-plane is a launcher: `/voices` and the `/cabinet` mic
-button open the Python-owned voice meeting URL for the selected Cabinet meeting.
-They do not start, stop, supervise, or replace the voice subprocess. Process
-lifecycle controls belong in a later Python-owned slice.
+The dashboard control plane now exposes the Python-owned single-session voice
+lifecycle. `/voices` and the `/cabinet` mic button open the Python-owned voice
+meeting URL for the selected Cabinet meeting; `/voices` also polls status and
+can start, stop, or restart the local voice subprocess for that meeting. Hono
+and dashboard code remain thin over the orchestration API.
 
 Voice should:
 
 - use the same meeting ID
 - respect the same roster snapshot
+- keep subprocess lifecycle state in Python
 - route selected spoken targets to the same `handle_text_turn()` path
 - consume SSE events from the text orchestrator
 - render or speak the selected participant responses
@@ -218,6 +220,8 @@ Voice should:
 Voice should not:
 
 - maintain separate canonical roster truth
+- allocate multiple local voice subprocesses before the single-session path is
+  proven stable
 - invoke LLMs directly
 - override text-room persona identity
 - describe text Cabinet participants as unavailable because voice is rebuilding

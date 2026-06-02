@@ -31,7 +31,7 @@
  * `dashboard/server/src/routes/conversation.ts:30-87`.
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { authedFetch, authedFetchBinary, authedFetchStream } from '../framework-client.js';
 import { inboundPersonaId, outboundPersonaId } from '../translate.js';
 
@@ -415,6 +415,40 @@ cabinetRoute.post('/api/cabinet/end', async (c) => {
   }
   return c.body(upstream.body, upstream.status as 200);
 });
+
+cabinetRoute.get('/api/cabinet/voice/status', async (c) => {
+  const url = new URL(c.req.url);
+  const upstream = await authedFetch(`/api/cabinet/voice/status${url.search}`);
+  return c.body(upstream.body, upstream.status as 200, {
+    'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
+    'Referrer-Policy': 'no-referrer',
+  });
+});
+
+async function forwardVoiceLifecyclePost(c: Context, path: string) {
+  const body = await c.req.json().catch(() => ({}));
+  const upstream = await authedFetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return c.body(upstream.body, upstream.status as 200, {
+    'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
+    'Referrer-Policy': 'no-referrer',
+  });
+}
+
+cabinetRoute.post('/api/cabinet/voice/start', async (c) => (
+  forwardVoiceLifecyclePost(c, '/api/cabinet/voice/start')
+));
+
+cabinetRoute.post('/api/cabinet/voice/stop', async (c) => (
+  forwardVoiceLifecyclePost(c, '/api/cabinet/voice/stop')
+));
+
+cabinetRoute.post('/api/cabinet/voice/restart', async (c) => (
+  forwardVoiceLifecyclePost(c, '/api/cabinet/voice/restart')
+));
 
 // Cabinet voice V1 launcher proxy. Python owns the voice document, bundle,
 // source reference, and avatar resolution; Hono only forwards the GETs.

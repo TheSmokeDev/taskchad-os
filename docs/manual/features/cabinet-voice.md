@@ -1,6 +1,6 @@
 # Cabinet Voice
 
-Status: V1 launcher over shipped voice adapter
+Status: Single-session lifecycle controls shipped
 Owner: Python orchestration and Cabinet voice adapter
 Last updated: 2026-06-01
 
@@ -11,9 +11,11 @@ Cabinet meeting. The voice surface is an adapter over the same Cabinet meeting
 ID, roster snapshot, text orchestrator, transcript stream, and participant
 tool policy used by the text room.
 
-V1 is a launcher/control-plane slice. It creates or opens the current Cabinet
-meeting and builds the Python-owned voice URL. It does not own the voice
-subprocess lifecycle.
+The current slice adds a Python-owned single-session lifecycle supervisor. The
+dashboard can see voice process status, start one local voice subprocess for
+the active Cabinet meeting, stop it, or restart it. Hono and the dashboard stay
+thin over the orchestration API; Python remains the source of truth for process
+state.
 
 ## Operator Entry Points
 
@@ -21,12 +23,13 @@ subprocess lifecycle.
 - Dashboard: `/voices`
 - Cabinet room: mic button on `/cabinet`
 - API: `/api/cabinet/voice/ui`
+- API lifecycle: `/api/cabinet/voice/status`, `/start`, `/stop`, `/restart`
 
 ## Source Of Truth Files
 
 | Layer | Files |
 |---|---|
-| Python/runtime | `.claude/scripts/cabinet/voice/`, `.claude/scripts/dashboard_api.py` |
+| Python/runtime | `.claude/scripts/cabinet/voice/`, `.claude/scripts/cabinet/voice/lifecycle.py`, `.claude/scripts/dashboard_api.py` |
 | Chat/router | `.claude/chat/core_handlers.py`, `.claude/scripts/integrations/cabinet_api.py` |
 | Hono/dashboard server | `dashboard/server/src/routes/cabinet.ts`, `dashboard/server/src/middleware/auth.ts` |
 | Dashboard web | `dashboard/web/src/pages/Voices.tsx`, `dashboard/web/src/pages/Cabinet.tsx`, `dashboard/web/src/lib/cabinet-voice-url.ts` |
@@ -38,9 +41,11 @@ subprocess lifecycle.
 - Voice does not maintain separate canonical roster truth.
 - Voice routes participant turns through the Cabinet orchestration API and
   text orchestrator.
-- Hono and dashboard stay thin over Python-owned URL/static/avatar endpoints.
+- Hono and dashboard stay thin over Python-owned URL/static/avatar/lifecycle
+  endpoints.
 - Participant turns preserve the default-deny Cabinet tool/runtime policy.
-- V1 does not start, stop, or supervise the voice subprocess.
+- The lifecycle supervisor is intentionally single-session for now. It does not
+  allocate per-meeting ports or run multiple simultaneous voice rooms.
 
 ## How To Run It
 
@@ -55,11 +60,15 @@ Dashboard:
 http://127.0.0.1:5173/voices
 ```
 
+The `/voices` page creates or reuses the Cabinet room, polls lifecycle status,
+and exposes Start, Stop, and Restart controls for the local voice subprocess.
+Open Voice is enabled when the tracked subprocess is ready for that room.
+
 ## How To Test It
 
 ```powershell
 cd .claude/scripts
-uv run pytest tests/test_dashboard_api_cabinet_voice.py tests/test_cabinet_voice_html.py -q
+uv run pytest tests/test_cabinet_voice_lifecycle.py tests/test_dashboard_api_cabinet_voice.py tests/test_cabinet_voice_html.py -q
 ```
 
 ```powershell
@@ -70,7 +79,7 @@ npm run typecheck
 
 ```powershell
 cd dashboard/web
-npm run test -- src/__tests__/cabinet.test.tsx
+npm run test -- src/__tests__/cabinet.test.tsx src/__tests__/donor-route-manifest.test.ts
 npm run typecheck
 ```
 
@@ -82,6 +91,8 @@ proof artifacts and local process state remain outside the public manual.
 
 ## Next Slices
 
-- Add Python-owned voice subprocess status and start controls.
-- Surface those controls thinly in Hono and `/voices`.
-- Keep lifecycle supervision separate from the V1 launcher URL builder.
+- Prove full browser mic-to-Cabinet-turn-to-audio loop from `/voices`.
+- Decide whether multi-session/per-meeting ports are needed after the
+  single-session operator flow is stable.
+- Keep future lifecycle expansion in Python; Hono/dashboard remain proxies and
+  controls.

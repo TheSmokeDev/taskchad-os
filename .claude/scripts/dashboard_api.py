@@ -3949,6 +3949,7 @@ from cabinet import (  # noqa: E402, I001
     text_orchestrator as _cabinet_orch,
     title as _cabinet_title,
 )
+from cabinet.voice import lifecycle as _cabinet_voice_lifecycle  # noqa: E402
 
 class CabinetNewBody(BaseModel):
     chatId: str | None = None
@@ -3988,6 +3989,16 @@ class CabinetPinBody(BaseModel):
 class CabinetParticipantBody(BaseModel):
     meetingId: int
     agentId: str
+    chatId: str | None = None
+
+
+class CabinetVoiceStartBody(BaseModel):
+    meetingId: int
+    chatId: str | None = None
+
+
+class CabinetVoiceStopBody(BaseModel):
+    meetingId: int | None = None
     chatId: str | None = None
 
 
@@ -4881,6 +4892,92 @@ _ = (_cabinet_title,)
 _CABINET_VOICE_STATIC_DIR = (
     Path(__file__).resolve().parent / "cabinet" / "voice" / "static"
 )
+
+
+def _cabinet_voice_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, _cabinet_voice_lifecycle.VoiceSessionActive):
+        return HTTPException(
+            status_code=409,
+            detail={"error": "voice_session_active", "session": exc.status},
+        )
+    if isinstance(exc, _cabinet_voice_lifecycle.VoiceSessionMismatch):
+        return HTTPException(
+            status_code=409,
+            detail={"error": "voice_session_mismatch", "session": exc.status},
+        )
+    if isinstance(exc, _cabinet_voice_lifecycle.VoiceStartFailed):
+        return HTTPException(
+            status_code=503,
+            detail={
+                "error": "voice_start_failed",
+                "reason": exc.reason,
+                "session": exc.status,
+            },
+        )
+    return HTTPException(status_code=503, detail={"error": "voice_lifecycle_error"})
+
+
+@router.get("/api/cabinet/voice/status")
+def cabinet_voice_status(
+    meetingId: int | None = Query(default=None),
+    chatId: str | None = Query(default=None),
+) -> dict:
+    """Return Python-owned single-session Cabinet voice subprocess status."""
+    return {
+        "ok": True,
+        **_cabinet_voice_lifecycle.status(meeting_id=meetingId, chat_id=chatId),
+    }
+
+
+@router.post("/api/cabinet/voice/start")
+def cabinet_voice_start(body: CabinetVoiceStartBody) -> dict:
+    """Start the single local Cabinet voice subprocess for one meeting."""
+    chat_id = (body.chatId or "").strip()
+    _cabinet_validate_room_request(body.meetingId, chat_id)
+    try:
+        session = _cabinet_voice_lifecycle.start_session(
+            meeting_id=body.meetingId,
+            chat_id=chat_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _cabinet_voice_http_error(exc) from exc
+    return {"ok": True, **session}
+
+
+@router.post("/api/cabinet/voice/stop")
+def cabinet_voice_stop(body: CabinetVoiceStopBody | None = None) -> dict:
+    """Stop the tracked Cabinet voice subprocess, if any."""
+    meeting_id = body.meetingId if body else None
+    chat_id = ((body.chatId or "").strip() if body else "")
+    if meeting_id is not None:
+        meeting = _cabinet_get_meeting(meeting_id)
+        if meeting is None:
+            raise HTTPException(status_code=404, detail="meeting_not_found")
+        if chat_id and not _cabinet_chat_match_or_403(meeting, chat_id):
+            raise HTTPException(status_code=403, detail="chat_mismatch")
+    try:
+        session = _cabinet_voice_lifecycle.stop_session(
+            meeting_id=meeting_id,
+            chat_id=chat_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _cabinet_voice_http_error(exc) from exc
+    return {"ok": True, **session}
+
+
+@router.post("/api/cabinet/voice/restart")
+def cabinet_voice_restart(body: CabinetVoiceStartBody) -> dict:
+    """Restart the single local Cabinet voice subprocess for one meeting."""
+    chat_id = (body.chatId or "").strip()
+    _cabinet_validate_room_request(body.meetingId, chat_id)
+    try:
+        session = _cabinet_voice_lifecycle.restart_session(
+            meeting_id=body.meetingId,
+            chat_id=chat_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _cabinet_voice_http_error(exc) from exc
+    return {"ok": True, **session}
 
 
 @router.get("/api/cabinet/voice/ui")

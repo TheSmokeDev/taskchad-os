@@ -96,6 +96,10 @@ describe('cabinet route — static invariants', () => {
       '/api/cabinet/unpin',
       '/api/cabinet/clear',
       '/api/cabinet/end',
+      '/api/cabinet/voice/status',
+      '/api/cabinet/voice/start',
+      '/api/cabinet/voice/stop',
+      '/api/cabinet/voice/restart',
       '/api/cabinet/voice/ui',
       '/api/cabinet/voice/client.bundle.js',
       '/api/cabinet/voice/client.js',
@@ -112,6 +116,10 @@ describe('cabinet route — static invariants', () => {
     expect(src).toContain("/api/cabinet/voice/client.bundle.js");
     expect(src).toContain("/api/cabinet/voice/client.js");
     expect(src).toContain("/api/cabinet/voice/avatars/:persona_file");
+    expect(src).toContain("/api/cabinet/voice/status");
+    expect(src).toContain("/api/cabinet/voice/start");
+    expect(src).toContain("/api/cabinet/voice/stop");
+    expect(src).toContain("/api/cabinet/voice/restart");
     expect(src).toContain("authedFetchBinary(");
     expect(src).toContain("Referrer-Policy");
   });
@@ -158,5 +166,29 @@ describe('cabinet route — voice proxy behavior', () => {
     const upstreamUrl = String(fetchMock.mock.calls[0]?.[0] ?? '');
     expect(upstreamUrl).toContain('/api/cabinet/voice/avatars/main.png?token=secret');
     expect(res.headers.get('Content-Type')).toContain('image/png');
+  });
+
+  it('proxies Cabinet voice lifecycle POST bodies to Python', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, status: 'ready' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const app = new Hono();
+    app.route('/', cabinetRoute);
+
+    const res = await app.request('/api/cabinet/voice/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ meetingId: 7, chatId: 'cabinet-browser' }),
+    });
+    expect(res.status).toBe(200);
+    const upstreamUrl = String(fetchMock.mock.calls[0]?.[0] ?? '');
+    expect(upstreamUrl).toContain('/api/cabinet/voice/start');
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({ meetingId: 7, chatId: 'cabinet-browser' });
   });
 });

@@ -613,3 +613,131 @@ def test_voice_ui_falls_back_to_default_when_broadcast_order_null(
             f"Hardcoded stub {agent_id!r} missing from fallback render "
             f"when broadcast_order=NULL (backwards-compat for pre-Phase-6 meetings)."
         )
+
+
+# ─── Cabinet Voice V2: single-session lifecycle endpoints ────────────────
+
+
+def test_voice_status_endpoint_returns_lifecycle_snapshot(
+    dash_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dashboard_api  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        dashboard_api._cabinet_voice_lifecycle,
+        "status",
+        lambda meeting_id=None, chat_id=None: {
+            "status": "ready",
+            "meetingId": meeting_id,
+            "chatId": chat_id or "",
+            "pid": 123,
+            "matchesMeeting": True,
+            "capabilities": {"pipecat": True, "ffmpeg": True, "stt": True, "tts": True},
+        },
+    )
+    r = dash_client.get(
+        "/api/cabinet/voice/status",
+        params={"meetingId": 42, "chatId": "tg-voice"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["status"] == "ready"
+    assert body["meetingId"] == 42
+    assert body["chatId"] == "tg-voice"
+
+
+def test_voice_start_endpoint_validates_meeting_and_invokes_supervisor(
+    dash_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dashboard_api  # noqa: PLC0415
+
+    meeting_id = _create_meeting(dash_client, "tg-start")
+    calls: list[tuple[int, str]] = []
+
+    def _fake_start(meeting_id: int, chat_id: str):
+        calls.append((meeting_id, chat_id))
+        return {
+            "status": "ready",
+            "meetingId": meeting_id,
+            "chatId": chat_id,
+            "pid": 456,
+            "wsUrl": "ws://localhost:7860",
+            "action": "started",
+        }
+
+    monkeypatch.setattr(dashboard_api._cabinet_voice_lifecycle, "start_session", _fake_start)
+    r = dash_client.post(
+        "/api/cabinet/voice/start",
+        json={"meetingId": meeting_id, "chatId": "tg-start"},
+    )
+    assert r.status_code == 200, r.text
+    assert calls == [(meeting_id, "tg-start")]
+    assert r.json()["status"] == "ready"
+
+
+def test_voice_start_endpoint_rejects_missing_meeting(dash_client: TestClient) -> None:
+    r = dash_client.post(
+        "/api/cabinet/voice/start",
+        json={"meetingId": 999999, "chatId": "tg-missing"},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"] == "meeting_not_found"
+
+
+def test_voice_start_endpoint_surfaces_active_conflict(
+    dash_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dashboard_api  # noqa: PLC0415
+
+    meeting_id = _create_meeting(dash_client, "tg-conflict")
+
+    def _fake_start(meeting_id: int, chat_id: str):
+        raise dashboard_api._cabinet_voice_lifecycle.VoiceSessionActive({
+            "status": "ready",
+            "meetingId": 111,
+            "chatId": "other",
+            "pid": 777,
+        })
+
+    monkeypatch.setattr(dashboard_api._cabinet_voice_lifecycle, "start_session", _fake_start)
+    r = dash_client.post(
+        "/api/cabinet/voice/start",
+        json={"meetingId": meeting_id, "chatId": "tg-conflict"},
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "voice_session_active"
+
+
+def test_voice_stop_allows_ended_meeting_to_stop_process(
+    dash_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dashboard_api  # noqa: PLC0415
+
+    meeting_id = _create_meeting(dash_client, "tg-ended-stop")
+    end = dash_client.post(
+        "/api/cabinet/end",
+        json={"meetingId": meeting_id, "chatId": "tg-ended-stop"},
+    )
+    assert end.status_code == 200
+    monkeypatch.setattr(
+        dashboard_api._cabinet_voice_lifecycle,
+        "stop_session",
+        lambda meeting_id=None, chat_id=None: {
+            "status": "stopped",
+            "meetingId": meeting_id,
+            "chatId": chat_id or "",
+            "pid": None,
+            "action": "stopped",
+        },
+    )
+    r = dash_client.post(
+        "/api/cabinet/voice/stop",
+        json={"meetingId": meeting_id, "chatId": "tg-ended-stop"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "stopped"

@@ -84,6 +84,8 @@ describe('auth: 4-branch boot policy (R4 NM1)', () => {
     app.get('/api/cabinet/voice/ui', (c) => c.json({ ok: true }));
     app.get('/api/cabinet/voice/client.bundle.js', (c) => c.text('js'));
     app.get('/api/cabinet/voice/avatars/:id.png', (c) => c.text('png'));
+    app.get('/api/cabinet/voice/status', (c) => c.json({ ok: true }));
+    app.post('/api/cabinet/voice/start', (c) => c.json({ ok: true }));
     app.post('/api/cabinet/voice/ui', (c) => c.json({ ok: true }));
 
     expect((await app.request('/api/cabinet/voice/ui?token=voice-token')).status).toBe(200);
@@ -91,6 +93,8 @@ describe('auth: 4-branch boot policy (R4 NM1)', () => {
     expect((await app.request('/api/cabinet/voice/avatars/main.png?token=voice-token')).status).toBe(200);
     expect((await app.request('/api/cabinet/voice/ui?token=wrong')).status).toBe(401);
     expect((await app.request('/api/cabinet/voice/ui?token=voice-token', { method: 'POST' })).status).toBe(401);
+    expect((await app.request('/api/cabinet/voice/status?token=voice-token')).status).toBe(401);
+    expect((await app.request('/api/cabinet/voice/start?token=voice-token', { method: 'POST' })).status).toBe(401);
   });
 
   it('token-to-Bearer translation: query token must match expectedToken', async () => {

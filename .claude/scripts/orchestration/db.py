@@ -207,6 +207,8 @@ class OrchestrationDB:
 
     def __init__(self, db_path: str | Path = ":memory:", check_same_thread: bool = True):
         self.db_path = str(db_path)
+        if self.db_path != ":memory:":
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path, check_same_thread=check_same_thread)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
