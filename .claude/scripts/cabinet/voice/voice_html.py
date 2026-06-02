@@ -506,6 +506,7 @@ let micActive = false;
 let connectTimer = null;
 let connectAttemptId = 0;
 let meetingStartedNoticeShown = false;
+let intentionalDisconnect = false;
 window.__cabinetVoiceDebug = {{
   states: [],
   errors: [],
@@ -610,7 +611,10 @@ class CabinetSimpleMediaManager {{
       if (!this._micEnabled || !this._audioCallback) return;
       const input = event.inputBuffer.getChannelData(0);
       const frame = this._downsampleToInt16(input, this._inputContext.sampleRate, this._recorderSampleRate);
-      if (frame.length > 0) this._audioCallback(frame);
+      if (frame.length > 0) {{
+        const frameBytes = new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength);
+        this._audioCallback(frameBytes);
+      }}
     }};
     this._source.connect(this._processor);
     this._processor.connect(this._zeroGain);
@@ -850,7 +854,10 @@ function scheduleConnectTimeout(attemptId) {{
       at: new Date().toISOString(),
     }});
     try {{
-      if (pipecatClient) pipecatClient.disconnect();
+      if (pipecatClient) {{
+        intentionalDisconnect = true;
+        pipecatClient.disconnect();
+      }}
     }} catch (e) {{ /* ignore */ }}
     pipecatClient = null;
     currentTransport = null;
@@ -912,7 +919,16 @@ async function toggleMeeting() {{
           onDisconnected: function() {{
             console.log('[Cabinet] Disconnected');
             window.__cabinetVoiceDebug.states.push({{ state: 'disconnected_callback', at: new Date().toISOString() }});
-            resetMeetingStart('disconnected', null, false);
+            if (intentionalDisconnect) {{
+              intentionalDisconnect = false;
+              resetMeetingStart('disconnected', null, false);
+            }} else {{
+              resetMeetingStart(
+                'disconnected',
+                'Voice disconnected. If another Cabinet Voice tab is open, close it and press Start Meeting here.',
+                true
+              );
+            }}
           }},
           onUserTranscript: function(data) {{
             if (data && data.final) addTranscriptEntry('You', data.text);
@@ -945,6 +961,7 @@ async function toggleMeeting() {{
     btn.disabled = true;
     clearConnectTimer();
     try {{
+      intentionalDisconnect = true;
       if (pipecatClient) {{ await pipecatClient.disconnect(); pipecatClient = null; }}
     }} catch (e) {{ /* ignore */ }}
     currentTransport = null;

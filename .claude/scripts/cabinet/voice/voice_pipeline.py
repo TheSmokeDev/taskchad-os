@@ -186,15 +186,24 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
             return
 
         self._sample_rate = frame.sample_rate or self.DEFAULT_SAMPLE_RATE
-        self._buffer.extend(frame.audio or b"")
+        audio = frame.audio or b""
+        if len(audio) % self._BYTES_PER_SAMPLE != 0:
+            logger.warning(
+                "stt_ignored reason=odd_pcm_bytes bytes=%s sample_rate=%s",
+                _redact(str(len(audio))),
+                _redact(str(self._sample_rate)),
+            )
+            return
+
+        self._buffer.extend(audio)
         self._audio_frame_count += 1
         if self._audio_frame_count == 1 or self._audio_frame_count % 50 == 0:
             logger.info(
                 "stt_audio_frame bytes=%s sample_rate=%s buffer_bytes=%s rms=%s",
-                _redact(str(len(frame.audio or b""))),
+                _redact(str(len(audio))),
                 _redact(str(self._sample_rate)),
                 _redact(str(len(self._buffer))),
-                _redact(str(self._pcm16_rms(frame.audio or b""))),
+                _redact(str(self._pcm16_rms(audio))),
             )
 
         # Safety-net flush only for genuinely long continuous speech. The

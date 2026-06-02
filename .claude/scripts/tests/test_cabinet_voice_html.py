@@ -130,6 +130,22 @@ def test_voice_page_uses_page_local_media_manager():
     assert "createScriptProcessor" in html
 
 
+def test_voice_page_sends_pcm16_bytes_to_pipecat():
+    """Pipecat's WebSocket serializer expects bytes, not an Int16Array object."""
+    html = _render_default()
+    assert "new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength)" in html
+    assert "this._audioCallback(frame);" not in html
+
+
+def test_voice_page_warns_when_replaced_by_another_tab():
+    """The legacy voice server allows one active client; replaced tabs need
+    an operator-visible explanation.
+    """
+    html = _render_default()
+    assert "intentionalDisconnect" in html
+    assert "If another Cabinet Voice tab is open" in html
+
+
 def test_handle_server_message_renders_agent_error():
     """R1 v2 B2 — kill-switch refusals from SSE error events surface as
     transcript entries via the agent_error event handler."""

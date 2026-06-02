@@ -119,3 +119,20 @@ async def test_homie_stt_flushes_on_byte_count_safety_net(monkeypatch) -> None:
     transcripts = [frame for frame in pushed if isinstance(frame, TranscriptionFrame)]
     assert [frame.text for frame in transcripts] == ["long utterance"]
     assert len(seen_paths) == 1
+
+
+@pytest.mark.asyncio
+async def test_homie_stt_rejects_odd_length_pcm_frames(monkeypatch, caplog) -> None:
+    stt, pushed, seen_paths = await _capture_stt_flush(monkeypatch, "should not transcribe")
+    caplog.set_level("WARNING", logger="cabinet.voice.pipeline")
+
+    await stt.process_frame(
+        AudioRawFrame(audio=b"\x00\x10\x7f", sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
+    await stt.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+
+    assert stt._buffer == bytearray()
+    assert pushed == []
+    assert seen_paths == []
+    assert "stt_ignored reason=odd_pcm_bytes bytes=3 sample_rate=16000" in caplog.text
