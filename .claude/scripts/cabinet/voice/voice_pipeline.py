@@ -159,12 +159,16 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
     _DEFAULT_MIN_UTTERANCE_SECS = 0.35
     _DEFAULT_MAX_UTTERANCE_SECS = 8.0
     _DEFAULT_MIN_RMS = 120
+    _DEFAULT_IDLE_FLUSH_SECS = 0.9
+    _DEFAULT_SILENCE_RMS = 350
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._buffer: bytearray = bytearray()
         self._sample_rate: int = self.DEFAULT_SAMPLE_RATE
         self._audio_frame_count: int = 0
+        self._silent_bytes: int = 0
+        self._has_speech: bool = False
 
     async def process_frame(self, frame, direction) -> None:
         await super().process_frame(frame, direction)
@@ -195,6 +199,7 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
             )
             return
 
+        frame_rms = self._pcm16_rms(audio)
         self._buffer.extend(audio)
         self._audio_frame_count += 1
         if self._audio_frame_count == 1 or self._audio_frame_count % 50 == 0:
@@ -203,22 +208,39 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
                 _redact(str(len(audio))),
                 _redact(str(self._sample_rate)),
                 _redact(str(len(self._buffer))),
-                _redact(str(self._pcm16_rms(audio))),
+                _redact(str(frame_rms)),
             )
+
+        if frame_rms <= self._silence_rms():
+            self._silent_bytes += len(audio)
+        else:
+            self._silent_bytes = 0
+            self._has_speech = True
+
+        if (
+            self._has_speech
+            and len(self._buffer) >= self._min_transcribe_bytes(self._sample_rate)
+            and self._silent_bytes >= self._idle_flush_bytes(self._sample_rate)
+        ):
+            await self._flush_to_transcript(self._sample_rate, trigger="idle_silence")
+            return
 
         # Safety-net flush only for genuinely long continuous speech. The
         # previous 1s byte-count flush raced VAD, chopped turns, and sent
-        # silence/noise into Whisper where it hallucinated. The primary
-        # utterance boundary is ``UserStoppedSpeakingFrame`` from Silero VAD.
+        # silence/noise into Whisper where it hallucinated. The preferred
+        # boundary is VAD stop, with idle-silence detection covering browser
+        # WebSocket sessions where VAD stop frames do not arrive reliably.
         if len(self._buffer) >= self._max_flush_bytes(self._sample_rate):
             await self._flush_to_transcript(self._sample_rate, trigger="max_buffer")
 
     async def _flush_to_transcript(self, sample_rate: int, *, trigger: str) -> None:
         if not self._buffer:
             logger.info("stt_flush trigger=%s ignored=empty_buffer", _redact(trigger))
+            self._reset_utterance_state()
             return
         audio_bytes = bytes(self._buffer)
         self._buffer.clear()
+        self._reset_utterance_state()
         duration_ms = int((len(audio_bytes) / (sample_rate * self._BYTES_PER_SAMPLE)) * 1000)
         rms = self._pcm16_rms(audio_bytes)
         logger.info(
@@ -306,8 +328,21 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
         return int(max(1.0, seconds) * sample_rate * cls._BYTES_PER_SAMPLE)
 
     @classmethod
+    def _idle_flush_bytes(cls, sample_rate: int) -> int:
+        seconds = cls._env_float("CABINET_STT_IDLE_FLUSH_SECS", cls._DEFAULT_IDLE_FLUSH_SECS)
+        return int(max(0.1, seconds) * sample_rate * cls._BYTES_PER_SAMPLE)
+
+    @classmethod
     def _min_rms(cls) -> int:
         return int(cls._env_float("CABINET_STT_MIN_RMS", float(cls._DEFAULT_MIN_RMS)))
+
+    @classmethod
+    def _silence_rms(cls) -> int:
+        return int(cls._env_float("CABINET_STT_SILENCE_RMS", float(cls._DEFAULT_SILENCE_RMS)))
+
+    def _reset_utterance_state(self) -> None:
+        self._silent_bytes = 0
+        self._has_speech = False
 
     @staticmethod
     def _env_float(name: str, default: float) -> float:

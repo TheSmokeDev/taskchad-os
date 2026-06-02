@@ -122,6 +122,44 @@ async def test_homie_stt_flushes_on_byte_count_safety_net(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_homie_stt_flushes_on_idle_silence_after_speech(monkeypatch) -> None:
+    monkeypatch.setenv("CABINET_STT_IDLE_FLUSH_SECS", "0.05")
+    monkeypatch.setenv("CABINET_STT_SILENCE_RMS", "350")
+    stt, pushed, seen_paths = await _capture_stt_flush(monkeypatch, "current phrase")
+
+    await stt.process_frame(
+        AudioRawFrame(audio=b"\x00\x10" * 6000, sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
+    assert pushed == []
+
+    await stt.process_frame(
+        AudioRawFrame(audio=b"\x00\x00" * 2000, sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
+
+    transcripts = [frame for frame in pushed if isinstance(frame, TranscriptionFrame)]
+    assert [frame.text for frame in transcripts] == ["current phrase"]
+    assert len(seen_paths) == 1
+    assert stt._buffer == bytearray()
+
+
+@pytest.mark.asyncio
+async def test_homie_stt_does_not_idle_flush_silence_only(monkeypatch) -> None:
+    monkeypatch.setenv("CABINET_STT_IDLE_FLUSH_SECS", "0.05")
+    monkeypatch.setenv("CABINET_STT_SILENCE_RMS", "350")
+    stt, pushed, seen_paths = await _capture_stt_flush(monkeypatch, "should not transcribe")
+
+    await stt.process_frame(
+        AudioRawFrame(audio=b"\x00\x00" * 2000, sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
+
+    assert pushed == []
+    assert seen_paths == []
+
+
+@pytest.mark.asyncio
 async def test_homie_stt_rejects_odd_length_pcm_frames(monkeypatch, caplog) -> None:
     stt, pushed, seen_paths = await _capture_stt_flush(monkeypatch, "should not transcribe")
     caplog.set_level("WARNING", logger="cabinet.voice.pipeline")

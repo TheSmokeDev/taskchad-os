@@ -1,6 +1,6 @@
 # Cabinet Voice
 
-Status: Single-session lifecycle controls shipped
+Status: Single-session lifecycle and browser STT controls shipped
 Owner: Python orchestration and Cabinet voice adapter
 Last updated: 2026-06-01
 
@@ -16,6 +16,11 @@ dashboard can see voice process status, start one local voice subprocess for
 the active Cabinet meeting, stop it, or restart it. Hono and the dashboard stay
 thin over the orchestration API; Python remains the source of truth for process
 state.
+
+The browser microphone adapter sends PCM16 audio into the Python voice pipeline.
+`HomieSTT` handles utterance boundaries with VAD stop frames, a short
+idle-silence flush, and a long max-buffer safety net so spoken turns do not wait
+for a follow-up phrase before transcription.
 
 ## Operator Entry Points
 
@@ -46,6 +51,8 @@ state.
 - Participant turns preserve the default-deny Cabinet tool/runtime policy.
 - The lifecycle supervisor is intentionally single-session for now. It does not
   allocate per-meeting ports or run multiple simultaneous voice rooms.
+- STT flush and audio corruption guards live in Python. The browser page only
+  captures microphone frames and passes PCM bytes to the transport.
 
 ## How To Run It
 
@@ -68,7 +75,7 @@ Open Voice is enabled when the tracked subprocess is ready for that room.
 
 ```powershell
 cd .claude/scripts
-uv run pytest tests/test_cabinet_voice_lifecycle.py tests/test_dashboard_api_cabinet_voice.py tests/test_cabinet_voice_html.py -q
+uv run pytest tests/test_cabinet_voice_state_machine.py tests/test_cabinet_voice_lifecycle.py tests/test_dashboard_api_cabinet_voice.py tests/test_cabinet_voice_html.py -q
 ```
 
 ```powershell
@@ -91,7 +98,7 @@ proof artifacts and local process state remain outside the public manual.
 
 ## Next Slices
 
-- Prove full browser mic-to-Cabinet-turn-to-audio loop from `/voices`.
+- Tune browser mic/STT latency from real Chrome/Edge operator testing if needed.
 - Decide whether multi-session/per-meeting ports are needed after the
   single-session operator flow is stable.
 - Keep future lifecycle expansion in Python; Hono/dashboard remain proxies and

@@ -208,6 +208,10 @@ meeting URL for the selected Cabinet meeting; `/voices` also polls status and
 can start, stop, or restart the local voice subprocess for that meeting. Hono
 and dashboard code remain thin over the orchestration API.
 
+Browser microphone input is still an adapter boundary. The page passes PCM16
+bytes to the transport, and Python-owned `HomieSTT` decides when a spoken turn
+is ready using VAD stop frames, idle-silence flush, and a max-buffer safety net.
+
 Voice should:
 
 - use the same meeting ID
