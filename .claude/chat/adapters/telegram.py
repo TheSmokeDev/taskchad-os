@@ -33,6 +33,10 @@ from voice_markers import parse_send_markers, strip_send_markers
 from security import kill_switches as _kill_switches
 
 
+class TelegramDeliveryError(RuntimeError):
+    """Raised when Telegram cannot deliver non-empty response text."""
+
+
 @dataclass(frozen=True)
 class _TelegramMediaRef:
     """A local file or remote URL that should be sent as Telegram media."""
@@ -267,6 +271,11 @@ class TelegramAdapter:
                     text=text,
                     parse_mode="Markdown",
                 )
+                print(
+                    f"[{datetime.now()}] Telegram edit delivered "
+                    f"message_id={message.update_message_id}",
+                    flush=True,
+                )
                 return message.update_message_id
             except Exception as e:
                 err_msg = str(e)
@@ -274,7 +283,7 @@ class TelegramAdapter:
                 if "is not modified" in err_msg:
                     return message.update_message_id
                 # Other edit failures — fall through to send new message
-                print(f"[{datetime.now()}] Edit failed, sending new: {e}")
+                print(f"[{datetime.now()}] Telegram edit failed, sending new: {e}", flush=True)
 
         # Send media natively when the runtime provides attachments or a Hermes-style
         # MEDIA:/path/to/file.png directive. This avoids echoing local paths into chat.
@@ -290,6 +299,7 @@ class TelegramAdapter:
         # Send new message(s) — split if over 4096 chars
         chunks = self._split_message(text)
         first_id: str | None = None
+        failed_chunks = 0
 
         # Buttons ride on the LAST chunk so they sit under the final content
         # the user reads (matches Discord adapter behavior).
@@ -310,7 +320,7 @@ class TelegramAdapter:
                     first_id = str(sent.message_id)
             except Exception as e:
                 # Fallback: send without markdown if parsing fails
-                print(f"[{datetime.now()}] Markdown send failed, retrying plain: {e}")
+                print(f"[{datetime.now()}] Telegram Markdown send failed, retrying plain: {e}", flush=True)
                 try:
                     sent = await self._app.bot.send_message(
                         chat_id=chat_id,
@@ -320,8 +330,31 @@ class TelegramAdapter:
                     )
                     if first_id is None:
                         first_id = str(sent.message_id)
+                    print(
+                        f"[{datetime.now()}] Telegram plain send fallback succeeded "
+                        f"message_id={sent.message_id}",
+                        flush=True,
+                    )
                 except Exception as e2:
-                    print(f"[{datetime.now()}] Send failed: {e2}")
+                    failed_chunks += 1
+                    print(f"[{datetime.now()}] Telegram send failed after fallback: {e2}", flush=True)
+
+        if failed_chunks:
+            print(
+                f"[{datetime.now()}] Telegram delivery failed: "
+                f"{failed_chunks} text chunk(s) were not delivered",
+                flush=True,
+            )
+            raise TelegramDeliveryError(
+                f"Telegram failed to deliver {failed_chunks} text chunk(s)"
+            )
+        if text.strip() and first_id is None:
+            print(
+                f"[{datetime.now()}] Telegram delivery failed: "
+                "non-empty text produced no message id",
+                flush=True,
+            )
+            raise TelegramDeliveryError("Telegram returned no message id for non-empty text")
 
         return first_id
 
@@ -472,9 +505,9 @@ class TelegramAdapter:
         path = media.source.split("?", 1)[0].lower()
         return path.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"))
 
-    async def update(self, message: OutgoingMessage) -> None:
+    async def update(self, message: OutgoingMessage) -> str | None:
         """Edit an existing message."""
-        await self.send(message)
+        return await self.send(message)
 
     async def send_typing(self, channel: Channel) -> None:
         """Send typing indicator."""

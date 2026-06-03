@@ -314,7 +314,7 @@ class CLIAdapter:
         self._responses.append(message)
         return None
 
-    async def update(self, message: OutgoingMessage) -> None:
+    async def update(self, message: OutgoingMessage) -> str | None:
         """CLI doesn't support message editing.
 
         In quiet mode, do NOT capture updates as the final response.

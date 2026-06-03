@@ -240,9 +240,9 @@ class SlackAdapter:
             except Exception as e2:
                 print(f"[{datetime.now()}] Slack text fallback failed: {e2}")
 
-    async def update(self, message: OutgoingMessage) -> None:
+    async def update(self, message: OutgoingMessage) -> str | None:
         """Edit an existing message (convenience wrapper around send)."""
-        await self.send(message)
+        return await self.send(message)
 
     async def send_typing(self, channel: Channel) -> None:
         """No-op — Slack doesn't support outbound typing indicators for bots."""

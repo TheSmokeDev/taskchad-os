@@ -1,6 +1,6 @@
 # Telegram Command Menu
 
-Status: shipped, live Telegram menu verified
+Status: shipped, live Telegram menu and delivery gate verified
 Owner: `.claude/chat/` command registry and Telegram adapter
 Last updated: 2026-06-02
 
@@ -25,7 +25,7 @@ the visible command list stays useful.
 | Router handlers | `.claude/chat/core_handlers.py`, `.claude/chat/router.py` |
 | Telegram adapter | `.claude/chat/adapters/telegram.py` |
 | LinkedIn prompt | `.claude/commands/linkedin.md` |
-| Tests | `.claude/scripts/tests/test_command_menu.py`, `.claude/scripts/tests/test_skill_intent_gates.py` |
+| Tests | `.claude/scripts/tests/test_command_menu.py`, `.claude/scripts/tests/test_chat_router_timeout.py`, `.claude/scripts/tests/test_adapter_telegram.py` |
 
 ## Safety Boundaries
 
@@ -38,6 +38,9 @@ the visible command list stays useful.
   `/linkedin_profile` policy gates.
 - Telegram's menu refreshes when the Telegram adapter reconnects and registers
   commands again.
+- Follow-up nudges, including `/file` save prompts, are gated behind successful
+  final-answer delivery. A nudge must not become the only visible reply for a
+  turn.
 
 ## How To Run It
 
@@ -62,6 +65,7 @@ Telegram examples:
 ```powershell
 cd .claude/scripts
 uv run pytest tests/test_command_menu.py tests/test_skill_intent_gates.py -q
+uv run pytest tests/test_chat_router_timeout.py tests/test_adapter_telegram.py -q
 ```
 
 ## Latest Live Proof
@@ -73,6 +77,8 @@ uv run pytest tests/test_command_menu.py tests/test_skill_intent_gates.py -q
 - Result after Telegram restart: live menu reports 30 curated native commands,
   includes `/commands` and `/linkedin`, and no longer includes `publish` or
   `blogstatus`.
+- Delivery gate proof: a live Telegram answer rendered in Telegram Web and the
+  bot log recorded final answer delivery before any follow-up delivery.
 
 ## Public Export Status
 

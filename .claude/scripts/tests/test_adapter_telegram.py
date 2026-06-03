@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from adapters.telegram import TelegramAdapter
+from adapters.telegram import TelegramAdapter, TelegramDeliveryError
 from models import Attachment, Channel, OutgoingMessage, Platform
 
 
@@ -13,6 +13,15 @@ class FakeTelegramBot:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self._next_id = 100
+        self.fail_edit = False
+        self.fail_markdown_send = False
+        self.fail_plain_send = False
+
+    async def edit_message_text(self, **kwargs):
+        self.calls.append(("edit_message_text", kwargs))
+        if self.fail_edit:
+            raise RuntimeError("telegram edit failed")
+        return SimpleNamespace(message_id=kwargs["message_id"])
 
     async def send_photo(self, **kwargs):
         self.calls.append(("send_photo", kwargs))
@@ -26,6 +35,10 @@ class FakeTelegramBot:
 
     async def send_message(self, **kwargs):
         self.calls.append(("send_message", kwargs))
+        if kwargs.get("parse_mode") == "Markdown" and self.fail_markdown_send:
+            raise RuntimeError("markdown parse failed")
+        if kwargs.get("parse_mode") is None and self.fail_plain_send:
+            raise RuntimeError("plain send failed")
         self._next_id += 1
         return SimpleNamespace(message_id=self._next_id)
 
@@ -97,3 +110,54 @@ async def test_send_attachment_uses_document_for_non_image(tmp_path: Path) -> No
 
     assert [name for name, _ in bot.calls] == ["send_document"]
     assert bot.calls[0][1]["caption"] == "Report attached"
+
+
+@pytest.mark.asyncio
+async def test_update_falls_back_to_plain_send_and_returns_message_id() -> None:
+    bot = FakeTelegramBot()
+    bot.fail_edit = True
+    bot.fail_markdown_send = True
+    adapter = _adapter_with_fake_bot(bot)
+
+    delivered_id = await adapter.update(
+        OutgoingMessage(
+            text="Final answer with *bad markdown",
+            channel=_channel(),
+            is_update=True,
+            update_message_id="55",
+        )
+    )
+
+    assert delivered_id == "101"
+    assert [name for name, _ in bot.calls] == [
+        "edit_message_text",
+        "send_message",
+        "send_message",
+    ]
+    assert bot.calls[1][1]["parse_mode"] == "Markdown"
+    assert "parse_mode" not in bot.calls[2][1]
+
+
+@pytest.mark.asyncio
+async def test_update_raises_when_markdown_and_plain_delivery_fail() -> None:
+    bot = FakeTelegramBot()
+    bot.fail_edit = True
+    bot.fail_markdown_send = True
+    bot.fail_plain_send = True
+    adapter = _adapter_with_fake_bot(bot)
+
+    with pytest.raises(TelegramDeliveryError, match="failed to deliver"):
+        await adapter.update(
+            OutgoingMessage(
+                text="Final answer with *bad markdown",
+                channel=_channel(),
+                is_update=True,
+                update_message_id="55",
+            )
+        )
+
+    assert [name for name, _ in bot.calls] == [
+        "edit_message_text",
+        "send_message",
+        "send_message",
+    ]

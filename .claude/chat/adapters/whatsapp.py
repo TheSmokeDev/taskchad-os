@@ -301,9 +301,9 @@ class WhatsAppAdapter:
                     except OSError:
                         pass
 
-    async def update(self, message: OutgoingMessage) -> None:
+    async def update(self, message: OutgoingMessage) -> str | None:
         """WhatsApp doesn't support message editing — send new message."""
-        await self.send(message)
+        return await self.send(message)
 
     async def send_typing(self, channel: Channel) -> None:
         """No-op — WhatsApp typing via API is not well-supported."""

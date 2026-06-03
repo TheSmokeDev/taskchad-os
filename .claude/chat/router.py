@@ -460,10 +460,14 @@ class ChatRouter:
         final_is_error = False
         final_footer: str | None = None
         final_components: list[Any] = []
+        followup_messages: list[OutgoingMessage] = []
 
         async def _run_engine() -> None:
             nonlocal final_text, final_is_error, final_footer, final_components
             async for outgoing in self.engine.handle_message(incoming, progress=progress):
+                if final_text:
+                    followup_messages.append(outgoing)
+                    continue
                 final_text = outgoing.text
                 final_is_error = getattr(outgoing, "is_error", False)
                 # gap-6: capture engine-side footer + components (concept draft).
@@ -502,9 +506,11 @@ class ChatRouter:
         if final_components:
             components = list(components) + list(final_components)
 
+        final_delivery_ok = False
+        final_delivery_id: str | None = None
         try:
             if placeholder_id:
-                await adapter.update(
+                final_delivery_id = await adapter.update(
                     OutgoingMessage(
                         text=final_text,
                         channel=incoming.channel,
@@ -515,6 +521,47 @@ class ChatRouter:
                         footer=final_footer,
                     )
                 )
+            else:
+                final_delivery_id = await adapter.send(
+                    OutgoingMessage(
+                        text=final_text,
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                        is_error=final_is_error,
+                        components=components,
+                        footer=final_footer,
+                    )
+                )
+            final_delivery_ok = True
+            print(
+                f"[{datetime.now()}] Final response delivered "
+                f"platform={incoming.platform.value} "
+                f"message_id={final_delivery_id or 'unknown'} "
+                f"followups={len(followup_messages)}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[{datetime.now()}] Failed to deliver final response: {e}", flush=True)
+            try:
+                await adapter.send(
+                    OutgoingMessage(
+                        text=(
+                            "I generated a response, but delivery failed before it "
+                            "could be shown. I suppressed follow-up nudges for this turn."
+                        ),
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                        is_error=True,
+                    )
+                )
+            except Exception as diag_exc:
+                print(
+                    f"[{datetime.now()}] Failed to send delivery diagnostic: {diag_exc}",
+                    flush=True,
+                )
+
+        if final_delivery_ok:
+            try:
                 # Buttons can't be added to edits — send as follow-up
                 if components:
                     await adapter.send(
@@ -526,19 +573,10 @@ class ChatRouter:
                             footer=final_footer if final_components else None,
                         )
                     )
-            else:
-                await adapter.send(
-                    OutgoingMessage(
-                        text=final_text,
-                        channel=incoming.channel,
-                        thread=incoming.thread,
-                        is_error=final_is_error,
-                        components=components,
-                        footer=final_footer,
-                    )
-                )
-        except Exception as e:
-            print(f"[{datetime.now()}] Failed to send response: {e}")
+                for followup in followup_messages:
+                    await adapter.send(followup)
+            except Exception as e:
+                print(f"[{datetime.now()}] Failed to send follow-up response: {e}", flush=True)
 
         if final_is_error:
             self._persist_router_turn(incoming, final_text)

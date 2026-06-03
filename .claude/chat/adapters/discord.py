@@ -231,7 +231,7 @@ class DiscordAdapter:
             sent = await channel.send(**kwargs)
         return str(sent.id) if sent else None
 
-    async def update(self, message: OutgoingMessage) -> None:
+    async def update(self, message: OutgoingMessage) -> str | None:
         """Edit an existing Discord message."""
         if not message.update_message_id:
             return
@@ -244,8 +244,10 @@ class DiscordAdapter:
             if message.components:
                 kwargs["view"] = self._build_view(message.components)
             await msg.edit(**kwargs)
+            return message.update_message_id
         except Exception as e:
             print(f"[{datetime.now()}] Discord edit failed: {e}")
+            return None
 
     async def send_typing(self, channel: Channel) -> None:
         """Send typing indicator."""

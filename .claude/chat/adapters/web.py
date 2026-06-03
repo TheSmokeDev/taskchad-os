@@ -211,9 +211,9 @@ class WebAdapter:
             except OSError:
                 pass
 
-    async def update(self, message: OutgoingMessage) -> None:
+    async def update(self, message: OutgoingMessage) -> str | None:
         """Edit/update an existing message -- same as send for relay."""
-        await self.send(message)
+        return await self.send(message)
 
     async def send_typing(self, channel: Channel) -> None:
         """No-op -- typing indicators not supported via relay."""

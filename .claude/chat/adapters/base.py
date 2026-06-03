@@ -29,8 +29,8 @@ class PlatformAdapter(Protocol):
         """Send a message, return platform message ID for later updates."""
         ...
 
-    async def update(self, message: OutgoingMessage) -> None:
-        """Edit/update an existing message (for streaming updates)."""
+    async def update(self, message: OutgoingMessage) -> str | None:
+        """Edit/update an existing message and return the delivered message ID."""
         ...
 
     async def send_typing(self, channel: Channel) -> None:
