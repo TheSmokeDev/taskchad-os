@@ -1,8 +1,8 @@
 # Cabinet Voice
 
-Status: Single-session lifecycle and browser STT controls shipped
+Status: Single-session lifecycle and browser STT idle timer shipped
 Owner: Python orchestration and Cabinet voice adapter
-Last updated: 2026-06-01
+Last updated: 2026-06-02
 
 ## What It Does
 
@@ -19,8 +19,8 @@ state.
 
 The browser microphone adapter sends PCM16 audio into the Python voice pipeline.
 `HomieSTT` handles utterance boundaries with VAD stop frames, a short
-idle-silence flush, and a long max-buffer safety net so spoken turns do not wait
-for a follow-up phrase before transcription.
+idle-silence flush, a wall-clock idle timer, and a long max-buffer safety net so
+spoken turns do not wait for a follow-up phrase before transcription.
 
 ## Operator Entry Points
 
@@ -51,8 +51,9 @@ for a follow-up phrase before transcription.
 - Participant turns preserve the default-deny Cabinet tool/runtime policy.
 - The lifecycle supervisor is intentionally single-session for now. It does not
   allocate per-meeting ports or run multiple simultaneous voice rooms.
-- STT flush and audio corruption guards live in Python. The browser page only
-  captures microphone frames and passes PCM bytes to the transport.
+- STT flush timing, idle timers, and audio corruption guards live in Python.
+  The browser page only captures microphone frames and passes PCM bytes to the
+  transport.
 
 ## How To Run It
 
@@ -96,9 +97,19 @@ This page is public-framework documentation and is exported through the
 sanitizer manual allowlist. The deep setup guide is also public-safe. Private
 proof artifacts and local process state remain outside the public manual.
 
+## Latest Proof
+
+- State-machine coverage proves the idle timer flushes a current phrase without
+  requiring a next audio frame and that continued speech resets the timer before
+  transcription.
+- Focused voice coverage command:
+  `uv run pytest tests/test_cabinet_voice_state_machine.py tests/test_cabinet_voice_html.py tests/test_cabinet_voice_lifecycle.py tests/test_dashboard_api_cabinet_voice.py -q`
+
 ## Next Slices
 
-- Tune browser mic/STT latency from real Chrome/Edge operator testing if needed.
+- Run the real Chrome/Edge mic retest when the operator is available and confirm
+  live logs show `stt_flush trigger=idle_timer` or `idle_silence` for the
+  current phrase without needing a second phrase.
 - Decide whether multi-session/per-meeting ports are needed after the
   single-session operator flow is stable.
 - Keep future lifecycle expansion in Python; Hono/dashboard remain proxies and

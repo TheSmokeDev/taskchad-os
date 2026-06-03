@@ -31,6 +31,7 @@ config edit, or kill-switch refusal works transparently.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -145,8 +146,8 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
     Idle detection: Pipecat's ``WebsocketServerTransport`` does NOT do VAD
     on its own (vad_analyzer=None matches upstream warroom/server.py:146).
     So we accumulate audio frames until we receive a ``UserStoppedSpeaking``
-    signal (or fall back to a configurable idle timeout). owner's voice
-    cabinet is single-speaker so this naive flush model is fine.
+    signal, enough trailing silent audio, or the wall-clock idle timer fires.
+    owner's voice cabinet is single-speaker so this naive flush model is fine.
 
     Sample rate: PCM16 mono at 16 kHz (matches the Pipecat browser client
     bundle + warroom/server.py:131-149).
@@ -160,7 +161,7 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
     _DEFAULT_MAX_UTTERANCE_SECS = 8.0
     _DEFAULT_MIN_RMS = 120
     _DEFAULT_IDLE_FLUSH_SECS = 0.9
-    _DEFAULT_SILENCE_RMS = 350
+    _DEFAULT_SILENCE_RMS = 180
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -169,6 +170,10 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
         self._audio_frame_count: int = 0
         self._silent_bytes: int = 0
         self._has_speech: bool = False
+        self._speech_generation: int = 0
+        self._idle_flush_task: asyncio.Task[None] | None = None
+        self._idle_flush_generation: int | None = None
+        self._flush_lock = asyncio.Lock()
 
     async def process_frame(self, frame, direction) -> None:
         await super().process_frame(frame, direction)
@@ -216,6 +221,10 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
         else:
             self._silent_bytes = 0
             self._has_speech = True
+            self._speech_generation += 1
+
+        if self._has_speech and len(self._buffer) >= self._min_transcribe_bytes(self._sample_rate):
+            self._arm_idle_flush_timer(self._sample_rate, self._speech_generation)
 
         if (
             self._has_speech
@@ -234,63 +243,98 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
             await self._flush_to_transcript(self._sample_rate, trigger="max_buffer")
 
     async def _flush_to_transcript(self, sample_rate: int, *, trigger: str) -> None:
-        if not self._buffer:
-            logger.info("stt_flush trigger=%s ignored=empty_buffer", _redact(trigger))
+        async with self._flush_lock:
+            if not self._buffer:
+                logger.info("stt_flush trigger=%s ignored=empty_buffer", _redact(trigger))
+                self._reset_utterance_state()
+                return
+            audio_bytes = bytes(self._buffer)
+            self._buffer.clear()
             self._reset_utterance_state()
-            return
-        audio_bytes = bytes(self._buffer)
-        self._buffer.clear()
-        self._reset_utterance_state()
-        duration_ms = int((len(audio_bytes) / (sample_rate * self._BYTES_PER_SAMPLE)) * 1000)
-        rms = self._pcm16_rms(audio_bytes)
-        logger.info(
-            "stt_flush trigger=%s bytes=%s duration_ms=%s rms=%s",
-            _redact(trigger),
-            _redact(str(len(audio_bytes))),
-            _redact(str(duration_ms)),
-            _redact(str(rms)),
-        )
-
-        if len(audio_bytes) < self._min_transcribe_bytes(sample_rate):
+            duration_ms = int((len(audio_bytes) / (sample_rate * self._BYTES_PER_SAMPLE)) * 1000)
+            rms = self._pcm16_rms(audio_bytes)
             logger.info(
-                "stt_ignored reason=too_short bytes=%s min_bytes=%s",
+                "stt_flush trigger=%s bytes=%s duration_ms=%s rms=%s",
+                _redact(trigger),
                 _redact(str(len(audio_bytes))),
-                _redact(str(self._min_transcribe_bytes(sample_rate))),
-            )
-            return
-        if rms < self._min_rms():
-            logger.info(
-                "stt_ignored reason=low_rms rms=%s min_rms=%s",
+                _redact(str(duration_ms)),
                 _redact(str(rms)),
-                _redact(str(self._min_rms())),
             )
-            return
 
-        # Wrap raw PCM as a WAV file for voice.transcribe_audio_file.
-        try:
-            wav_path = await self._buffer_to_temp_wav(audio_bytes, sample_rate)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("HomieSTT WAV wrap failed: %s", _redact(str(exc)))
-            return
+            if len(audio_bytes) < self._min_transcribe_bytes(sample_rate):
+                logger.info(
+                    "stt_ignored reason=too_short bytes=%s min_bytes=%s",
+                    _redact(str(len(audio_bytes))),
+                    _redact(str(self._min_transcribe_bytes(sample_rate))),
+                )
+                return
+            if rms < self._min_rms():
+                logger.info(
+                    "stt_ignored reason=low_rms rms=%s min_rms=%s",
+                    _redact(str(rms)),
+                    _redact(str(self._min_rms())),
+                )
+                return
 
-        try:
-            import voice  # noqa: PLC0415 — late-bind so import failures don't kill pipeline.
-            text = await self._transcribe_wav(voice, wav_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("HomieSTT transcribe failed: %s", _redact(str(exc)))
-            text = ""
-        finally:
+            # Wrap raw PCM as a WAV file for voice.transcribe_audio_file.
             try:
-                os.unlink(wav_path)
-            except OSError:
-                pass
+                wav_path = await self._buffer_to_temp_wav(audio_bytes, sample_rate)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("HomieSTT WAV wrap failed: %s", _redact(str(exc)))
+                return
 
-        text = (text or "").strip()
-        if not text:
+            try:
+                import voice  # noqa: PLC0415 — late-bind so import failures don't kill pipeline.
+                text = await self._transcribe_wav(voice, wav_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("HomieSTT transcribe failed: %s", _redact(str(exc)))
+                text = ""
+            finally:
+                try:
+                    os.unlink(wav_path)
+                except OSError:
+                    pass
+
+            text = (text or "").strip()
+            if not text:
+                return
+
+            # Emit final transcription so AgentRouter routes it.
+            await self.push_frame(TranscriptionFrame(text=text, user_id="user", timestamp=""))
+
+    def _arm_idle_flush_timer(self, sample_rate: int, speech_generation: int) -> None:
+        current = self._idle_flush_task
+        if current is not None and not current.done():
+            if self._idle_flush_generation == speech_generation:
+                return
+            current.cancel()
+        task = asyncio.create_task(self._idle_flush_after(sample_rate, speech_generation))
+        self._idle_flush_task = task
+        self._idle_flush_generation = speech_generation
+
+    async def _idle_flush_after(self, sample_rate: int, speech_generation: int) -> None:
+        try:
+            await asyncio.sleep(self._idle_flush_secs())
+            if speech_generation != self._speech_generation:
+                return
+            if not self._has_speech or len(self._buffer) < self._min_transcribe_bytes(sample_rate):
+                return
+            await self._flush_to_transcript(sample_rate, trigger="idle_timer")
+        except asyncio.CancelledError:
             return
 
-        # Emit final transcription so AgentRouter routes it.
-        await self.push_frame(TranscriptionFrame(text=text, user_id="user", timestamp=""))
+    def _cancel_idle_flush_timer(self) -> None:
+        task = self._idle_flush_task
+        if task is None:
+            return
+        self._idle_flush_task = None
+        self._idle_flush_generation = None
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not current and not task.done():
+            task.cancel()
 
     async def _transcribe_wav(self, voice_module, wav_path: str) -> str:
         """Transcribe with the cabinet's free/local preference first.
@@ -329,8 +373,12 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
 
     @classmethod
     def _idle_flush_bytes(cls, sample_rate: int) -> int:
+        return int(cls._idle_flush_secs() * sample_rate * cls._BYTES_PER_SAMPLE)
+
+    @classmethod
+    def _idle_flush_secs(cls) -> float:
         seconds = cls._env_float("CABINET_STT_IDLE_FLUSH_SECS", cls._DEFAULT_IDLE_FLUSH_SECS)
-        return int(max(0.1, seconds) * sample_rate * cls._BYTES_PER_SAMPLE)
+        return max(0.1, seconds)
 
     @classmethod
     def _min_rms(cls) -> int:
@@ -341,8 +389,10 @@ class HomieSTT(FrameProcessor):  # type: ignore[misc]
         return int(cls._env_float("CABINET_STT_SILENCE_RMS", float(cls._DEFAULT_SILENCE_RMS)))
 
     def _reset_utterance_state(self) -> None:
+        self._cancel_idle_flush_timer()
         self._silent_bytes = 0
         self._has_speech = False
+        self._speech_generation += 1
 
     @staticmethod
     def _env_float(name: str, default: float) -> float:

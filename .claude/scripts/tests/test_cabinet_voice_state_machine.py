@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from types import SimpleNamespace
 
@@ -142,6 +143,51 @@ async def test_homie_stt_flushes_on_idle_silence_after_speech(monkeypatch) -> No
     assert [frame.text for frame in transcripts] == ["current phrase"]
     assert len(seen_paths) == 1
     assert stt._buffer == bytearray()
+
+
+@pytest.mark.asyncio
+async def test_homie_stt_idle_timer_flushes_without_next_audio_frame(monkeypatch) -> None:
+    monkeypatch.setenv("CABINET_STT_IDLE_FLUSH_SECS", "0.1")
+    stt, pushed, seen_paths = await _capture_stt_flush(monkeypatch, "current phrase")
+
+    await stt.process_frame(
+        AudioRawFrame(audio=b"\x00\x10" * 6000, sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
+    assert pushed == []
+
+    await asyncio.sleep(0.2)
+
+    transcripts = [frame for frame in pushed if isinstance(frame, TranscriptionFrame)]
+    assert [frame.text for frame in transcripts] == ["current phrase"]
+    assert len(seen_paths) == 1
+    assert stt._buffer == bytearray()
+
+
+@pytest.mark.asyncio
+async def test_homie_stt_idle_timer_resets_while_speech_continues(monkeypatch) -> None:
+    monkeypatch.setenv("CABINET_STT_IDLE_FLUSH_SECS", "0.25")
+    stt, pushed, seen_paths = await _capture_stt_flush(monkeypatch, "combined phrase")
+
+    await stt.process_frame(
+        AudioRawFrame(audio=b"\x00\x10" * 6000, sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
+    await asyncio.sleep(0.05)
+    await stt.process_frame(
+        AudioRawFrame(audio=b"\x00\x10" * 6000, sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
+    await asyncio.sleep(0.12)
+
+    assert pushed == []
+    assert seen_paths == []
+
+    await asyncio.sleep(0.2)
+
+    transcripts = [frame for frame in pushed if isinstance(frame, TranscriptionFrame)]
+    assert [frame.text for frame in transcripts] == ["combined phrase"]
+    assert len(seen_paths) == 1
 
 
 @pytest.mark.asyncio
