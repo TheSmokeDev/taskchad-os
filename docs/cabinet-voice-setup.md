@@ -50,8 +50,9 @@ For the broader Cabinet dashboard manual and room-state vertical slice, see `doc
 | `CABINET_LIVEKIT_TOKEN_TTL_S` | `1800` | Browser participant token TTL, clamped between 60 seconds and 24 hours. |
 | `CABINET_LIVEKIT_ROOM_PREFIX` | `cabinet` | Prefix for deterministic LiveKit room names such as `cabinet-42`. |
 | `CABINET_LIVEKIT_AGENT_NAME` | `cabinet-livekit-agent` | Expected Python LiveKit agent name/identity prefix. |
-| `CABINET_LIVEKIT_STT_MODEL` | `deepgram/nova-3` | LiveKit Agents STT model passed to `livekit.agents.inference.STT`. |
-| `CABINET_LIVEKIT_STT_LANGUAGE` | `multi` | STT language hint passed to LiveKit Agents. |
+| `CABINET_LIVEKIT_STT_PROVIDER` | `openai` | STT provider for the LiveKit runner. Use `openai` for local dev with `OPENAI_API_KEY`; use `inference` for LiveKit Cloud inference credentials. |
+| `CABINET_LIVEKIT_STT_MODEL` | `gpt-4o-mini-transcribe` | STT model passed to the selected provider. |
+| `CABINET_LIVEKIT_STT_LANGUAGE` | `en` | STT language hint passed to LiveKit Agents. |
 | `CABINET_LIVEKIT_TURN_DETECTION` | `stt` | Turn detection mode passed through `turn_handling`. |
 
 ## Per-persona voice configuration
@@ -184,10 +185,14 @@ uv run --extra livekit python -m cabinet.voice.livekit_agent --meeting-id 16 --c
 ```
 
 The local LiveKit server is the media transport. The default STT path uses
-`livekit.agents.inference.STT`, so real transcription also requires whatever
-LiveKit inference/provider credentials and model access are valid for the
-selected `CABINET_LIVEKIT_STT_MODEL`. LiveKit audio response/TTS is
-intentionally out of scope until the transcript path is proven locally.
+the LiveKit OpenAI plugin with `OPENAI_API_KEY` loaded from `.env` or the
+process environment, plus LiveKit Silero VAD because OpenAI STT is not a
+native streaming STT. To use LiveKit Cloud inference instead, set
+`CABINET_LIVEKIT_STT_PROVIDER=inference`, choose an inference model such as
+`deepgram/nova-3`, and provide real LiveKit Cloud credentials. Local dev
+`devkey/secret` are valid for the local room/token server, but not for
+LiveKit Cloud inference. LiveKit audio response/TTS is intentionally out of
+scope until the transcript path is proven locally.
 
 For phone testing, open the dashboard over the machine's Tailscale URL and
 include the Cabinet chat scope, for example:

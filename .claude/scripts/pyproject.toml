@@ -117,7 +117,7 @@ voice = [
 # checkout must still run without WebRTC/agent dependencies installed.
 livekit = [
     "livekit-api>=1.0.0",
-    "livekit-agents>=1.0.0",
+    "livekit-agents[openai,silero]>=1.5,<2",
 ]
 
 [tool.ruff]

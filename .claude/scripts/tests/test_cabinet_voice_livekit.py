@@ -77,7 +77,8 @@ def test_create_browser_session_uses_room_scoped_token(monkeypatch: pytest.Monke
 def test_livekit_agent_config_uses_room_and_stt_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CABINET_LIVEKIT_URL", "ws://127.0.0.1:7880")
     monkeypatch.setenv("CABINET_LIVEKIT_AGENT_NAME", "cabinet-agent")
-    monkeypatch.setenv("CABINET_LIVEKIT_STT_MODEL", "deepgram/nova-3")
+    monkeypatch.setenv("CABINET_LIVEKIT_STT_PROVIDER", "openai")
+    monkeypatch.setenv("CABINET_LIVEKIT_STT_MODEL", "gpt-4o-mini-transcribe")
     monkeypatch.setenv("CABINET_LIVEKIT_STT_LANGUAGE", "en")
     monkeypatch.setenv("CABINET_LIVEKIT_TURN_DETECTION", "stt")
 
@@ -91,7 +92,8 @@ def test_livekit_agent_config_uses_room_and_stt_env(monkeypatch: pytest.MonkeyPa
     assert config_obj.room_name == "cabinet-16"
     assert config_obj.server_url == "ws://127.0.0.1:7880"
     assert config_obj.agent_name == "cabinet-agent"
-    assert config_obj.stt_model == "deepgram/nova-3"
+    assert config_obj.stt_provider == "openai"
+    assert config_obj.stt_model == "gpt-4o-mini-transcribe"
     assert config_obj.stt_language == "en"
     assert config_obj.turn_detection == "stt"
 
@@ -154,6 +156,7 @@ async def test_livekit_agent_server_wires_transcript_only_session(
         room_name="cabinet-16",
         server_url="ws://127.0.0.1:7880",
         agent_name="cabinet-livekit-agent",
+        stt_provider="openai",
         stt_model="deepgram/nova-3",
         stt_language="multi",
         turn_detection="stt",
@@ -177,6 +180,7 @@ async def test_livekit_agent_server_wires_transcript_only_session(
     }
     assert captured["agent_name"] == "cabinet-livekit-agent"
     assert captured["stt_kwargs"] == {
+        "provider": "openai",
         "model": "deepgram/nova-3",
         "language": "multi",
         "api_key": "devkey",
@@ -255,6 +259,7 @@ def test_livekit_run_agent_app_defaults_to_meeting_room(monkeypatch: pytest.Monk
         room_name="cabinet-16",
         server_url="ws://127.0.0.1:7880",
         agent_name="cabinet-livekit-agent",
+        stt_provider="openai",
         stt_model="deepgram/nova-3",
         stt_language="multi",
         turn_detection="stt",

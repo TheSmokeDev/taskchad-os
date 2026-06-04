@@ -101,7 +101,11 @@ Default local dev credentials are `LIVEKIT_API_KEY=devkey` and
 `LIVEKIT_API_SECRET=secret` when the LiveKit dev server is started with
 `--dev`. Do not commit those values; set them in the local process environment.
 The runner defaults to LiveKit CLI `connect --room cabinet-<meetingId>`; pass
-explicit LiveKit CLI args after `--chat-id` when using another mode.
+explicit LiveKit CLI args after `--chat-id` when using another mode. Local
+transcription defaults to OpenAI STT through the LiveKit OpenAI plugin and
+Silero VAD, and requires `OPENAI_API_KEY` in `.env` or the process
+environment. Set `CABINET_LIVEKIT_STT_PROVIDER=inference` only when using real
+LiveKit Cloud inference credentials.
 
 ## How To Test It
 
@@ -135,8 +139,9 @@ proof artifacts and local process state remain outside the public manual.
   transcription.
 - LiveKit spike coverage proves the token endpoint validates Cabinet meetings,
   returns room-scoped browser metadata without exposing API secrets, wires a
-  transcript-only LiveKit Agents session with STT turn handling, and hands
-  final transcripts to Cabinet with `audience="auto"` and no forced target.
+  transcript-only LiveKit Agents session with provider-selectable STT turn
+  handling, and hands final transcripts to Cabinet with `audience="auto"` and
+  no forced target.
 - Broader voice coverage command passed `138` tests:
   `uv run pytest tests/test_cabinet_voice_html.py tests/test_cabinet_voice_architectural_locks.py tests/test_cabinet_voice_agent_bridge.py tests/test_cabinet_voice_state_machine.py tests/test_cabinet_voice_router.py tests/test_cabinet_voice_personas.py tests/test_cabinet_voice_livekit.py tests/test_cabinet_voice_lifecycle.py tests/test_cabinet_voice_integration.py tests/test_dashboard_api_cabinet_voice.py -q`
 

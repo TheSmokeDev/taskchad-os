@@ -22,10 +22,18 @@ logger = logging.getLogger("cabinet.voice.livekit_agent")
 from cabinet.voice import livekit_session  # noqa: E402
 from security import redact as _redact_mod  # noqa: E402
 
+try:
+    from dotenv import load_dotenv  # noqa: PLC0415
+
+    load_dotenv()
+except ImportError:  # pragma: no cover - python-dotenv is a base dependency.
+    pass
+
 _redact = _redact_mod.redact
 
-DEFAULT_STT_MODEL = "deepgram/nova-3"
-DEFAULT_STT_LANGUAGE = "multi"
+DEFAULT_STT_PROVIDER = "openai"
+DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe"
+DEFAULT_STT_LANGUAGE = "en"
 DEFAULT_TURN_DETECTION = "stt"
 AGENT_INSTRUCTIONS = (
     "You are a transcript-only Cabinet voice transport adapter. "
@@ -42,6 +50,7 @@ class LiveKitAgentConfig:
     room_name: str
     server_url: str
     agent_name: str
+    stt_provider: str
     stt_model: str
     stt_language: str
     turn_detection: str
@@ -60,6 +69,7 @@ def build_agent_config(*, meeting_id: int, chat_id: str | None = None) -> LiveKi
         room_name=livekit_session.build_room_name(meeting_id),
         server_url=livekit_session.livekit_server_url(),
         agent_name=livekit_session.livekit_agent_name(),
+        stt_provider=_env_text("CABINET_LIVEKIT_STT_PROVIDER", DEFAULT_STT_PROVIDER).lower(),
         stt_model=_env_text("CABINET_LIVEKIT_STT_MODEL", DEFAULT_STT_MODEL),
         stt_language=_env_text("CABINET_LIVEKIT_STT_LANGUAGE", DEFAULT_STT_LANGUAGE),
         turn_detection=_env_text("CABINET_LIVEKIT_TURN_DETECTION", DEFAULT_TURN_DETECTION),
@@ -141,14 +151,78 @@ def _load_livekit_agent_deps():
             Agent,
             AgentServer,
             AgentSession,
-            inference,
             room_io,
         )
     except ImportError as exc:  # pragma: no cover - optional dependency guard.
         raise livekit_session.LiveKitDependencyMissing(
             "Install the optional livekit extra to run the Cabinet LiveKit agent"
         ) from exc
-    return agents, Agent, AgentServer, AgentSession, inference, room_io
+    return agents, Agent, AgentServer, AgentSession, room_io
+
+
+def _create_stt(config: LiveKitAgentConfig, *, livekit_api_key: str, livekit_api_secret: str):
+    provider = (config.stt_provider or DEFAULT_STT_PROVIDER).lower()
+    if provider in {"livekit", "inference", "livekit-inference"}:
+        try:
+            from livekit.agents import inference  # noqa: PLC0415
+        except ImportError as exc:  # pragma: no cover - optional dependency guard.
+            raise livekit_session.LiveKitDependencyMissing(
+                "Install the optional livekit extra to use LiveKit inference STT"
+            ) from exc
+        return inference.STT(
+            model=config.stt_model,
+            language=config.stt_language,
+            api_key=livekit_api_key,
+            api_secret=livekit_api_secret,
+        )
+
+    if provider == "openai":
+        try:
+            from livekit.plugins import openai  # noqa: PLC0415
+        except ImportError as exc:  # pragma: no cover - optional dependency guard.
+            raise livekit_session.LiveKitDependencyMissing(
+                "Install the optional livekit extra with OpenAI plugin support"
+            ) from exc
+        return openai.STT(
+            model=config.stt_model,
+            language=config.stt_language,
+        )
+
+    raise livekit_session.LiveKitConfigError(
+        "CABINET_LIVEKIT_STT_PROVIDER must be one of: openai, inference"
+    )
+
+
+def _create_vad(config: LiveKitAgentConfig):
+    provider = (config.stt_provider or DEFAULT_STT_PROVIDER).lower()
+    if provider != "openai":
+        return None
+    try:
+        from livekit.plugins import silero  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - optional dependency guard.
+        raise livekit_session.LiveKitDependencyMissing(
+            "Install the optional livekit extra with Silero VAD support"
+        ) from exc
+    return silero.VAD.load()
+
+
+def _preload_stt_provider(config: LiveKitAgentConfig) -> None:
+    """Import plugin-backed STT providers on the main thread before jobs start."""
+
+    provider = (config.stt_provider or DEFAULT_STT_PROVIDER).lower()
+    if provider == "openai":
+        try:
+            from livekit.plugins import openai as _openai_plugin  # noqa: F401, PLC0415
+        except ImportError as exc:  # pragma: no cover - optional dependency guard.
+            raise livekit_session.LiveKitDependencyMissing(
+                "Install the optional livekit extra with OpenAI plugin support"
+            ) from exc
+        try:
+            from livekit.plugins import silero as _silero_plugin  # noqa: F401, PLC0415
+        except ImportError as exc:  # pragma: no cover - optional dependency guard.
+            raise livekit_session.LiveKitDependencyMissing(
+                "Install the optional livekit extra with Silero VAD support"
+            ) from exc
 
 
 def create_agent_server(
@@ -168,15 +242,15 @@ def create_agent_server(
     """
 
     api_key, api_secret = livekit_session.livekit_api_credentials()
-    if not all(
-        [server_factory, session_factory, stt_factory, agent_factory, room_options_factory]
-    ):
-        _, Agent, AgentServer, AgentSession, inference, room_io = _load_livekit_agent_deps()
+    if not all([server_factory, session_factory, agent_factory, room_options_factory]):
+        _, Agent, AgentServer, AgentSession, room_io = _load_livekit_agent_deps()
         server_factory = server_factory or AgentServer
         session_factory = session_factory or AgentSession
-        stt_factory = stt_factory or inference.STT
         agent_factory = agent_factory or Agent
         room_options_factory = room_options_factory or room_io.RoomOptions
+
+    if stt_factory is None:
+        _preload_stt_provider(config)
 
     server = server_factory(
         ws_url=config.server_url,
@@ -186,16 +260,25 @@ def create_agent_server(
 
     @server.rtc_session(agent_name=config.agent_name)
     async def _cabinet_livekit_session(ctx) -> None:
-        stt = stt_factory(
-            model=config.stt_model,
-            language=config.stt_language,
-            api_key=api_key,
-            api_secret=api_secret,
-        )
-        session = session_factory(
-            stt=stt,
-            turn_handling={"turn_detection": config.turn_detection},
-        )
+        if stt_factory is not None:
+            stt = stt_factory(
+                provider=config.stt_provider,
+                model=config.stt_model,
+                language=config.stt_language,
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+        else:
+            stt = _create_stt(config, livekit_api_key=api_key, livekit_api_secret=api_secret)
+        session_kwargs = {
+            "stt": stt,
+            "turn_handling": {"turn_detection": config.turn_detection},
+        }
+        if stt_factory is None:
+            vad = _create_vad(config)
+            if vad is not None:
+                session_kwargs["vad"] = vad
+        session = session_factory(**session_kwargs)
         register_handoff(session, meeting_id=config.meeting_id, chat_id=config.chat_id)
         agent = agent_factory(instructions=AGENT_INSTRUCTIONS)
         room_options = room_options_factory(
@@ -204,10 +287,11 @@ def create_agent_server(
             text_output=False,
         )
         logger.info(
-            "livekit_agent_start meeting=%s room=%s url=%s model=%s language=%s",
+            "livekit_agent_start meeting=%s room=%s url=%s stt_provider=%s model=%s language=%s",
             _redact(str(config.meeting_id)),
             _redact(config.room_name),
             _redact(config.server_url),
+            _redact(config.stt_provider),
             _redact(config.stt_model),
             _redact(config.stt_language),
         )
@@ -262,6 +346,7 @@ __all__ = [
     "AGENT_INSTRUCTIONS",
     "DEFAULT_STT_LANGUAGE",
     "DEFAULT_STT_MODEL",
+    "DEFAULT_STT_PROVIDER",
     "DEFAULT_TURN_DETECTION",
     "LiveKitAgentConfig",
     "build_agent_config",
