@@ -105,7 +105,9 @@ def build_participant_identity(meeting_id: int, chat_id: str) -> str:
     return f"cabinet-browser-{meeting_id}-{scope}"
 
 
-def _livekit_api_credentials() -> tuple[str, str]:
+def livekit_api_credentials() -> tuple[str, str]:
+    """Resolve server-side LiveKit API credentials for local token/agent work."""
+
     key = (os.environ.get("LIVEKIT_API_KEY") or "").strip()
     secret = (os.environ.get("LIVEKIT_API_SECRET") or "").strip()
     if not key or not secret:
@@ -131,7 +133,7 @@ def _mint_room_token(
             "Install the optional livekit extra to mint LiveKit tokens"
         ) from exc
 
-    api_key, api_secret = _livekit_api_credentials()
+    api_key, api_secret = livekit_api_credentials()
     token = (
         api.AccessToken(api_key, api_secret)
         .with_ttl(timedelta(seconds=ttl_seconds))
@@ -207,6 +209,7 @@ __all__ = [
     "build_participant_identity",
     "build_room_name",
     "create_browser_session",
+    "livekit_api_credentials",
     "livekit_agent_name",
     "livekit_server_url",
     "livekit_token_ttl_seconds",

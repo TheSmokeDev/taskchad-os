@@ -2,7 +2,7 @@
 
 The Homie's cabinet voice feature gives operators a single-user voice meeting with their cabinet personas through a browser. The stable path ports from ClaudeClaw's war room: a server-rendered HTML page drives a Pipecat WebSocket client that connects to a small Python voice subprocess. The voice subprocess routes turns through the same brain (`text_orchestrator.handle_text_turn`) that powers Telegram cabinet meetings, so persona behavior stays identical across surfaces.
 
-A parallel LiveKit local transport spike now exists beside Pipecat. It does not replace the Pipecat path yet. The first LiveKit slice mints room-scoped browser tokens, lets the dashboard join a local LiveKit room and publish the microphone, and provides a Python final-transcript handoff into Cabinet's normal text router. Spoken LiveKit TTS is a later slice.
+A parallel LiveKit local transport spike now exists beside Pipecat. It does not replace the Pipecat path yet. The current LiveKit slice mints room-scoped browser tokens, lets the dashboard join a local LiveKit room and publish the microphone, runs a Python LiveKit Agents transcript receiver, and posts final STT user turns into Cabinet's normal text router. Spoken LiveKit TTS is a later slice.
 
 For the broader Cabinet dashboard manual and room-state vertical slice, see `docs/cabinet-room-manual.md`.
 
@@ -16,7 +16,7 @@ For the broader Cabinet dashboard manual and room-state vertical slice, see `doc
 | Lifecycle supervisor | `.claude/scripts/cabinet/voice/lifecycle.py` | Python-owned single-session status/start/stop/restart process control. |
 | Voice pipeline | `transport.input → HomieSTT → AgentRouter → HomieAgentBridge → HomieTTS → transport.output` | Verbatim port of ClaudeClaw `warroom/server.py:751-758` legacy mode. |
 | LiveKit session/token spike | `GET /api/cabinet/voice/livekit/session` + `.claude/scripts/cabinet/voice/livekit_session.py` | Issues local room metadata and browser participant tokens without exposing LiveKit secrets. |
-| LiveKit transcript handoff | `.claude/scripts/cabinet/voice/livekit_agent.py` | Posts final LiveKit transcripts to Cabinet with `is_voice=True`, `audience="auto"`, and no forced target. |
+| LiveKit transcript runner | `python -m cabinet.voice.livekit_agent --meeting-id N` | Joins the LiveKit room through AgentServer, receives final STT user-turn events, and posts transcripts to Cabinet with `is_voice=True`, `audience="auto"`, and no forced target. |
 | Persona reasoning | Phase 5a `text_orchestrator.handle_text_turn` over HTTP | Voice never invokes an LLM directly; it consumes the Phase 5a SSE stream. |
 
 ## Prerequisites
@@ -45,11 +45,14 @@ For the broader Cabinet dashboard manual and room-state vertical slice, see `doc
 | `ORCHESTRATION_API_BASE_URL` | `http://127.0.0.1:4322` | Base URL the voice subprocess uses to reach the cabinet HTTP API. |
 | `ORCHESTRATION_API_TOKEN` | (empty) | Bearer token if the orchestration API process has authentication enabled. |
 | `CABINET_LIVEKIT_URL` | `ws://127.0.0.1:7880` | LiveKit signal URL for the local OSS spike. |
-| `LIVEKIT_API_KEY` | (empty) | Server-side LiveKit API key used only to mint browser tokens. |
-| `LIVEKIT_API_SECRET` | (empty) | Server-side LiveKit API secret; never returned by the API. |
+| `LIVEKIT_API_KEY` | (empty) | Server-side LiveKit API key used to mint browser tokens and run the Python LiveKit agent; never returned by the API. |
+| `LIVEKIT_API_SECRET` | (empty) | Server-side LiveKit API secret for token/agent work; never returned by the API. |
 | `CABINET_LIVEKIT_TOKEN_TTL_S` | `1800` | Browser participant token TTL, clamped between 60 seconds and 24 hours. |
 | `CABINET_LIVEKIT_ROOM_PREFIX` | `cabinet` | Prefix for deterministic LiveKit room names such as `cabinet-42`. |
 | `CABINET_LIVEKIT_AGENT_NAME` | `cabinet-livekit-agent` | Expected Python LiveKit agent name/identity prefix. |
+| `CABINET_LIVEKIT_STT_MODEL` | `deepgram/nova-3` | LiveKit Agents STT model passed to `livekit.agents.inference.STT`. |
+| `CABINET_LIVEKIT_STT_LANGUAGE` | `multi` | STT language hint passed to LiveKit Agents. |
+| `CABINET_LIVEKIT_TURN_DETECTION` | `stt` | Turn detection mode passed through `turn_handling`. |
 
 ## Per-persona voice configuration
 
@@ -159,10 +162,32 @@ $env:LIVEKIT_API_SECRET = "secret"
 ```
 
 Then open `/voices` and use Join LiveKit. The first shipped Python contract is
-the final-transcript handoff helper used by a LiveKit Agents session; the
-AgentServer runner that receives real STT events is the next slice. LiveKit
-audio response/TTS is intentionally out of scope until the transcript path is
-proven locally.
+the final-transcript handoff helper used by a LiveKit Agents session.
+
+Start the transcript receiver in a second terminal:
+
+```powershell
+cd .claude/scripts
+uv run --extra livekit python -m cabinet.voice.livekit_agent --meeting-id 16 --chat-id cabinet-browser
+```
+
+With no trailing LiveKit CLI args, the runner defaults to:
+
+```text
+connect --room cabinet-16
+```
+
+You can pass explicit LiveKit CLI args after the Cabinet flags when needed:
+
+```powershell
+uv run --extra livekit python -m cabinet.voice.livekit_agent --meeting-id 16 --chat-id cabinet-browser connect --room cabinet-16
+```
+
+The local LiveKit server is the media transport. The default STT path uses
+`livekit.agents.inference.STT`, so real transcription also requires whatever
+LiveKit inference/provider credentials and model access are valid for the
+selected `CABINET_LIVEKIT_STT_MODEL`. LiveKit audio response/TTS is
+intentionally out of scope until the transcript path is proven locally.
 
 For phone testing, open the dashboard over the machine's Tailscale URL and
 include the Cabinet chat scope, for example:

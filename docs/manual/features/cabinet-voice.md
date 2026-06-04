@@ -1,6 +1,6 @@
 # Cabinet Voice
 
-Status: Pipecat lifecycle stable; LiveKit local transport spike wired
+Status: Pipecat lifecycle stable; LiveKit transcript runner wired
 Owner: Python orchestration and Cabinet voice adapter
 Last updated: 2026-06-04
 
@@ -22,11 +22,12 @@ pipeline. `HomieSTT` handles utterance boundaries with VAD stop frames, a short
 idle-silence flush, a wall-clock idle timer, and a long max-buffer safety net so
 spoken turns do not wait for a follow-up phrase before transcription.
 
-A parallel LiveKit local transport spike is now wired beside Pipecat. The
+A parallel LiveKit local transport lane is now wired beside Pipecat. The
 dashboard can request a room-scoped browser token for `ws://127.0.0.1:7880`,
-join the LiveKit room, and publish the microphone. The Python LiveKit handoff
-module posts final transcripts into the same Cabinet text orchestrator with
-`is_voice=True`, `audience="auto"`, and no forced target. TTS over LiveKit is
+join the LiveKit room, and publish the microphone. A Python LiveKit Agents
+runner can join the same room, receive final STT user-turn events, and post
+those transcripts into the same Cabinet text orchestrator with `is_voice=True`,
+`audience="auto"`, and no forced target. Spoken/TTS response over LiveKit is
 not shipped yet.
 
 ## Operator Entry Points
@@ -37,6 +38,8 @@ not shipped yet.
 - API: `/api/cabinet/voice/ui`
 - API lifecycle: `/api/cabinet/voice/status`, `/start`, `/stop`, `/restart`
 - LiveKit spike API: `/api/cabinet/voice/livekit/session`
+- LiveKit transcript runner:
+  `python -m cabinet.voice.livekit_agent --meeting-id <id> --chat-id <chat>`
 
 ## Source Of Truth Files
 
@@ -91,11 +94,14 @@ LiveKit local spike:
 livekit-server --dev
 cd .claude/scripts
 uv sync --extra livekit
+uv run --extra livekit python -m cabinet.voice.livekit_agent --meeting-id 16 --chat-id cabinet-browser
 ```
 
 Default local dev credentials are `LIVEKIT_API_KEY=devkey` and
 `LIVEKIT_API_SECRET=secret` when the LiveKit dev server is started with
 `--dev`. Do not commit those values; set them in the local process environment.
+The runner defaults to LiveKit CLI `connect --room cabinet-<meetingId>`; pass
+explicit LiveKit CLI args after `--chat-id` when using another mode.
 
 ## How To Test It
 
@@ -128,9 +134,10 @@ proof artifacts and local process state remain outside the public manual.
   requiring a next audio frame and that continued speech resets the timer before
   transcription.
 - LiveKit spike coverage proves the token endpoint validates Cabinet meetings,
-  returns room-scoped browser metadata without exposing API secrets, and hands
+  returns room-scoped browser metadata without exposing API secrets, wires a
+  transcript-only LiveKit Agents session with STT turn handling, and hands
   final transcripts to Cabinet with `audience="auto"` and no forced target.
-- Broader voice coverage command passed `134` tests:
+- Broader voice coverage command passed `138` tests:
   `uv run pytest tests/test_cabinet_voice_html.py tests/test_cabinet_voice_architectural_locks.py tests/test_cabinet_voice_agent_bridge.py tests/test_cabinet_voice_state_machine.py tests/test_cabinet_voice_router.py tests/test_cabinet_voice_personas.py tests/test_cabinet_voice_livekit.py tests/test_cabinet_voice_lifecycle.py tests/test_cabinet_voice_integration.py tests/test_dashboard_api_cabinet_voice.py -q`
 
 ## Next Slices
@@ -138,9 +145,8 @@ proof artifacts and local process state remain outside the public manual.
 - Run the real Chrome/Edge mic retest when the operator is available and confirm
   live logs show `stt_flush trigger=idle_timer` or `idle_silence` for the
   current phrase without needing a second phrase.
-- Add the LiveKit AgentServer runner around the shipped transcript handoff,
-  then prove a final transcript reaches the Cabinet room from the LiveKit mic
-  transport.
+- Start the LiveKit runner against a local LiveKit server and prove a final
+  transcript reaches the Cabinet room from the real browser mic transport.
 - Add LiveKit spoken/TTS response after the transcript path is proven.
 - Decide whether multi-session/per-meeting ports are needed after the
   single-session operator flow is stable.

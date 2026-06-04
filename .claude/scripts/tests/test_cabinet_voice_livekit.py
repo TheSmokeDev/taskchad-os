@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -71,6 +72,214 @@ def test_create_browser_session_uses_room_scoped_token(monkeypatch: pytest.Monke
     wire = json.dumps(session.to_wire())
     assert "devkey" not in wire
     assert "devsecret" not in wire
+
+
+def test_livekit_agent_config_uses_room_and_stt_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CABINET_LIVEKIT_URL", "ws://127.0.0.1:7880")
+    monkeypatch.setenv("CABINET_LIVEKIT_AGENT_NAME", "cabinet-agent")
+    monkeypatch.setenv("CABINET_LIVEKIT_STT_MODEL", "deepgram/nova-3")
+    monkeypatch.setenv("CABINET_LIVEKIT_STT_LANGUAGE", "en")
+    monkeypatch.setenv("CABINET_LIVEKIT_TURN_DETECTION", "stt")
+
+    config_obj = livekit_agent.build_agent_config(
+        meeting_id=16,
+        chat_id="cabinet-browser",
+    )
+
+    assert config_obj.meeting_id == 16
+    assert config_obj.chat_id == "cabinet-browser"
+    assert config_obj.room_name == "cabinet-16"
+    assert config_obj.server_url == "ws://127.0.0.1:7880"
+    assert config_obj.agent_name == "cabinet-agent"
+    assert config_obj.stt_model == "deepgram/nova-3"
+    assert config_obj.stt_language == "en"
+    assert config_obj.turn_detection == "stt"
+
+
+@pytest.mark.asyncio
+async def test_livekit_agent_server_wires_transcript_only_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVEKIT_API_KEY", "devkey")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "devsecret")
+    captured: dict = {}
+
+    class FakeServer:
+        def __init__(self, **kwargs):
+            captured["server_kwargs"] = kwargs
+            self.callback = None
+
+        def rtc_session(self, *, agent_name: str):
+            captured["agent_name"] = agent_name
+
+            def decorator(callback):
+                self.callback = callback
+                return callback
+
+            return decorator
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session_kwargs"] = kwargs
+            self.events = {}
+
+        def on(self, event_name: str):
+            def decorator(callback):
+                self.events[event_name] = callback
+                return callback
+
+            return decorator
+
+        async def start(self, **kwargs):
+            captured["start_kwargs"] = kwargs
+
+    fake_server = FakeServer
+    fake_session = FakeSession
+
+    def fake_stt(**kwargs):
+        captured["stt_kwargs"] = kwargs
+        return "fake-stt"
+
+    def fake_agent(**kwargs):
+        captured["agent_kwargs"] = kwargs
+        return "fake-agent"
+
+    def fake_room_options(**kwargs):
+        captured["room_options_kwargs"] = kwargs
+        return "fake-room-options"
+
+    config_obj = livekit_agent.LiveKitAgentConfig(
+        meeting_id=16,
+        chat_id="cabinet-browser",
+        room_name="cabinet-16",
+        server_url="ws://127.0.0.1:7880",
+        agent_name="cabinet-livekit-agent",
+        stt_model="deepgram/nova-3",
+        stt_language="multi",
+        turn_detection="stt",
+    )
+
+    server = livekit_agent.create_agent_server(
+        config_obj,
+        server_factory=fake_server,
+        session_factory=fake_session,
+        stt_factory=fake_stt,
+        agent_factory=fake_agent,
+        room_options_factory=fake_room_options,
+    )
+
+    await server.callback(SimpleNamespace(room="livekit-room"))
+
+    assert captured["server_kwargs"] == {
+        "ws_url": "ws://127.0.0.1:7880",
+        "api_key": "devkey",
+        "api_secret": "devsecret",
+    }
+    assert captured["agent_name"] == "cabinet-livekit-agent"
+    assert captured["stt_kwargs"] == {
+        "model": "deepgram/nova-3",
+        "language": "multi",
+        "api_key": "devkey",
+        "api_secret": "devsecret",
+    }
+    assert captured["session_kwargs"] == {
+        "stt": "fake-stt",
+        "turn_handling": {"turn_detection": "stt"},
+    }
+    assert "turn_detection" not in captured["session_kwargs"]
+    assert captured["agent_kwargs"]["instructions"] == livekit_agent.AGENT_INSTRUCTIONS
+    assert captured["room_options_kwargs"] == {
+        "audio_input": True,
+        "audio_output": False,
+        "text_output": False,
+    }
+    assert captured["start_kwargs"] == {
+        "room": "livekit-room",
+        "agent": "fake-agent",
+        "room_options": "fake-room-options",
+    }
+
+
+@pytest.mark.asyncio
+async def test_livekit_register_user_transcript_handoff_schedules_final_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+
+    class FakeSession:
+        def __init__(self):
+            self.events = {}
+
+        def on(self, event_name: str):
+            def decorator(callback):
+                self.events[event_name] = callback
+                return callback
+
+            return decorator
+
+    async def fake_handoff(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(livekit_agent, "handoff_transcript_to_cabinet", fake_handoff)
+    fake_session = FakeSession()
+
+    livekit_agent.register_user_transcript_handoff(
+        fake_session,
+        meeting_id=16,
+        chat_id="cabinet-browser",
+    )
+
+    callback = fake_session.events["user_input_transcribed"]
+    callback(SimpleNamespace(is_final=False, transcript="partial"))
+    await asyncio.sleep(0)
+    assert calls == []
+
+    callback(SimpleNamespace(is_final=True, transcript="final phrase"))
+    await asyncio.sleep(0)
+
+    assert calls == [
+        {
+            "meeting_id": 16,
+            "chat_id": "cabinet-browser",
+            "transcript": "final phrase",
+        }
+    ]
+
+
+def test_livekit_run_agent_app_defaults_to_meeting_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+    config_obj = livekit_agent.LiveKitAgentConfig(
+        meeting_id=16,
+        chat_id="cabinet-browser",
+        room_name="cabinet-16",
+        server_url="ws://127.0.0.1:7880",
+        agent_name="cabinet-livekit-agent",
+        stt_model="deepgram/nova-3",
+        stt_language="multi",
+        turn_detection="stt",
+    )
+
+    def fake_create_server(received_config):
+        captured["config"] = received_config
+        return "fake-server"
+
+    def fake_cli_runner(server):
+        captured["server"] = server
+        captured["argv"] = sys.argv[:]
+
+    monkeypatch.setattr(sys, "argv", ["cabinet-livekit-agent"])
+
+    livekit_agent.run_agent_app(
+        config_obj,
+        create_server_fn=fake_create_server,
+        cli_runner=fake_cli_runner,
+    )
+
+    assert captured["config"] == config_obj
+    assert captured["server"] == "fake-server"
+    assert captured["argv"] == ["cabinet-livekit-agent", "connect", "--room", "cabinet-16"]
+    assert sys.argv == ["cabinet-livekit-agent"]
 
 
 def test_livekit_session_endpoint_returns_token_without_secrets(
