@@ -53,6 +53,9 @@ describe('cabinet UI surface — static contract', () => {
     expect(src).toContain('/api/cabinet/voice/start');
     expect(src).toContain('/api/cabinet/voice/stop');
     expect(src).toContain('/api/cabinet/voice/restart');
+    expect(src).toContain('/api/cabinet/voice/livekit/session');
+    expect(src).toContain("import('livekit-client')");
+    expect(src).toContain('Join LiveKit');
     expect(src).toContain('Voice Subprocess');
   });
 

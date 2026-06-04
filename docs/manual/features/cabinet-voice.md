@@ -1,8 +1,8 @@
 # Cabinet Voice
 
-Status: Single-session lifecycle and browser STT idle timer shipped
+Status: Pipecat lifecycle stable; LiveKit local transport spike wired
 Owner: Python orchestration and Cabinet voice adapter
-Last updated: 2026-06-02
+Last updated: 2026-06-04
 
 ## What It Does
 
@@ -17,10 +17,17 @@ the active Cabinet meeting, stop it, or restart it. Hono and the dashboard stay
 thin over the orchestration API; Python remains the source of truth for process
 state.
 
-The browser microphone adapter sends PCM16 audio into the Python voice pipeline.
-`HomieSTT` handles utterance boundaries with VAD stop frames, a short
+The browser microphone adapter sends PCM16 audio into the Python Pipecat voice
+pipeline. `HomieSTT` handles utterance boundaries with VAD stop frames, a short
 idle-silence flush, a wall-clock idle timer, and a long max-buffer safety net so
 spoken turns do not wait for a follow-up phrase before transcription.
+
+A parallel LiveKit local transport spike is now wired beside Pipecat. The
+dashboard can request a room-scoped browser token for `ws://127.0.0.1:7880`,
+join the LiveKit room, and publish the microphone. The Python LiveKit handoff
+module posts final transcripts into the same Cabinet text orchestrator with
+`is_voice=True`, `audience="auto"`, and no forced target. TTS over LiveKit is
+not shipped yet.
 
 ## Operator Entry Points
 
@@ -29,12 +36,13 @@ spoken turns do not wait for a follow-up phrase before transcription.
 - Cabinet room: mic button on `/cabinet`
 - API: `/api/cabinet/voice/ui`
 - API lifecycle: `/api/cabinet/voice/status`, `/start`, `/stop`, `/restart`
+- LiveKit spike API: `/api/cabinet/voice/livekit/session`
 
 ## Source Of Truth Files
 
 | Layer | Files |
 |---|---|
-| Python/runtime | `.claude/scripts/cabinet/voice/`, `.claude/scripts/cabinet/voice/lifecycle.py`, `.claude/scripts/dashboard_api.py` |
+| Python/runtime | `.claude/scripts/cabinet/voice/`, `.claude/scripts/cabinet/voice/lifecycle.py`, `.claude/scripts/cabinet/voice/livekit_session.py`, `.claude/scripts/cabinet/voice/livekit_agent.py`, `.claude/scripts/dashboard_api.py` |
 | Chat/router | `.claude/chat/core_handlers.py`, `.claude/scripts/integrations/cabinet_api.py` |
 | Hono/dashboard server | `dashboard/server/src/routes/cabinet.ts`, `dashboard/server/src/middleware/auth.ts` |
 | Dashboard web | `dashboard/web/src/pages/Voices.tsx`, `dashboard/web/src/pages/Cabinet.tsx`, `dashboard/web/src/lib/cabinet-voice-url.ts` |
@@ -46,6 +54,9 @@ spoken turns do not wait for a follow-up phrase before transcription.
 - Voice does not maintain separate canonical roster truth.
 - Voice routes participant turns through the Cabinet orchestration API and
   text orchestrator.
+- Unaddressed voice turns use Cabinet's `auto` routing path. Explicit spoken
+  targets, pinned targets, and broadcast triggers still bypass the text router
+  only when the operator provided that target.
 - Hono and dashboard stay thin over Python-owned URL/static/avatar/lifecycle
   endpoints.
 - Participant turns preserve the default-deny Cabinet tool/runtime policy.
@@ -70,13 +81,27 @@ http://127.0.0.1:5173/voices
 
 The `/voices` page creates or reuses the Cabinet room, polls lifecycle status,
 and exposes Start, Stop, and Restart controls for the local voice subprocess.
-Open Voice is enabled when the tracked subprocess is ready for that room.
+Open Voice is enabled when the tracked subprocess is ready for that room. The
+same page also exposes Join LiveKit for the local OSS transport spike; run a
+local LiveKit server first and set LiveKit credentials before using that path.
+
+LiveKit local spike:
+
+```powershell
+livekit-server --dev
+cd .claude/scripts
+uv sync --extra livekit
+```
+
+Default local dev credentials are `LIVEKIT_API_KEY=devkey` and
+`LIVEKIT_API_SECRET=secret` when the LiveKit dev server is started with
+`--dev`. Do not commit those values; set them in the local process environment.
 
 ## How To Test It
 
 ```powershell
 cd .claude/scripts
-uv run pytest tests/test_cabinet_voice_state_machine.py tests/test_cabinet_voice_lifecycle.py tests/test_dashboard_api_cabinet_voice.py tests/test_cabinet_voice_html.py -q
+uv run pytest tests/test_cabinet_voice_html.py tests/test_cabinet_voice_architectural_locks.py tests/test_cabinet_voice_agent_bridge.py tests/test_cabinet_voice_state_machine.py tests/test_cabinet_voice_router.py tests/test_cabinet_voice_personas.py tests/test_cabinet_voice_livekit.py tests/test_cabinet_voice_lifecycle.py tests/test_cabinet_voice_integration.py tests/test_dashboard_api_cabinet_voice.py -q
 ```
 
 ```powershell
@@ -102,14 +127,21 @@ proof artifacts and local process state remain outside the public manual.
 - State-machine coverage proves the idle timer flushes a current phrase without
   requiring a next audio frame and that continued speech resets the timer before
   transcription.
-- Focused voice coverage command:
-  `uv run pytest tests/test_cabinet_voice_state_machine.py tests/test_cabinet_voice_html.py tests/test_cabinet_voice_lifecycle.py tests/test_dashboard_api_cabinet_voice.py -q`
+- LiveKit spike coverage proves the token endpoint validates Cabinet meetings,
+  returns room-scoped browser metadata without exposing API secrets, and hands
+  final transcripts to Cabinet with `audience="auto"` and no forced target.
+- Broader voice coverage command passed `134` tests:
+  `uv run pytest tests/test_cabinet_voice_html.py tests/test_cabinet_voice_architectural_locks.py tests/test_cabinet_voice_agent_bridge.py tests/test_cabinet_voice_state_machine.py tests/test_cabinet_voice_router.py tests/test_cabinet_voice_personas.py tests/test_cabinet_voice_livekit.py tests/test_cabinet_voice_lifecycle.py tests/test_cabinet_voice_integration.py tests/test_dashboard_api_cabinet_voice.py -q`
 
 ## Next Slices
 
 - Run the real Chrome/Edge mic retest when the operator is available and confirm
   live logs show `stt_flush trigger=idle_timer` or `idle_silence` for the
   current phrase without needing a second phrase.
+- Add the LiveKit AgentServer runner around the shipped transcript handoff,
+  then prove a final transcript reaches the Cabinet room from the LiveKit mic
+  transport.
+- Add LiveKit spoken/TTS response after the transcript path is proven.
 - Decide whether multi-session/per-meeting ports are needed after the
   single-session operator flow is stable.
 - Keep future lifecycle expansion in Python; Hono/dashboard remain proxies and

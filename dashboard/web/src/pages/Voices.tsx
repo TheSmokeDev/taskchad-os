@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
+import type { Room as LiveKitRoom } from 'livekit-client';
 import { ExternalLink, MessageSquare, Mic, Play, RefreshCw, RotateCw, Square } from 'lucide-preact';
 import { TopBar } from '@/components/TopBar';
 import { apiGet, apiPost, chatId as dashboardChatId } from '@/lib/api';
@@ -17,6 +18,10 @@ export function Voices() {
   const [loading, setLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [voiceAction, setVoiceAction] = useState<string | null>(null);
+  const [liveKitSession, setLiveKitSession] = useState<LiveKitSessionResponse | null>(null);
+  const [liveKitRoom, setLiveKitRoom] = useState<LiveKitRoom | null>(null);
+  const [liveKitStatus, setLiveKitStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
+  const [liveKitError, setLiveKitError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const roster = room?.roster ?? room?.agents ?? [];
@@ -28,6 +33,7 @@ export function Voices() {
   const voiceReady = voiceStatus?.status === 'ready' && voiceMatchesRoom;
   const voiceActive = Boolean(voiceStatus?.active && voiceMatchesRoom);
   const voiceConflict = Boolean(voiceStatus?.active && !voiceMatchesRoom);
+  const liveKitConnected = liveKitStatus === 'connected' && liveKitRoom !== null;
 
   async function openRoom() {
     setLoading(true);
@@ -77,6 +83,56 @@ export function Voices() {
     }
   }
 
+  async function joinLiveKit() {
+    if (!room) return;
+    setLiveKitStatus('connecting');
+    setLiveKitError(null);
+    try {
+      liveKitRoom?.disconnect();
+      const qs = new URLSearchParams({
+        meetingId: String(room.meetingId),
+        chatId: cabinetChatId,
+      });
+      const session = await apiGet<LiveKitSessionResponse>(
+        `/api/cabinet/voice/livekit/session?${qs.toString()}`,
+      );
+      const livekit = await import('livekit-client');
+      const nextRoom = new livekit.Room({
+        adaptiveStream: true,
+        dynacast: true,
+        audioCaptureDefaults: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      nextRoom.on(livekit.RoomEvent.Disconnected, () => {
+        setLiveKitStatus('idle');
+        setLiveKitRoom(null);
+      });
+      await nextRoom.connect(session.serverUrl, session.participantToken, {
+        autoSubscribe: true,
+      });
+      await nextRoom.localParticipant.setMicrophoneEnabled(true, {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      });
+      setLiveKitSession(session);
+      setLiveKitRoom(nextRoom);
+      setLiveKitStatus('connected');
+    } catch (err) {
+      setLiveKitStatus('error');
+      setLiveKitError(err instanceof Error ? err.message : 'LiveKit connection failed');
+    }
+  }
+
+  function leaveLiveKit() {
+    liveKitRoom?.disconnect();
+    setLiveKitRoom(null);
+    setLiveKitStatus('idle');
+  }
+
   useEffect(() => {
     void openRoom();
   }, []);
@@ -89,6 +145,10 @@ export function Voices() {
     }, 3000);
     return () => window.clearInterval(timer);
   }, [room?.meetingId, cabinetChatId]);
+
+  useEffect(() => () => {
+    liveKitRoom?.disconnect();
+  }, [liveKitRoom]);
 
   return (
     <div class="flex flex-col h-full min-h-0">
@@ -210,6 +270,50 @@ export function Voices() {
                   )}
                 </div>
 
+                <div class="border border-[var(--color-border)] rounded-md p-3">
+                  <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
+                    <div class="min-w-0">
+                      <div class="text-sm font-semibold">LiveKit Transport</div>
+                      <div class="text-xs text-[var(--color-text-muted)] break-words">
+                        {liveKitConnected
+                          ? `${liveKitSession?.roomName ?? 'room'} / mic published`
+                          : liveKitStatus === 'connecting'
+                            ? 'Connecting microphone...'
+                            : 'Local room token pending'}
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 w-full md:w-auto">
+                      <button
+                        type="button"
+                        onClick={() => void joinLiveKit()}
+                        disabled={!room || liveKitStatus === 'connecting' || liveKitConnected}
+                        class="min-h-11 md:min-h-8 px-2 md:px-3 inline-flex items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] text-sm hover:bg-[var(--color-hover)] disabled:opacity-50 disabled:pointer-events-none"
+                      >
+                        <Mic size={14} />
+                        Join LiveKit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={leaveLiveKit}
+                        disabled={!liveKitConnected}
+                        class="min-h-11 md:min-h-8 px-2 md:px-3 inline-flex items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] text-sm hover:bg-[var(--color-hover)] disabled:opacity-50 disabled:pointer-events-none"
+                      >
+                        <Square size={14} />
+                        Leave
+                      </button>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                    <Metric label="Mode" value="local oss" />
+                    <Metric label="Signal" value={liveKitSession?.serverUrl ?? 'ws://127.0.0.1:7880'} />
+                    <Metric label="Room" value={liveKitSession?.roomName ?? '-'} />
+                    <Metric label="Agent" value={liveKitSession?.agentName ?? '-'} />
+                  </div>
+                  {liveKitError && (
+                    <div class="mt-3 text-xs text-red-500 break-words">{liveKitError}</div>
+                  )}
+                </div>
+
                 <div class="border border-[var(--color-border)] rounded-md overflow-hidden">
                   <div class="px-3 py-2 text-xs uppercase tracking-wide text-[var(--color-text-muted)] border-b border-[var(--color-border)]">
                     Roster Snapshot
@@ -308,6 +412,22 @@ interface VoiceStatusResponse {
     stt: boolean;
     tts: boolean;
   };
+}
+
+interface LiveKitSessionResponse {
+  ok: boolean;
+  transport: 'livekit';
+  mode: 'local_oss_spike';
+  meetingId: number;
+  chatId: string;
+  roomName: string;
+  serverUrl: string;
+  participantIdentity: string;
+  participantName: string;
+  participantToken: string;
+  agentIdentity: string;
+  agentName: string;
+  expiresInS: number;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

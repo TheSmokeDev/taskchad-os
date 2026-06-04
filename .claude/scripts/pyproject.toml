@@ -113,6 +113,12 @@ dev = [
 voice = [
     "pipecat-ai[websocket,silero]==0.0.108",
 ]
+# Cabinet LiveKit transport spike. Optional because the default framework
+# checkout must still run without WebRTC/agent dependencies installed.
+livekit = [
+    "livekit-api>=1.0.0",
+    "livekit-agents>=1.0.0",
+]
 
 [tool.ruff]
 target-version = "py312"

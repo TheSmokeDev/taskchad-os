@@ -11,7 +11,8 @@ is preserved exactly:
      ``AgentRouteFrame(agent_id="research", mode="single")``.
   4. Pinned agent (set by dashboard via :data:`config.PIN_PATH`) → emit
      ``AgentRouteFrame(agent_id=pinned, mode="single")``.
-  5. Default fallback → emit ``AgentRouteFrame(agent_id="main", mode="single")``.
+  5. Default fallback → emit ``AgentRouteFrame(mode="auto")`` so Cabinet's
+     text router picks the responder.
 
 The wire string ``"main"`` is preserved verbatim at this boundary (Q4
 translation lock). The Homie-side translation to internal id ``"default"``
@@ -76,13 +77,21 @@ except ImportError:  # pragma: no cover — pipecat optional dep.
         pass
 
     class TranscriptionFrame:  # type: ignore[no-redef]
-        pass
+        def __init__(self, text: str = "", user_id: str = "", timestamp: str = "", **kwargs) -> None:
+            self.text = text
+            self.user_id = user_id
+            self.timestamp = timestamp
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
-    class InterimTranscriptionFrame:  # type: ignore[no-redef]
+    class InterimTranscriptionFrame(TranscriptionFrame):  # type: ignore[no-redef]
         pass
 
     class TextFrame:  # type: ignore[no-redef]
-        pass
+        def __init__(self, text: str = "", **kwargs) -> None:
+            self.text = text
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
 
 from . import config as voice_config  # noqa: E402
@@ -218,7 +227,7 @@ class AgentRouteFrame(DataFrame):  # type: ignore[misc]
 
     agent_id: str = ""
     message: str = ""
-    mode: str = "single"  # "single" or "broadcast"
+    mode: str = "single"  # "single", "broadcast", or "auto"
 
 
 class AgentRouter(FrameProcessor):  # type: ignore[misc]
@@ -226,7 +235,7 @@ class AgentRouter(FrameProcessor):  # type: ignore[misc]
     AgentRouteFrames downstream to the HomieAgentBridge.
 
     Verbatim port of warroom/router.py:144-266 (entire class). Routing
-    precedence: broadcast trigger → name-prefix → pinned → main.
+    precedence: broadcast trigger → name-prefix → pinned → Cabinet auto-router.
     """
 
     def __init__(self, agent_names: list[str] | set[str] | None = None, **kwargs):
@@ -363,11 +372,12 @@ class AgentRouter(FrameProcessor):  # type: ignore[misc]
             await self.push_frame(route)
             return
 
-        # Default: route to main agent.
+        # Default: let Cabinet's text router choose the responder. This keeps
+        # unaddressed speech behavior aligned with typed Cabinet messages.
         route = AgentRouteFrame(
-            agent_id="main",
+            agent_id="",
             message=text,
-            mode="single",
+            mode="auto",
         )
         await self.push_frame(route)
 

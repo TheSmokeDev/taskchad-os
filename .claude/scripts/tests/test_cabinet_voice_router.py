@@ -188,8 +188,8 @@ async def test_name_prefix_uses_meeting_roster_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_default_main_emits_single_route_frame(monkeypatch):
-    """When no broadcast/prefix/pin matches, route to main."""
+async def test_default_unaddressed_speech_emits_auto_route_frame(monkeypatch):
+    """When no broadcast/prefix/pin matches, let Cabinet's text router choose."""
     router = voice_router.AgentRouter()
     pushed: list = []
 
@@ -205,8 +205,8 @@ async def test_default_main_emits_single_route_frame(monkeypatch):
 
     assert len(pushed) == 1
     f, _ = pushed[0]
-    assert f.agent_id == "main"
-    assert f.mode == "single"
+    assert f.agent_id == ""
+    assert f.mode == "auto"
 
 
 @pytest.mark.asyncio

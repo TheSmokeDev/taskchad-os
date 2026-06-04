@@ -152,6 +152,7 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/cabinet/voice/start',
   '/api/cabinet/voice/stop',
   '/api/cabinet/voice/restart',
+  '/api/cabinet/voice/livekit/session',
   '/api/cabinet/voice/ui',
   '/api/cabinet/voice/client.bundle.js',
   '/api/cabinet/voice/client.js',

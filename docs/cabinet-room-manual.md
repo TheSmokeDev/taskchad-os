@@ -91,6 +91,7 @@ Expected: slash commands are handled by the server and are not sent to the LLM a
 | Surface | Location | Purpose |
 |---|---|---|
 | Cabinet page | `dashboard/web/src/pages/Cabinet.tsx` | Main browser room. Owns layout, roster chips, meeting list, selected room state, and wiring to the stream/composer/transcript components. |
+| Voice page | `dashboard/web/src/pages/Voices.tsx` | Pipecat lifecycle controls plus the local LiveKit transport spike join/leave control. |
 | Composer | `dashboard/web/src/components/CabinetComposer.tsx` | Builds `/api/cabinet/send` bodies. No mention defaults to `audience="all"`; mentions default to `audience="mentions"`. |
 | Transcript | `dashboard/web/src/components/CabinetTranscript.tsx` | Renders baseline transcript rows plus live SSE events. Shows router decisions, typing states, agent replies, and errors. |
 | Stream helper | `dashboard/web/src/lib/cabinet-stream.ts` | Connects browser `EventSource` to the Hono stream endpoint and handles transcript fetches. |
@@ -133,6 +134,12 @@ CabinetComposer
 ```
 
 Key invariant: the chat process and orchestration API process are separate processes. Do not cross that boundary with in-process channel registries. Browser, Telegram, and other external surfaces must reach Cabinet through the orchestration HTTP API.
+
+Voice transport follows the same rule. Pipecat and LiveKit are adapters over a
+Cabinet meeting; neither owns room truth. Unaddressed voice transcripts enter
+`handle_text_turn()` with `audience="auto"` so Cabinet's normal router decides
+the responder. Explicit spoken targets, pins, and broadcasts can still provide
+deterministic targets.
 
 ## 6. Roster And Participant State
 

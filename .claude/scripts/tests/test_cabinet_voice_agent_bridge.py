@@ -66,6 +66,7 @@ def _patch_cabinet_api(captured: dict, stream_events):
     async def capture_send(**kwargs):
         captured["client_msg_id"] = kwargs.get("client_msg_id")
         captured["target_agent_id"] = kwargs.get("target_agent_id")
+        captured["audience"] = kwargs.get("audience")
         captured["is_voice"] = kwargs.get("is_voice")
         captured["meeting_id"] = kwargs.get("meeting_id")
         captured["text"] = kwargs.get("text")
@@ -130,10 +131,13 @@ async def test_call_agent_uses_cabinet_api_send_message_is_voice(monkeypatch):
 
     reply = await bridge._call_agent("research", "what's new")
 
-    assert reply == "Three new threats this week."
+    assert reply is not None
+    assert reply.text == "Three new threats this week."
+    assert reply.agent_id == "research"
     # B1 lock — both kwargs must be set on the send.
     assert captured["is_voice"] is True
     assert captured["target_agent_id"] == "research"
+    assert captured["audience"] == "auto"
     assert captured["client_msg_id"]  # non-empty
     assert captured["meeting_id"] == 42
     assert captured["text"] == "what's new"
@@ -170,8 +174,8 @@ async def test_sse_error_event_renders_friendly_message(monkeypatch):
     reply = await bridge._call_agent("research", "anything")
 
     assert reply is not None
-    assert "Cabinet kill-switch disabled by operator" in reply
-    assert "declined" in reply.lower()
+    assert "Cabinet kill-switch disabled by operator" in reply.text
+    assert "declined" in reply.text.lower()
 
 
 @pytest.mark.asyncio
@@ -219,8 +223,46 @@ async def test_correlation_filters_concurrent_turns(monkeypatch):
 
     reply = await bridge._call_agent("research", "ping")
 
-    assert reply == "the right reply"
-    assert "stale" not in (reply or "").lower()
+    assert reply is not None
+    assert reply.text == "the right reply"
+    assert reply.agent_id == "research"
+    assert "stale" not in reply.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_call_agent_auto_route_uses_cabinet_router(monkeypatch):
+    """Unaddressed voice posts should not force targetAgentId='main'."""
+    bridge = voice_agent_bridge.HomieAgentBridge(meeting_id=42, chat_id="123")
+    captured: dict = {}
+
+    def stream_events(captured):
+        return [
+            {"seq": 1, "event": {
+                "type": "turn_start",
+                "turnId": "t_auto",
+                "clientMsgId": captured.get("client_msg_id"),
+            }},
+            {"seq": 2, "event": {
+                "type": "agent_done",
+                "turnId": "t_auto",
+                "agentId": "content",
+                "text": "I'll take that one.",
+            }},
+        ]
+
+    capture_send, fake_stream, mod = _patch_cabinet_api(captured, stream_events)
+    monkeypatch.setattr(mod, "send_message", capture_send)
+    monkeypatch.setattr(mod, "stream_meeting", fake_stream)
+    monkeypatch.setenv("CABINET_VOICE_BRIDGE_TIMEOUT_S", "5")
+
+    reply = await bridge._call_agent(None, "what should we do?", audience="auto")
+
+    assert reply is not None
+    assert reply.text == "I'll take that one."
+    assert reply.agent_id == "content"
+    assert captured["is_voice"] is True
+    assert captured["target_agent_id"] is None
+    assert captured["audience"] == "auto"
 
 
 @pytest.mark.asyncio

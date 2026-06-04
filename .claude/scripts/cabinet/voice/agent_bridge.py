@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import Any, Optional
 
 # Pipecat is an optional Phase 6 install — wrap so AST scans + tests run
@@ -121,6 +122,14 @@ _MAIN_DEFAULT_VOICE_ID: str = "en-US-BrianMultilingualNeural"
 _MAIN_DEFAULT_VOICE_PROVIDER: str = "edge"
 
 
+@dataclass(frozen=True)
+class AgentBridgeReply:
+    """Persona reply selected by the Cabinet orchestrator."""
+
+    agent_id: str
+    text: str
+
+
 # ── HomieAgentBridge — port of warroom/agent_bridge.py:37-94 ──────────────
 
 
@@ -178,6 +187,8 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
 
         if frame.mode == "broadcast":
             await self._handle_broadcast(frame.message)
+        elif frame.mode == "auto":
+            await self._handle_auto(frame.message)
         else:
             await self._handle_single(frame.agent_id, frame.message)
 
@@ -192,7 +203,13 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
 
         response = await self._call_agent(agent_id, message)
         if response:
-            await self._emit_response(agent_id, response)
+            await self._emit_response(response.agent_id, response.text)
+
+    async def _handle_auto(self, message: str) -> None:
+        """Route a message through Cabinet's normal text router."""
+        response = await self._call_agent(None, message, audience="auto")
+        if response:
+            await self._emit_response(response.agent_id, response.text)
 
     # ── Broadcast — verbatim shape from warroom/agent_bridge.py:68-75 ────
 
@@ -201,7 +218,7 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
         for agent_id in self._broadcast_order:
             response = await self._call_agent(agent_id, message)
             if response:
-                tagged = f"{agent_id.capitalize()} here. {response}"
+                tagged = f"{response.agent_id.capitalize()} here. {response.text}"
                 await self._emit_response(agent_id, tagged)
 
     # ── Voice-switched TTS emit — verbatim from warroom/agent_bridge.py:77-94 ──
@@ -312,7 +329,13 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
 
     # ── _call_agent — REPLACED body (R1 v2 B1 + B2 correlation) ──────────
 
-    async def _call_agent(self, agent_id: str, message: str) -> Optional[str]:
+    async def _call_agent(
+        self,
+        agent_id: str | None,
+        message: str,
+        *,
+        audience: str = "auto",
+    ) -> Optional[AgentBridgeReply]:
         """Invoke Phase 5a's orchestrator over HTTP and consume the SSE
         stream until the matching response arrives.
 
@@ -324,19 +347,21 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
              the bridge can match the SSE ``turn_start.clientMsgId`` event.
           2. Subscribe to :func:`stream_meeting` BEFORE the send so the
              ``turn_start`` event isn't missed (race-safe).
-          3. POST ``/api/cabinet/send`` with ``is_voice=True``,
-             ``target_agent_id=agent_id``, and the deterministic id.
+          3. POST ``/api/cabinet/send`` with ``is_voice=True``, the
+             deterministic id, and ``target_agent_id`` only for explicit
+             spoken/pinned targets.
           4. Filter SSE events to the matching ``turnId`` (correlation).
           5. Wait for ``agent_done`` / ``error`` / ``turn_complete`` /
              timeout. Render kill-switch refusal events as friendly text.
 
         Args:
             agent_id: routed persona id (wire-side; ``"main"`` resolves to
-                ``"default"`` server-side).
+                ``"default"`` server-side). ``None`` preserves Cabinet's
+                normal text-router path for unaddressed speech.
             message: user transcript text.
 
         Returns:
-            Agent text reply, or a friendly fallback string on error /
+            Agent text reply, or a friendly fallback reply on error /
             timeout / kill-switch refusal.
         """
         # Late-bind cabinet_api so import order stays loose for tests.
@@ -351,18 +376,19 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
         logger.info(
             "voice turn meeting=%s agent=%s msg_preview=%r",
             _redact(str(self._meeting_id)),
-            _redact(agent_id),
+            _redact(str(agent_id or "auto")),
             _redact(message[:80]),
         )
 
         # Subscribe to the meeting's SSE stream BEFORE send (race-safe).
         # We use a small per-call task so we can cancel cleanly on timeout.
         target_turn_id: Optional[str] = None
+        reply_agent_id: str = agent_id or "main"
         agent_text_reply: Optional[str] = None
         terminal_event = asyncio.Event()
 
         async def _consumer() -> None:
-            nonlocal target_turn_id, agent_text_reply
+            nonlocal target_turn_id, reply_agent_id, agent_text_reply
             try:
                 async for envelope in cabinet_api.stream_meeting(
                     self._meeting_id,
@@ -404,6 +430,9 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
 
                     if etype == "agent_done":
                         # First persona reply for our turn — capture and stop.
+                        event_agent_id = event.get("agentId") or event.get("agent_id")
+                        if isinstance(event_agent_id, str) and event_agent_id.strip():
+                            reply_agent_id = event_agent_id.strip()
                         text = event.get("text")
                         if isinstance(text, str) and text.strip():
                             agent_text_reply = text.strip()
@@ -450,16 +479,20 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
                 chat_id=self._chat_id,
                 is_voice=True,
                 target_agent_id=agent_id,
+                audience=audience,
             )
         except cabinet_api.CabinetAPIError as exc:
             # Synchronous post failed (auth / connect / 503 on the rare
             # synchronous endpoints). Cancel the consumer; surface friendly.
             consumer_task.cancel()
-            return exc.friendly_message
+            return AgentBridgeReply(agent_id=reply_agent_id, text=exc.friendly_message)
         except Exception as exc:  # noqa: BLE001
             consumer_task.cancel()
             logger.warning("voice send_message crashed: %s", _redact(str(exc)))
-            return f"The {agent_id} agent ran into an issue. Try again in a moment."
+            return AgentBridgeReply(
+                agent_id=reply_agent_id,
+                text=f"The {reply_agent_id} agent ran into an issue. Try again in a moment.",
+            )
 
         # Wait up to bridge timeout for the matching agent_done / error.
         try:
@@ -475,10 +508,13 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
             logger.warning(
                 "voice turn meeting=%s agent=%s timed out after %ss",
                 _redact(str(self._meeting_id)),
-                _redact(agent_id),
+                _redact(str(agent_id or "auto")),
                 _redact(f"{timeout_s:.0f}"),
             )
-            return f"The {agent_id} agent took too long to respond."
+            return AgentBridgeReply(
+                agent_id=reply_agent_id,
+                text=f"The {reply_agent_id} agent took too long to respond.",
+            )
 
         # Clean shutdown of the consumer.
         consumer_task.cancel()
@@ -487,7 +523,9 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
 
-        return agent_text_reply
+        if agent_text_reply is None:
+            return None
+        return AgentBridgeReply(agent_id=reply_agent_id, text=agent_text_reply)
 
     @staticmethod
     async def _maybe_await(result) -> None:
@@ -497,6 +535,7 @@ class HomieAgentBridge(FrameProcessor):  # type: ignore[misc]
 
 
 __all__ = [
+    "AgentBridgeReply",
     "BROADCAST_ORDER",
     "HomieAgentBridge",
 ]

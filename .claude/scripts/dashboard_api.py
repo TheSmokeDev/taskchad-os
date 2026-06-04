@@ -3950,6 +3950,7 @@ from cabinet import (  # noqa: E402, I001
     title as _cabinet_title,
 )
 from cabinet.voice import lifecycle as _cabinet_voice_lifecycle  # noqa: E402
+from cabinet.voice import livekit_session as _cabinet_livekit_session  # noqa: E402
 
 class CabinetNewBody(BaseModel):
     chatId: str | None = None
@@ -4917,6 +4918,26 @@ def _cabinet_voice_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=503, detail={"error": "voice_lifecycle_error"})
 
 
+def _cabinet_livekit_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, _cabinet_livekit_session.LiveKitDependencyMissing):
+        return HTTPException(
+            status_code=503,
+            detail={
+                "error": "livekit_dependency_missing",
+                "message": str(exc),
+            },
+        )
+    if isinstance(exc, _cabinet_livekit_session.LiveKitConfigError):
+        return HTTPException(
+            status_code=503,
+            detail={
+                "error": "livekit_config_error",
+                "message": str(exc),
+            },
+        )
+    return HTTPException(status_code=503, detail={"error": "livekit_session_error"})
+
+
 @router.get("/api/cabinet/voice/status")
 def cabinet_voice_status(
     meetingId: int | None = Query(default=None),
@@ -4978,6 +4999,30 @@ def cabinet_voice_restart(body: CabinetVoiceStartBody) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise _cabinet_voice_http_error(exc) from exc
     return {"ok": True, **session}
+
+
+@router.get("/api/cabinet/voice/livekit/session")
+def cabinet_voice_livekit_session(
+    meetingId: int = Query(..., description="Cabinet meeting id"),
+    chatId: str | None = Query(default=None, description="Chat scope"),
+) -> dict:
+    """Issue a room-scoped LiveKit browser token for a Cabinet meeting."""
+
+    chat_id = (chatId or "").strip()
+    _cabinet_validate_room_request(meetingId, chat_id)
+    try:
+        session = _cabinet_livekit_session.create_browser_session(
+            meeting_id=meetingId,
+            chat_id=chat_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _cabinet_livekit_http_error(exc) from exc
+    return {
+        "ok": True,
+        "transport": "livekit",
+        "mode": "local_oss_spike",
+        **session.to_wire(),
+    }
 
 
 @router.get("/api/cabinet/voice/ui")

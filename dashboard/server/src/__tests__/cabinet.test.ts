@@ -100,6 +100,7 @@ describe('cabinet route — static invariants', () => {
       '/api/cabinet/voice/start',
       '/api/cabinet/voice/stop',
       '/api/cabinet/voice/restart',
+      '/api/cabinet/voice/livekit/session',
       '/api/cabinet/voice/ui',
       '/api/cabinet/voice/client.bundle.js',
       '/api/cabinet/voice/client.js',
@@ -120,6 +121,7 @@ describe('cabinet route — static invariants', () => {
     expect(src).toContain("/api/cabinet/voice/start");
     expect(src).toContain("/api/cabinet/voice/stop");
     expect(src).toContain("/api/cabinet/voice/restart");
+    expect(src).toContain("/api/cabinet/voice/livekit/session");
     expect(src).toContain("authedFetchBinary(");
     expect(src).toContain("Referrer-Policy");
   });
@@ -190,5 +192,23 @@ describe('cabinet route — voice proxy behavior', () => {
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body as string)).toEqual({ meetingId: 7, chatId: 'cabinet-browser' });
+  });
+
+  it('preserves the LiveKit session query string when forwarding to Python', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, transport: 'livekit' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const app = new Hono();
+    app.route('/', cabinetRoute);
+
+    const res = await app.request('/api/cabinet/voice/livekit/session?meetingId=7&chatId=cabinet-browser');
+    expect(res.status).toBe(200);
+    const upstreamUrl = String(fetchMock.mock.calls[0]?.[0] ?? '');
+    expect(upstreamUrl).toContain('/api/cabinet/voice/livekit/session?meetingId=7&chatId=cabinet-browser');
+    expect(res.headers.get('Referrer-Policy')).toBe('no-referrer');
   });
 });

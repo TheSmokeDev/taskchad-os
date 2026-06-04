@@ -1,6 +1,8 @@
 # Cabinet Voice Setup
 
-The Homie's cabinet voice feature gives operators a single-user voice meeting with their cabinet personas through a browser. The architecture ports verbatim from ClaudeClaw's war room: a server-rendered HTML page drives a Pipecat WebSocket client that connects to a small Python voice subprocess. The voice subprocess routes turns through the same brain (`text_orchestrator.handle_text_turn`) that powers Telegram cabinet meetings, so persona behavior stays identical across surfaces.
+The Homie's cabinet voice feature gives operators a single-user voice meeting with their cabinet personas through a browser. The stable path ports from ClaudeClaw's war room: a server-rendered HTML page drives a Pipecat WebSocket client that connects to a small Python voice subprocess. The voice subprocess routes turns through the same brain (`text_orchestrator.handle_text_turn`) that powers Telegram cabinet meetings, so persona behavior stays identical across surfaces.
+
+A parallel LiveKit local transport spike now exists beside Pipecat. It does not replace the Pipecat path yet. The first LiveKit slice mints room-scoped browser tokens, lets the dashboard join a local LiveKit room and publish the microphone, and provides a Python final-transcript handoff into Cabinet's normal text router. Spoken LiveKit TTS is a later slice.
 
 For the broader Cabinet dashboard manual and room-state vertical slice, see `docs/cabinet-room-manual.md`.
 
@@ -13,6 +15,8 @@ For the broader Cabinet dashboard manual and room-state vertical slice, see `doc
 | Voice subprocess | `python -m cabinet.voice.voice_server --meeting-id N` | Pipecat `WebsocketServerTransport`, default port 7860. |
 | Lifecycle supervisor | `.claude/scripts/cabinet/voice/lifecycle.py` | Python-owned single-session status/start/stop/restart process control. |
 | Voice pipeline | `transport.input → HomieSTT → AgentRouter → HomieAgentBridge → HomieTTS → transport.output` | Verbatim port of ClaudeClaw `warroom/server.py:751-758` legacy mode. |
+| LiveKit session/token spike | `GET /api/cabinet/voice/livekit/session` + `.claude/scripts/cabinet/voice/livekit_session.py` | Issues local room metadata and browser participant tokens without exposing LiveKit secrets. |
+| LiveKit transcript handoff | `.claude/scripts/cabinet/voice/livekit_agent.py` | Posts final LiveKit transcripts to Cabinet with `is_voice=True`, `audience="auto"`, and no forced target. |
 | Persona reasoning | Phase 5a `text_orchestrator.handle_text_turn` over HTTP | Voice never invokes an LLM directly; it consumes the Phase 5a SSE stream. |
 
 ## Prerequisites
@@ -40,6 +44,12 @@ For the broader Cabinet dashboard manual and room-state vertical slice, see `doc
 | `CABINET_VOICE_PIN_PATH` | `<tempdir>/cabinet-voice-pin.json` | Optional override for the click-to-pin file. Same `tempfile.gettempdir()` resolution as above. |
 | `ORCHESTRATION_API_BASE_URL` | `http://127.0.0.1:4322` | Base URL the voice subprocess uses to reach the cabinet HTTP API. |
 | `ORCHESTRATION_API_TOKEN` | (empty) | Bearer token if the orchestration API process has authentication enabled. |
+| `CABINET_LIVEKIT_URL` | `ws://127.0.0.1:7880` | LiveKit signal URL for the local OSS spike. |
+| `LIVEKIT_API_KEY` | (empty) | Server-side LiveKit API key used only to mint browser tokens. |
+| `LIVEKIT_API_SECRET` | (empty) | Server-side LiveKit API secret; never returned by the API. |
+| `CABINET_LIVEKIT_TOKEN_TTL_S` | `1800` | Browser participant token TTL, clamped between 60 seconds and 24 hours. |
+| `CABINET_LIVEKIT_ROOM_PREFIX` | `cabinet` | Prefix for deterministic LiveKit room names such as `cabinet-42`. |
+| `CABINET_LIVEKIT_AGENT_NAME` | `cabinet-livekit-agent` | Expected Python LiveKit agent name/identity prefix. |
 
 ## Per-persona voice configuration
 
@@ -93,7 +103,8 @@ thehomie cabinet voice
 Open `/voices` to create or reuse the current Cabinet room. The page polls
 `/api/cabinet/voice/status`, exposes Start, Stop, and Restart controls, and
 enables Open Voice after the Python supervisor reports the subprocess ready for
-that meeting. The mic button on `/cabinet` opens voice for the selected room.
+that meeting. The page also exposes Join LiveKit for the local OSS spike. The
+mic button on `/cabinet` opens Pipecat voice for the selected room.
 
 Lifecycle endpoints are mounted on the Python orchestration API and proxied by
 Hono:
@@ -103,6 +114,7 @@ GET  /api/cabinet/voice/status?meetingId=42&chatId=YOUR_CHAT_ID
 POST /api/cabinet/voice/start
 POST /api/cabinet/voice/stop
 POST /api/cabinet/voice/restart
+GET  /api/cabinet/voice/livekit/session?meetingId=42&chatId=YOUR_CHAT_ID
 ```
 
 The POST body is:
@@ -116,6 +128,41 @@ The POST body is:
 meeting's tracked voice process. The lifecycle supervisor is deliberately
 single-session: a different active meeting returns a conflict instead of
 allocating another port.
+
+The LiveKit session endpoint validates the Cabinet meeting and chat scope
+before minting a token. The response includes `roomName`, `serverUrl`,
+`participantIdentity`, `participantToken`, `agentName`, and `agentIdentity`;
+it never includes `LIVEKIT_API_KEY` or `LIVEKIT_API_SECRET`.
+
+### LiveKit local spike
+
+Start a local LiveKit server:
+
+```powershell
+livekit-server --dev
+```
+
+Install the optional Python dependencies when running the LiveKit agent path:
+
+```powershell
+cd .claude/scripts
+uv sync --extra livekit
+```
+
+For the local dev server, set the local process environment to the dev
+credentials before starting the orchestration API:
+
+```powershell
+$env:CABINET_LIVEKIT_URL = "ws://127.0.0.1:7880"
+$env:LIVEKIT_API_KEY = "devkey"
+$env:LIVEKIT_API_SECRET = "secret"
+```
+
+Then open `/voices` and use Join LiveKit. The first shipped Python contract is
+the final-transcript handoff helper used by a LiveKit Agents session; the
+AgentServer runner that receives real STT events is the next slice. LiveKit
+audio response/TTS is intentionally out of scope until the transcript path is
+proven locally.
 
 For phone testing, open the dashboard over the machine's Tailscale URL and
 include the Cabinet chat scope, for example:
@@ -134,14 +181,19 @@ The page renders the cinematic intro overlay — click anywhere to enter, then c
 
 ## Routing
 
-The voice subprocess's `AgentRouter` (verbatim port of `warroom/router.py`) supports four routing modes per upstream:
+The Pipecat voice subprocess's `AgentRouter` supports these routing modes:
 
 1. **Broadcast triggers** — saying "everyone, status update" routes to `agent_id="all"` and the bridge broadcasts to each persona in the meeting's roster snapshot.
 2. **Name prefix** — "research, summarize this" routes to the research persona.
 3. **Pinned agent** — write `{"agent": "comms"}` to the pin path (`<tempdir>/cabinet-voice-pin.json` by default, `CABINET_VOICE_PIN_PATH` to override) or use the dashboard click-to-pin; unprefixed utterances then route to comms.
-4. **Default** — everything else falls through to the main persona.
+4. **Default auto-route** — everything else posts into Cabinet with
+   `audience="auto"` and no `targetAgentId`, so the normal text router chooses
+   the responder from mentions, pin, sticky context, router decision, and social
+   fallback.
 
-The bridge passes the routed agent id to Phase 5a's orchestrator as `targetAgentId`, so the Haiku router does NOT re-evaluate the routing — voice respects the spoken/pinned target.
+The bridge passes `targetAgentId` only when speech or pinning selected a
+specific target. Broadcast and explicit targets keep their deterministic
+behavior; unaddressed speech no longer forces the main persona.
 
 ## Kill switches
 
@@ -187,7 +239,7 @@ STT, and TTS.
 
 ## Out of scope for Phase 6
 
-* Multi-party voice rooms (Phase 6c — self-hosted LiveKit SFU).
+* LiveKit spoken/TTS response.
 * External participant adapter (Phase 6d).
 * Hermes push-to-talk + VAD desktop mode.
 * Cinematic intro music asset.

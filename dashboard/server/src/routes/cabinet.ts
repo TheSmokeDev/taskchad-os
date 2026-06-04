@@ -450,6 +450,15 @@ cabinetRoute.post('/api/cabinet/voice/restart', async (c) => (
   forwardVoiceLifecyclePost(c, '/api/cabinet/voice/restart')
 ));
 
+cabinetRoute.get('/api/cabinet/voice/livekit/session', async (c) => {
+  const url = new URL(c.req.url);
+  const upstream = await authedFetch(`/api/cabinet/voice/livekit/session${url.search}`);
+  return c.body(upstream.body, upstream.status as 200, {
+    'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
+    'Referrer-Policy': 'no-referrer',
+  });
+});
+
 // Cabinet voice V1 launcher proxy. Python owns the voice document, bundle,
 // source reference, and avatar resolution; Hono only forwards the GETs.
 cabinetRoute.get('/api/cabinet/voice/ui', async (c) => {
