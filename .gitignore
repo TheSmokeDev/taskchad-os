@@ -75,5 +75,8 @@ PRPs/planning/.clutch-tmp/
 # Dashboard slice (PRD-8 Phase 3)
 dashboard/server/dist/
 dashboard/server/node_modules/
+dashboard/desktop/dist/
+dashboard/desktop/node_modules/
+dashboard/desktop/out/
 dashboard/web/dist/
 dashboard/web/node_modules/

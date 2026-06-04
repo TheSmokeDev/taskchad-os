@@ -1,0 +1,23 @@
+{
+  "name": "@thehomie/desktop",
+  "version": "0.1.0",
+  "description": "Windows-first local desktop shell for The Homie Operating Room.",
+  "private": true,
+  "main": "main.cjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build:web": "npm --prefix ../web run build",
+    "package:win": "npm run build:web && electron-builder --win dir --config electron-builder.cjs",
+    "start": "electron .",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:electron": "node scripts/electron-smoke.mjs",
+    "smoke:package": "node scripts/packaged-smoke.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "electron": "^42.3.3",
+    "electron-builder": "^26.8.1"
+  }
+}

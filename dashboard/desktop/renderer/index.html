@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>The Homie Operating Room</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="header">
+        <div>
+          <p class="eyebrow">The Homie Desktop</p>
+          <h1>Operating Room</h1>
+        </div>
+        <div class="actions">
+          <button id="start">Start</button>
+          <button id="stop" class="secondary">Stop</button>
+          <button id="open" class="primary">Open Room</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <form id="config" class="panel">
+          <div class="panel-title">
+            <h2>First Run Config</h2>
+            <span id="config-state">Local only</span>
+          </div>
+          <label>
+            API port
+            <input id="apiPort" name="apiPort" inputmode="numeric" />
+          </label>
+          <label>
+            Dashboard port
+            <input id="dashboardPort" name="dashboardPort" inputmode="numeric" />
+          </label>
+          <label>
+            Bind host
+            <input id="bind" name="bind" />
+          </label>
+          <label>
+            Start path
+            <input id="startPath" name="startPath" />
+          </label>
+          <label class="toggle">
+            <input id="autoStart" name="autoStart" type="checkbox" />
+            Auto-start local stack when Desktop opens
+          </label>
+          <button type="submit" class="secondary">Save Config</button>
+        </form>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Stack Status</h2>
+            <span id="running">Unknown</span>
+          </div>
+          <div id="services" class="services"></div>
+          <div class="target">
+            <span>Target</span>
+            <strong id="targetUrl"></strong>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel logs-panel">
+        <div class="panel-title">
+          <h2>Logs</h2>
+          <span id="log-count">0 lines</span>
+        </div>
+        <pre id="logs"></pre>
+      </section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

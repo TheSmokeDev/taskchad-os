@@ -355,6 +355,52 @@ def setup(check, advanced, headless_google):
 
 
 @main.command()
+@click.option("--api-port", default=4322, show_default=True, type=int, help="Python orchestration API port.")
+@click.option("--dashboard-port", default=3141, show_default=True, type=int, help="Hono dashboard port.")
+@click.option("--web-port", default=5173, show_default=True, type=int, help="Vite web port.")
+@click.option("--no-open", "no_open", is_flag=True, help="Do not open the Operating Room in a browser.")
+@click.option("--no-vite", "no_vite", is_flag=True, help="Use Hono/static only instead of Vite dev.")
+@click.option("--shell", "shell_mode", is_flag=True, help="Launch the Electron Desktop v0 shell.")
+@click.option("--dry-run", is_flag=True, help="Print planned local stack commands without starting processes.")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output for --dry-run.")
+def desktop(api_port, dashboard_port, web_port, no_open, no_vite, shell_mode, dry_run, json_mode):
+    """Launch the local desktop/operator stack."""
+    from desktop_launcher import (
+        DesktopLaunchConfig,
+        describe_desktop_launch,
+        describe_desktop_shell_launch,
+        launch_desktop,
+        launch_desktop_shell,
+    )
+
+    config = DesktopLaunchConfig(
+        api_port=api_port,
+        dashboard_port=dashboard_port,
+        vite_port=web_port,
+        open_browser=not no_open,
+        use_vite=not no_vite,
+    )
+    if dry_run:
+        payload = (
+            describe_desktop_shell_launch(config)
+            if shell_mode
+            else describe_desktop_launch(config)
+        )
+        if json_mode:
+            click.echo(json_mod.dumps(payload, indent=2))
+            return
+        click.echo("The Homie desktop stack:")
+        click.echo(f"  Operating Room: {payload['target_url']}")
+        for command in payload["commands"]:
+            click.echo(f"  {command['name']}:")
+            click.echo(f"    cwd: {command['cwd']}")
+            click.echo(f"    cmd: {' '.join(command['argv'])}")
+        return
+
+    sys.exit(launch_desktop_shell(config) if shell_mode else launch_desktop(config))
+
+
+@main.command()
 def doctor():
     """Diagnose issues — like `hermes doctor` / `openclaw doctor`.
 

@@ -1,0 +1,90 @@
+{
+  "run_id": "opr-demo-public",
+  "created_at": "2026-06-04T00:00:00Z",
+  "product_surface": "homie_operating_room",
+  "sanitized": true,
+  "goal": "Decide the next product wedge for The Homie",
+  "workflow_id": "growth_boardroom",
+  "meeting_mode": "facilitated_boardroom",
+  "team_id": 101,
+  "convoy_id": 202,
+  "progress": {
+    "completed": 21,
+    "total": 21,
+    "status": "completed"
+  },
+  "runtime": {
+    "enabled": false,
+    "turn_count": 0,
+    "lanes": [],
+    "providers": [],
+    "models": [],
+    "tool_call_count": 0,
+    "cost_usd": null,
+    "execution_time_ms": null,
+    "errors": []
+  },
+  "vote_board": [
+    {
+      "role": "sales",
+      "role_name": "Sales",
+      "recommendation": "Lead with Operating Room proof packets.",
+      "confidence": 0.82,
+      "rationale": "The proof packet is easier to evaluate than a generic chat transcript.",
+      "blocking_issue": null
+    }
+  ],
+  "interrupts": [
+    {
+      "from_role": "ops",
+      "from_role_name": "Ops",
+      "target_role": "product",
+      "target_role_name": "Product",
+      "severity": "control",
+      "challenge": "Do not ship desktop packaging before lifecycle and logs are visible.",
+      "required_response": "Keep process ownership in Python and expose status first."
+    }
+  ],
+  "owner_actions": [
+    {
+      "owner": "Product",
+      "action": "Run a local dashboard demo that shows the proof packet and team transcript.",
+      "validation_signal": "Browser DOM plus API response both show the same run id."
+    }
+  ],
+  "decisions": [
+    "Make Operating Room the first product slice."
+  ],
+  "open_questions": [
+    "Which proof history view should ship after the first demo?"
+  ],
+  "strongest_objection": "Desktop packaging without status/logs would hide failures.",
+  "next_meeting_trigger": "Reconvene after local DOM and API proof pass.",
+  "synthesis": {
+    "decision_summary": "Ship the Operating Room proof surface before desktop packaging.",
+    "confidence": 0.82,
+    "agreements": [
+      "Python orchestration remains the source of truth."
+    ],
+    "disagreements": [
+      "Desktop shell depth should wait for lifecycle proof."
+    ]
+  },
+  "tick_summary": {
+    "selected_action": "claim_respond",
+    "reason": "One owner action is ready for continuation.",
+    "agent_id": "product-worker",
+    "convoy_id": 202,
+    "subtask_id": 303,
+    "waited": false,
+    "error": null,
+    "step_action": "running",
+    "step_claimed_count": 1,
+    "step_status": "running",
+    "executor_command": null,
+    "executor_success": null,
+    "executor_exit_code": null,
+    "executor_completed": null
+  },
+  "final_brief": "Ship a Cabinet-free Operating Room demo where the team meets, votes, assigns owner actions, advances one tick, and emits a sanitized proof packet."
+}

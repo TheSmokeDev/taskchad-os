@@ -116,6 +116,7 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/team',
   '/api/team/taskchad-drill',
   '/api/team/room/run',
+  '/api/team/operating-room/run',
   '/api/team/:id',
   '/api/team/:id/members',
   '/api/team/:id/shutdown',
@@ -123,6 +124,8 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/team/:id/tick',
   '/api/team/:id/executor-step',
   '/api/team/:id/memory',
+  '/api/capabilities',
+  '/api/capabilities/status',
   '/api/executor/callback',
 
   // work.ts — dashboard work queue over the framework orchestration API.

@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from orchestration.capability_gateway import collect_capability_gateway_status
 from orchestration.convoy_service import ConvoyService
 from orchestration.db import OrchestrationDB
 from orchestration.executor import ExecutorRegistry, create_default_registry
@@ -32,6 +33,7 @@ from orchestration.models import (
     SendMessageInput,
 )
 from orchestration.observability import orchestration_span, update_observation
+from orchestration.operating_room import OperatingRoomService, operating_room_result_to_dict
 from orchestration.team_drill import TaskChadTeamDrillService, taskchad_drill_result_to_dict
 from orchestration.team_executor import TeamExecutorService, executor_result_to_dict
 from orchestration.team_loop import (
@@ -268,6 +270,23 @@ class TeamRoomRunBody(BaseModel):
     max_rounds: int | None = None
     meeting_mode: str | None = None
     v2: bool = False
+
+
+class OperatingRoomRunBody(BaseModel):
+    goal: str
+    workflow_id: str = "growth_boardroom"
+    context: str | None = None
+    use_runtime: bool = False
+    runtime_lane: str | None = None
+    max_rounds: int | None = 2
+    meeting_mode: str | None = "facilitated_boardroom"
+    run_tick: bool = True
+    tick_agent_id: str | None = None
+    tick_complete_running: bool = False
+    tick_execute_running: bool = False
+    tick_executor_command: str = "git_status"
+    tick_executor_cwd: str | None = None
+    tick_complete_on_executor_success: bool = False
 
 
 class TeamLoopStepBody(BaseModel):
@@ -835,6 +854,82 @@ def run_team_room(request: Request, body: TeamRoomRunBody):
                 ),
             },
             output={"final_brief_chars": len(payload["final_brief"])},
+        )
+        return payload
+
+
+@app.post("/api/team/operating-room/run")
+def run_operating_room(request: Request, body: OperatingRoomRunBody):
+    surface = _operator_surface(request)
+    with orchestration_span(
+        "orchestration.api.operating_room_run",
+        metadata={
+            "surface": surface,
+            "workflow_id": body.workflow_id,
+            "meeting_mode": body.meeting_mode,
+            "use_runtime": body.use_runtime,
+            "runtime_lane": body.runtime_lane,
+            "run_tick": body.run_tick,
+        },
+        trace_metadata={"surface": surface, "feature_phase": 13},
+        expected_exceptions=(HTTPException,),
+    ):
+        try:
+            result = OperatingRoomService(_db).run_operating_room(
+                goal=body.goal,
+                workflow_id=body.workflow_id,
+                context=body.context,
+                use_runtime=body.use_runtime,
+                runtime_lane=body.runtime_lane,
+                max_rounds=body.max_rounds,
+                meeting_mode=body.meeting_mode,
+                run_tick=body.run_tick,
+                tick_agent_id=body.tick_agent_id,
+                tick_complete_running=body.tick_complete_running,
+                tick_execute_running=body.tick_execute_running,
+                tick_executor_command=body.tick_executor_command,
+                tick_executor_cwd=body.tick_executor_cwd,
+                tick_complete_on_executor_success=body.tick_complete_on_executor_success,
+            )
+        except ValueError as e:
+            update_observation(
+                level="WARNING",
+                status_message=str(e),
+                metadata={"error_type": "operating_room_validation"},
+            )
+            raise HTTPException(status_code=400, detail=str(e))
+        payload = operating_room_result_to_dict(result)
+        proof = payload["proof_packet"]
+        update_observation(
+            metadata={
+                "run_id": payload["run_id"],
+                "team_id": proof["team_id"],
+                "convoy_id": proof["convoy_id"],
+                "workflow_id": proof["workflow_id"],
+                "sanitized": proof["sanitized"],
+            },
+            output={"final_brief_chars": len(proof["final_brief"] or "")},
+        )
+        return payload
+
+
+@app.get("/api/capabilities/status")
+def get_capability_gateway_status(request: Request):
+    surface = _operator_surface(request)
+    with orchestration_span(
+        "orchestration.api.capabilities_status",
+        metadata={"surface": surface},
+        trace_metadata={"surface": surface, "feature_phase": 13},
+        expected_exceptions=(HTTPException,),
+    ):
+        payload = collect_capability_gateway_status()
+        update_observation(
+            metadata={
+                "enabled_capabilities": payload["capabilities"]["enabled_count"],
+                "total_capabilities": payload["capabilities"]["total_count"],
+                "enabled_integrations": payload["integrations"]["enabled_count"],
+                "toolset_count": len(payload["toolsets"]),
+            }
         )
         return payload
 

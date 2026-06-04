@@ -20,12 +20,14 @@ describe('mission orchestration route', () => {
     expect(ROUTE_MANIFEST).toContain('/api/team');
     expect(ROUTE_MANIFEST).toContain('/api/team/taskchad-drill');
     expect(ROUTE_MANIFEST).toContain('/api/team/room/run');
+    expect(ROUTE_MANIFEST).toContain('/api/team/operating-room/run');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id/members');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id/shutdown');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id/loop-step');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id/tick');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id/executor-step');
+    expect(ROUTE_MANIFEST).toContain('/api/capabilities/status');
   });
 
   it('keeps Convoy and Team as thin pass-throughs to Python orchestration', () => {
@@ -33,6 +35,7 @@ describe('mission orchestration route', () => {
     expect(src).toContain("'/api/convoy'");
     expect(src).toContain("'/api/mailbox'");
     expect(src).toContain("'/api/team'");
+    expect(src).toContain("'/api/capabilities'");
     expect(src).toContain('authedFetch(upstreamPath');
     expect(src).not.toMatch(/better-sqlite3|\bnew\s+Database\(|sqlite3/);
     expect(src).not.toMatch(/readFileSync|config\.yaml|TheHomie\/Memory/);

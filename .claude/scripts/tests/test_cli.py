@@ -91,6 +91,41 @@ class TestCLIHelp:
         result = runner.invoke(cli_main, ["doctor", "--help"])
         assert result.exit_code == 0
 
+    def test_desktop_dry_run_shows_local_stack(self):
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(cli_main, ["desktop", "--dry-run", "--no-open", "--json"])
+        payload = json.loads(result.output)
+
+        assert result.exit_code == 0
+        assert payload["target_url"] == "http://127.0.0.1:5173/teams"
+        names = {command["name"] for command in payload["commands"]}
+        assert names == {"python-api", "hono-dashboard", "vite-web"}
+        assert any(
+            command["env"]["ORCHESTRATION_API_PORT"] == "4322"
+            for command in payload["commands"]
+        )
+        assert any(
+            command["env"]["FRAMEWORK_API_URL"] == "http://127.0.0.1:4322"
+            for command in payload["commands"]
+        )
+
+    def test_desktop_shell_dry_run_shows_electron_entrypoint(self):
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(cli_main, ["desktop", "--shell", "--dry-run", "--json"])
+        payload = json.loads(result.output)
+
+        assert result.exit_code == 0
+        assert payload["target_url"] == "http://127.0.0.1:3141/teams"
+        assert payload["commands"][0]["name"] == "electron-shell"
+        assert payload["commands"][0]["argv"] == ["npm", "run", "start"]
+        assert payload["commands"][0]["env"]["FRAMEWORK_API_URL"] == "http://127.0.0.1:4322"
+        static_dir = payload["commands"][0]["env"]["DASHBOARD_STATIC_DIR"].replace("\\", "/")
+        assert static_dir.endswith("dashboard/web/dist")
+
     def test_version(self):
         from click.testing import CliRunner
 

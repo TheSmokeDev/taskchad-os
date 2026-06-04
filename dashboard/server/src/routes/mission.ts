@@ -1,5 +1,6 @@
 /**
- * Mission control passthrough — /api/convoy*, /api/mailbox*, /api/team*.
+ * Mission control passthrough — /api/convoy*, /api/mailbox*, /api/team*,
+ * /api/capabilities*.
  *
  * These endpoints belong to the orchestration slice (orchestration-owner).
  * Hono forwards verbatim — no body translation, no persona-id mapping
@@ -17,7 +18,7 @@ void outboundPersonaId;
 
 export const missionRoute = new Hono();
 
-const PASSTHROUGH_PREFIXES = ['/api/convoy', '/api/mailbox', '/api/team'];
+const PASSTHROUGH_PREFIXES = ['/api/convoy', '/api/mailbox', '/api/team', '/api/capabilities'];
 
 function isPassthrough(pathname: string): boolean {
   return PASSTHROUGH_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
@@ -54,3 +55,5 @@ missionRoute.all('/api/mailbox', async (c) => forward(c));
 missionRoute.all('/api/mailbox/*', async (c) => forward(c));
 missionRoute.all('/api/team', async (c) => forward(c));
 missionRoute.all('/api/team/*', async (c) => forward(c));
+missionRoute.all('/api/capabilities', async (c) => forward(c));
+missionRoute.all('/api/capabilities/*', async (c) => forward(c));

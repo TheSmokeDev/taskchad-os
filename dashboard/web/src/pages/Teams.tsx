@@ -289,6 +289,53 @@ interface TeamRoomRunResponse {
   final_brief: string;
 }
 
+interface OperatingRoomProofPacket {
+  run_id: string;
+  created_at: string;
+  product_surface: string;
+  sanitized: boolean;
+  goal: string;
+  workflow_id: string;
+  meeting_mode: string;
+  team_id: number;
+  convoy_id: number;
+  progress: TeamRoomRunResponse['progress'];
+  runtime: TeamRoomRuntimeSummary;
+  vote_board: TeamRoomVote[];
+  interrupts: TeamRoomInterrupt[];
+  owner_actions: TeamRoomDecisionLedger['owner_actions'];
+  decisions: string[];
+  open_questions: string[];
+  strongest_objection?: string | null;
+  next_meeting_trigger?: string | null;
+  synthesis: TeamRoomSynthesis;
+  tick_summary?: {
+    selected_action?: string | null;
+    reason?: string | null;
+    agent_id?: string | null;
+    convoy_id?: number | null;
+    subtask_id?: number | null;
+    waited?: boolean | null;
+    error?: string | null;
+    step_action?: string | null;
+    step_claimed_count?: number | null;
+    step_status?: string | null;
+    executor_command?: string | null;
+    executor_success?: boolean | null;
+    executor_exit_code?: number | null;
+    executor_completed?: boolean | null;
+  } | null;
+  final_brief: string;
+}
+
+interface OperatingRoomRunResponse {
+  run_id: string;
+  created_at: string;
+  team_room: TeamRoomRunResponse;
+  tick?: TeamTickResponse | null;
+  proof_packet: OperatingRoomProofPacket;
+}
+
 const STATUS_TONE: Record<string, string> = {
   active: 'bg-emerald-500/10 text-emerald-300',
   idle: 'bg-sky-500/10 text-sky-300',
@@ -615,18 +662,26 @@ export function Teams() {
   const [lastTaskChadDrill, setLastTaskChadDrill] = useState<TaskChadDrillResponse | null>(null);
   const [drillUseRuntime, setDrillUseRuntime] = useState(false);
   const [lastTeamRoomRun, setLastTeamRoomRun] = useState<TeamRoomRunResponse | null>(null);
+  const [lastOperatingRoomRun, setLastOperatingRoomRun] = useState<OperatingRoomRunResponse | null>(null);
   const [teamRoomGoal, setTeamRoomGoal] = useState('How do we get TaskChad to one million dollars?');
   const [teamRoomContext, setTeamRoomContext] = useState('');
   const [teamRoomUseV2, setTeamRoomUseV2] = useState(true);
   const [teamRoomUseRuntime, setTeamRoomUseRuntime] = useState(false);
   const [teamRoomRuntimeLane, setTeamRoomRuntimeLane] = useState('generic_runtime');
   const [teamRoomMaxRounds, setTeamRoomMaxRounds] = useState('2');
-  const currentTeamRoomRun = lastTeamRoomRun && session && lastTeamRoomRun.team_id === session.id
+  const [operatingRoomRunTick, setOperatingRoomRunTick] = useState(true);
+  const currentOperatingRoomRun = lastOperatingRoomRun && session && lastOperatingRoomRun.team_room.team_id === session.id
+    ? lastOperatingRoomRun
+    : null;
+  const currentTeamRoomRun = currentOperatingRoomRun
+    ? currentOperatingRoomRun.team_room
+    : lastTeamRoomRun && session && lastTeamRoomRun.team_id === session.id
     ? lastTeamRoomRun
     : null;
   const currentTeamRoomArtifacts = currentTeamRoomRun
     ? normalizeTeamRoomArtifacts(currentTeamRoomRun)
     : null;
+  const currentOperatingRoomProof = currentOperatingRoomRun?.proof_packet ?? null;
   const selectedTeamRoomArtifacts = teamRoomArtifactsFromSession(session);
 
   useEffect(() => {
@@ -881,7 +936,7 @@ export function Teams() {
     event.preventDefault();
     const goal = teamRoomGoal.trim();
     if (!goal) {
-      pushToast({ tone: 'error', title: 'Team Room goal required' });
+      pushToast({ tone: 'error', title: 'Operating Room goal required' });
       return;
     }
     const parsedRounds = Number(teamRoomMaxRounds);
@@ -890,24 +945,27 @@ export function Teams() {
       : 2;
     setBusy(true);
     try {
-      const result = await apiPost<TeamRoomRunResponse>('/api/team/room/run', {
+      const result = await apiPost<OperatingRoomRunResponse>('/api/team/operating-room/run', {
         goal,
         context: teamRoomContext.trim() || null,
-        v2: teamRoomUseV2,
+        meeting_mode: teamRoomUseV2 ? 'facilitated_boardroom' : 'classic_boardroom',
         max_rounds: teamRoomUseV2 ? maxRounds : null,
         use_runtime: teamRoomUseRuntime,
         runtime_lane: teamRoomUseRuntime ? (teamRoomRuntimeLane.trim() || null) : null,
+        run_tick: operatingRoomRunTick,
       });
-      setLastTeamRoomRun(result);
-      setSelectedId(result.team_id);
+      setLastOperatingRoomRun(result);
+      setLastTeamRoomRun(result.team_room);
+      if (result.tick) setLastTeamTick(result.tick);
+      setSelectedId(result.team_room.team_id);
       pushToast({
         tone: 'success',
-        title: 'Team Room complete',
-        description: `Team #${result.team_id} · ${result.progress.completed}/${result.progress.total}`,
+        title: 'Operating Room complete',
+        description: `Team #${result.team_room.team_id} · proof ${result.proof_packet.sanitized ? 'sanitized' : 'raw'}`,
       });
       refreshAll();
     } catch (err: unknown) {
-      pushToast({ tone: 'error', title: 'Team Room failed', description: errorMessage(err) });
+      pushToast({ tone: 'error', title: 'Operating Room failed', description: errorMessage(err) });
     } finally {
       setBusy(false);
     }
@@ -916,8 +974,8 @@ export function Teams() {
   return (
     <div class="flex h-full flex-col">
       <TopBar
-        title="Teams"
-        subtitle={`${activeCount} active · ${teams.length} total`}
+        title="Operating Room"
+        subtitle={`${activeCount} active rooms · ${teams.length} total teams`}
         actions={
           <>
             <button
@@ -1055,7 +1113,7 @@ export function Teams() {
                 <form class="grid gap-3" onSubmit={runTeamRoom}>
                   <div class="flex flex-wrap items-center justify-between gap-2">
                     <div class="flex min-w-0 items-center gap-2 text-[13px] font-medium text-[var(--color-text)]">
-                      <MessageSquare size={15} /> Team Room
+                      <MessageSquare size={15} /> Operating Room Run
                     </div>
                     <div class="flex flex-wrap gap-2">
                       <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
@@ -1063,6 +1121,9 @@ export function Teams() {
                       </Badge>
                       <Badge className={teamRoomUseRuntime ? 'bg-emerald-500/10 text-emerald-300' : 'bg-[var(--color-elevated)] text-[var(--color-text-muted)]'}>
                         runtime {teamRoomUseRuntime ? 'on' : 'off'}
+                      </Badge>
+                      <Badge className={operatingRoomRunTick ? 'bg-sky-500/10 text-sky-300' : 'bg-[var(--color-elevated)] text-[var(--color-text-muted)]'}>
+                        tick {operatingRoomRunTick ? 'on' : 'off'}
                       </Badge>
                     </div>
                   </div>
@@ -1100,6 +1161,14 @@ export function Teams() {
                         />
                         Runtime turns
                       </label>
+                      <label class="inline-flex items-center gap-2 rounded border border-[var(--color-border)] px-3 py-2 text-[12px] text-[var(--color-text-muted)]">
+                        <input
+                          type="checkbox"
+                          checked={operatingRoomRunTick}
+                          onChange={(event) => setOperatingRoomRunTick((event.target as HTMLInputElement).checked)}
+                        />
+                        Auto tick
+                      </label>
                     </div>
                     <label class="grid gap-1 text-[12px] text-[var(--color-text-muted)]">
                       Max rounds
@@ -1127,7 +1196,7 @@ export function Teams() {
                       disabled={busy || !teamRoomGoal.trim()}
                       class="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--color-accent)] px-3 py-2 text-[12px] font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
                     >
-                      <Play size={14} /> Run Team Room
+                      <Play size={14} /> Run Operating Room
                     </button>
                   </div>
                 </form>
@@ -1137,7 +1206,7 @@ export function Teams() {
                 <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
                   <div class="flex flex-wrap items-center justify-between gap-2">
                     <div class="flex min-w-0 items-center gap-2 text-[13px] font-medium text-[var(--color-text)]">
-                      <Brain size={15} /> Team Room V3 Artifacts
+                      <Brain size={15} /> Persisted Operating Room Artifacts
                     </div>
                     <div class="flex flex-wrap gap-2">
                       <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
@@ -1163,20 +1232,82 @@ export function Teams() {
                 <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
                   <div class="flex flex-wrap items-center justify-between gap-2">
                     <div class="flex min-w-0 items-center gap-2 text-[13px] font-medium text-[var(--color-text)]">
-                      <MessageSquare size={15} /> Team Room Result
+                      <MessageSquare size={15} /> Operating Room Proof
                     </div>
                     <div class="flex flex-wrap gap-2">
+                      {currentOperatingRoomProof && (
+                        <Badge className="max-w-full truncate bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
+                          {currentOperatingRoomProof.run_id}
+                        </Badge>
+                      )}
                       <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
                         Team #{currentTeamRoomRun.team_id}
                       </Badge>
                       <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
                         Convoy #{currentTeamRoomRun.convoy_id}
                       </Badge>
+                      {currentOperatingRoomProof?.sanitized && (
+                        <Badge className="bg-emerald-500/10 text-emerald-300">
+                          sanitized
+                        </Badge>
+                      )}
                       <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
                         {currentTeamRoomRun.meeting_mode}
                       </Badge>
                     </div>
                   </div>
+                  {currentOperatingRoomProof && (
+                    <div class="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(260px,0.8fr)]">
+                      <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
+                        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <div class="text-[12px] font-medium text-[var(--color-text)]">Final Brief</div>
+                          <Badge className="bg-[var(--color-card)] text-[var(--color-text-muted)]">
+                            {formatConfidence(currentOperatingRoomProof.synthesis?.confidence)} confidence
+                          </Badge>
+                        </div>
+                        <div class="whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--color-text-muted)]">
+                          {currentOperatingRoomProof.final_brief}
+                        </div>
+                      </div>
+                      <div class="grid gap-3">
+                        <div class="grid gap-2 text-[11px] text-[var(--color-text-muted)] sm:grid-cols-2">
+                          <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
+                            <div class="font-medium text-[var(--color-text)]">Vote Board</div>
+                            <div>{currentOperatingRoomProof.vote_board.length} votes</div>
+                          </div>
+                          <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
+                            <div class="font-medium text-[var(--color-text)]">Interrupts</div>
+                            <div>{currentOperatingRoomProof.interrupts.length} challenges</div>
+                          </div>
+                          <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
+                            <div class="font-medium text-[var(--color-text)]">Owner Actions</div>
+                            <div>{currentOperatingRoomProof.owner_actions.length} assigned</div>
+                          </div>
+                          <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
+                            <div class="font-medium text-[var(--color-text)]">Tick</div>
+                            <div>{currentOperatingRoomProof.tick_summary?.selected_action ?? 'not run'}</div>
+                          </div>
+                        </div>
+                        {currentOperatingRoomProof.tick_summary && (
+                          <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3 text-[11px] text-[var(--color-text-muted)]">
+                            <div class="font-medium text-[var(--color-text)]">Tick / Executor Summary</div>
+                            <div class="mt-1 break-words">{currentOperatingRoomProof.tick_summary.reason ?? 'No reason recorded.'}</div>
+                            <div class="mt-1 break-words">
+                              {currentOperatingRoomProof.tick_summary.agent_id ?? 'no agent'} · subtask #{currentOperatingRoomProof.tick_summary.subtask_id ?? 'none'} · {currentOperatingRoomProof.tick_summary.step_status ?? 'unknown'}
+                            </div>
+                            {currentOperatingRoomProof.tick_summary.executor_command && (
+                              <div class="mt-1 break-words">
+                                executor {currentOperatingRoomProof.tick_summary.executor_command} · {currentOperatingRoomProof.tick_summary.executor_success ? 'passed' : 'not passed'}
+                              </div>
+                            )}
+                            {currentOperatingRoomProof.tick_summary.error && (
+                              <div class="mt-1 break-words text-red-300">{currentOperatingRoomProof.tick_summary.error}</div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   <div class="mt-3 grid gap-2 text-[11px] text-[var(--color-text-muted)] sm:grid-cols-2 xl:grid-cols-5">
                     <div class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2">
                       <div class="font-medium text-[var(--color-text)]">Progress</div>

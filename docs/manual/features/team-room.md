@@ -17,6 +17,8 @@ memory between meetings, and clearer synthesis of agreements/disagreements.
 - Dashboard: `/teams` Team Room run controls, result panel, and persisted V3
   artifact panels
 - API: `POST /api/team/room/run`
+- Product wrapper: `POST /api/team/operating-room/run` composes Team Room plus
+  optional Team Tick into a sanitized proof packet.
 - CLI: through `thehomie chat -q "/teamroom ..."`
 
 ## Source Of Truth Files
@@ -35,6 +37,8 @@ memory between meetings, and clearer synthesis of agreements/disagreements.
 - Python/orchestration remains the source of truth for meeting behavior and
   metadata serialization.
 - Dashboard and Hono stay thin over the Python result.
+- Operating Room may wrap Team Room results, but Team Room remains the owner of
+  meeting behavior and serialization.
 - Dashboard artifact panels render Python-owned result/session metadata; they
   must not invent meeting state locally.
 - Default behavior remains deterministic unless runtime is explicitly requested.

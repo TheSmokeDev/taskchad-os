@@ -2,7 +2,7 @@ import {
   LayoutGrid, ListTodo, Users, MessageSquare,
   Brain, Network, Activity, ShieldCheck,
   Briefcase, Mic, Calendar,
-  Bot, Kanban, Monitor, Settings as SettingsIcon,
+  Bot, Kanban, Monitor, PlugZap, Settings as SettingsIcon,
   Smartphone,
 } from 'lucide-preact';
 import type { ComponentChildren } from 'preact';
@@ -34,10 +34,11 @@ export const ROUTES: RouteDef[] = [
   { path: '/hive',          label: 'Hive Mind',       section: 'intelligence', icon: Network,       shortcut: 'g h' },
   { path: '/usage',         label: 'Usage',           section: 'intelligence', icon: Activity,      shortcut: 'g u' },
   { path: '/jarvis',        label: 'Jarvis',          section: 'intelligence', icon: Bot,           shortcut: 'g j' },
+  { path: '/capabilities',  label: 'Capabilities',    section: 'intelligence', icon: PlugZap                      },
   { path: '/audit',         label: 'Audit',           section: 'intelligence', icon: ShieldCheck                   },
 
   { path: '/cabinet',       label: 'Cabinet',         section: 'collaborate',  icon: Briefcase,     shortcut: 'g w' },
-  { path: '/teams',         label: 'Teams',           section: 'collaborate',  icon: Users,         shortcut: 'g t' },
+  { path: '/teams',         label: 'Operating Room',  section: 'collaborate',  icon: Users,         shortcut: 'g t' },
   { path: '/voices',        label: 'Voices',          section: 'collaborate',  icon: Mic                           },
   { path: '/standup',       label: 'Standup',         section: 'collaborate',  icon: Calendar                      },
 

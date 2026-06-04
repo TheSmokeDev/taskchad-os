@@ -8,6 +8,7 @@ import { Convoy } from '@/pages/Convoy';
 import { Teams } from '@/pages/Teams';
 import { Usage } from '@/pages/Usage';
 import { Jarvis } from '@/pages/Jarvis';
+import { CapabilityGateway } from '@/pages/CapabilityGateway';
 
 function mockFetchOnce(payload: unknown) {
   globalThis.fetch = vi.fn(async () =>
@@ -495,8 +496,8 @@ describe('panels populate from fixture API responses', () => {
           convoy_completed: false,
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
-      if (path === '/api/team/room/run') {
-        return new Response(JSON.stringify({
+      if (path === '/api/team/operating-room/run') {
+        const teamRoomRun = {
           workflow_id: 'growth_boardroom',
           meeting_mode: 'facilitated_boardroom',
           max_rounds: 2,
@@ -670,6 +671,55 @@ describe('panels populate from fixture API responses', () => {
             },
           },
           final_brief: 'Final Team Room brief: pick the sales-led audit wedge, measure booked audits, and revise after the two-week readout.',
+        };
+        return new Response(JSON.stringify({
+          run_id: 'opr-test-run',
+          created_at: '2026-06-04T00:00:00Z',
+          team_room: teamRoomRun,
+          tick: {
+            team_id: 9,
+            selected_action: 'claim_respond',
+            reason: '1 pending convoy mailbox item.',
+            agent_id: 'sales-worker',
+            convoy_id: 1,
+            subtask_id: 13,
+            step: null,
+            executor: null,
+            waited: false,
+            error: null,
+          },
+          proof_packet: {
+            run_id: 'opr-test-run',
+            created_at: '2026-06-04T00:00:00Z',
+            product_surface: 'homie_operating_room',
+            sanitized: true,
+            goal: teamRoomRun.goal,
+            workflow_id: teamRoomRun.workflow_id,
+            meeting_mode: teamRoomRun.meeting_mode,
+            team_id: teamRoomRun.team_id,
+            convoy_id: teamRoomRun.convoy_id,
+            progress: teamRoomRun.progress,
+            runtime: teamRoomRun.runtime,
+            vote_board: teamRoomRun.vote_board,
+            interrupts: teamRoomRun.interrupts,
+            owner_actions: teamRoomRun.decision_ledger.owner_actions,
+            decisions: teamRoomRun.decision_ledger.decisions,
+            open_questions: teamRoomRun.decision_ledger.open_questions,
+            strongest_objection: teamRoomRun.decision_ledger.strongest_objection,
+            next_meeting_trigger: teamRoomRun.decision_ledger.next_meeting_trigger,
+            synthesis: teamRoomRun.synthesis,
+            tick_summary: {
+              selected_action: 'claim_respond',
+              reason: '1 pending convoy mailbox item.',
+              agent_id: 'sales-worker',
+              convoy_id: 1,
+              subtask_id: 13,
+              waited: false,
+              error: null,
+              step_status: 'running',
+            },
+            final_brief: teamRoomRun.final_brief,
+          },
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
       if (path === '/api/team/taskchad-drill') {
@@ -734,7 +784,7 @@ describe('panels populate from fixture API responses', () => {
     await waitFor(() => expect(screen.getAllByText(/team worker/i).length).toBeGreaterThan(0));
     await waitFor(() => expect(screen.getByText(/sales needs the landing page angle/i)).toBeInTheDocument());
     expect(screen.getByText(/Convoy: #1/i)).toBeInTheDocument();
-    expect(screen.getByText(/team room v3 artifacts/i)).toBeInTheDocument();
+    expect(screen.getByText(/persisted operating room artifacts/i)).toBeInTheDocument();
     expect(screen.getByText(/Persisted dashboard artifact proof/i)).toBeInTheDocument();
     expect(screen.getByText(/Persisted vote backs the audit wedge/i)).toBeInTheDocument();
     expect(screen.getByText(/Persisted interrupt keeps owner pressure visible/i)).toBeInTheDocument();
@@ -745,9 +795,11 @@ describe('panels populate from fixture API responses', () => {
     await waitFor(() => expect(requests).toContain('/api/team/taskchad-drill'));
     expect(await screen.findByText(/round 2 revisions/i)).toBeInTheDocument();
     expect(await screen.findByText(/final revised taskchad plan: clarify offer/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /run team room/i }));
-    await waitFor(() => expect(requests).toContain('/api/team/room/run'));
-    expect(await screen.findByText(/team room result/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /run operating room/i }));
+    await waitFor(() => expect(requests).toContain('/api/team/operating-room/run'));
+    expect(await screen.findByText(/operating room proof/i)).toBeInTheDocument();
+    expect(screen.getByText(/opr-test-run/i)).toBeInTheDocument();
+    expect(screen.getByText(/sanitized/i)).toBeInTheDocument();
     expect(screen.getAllByText(/facilitated_boardroom/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/21\/21 · completed/i)).toBeInTheDocument();
     expect(screen.getByText(/3 facilitator, 4 proposals/i)).toBeInTheDocument();
@@ -769,7 +821,7 @@ describe('panels populate from fixture API responses', () => {
     expect(screen.getByText(/Decision Summary/i)).toBeInTheDocument();
     expect(screen.getByText(/Decision: Validate demand before building/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Sales owns qualified outreach/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Final Team Room brief: pick the sales-led audit wedge/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Final Team Room brief: pick the sales-led audit wedge/i).length).toBeGreaterThan(0);
     fireEvent.change(screen.getByLabelText(/^to$/i), { target: { value: 'sales-worker' } });
     fireEvent.input(screen.getByLabelText(/subject/i), { target: { value: 'Sales reply' } });
     fireEvent.input(screen.getByLabelText(/message/i), { target: { value: 'Lead list is ready.' } });
@@ -785,8 +837,8 @@ describe('panels populate from fixture API responses', () => {
     expect(screen.getByText(/generic_runtime · codex/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /run auto tick/i }));
     await waitFor(() => expect(requests).toContain('/api/team/9/tick'));
-    expect(await screen.findByText(/claim_respond/i)).toBeInTheDocument();
-    expect(screen.getByText(/1 pending convoy mailbox item/i)).toBeInTheDocument();
+    expect((await screen.findAllByText(/claim_respond/i)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/1 pending convoy mailbox item/i).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('button', { name: /run executor step/i }));
     await waitFor(() => expect(requests).toContain('/api/team/9/executor-step'));
     expect(await screen.findByText(/git_status · passed/i)).toBeInTheDocument();
@@ -869,5 +921,68 @@ describe('panels populate from fixture API responses', () => {
     expect(screen.getByText('Telegram Bot')).toBeInTheDocument();
     expect(screen.getByText('34723c42e7103e986274c4825b0e68a3')).toBeInTheDocument();
     expect(screen.getByText('f822285b539e4820bd50988bc7ec6984')).toBeInTheDocument();
+  });
+
+  test('Capability Gateway page renders default-deny policy and integrations', async () => {
+    mockFetchOnce({
+      status: 'ok',
+      timestamp: '2026-06-04T00:00:00Z',
+      runtime: {
+        selected_lane: 'generic_runtime',
+        selected_generic_provider: 'codex',
+        selected_model: 'chatgpt-plan-default',
+        generic_text_route: ['codex', 'gemini'],
+        generic_tool_route: ['claude_native', 'codex'],
+      },
+      capabilities: {
+        total_count: 2,
+        enabled_count: 1,
+        sources: { integrations: 1 },
+        items: [
+          { id: 'telegram_bot', display_name: 'Telegram Bot', enabled: true, source: 'integrations' },
+        ],
+      },
+      toolsets: [
+        { name: 'google', capability_count: 3 },
+        { name: 'browserops', capability_count: 1 },
+      ],
+      integrations: {
+        total_count: 2,
+        enabled_count: 1,
+        items: [
+          { id: 'telegram', display_name: 'Telegram', enabled: true, action_count: 4 },
+          { id: 'slack', display_name: 'Slack', enabled: false, action_count: 2 },
+        ],
+      },
+      browserops: {
+        enabled: false,
+        status: 'attention',
+        cdp_port: 9222,
+        reason: 'CDP not connected',
+      },
+      outbound_messaging: {
+        status: 'policy_gated',
+        requires_operator_confirmation: true,
+        actions: [
+          { id: 'telegram.send_message', effect: 'send' },
+        ],
+      },
+      approval_policy: {
+        default_deny: true,
+        mutating_actions_require_operator_confirmation: true,
+        dashboard_mode: 'read_only',
+        model_exposed_mutating_actions: [],
+      },
+    });
+
+    render(<CapabilityGateway />);
+
+    await waitFor(() => expect(screen.getByText(/capability gateway/i)).toBeInTheDocument());
+    expect(screen.getAllByText('chatgpt-plan-default').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/default deny/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/true/i).length).toBeGreaterThan(0);
+    expect(screen.getByText('Telegram')).toBeInTheDocument();
+    expect(screen.getByText('telegram.send_message')).toBeInTheDocument();
+    expect(screen.getAllByText(/read_only/i).length).toBeGreaterThan(0);
   });
 });

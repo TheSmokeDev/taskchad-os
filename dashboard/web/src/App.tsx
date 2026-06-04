@@ -24,6 +24,7 @@ import { Teams } from '@/pages/Teams';
 import { StandupConfig } from '@/pages/StandupConfig';
 import { AgentFiles } from '@/pages/AgentFiles';
 import { Jarvis } from '@/pages/Jarvis';
+import { CapabilityGateway } from '@/pages/CapabilityGateway';
 import { BrowserViewer } from '@/pages/BrowserViewer';
 import { MobileAccess } from '@/pages/MobileAccess';
 import { DEFAULT_ROUTE } from '@/lib/routes';
@@ -71,6 +72,7 @@ export function App() {
           <Route path="/voices"><Voices /></Route>
           <Route path="/standup"><StandupConfig /></Route>
           <Route path="/jarvis"><Jarvis /></Route>
+          <Route path="/capabilities"><CapabilityGateway /></Route>
           <Route path="/browser"><BrowserViewer /></Route>
           <Route path="/mobile"><MobileAccess /></Route>
           <Route path="/settings"><Settings /></Route>
@@ -81,6 +83,7 @@ export function App() {
           <Route path="/memory"><Redirect to="/memories" /></Route>
           <Route path="/tasks"><Redirect to="/work" /></Route>
           <Route path="/team"><Redirect to="/teams" /></Route>
+          <Route path="/gateway"><Redirect to="/capabilities" /></Route>
           <Route path="/warroom"><Redirect to="/cabinet" /></Route>
 
           <Route path="/"><Redirect to={DEFAULT_ROUTE} /></Route>

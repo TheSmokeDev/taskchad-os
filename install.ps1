@@ -1,6 +1,49 @@
 # install.ps1 — Windows install script for The Homie
 $ErrorActionPreference = "Stop"
 
+function Invoke-NpmInstall {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    Push-Location $Path
+    try {
+        npm install
+        Assert-LastExitCode "npm install in $Path"
+    } finally {
+        Pop-Location
+    }
+}
+
+function Invoke-NpmScript {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Script
+    )
+
+    Push-Location $Path
+    try {
+        npm run $Script
+        Assert-LastExitCode "npm run $Script in $Path"
+    } finally {
+        Pop-Location
+    }
+}
+
+function Assert-LastExitCode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Action
+    )
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Action failed with exit code $LASTEXITCODE"
+    }
+}
+
 # Check Python 3.12+
 $py = Get-Command python -ErrorAction SilentlyContinue
 if (-not $py) {
@@ -15,6 +58,26 @@ if ([int]$parts[0] -lt 3 -or ([int]$parts[0] -eq 3 -and [int]$parts[1] -lt 12)) 
 }
 Write-Host "Python $version OK" -ForegroundColor Green
 
+# Check Git
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Error "Git not found. Install from https://git-scm.com/download/win"
+    exit 1
+}
+Write-Host "Git OK" -ForegroundColor Green
+
+# Check Node.js 20+ for the dashboard and desktop dev stack
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Error "Node.js not found. Install Node.js 20+ from https://nodejs.org/"
+    exit 1
+}
+$nodeVersionRaw = & node -p "process.versions.node"
+$nodeMajor = [int]($nodeVersionRaw.Split('.')[0])
+if ($nodeMajor -lt 20) {
+    Write-Error "Node.js $nodeVersionRaw found - need 20+."
+    exit 1
+}
+Write-Host "Node.js $nodeVersionRaw OK" -ForegroundColor Green
+
 # Install uv if missing
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     Write-Host "Installing uv..."
@@ -24,18 +87,21 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 # Clone or use existing
 $repoDir = if ($env:THEHOMIE_DIR) { $env:THEHOMIE_DIR } else { "$HOME\thehomie" }
 if (-not (Test-Path $repoDir)) {
-    git clone https://github.com/thehomie-framework/thehomie.git $repoDir
+    git clone https://github.com/your-github-user/thehomie-framework.git $repoDir
+    Assert-LastExitCode "git clone"
 }
 
 # Install deps
 Push-Location "$repoDir\.claude\scripts"
 uv sync
+Assert-LastExitCode "uv sync"
 
-# Create .env
+# Create starter .env only when a public example exists. Use the setup wizard
+# for provider configuration instead of asking operators to hand-edit secrets.
 if (-not (Test-Path ".env")) {
     if (Test-Path ".env.example") {
         Copy-Item ".env.example" ".env"
-        Write-Host "Created .env from .env.example — edit with your API keys"
+        Write-Host "Created .env from .env.example"
     } else {
         "# The Homie configuration" | Out-File -FilePath ".env"
     }
@@ -43,8 +109,31 @@ if (-not (Test-Path ".env")) {
 
 # Verify
 uv run thehomie setup --check
+Assert-LastExitCode "thehomie setup --check"
 Pop-Location
 
+# Install dashboard and desktop shell dependencies. The Electron shell stays a
+# thin lifecycle wrapper; Python and Hono remain the runtime source of truth.
+Write-Host "`nInstalling dashboard and desktop dependencies..." -ForegroundColor Cyan
+Invoke-NpmInstall "$repoDir\dashboard\server"
+Invoke-NpmInstall "$repoDir\dashboard\web"
+Invoke-NpmInstall "$repoDir\dashboard\desktop"
+
+Write-Host "`nBuilding dashboard web assets for Desktop v0..." -ForegroundColor Cyan
+Invoke-NpmScript "$repoDir\dashboard\web" "build"
+
+Push-Location "$repoDir\.claude\scripts"
+try {
+    $desktopDryRun = uv run thehomie desktop --shell --dry-run --json
+    Assert-LastExitCode "desktop shell dry-run"
+    $desktopDryRun | Out-Null
+} finally {
+    Pop-Location
+}
+
 Write-Host "`nInstallation complete!" -ForegroundColor Green
-Write-Host "  Edit: $repoDir\.claude\scripts\.env"
-Write-Host "  Run:  cd $repoDir\.claude\scripts; uv run thehomie chat"
+Write-Host "  Configure: cd $repoDir\.claude\scripts; uv run thehomie setup"
+Write-Host "  Chat:      cd $repoDir\.claude\scripts; uv run thehomie chat"
+Write-Host "  Desktop:   cd $repoDir\.claude\scripts; uv run thehomie desktop --shell"
+Write-Host "  Dev mode:  cd $repoDir\.claude\scripts; uv run thehomie desktop"
+Write-Host "  Package:   cd $repoDir\dashboard\desktop; npm run package:win"
