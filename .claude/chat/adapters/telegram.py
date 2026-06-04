@@ -712,8 +712,102 @@ class TelegramAdapter:
         await self._queue.put(incoming)
 
     async def _on_document(self, update: Any, context: Any) -> None:
-        """Handle document uploads. Currently a no-op — extensions can register handlers."""
-        pass
+        """Handle incoming document uploads and queue them as attachments."""
+        msg = update.message
+        if not msg or not msg.document:
+            return
+
+        user_id = msg.from_user.id
+
+        if self.allowed_user_ids and user_id not in self.allowed_user_ids:
+            await msg.reply_text("Not authorized.")
+            return
+
+        document = msg.document
+        filename = document.file_name or f"{document.file_unique_id or document.file_id}.bin"
+
+        try:
+            tg_file = await self._app.bot.get_file(document.file_id)
+            tmp_dir = Path(tempfile.gettempdir()) / "thehomie_telegram_documents"
+            tmp_dir.mkdir(exist_ok=True)
+            unique_id = self._safe_document_filename(
+                document.file_unique_id or str(msg.message_id)
+            )
+            file_path = tmp_dir / f"{unique_id}_{self._safe_document_filename(filename)}"
+            await tg_file.download_to_drive(str(file_path))
+            print(
+                f"[{datetime.now()}] Document saved: {file_path} "
+                f"({document.file_size or 0} bytes)",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[{datetime.now()}] Document download failed: {e}", flush=True)
+            await msg.reply_text(f"Failed to download document: {e}")
+            return
+
+        caption = msg.caption or ""
+        details = [
+            f"[User uploaded a document: {filename}]",
+            f"Saved at: {file_path}",
+        ]
+        if document.mime_type:
+            details.append(f"MIME type: {document.mime_type}")
+        if document.file_size is not None:
+            details.append(f"Size: {document.file_size} bytes")
+        details.append(
+            "Use the Read tool to inspect Markdown or text documents at the path above, then respond."
+        )
+        text = "\n".join(details)
+        if caption:
+            text += f"\n\nUser's message: {caption}"
+
+        chat_id = str(msg.chat_id)
+        thread_id = chat_id
+        parent_msg_id = None
+
+        if msg.reply_to_message:
+            thread_id = f"{chat_id}:{msg.reply_to_message.message_id}"
+            parent_msg_id = str(msg.reply_to_message.message_id)
+
+        user = User(
+            platform=Platform.TELEGRAM,
+            platform_id=str(user_id),
+            display_name=msg.from_user.first_name,
+        )
+        channel = Channel(
+            platform=Platform.TELEGRAM,
+            platform_id=chat_id,
+            is_dm=msg.chat.type == "private",
+        )
+        thread = Thread(thread_id=thread_id, parent_message_id=parent_msg_id)
+
+        incoming = IncomingMessage(
+            text=text,
+            user=user,
+            channel=channel,
+            platform=Platform.TELEGRAM,
+            thread=thread,
+            platform_message_id=str(msg.message_id),
+            attachments=[
+                Attachment(
+                    filename=filename,
+                    mimetype=document.mime_type,
+                    url=str(file_path),
+                    size_bytes=document.file_size,
+                )
+            ],
+            raw_event=msg.to_dict(),
+        )
+
+        await self._queue.put(incoming)
+
+    @staticmethod
+    def _safe_document_filename(filename: str) -> str:
+        """Return a filesystem-safe filename segment for Telegram downloads."""
+        import re
+
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(filename).name).strip("._")
+        return safe[:120] or "document"
 
     # ── Inline buttons ─────────────────────────────────────────────
 

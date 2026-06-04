@@ -5,8 +5,19 @@ from types import SimpleNamespace
 
 import pytest
 
+import adapters.telegram as telegram_adapter
 from adapters.telegram import TelegramAdapter, TelegramDeliveryError
 from models import Attachment, Channel, OutgoingMessage, Platform
+
+
+class FakeTelegramFile:
+    def __init__(self, content: bytes = b"") -> None:
+        self.content = content
+        self.downloaded_to: str | None = None
+
+    async def download_to_drive(self, path: str) -> None:
+        self.downloaded_to = path
+        Path(path).write_bytes(self.content)
 
 
 class FakeTelegramBot:
@@ -16,6 +27,10 @@ class FakeTelegramBot:
         self.fail_edit = False
         self.fail_markdown_send = False
         self.fail_plain_send = False
+        self.files: dict[str, FakeTelegramFile] = {}
+
+    async def get_file(self, file_id: str) -> FakeTelegramFile:
+        return self.files[file_id]
 
     async def edit_message_text(self, **kwargs):
         self.calls.append(("edit_message_text", kwargs))
@@ -46,6 +61,8 @@ class FakeTelegramBot:
 def _adapter_with_fake_bot(bot: FakeTelegramBot) -> TelegramAdapter:
     adapter = TelegramAdapter.__new__(TelegramAdapter)
     adapter._app = SimpleNamespace(bot=bot)
+    adapter._queue = telegram_adapter.asyncio.Queue()
+    adapter.allowed_user_ids = []
     adapter._sent_messages = {}
     adapter._callback_id_map = {}
     adapter._voice_reply_threads = set()
@@ -110,6 +127,53 @@ async def test_send_attachment_uses_document_for_non_image(tmp_path: Path) -> No
 
     assert [name for name, _ in bot.calls] == ["send_document"]
     assert bot.calls[0][1]["caption"] == "Report attached"
+
+
+@pytest.mark.asyncio
+async def test_on_document_downloads_and_queues_attachment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(telegram_adapter.tempfile, "gettempdir", lambda: str(tmp_path))
+    bot = FakeTelegramBot()
+    bot.files["file-123"] = FakeTelegramFile(b"# Game Plan\n\nShip the adapter.")
+    adapter = _adapter_with_fake_bot(bot)
+    message = SimpleNamespace(
+        document=SimpleNamespace(
+            file_id="file-123",
+            file_unique_id="unique-123",
+            file_name="game-plan.md",
+            mime_type="text/markdown",
+            file_size=29,
+        ),
+        from_user=SimpleNamespace(id=123456, first_name="Operator"),
+        chat_id=123456,
+        chat=SimpleNamespace(type="private"),
+        reply_to_message=None,
+        caption="Please read this",
+        message_id=42,
+        to_dict=lambda: {"message_id": 42, "document": {"file_name": "game-plan.md"}},
+    )
+
+    await adapter._on_document(SimpleNamespace(message=message), None)
+
+    incoming = adapter._queue.get_nowait()
+    assert incoming.text.startswith("[User uploaded a document: game-plan.md]")
+    assert "Please read this" in incoming.text
+    assert incoming.platform_message_id == "42"
+    assert incoming.attachments == [
+        Attachment(
+            filename="game-plan.md",
+            mimetype="text/markdown",
+            url=str(
+                tmp_path
+                / "thehomie_telegram_documents"
+                / "unique-123_game-plan.md"
+            ),
+            size_bytes=29,
+        )
+    ]
+    assert Path(incoming.attachments[0].url or "").read_text() == "# Game Plan\n\nShip the adapter."
 
 
 @pytest.mark.asyncio
