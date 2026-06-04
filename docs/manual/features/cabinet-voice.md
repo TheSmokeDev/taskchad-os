@@ -1,6 +1,6 @@
 # Cabinet Voice
 
-Status: Pipecat lifecycle stable; LiveKit transcript runner wired
+Status: Pipecat lifecycle stable; LiveKit live mic proof deferred
 Owner: Python orchestration and Cabinet voice adapter
 Last updated: 2026-06-04
 
@@ -28,7 +28,9 @@ join the LiveKit room, and publish the microphone. A Python LiveKit Agents
 runner can join the same room, receive final STT user-turn events, and post
 those transcripts into the same Cabinet text orchestrator with `is_voice=True`,
 `audience="auto"`, and no forced target. Spoken/TTS response over LiveKit is
-not shipped yet.
+not shipped yet. LiveKit is not the default operator voice path yet; the manual
+Chrome mic proof is deferred until the runner lifecycle and observability are
+controlled from Python instead of a separate timed CLI process.
 
 ## Operator Entry Points
 
@@ -144,14 +146,22 @@ proof artifacts and local process state remain outside the public manual.
   no forced target.
 - Broader voice coverage command passed `138` tests:
   `uv run pytest tests/test_cabinet_voice_html.py tests/test_cabinet_voice_architectural_locks.py tests/test_cabinet_voice_agent_bridge.py tests/test_cabinet_voice_state_machine.py tests/test_cabinet_voice_router.py tests/test_cabinet_voice_personas.py tests/test_cabinet_voice_livekit.py tests/test_cabinet_voice_lifecycle.py tests/test_cabinet_voice_integration.py tests/test_dashboard_api_cabinet_voice.py -q`
+- LiveKit runtime proof on 2026-06-04 is intentionally partial: local token
+  minting and the Python runner startup worked, including OpenAI STT plus
+  Silero VAD registration. The manual Chrome test did not produce confirmed
+  `livekit_transcript_handoff` or Cabinet transcript proof, so the LiveKit mic
+  UX remains deferred.
 
 ## Next Slices
 
 - Run the real Chrome/Edge mic retest when the operator is available and confirm
   live logs show `stt_flush trigger=idle_timer` or `idle_silence` for the
   current phrase without needing a second phrase.
-- Start the LiveKit runner against a local LiveKit server and prove a final
-  transcript reaches the Cabinet room from the real browser mic transport.
+- Add Python-owned LiveKit runner lifecycle/status to `/voices` before the next
+  manual LiveKit mic test, so Join LiveKit can start or verify the runner,
+  expose log/status errors, and avoid empty-room idle-close timing traps.
+- Prove a final LiveKit browser transcript reaches the Cabinet room from the
+  real mic transport.
 - Add LiveKit spoken/TTS response after the transcript path is proven.
 - Decide whether multi-session/per-meeting ports are needed after the
   single-session operator flow is stable.

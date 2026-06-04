@@ -266,6 +266,21 @@ STT, and TTS.
 * **"The X agent took too long to respond"** — the bridge timeout fired before Phase 5a returned an `agent_done` event. Either Phase 5a is slow (check its logs), or the SSE stream got disconnected. Increase `CABINET_VOICE_BRIDGE_TIMEOUT_S` or restart the orchestration API.
 * **"Cabinet declined this turn"** — kill switch refusal. Check `HOMIE_KILLSWITCH_CABINET` env state and the audit log.
 * **No persona reply audio** — verify the Phase 4 TTS cascade has at least one configured provider (`ELEVENLABS_API_KEY` + `ELEVENLABS_VOICE_ID`, etc.).
+* **LiveKit STT returns `401 Unauthorized` with `devkey/secret`** — local
+  LiveKit dev credentials are valid for the local room server and browser
+  token minting, but not for LiveKit Cloud inference. Use the default
+  `CABINET_LIVEKIT_STT_PROVIDER=openai` path with `OPENAI_API_KEY`, or provide
+  real LiveKit Cloud inference credentials before setting
+  `CABINET_LIVEKIT_STT_PROVIDER=inference`.
+* **LiveKit runner starts, then disconnects before testing** — direct
+  `connect --room cabinet-<id>` can close after the room stays empty. Restart
+  the runner immediately before joining from Chrome, or implement the next
+  Python-owned LiveKit lifecycle slice so `/voices` owns runner start/status.
+* **LiveKit manual mic test feels connected but no Cabinet turn appears** —
+  check for `livekit_transcript_handoff` in the runner log and a matching
+  `cabinet_transcripts` row before calling the test successful. If those are
+  absent, the browser transport/STT path is still unproven even if room join
+  and runner startup worked.
 
 ## Out of scope for Phase 6
 
