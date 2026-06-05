@@ -139,6 +139,12 @@ config ship; `dashboard/desktop/node_modules/`, `dashboard/desktop/dist/`,
 
 ## Next Slices
 
+- Hermes Desktop parity pass for distribution. Use
+  `NousResearch/hermes-agent/apps/desktop` as the primary comparator for
+  installer targets, unpacked/portable behavior, first-run bootstrap, local
+  runtime dependency handling, logs/status, and failure recovery. Ship the
+  Homie-native subset only: Python/orchestration stays the source of truth and
+  Electron stays thin over lifecycle/status/logs.
 - Signed installer or portable installer distribution. The current proof is an
   unpacked no-admin Windows package, not a signed installer.
 - Desktop icon and artifact naming polish.
