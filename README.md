@@ -16,45 +16,71 @@ It's not your second brain. It's your homie - a partner with its own soul, its o
 
 ---
 
-## Start Here
+## Quick Install
 
-- Install and first run: [INSTALL.md](INSTALL.md), `install.ps1`, and
-  `install.sh`.
-- Operator manual: [docs/manual/README.md](docs/manual/README.md). This is
-  the public feature map for what shipped, how to run it, how to test it, and
-  where each source-of-truth file lives.
-- Desktop app: [docs/manual/features/desktop-v0.md](docs/manual/features/desktop-v0.md)
-  and [docs/manual/features/desktop-dev-launcher.md](docs/manual/features/desktop-dev-launcher.md).
-- Channels and Telegram attachment behavior:
-  [docs/manual/features/multi-channel-adapters.md](docs/manual/features/multi-channel-adapters.md).
-- Runtime/model control:
-  [docs/manual/features/runtime-status-model-control.md](docs/manual/features/runtime-status-model-control.md).
+```bash
+# Linux/macOS/WSL
+curl -sSL https://raw.githubusercontent.com/your-github-user/thehomie-framework/master/install.sh | bash
+```
 
-The public mirror also generates `FRAMEWORK.md`, a compact development guide
-for framework contributors.
+```powershell
+# Windows PowerShell
+irm https://raw.githubusercontent.com/your-github-user/thehomie-framework/master/install.ps1 | iex
+```
 
-## Current Public Surface
+Manual path:
 
-- Local CLI and runtime: `thehomie chat`, `thehomie status`, `thehomie doctor`,
-  `/provider`, and `/model`.
-- Multi-channel ingress: Telegram, Slack, Discord, WhatsApp, web relay, and
-  CLI share one canonical message/session path. Telegram document attachments,
-  attachment groups, quick-turn batching, and Queue/Steer follow-up controls
-  are documented and live-proven.
-- Operating Room and Capability Gateway: dashboard/API operator surfaces stay
-  thin over Python-owned orchestration and capability state.
-- Desktop v0: Electron shell, local process lifecycle, logs/status, static
-  dashboard launch, and an unpacked Windows package smoke. Electron stays thin;
-  Python/orchestration remains the source of truth.
-- Multi-agent work: convoy DAGs, typed mailbox, team sessions, Team Room, and
-  scheduler surfaces.
-- Memory and learning: local Markdown vault, hybrid recall, daily/weekly
-  synthesis, knowledge compilation, and human-gated self-evolution.
+```bash
+git clone https://github.com/your-github-user/thehomie-framework.git
+cd thehomie-framework/.claude/scripts
+uv sync
+cp .env.example .env
+uv run python setup_wizard.py
+uv run thehomie chat
+```
 
-## Proof Boundaries
+## Getting Started
 
-- Desktop v0 currently proves the Electron shell and unpacked Windows package.
-  A signed installer or no-admin installer flow is not claimed yet.
+```bash
+thehomie chat                    # Start a conversation
+thehomie setup                   # Configure providers and integrations
+thehomie setup --check           # Verify setup without changing anything
+thehomie status --json           # Machine-readable health report
+thehomie doctor                  # Diagnostics with fix hints
+thehomie desktop --shell         # Launch the Desktop v0 Electron shell
+thehomie team list               # Inspect team sessions
+```
+
+## What You Get
+
+<table>
+<tr><td><b>Monitors your world proactively</b></td><td>Heartbeat every 30 min checks your email, calendar, tasks, and metrics. Direct integration actions have a canonical policy contract for read, write, send, archive, and external-post effects. Daily reflection at 8 AM promotes decisions to long-term memory. Weekly synthesis every Sunday detects patterns and updates goals — all running whether you're talking to it or not.</td></tr>
+<tr><td><b>Remembers across every session</b></td><td>Local-first Obsidian-compatible vault (SOUL.md, USER.md, MEMORY.md, daily + weekly logs). Hybrid search — FTS5 keyword + FastEmbed ONNX vector (BGE-base-en-v1.5, 768-dim) + LLM re-ranking (haiku, Tier 1). Memory graph with PageRank + betweenness centrality. Proactive recall injected on every message. WORKING.md scratchpad carries open threads across sessions.</td></tr>
+<tr><td><b>Compiles knowledge like code</b></td><td>Entity compilation engine (Karpathy LLM Wiki port): ingest a source → extract entities → create/update concept pages → detect connections → flag contradictions. Concept pages in <code>concepts/</code> accumulate claims from multiple sources. Connection articles in <code>connections/</code> link related concepts. Q&A answers filed via <code>/file</code> persist in <code>qa/</code>. Raw sources preserved immutably in <code>raw/</code>. Build log tracks every compilation. 8 entry points — fires automatically during ingest, daily reflection, weekly synthesis, and on-demand via <code>/file</code> or CLI.</td></tr>
+<tr><td><b>Gets smarter from experience</b></td><td>Per-turn auto-capture (6 regex triggers) → staging store → batch promotion in daily reflection. Auto-skill generation after 5+ tool calls. InferenceTracker with confidence decay and contradiction detection. Theory of mind built on USER.md. Human-gated amendment proposals can target SELF/SOUL/USER/MEMORY without auto-applying durable identity changes.</td></tr>
+<tr><td><b>One brain, six channels</b></td><td>Telegram, Slack, Discord, WhatsApp, Web relay, CLI — all enter through a single canonical ingress. One session model, one recall service, one runtime. Transport identity is separated from conversation identity so sessions survive reconnects.</td></tr>
+<tr><td><b>Any model, no lock-in</b></td><td>Claude SDK, OpenAI Codex, Gemini CLI, OpenRouter, OpenAI-compatible — with health-aware fallback, manual <code>/provider</code> + <code>/model</code> control, lane-first runtime (<code>selection.py</code>, <code>lane_router.py</code>), cost tracking, and automatic retry on transient failures.</td></tr>
+<tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs for multi-subtask dependency tracking. Typed mailbox for agent-to-agent messaging. Team sessions with typed roles, backend fallback, and shared memory. All exposed via a local API on port 4322.</td></tr>
+<tr><td><b>Full observability</b></td><td>Every message → one nested Langfuse trace: session lookup → process detection → recall (tier + pipeline) → region assembly → runtime where supported → post-response. Cost, provider, model, and tool calls are tracked when the active runtime exposes them. Sentry/GlitchTip captures unexpected orchestration errors when a DSN is configured.</td></tr>
+</table>
+
+---
+
+## Documentation
+
+| Start here | What it covers |
+|---|---|
+| [Install Guide](INSTALL.md) | Prerequisites, setup wizard, channel credentials, Docker, systemd, vault setup |
+| [Operator Manual](docs/manual/README.md) | Public feature map, source-of-truth files, operator entry points, tests, proof boundaries |
+| [Desktop v0](docs/manual/features/desktop-v0.md) | Electron shell, package smoke proof, Desktop/Hono/Python lifecycle |
+| [Multi-Channel Adapters](docs/manual/features/multi-channel-adapters.md) | Telegram attachments, grouped documents, quick-turn batching, Queue/Steer controls |
+| [Runtime Status And Model Control](docs/manual/features/runtime-status-model-control.md) | `/provider`, `/model`, lane-first runtime behavior, quiet JSON contract |
+| [FRAMEWORK.md](FRAMEWORK.md) | Compact development guide generated for the public framework mirror |
+
+## Current Proof Boundaries
+
+- Desktop v0 proves the Electron shell and unpacked Windows package. A signed
+  installer or no-admin installer flow is not claimed yet.
 - Cabinet Voice has lifecycle controls and a partial LiveKit spike. The browser
   mic -> transcript -> Cabinet reply path is not claimed ready.
 - Optional integrations require user-owned credentials. No private account
@@ -74,21 +100,6 @@ Instead of *"Hi, how can I help you today?"* — you get:
 You didn't set up a notification. You didn't write a morning brief. The Homie was watching. Its memory isn't a static file you load — it's a living record tended between sessions. Its identity isn't a document you edit — it's a self that amends when the evidence is strong enough.
 
 That's the target. Most of the load-bearing walls are already up: vault, recall, daily reflection, weekly synthesis, dream consolidation, WorkingMemory-owned prompt state, unified proactive briefs across chat and scheduled loops, and the self-evolution replay loop ship today. Ambient monitoring is live through heartbeat; automatic durable-memory amendments remain human-gated.
-
----
-
-## What You Get
-
-<table>
-<tr><td><b>Monitors your world proactively</b></td><td>Heartbeat every 30 min checks your email, calendar, tasks, and metrics. Direct integration actions have a canonical policy contract for read, write, send, archive, and external-post effects. Daily reflection at 8 AM promotes decisions to long-term memory. Weekly synthesis every Sunday detects patterns and updates goals — all running whether you're talking to it or not.</td></tr>
-<tr><td><b>Remembers across every session</b></td><td>Local-first Obsidian-compatible vault (SOUL.md, USER.md, MEMORY.md, daily + weekly logs). Hybrid search — FTS5 keyword + FastEmbed ONNX vector (BGE-base-en-v1.5, 768-dim) + LLM re-ranking (haiku, Tier 1). Memory graph with PageRank + betweenness centrality. Proactive recall injected on every message. WORKING.md scratchpad carries open threads across sessions.</td></tr>
-<tr><td><b>Compiles knowledge like code</b></td><td>Entity compilation engine (Karpathy LLM Wiki port): ingest a source → extract entities → create/update concept pages → detect connections → flag contradictions. Concept pages in <code>concepts/</code> accumulate claims from multiple sources. Connection articles in <code>connections/</code> link related concepts. Q&A answers filed via <code>/file</code> persist in <code>qa/</code>. Raw sources preserved immutably in <code>raw/</code>. Build log tracks every compilation. 8 entry points — fires automatically during ingest, daily reflection, weekly synthesis, and on-demand via <code>/file</code> or CLI.</td></tr>
-<tr><td><b>Gets smarter from experience</b></td><td>Per-turn auto-capture (6 regex triggers) → staging store → batch promotion in daily reflection. Auto-skill generation after 5+ tool calls. InferenceTracker with confidence decay and contradiction detection. Theory of mind built on USER.md. Human-gated amendment proposals can target SELF/SOUL/USER/MEMORY without auto-applying durable identity changes.</td></tr>
-<tr><td><b>One brain, six channels</b></td><td>Telegram, Slack, Discord, WhatsApp, Web relay, CLI — all enter through a single canonical ingress. One session model, one recall service, one runtime. Transport identity is separated from conversation identity so sessions survive reconnects.</td></tr>
-<tr><td><b>Any model, no lock-in</b></td><td>Claude SDK, OpenAI Codex, Gemini CLI, OpenRouter, OpenAI-compatible — with health-aware fallback, manual <code>/provider</code> + <code>/model</code> control, lane-first runtime (<code>selection.py</code>, <code>lane_router.py</code>), cost tracking, and automatic retry on transient failures.</td></tr>
-<tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs for multi-subtask dependency tracking. Typed mailbox for agent-to-agent messaging. Team sessions with typed roles, backend fallback, and shared memory. All exposed via a local API on port 4322.</td></tr>
-<tr><td><b>Full observability</b></td><td>Every message → one nested Langfuse trace: session lookup → process detection → recall (tier + pipeline) → region assembly → runtime where supported → post-response. Cost, provider, model, and tool calls are tracked when the active runtime exposes them. Sentry/GlitchTip captures unexpected orchestration errors when a DSN is configured.</td></tr>
-</table>
 
 ---
 
@@ -114,29 +125,6 @@ The vault is where The Homie's mind actually lives. Not a notes folder it writes
 ### Framework vs. adapter
 
 The Homie is provider-agnostic. Claude SDK, Codex, Gemini, OpenRouter, OpenAI-compatible — interchangeable batteries. The framework runs the same regardless. Editor adapters (Claude Code project instructions, hooks, MCP bridges) are integration surfaces *layered on top of* the framework, not part of it. When the heartbeat runs through Codex or Gemini fallback, those editor instructions are not touched.
-
----
-
-## Quick Install
-
-```bash
-git clone https://github.com/your-github-user/thehomie-framework.git
-cd thehomie-framework/.claude/scripts
-uv sync
-cp .env.example .env                  # Add your API keys
-uv run python setup_wizard.py         # Interactive onboarding wizard
-uv run thehomie chat                  # Start talking
-```
-
-Or use the install script:
-
-```bash
-# Linux/macOS/WSL
-curl -sSL https://raw.githubusercontent.com/your-github-user/thehomie-framework/master/install.sh | bash
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/your-github-user/thehomie-framework/master/install.ps1 | iex
-```
 
 ---
 
@@ -509,12 +497,13 @@ Identity files (`SOUL.md`, `USER.md`) don't update by hand. The self-evolution l
 | | OpenClaw | Hermes Agent | The Homie |
 |---|---|---|---|
 | **Thesis** | Channel breadth - 25+ adapters | Self-improving skills loop | A real partner - identity + memory + proactive judgment + the nerve to push back |
-| **Memory** | Plain-text notes | MEMORY.md + FTS session search | 9-layer vault: graph + dual search + daily/weekly synthesis + staged promotion |
-| **Knowledge graph** | No | No | Entity compilation engine (Karpathy port) — concept pages, connections, contradictions, Q&A filing, LLM re-ranking |
-| **Cognition** | None | Prompt assembly stack | Mental process state machine + theory of mind + region-weighted assembly |
-| **Proactive** | No | In-process cron | Heartbeat (30 min) + daily reflection + weekly synthesis — all via unified recall |
-| **Observability** | Usage tracking | Basic | Langfuse trace tree per message + Sentry/GlitchTip error capture when configured |
-| **Multi-agent** | No | Subagents | Convoy DAGs + typed mailbox + team sessions with backend fallback |
+| **Interface** | Many chat channels | TUI, CLI, gateway, and desktop workbench | CLI, Telegram/Slack/Discord/WhatsApp/web relay, dashboard, and Desktop v0 shell |
+| **Runtime** | Adapter-first routing | Broad provider/model support plus terminal backends | Lane-first runtime with `/provider`, `/model`, status/doctor, and quiet JSON contract |
+| **Learning loop** | Notes and commands | Skills from experience, skill improvement, memory nudges, session search | Human-gated self-evolution, staged memory promotion, theory of mind, replay safety |
+| **Memory** | Plain-text notes | MEMORY.md, user modeling, FTS session search | 9-layer vault: identity, graph, dual search, daily/weekly synthesis, staged promotion |
+| **Knowledge graph** | No | Not the focus | Entity compilation engine: concept pages, connections, contradictions, Q&A filing, LLM re-ranking |
+| **Operator surface** | Bot-style access | Gateway and terminal workbench | Operating Room, Capability Gateway, Team Room, Desktop v0, public manual surfaces |
+| **Multi-agent** | No | Subagents and parallel workstreams | Convoy DAGs, typed mailbox, team sessions, scheduler, backend fallback |
 
 ---
 

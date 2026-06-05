@@ -50,7 +50,7 @@ fi
 # Clone or use existing repo
 REPO_DIR="${THEHOMIE_DIR:-$HOME/thehomie}"
 if [ ! -d "$REPO_DIR" ]; then
-    run_cmd git clone https://github.com/thehomie-framework/thehomie.git "$REPO_DIR"
+    run_cmd git clone https://github.com/your-github-user/thehomie-framework.git "$REPO_DIR"
 fi
 
 # Install dependencies

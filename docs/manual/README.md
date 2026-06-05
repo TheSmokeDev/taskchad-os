@@ -12,8 +12,8 @@ machine-specific proof artifacts stay outside the public manual.
 
 ## Open Source Reader Path
 
-1. Start with the root [README](../../README.md) for the thesis, install path,
-   current public surface, and proof boundaries.
+1. Start with the root [README](../../README.md) for Quick Install, Getting
+   Started commands, the documentation map, and proof boundaries.
 2. Use [INSTALL](../../INSTALL.md) for setup and channel credentials.
 3. Read [Operating Room](features/operating-room.md),
    [Capability Gateway](features/capability-gateway.md), and
