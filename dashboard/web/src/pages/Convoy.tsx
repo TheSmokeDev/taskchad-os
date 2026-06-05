@@ -15,7 +15,7 @@ import { Empty } from '@/components/Empty';
 import { Spinner } from '@/components/Spinner';
 import { Modal } from '@/components/Modal';
 import { useFetch } from '@/lib/useFetch';
-import { apiPost } from '@/lib/api';
+import { apiPost, describeApiError } from '@/lib/api';
 import { pushToast } from '@/lib/toasts';
 
 type ConvoyStatus = 'draft' | 'active' | 'paused' | 'completed' | 'failed' | 'cancelled';
@@ -107,7 +107,7 @@ const STATUS_TONE: Record<string, string> = {
 };
 
 function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return describeApiError(err);
 }
 
 function formatTime(value?: number | null): string {

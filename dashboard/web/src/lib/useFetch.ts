@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'preact/hooks';
-import { apiGet, ApiError } from './api';
+import { apiGet, describeApiError } from './api';
 
 export interface FetchState<T> {
   data: T | null;
@@ -46,7 +46,7 @@ export function useFetch<T = unknown>(path: string | null, pollMs = 0): FetchSta
       setError(null);
     }).catch((e) => {
       if (cancelled) return;
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(describeApiError(e));
     }).finally(() => {
       if (cancelled) return;
       setLoading(false);

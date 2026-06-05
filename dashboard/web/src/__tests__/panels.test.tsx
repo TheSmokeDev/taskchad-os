@@ -139,6 +139,15 @@ describe('panels populate from fixture API responses', () => {
     expect(screen.getAllByRole('button', { name: /dispatch/i }).length).toBeGreaterThan(0);
   });
 
+  test('Work Queue page explains offline local stack instead of raw fetch errors', async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    }) as any;
+    render(<WorkQueue />);
+    await waitFor(() => expect(screen.getByText(/local stack is offline/i)).toBeInTheDocument());
+    expect(screen.queryByText(/typeerror/i)).not.toBeInTheDocument();
+  });
+
   test('Convoy page renders dependency graph, subtasks, and mailbox', async () => {
     globalThis.fetch = vi.fn(async (url: string) => {
       const path = String(url);
@@ -231,6 +240,15 @@ describe('panels populate from fixture API responses', () => {
     expect(screen.getByLabelText(/convoy dependency graph/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /mailbox/i }));
     await waitFor(() => expect(screen.getByText(/ready for team dispatch/i)).toBeInTheDocument());
+  });
+
+  test('Convoy page explains offline local stack instead of raw fetch errors', async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    }) as any;
+    render(<Convoy />);
+    await waitFor(() => expect(screen.getAllByText(/local stack is offline/i).length).toBeGreaterThan(0));
+    expect(screen.queryByText(/typeerror/i)).not.toBeInTheDocument();
   });
 
   test('Teams page renders framework-owned team session detail', async () => {

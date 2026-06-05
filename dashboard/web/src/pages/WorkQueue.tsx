@@ -15,7 +15,7 @@ import { Empty } from '@/components/Empty';
 import { Spinner } from '@/components/Spinner';
 import { Modal } from '@/components/Modal';
 import { useFetch } from '@/lib/useFetch';
-import { apiPatch, apiPost } from '@/lib/api';
+import { apiPatch, apiPost, describeApiError } from '@/lib/api';
 import { pushToast } from '@/lib/toasts';
 
 type WorkStatus =
@@ -97,7 +97,7 @@ const PRIORITY_TONE: Record<string, string> = {
 };
 
 function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return describeApiError(err);
 }
 
 function isWorkStatus(value: string): value is WorkStatus {

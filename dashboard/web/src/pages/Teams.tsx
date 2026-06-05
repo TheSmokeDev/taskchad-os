@@ -6,7 +6,7 @@ import { Empty } from '@/components/Empty';
 import { Spinner } from '@/components/Spinner';
 import { Modal } from '@/components/Modal';
 import { useFetch } from '@/lib/useFetch';
-import { apiDelete, apiPost } from '@/lib/api';
+import { apiDelete, apiPost, describeApiError } from '@/lib/api';
 import { pushToast } from '@/lib/toasts';
 
 interface TeamSession {
@@ -357,7 +357,7 @@ const EXECUTOR_COMMANDS = [
 ] as const;
 
 function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return describeApiError(err);
 }
 
 function formatTime(value?: number | null): string {

@@ -56,6 +56,34 @@ export class ApiError extends Error {
   }
 }
 
+const LOCAL_STACK_OFFLINE_MESSAGE =
+  'Local stack is offline. Start The Homie Desktop stack, then refresh this page. This alpha panel depends on the local Python API and dashboard server.';
+
+function bodyMessage(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const record = body as Record<string, unknown>;
+  for (const key of ['error', 'detail', 'message']) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+export function describeApiError(err: unknown): string {
+  if (err instanceof ApiError) {
+    const detail = bodyMessage(err.body);
+    return detail ? `${err.message}: ${detail}` : err.message;
+  }
+
+  const message = err instanceof Error ? err.message : String(err);
+  if (/failed to fetch|fetch failed|networkerror|load failed/i.test(message)) {
+    return LOCAL_STACK_OFFLINE_MESSAGE;
+  }
+  return message;
+}
+
 export async function apiGet<T = unknown>(path: string): Promise<T> {
   const res = await fetch(path, { method: 'GET', headers: bearerHeaders() });
   if (!res.ok) {
