@@ -16,7 +16,7 @@ the runtime layer.
 - Chat/Telegram: `/provider`, `/model`, `/diagnostics`
 - CLI: `thehomie status --json`, `thehomie doctor`,
   `thehomie chat -m <lane-or-provider>`
-- Dashboard: `/agents`, `/usage`, `/jarvis`
+- Dashboard: `/agents`, `/usage`
 - API: `/api/agents/model`, `/api/tokens`, `/api/jarvis/status`
 
 ## Source Of Truth Files
@@ -26,7 +26,7 @@ the runtime layer.
 | Runtime selection | `.claude/scripts/runtime/selection.py`, `.claude/scripts/runtime/lane_router.py`, `.claude/scripts/runtime/registry.py` |
 | Chat/router | `.claude/chat/commands.py`, `.claude/chat/core_handlers.py`, `.claude/chat/cli.py`, `.claude/chat/diagnostics.py` |
 | Dashboard API | `.claude/scripts/dashboard_api.py` |
-| Dashboard web | `dashboard/web/src/pages/Agents.tsx`, `dashboard/web/src/pages/Usage.tsx`, `dashboard/web/src/pages/Jarvis.tsx` |
+| Dashboard web | `dashboard/web/src/pages/Agents.tsx`, `dashboard/web/src/pages/Usage.tsx`; `dashboard/web/src/pages/Jarvis.tsx` remains an internal status component hidden from public nav |
 | Tests | `.claude/scripts/tests/test_runtime_selection.py`, `.claude/scripts/tests/test_cli.py`, `.claude/scripts/tests/test_diagnostics.py`, `.claude/scripts/tests/test_dashboard_api.py` |
 
 ## Safety Boundaries

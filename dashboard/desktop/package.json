@@ -1,7 +1,7 @@
 {
   "name": "@thehomie/desktop",
   "version": "0.1.0",
-  "description": "Windows-first local desktop shell for The Homie Operating Room.",
+  "description": "Windows-first local desktop shell for The Homie dashboard.",
   "private": true,
   "main": "main.cjs",
   "engines": {

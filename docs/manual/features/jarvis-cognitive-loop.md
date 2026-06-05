@@ -1,4 +1,4 @@
-# Jarvis Cognitive Loop
+# Cognitive Loop
 
 Status: shipped, live-runtime activated, Telegram E2E proven
 Owner: chat cognition/runtime layers
@@ -6,14 +6,14 @@ Last updated: 2026-05-31
 
 ## What It Does
 
-Jarvis Cognitive Loop is the Homie cognition/autonomy stack: active self-model,
+The cognitive loop is the Homie cognition/autonomy stack: active self-model,
 scheduled reflection/weekly/dream processing, policy-gated self-amendment,
 WorkingMemory prompt state, proactive brief generation, and status/diagnostic
-truth surfaces.
+truth surfaces. Some internal files still carry the legacy Jarvis name.
 
 ## Operator Entry Points
 
-- Dashboard: `/jarvis`
+- Dashboard: internal status component hidden from the public nav
 - CLI/status: `thehomie status --json`, `thehomie doctor`, `/diagnostics`
 - Scheduled loops: reflection, weekly, dream, heartbeat probes
 - Telegram: live bot status/runtime proof paths
@@ -24,7 +24,7 @@ truth surfaces.
 |---|---|
 | Cognition/runtime | `.claude/chat/cognition/*`, `.claude/chat/engine.py`, `.claude/chat/diagnostics.py`, `.claude/chat/cli.py` |
 | Dashboard API | `.claude/scripts/dashboard_api.py`, `.claude/scripts/tests/test_jarvis_dashboard_status.py` |
-| Dashboard server/web | `dashboard/server/src/routes/jarvis.ts`, `dashboard/web/src/pages/Jarvis.tsx` |
+| Dashboard server/web | `dashboard/server/src/routes/jarvis.ts`, `dashboard/web/src/pages/Jarvis.tsx` remains an internal status component; it is hidden from the public dashboard nav until the public surface is re-proven |
 | Tests | cognition/status/scheduled-loop tests under `.claude/scripts/tests/`, `dashboard/server/src/__tests__/jarvis.test.ts` |
 | Tracker/proof | `PRPs/active/TRACKER.md` Jarvis autonomy entries |
 
@@ -46,11 +46,8 @@ uv run thehomie doctor
 uv run thehomie chat -q "/diagnostics" -Q
 ```
 
-Dashboard:
-
-```text
-http://127.0.0.1:5173/jarvis
-```
+The public dashboard shell does not advertise the internal cognitive status
+component.
 
 ## How To Test It
 
@@ -70,7 +67,7 @@ npm run typecheck
 
 ## Latest Live Proof
 
-Tracker records the Jarvis autonomy closeout: live-runtime activation,
+Tracker records the cognition-loop closeout: live-runtime activation,
 real-vault apply proof, Telegram E2E proof, Langfuse trace, Sentry event, and
 public export. Recheck current live bot process state before claiming a new live
 proof.
@@ -82,7 +79,7 @@ proof.
 
 ## Public Export Status
 
-Public-exported in the Jarvis autonomy slice; current public mirror state
+Public-exported in the cognition-loop slice; current public mirror state
 should be rechecked before repeating export claims.
 
 ## Next Slices

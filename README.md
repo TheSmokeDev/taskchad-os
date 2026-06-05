@@ -8,7 +8,7 @@
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Channels: 6](https://img.shields.io/badge/Channels-Telegram%20%C2%B7%20Slack%20%C2%B7%20Discord%20%C2%B7%20WhatsApp%20%C2%B7%20Web%20%C2%B7%20CLI-4A154B?style=flat-square)
 
-**Watch the v0.1.0-alpha.1 demo:** [Desktop shell + Operating Room proof](https://github.com/your-github-user/thehomie-framework/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo.mp4)
+**Watch the v0.1.0-alpha.1 demo:** [Homie dashboard product tour](https://github.com/your-github-user/thehomie-framework/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo.mp4)
 
 The Homie is an open-source cognitive agent OS. Not a chatbot wrapper - a 9-layer cognitive architecture that gives an AI identity, self-awareness, theory of mind, durable memory, tiered recall, self-improving learning, mental processes, and continuity. Run it locally, on a VPS, or in Docker. Talk to it from Telegram, Slack, Discord, WhatsApp, or the CLI. It monitors your world, remembers what matters, coordinates multi-agent work, and gets smarter with every session.
 
@@ -61,7 +61,7 @@ thehomie setup                   # Configure providers and integrations
 thehomie setup --check           # Verify setup without changing anything
 thehomie status --json           # Machine-readable health report
 thehomie doctor                  # Diagnostics with fix hints
-thehomie desktop --shell         # Launch the Desktop v0 Electron shell
+thehomie desktop --shell         # Launch the Desktop dashboard app
 thehomie team list               # Inspect team sessions
 ```
 
@@ -86,14 +86,14 @@ thehomie team list               # Inspect team sessions
 |---|---|
 | [Install Guide](INSTALL.md) | Prerequisites, setup wizard, channel credentials, Docker, systemd, vault setup |
 | [Operator Manual](docs/manual/README.md) | Public feature map, source-of-truth files, operator entry points, tests, proof boundaries |
-| [Desktop v0](docs/manual/features/desktop-v0.md) | Electron shell, package smoke proof, Desktop/Hono/Python lifecycle |
+| [Desktop v0](docs/manual/features/desktop-v0.md) | Dashboard-first Electron app, package smoke proof, Desktop/Hono/Python lifecycle |
 | [Multi-Channel Adapters](docs/manual/features/multi-channel-adapters.md) | Telegram attachments, grouped documents, quick-turn batching, Queue/Steer controls |
 | [Runtime Status And Model Control](docs/manual/features/runtime-status-model-control.md) | `/provider`, `/model`, lane-first runtime behavior, quiet JSON contract |
 | `FRAMEWORK.md` | Compact development guide generated during public framework export |
 
 ## Current Proof Boundaries
 
-- Desktop v0 proves the Electron shell and unpacked Windows package. A signed
+- Desktop v0 proves the dashboard-first Electron app and unpacked Windows package. A signed
   installer or no-admin installer flow is not claimed yet.
 - Cabinet Voice has lifecycle controls and a partial LiveKit spike. The browser
   mic -> transcript -> Cabinet reply path is not claimed ready.

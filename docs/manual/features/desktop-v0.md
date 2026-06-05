@@ -1,21 +1,24 @@
 # Desktop v0
 
-Status: Windows-first Electron shell and unpacked package smoke-proven
-Owner: Desktop shell + dashboard server
-Last updated: 2026-06-04
+Status: Windows-first dashboard app and unpacked package smoke-proven
+Owner: Desktop app + dashboard server
+Last updated: 2026-06-05
 
 ## What It Does
 
-Desktop v0 wraps the existing Homie local stack in an Electron shell. It is not
-a new orchestration engine. It starts and stops the Python orchestration API and
-the Hono dashboard server, then opens the Operating Room at `/teams` through
-the static dashboard served by Hono.
+Desktop v0 wraps the existing Homie local stack in Electron. It is not a new
+orchestration engine. It starts and stops the Python orchestration API and the
+Hono dashboard server, waits for both to be healthy, then loads the Homie
+dashboard inside the same Electron window.
+
+The dashboard is the product surface. The old local-control shell remains only
+as a fallback/maintenance screen if the dashboard cannot boot.
 
 ## Operator Entry Points
 
 - CLI shell mode: `thehomie desktop --shell`
 - Shell package: `dashboard/desktop`
-- Static dashboard target: `http://127.0.0.1:3141/teams`
+- Static dashboard target: `http://127.0.0.1:3141/`
 - Browser/Vite dev fallback: `thehomie desktop`
 
 ## Source Of Truth Files
@@ -26,7 +29,7 @@ the static dashboard served by Hono.
 | Desktop process manager | `dashboard/desktop/lib/process-manager.cjs` |
 | Desktop config | `dashboard/desktop/lib/config-store.cjs` |
 | Desktop packaging | `dashboard/desktop/electron-builder.cjs`, `dashboard/desktop/scripts/packaged-smoke.mjs` |
-| Desktop UI | `dashboard/desktop/renderer/` |
+| Desktop controls | `dashboard/web/src/components/DesktopControls.tsx`, `dashboard/desktop/renderer/` fallback shell |
 | Hono static dashboard serving | `dashboard/server/src/static-web.ts` |
 | CLI entrypoint | `.claude/chat/desktop_launcher.py`, `.claude/chat/cli.py` |
 | Tests | `dashboard/desktop/tests/process-manager.test.mjs`, `dashboard/server/src/__tests__/static-web.test.ts`, `.claude/scripts/tests/test_cli.py` |
@@ -35,7 +38,7 @@ the static dashboard served by Hono.
 
 - Python orchestration remains the source of truth for Operating Room behavior.
 - Electron only owns local process lifecycle, first-run config, logs, status,
-  and opening the dashboard URL.
+  and loading the dashboard URL in-window.
 - The shell stores only local desktop config: ports, bind host, start path, and
   auto-start preference.
 - It does not write raw `.env` values, expose secrets, or bypass the
@@ -75,13 +78,14 @@ Useful dry run:
 uv run thehomie desktop --shell --dry-run --json
 ```
 
-## What The Shell Shows
+## What Desktop Shows
 
-- First-run config for API port, dashboard port, bind host, start path, and
-  auto-start.
-- Start, stop, and open-room controls.
-- Per-service status for `python-api` and `hono-dashboard`.
-- Rolling local log buffer from both child processes.
+- The normal Homie dashboard as the first product surface.
+- A compact `Desktop Stack` strip, visible only inside Electron, with
+  start/stop/refresh controls, target URL, service status, ports, and recent
+  logs.
+- Fallback first-run config for API port, dashboard port, bind host, start
+  path, and auto-start if the dashboard cannot boot.
 
 ## How To Test It
 
@@ -99,12 +103,25 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
 
 ## Latest Proof
 
+- Date: 2026-06-05
+- Dashboard-first unpacked Windows package smoke: passed on alternate ports
+  `45135/33153`
+  - package built `dashboard/desktop/dist/win-unpacked/The Homie Desktop.exe`
+  - Electron renderer loaded `The Homie Dashboard`, not the standalone shell
+  - renderer reported dashboard root, Desktop IPC bridge, embedded
+    `Desktop Stack` controls, and Mission Control content
+  - in-window route checks passed for `/mission`, `/chat`, `/mobile`,
+    `/browser`, `/work`, `/convoy`, and `/teams`
+  - direct Python `/api/health` returned 200 from `45135`
+  - Hono `/api/health` returned 200 from `33153`
+  - Hono `/api/agents` returned 200 through the Python API after readiness gate
+  - shell stopped both services and ports `45135/33153` were closed after smoke
 - Date: 2026-06-04
 - Unpacked Windows package smoke: passed on alternate ports `45124/33142`
   - package built `dashboard/desktop/dist/win-unpacked/The Homie Desktop.exe`
   - renderer reported `isPackaged=true`
   - packaged shell used bundled static assets from `resources/dashboard-web`
-  - renderer showed Start, Stop, Open Room, status, and logs
+  - renderer showed Start, Stop, dashboard-open action, status, and logs
   - shell reported `python-api` PID `21860` and `hono-dashboard` PID `25272`
   - `/teams` returned 200 from Hono/static
   - direct Python `/api/health` returned 200 from `45124`
@@ -114,7 +131,7 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
 - Private package smoke report:
   `.codex/artifacts/desktop-v0-package-smoke/report.json`
 - Real Electron smoke: passed on alternate ports `45123/33141`
-  - renderer showed Start, Stop, Open Room, status, and logs
+  - renderer showed Start, Stop, dashboard-open action, status, and logs
   - shell reported `python-api` PID `44056` and `hono-dashboard` PID `54532`
   - `/teams` returned 200 from Hono/static
   - direct Python `/api/health` returned 200 from `45123`

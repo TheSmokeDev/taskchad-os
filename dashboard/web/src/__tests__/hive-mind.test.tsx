@@ -123,7 +123,7 @@ describe('HiveMind page', () => {
   });
 
   test('renders the activity table from the shared /api/brain/graph contract', async () => {
-    localStorage.setItem('homie.hive.view', 'activity');
+    localStorage.setItem('homie.knowledgeGraph.view', 'activity');
     const calls = mockBrainFetch();
 
     render(<HiveMind />);
@@ -135,7 +135,7 @@ describe('HiveMind page', () => {
   });
 
   test('applies per-agent filters through the shared brain scope query', async () => {
-    localStorage.setItem('homie.hive.view', 'activity');
+    localStorage.setItem('homie.knowledgeGraph.view', 'activity');
     const calls = mockBrainFetch();
 
     render(<HiveMind />);

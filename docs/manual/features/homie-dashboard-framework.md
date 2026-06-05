@@ -18,7 +18,9 @@ features through Hono proxy routes over Python-owned APIs.
 - Hono server: `http://127.0.0.1:3141`
 - Python orchestration/dashboard API: `http://127.0.0.1:4322`
 - Key routes: `/mission`, `/work`, `/convoy`, `/agents`, `/chat`, `/browser`,
-  `/mobile`, `/teams`, `/cabinet`, `/memories`, `/hive`, `/jarvis`
+  `/mobile`, `/teams`, `/cabinet`, `/memories`, `/hive`
+- Internal cognitive status routes stay hidden from the public dashboard nav
+  until that surface is re-proven.
 
 ## Source Of Truth Files
 

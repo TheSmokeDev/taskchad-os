@@ -82,7 +82,9 @@ if [ "$DRY_RUN" = true ]; then
 else
     uv run thehomie setup --check
     echo ""
-    echo "Installation complete!"
-    echo "  Edit: $REPO_DIR/.claude/scripts/.env"
-    echo "  Run:  cd $REPO_DIR/.claude/scripts && uv run thehomie chat"
+    echo "Installed successfully."
+    echo "  If setup reported missing providers or chat adapters, finish onboarding first:"
+    echo "    cd $REPO_DIR/.claude/scripts && uv run thehomie setup"
+    echo "  Verify: cd $REPO_DIR/.claude/scripts && uv run thehomie setup --check"
+    echo "  Chat:   cd $REPO_DIR/.claude/scripts && uv run thehomie chat"
 fi

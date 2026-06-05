@@ -2,6 +2,7 @@ import { Route, Switch, Redirect } from 'wouter-preact';
 import { Menu } from 'lucide-preact';
 import { Sidebar } from '@/components/Sidebar';
 import { CommandPalette } from '@/components/CommandPalette';
+import { DesktopControls } from '@/components/DesktopControls';
 import { Toaster } from '@/components/Toaster';
 import { KillSwitchBanner } from '@/components/KillSwitchBanner';
 import { sidebarOpen, closeSidebar } from '@/lib/sidebar';
@@ -23,7 +24,6 @@ import { Cabinet } from '@/pages/Cabinet';
 import { Teams } from '@/pages/Teams';
 import { StandupConfig } from '@/pages/StandupConfig';
 import { AgentFiles } from '@/pages/AgentFiles';
-import { Jarvis } from '@/pages/Jarvis';
 import { CapabilityGateway } from '@/pages/CapabilityGateway';
 import { BrowserViewer } from '@/pages/BrowserViewer';
 import { MobileAccess } from '@/pages/MobileAccess';
@@ -54,6 +54,7 @@ export function App() {
       <Sidebar />
       <main class="flex-1 min-w-0 overflow-hidden flex flex-col pl-12 md:pl-0">
         <KillSwitchBanner />
+        <DesktopControls />
         <Switch>
           <Route path="/mission"><MissionControl /></Route>
           <Route path="/work"><WorkQueue /></Route>
@@ -71,7 +72,6 @@ export function App() {
           <Route path="/teams"><Teams /></Route>
           <Route path="/voices"><Voices /></Route>
           <Route path="/standup"><StandupConfig /></Route>
-          <Route path="/jarvis"><Jarvis /></Route>
           <Route path="/capabilities"><CapabilityGateway /></Route>
           <Route path="/browser"><BrowserViewer /></Route>
           <Route path="/mobile"><MobileAccess /></Route>

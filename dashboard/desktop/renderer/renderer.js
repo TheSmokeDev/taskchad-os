@@ -74,7 +74,7 @@ document.querySelector('#stop').addEventListener('click', async () => {
 });
 
 document.querySelector('#open').addEventListener('click', async () => {
-  await api.openOperatingRoom();
+  await api.openDashboard();
 });
 
 api.onStackEvent((event) => {

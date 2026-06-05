@@ -19,7 +19,7 @@ function defaultConfigFromEnv() {
     apiPort: process.env.ORCHESTRATION_API_PORT,
     dashboardPort: process.env.DASHBOARD_PORT,
     bind: process.env.DASHBOARD_BIND,
-    startPath: '/teams',
+    startPath: '/',
     autoStart: true,
   };
 }
@@ -30,7 +30,8 @@ async function createWindow() {
     height: 780,
     minWidth: 980,
     minHeight: 640,
-    title: 'The Homie Operating Room',
+    show: false,
+    title: 'The Homie Desktop',
     backgroundColor: '#101214',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -40,11 +41,49 @@ async function createWindow() {
     },
   });
 
-  await mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
   return mainWindow;
+}
+
+async function loadFallbackShell(reason) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  await mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  if (reason) {
+    broadcast({
+      type: 'error',
+      source: 'desktop',
+      message: reason,
+      timestamp: new Date().toISOString(),
+    });
+  }
+  if (!mainWindow.isVisible()) mainWindow.show();
+}
+
+async function loadDashboardInWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  const targetUrl = stackManager.targetUrl();
+  const pythonHealthUrl = `http://${stackManager.config.bind}:${stackManager.config.apiPort}/api/health`;
+  const honoHealthUrl = `http://${stackManager.config.bind}:${stackManager.config.dashboardPort}/api/health`;
+  const pythonReady = await waitForEndpoint(pythonHealthUrl);
+  if (!pythonReady.ok) return false;
+  const honoReady = await waitForEndpoint(honoHealthUrl);
+  if (!honoReady.ok) return false;
+  const ready = await waitForEndpoint(targetUrl, {
+    match: (text) => text.includes('<div id="app"') || text.includes('The Homie Dashboard'),
+  });
+  if (!ready.ok) return false;
+  await mainWindow.loadURL(targetUrl);
+  if (!mainWindow.isVisible()) mainWindow.show();
+  return true;
+}
+
+async function loadDashboardPath(routePath) {
+  const normalizedPath = routePath.startsWith('/') ? routePath : `/${routePath}`;
+  const targetUrl = `http://${stackManager.config.bind}:${stackManager.config.dashboardPort}${normalizedPath}`;
+  await mainWindow.loadURL(targetUrl);
+  return targetUrl;
 }
 
 function broadcast(event) {
@@ -64,6 +103,15 @@ function wireIpc() {
   ipcMain.handle('stack:status', () => stackManager.status());
   ipcMain.handle('stack:start', async () => stackManager.start());
   ipcMain.handle('stack:stop', async () => stackManager.stop());
+  ipcMain.handle('dashboard:open', async () => {
+    const targetUrl = stackManager.targetUrl();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await mainWindow.loadURL(targetUrl);
+    } else {
+      await shell.openExternal(targetUrl);
+    }
+    return { targetUrl };
+  });
   ipcMain.handle('operating-room:open', async () => {
     const targetUrl = stackManager.targetUrl();
     await shell.openExternal(targetUrl);
@@ -101,6 +149,18 @@ async function waitForEndpoint(url, options = {}) {
   };
 }
 
+async function waitForRendererProbe(script, match, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 15000;
+  const startedAt = Date.now();
+  let lastResult = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    lastResult = await mainWindow.webContents.executeJavaScript(script);
+    if (!match || match(lastResult)) return lastResult;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return lastResult;
+}
+
 async function runSmoke() {
   const reportPath = process.env.HOMIE_DESKTOP_SMOKE_REPORT
     ? path.resolve(process.env.HOMIE_DESKTOP_SMOKE_REPORT)
@@ -116,7 +176,8 @@ async function runSmoke() {
     },
     paths: { ...stackManager.paths },
     renderer: null,
-    teams: null,
+    routes: {},
+    dashboard: null,
     pythonHealth: null,
     honoHealth: null,
     beforeStop: null,
@@ -124,18 +185,45 @@ async function runSmoke() {
     error: null,
   };
   try {
-    report.renderer = await mainWindow.webContents.executeJavaScript(`
+    report.renderer = await waitForRendererProbe(`
       ({
         title: document.title,
-        hasStart: Boolean(document.querySelector('#start')),
-        hasStop: Boolean(document.querySelector('#stop')),
-        hasOpen: Boolean(document.querySelector('#open')),
-        hasLogs: Boolean(document.querySelector('#logs')),
+        hasDashboardRoot: Boolean(document.querySelector('#app')),
+        hasDesktopBridge: Boolean(window.homieDesktop),
+        hasDesktopControls: document.body.innerText.toLowerCase().includes('desktop stack'),
+        hasMissionControl: document.body.innerText.includes('Mission Control'),
         text: document.body.innerText
       })
-    `);
-    report.teams = await waitForEndpoint(stackManager.targetUrl(), {
-      match: (text) => text.includes('<div id="root"') || text.includes('The Homie Dashboard'),
+    `, (result) => result?.hasDashboardRoot && result?.hasDesktopBridge && result?.hasDesktopControls);
+    const routeExpectations = {
+      '/mission': 'Mission Control',
+      '/chat': 'Chat',
+      '/mobile': 'Mobile Access',
+      '/browser': 'Browser Viewer',
+      '/work': 'Work Queue',
+      '/convoy': 'Convoy',
+      '/teams': 'Operating Room',
+    };
+    for (const [routePath, expectedText] of Object.entries(routeExpectations)) {
+      const routeUrl = await loadDashboardPath(routePath);
+      const result = await waitForRendererProbe(`
+        ({
+          url: window.location.href,
+          hasDashboardRoot: Boolean(document.querySelector('#app')),
+          hasDesktopBridge: Boolean(window.homieDesktop),
+          hasDesktopControls: document.body.innerText.toLowerCase().includes('desktop stack'),
+          hasExpectedText: document.body.innerText.includes(${JSON.stringify(expectedText)}),
+          text: document.body.innerText
+        })
+      `, (probe) => probe?.hasDashboardRoot && probe?.hasDesktopBridge && probe?.hasDesktopControls && probe?.hasExpectedText);
+      report.routes[routePath] = {
+        ok: Boolean(result?.hasDashboardRoot && result?.hasDesktopBridge && result?.hasDesktopControls && result?.hasExpectedText),
+        url: routeUrl,
+        expectedText,
+      };
+    }
+    report.dashboard = await waitForEndpoint(stackManager.targetUrl(), {
+      match: (text) => text.includes('<div id="app"') || text.includes('The Homie Dashboard'),
     });
     const pythonHealthUrl = `http://${stackManager.config.bind}:${stackManager.config.apiPort}/api/health`;
     const honoHealthUrl = `http://${stackManager.config.bind}:${stackManager.config.dashboardPort}/api/health`;
@@ -143,13 +231,14 @@ async function runSmoke() {
     report.honoHealth = await waitForEndpoint(honoHealthUrl);
     report.beforeStop = stackManager.status();
     report.ok = Boolean(
-      report.renderer?.hasStart
-      && report.renderer?.hasStop
-      && report.renderer?.hasOpen
-      && report.renderer?.hasLogs
+      report.renderer?.hasDashboardRoot
+      && report.renderer?.hasDesktopBridge
+      && report.renderer?.hasDesktopControls
+      && report.renderer?.hasMissionControl
       && report.beforeStop?.running
       && report.beforeStop?.services?.every((service) => service.running)
-      && report.teams?.ok
+      && Object.values(report.routes).every((route) => route.ok)
+      && report.dashboard?.ok
       && report.pythonHealth?.ok
       && report.honoHealth?.ok
     );
@@ -175,12 +264,13 @@ app.whenReady().then(async () => {
     try {
       await stackManager.start();
     } catch (error) {
-      broadcast({
-        type: 'error',
-        source: 'desktop',
-        message: error instanceof Error ? error.message : String(error),
-        timestamp: new Date().toISOString(),
-      });
+      await loadFallbackShell(error instanceof Error ? error.message : String(error));
+    }
+  }
+  if (!mainWindow?.isVisible()) {
+    const loaded = stackManager.isRunning() ? await loadDashboardInWindow() : false;
+    if (!loaded) {
+      await loadFallbackShell('Dashboard did not become ready. Showing local fallback controls.');
     }
   }
   if (smokeMode) {

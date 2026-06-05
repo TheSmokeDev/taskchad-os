@@ -10,13 +10,13 @@ Last updated: 2026-06-04
 desktop experience: Python orchestration API, Hono dashboard server, and the
 Vite web dashboard. The default target opens Operating Room at `/teams`.
 
-For the Electron shell/process-manager path, use
+For the Electron dashboard app/process-manager path, use
 [Desktop v0](desktop-v0.md). This page documents the browser/Vite dev launcher.
 
 ## Operator Entry Points
 
 - CLI: `thehomie desktop`
-- Electron shell mode: `thehomie desktop --shell`
+- Electron dashboard mode: `thehomie desktop --shell`
 - CLI dry run: `thehomie desktop --dry-run --json`
 - Dashboard target: `/teams`
 
@@ -28,7 +28,7 @@ For the Electron shell/process-manager path, use
 | Chat/router | `.claude/chat/cli.py` |
 | Hono/dashboard server | `dashboard/server/src/index.ts` |
 | Dashboard web | `dashboard/web/vite.config.ts` |
-| Electron shell | `dashboard/desktop/` |
+| Electron dashboard app | `dashboard/desktop/` |
 | Tests | `.claude/scripts/tests/test_cli.py` |
 | Docs/proof | this page |
 

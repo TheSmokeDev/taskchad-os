@@ -5,7 +5,7 @@ const DEFAULT_CONFIG = Object.freeze({
   apiPort: 4322,
   dashboardPort: 3141,
   bind: '127.0.0.1',
-  startPath: '/teams',
+  startPath: '/',
   autoStart: true,
 });
 

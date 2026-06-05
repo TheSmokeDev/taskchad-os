@@ -23,7 +23,7 @@ test('normalizes config without secrets', () => {
 
   assert.equal(config.apiPort, 45123);
   assert.equal(config.dashboardPort, 33141);
-  assert.equal(config.startPath, '/teams');
+  assert.equal(config.startPath, '/');
   assert.equal(config.autoStart, false);
   assert.equal(Object.hasOwn(config, 'token'), false);
 });
@@ -128,7 +128,7 @@ test('manager reports target url and bounded service status', async () => {
   };
 
   const manager = new DesktopStackManager(
-    { apiPort: 45123, dashboardPort: 33141, startPath: '/teams' },
+    { apiPort: 45123, dashboardPort: 33141, startPath: '/' },
     {
       spawnFn: fakeSpawn,
       paths: { scriptsDir: 'scripts', serverDir: 'server', webDistDir: 'web-dist' },
@@ -137,7 +137,7 @@ test('manager reports target url and bounded service status', async () => {
 
   const started = await manager.start();
   assert.equal(started.running, true);
-  assert.equal(started.targetUrl, 'http://127.0.0.1:33141/teams');
+  assert.equal(started.targetUrl, 'http://127.0.0.1:33141/');
   assert.deepEqual(started.services.map((service) => service.name), ['python-api', 'hono-dashboard']);
   assert.equal(children.length, 2);
   assert.equal(spawnOptions.every((options) => options.windowsHide === true), true);

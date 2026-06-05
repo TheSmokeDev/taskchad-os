@@ -112,8 +112,8 @@ uv run thehomie setup --check
 Assert-LastExitCode "thehomie setup --check"
 Pop-Location
 
-# Install dashboard and desktop shell dependencies. The Electron shell stays a
-# thin lifecycle wrapper; Python and Hono remain the runtime source of truth.
+# Install dashboard and desktop dependencies. Electron loads the dashboard as
+# the product surface; Python and Hono remain the runtime source of truth.
 Write-Host "`nInstalling dashboard and desktop dependencies..." -ForegroundColor Cyan
 Invoke-NpmInstall "$repoDir\dashboard\server"
 Invoke-NpmInstall "$repoDir\dashboard\web"
@@ -131,8 +131,10 @@ try {
     Pop-Location
 }
 
-Write-Host "`nInstallation complete!" -ForegroundColor Green
-Write-Host "  Configure: cd $repoDir\.claude\scripts; uv run thehomie setup"
+Write-Host "`nInstalled successfully." -ForegroundColor Green
+Write-Host "  If setup reported missing providers or chat adapters, finish onboarding first:"
+Write-Host "    cd $repoDir\.claude\scripts; uv run thehomie setup"
+Write-Host "  Verify:    cd $repoDir\.claude\scripts; uv run thehomie setup --check"
 Write-Host "  Chat:      cd $repoDir\.claude\scripts; uv run thehomie chat"
 Write-Host "  Desktop:   cd $repoDir\.claude\scripts; uv run thehomie desktop --shell"
 Write-Host "  Dev mode:  cd $repoDir\.claude\scripts; uv run thehomie desktop"

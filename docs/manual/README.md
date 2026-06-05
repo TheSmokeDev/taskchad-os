@@ -41,7 +41,7 @@ machine-specific proof artifacts stay outside the public manual.
 | Homie Dashboard Framework | Canonical operator shell | [homie-dashboard-framework](features/homie-dashboard-framework.md) | `dashboard/`, `/mission`, `/teams`, `/browser`, `/mobile` |
 | Operating Room | Product slice implemented | [operating-room](features/operating-room.md) | `/teams`, `/api/team/operating-room/run` |
 | Capability Gateway | Read-only v1 implemented | [capability-gateway](features/capability-gateway.md) | `/capabilities`, `/api/capabilities/status` |
-| Desktop v0 | Electron shell + unpacked package | [desktop-v0](features/desktop-v0.md) | `thehomie desktop --shell`, `dashboard/desktop` |
+| Desktop v0 | Dashboard-first Electron app + unpacked package | [desktop-v0](features/desktop-v0.md) | `thehomie desktop --shell`, `dashboard/desktop` |
 | Desktop Dev Launcher | Windows-first dev launcher | [desktop-dev-launcher](features/desktop-dev-launcher.md) | `thehomie desktop` |
 | Runtime Status And Model Control | Active baseline | [runtime-status-model-control](features/runtime-status-model-control.md) | `/provider`, `/model`, status/doctor |
 | Persona Lifecycle And Files | Active baseline | [persona-lifecycle-files](features/persona-lifecycle-files.md) | `/agents`, `/agents/:id/files` |
@@ -56,9 +56,9 @@ machine-specific proof artifacts stay outside the public manual.
 | Multi-Channel Adapters | Active baseline, Telegram docs + turn controls proven | [multi-channel-adapters](features/multi-channel-adapters.md) | Telegram, Slack, Discord, WhatsApp, web, CLI |
 | Cabinet Rooms | Shipped baseline, manual exists | [cabinet-rooms](features/cabinet-rooms.md) | `/cabinet`, `/standup`, `/discuss`, `/cabinet` dashboard |
 | Cabinet Voice | Single-session lifecycle controls shipped | [cabinet-voice](features/cabinet-voice.md) | `/cabinet voice`, `/voices`, `/api/cabinet/voice/*` |
-| Jarvis Cognitive Loop | Shipped/live-runtime proven | [jarvis-cognitive-loop](features/jarvis-cognitive-loop.md) | `/jarvis`, status/doctor, scheduled loops |
+| Cognitive Loop | Shipped/live-runtime proven; dashboard route hidden from public nav | [jarvis-cognitive-loop](features/jarvis-cognitive-loop.md) | status/doctor, scheduled loops |
 | Direct Integration Capability Contract | Shipped, policy-enforced | [direct-integration-capability-contract](features/direct-integration-capability-contract.md) | direct integration wrapper, `/send`, status/doctor |
-| Memory, Hive, And Chat Observer | Active baseline | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
+| Memory, Knowledge Graph, And Chat Observer | Active baseline | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
 | Scheduled Jobs, Settings, And Audit | Active baseline | [scheduled-settings-audit](features/scheduled-settings-audit.md) | `/scheduled`, `/settings`, `/audit` |
 
 ### Existing Deep Public Manuals
@@ -74,7 +74,7 @@ requiring those private documents.
 
 ## Public Proof Boundaries
 
-- Desktop v0 proves the Electron shell and unpacked Windows package. A signed
+- Desktop v0 proves the dashboard-first Electron app and unpacked Windows package. A signed
   installer or no-admin installer flow is not claimed yet.
 - Cabinet Voice has lifecycle controls and a partial LiveKit spike. The
   browser mic -> transcript -> Cabinet reply path remains deferred.

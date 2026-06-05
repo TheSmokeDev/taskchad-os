@@ -67,7 +67,7 @@
       "Python orchestration remains the source of truth."
     ],
     "disagreements": [
-      "Desktop shell depth should wait for lifecycle proof."
+      "Desktop app depth should wait for lifecycle proof."
     ]
   },
   "tick_summary": {
