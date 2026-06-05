@@ -25,11 +25,22 @@ machine-specific proof artifacts stay outside the public manual.
 5. Read [Runtime Status And Model Control](features/runtime-status-model-control.md)
    before changing provider, lane, or quiet JSON behavior.
 
+## Ecosystem Positioning
+
+The Homie sits in the same public agent ecosystem as OpenClaw and Hermes Agent.
+OpenClaw proved broad agent/channel access; Hermes pushed self-improving loops
+and desktop/operator ergonomics. The Homie is independent and identity-first:
+durable memory, judgment, Operating Room orchestration, and thin
+channel/desktop surfaces over one runtime. Use [NOTICE](../../NOTICE.md) and
+[AUTHORS](../../AUTHORS.md) for attribution; use
+[CONTRIBUTING](../../CONTRIBUTING.md) for community participation.
+
 ## Table Of Contents
 
 ### Start Here
 
 - [Open Source Reader Path](#open-source-reader-path)
+- [Ecosystem Positioning](#ecosystem-positioning)
 - [Feature Page Template](feature-template.md)
 - [Manual Maintenance Rules](#manual-maintenance-rules)
 - [Feature Coverage Map](#feature-coverage-map)
