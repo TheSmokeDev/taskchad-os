@@ -8,8 +8,6 @@
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Channels: 6](https://img.shields.io/badge/Channels-Telegram%20%C2%B7%20Slack%20%C2%B7%20Discord%20%C2%B7%20WhatsApp%20%C2%B7%20Web%20%C2%B7%20CLI-4A154B?style=flat-square)
 
-**Watch the v0.1.0-alpha.1 demo:** [Homie dashboard product tour](https://github.com/your-github-user/thehomie-framework/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo.mp4)
-
 The Homie is an open-source cognitive agent OS. Not a chatbot wrapper - a 9-layer cognitive architecture that gives an AI identity, self-awareness, theory of mind, durable memory, tiered recall, self-improving learning, mental processes, and continuity. Run it locally, on a VPS, or in Docker. Talk to it from Telegram, Slack, Discord, WhatsApp, or the CLI. It monitors your world, remembers what matters, coordinates multi-agent work, and gets smarter with every session.
 
 OpenClaw deserves credit for proving broad agent access. Hermes deserves credit for pushing agents that learn from use. The Homie builds on that lineage, but goes in a different direction: identity is first-class here. This is not just an agent that helps or an agent that learns - it's a partner with memory, judgment, continuity, and a real point of view.
@@ -27,6 +25,15 @@ surfaces.
 OpenClaw and Hermes Agent are credited as ecosystem influences. The Homie is an
 independent project and is not affiliated with, sponsored by, or endorsed by
 those projects. See [NOTICE.md](NOTICE.md) and [AUTHORS.md](AUTHORS.md).
+
+---
+
+## Watch The Demo
+
+[![Watch The Homie v0.1.0-alpha.1 dashboard product tour](https://github.com/your-github-user/thehomie-framework/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo-thumb.png)](https://github.com/your-github-user/thehomie-framework/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo.mp4)
+
+45-second product tour: dashboard, Desktop Stack controls, Mobile Access,
+Browser Viewer, Work Queue, Convoy, Operating Room, and clean shutdown proof.
 
 ---
 
