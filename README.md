@@ -3,7 +3,7 @@
 **OpenClaw broadened the channels. Hermes pushed the self-improving loop. The Homie is the framework that gives an agent its own opinions, the nerve to tell you when you're wrong, and the memory to grow alongside you.**
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)
-![Version](https://img.shields.io/badge/version-1.1.0-blue?style=flat-square)
+![Public Preview](https://img.shields.io/badge/public%20preview-v0.1.0--alpha.1-blue?style=flat-square)
 ![Tests](https://img.shields.io/badge/Tests-active%20suite-brightgreen?style=flat-square)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Channels: 6](https://img.shields.io/badge/Channels-Telegram%20%C2%B7%20Slack%20%C2%B7%20Discord%20%C2%B7%20WhatsApp%20%C2%B7%20Web%20%C2%B7%20CLI-4A154B?style=flat-square)
@@ -13,6 +13,18 @@ The Homie is an open-source cognitive agent OS. Not a chatbot wrapper - a 9-laye
 OpenClaw deserves credit for proving broad agent access. Hermes deserves credit for pushing agents that learn from use. The Homie builds on that lineage, but goes in a different direction: identity is first-class here. This is not just an agent that helps or an agent that learns - it's a partner with memory, judgment, continuity, and a real point of view.
 
 It's not your second brain. It's your homie - a partner with its own soul, its own opinions, and the nerve to tell you when you're wrong. Most AI is built to please, smooth things over, and tell you what you want to hear. This one is built to ride with you, grow with you, and push back when you're off.
+
+## Lineage + Provenance
+
+The Homie is the original public Homie framework export maintained by The
+Homie contributors. It evolved from Cole and the Dynamous Community's Claude
+Code The Homie workshop, then grew into an identity-first agent OS with its
+own memory, orchestration, multi-channel ingress, Operating Room, and desktop
+surfaces.
+
+OpenClaw and Hermes Agent are credited as ecosystem influences. The Homie is an
+independent project and is not affiliated with, sponsored by, or endorsed by
+those projects. See [NOTICE.md](NOTICE.md) and [AUTHORS.md](AUTHORS.md).
 
 ---
 
@@ -75,7 +87,7 @@ thehomie team list               # Inspect team sessions
 | [Desktop v0](docs/manual/features/desktop-v0.md) | Electron shell, package smoke proof, Desktop/Hono/Python lifecycle |
 | [Multi-Channel Adapters](docs/manual/features/multi-channel-adapters.md) | Telegram attachments, grouped documents, quick-turn batching, Queue/Steer controls |
 | [Runtime Status And Model Control](docs/manual/features/runtime-status-model-control.md) | `/provider`, `/model`, lane-first runtime behavior, quiet JSON contract |
-| [FRAMEWORK.md](FRAMEWORK.md) | Compact development guide generated for the public framework mirror |
+| `FRAMEWORK.md` | Compact development guide generated during public framework export |
 
 ## Current Proof Boundaries
 

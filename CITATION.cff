@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use The Homie, please cite the public framework repository and release."
+title: "The Homie"
+version: "0.1.0-alpha.1"
+date-released: "2026-06-05"
+authors:
+  - name: "SmokeDev"
+  - name: "The Homie Contributors"
+repository-code: "https://github.com/your-github-user/thehomie-framework"
+url: "https://github.com/your-github-user/thehomie-framework"
+abstract: "An open-source cognitive agent OS with identity-first memory, canonical multi-channel ingress, Operating Room orchestration, and local desktop/operator surfaces."
+keywords:
+  - cognitive-agent-os
+  - agent-memory
+  - multi-channel-agent
+  - orchestration
+  - desktop-agent
+license: "MIT"

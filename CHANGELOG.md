@@ -8,6 +8,30 @@ Format inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 - Highlights for the user-visible wins
 - Grouped sections by area
 
+Entries before `v0.1.0-alpha.1` are internal development history preserved for
+context. They are not public release tags unless a matching public tag exists.
+
+---
+
+## The Homie v0.1.0-alpha.1
+
+**Release Date:** June 5, 2026
+
+> The first public framework preview - timestamped, credited, and ready for the
+> community to inspect.
+
+### Highlights
+
+- **Public Provenance** - Added `NOTICE.md`, `AUTHORS.md`, and
+  `CITATION.cff` so the public framework has clear maintainer, contributor,
+  lineage, and citation surfaces.
+- **Lineage Credit** - Credited Cole and the Dynamous Community's Claude Code
+  The Homie workshop as the starting point The Homie evolved from, with
+  OpenClaw and Hermes Agent listed as ecosystem influences.
+- **Public Boundaries** - Kept the README honest: Desktop v0 has an unpacked
+  Windows package proof, but no signed installer or no-admin installer is
+  claimed in this release.
+
 ---
 
 ## The Homie v1.2.0 (v2026.4.8)
