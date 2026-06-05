@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import sys
 from pathlib import Path
@@ -66,6 +67,25 @@ class _RecordingEngine:
         )
 
 
+class _SlowEngine:
+    session_store = None
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def handle_message(self, incoming: IncomingMessage, progress=None):
+        self.messages.append(incoming.text)
+        self.started.set()
+        await self.release.wait()
+        yield OutgoingMessage(
+            text="slow engine handled",
+            channel=incoming.channel,
+            thread=incoming.thread,
+        )
+
+
 class _SlashOnlyManager:
     command_regex = re.compile(r"^/(send)\b(.*)$")
 
@@ -122,6 +142,25 @@ async def test_potential_external_action_requires_confirmation_before_engine():
 
 
 @pytest.mark.asyncio
+async def test_email_language_reaches_engine_without_router_data_fetch():
+    async def fail_email(*args, **kwargs):
+        raise AssertionError("natural language must not fetch email")
+
+    manager = _build_manager()
+    manager._commands["email"].handler = fail_email
+    engine = _RecordingEngine()
+    router = ChatRouter(engine, manager)
+    adapter = _RecordingAdapter()
+
+    await router._handle_inner(adapter, _incoming("check my email"))
+
+    assert engine.messages == ["check my email"]
+    assert engine.prefetched_contexts == [""]
+    assert adapter.sent[0].text == "Thinking..."
+    assert adapter.updates[-1].text == "engine handled"
+
+
+@pytest.mark.asyncio
 async def test_authorized_external_action_with_context_reaches_engine():
     engine = _RecordingEngine()
     router = ChatRouter(engine, _build_manager())
@@ -133,6 +172,104 @@ async def test_authorized_external_action_with_context_reaches_engine():
     assert engine.messages == [text]
     assert adapter.sent[0].text == "Thinking..."
     assert adapter.updates[-1].text == "engine handled"
+
+
+@pytest.mark.asyncio
+async def test_back_to_back_messages_are_merged_before_engine():
+    engine = _RecordingEngine()
+    router = ChatRouter(engine, _build_manager())
+    router._burst_delay_seconds = 0.01
+    adapter = _RecordingAdapter()
+
+    router._queue_incoming(adapter, _incoming("first thought"))
+    router._queue_incoming(adapter, _incoming("second thought"))
+    await asyncio.sleep(0.08)
+
+    assert len(engine.messages) == 1
+    assert "User sent 2 messages in quick succession" in engine.messages[0]
+    assert "Message 1:\nfirst thought" in engine.messages[0]
+    assert "Message 2:\nsecond thought" in engine.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_in_flight_followup_prompts_for_queue_or_steer():
+    engine = _SlowEngine()
+    router = ChatRouter(engine, _build_manager())
+    router._burst_delay_seconds = 0.01
+    adapter = _RecordingAdapter()
+
+    router._queue_incoming(adapter, _incoming("first long turn"))
+    await asyncio.wait_for(engine.started.wait(), timeout=1)
+    router._queue_incoming(adapter, _incoming("follow-up while thinking"))
+    await asyncio.sleep(0.08)
+
+    prompts = [
+        message for message in adapter.sent
+        if "How should I apply this follow-up" in message.text
+    ]
+    assert len(prompts) == 1
+    assert [component.label for component in prompts[0].components] == [
+        "Queue Next",
+        "Steer Current",
+    ]
+    assert engine.messages == ["first long turn"]
+
+    engine.release.set()
+    await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_queue_button_runs_followup_after_current_turn():
+    engine = _SlowEngine()
+    router = ChatRouter(engine, _build_manager())
+    router._burst_delay_seconds = 0.01
+    adapter = _RecordingAdapter()
+
+    router._queue_incoming(adapter, _incoming("first long turn"))
+    await asyncio.wait_for(engine.started.wait(), timeout=1)
+    router._queue_incoming(adapter, _incoming("queued follow-up"))
+    await asyncio.sleep(0.08)
+    prompt = next(
+        message for message in adapter.sent
+        if "How should I apply this follow-up" in message.text
+    )
+    queue_id = prompt.components[0].custom_id
+
+    await router._handle_inner(adapter, _incoming(f"__button:{queue_id}"))
+
+    assert adapter.sent[-1].text.startswith("Queued.")
+    assert engine.messages == ["first long turn"]
+    engine.release.set()
+    await asyncio.sleep(0.08)
+    assert engine.messages == ["first long turn", "queued follow-up"]
+
+
+@pytest.mark.asyncio
+async def test_steer_button_marks_followup_as_revision():
+    engine = _SlowEngine()
+    router = ChatRouter(engine, _build_manager())
+    router._burst_delay_seconds = 0.01
+    adapter = _RecordingAdapter()
+
+    router._queue_incoming(adapter, _incoming("first long turn"))
+    await asyncio.wait_for(engine.started.wait(), timeout=1)
+    router._queue_incoming(adapter, _incoming("steer this response"))
+    await asyncio.sleep(0.08)
+    prompt = next(
+        message for message in adapter.sent
+        if "How should I apply this follow-up" in message.text
+    )
+    steer_id = prompt.components[1].custom_id
+
+    await router._handle_inner(adapter, _incoming(f"__button:{steer_id}"))
+
+    assert adapter.sent[-1].text.startswith("Steer captured.")
+    assert engine.messages == ["first long turn"]
+    engine.release.set()
+    await asyncio.sleep(0.08)
+    assert len(engine.messages) == 2
+    assert "Steer the in-flight conversation" in engine.messages[1]
+    assert "steer this response" in engine.messages[1]
 
 
 @pytest.mark.asyncio

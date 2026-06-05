@@ -7,7 +7,7 @@ import pytest
 
 import adapters.telegram as telegram_adapter
 from adapters.telegram import TelegramAdapter, TelegramDeliveryError
-from models import Attachment, Channel, OutgoingMessage, Platform
+from models import Attachment, Channel, MessageComponent, OutgoingMessage, Platform
 
 
 class FakeTelegramFile:
@@ -66,6 +66,9 @@ def _adapter_with_fake_bot(bot: FakeTelegramBot) -> TelegramAdapter:
     adapter._sent_messages = {}
     adapter._callback_id_map = {}
     adapter._voice_reply_threads = set()
+    adapter._pending_document_groups = {}
+    adapter._pending_document_tasks = {}
+    adapter._document_group_delay_seconds = 0.01
     return adapter
 
 
@@ -81,6 +84,24 @@ def test_extract_media_directive_removes_path_from_text() -> None:
     assert text == "Here it is\nDone"
     assert len(media) == 1
     assert media[0].source == "C:\\tmp\\portrait.png"
+
+
+def test_turn_control_buttons_render_in_one_row() -> None:
+    bot = FakeTelegramBot()
+    adapter = _adapter_with_fake_bot(bot)
+
+    markup = adapter._build_reply_markup(
+        [
+            MessageComponent("Queue Next", "turn_queue:abc", "secondary"),
+            MessageComponent("Steer Current", "turn_steer:abc", "primary"),
+        ]
+    )
+
+    assert len(markup.inline_keyboard) == 1
+    assert [button.text for button in markup.inline_keyboard[0]] == [
+        "Queue Next",
+        "Steer Current",
+    ]
 
 
 @pytest.mark.asyncio
@@ -152,6 +173,7 @@ async def test_on_document_downloads_and_queues_attachment(
         reply_to_message=None,
         caption="Please read this",
         message_id=42,
+        media_group_id=None,
         to_dict=lambda: {"message_id": 42, "document": {"file_name": "game-plan.md"}},
     )
 
@@ -174,6 +196,57 @@ async def test_on_document_downloads_and_queues_attachment(
         )
     ]
     assert Path(incoming.attachments[0].url or "").read_text() == "# Game Plan\n\nShip the adapter."
+
+
+@pytest.mark.asyncio
+async def test_on_document_media_group_queues_single_combined_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(telegram_adapter.tempfile, "gettempdir", lambda: str(tmp_path))
+    bot = FakeTelegramBot()
+    bot.files["file-a"] = FakeTelegramFile(b"# One")
+    bot.files["file-b"] = FakeTelegramFile(b"# Two")
+    adapter = _adapter_with_fake_bot(bot)
+
+    def message(file_id: str, unique_id: str, filename: str, message_id: int):
+        return SimpleNamespace(
+            document=SimpleNamespace(
+                file_id=file_id,
+                file_unique_id=unique_id,
+                file_name=filename,
+                mime_type="text/markdown",
+                file_size=5,
+            ),
+            from_user=SimpleNamespace(id=123456, first_name="Operator"),
+            chat_id=123456,
+            chat=SimpleNamespace(type="private"),
+            reply_to_message=None,
+            caption="Read these together" if message_id == 42 else "",
+            message_id=message_id,
+            media_group_id="album-1",
+            to_dict=lambda: {
+                "message_id": message_id,
+                "media_group_id": "album-1",
+                "document": {"file_name": filename},
+            },
+        )
+
+    await adapter._on_document(SimpleNamespace(message=message("file-a", "unique-a", "one.md", 42)), None)
+    await adapter._on_document(SimpleNamespace(message=message("file-b", "unique-b", "two.md", 43)), None)
+    await telegram_adapter.asyncio.sleep(0.05)
+
+    incoming = adapter._queue.get_nowait()
+    assert adapter._queue.empty()
+    assert "2 documents in one Telegram attachment group" in incoming.text
+    assert "one.md" in incoming.text
+    assert "two.md" in incoming.text
+    assert "Read these together" in incoming.text
+    assert [attachment.filename for attachment in incoming.attachments] == [
+        "one.md",
+        "two.md",
+    ]
+    assert incoming.platform_message_id == "42,43"
 
 
 @pytest.mark.asyncio

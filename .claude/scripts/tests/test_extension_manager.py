@@ -172,12 +172,11 @@ class TestQueryHelpers:
 class TestIntentDetection:
     def test_detect_intents_keyword(self, populated_manager: ExtensionManager):
         detected = populated_manager.detect_intents("check my email")
-        assert "email" in detected
+        assert detected == []
 
     def test_detect_intents_multiple(self, populated_manager: ExtensionManager):
         detected = populated_manager.detect_intents("check email and budget")
-        assert "email" in detected
-        assert "budget" in detected
+        assert detected == ["budget"]
 
     def test_detect_intents_broad_query(self, populated_manager: ExtensionManager):
         detected = populated_manager.detect_intents("how are we looking across all boards")

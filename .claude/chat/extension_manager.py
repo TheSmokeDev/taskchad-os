@@ -186,6 +186,12 @@ class ExtensionManager:
         # Allow/deny lists (set via config)
         self._allow_list: list[str] = []  # empty = allow all
         self._deny_list: list[str] = []
+        self._slash_only_natural_language_intents = {
+            "email",
+            "pemail",
+            "inbox",
+            "cleanup",
+        }
 
     # ------------------------------------------------------------------
     # Registration
@@ -499,10 +505,15 @@ class ExtensionManager:
 
         # Broad status query → return all brief intents
         if not external_action and any(sig in text_lower for sig in self._broad_query_signals):
-            return self.get_brief_intents()
+            return [
+                command for command in self.get_brief_intents()
+                if command not in self._slash_only_natural_language_intents
+            ]
 
         detected: list[str] = []
         for intent in self._intents:
+            if intent.command in self._slash_only_natural_language_intents:
+                continue
             if external_action and intent.command != "browserops":
                 continue
             if any(kw in text_lower for kw in intent.keywords):

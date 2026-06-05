@@ -73,6 +73,9 @@ class TelegramAdapter:
         self._app = ApplicationBuilder().token(bot_token).build()
         self._sent_messages: dict[str, int] = {}  # key -> message_id for updates
         self._bot_username: str | None = None
+        self._pending_document_groups: dict[str, list[IncomingMessage]] = {}
+        self._pending_document_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._document_group_delay_seconds = 1.0
         # Hashed callback_data → original custom_id. Telegram's callback_data
         # limit is 64 bytes; longer IDs are hashed and resolved on tap.
         self._callback_id_map: dict[str, str] = {}
@@ -799,7 +802,65 @@ class TelegramAdapter:
             raw_event=msg.to_dict(),
         )
 
+        media_group_id = getattr(msg, "media_group_id", None)
+        if media_group_id:
+            group_key = f"{chat_id}:{media_group_id}"
+            self._pending_document_groups.setdefault(group_key, []).append(incoming)
+            task = self._pending_document_tasks.get(group_key)
+            if task is None or task.done():
+                self._pending_document_tasks[group_key] = asyncio.create_task(
+                    self._flush_document_group_after_delay(group_key)
+                )
+            return
+
         await self._queue.put(incoming)
+
+    async def _flush_document_group_after_delay(self, group_key: str) -> None:
+        try:
+            await asyncio.sleep(self._document_group_delay_seconds)
+            batch = self._pending_document_groups.pop(group_key, [])
+            self._pending_document_tasks.pop(group_key, None)
+            if not batch:
+                return
+            await self._queue.put(self._merge_document_group(batch, group_key))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(
+                f"[{datetime.now()}] Document group flush failed for {group_key}: {e}",
+                flush=True,
+            )
+
+    @staticmethod
+    def _merge_document_group(
+        batch: list[IncomingMessage],
+        group_key: str,
+    ) -> IncomingMessage:
+        first = batch[0]
+        attachments: list[Attachment] = []
+        message_ids: list[str] = []
+        raw_events: list[dict[str, Any]] = []
+        parts = [
+            f"[User uploaded {len(batch)} documents in one Telegram attachment group. "
+            "Treat them as one user turn.]"
+        ]
+        for index, incoming in enumerate(batch, start=1):
+            parts.append(f"Document {index}:\n{incoming.text}")
+            attachments.extend(incoming.attachments)
+            if incoming.platform_message_id:
+                message_ids.append(incoming.platform_message_id)
+            raw_events.append(incoming.raw_event)
+
+        first.text = "\n\n".join(parts)
+        first.attachments = attachments
+        if message_ids:
+            first.platform_message_id = ",".join(message_ids)
+        first.raw_event = {
+            "coalesced": True,
+            "telegram_media_group": group_key,
+            "events": raw_events,
+        }
+        return first
 
     @staticmethod
     def _safe_document_filename(filename: str) -> str:
@@ -814,7 +875,8 @@ class TelegramAdapter:
     def _build_reply_markup(self, components: list[MessageComponent]) -> Any:
         """Build an InlineKeyboardMarkup from MessageComponent list.
 
-        One button per row (matches the simple vertical stack Discord uses).
+        Most controls render one button per row. Turn-control buttons render
+        in one compact row so Queue/Steer are both visible while composing.
         Telegram's `callback_data` is capped at 64 bytes — longer custom_ids
         are hashed and the original is stored in `_callback_id_map` so taps
         can be resolved back to the real id without collision risk.
@@ -823,6 +885,7 @@ class TelegramAdapter:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         rows: list[list[InlineKeyboardButton]] = []
+        turn_row: list[InlineKeyboardButton] = []
         for comp in components:
             cid_bytes = comp.custom_id.encode("utf-8")
             if len(cid_bytes) <= 64:
@@ -831,7 +894,13 @@ class TelegramAdapter:
                 digest = hashlib.sha1(cid_bytes).hexdigest()[:16]
                 callback_data = f"h:{digest}"
                 self._callback_id_map[callback_data] = comp.custom_id
-            rows.append([InlineKeyboardButton(text=comp.label, callback_data=callback_data)])
+            button = InlineKeyboardButton(text=comp.label, callback_data=callback_data)
+            if comp.custom_id.startswith(("turn_queue:", "turn_steer:")):
+                turn_row.append(button)
+            else:
+                rows.append([button])
+        if turn_row:
+            rows.append(turn_row)
         return InlineKeyboardMarkup(rows)
 
     async def _on_callback(self, update: Any, context: Any) -> None:

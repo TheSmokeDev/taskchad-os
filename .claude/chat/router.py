@@ -70,8 +70,7 @@ def _engine_timeout_message(timeout_seconds: float) -> str:
 class ChatRouter:
     """Routes messages between platform adapters and the conversation engine.
 
-    Handles concurrent message processing — each incoming message spawns
-    its own task so multiple conversations can run simultaneously.
+    Handles concurrent conversations while preserving per-thread ordering.
     """
 
     def __init__(self, engine: ConversationEngine, manager: ExtensionManager) -> None:
@@ -79,6 +78,12 @@ class ChatRouter:
         self.adapters: dict[Platform, Any] = {}
         self.manager = manager
         self._transcript_reset_commands = {"clear", "reload"}
+        self._thread_locks: dict[str, asyncio.Lock] = {}
+        self._pending_bursts: dict[str, list[Any]] = {}
+        self._burst_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._burst_delay_seconds = 1.2
+        self._pending_followup_choices: dict[str, tuple[Any, Any, str]] = {}
+        self._turn_choice_counter = 0
 
     def register(self, adapter: Any) -> None:
         """Register a platform adapter."""
@@ -131,7 +136,7 @@ class ChatRouter:
             try:
                 async for incoming in adapter.listen():
                     retry_count = 0  # Reset on successful message
-                    asyncio.create_task(self._handle(adapter, incoming))
+                    self._queue_incoming(adapter, incoming)
                 # listen() returned without error — generator exhausted (shouldn't happen)
                 print(f"[{datetime.now()}] WARNING: {adapter.platform.value} listener exited cleanly — restarting", flush=True)
             except asyncio.CancelledError:
@@ -146,6 +151,189 @@ class ChatRouter:
                 )
                 await asyncio.sleep(backoff)
         print(f"[{datetime.now()}] FATAL: {adapter.platform.value} listener gave up after {max_retries} retries", flush=True)
+
+    def _conversation_key(self, incoming: Any) -> str:
+        channel = getattr(incoming, "channel", None)
+        thread = getattr(incoming, "thread", None)
+        user = getattr(incoming, "user", None)
+        platform = getattr(incoming, "platform", "")
+        platform_value = getattr(platform, "value", str(platform))
+        channel_id = getattr(channel, "platform_id", "")
+        thread_id = getattr(thread, "thread_id", None) or channel_id
+        user_id = getattr(user, "platform_id", "")
+        return f"{platform_value}:{channel_id}:{thread_id}:{user_id}"
+
+    @staticmethod
+    def _can_coalesce(incoming: Any) -> bool:
+        text = (getattr(incoming, "text", "") or "").strip()
+        return not text.startswith("/") and not text.startswith("__button:")
+
+    @staticmethod
+    def _is_turn_followup_button(incoming: Any) -> bool:
+        text = (getattr(incoming, "text", "") or "").strip()
+        return text.startswith("__button:turn_queue:") or text.startswith(
+            "__button:turn_steer:"
+        )
+
+    def _queue_incoming(self, adapter: Any, incoming: Any) -> None:
+        """Buffer quick conversational bursts, then handle in thread order."""
+        if self._is_turn_followup_button(incoming):
+            asyncio.create_task(self._handle(adapter, incoming))
+            return
+
+        if not self._can_coalesce(incoming):
+            asyncio.create_task(self._handle_serialized(adapter, incoming))
+            return
+
+        key = self._conversation_key(incoming)
+        self._pending_bursts.setdefault(key, []).append(incoming)
+        task = self._burst_tasks.get(key)
+        if task is None or task.done():
+            self._burst_tasks[key] = asyncio.create_task(
+                self._flush_burst_after_delay(adapter, key)
+            )
+
+    async def _flush_burst_after_delay(self, adapter: Any, key: str) -> None:
+        try:
+            await asyncio.sleep(self._burst_delay_seconds)
+            batch = self._pending_bursts.pop(key, [])
+            self._burst_tasks.pop(key, None)
+            if not batch:
+                return
+            incoming = self._merge_incoming_batch(batch) if len(batch) > 1 else batch[0]
+            lock = self._thread_locks.get(key)
+            if lock and lock.locked():
+                await self._offer_turn_followup_choice(adapter, incoming, key)
+                return
+            await self._handle_serialized(adapter, incoming)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[{datetime.now()}] Burst flush failed for {key}: {e}", flush=True)
+        finally:
+            if self._pending_bursts.get(key) and key not in self._burst_tasks:
+                self._burst_tasks[key] = asyncio.create_task(
+                    self._flush_burst_after_delay(adapter, key)
+                )
+
+    async def _handle_serialized(self, adapter: Any, incoming: Any) -> None:
+        key = self._conversation_key(incoming)
+        lock = self._thread_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            await self._handle(adapter, incoming)
+
+    @staticmethod
+    def _merge_incoming_batch(batch: list[Any]) -> Any:
+        first = batch[0]
+        parts: list[str] = [
+            f"[User sent {len(batch)} messages in quick succession. "
+            "Treat them as one turn; later messages may revise or steer earlier ones.]"
+        ]
+        attachments = []
+        message_ids = []
+        raw_events = []
+        for index, incoming in enumerate(batch, start=1):
+            text = (getattr(incoming, "text", "") or "").strip()
+            if text:
+                parts.append(f"Message {index}:\n{text}")
+            incoming_attachments = list(getattr(incoming, "attachments", []) or [])
+            if incoming_attachments:
+                attachments.extend(incoming_attachments)
+            message_id = getattr(incoming, "platform_message_id", None)
+            if message_id:
+                message_ids.append(str(message_id))
+            raw_events.append(getattr(incoming, "raw_event", {}) or {})
+
+        first.text = "\n\n".join(parts)
+        first.attachments = attachments
+        if message_ids:
+            first.platform_message_id = ",".join(message_ids)
+        first.raw_event = {"coalesced": True, "events": raw_events}
+        return first
+
+    async def _offer_turn_followup_choice(
+        self,
+        adapter: Any,
+        incoming: Any,
+        key: str,
+    ) -> None:
+        """Ask the operator how to apply a follow-up sent during an active turn."""
+        from models import MessageComponent
+
+        self._turn_choice_counter += 1
+        choice_id = f"{int(time.time() * 1000):x}-{self._turn_choice_counter}"
+        self._pending_followup_choices[choice_id] = (adapter, incoming, key)
+        preview = (getattr(incoming, "text", "") or "").strip().replace("\n", " ")
+        if len(preview) > 160:
+            preview = preview[:157] + "..."
+
+        await adapter.send(
+            OutgoingMessage(
+                text=(
+                    "I’m still working on the previous turn. How should I apply "
+                    f"this follow-up?\n\n`{preview or '[attachment follow-up]'}`"
+                ),
+                channel=incoming.channel,
+                thread=incoming.thread,
+                components=[
+                    MessageComponent(
+                        label="Queue Next",
+                        custom_id=f"turn_queue:{choice_id}",
+                        style="secondary",
+                    ),
+                    MessageComponent(
+                        label="Steer Current",
+                        custom_id=f"turn_steer:{choice_id}",
+                        style="primary",
+                    ),
+                ],
+            )
+        )
+
+    async def _apply_turn_followup_choice(
+        self,
+        adapter: Any,
+        incoming: Any,
+        custom_id: str,
+        *,
+        mode: str,
+    ) -> None:
+        choice_id = custom_id.split(":", 1)[1]
+        pending = self._pending_followup_choices.pop(choice_id, None)
+        if pending is None:
+            await adapter.send(
+                OutgoingMessage(
+                    text="That follow-up choice is no longer active.",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        pending_adapter, followup, _key = pending
+        if mode == "steer":
+            followup.text = (
+                "[Steer the in-flight conversation with this follow-up. "
+                "If the previous response already shipped, revise it instead "
+                "of treating this as an unrelated topic.]\n\n"
+                f"{followup.text}"
+            )
+            reply = (
+                "Steer captured. I’ll apply it as a revision right after the "
+                "current response finishes."
+            )
+        else:
+            reply = "Queued. I’ll run it as the next turn after the current response."
+
+        asyncio.create_task(self._handle_serialized(pending_adapter, followup))
+        await adapter.send(
+            OutgoingMessage(
+                text=reply,
+                channel=incoming.channel,
+                thread=incoming.thread,
+            )
+        )
 
     def _parse_command(self, text: str) -> tuple[str, str] | None:
         """Return (command, args) if text is a known bot command, else None."""
@@ -749,7 +937,21 @@ class ChatRouter:
         Supports blog_publish:{draft_id}, blog_skip:{draft_id}, and
         other future button patterns.
         """
-        if custom_id.startswith("blog_publish:"):
+        if custom_id.startswith("turn_queue:"):
+            await self._apply_turn_followup_choice(
+                adapter,
+                incoming,
+                custom_id,
+                mode="queue",
+            )
+        elif custom_id.startswith("turn_steer:"):
+            await self._apply_turn_followup_choice(
+                adapter,
+                incoming,
+                custom_id,
+                mode="steer",
+            )
+        elif custom_id.startswith("blog_publish:"):
             draft_id = custom_id.split(":", 1)[1]
             try:
                 # Lazy import — extension may not be available
