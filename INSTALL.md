@@ -1,4 +1,4 @@
-# Installation Guide
+# The Homie Installation Guide
 
 ## Prerequisites
 
@@ -9,9 +9,9 @@
 ## Quick Start
 
 ```bash
-# 1. Clone the repo
-git clone https://github.com/thehomie-framework/thehomie.git
-cd thehomie
+# 1. Clone the public framework repo
+git clone https://github.com/your-github-user/thehomie-framework.git
+cd thehomie-framework
 
 # 2. Run the setup wizard
 cd .claude/scripts && uv run python setup_wizard.py
@@ -74,10 +74,10 @@ docker compose logs -f bot
 
 ```bash
 # 1. Copy files to server
-./deploy/deploy.sh root@your-server /opt/thehomie
+./deploy/deploy.sh root@your-server /opt/thehomie-framework
 
 # 2. Install the service
-sudo cp deploy/thehomie.service /etc/systemd/system/thehomie.service
+sudo cp deploy/secondbrain.service /etc/systemd/system/thehomie.service
 sudo systemctl daemon-reload
 sudo systemctl enable thehomie
 sudo systemctl start thehomie
@@ -85,6 +85,9 @@ sudo systemctl start thehomie
 # 3. Set up log rotation
 sudo cp deploy/logrotate.conf /etc/logrotate.d/thehomie
 ```
+
+The source unit file is still named `deploy/secondbrain.service` for backward
+compatibility; install it under the service name you want to operate.
 
 ## Vault Setup
 

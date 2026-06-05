@@ -3,6 +3,9 @@
 ## Architecture Overview
 
 See [docs/architecture.md](docs/architecture.md) for the full 9-layer cognitive stack.
+Use [docs/manual/README.md](docs/manual/README.md) as the feature/operator map:
+when behavior changes, update the matching manual page with the source of truth,
+operator entry points, tests, and proof boundaries.
 
 The codebase follows a vertical slice architecture:
 
@@ -66,4 +69,5 @@ cd .claude/scripts && uv run ruff format .
 - One feature per PR
 - All tests must pass
 - Include tests for new functionality
-- Update docs if adding adapters or cognition modules
+- Update docs if adding adapters, cognition modules, operator surfaces, or
+  public manual behavior

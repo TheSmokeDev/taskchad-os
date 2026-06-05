@@ -4,7 +4,7 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)
 ![Version](https://img.shields.io/badge/version-1.1.0-blue?style=flat-square)
-![Tests: 1620+](https://img.shields.io/badge/Tests-1620%2B%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-active%20suite-brightgreen?style=flat-square)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Channels: 6](https://img.shields.io/badge/Channels-Telegram%20%C2%B7%20Slack%20%C2%B7%20Discord%20%C2%B7%20WhatsApp%20%C2%B7%20Web%20%C2%B7%20CLI-4A154B?style=flat-square)
 
@@ -13,6 +13,53 @@ The Homie is an open-source cognitive agent OS. Not a chatbot wrapper - a 9-laye
 OpenClaw deserves credit for proving broad agent access. Hermes deserves credit for pushing agents that learn from use. The Homie builds on that lineage, but goes in a different direction: identity is first-class here. This is not just an agent that helps or an agent that learns - it's a partner with memory, judgment, continuity, and a real point of view.
 
 It's not your second brain. It's your homie - a partner with its own soul, its own opinions, and the nerve to tell you when you're wrong. Most AI is built to please, smooth things over, and tell you what you want to hear. This one is built to ride with you, grow with you, and push back when you're off.
+
+---
+
+## Start Here
+
+- Install and first run: [INSTALL.md](INSTALL.md), `install.ps1`, and
+  `install.sh`.
+- Operator manual: [docs/manual/README.md](docs/manual/README.md). This is
+  the public feature map for what shipped, how to run it, how to test it, and
+  where each source-of-truth file lives.
+- Desktop app: [docs/manual/features/desktop-v0.md](docs/manual/features/desktop-v0.md)
+  and [docs/manual/features/desktop-dev-launcher.md](docs/manual/features/desktop-dev-launcher.md).
+- Channels and Telegram attachment behavior:
+  [docs/manual/features/multi-channel-adapters.md](docs/manual/features/multi-channel-adapters.md).
+- Runtime/model control:
+  [docs/manual/features/runtime-status-model-control.md](docs/manual/features/runtime-status-model-control.md).
+
+The public mirror also generates `FRAMEWORK.md`, a compact development guide
+for framework contributors.
+
+## Current Public Surface
+
+- Local CLI and runtime: `thehomie chat`, `thehomie status`, `thehomie doctor`,
+  `/provider`, and `/model`.
+- Multi-channel ingress: Telegram, Slack, Discord, WhatsApp, web relay, and
+  CLI share one canonical message/session path. Telegram document attachments,
+  attachment groups, quick-turn batching, and Queue/Steer follow-up controls
+  are documented and live-proven.
+- Operating Room and Capability Gateway: dashboard/API operator surfaces stay
+  thin over Python-owned orchestration and capability state.
+- Desktop v0: Electron shell, local process lifecycle, logs/status, static
+  dashboard launch, and an unpacked Windows package smoke. Electron stays thin;
+  Python/orchestration remains the source of truth.
+- Multi-agent work: convoy DAGs, typed mailbox, team sessions, Team Room, and
+  scheduler surfaces.
+- Memory and learning: local Markdown vault, hybrid recall, daily/weekly
+  synthesis, knowledge compilation, and human-gated self-evolution.
+
+## Proof Boundaries
+
+- Desktop v0 currently proves the Electron shell and unpacked Windows package.
+  A signed installer or no-admin installer flow is not claimed yet.
+- Cabinet Voice has lifecycle controls and a partial LiveKit spike. The browser
+  mic -> transcript -> Cabinet reply path is not claimed ready.
+- Optional integrations require user-owned credentials. No private account
+  data, local tokens, or machine-specific proof artifacts belong in the public
+  export.
 
 ---
 
@@ -66,7 +113,7 @@ The vault is where The Homie's mind actually lives. Not a notes folder it writes
 
 ### Framework vs. adapter
 
-The Homie is provider-agnostic. Claude SDK, Codex, Gemini, OpenRouter, OpenAI-compatible — interchangeable batteries. The framework runs the same regardless. Editor adapters (Claude Code's `CLAUDE.md`, hooks, MCP bridges) are integration surfaces *layered on top of* the framework, not part of it. When the heartbeat runs through Codex or Gemini fallback, nothing in `CLAUDE.md` is touched.
+The Homie is provider-agnostic. Claude SDK, Codex, Gemini, OpenRouter, OpenAI-compatible — interchangeable batteries. The framework runs the same regardless. Editor adapters (Claude Code project instructions, hooks, MCP bridges) are integration surfaces *layered on top of* the framework, not part of it. When the heartbeat runs through Codex or Gemini fallback, those editor instructions are not touched.
 
 ---
 
@@ -213,7 +260,9 @@ L0  FOUNDATION        Obsidian vault graph + MOCs + autolink
 
 ### The 5 Dimensions of The Homie
 
-L0–L9 is the engineering view. The product story has five dimensions — every shipped feature, every PRD, every PRP maps to one of them. The canonical narrative lives in `vault/memory/docs/THE-HOMIE-VISION.md`.
+L0-L9 is the engineering view. The product story has five dimensions; the
+operator-facing public map lives in [docs/manual/README.md](docs/manual/README.md).
+Private PRDs, PRPs, and vault notes stay outside the public framework export.
 
 | Dimension | The question it answers | Status |
 |-----------|-------------------------|--------|
@@ -400,7 +449,9 @@ Provider-agnostic: entity extraction is pure Python (heuristic — headings, bol
 
 ## Orchestration
 
-The local API (port 4322) exposes convoy, mailbox, and team endpoints. See the orchestration section in CLAUDE.md for the full endpoint reference.
+The local API (port 4322) exposes convoy, mailbox, and team endpoints. The
+public operator map starts in [docs/manual/README.md](docs/manual/README.md);
+private agent instructions are not part of the public export.
 
 Team dispatch uses a `BackendSelector` with `auto → paperclip → workflow → local` fallback. Team memory is stored per team-id in the vault with secret guardrails (8 credential patterns rejected before write).
 
@@ -449,7 +500,7 @@ Identity files (`SOUL.md`, `USER.md`) don't update by hand. The self-evolution l
 - ✅ Phase 2.6: stratified goldens + bootstrap CIs + regression hard-veto
 - ⏳ Automatic durable-memory apply remains intentionally gated behind human approval
 
-**Two-phase ship rhythm:** every Evolve increment goes through ship → adversarial Codex review → harden → claim done. This pattern caught five class-of-bug fixes in one week that unit tests missed (codified in `CLAUDE.md` → Code Review Patterns).
+**Two-phase ship rhythm:** every Evolve increment goes through ship → adversarial Codex review → harden → claim done. This pattern caught five class-of-bug fixes in one week that unit tests missed and is now part of the project review discipline.
 
 ---
 
@@ -471,15 +522,13 @@ Identity files (`SOUL.md`, `USER.md`) don't update by hand. The self-evolution l
 
 ```bash
 cd .claude/scripts
-uv run pytest tests/ -v          # 1620+ tests
+uv run pytest tests/ -v          # full active suite
 uv run ruff check .              # Lint
 uv run ruff format .             # Format
 uv run thehomie --help           # Verify CLI
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide.
-
-
 
 ---
 
@@ -493,4 +542,4 @@ docker compose up    # bot + scheduler (heartbeat · reflection · weekly synthe
 
 ## License
 
-MIT. Built by YourTech.
+MIT. Built by The Homie contributors.

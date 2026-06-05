@@ -10,10 +10,26 @@ documents back the current state.
 sanitizer-safe; private handoffs, PRPs, vault notes, account details, and
 machine-specific proof artifacts stay outside the public manual.
 
+## Open Source Reader Path
+
+1. Start with the root [README](../../README.md) for the thesis, install path,
+   current public surface, and proof boundaries.
+2. Use [INSTALL](../../INSTALL.md) for setup and channel credentials.
+3. Read [Operating Room](features/operating-room.md),
+   [Capability Gateway](features/capability-gateway.md), and
+   [Desktop v0](features/desktop-v0.md) to understand the current dashboard
+   and desktop operator loop.
+4. Read [Multi-Channel Adapters](features/multi-channel-adapters.md) for
+   Telegram attachments, attachment groups, quick-turn batching, and
+   Queue/Steer follow-up controls.
+5. Read [Runtime Status And Model Control](features/runtime-status-model-control.md)
+   before changing provider, lane, or quiet JSON behavior.
+
 ## Table Of Contents
 
 ### Start Here
 
+- [Open Source Reader Path](#open-source-reader-path)
 - [Feature Page Template](feature-template.md)
 - [Manual Maintenance Rules](#manual-maintenance-rules)
 - [Feature Coverage Map](#feature-coverage-map)
@@ -56,13 +72,23 @@ Private proof handoffs, tracker entries, and migration notes stay out of the
 public framework export. Feature pages summarize the latest proof without
 requiring those private documents.
 
+## Public Proof Boundaries
+
+- Desktop v0 proves the Electron shell and unpacked Windows package. A signed
+  installer or no-admin installer flow is not claimed yet.
+- Cabinet Voice has lifecycle controls and a partial LiveKit spike. The
+  browser mic -> transcript -> Cabinet reply path remains deferred.
+- Local proof reports, private handoffs, account-specific setup, and generated
+  runtime artifacts stay private even when the feature manual is public.
+
 ## Manual Maintenance Rules
 
 When a feature ships or materially changes:
 
 1. Update or create the matching page under `docs/manual/features/`.
 2. Add it to the Active Feature Manuals table if it is new.
-3. Keep `AGENTS.md` slim; add only a pointer or invariant that all agents need.
+3. Keep private agent instructions slim; add only pointers or invariants that
+   all agents need.
 4. Keep `PRPs/active/TRACKER.md` focused on current state and next work, not a
    full feature manual.
 5. Link proof handoffs from the feature page instead of copying whole handoffs.
