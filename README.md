@@ -30,10 +30,13 @@ those projects. See [NOTICE.md](NOTICE.md) and [AUTHORS.md](AUTHORS.md).
 
 ## Watch The Demo
 
-[![Watch The Homie v0.1.0-alpha.1 dashboard product tour](https://github.com/your-github-user/thehomie-framework/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo-thumb.png)](https://github.com/your-github-user/thehomie-framework/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo.mp4)
+![The Homie v0.1.0-alpha.1 dashboard product tour](https://github.com/your-github-user/thehomie-framework/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo-preview.gif)
 
 45-second product tour: dashboard, Desktop Stack controls, Mobile Access,
 Browser Viewer, Work Queue, Convoy, Operating Room, and clean shutdown proof.
+
+Full-quality MP4 is attached on the
+[v0.1.0-alpha.1 release](https://github.com/your-github-user/thehomie-framework/releases/tag/v0.1.0-alpha.1).
 
 ---
 
