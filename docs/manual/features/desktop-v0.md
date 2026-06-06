@@ -1,8 +1,8 @@
 # Desktop v0
 
-Status: Windows-first dashboard app, unpacked package, and portable artifact smoke-proven
+Status: Windows-first dashboard app, unpacked package, portable artifact, and fresh public install smoke-proven
 Owner: Desktop app + dashboard server
-Last updated: 2026-06-05
+Last updated: 2026-06-06
 
 ## What It Does
 
@@ -114,6 +114,41 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
 
 ## Latest Proof
 
+- Date: 2026-06-06
+- Fresh public user smoke: passed from a clean temp install at
+  `.codex/artifacts/fresh-public-user-smoke-20260606-080641/thehomie`
+  using the public Windows installer and `THEHOMIE_DIR`
+  - installer passed Python/Git/Node prerequisite checks with
+    `Node.js 24.11.0`
+  - installer cloned `your-github-user/thehomie-framework`, ran `uv sync`, created
+    `.env` from `.env.example`, installed dashboard/server/web/desktop npm
+    dependencies, built dashboard web assets, and validated
+    `uv run thehomie desktop --shell --dry-run --json`
+  - first-run setup check returned the expected warning:
+    `No chat adapter configured`
+  - fresh clone `/provider` returned successfully
+  - fresh clone real CLI chat returned `FRESH_PUBLIC_OK` through
+    `openai-codex` with model `chatgpt-plan-default`
+  - fresh clone Electron smoke passed with `ok=true` on alternate ports
+    `45138/33156`
+  - renderer loaded `The Homie Dashboard`, reported dashboard root, Desktop
+    IPC bridge, embedded `Desktop Stack` controls, and Mission Control content
+  - in-window route checks passed for `/mission`, `/chat`, `/mobile`,
+    `/browser`, `/work`, `/convoy`, and `/teams`
+  - every route reported `hasRawFetchError=false`
+  - direct Python `/api/health` returned 200 from `45138`
+  - Hono `/api/health` returned 200 from `33156`
+  - shell stopped both services and direct port checks confirmed
+    `45138/33156` closed
+  - first-run observations: local embedding assets download on first chat, and
+    Electron binary downloads on first dev-shell smoke
+- Dashboard server audit cleanup from the fresh install:
+  - first public install surfaced a dev-only `npm audit` warning through
+    `vitest@2 -> vite <=6 -> esbuild <=0.24.2`
+  - `dashboard/server` now uses `vitest ^4.1.8`
+  - server full audit and prod audit both report `0 vulnerabilities`
+  - server tests passed: 78
+  - server build passed
 - Date: 2026-06-05
 - Dashboard-first portable Windows artifact smoke: passed on alternate ports
   `45136/33154`
@@ -177,6 +212,7 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
 - Desktop smoke: reports `python-api`, `hono-dashboard`, and
   `http://127.0.0.1:3141/teams`
 - Desktop package audit: 0 high-severity vulnerabilities
+- Dashboard server audit: 0 vulnerabilities
 - Hono focused tests: 7 passed
 - CLI shell dry-run tests: 2 passed
 - Hono typecheck, Python compile, dashboard web build, sanitizer tests, and
@@ -184,9 +220,10 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
 
 ## Public Export Status
 
-Public export passed after the portable smoke. Desktop source and packaging
-config ship; `dashboard/desktop/node_modules/`, `dashboard/desktop/dist/`,
-`dashboard/desktop/out/`, and private `.codex` proof artifacts are denied.
+Public export passed after the portable smoke. Desktop source, packaging
+config, and dashboard server package metadata ship; `dashboard/desktop/node_modules/`,
+`dashboard/desktop/dist/`, `dashboard/desktop/out/`, and private `.codex`
+proof artifacts are denied.
 
 ## Next Slices
 

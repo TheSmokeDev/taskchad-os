@@ -105,6 +105,8 @@ thehomie team list               # Inspect team sessions
 
 - Desktop v0 proves the dashboard-first Electron app plus unpacked and
   portable no-admin Windows artifacts. A signed installer is not claimed yet.
+- Fresh public Windows install smoke has proven install, setup check, real CLI
+  chat, Desktop launch, route checks, and clean shutdown from a clean clone.
 - Cabinet Voice has lifecycle controls and a partial LiveKit spike. The browser
   mic -> transcript -> Cabinet reply path is not claimed ready.
 - Optional integrations require user-owned credentials. No private account
