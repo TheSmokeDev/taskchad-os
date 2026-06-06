@@ -16,9 +16,9 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
-    "hono": "^4.6.14",
-    "pino": "^9.5.0",
-    "isomorphic-dompurify": "^2.19.0"
+    "hono": "^4.12.23",
+    "isomorphic-dompurify": "^2.19.0",
+    "pino": "^9.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

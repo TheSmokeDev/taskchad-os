@@ -17,6 +17,25 @@ run_cmd() {
     fi
 }
 
+npm_install() {
+    local path="$1"
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] cd $path && npm install"
+    else
+        (cd "$path" && npm install)
+    fi
+}
+
+npm_script() {
+    local path="$1"
+    local script="$2"
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] cd $path && npm run $script"
+    else
+        (cd "$path" && npm run "$script")
+    fi
+}
+
 # Check Python 3.12+
 python_cmd=""
 for cmd in python3.12 python3 python; do
@@ -35,6 +54,28 @@ if [ -z "$python_cmd" ]; then
     exit 1
 fi
 echo "Python $version OK ($python_cmd)"
+
+# Check Node.js 22.12+ for the dashboard and desktop dev stack
+if ! command -v node &>/dev/null; then
+    echo "ERROR: Node.js not found. Install Node.js 22.12+ from https://nodejs.org/"
+    exit 1
+fi
+node_version=$(node -p "process.versions.node" | tr -d '\r')
+node_major=$(echo "$node_version" | cut -d. -f1)
+node_minor=$(echo "$node_version" | cut -d. -f2)
+if ! [[ "$node_major" =~ ^[0-9]+$ ]] || ! [[ "$node_minor" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: Could not parse Node.js version: $node_version"
+    exit 1
+fi
+if [ "$node_major" -lt 22 ] || { [ "$node_major" -eq 22 ] && [ "$node_minor" -lt 12 ]; }; then
+    echo "ERROR: Node.js $node_version found - need 22.12+."
+    exit 1
+fi
+if ! command -v npm &>/dev/null; then
+    echo "ERROR: npm not found. Install Node.js 22.12+ from https://nodejs.org/"
+    exit 1
+fi
+echo "Node.js $node_version OK"
 
 # Install uv if missing
 if ! command -v uv &>/dev/null; then
@@ -77,14 +118,32 @@ fi
 # Verify
 if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] uv run thehomie setup --check"
+    npm_install "$REPO_DIR/dashboard/server"
+    npm_install "$REPO_DIR/dashboard/web"
+    npm_install "$REPO_DIR/dashboard/desktop"
+    npm_script "$REPO_DIR/dashboard/web" "build"
+    echo "[DRY RUN] cd $REPO_DIR/.claude/scripts && uv run thehomie desktop --shell --dry-run --json"
     echo ""
     echo "Dry run complete. To install for real: bash install.sh"
 else
     uv run thehomie setup --check
+    echo ""
+    echo "Installing dashboard and desktop dependencies..."
+    npm_install "$REPO_DIR/dashboard/server"
+    npm_install "$REPO_DIR/dashboard/web"
+    npm_install "$REPO_DIR/dashboard/desktop"
+
+    echo ""
+    echo "Building dashboard web assets for Desktop v0..."
+    npm_script "$REPO_DIR/dashboard/web" "build"
+
+    cd "$REPO_DIR/.claude/scripts"
+    uv run thehomie desktop --shell --dry-run --json >/dev/null
     echo ""
     echo "Installed successfully."
     echo "  If setup reported missing providers or chat adapters, finish onboarding first:"
     echo "    cd $REPO_DIR/.claude/scripts && uv run thehomie setup"
     echo "  Verify: cd $REPO_DIR/.claude/scripts && uv run thehomie setup --check"
     echo "  Chat:   cd $REPO_DIR/.claude/scripts && uv run thehomie chat"
+    echo "  Desktop: cd $REPO_DIR/.claude/scripts && uv run thehomie desktop --shell"
 fi

@@ -53,6 +53,9 @@ Build the dashboard web assets first:
 npm --prefix dashboard/web run build
 ```
 
+Desktop v0 packaging uses the supported Electron toolchain and requires
+Node.js 22.12+.
+
 Install the desktop package dependencies:
 
 ```powershell

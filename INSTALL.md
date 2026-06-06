@@ -3,6 +3,7 @@
 ## Prerequisites
 
 - **Python 3.12+** — [python.org](https://www.python.org/downloads/)
+- **Node.js 22.12+** — required for dashboard and Desktop v0 assets
 - **uv** — Fast Python package manager: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - **Obsidian** (optional) — For vault management and cross-machine sync
 
@@ -60,7 +61,11 @@ cd .claude/chat && bash run_chat.sh
 ## Docker Deployment
 
 ```bash
-# Build and run
+# Create the Compose env file first
+cp .claude/scripts/.env.example .claude/scripts/.env
+
+# Validate, build, and run
+docker compose config
 docker compose up -d
 
 # Check health

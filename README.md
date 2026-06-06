@@ -301,6 +301,7 @@ Private PRDs, PRPs, and vault notes stay outside the public framework export.
 ### Prerequisites
 
 - Python 3.12+ with [uv](https://docs.astral.sh/uv/)
+- Node.js 22.12+ for dashboard and Desktop v0 assets
 - Claude Code CLI — `npm install -g @anthropic-ai/claude-code` (handles auth + model access)
 
 ### Setup
@@ -548,6 +549,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide.
 ## Docker
 
 ```bash
+cp .claude/scripts/.env.example .claude/scripts/.env
+docker compose config
 docker compose up    # bot + scheduler (heartbeat · reflection · weekly synthesis)
 ```
 

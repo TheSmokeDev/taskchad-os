@@ -65,15 +65,17 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 }
 Write-Host "Git OK" -ForegroundColor Green
 
-# Check Node.js 20+ for the dashboard and desktop dev stack
+# Check Node.js 22.12+ for the dashboard and desktop dev stack
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Error "Node.js not found. Install Node.js 20+ from https://nodejs.org/"
+    Write-Error "Node.js not found. Install Node.js 22.12+ from https://nodejs.org/"
     exit 1
 }
 $nodeVersionRaw = & node -p "process.versions.node"
-$nodeMajor = [int]($nodeVersionRaw.Split('.')[0])
-if ($nodeMajor -lt 20) {
-    Write-Error "Node.js $nodeVersionRaw found - need 20+."
+$nodeVersionParts = $nodeVersionRaw.Split('.')
+$nodeMajor = [int]$nodeVersionParts[0]
+$nodeMinor = [int]$nodeVersionParts[1]
+if (($nodeMajor -lt 22) -or (($nodeMajor -eq 22) -and ($nodeMinor -lt 12))) {
+    Write-Error "Node.js $nodeVersionRaw found - need 22.12+."
     exit 1
 }
 Write-Host "Node.js $nodeVersionRaw OK" -ForegroundColor Green
