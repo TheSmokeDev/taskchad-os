@@ -52,7 +52,7 @@ channel/desktop surfaces over one runtime. Use [NOTICE](../../NOTICE.md) and
 | Homie Dashboard Framework | Canonical operator shell | [homie-dashboard-framework](features/homie-dashboard-framework.md) | `dashboard/`, `/mission`, `/teams`, `/browser`, `/mobile` |
 | Operating Room | Product slice implemented | [operating-room](features/operating-room.md) | `/teams`, `/api/team/operating-room/run` |
 | Capability Gateway | Read-only v1 implemented | [capability-gateway](features/capability-gateway.md) | `/capabilities`, `/api/capabilities/status` |
-| Desktop v0 | Dashboard-first Electron app + unpacked package | [desktop-v0](features/desktop-v0.md) | `thehomie desktop --shell`, `dashboard/desktop` |
+| Desktop v0 | Dashboard-first Electron app + unpacked and portable artifacts | [desktop-v0](features/desktop-v0.md) | `thehomie desktop --shell`, `dashboard/desktop` |
 | Desktop Dev Launcher | Windows-first dev launcher | [desktop-dev-launcher](features/desktop-dev-launcher.md) | `thehomie desktop` |
 | Runtime Status And Model Control | Active baseline | [runtime-status-model-control](features/runtime-status-model-control.md) | `/provider`, `/model`, status/doctor |
 | Persona Lifecycle And Files | Active baseline | [persona-lifecycle-files](features/persona-lifecycle-files.md) | `/agents`, `/agents/:id/files` |
@@ -85,8 +85,8 @@ requiring those private documents.
 
 ## Public Proof Boundaries
 
-- Desktop v0 proves the dashboard-first Electron app and unpacked Windows package. A signed
-  installer or no-admin installer flow is not claimed yet.
+- Desktop v0 proves the dashboard-first Electron app plus unpacked and
+  portable no-admin Windows artifacts. A signed installer is not claimed yet.
 - Cabinet Voice has lifecycle controls and a partial LiveKit spike. The
   browser mic -> transcript -> Cabinet reply path remains deferred.
 - Local proof reports, private handoffs, account-specific setup, and generated

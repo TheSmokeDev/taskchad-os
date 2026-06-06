@@ -1,6 +1,6 @@
 # Desktop v0
 
-Status: Windows-first dashboard app and unpacked package smoke-proven
+Status: Windows-first dashboard app, unpacked package, and portable artifact smoke-proven
 Owner: Desktop app + dashboard server
 Last updated: 2026-06-05
 
@@ -28,7 +28,7 @@ as a fallback/maintenance screen if the dashboard cannot boot.
 | Electron main/preload | `dashboard/desktop/main.cjs`, `dashboard/desktop/preload.cjs` |
 | Desktop process manager | `dashboard/desktop/lib/process-manager.cjs` |
 | Desktop config | `dashboard/desktop/lib/config-store.cjs` |
-| Desktop packaging | `dashboard/desktop/electron-builder.cjs`, `dashboard/desktop/scripts/packaged-smoke.mjs` |
+| Desktop packaging | `dashboard/desktop/electron-builder.cjs`, `dashboard/desktop/scripts/packaged-smoke.mjs`, `dashboard/desktop/scripts/portable-smoke.mjs` |
 | Desktop controls | `dashboard/web/src/components/DesktopControls.tsx`, `dashboard/desktop/renderer/` fallback shell |
 | Hono static dashboard serving | `dashboard/server/src/static-web.ts` |
 | CLI entrypoint | `.claude/chat/desktop_launcher.py`, `.claude/chat/cli.py` |
@@ -68,6 +68,12 @@ Build the no-admin unpacked Windows package:
 npm --prefix dashboard/desktop run package:win
 ```
 
+Build the no-admin portable Windows artifact:
+
+```powershell
+npm --prefix dashboard/desktop run package:win:portable
+```
+
 Launch through the Homie CLI:
 
 ```powershell
@@ -98,6 +104,8 @@ npm --prefix dashboard/desktop run smoke
 npm --prefix dashboard/desktop run smoke:electron
 npm --prefix dashboard/desktop run package:win
 npm --prefix dashboard/desktop run smoke:package
+npm --prefix dashboard/desktop run package:win:portable
+npm --prefix dashboard/desktop run smoke:portable
 npm --prefix dashboard/desktop audit --audit-level=high
 npm --prefix dashboard/server test -- static-web.test.ts
 cd .claude\scripts
@@ -106,6 +114,29 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
 
 ## Latest Proof
 
+- Date: 2026-06-05
+- Dashboard-first portable Windows artifact smoke: passed on alternate ports
+  `45136/33154`
+  - portable artifact built
+    `dashboard/desktop/dist/The-Homie-Desktop-0.1.0-x64.exe`
+  - artifact size: `96145321` bytes
+  - Electron renderer loaded `The Homie Dashboard`, not the standalone shell
+  - renderer reported `isPackaged=true`, `artifactKind=portable`, dashboard
+    root, Desktop IPC bridge, embedded `Desktop Stack` controls, and Mission
+    Control content
+  - portable app used bundled static assets from extracted
+    `resources/dashboard-web`
+  - in-window route checks passed for `/mission`, `/chat`, `/mobile`,
+    `/browser`, `/work`, `/convoy`, and `/teams`
+  - `/work` and `/convoy` route probes reported `hasRawFetchError=false`
+  - direct Python `/api/health` returned 200 from `45136`
+  - Hono `/api/health` returned 200 from `33154`
+  - shell reported `python-api` PID `59164` and `hono-dashboard` PID `28636`
+  - shell stopped both services and ports `45136/33154` were closed after
+    smoke
+  - original services remained running on `4322`, `3141`, `5173`, and `7860`
+- Private portable smoke report:
+  `.codex/artifacts/desktop-v0-portable-smoke/report.json`
 - Date: 2026-06-05
 - Dashboard-first unpacked Windows package smoke: passed on alternate ports
   `45135/33153`
@@ -142,7 +173,7 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
   - shell stopped both services and alternate ports were closed after smoke
 - Private smoke report:
   `.codex/artifacts/desktop-v0-electron-smoke/report.json`
-- Desktop unit tests: 6 passed
+- Desktop unit tests: 11 passed
 - Desktop smoke: reports `python-api`, `hono-dashboard`, and
   `http://127.0.0.1:3141/teams`
 - Desktop package audit: 0 high-severity vulnerabilities
@@ -153,18 +184,12 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
 
 ## Public Export Status
 
-Public export passed after the package smoke. Desktop source and packaging
+Public export passed after the portable smoke. Desktop source and packaging
 config ship; `dashboard/desktop/node_modules/`, `dashboard/desktop/dist/`,
 `dashboard/desktop/out/`, and private `.codex` proof artifacts are denied.
 
 ## Next Slices
 
-- Hermes Desktop parity pass for distribution. Use
-  `NousResearch/hermes-agent/apps/desktop` as the primary comparator for
-  installer targets, unpacked/portable behavior, first-run bootstrap, local
-  runtime dependency handling, logs/status, and failure recovery. Ship the
-  Homie-native subset only: Python/orchestration stays the source of truth and
-  Electron stays thin over lifecycle/status/logs.
-- Signed installer or portable installer distribution. The current proof is an
-  unpacked no-admin Windows package, not a signed installer.
+- Per-user installer distribution. The current proof is unpacked and portable
+  no-admin Windows artifacts, not a signed installer.
 - Desktop icon and artifact naming polish.

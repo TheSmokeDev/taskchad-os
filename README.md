@@ -96,15 +96,15 @@ thehomie team list               # Inspect team sessions
 |---|---|
 | [Install Guide](INSTALL.md) | Prerequisites, setup wizard, channel credentials, Docker, systemd, vault setup |
 | [Operator Manual](docs/manual/README.md) | Public feature map, source-of-truth files, operator entry points, tests, proof boundaries |
-| [Desktop v0](docs/manual/features/desktop-v0.md) | Dashboard-first Electron app, package smoke proof, Desktop/Hono/Python lifecycle |
+| [Desktop v0](docs/manual/features/desktop-v0.md) | Dashboard-first Electron app, portable/package smoke proof, Desktop/Hono/Python lifecycle |
 | [Multi-Channel Adapters](docs/manual/features/multi-channel-adapters.md) | Telegram attachments, grouped documents, quick-turn batching, Queue/Steer controls |
 | [Runtime Status And Model Control](docs/manual/features/runtime-status-model-control.md) | `/provider`, `/model`, lane-first runtime behavior, quiet JSON contract |
 | `FRAMEWORK.md` | Compact development guide generated during public framework export |
 
 ## Current Proof Boundaries
 
-- Desktop v0 proves the dashboard-first Electron app and unpacked Windows package. A signed
-  installer or no-admin installer flow is not claimed yet.
+- Desktop v0 proves the dashboard-first Electron app plus unpacked and
+  portable no-admin Windows artifacts. A signed installer is not claimed yet.
 - Cabinet Voice has lifecycle controls and a partial LiveKit spike. The browser
   mic -> transcript -> Cabinet reply path is not claimed ready.
 - Optional integrations require user-owned credentials. No private account

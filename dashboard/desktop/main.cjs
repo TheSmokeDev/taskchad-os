@@ -113,8 +113,7 @@ function wireIpc() {
     return { targetUrl };
   });
   ipcMain.handle('operating-room:open', async () => {
-    const targetUrl = stackManager.targetUrl();
-    await shell.openExternal(targetUrl);
+    const targetUrl = await loadDashboardPath('/teams');
     return { targetUrl };
   });
 }
@@ -171,6 +170,7 @@ async function runSmoke() {
     targetUrl: stackManager.targetUrl(),
     package: {
       isPackaged: app.isPackaged,
+      artifactKind: process.env.HOMIE_DESKTOP_ARTIFACT_KIND || (app.isPackaged ? 'packaged' : 'dev'),
       appPath: app.getAppPath(),
       resourcesPath: process.resourcesPath || null,
     },
@@ -213,13 +213,15 @@ async function runSmoke() {
           hasDesktopBridge: Boolean(window.homieDesktop),
           hasDesktopControls: document.body.innerText.toLowerCase().includes('desktop stack'),
           hasExpectedText: document.body.innerText.includes(${JSON.stringify(expectedText)}),
+          hasRawFetchError: /typeerror:\\s*failed to fetch|failed to fetch/i.test(document.body.innerText),
           text: document.body.innerText
         })
-      `, (probe) => probe?.hasDashboardRoot && probe?.hasDesktopBridge && probe?.hasDesktopControls && probe?.hasExpectedText);
+      `, (probe) => probe?.hasDashboardRoot && probe?.hasDesktopBridge && probe?.hasDesktopControls && probe?.hasExpectedText && !probe?.hasRawFetchError);
       report.routes[routePath] = {
-        ok: Boolean(result?.hasDashboardRoot && result?.hasDesktopBridge && result?.hasDesktopControls && result?.hasExpectedText),
+        ok: Boolean(result?.hasDashboardRoot && result?.hasDesktopBridge && result?.hasDesktopControls && result?.hasExpectedText && !result?.hasRawFetchError),
         url: routeUrl,
         expectedText,
+        hasRawFetchError: Boolean(result?.hasRawFetchError),
       };
     }
     report.dashboard = await waitForEndpoint(stackManager.targetUrl(), {

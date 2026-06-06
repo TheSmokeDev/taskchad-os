@@ -87,7 +87,5 @@ any public push.
 
 ## Next Slices
 
-- Hermes Desktop parity pass against `NousResearch/hermes-agent/apps/desktop`
-  for the Desktop v0 distribution path.
-- Signed installer or portable installer distribution for Desktop v0.
+- Per-user or signed installer distribution for Desktop v0.
 - Desktop icon and artifact naming polish.
