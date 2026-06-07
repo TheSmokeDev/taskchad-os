@@ -99,9 +99,11 @@ focused suite.
 
 - Date: 2026-06-06
 - Dashboard chat write surface passed on isolated ports `45139/33157`:
-  `/chat` sent `/provider` from the dashboard composer and streamed back
-  `Runtime Provider Status` through Python-owned routing. Desktop and mobile
-  screenshots were inspected; no raw fetch errors or console warnings appeared.
+  `/chat` sent `hello`, `/provider`, and `/status` from the actual dashboard
+  composer in the in-app browser. The page streamed a normal Homie assistant
+  reply, `Runtime Provider Status`, and `Session Status` through Python-owned
+  routing. No raw fetch errors, console warnings, or `Message failed` toast
+  appeared after the isolated stack was ready.
 - The isolated services were stopped and ports `45139/33157` were confirmed
   closed.
 - Date: 2026-05-31

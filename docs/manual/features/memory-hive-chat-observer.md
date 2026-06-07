@@ -84,10 +84,15 @@ npm --prefix dashboard/web test -- --run src/__tests__/chat.test.tsx
 
 - Date: 2026-06-06
 - Isolated current-code stack passed on alternate ports `45139/33157`.
-- `/chat` rendered in the dashboard, sent `/provider` from the composer, and
-  streamed back `Runtime Provider Status` through the dashboard WEB adapter.
+- `/chat` rendered in the in-app browser and sent real dashboard-composer
+  messages:
+  - `hello` streamed a normal Homie assistant response.
+  - `/provider` streamed `Runtime Provider Status`.
+  - `/status` streamed `Session Status`.
+- The proof used the dashboard WEB adapter and Python-owned chat routing, not a
+  mocked UI response.
 - Browser validation showed no raw `TypeError: Failed to fetch`, no console
-  warnings, and clean desktop/mobile layouts.
+  warnings, and no `Message failed` toast after the isolated stack was ready.
 - Shutdown stopped the isolated Hono and Python services; ports `45139/33157`
   were closed afterward.
 - Memory graph and brain views retain prior May 2026 browser validation; re-run
