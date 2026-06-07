@@ -17,6 +17,7 @@ from core_handlers import CORE_HANDLERS  # noqa: E402
 from extension_manager import ExtensionManager  # noqa: E402
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, User  # noqa: E402
 from router import ChatRouter  # noqa: E402
+from session import SQLiteSessionStore  # noqa: E402
 
 
 def _build_manager() -> ExtensionManager:
@@ -68,9 +69,8 @@ class _RecordingEngine:
 
 
 class _SlowEngine:
-    session_store = None
-
-    def __init__(self) -> None:
+    def __init__(self, session_store=None) -> None:
+        self.session_store = session_store
         self.messages: list[str] = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -245,6 +245,32 @@ async def test_queue_button_runs_followup_after_current_turn():
 
 
 @pytest.mark.asyncio
+async def test_button_click_does_not_persist_button_sentinel_to_history(tmp_path: Path):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    engine = _SlowEngine(session_store=store)
+    router = ChatRouter(engine, _build_manager())
+    router._burst_delay_seconds = 0.01
+    adapter = _RecordingAdapter()
+
+    router._queue_incoming(adapter, _incoming("first long turn"))
+    await asyncio.wait_for(engine.started.wait(), timeout=1)
+    router._queue_incoming(adapter, _incoming("queued follow-up"))
+    await asyncio.sleep(0.08)
+    prompt = next(
+        message for message in adapter.sent
+        if "How should I apply this follow-up" in message.text
+    )
+    queue_id = prompt.components[0].custom_id
+
+    await router._handle_inner(adapter, _incoming(f"__button:{queue_id}"))
+
+    messages = store.list_messages("cli:cli-test:cli-test")
+    assert all("__button:" not in message.content for message in messages)
+    engine.release.set()
+    await asyncio.sleep(0.08)
+
+
+@pytest.mark.asyncio
 async def test_steer_button_marks_followup_as_revision():
     engine = _SlowEngine()
     router = ChatRouter(engine, _build_manager())
@@ -319,17 +345,16 @@ async def test_linkedin_slash_command_uses_deterministic_operator_prompt():
     engine = _RecordingEngine()
     router = ChatRouter(engine, _build_manager())
     adapter = _RecordingAdapter()
+    incoming = _incoming("/linkedin draft a post about multi-persona AI operators")
 
-    await router._handle_inner(
-        adapter,
-        _incoming("/linkedin draft a post about multi-persona AI operators"),
-    )
+    await router._handle_inner(adapter, incoming)
 
     assert len(engine.messages) == 1
     assert "LinkedIn/Social Homie" in engine.messages[0]
     assert "draft a post about multi-persona AI operators" in engine.messages[0]
     assert "must not" in engine.messages[0]
     assert "publish, DM, edit a profile" in engine.messages[0]
+    assert incoming.raw_event["display_text"] == "/linkedin draft a post about multi-persona AI operators"
     assert adapter.sent[0].text == "Thinking..."
     assert adapter.updates[-1].text == "engine handled"
 

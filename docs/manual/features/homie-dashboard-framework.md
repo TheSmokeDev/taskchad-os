@@ -2,7 +2,7 @@
 
 Status: canonical operator shell
 Owner: `thehomie/dashboard` thin UI over Python-owned framework APIs
-Last updated: 2026-06-06
+Last updated: 2026-06-07
 
 ## What It Does
 
@@ -97,6 +97,14 @@ focused suite.
 
 ## Latest Live Proof
 
+- Date: 2026-06-07
+- Dashboard chat reliability proof passed on isolated ports `45139/33157`.
+  `/chat` ran a model-backed `/linkedin` slash command, preserved raw operator
+  command history after reload, coalesced progress into one status card,
+  rendered Queue/Steer controls for an in-flight follow-up, accepted
+  `Steer Current`, and produced the steered revision. `/browser` and `/teams`
+  rendered without raw fetch errors. The isolated services were stopped and
+  `45139/33157` closed.
 - Date: 2026-06-06
 - Dashboard chat write surface passed on isolated ports `45139/33157`:
   `/chat` sent `hello`, `/provider`, and `/status` from the actual dashboard

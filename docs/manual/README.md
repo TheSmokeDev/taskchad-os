@@ -27,12 +27,14 @@ machine-specific proof artifacts stay outside the public manual.
 
 ## Ecosystem Positioning
 
-The Homie sits in the same public agent ecosystem as OpenClaw and Hermes Agent.
-OpenClaw proved broad agent/channel access; Hermes pushed self-improving loops
-and desktop/operator ergonomics. The Homie is independent and identity-first:
-durable memory, judgment, Operating Room orchestration, and thin
-channel/desktop surfaces over one runtime. Use [NOTICE](../../NOTICE.md) and
-[AUTHORS](../../AUTHORS.md) for attribution; use
+The Homie sits in the same public agent ecosystem as OpenClaw, Hermes Agent,
+OpenSouls, and ClaudeClaw. OpenClaw proved broad agent/channel access; Hermes
+pushed self-improving loops and desktop/operator ergonomics; OpenSouls
+influenced the mental-model vocabulary around AI souls, working memory, and
+mental processes; ClaudeClaw inspired dashboard/operator experience. The Homie
+is independent and identity-first: durable memory, judgment, Operating Room
+orchestration, and thin channel/desktop surfaces over one runtime. Use
+[NOTICE](../../NOTICE.md) and [AUTHORS](../../AUTHORS.md) for attribution; use
 [CONTRIBUTING](../../CONTRIBUTING.md) for community participation.
 
 ## Table Of Contents
@@ -69,7 +71,7 @@ channel/desktop surfaces over one runtime. Use [NOTICE](../../NOTICE.md) and
 | Cabinet Voice | Single-session lifecycle controls shipped | [cabinet-voice](features/cabinet-voice.md) | `/cabinet voice`, `/voices`, `/api/cabinet/voice/*` |
 | Cognitive Loop | Shipped/live-runtime proven; dashboard route hidden from public nav | [jarvis-cognitive-loop](features/jarvis-cognitive-loop.md) | status/doctor, scheduled loops |
 | Direct Integration Capability Contract | Shipped, policy-enforced | [direct-integration-capability-contract](features/direct-integration-capability-contract.md) | direct integration wrapper, `/send`, status/doctor |
-| Memory, Knowledge Graph, And Dashboard Chat | Active baseline, dashboard WEB send proven | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
+| Memory, Knowledge Graph, And Dashboard Chat | Active baseline, dashboard chat reliability proven | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
 | Scheduled Jobs, Settings, And Audit | Active baseline | [scheduled-settings-audit](features/scheduled-settings-audit.md) | `/scheduled`, `/settings`, `/audit` |
 
 ### Existing Deep Public Manuals

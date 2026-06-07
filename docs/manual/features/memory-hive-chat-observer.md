@@ -2,7 +2,7 @@
 
 Status: active baseline
 Owner: Python memory/brain APIs, chat router, and dashboard views
-Last updated: 2026-06-06
+Last updated: 2026-06-07
 
 ## What It Does
 
@@ -27,7 +27,7 @@ Python-owned chat router used by CLI and channel adapters.
 | Python/runtime | `.claude/scripts/dashboard_api.py`, memory/recall modules under `.claude/scripts/` and `.claude/chat/` |
 | Hono/dashboard server | `dashboard/server/src/routes/memories.ts`, `dashboard/server/src/routes/brain.ts`, `dashboard/server/src/routes/hive-mind.ts`, `dashboard/server/src/routes/conversation.ts`, `dashboard/server/src/routes.ts` |
 | Dashboard web | `dashboard/web/src/pages/Memories.tsx`, `dashboard/web/src/pages/HiveMind.tsx`, `dashboard/web/src/pages/Chat.tsx`, graph components/hooks |
-| Tests | `dashboard/web/src/__tests__/memory-graph.test.tsx`, `dashboard/web/src/__tests__/brain-graph-3d.test.tsx`, `dashboard/web/src/__tests__/chat.test.tsx`, `dashboard/server/src/__tests__/brain.test.ts`, `dashboard/server/src/__tests__/conversation.test.ts`, SSE/token-hardening tests |
+| Tests | `dashboard/web/src/__tests__/memory-graph.test.tsx`, `dashboard/web/src/__tests__/brain-graph-3d.test.tsx`, `dashboard/web/src/__tests__/chat.test.tsx`, `dashboard/web/src/__tests__/chat-stream.test.ts`, `dashboard/server/src/__tests__/brain.test.ts`, `dashboard/server/src/__tests__/conversation.test.ts`, SSE/token-hardening tests |
 
 ## Safety Boundaries
 
@@ -77,11 +77,30 @@ uv run pytest tests/test_dashboard_endpoints_sse.py -q
 ```powershell
 cd C:\Users\YourUser\thehomie
 npm --prefix dashboard/server test -- src/__tests__/conversation.test.ts
-npm --prefix dashboard/web test -- --run src/__tests__/chat.test.tsx
+npm --prefix dashboard/web test -- src/__tests__/chat.test.tsx src/__tests__/chat-stream.test.ts
 ```
 
 ## Latest Live Proof
 
+- Date: 2026-06-07
+- Dashboard chat reliability pass ran on isolated ports `45139/33157`.
+- `/chat` sent a real model-backed `/linkedin ... Do not post.` command
+  through the dashboard API and Python-owned chat router. The new stored user
+  row preserved the raw operator slash command instead of the internal
+  command-expansion prompt.
+- A follow-up turn used the prior response as context, then an in-flight
+  follow-up rendered existing `Queue Next` and `Steer Current` controls.
+  `Steer Current` posted the button action, showed a steer acknowledgement,
+  and produced a founder-announcement revision after the active turn finished.
+- Progress rendered as one replaceable status card during work instead of
+  stacking multiple `Thinking...` / `Working...` bubbles.
+- Reloaded history showed the raw slash command and follow-up text, with no
+  new internal `Writing Rules` prompt leakage.
+- `/browser` rendered Browser Viewer readiness, visible CDP guard, tab count,
+  live stream state, and read-only controls; `/teams` rendered Operating Room.
+  Neither route showed raw `TypeError: Failed to fetch`.
+- The isolated services were stopped and ports `45139/33157` were confirmed
+  closed afterward. Existing local services remained on their normal ports.
 - Date: 2026-06-06
 - Isolated current-code stack passed on alternate ports `45139/33157`.
 - `/chat` rendered in the in-app browser and sent real dashboard-composer

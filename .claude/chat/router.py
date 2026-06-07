@@ -67,6 +67,15 @@ def _engine_timeout_message(timeout_seconds: float) -> str:
     )
 
 
+def _incoming_display_text(incoming: Any) -> str:
+    raw_event = getattr(incoming, "raw_event", None)
+    if isinstance(raw_event, dict):
+        candidate = raw_event.get("display_text")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return getattr(incoming, "text", "") or ""
+
+
 class ChatRouter:
     """Routes messages between platform adapters and the conversation engine.
 
@@ -494,10 +503,14 @@ class ChatRouter:
             # Engine command — convert to natural language for the SDK
             piv_content = get_piv_instruction(command, args)
             if piv_content:
+                if isinstance(getattr(incoming, "raw_event", None), dict):
+                    incoming.raw_event.setdefault("display_text", text)
                 incoming.text = piv_content
                 incoming.is_piv = True
                 incoming.piv_command = command
             elif command == "clutch":
+                if isinstance(getattr(incoming, "raw_event", None), dict):
+                    incoming.raw_event.setdefault("display_text", text)
                 clutch_prompt = (
                     f"Use the Skill tool to invoke the 'clutch' skill with arguments: {args}"
                     if args
@@ -505,6 +518,8 @@ class ChatRouter:
                 )
                 incoming.text = clutch_prompt
             elif command == "quote":
+                if isinstance(getattr(incoming, "raw_event", None), dict):
+                    incoming.raw_event.setdefault("display_text", text)
                 quote_prompt = (
                     f"Use the Skill tool to invoke the 'turborater-quote' skill with arguments: {args}"
                     if args
@@ -514,6 +529,8 @@ class ChatRouter:
                 incoming.is_piv = True
                 incoming.piv_command = "clutch"
             else:
+                if isinstance(getattr(incoming, "raw_event", None), dict):
+                    incoming.raw_event.setdefault("display_text", text)
                 desc = get_engine_command_description(command)
                 if args:
                     incoming.text = f"{desc}: {args}"
@@ -1070,7 +1087,7 @@ class ChatRouter:
             store.create(session)
 
         timestamp = getattr(incoming, "timestamp", now)
-        store.add_message(session_id, "user", incoming.text, timestamp)
+        store.add_message(session_id, "user", _incoming_display_text(incoming), timestamp)
         store.add_message(session_id, "assistant", reply, now)
 
     def _apply_router_runtime_metadata(self, incoming: Any, session: Session) -> None:

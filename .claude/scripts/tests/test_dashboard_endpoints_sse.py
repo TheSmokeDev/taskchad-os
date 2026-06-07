@@ -305,6 +305,7 @@ def test_dashboard_chat_send_builds_web_incoming_and_user_sse(client, monkeypatc
     assert result["queued"] is True
     assert incoming.platform.value == "web"
     assert incoming.text == "/provider"
+    assert incoming.raw_event["display_text"] == "/provider"
     assert incoming.channel.platform_id == "dashboard-test"
     assert incoming.thread.thread_id == "dashboard-test"
     assert captured["track"] == {
@@ -347,3 +348,54 @@ def test_dashboard_chat_adapter_serializes_components_to_sse(client):
         "turn_queue:abc",
         "turn_steer:abc",
     ]
+
+
+def test_dashboard_chat_adapter_marks_placeholder_updates(client):
+    """Progress and final updates carry the placeholder event id for UI coalescing."""
+    import asyncio
+    import json
+
+    import dashboard_api as da
+    from models import Channel, OutgoingMessage, Platform, Thread
+
+    adapter = da._DashboardChatAdapter()
+    adapter.track(persona_id="default", conversation_id="dashboard-updates")
+    channel = Channel(Platform.WEB, "dashboard-updates", is_dm=True)
+    thread = Thread(thread_id="dashboard-updates")
+
+    placeholder_id = asyncio.run(adapter.send(OutgoingMessage(text="Thinking...", channel=channel, thread=thread)))
+    assert placeholder_id == "dashboard-sse-1"
+
+    progress_id = asyncio.run(
+        adapter.update(
+            OutgoingMessage(
+                text="Working... (12s)",
+                channel=channel,
+                thread=thread,
+                is_update=True,
+                update_message_id=placeholder_id,
+            )
+        )
+    )
+    assert progress_id == "dashboard-sse-2"
+
+    final_id = asyncio.run(
+        adapter.update(
+            OutgoingMessage(
+                text="Done.",
+                channel=channel,
+                thread=thread,
+                is_update=True,
+                update_message_id=placeholder_id,
+            )
+        )
+    )
+    assert final_id == "dashboard-sse-3"
+
+    events = da._SSE_REPLAY_BUFFERS[("default", "dashboard-updates")]
+    progress_payload = json.loads(events[1][2])
+    final_payload = json.loads(events[2][2])
+    assert events[1][1] == "progress"
+    assert progress_payload["replaces_event_id"] == 1
+    assert events[2][1] == "assistant_message"
+    assert final_payload["replaces_event_id"] == 1

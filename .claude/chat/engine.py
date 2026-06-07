@@ -129,6 +129,15 @@ def _should_use_text_only_fast_path(message: IncomingMessage) -> bool:
     return True
 
 
+def _incoming_display_text(message: IncomingMessage) -> str:
+    raw_event = getattr(message, "raw_event", None)
+    if isinstance(raw_event, dict):
+        candidate = raw_event.get("display_text")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return message.text
+
+
 class ConversationEngine:
     """Routes incoming messages through the runtime layer and persists sessions.
 
@@ -1149,7 +1158,7 @@ class ConversationEngine:
             self.session_store.add_message(
                 session_key,
                 "user",
-                message.text,
+                _incoming_display_text(message),
                 message.timestamp,
             )
             self.session_store.add_message(

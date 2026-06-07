@@ -17,11 +17,14 @@ desktop/operator surfaces.
 
 OpenClaw is credited for proving broad agent/channel access. Hermes Agent is
 credited for pushing self-improving agent loops and strong provider/tooling
-ergonomics.
+ergonomics. OpenSouls is credited as a conceptual reference for AI souls,
+working memory, mental processes, agency, and identity. ClaudeClaw is credited
+for dashboard and operator-experience inspiration.
 
 The Homie is an independent project. These lineage credits do not imply
 affiliation, sponsorship, endorsement, or ownership by Dynamous Community,
-OpenClaw, Hermes Agent, Nous Research, or their maintainers.
+OpenClaw, Hermes Agent, Nous Research, OpenSouls, ClaudeClaw, or their
+maintainers.
 
 ## License
 

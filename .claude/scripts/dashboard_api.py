@@ -3909,6 +3909,19 @@ def _serialize_chat_components(components: list[Any] | None) -> list[dict[str, A
     return serialized
 
 
+def _dashboard_update_event_id(message: Any) -> int | None:
+    raw = getattr(message, "update_message_id", None)
+    if not raw:
+        return None
+    text = str(raw)
+    if not text.startswith("dashboard-sse-"):
+        return None
+    try:
+        return int(text.rsplit("-", 1)[1])
+    except (TypeError, ValueError):
+        return None
+
+
 class _DashboardChatAdapter:
     """Local HTTP dashboard adapter that publishes router output into SSE."""
 
@@ -3969,6 +3982,7 @@ class _DashboardChatAdapter:
                 "components": components,
                 "is_error": is_error,
                 "is_update": bool(getattr(message, "is_update", False)),
+                "replaces_event_id": _dashboard_update_event_id(message),
             },
         )
         return f"dashboard-sse-{event_id}"
@@ -3981,7 +3995,13 @@ class _DashboardChatAdapter:
                 persona_id,
                 conversation_id,
                 "progress",
-                {"text": text, "content": text, "components": []},
+                {
+                    "text": text,
+                    "content": text,
+                    "components": [],
+                    "is_update": True,
+                    "replaces_event_id": _dashboard_update_event_id(message),
+                },
             )
             return f"dashboard-sse-{event_id}"
         return await self.send(message)
@@ -4134,6 +4154,7 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody) -> dic
             "surface": "dashboard",
             "request_id": request_id,
             "button_custom_id": button_custom_id,
+            "display_text": raw_text if not button_custom_id else "",
         },
         source=body.source or "interactive",
     )

@@ -92,4 +92,98 @@ describe('dashboard chat', () => {
       expect(sendCall).toBeTruthy();
     });
   });
+
+  test('progress updates replace one placeholder instead of stacking status bubbles', async () => {
+    render(<Chat />);
+
+    await waitFor(() => expect(streamMock.listener).toBeTruthy());
+    act(() => {
+      streamMock.listener?.('processing', {
+        event_id: 10,
+        text: 'Thinking...',
+        timestamp: Date.now() / 1000,
+      });
+      streamMock.listener?.('progress', {
+        event_id: 11,
+        replaces_event_id: 10,
+        text: 'Working... (12s)',
+        timestamp: Date.now() / 1000,
+      });
+      streamMock.listener?.('progress', {
+        event_id: 12,
+        replaces_event_id: 10,
+        text: 'Working... (24s)',
+        timestamp: Date.now() / 1000,
+      });
+      streamMock.listener?.('assistant_message', {
+        event_id: 13,
+        replaces_event_id: 10,
+        text: 'Done.',
+        timestamp: Date.now() / 1000,
+      });
+    });
+
+    expect(screen.queryByText('Thinking...')).toBeNull();
+    expect(screen.queryByText('Working... (12s)')).toBeNull();
+    expect(screen.queryByText('Working... (24s)')).toBeNull();
+    expect(await screen.findByText('Done.')).toBeTruthy();
+    expect(document.body.textContent?.match(/homie/g)).toHaveLength(1);
+  });
+
+  test('stream ignores other conversations and blank status events', async () => {
+    render(<Chat />);
+
+    await waitFor(() => expect(streamMock.listener).toBeTruthy());
+    act(() => {
+      streamMock.listener?.('processing', {
+        event_id: 20,
+        persona_id: 'main',
+        conversation_id: 'dashboard-main',
+        text: '',
+        timestamp: Date.now() / 1000,
+      });
+      streamMock.listener?.('assistant_message', {
+        event_id: 21,
+        persona_id: 'other',
+        conversation_id: 'dashboard-main',
+        text: 'Wrong persona',
+        timestamp: Date.now() / 1000,
+      });
+      streamMock.listener?.('assistant_message', {
+        event_id: 22,
+        persona_id: 'main',
+        conversation_id: 'other-chat',
+        text: 'Wrong conversation',
+        timestamp: Date.now() / 1000,
+      });
+      streamMock.listener?.('assistant_message', {
+        event_id: 23,
+        persona_id: 'main',
+        conversation_id: 'dashboard-main',
+        text: 'Right conversation',
+        timestamp: Date.now() / 1000,
+      });
+    });
+
+    expect(screen.queryByText('Wrong persona')).toBeNull();
+    expect(screen.queryByText('Wrong conversation')).toBeNull();
+    expect(await screen.findByText('Right conversation')).toBeTruthy();
+  });
+
+  test('stream accepts Python canonical default persona for dashboard main chat', async () => {
+    render(<Chat />);
+
+    await waitFor(() => expect(streamMock.listener).toBeTruthy());
+    act(() => {
+      streamMock.listener?.('assistant_message', {
+        event_id: 24,
+        persona_id: 'default',
+        conversation_id: 'dashboard-main',
+        text: 'Live SSE reached dashboard main.',
+        timestamp: Date.now() / 1000,
+      });
+    });
+
+    expect(await screen.findByText('Live SSE reached dashboard main.')).toBeTruthy();
+  });
 });

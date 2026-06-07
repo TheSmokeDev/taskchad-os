@@ -223,25 +223,26 @@ in Phase 4 (Voices), Phase 5 (Cabinet, StandupConfig), and Phase 7
 
 ---
 
-## License Attribution
+## Dashboard Lineage
 
-This dashboard is forked from
-[ClaudeClaw](https://github.com/your-github-user/thehomie-framework) (the
-upstream open-source TypeScript dashboard). The fork carries an
-explicit owner-grant from the upstream maintainer (the same person who
-maintains The Homie fork — confirmed during the PRD-8 design phase).
-The Homie's adaptation:
+The dashboard and operator experience were inspired by
+[ClaudeClaw](https://github.com/earlyaidopters/claudeclaw), especially the
+idea that an agent runtime should have a visible operator surface instead of
+living only behind chat commands. The Homie dashboard adapts that direction for
+its own Python-owned runtime:
 
-- Forks `web/` (Vite + Preact) into `dashboard/web/`.
-- Forks `src/dashboard.ts` into `dashboard/server/` with bot internals
-  stripped — Hono only proxies; all business logic moved into Python.
-- Adds the Q4 single-translation-site lock (`translate.ts`).
-- Adds the Q5 single-yaml-surface lock (no YAML import in TS).
-- Adds the lane-aware response shape across cost/usage endpoints.
-- Adds disk-state Rule 2 compliance for hard-delete.
+- `dashboard/web/` provides the Vite + Preact operator surface.
+- `dashboard/server/` strips bot internals out of the TypeScript layer; Hono
+  proxies to Python-owned runtime APIs.
+- `translate.ts` keeps the Q4 single-translation-site lock.
+- The TypeScript dashboard never imports YAML directly; Python owns the Q5
+  single-yaml surface.
+- Cost/usage endpoints stay lane-aware.
+- Hard-delete behavior stays aligned with disk-state Rule 2.
 
-The upstream MIT-style attribution is preserved. The Homie fork
-(`thehomie-framework` public mirror) ships as MIT-licensed.
+This is attribution and lineage credit only. The Homie is independent and is
+not affiliated with, sponsored by, or endorsed by ClaudeClaw or its
+maintainers.
 
 ---
 

@@ -35,6 +35,26 @@ export function resetUnread() { chatUnread.value = 0; }
 
 let started = false;
 let currentStreamKey: string | null = null;
+let activeEventSource: EventSource | null = null;
+let activeRoute = '';
+let routeWatcherStarted = false;
+
+function ensureRouteWatcher(): void {
+  if (routeWatcherStarted) return;
+  routeWatcherStarted = true;
+
+  function reactToRoute() { activeRoute = window.location.pathname; }
+  reactToRoute();
+  window.addEventListener('popstate', reactToRoute);
+
+  // Wouter pushes via history.pushState; patch once to update route state.
+  const origPush = history.pushState;
+  history.pushState = function (...args: any[]) {
+    const ret = origPush.apply(this as any, args as any);
+    reactToRoute();
+    return ret;
+  };
+}
 
 /** Start the global chat SSE for the lifetime of the page. Idempotent. */
 export function startChatStream(personaId?: string, conversationId?: string): void {
@@ -44,41 +64,37 @@ export function startChatStream(personaId?: string, conversationId?: string): vo
 
   // Already started for this conversation — no-op.
   if (started && currentStreamKey === streamKey) return;
+  if (activeEventSource) {
+    activeEventSource.close();
+    activeEventSource = null;
+    chatStreamConnected.value = false;
+  }
 
   started = true;
   currentStreamKey = streamKey;
+  ensureRouteWatcher();
 
-  let es: EventSource | null = null;
-  let activeRoute = window.location.pathname;
   let lastReceivedId: string | null = null;
   let reconnectAttempt = 0;
 
-  function reactToRoute() { activeRoute = window.location.pathname; }
-  window.addEventListener('popstate', reactToRoute);
-
-  // Wouter pushes via history.pushState; patch to fire popstate.
-  const origPush = history.pushState;
-  history.pushState = function (...args: any[]) {
-    const ret = origPush.apply(this as any, args as any);
-    reactToRoute();
-    return ret;
-  };
-
   function open() {
-    if (es) return;
+    if (currentStreamKey !== streamKey || activeEventSource) return;
 
     const params = new URLSearchParams({ conversation_id: targetConversationId });
     const sseUrl = tokenizedSseUrl(
       `/api/conversation/${encodeURIComponent(targetPersonaId)}/stream?${params.toString()}`,
     );
-    es = new EventSource(sseUrl);
+    const es = new EventSource(sseUrl);
+    activeEventSource = es;
 
     es.onopen = () => {
+      if (currentStreamKey !== streamKey) return;
       chatStreamConnected.value = true;
       reconnectAttempt = 0;
     };
 
     es.onerror = async () => {
+      if (currentStreamKey !== streamKey) return;
       chatStreamConnected.value = false;
 
       // EventSource auto-reconnects natively. We use this hook only to
@@ -94,20 +110,25 @@ export function startChatStream(personaId?: string, conversationId?: string): vo
           for (const l of listeners) {
             try { l('refetch_hint', { reason: probe.hint }); } catch {}
           }
-          es?.close();
-          es = null;
+          es.close();
+          if (activeEventSource === es) activeEventSource = null;
           lastReceivedId = null;
           reconnectAttempt = 0;
           // Reopen on next tick.
-          setTimeout(open, 100);
+          setTimeout(() => {
+            if (currentStreamKey === streamKey) open();
+          }, 100);
         }
       }
     };
 
     const dispatch = (eventName: string) => (ev: MessageEvent) => {
+      if (currentStreamKey !== streamKey) return;
       if (ev.lastEventId) lastReceivedId = ev.lastEventId;
       let data: any;
       try { data = JSON.parse(ev.data); } catch { return; }
+      if (ev.lastEventId && data.event_id == null) data.event_id = ev.lastEventId;
+      if (ev.lastEventId) data.last_event_id = ev.lastEventId;
       // Bump unread when an assistant message arrives and we're not on /chat.
       if (eventName === 'assistant_message' && !activeRoute.startsWith('/chat')) {
         chatUnread.value = chatUnread.value + 1;

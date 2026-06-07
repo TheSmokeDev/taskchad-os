@@ -15,6 +15,7 @@ import {
 } from '@/lib/api';
 import { formatRelativeTime } from '@/lib/format';
 import { pushToast } from '@/lib/toasts';
+import { outboundPersonaId } from '@/lib/translate-personas';
 
 interface ChatComponent {
   label: string;
@@ -29,6 +30,7 @@ interface ChatEvent {
   text?: string;
   timestamp: number;
   components?: ChatComponent[];
+  replacesEventId?: string;
 }
 
 interface HistoryTurn {
@@ -51,13 +53,37 @@ function eventFromHistory(turn: HistoryTurn): ChatEvent {
 }
 
 function eventFromStream(eventName: string, data: any): ChatEvent {
+  const replacesEventId = data?.replaces_event_id ? String(data.replaces_event_id) : undefined;
+  const streamEventId = data?.event_id ?? data?.last_event_id;
   return {
-    id: String(data?.event_id ?? `${Date.now()}-${Math.random()}`),
+    id: String(streamEventId ?? `${Date.now()}-${Math.random()}`),
     type: eventName as ChatEvent['type'],
     text: data?.text || data?.content || '',
     timestamp: data?.timestamp ?? Date.now() / 1000,
     components: Array.isArray(data?.components) ? data.components : [],
+    replacesEventId,
   };
+}
+
+function mergeChatEvent(prev: ChatEvent[], ev: ChatEvent): ChatEvent[] {
+  const replacementId = ev.replacesEventId;
+  if (replacementId) {
+    const targetIndex = prev.findIndex((item) => item.id === replacementId);
+    if (targetIndex >= 0) {
+      const next = [...prev];
+      next[targetIndex] = { ...ev, id: replacementId };
+      return next;
+    }
+    return [...prev, { ...ev, id: replacementId }];
+  }
+
+  const existing = prev.findIndex((item) => item.id === ev.id);
+  if (existing >= 0) {
+    const next = [...prev];
+    next[existing] = ev;
+    return next;
+  }
+  return [...prev, ev];
 }
 
 function messageTone(type: ChatEvent['type']): string {
@@ -76,6 +102,11 @@ function actorLabel(type: ChatEvent['type']): string {
   if (type === 'error') return 'error';
   if (type === 'processing' || type === 'progress') return 'status';
   return 'homie';
+}
+
+function streamPersonaMatches(streamPersonaId: unknown, browserPersonaId: string): boolean {
+  if (!streamPersonaId) return true;
+  return outboundPersonaId(String(streamPersonaId)) === browserPersonaId;
 }
 
 export function Chat() {
@@ -119,16 +150,11 @@ export function Chat() {
         return;
       }
       if (!['user_message', 'assistant_message', 'processing', 'progress', 'error'].includes(eventName)) return;
+      if (!streamPersonaMatches(data?.persona_id, personaId)) return;
+      if (data?.conversation_id && data.conversation_id !== conversationId) return;
+      if ((eventName === 'processing' || eventName === 'progress') && !(data?.text || data?.content)) return;
       const ev = eventFromStream(eventName, data);
-      setEvents((prev) => {
-        const existing = prev.findIndex((item) => item.id === ev.id);
-        if (existing >= 0) {
-          const next = [...prev];
-          next[existing] = ev;
-          return next;
-        }
-        return [...prev, ev];
-      });
+      setEvents((prev) => mergeChatEvent(prev, ev));
     });
 
     return () => {

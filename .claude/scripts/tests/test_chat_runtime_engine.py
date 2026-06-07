@@ -127,6 +127,37 @@ async def test_engine_preserves_codex_sentinel_runtime_metadata(
 
 
 @pytest.mark.asyncio
+async def test_engine_persists_operator_display_text_for_rewritten_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+
+    async def fake_run(_request):
+        return RuntimeResult(
+            text="Drafted.",
+            runtime_lane="generic_runtime",
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    message = _make_message("LinkedIn/Social Homie internal writing rules: draft the post")
+    message.raw_event["display_text"] = "/linkedin draft the post"
+
+    outputs = [out async for out in convo.handle_message(message)]
+    assert outputs[-1].text == "Drafted."
+
+    messages = store.list_messages("telegram:chat-1:thread-1")
+    assert messages[0].content == "/linkedin draft the post"
+    assert "internal writing rules" not in messages[0].content
+
+
+@pytest.mark.asyncio
 async def test_engine_uses_runtime_session_for_resume(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

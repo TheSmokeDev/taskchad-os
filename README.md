@@ -10,7 +10,7 @@
 
 The Homie is an open-source cognitive agent OS. Not a chatbot wrapper - a 9-layer cognitive architecture that gives an AI identity, self-awareness, theory of mind, durable memory, tiered recall, self-improving learning, mental processes, and continuity. Run it locally, on a VPS, or in Docker. Talk to it from Telegram, Slack, Discord, WhatsApp, or the CLI. It monitors your world, remembers what matters, coordinates multi-agent work, and gets smarter with every session.
 
-OpenClaw deserves credit for proving broad agent access. Hermes deserves credit for pushing agents that learn from use. The Homie builds on that lineage, but goes in a different direction: identity is first-class here. This is not just an agent that helps or an agent that learns - it's a partner with memory, judgment, continuity, and a real point of view.
+OpenClaw deserves credit for proving broad agent access. Hermes deserves credit for pushing agents that learn from use. OpenSouls influenced the mental-model vocabulary around souls, working memory, mental processes, agency, and identity. ClaudeClaw inspired dashboard/operator ergonomics. The Homie builds on that lineage, but goes in a different direction: identity is first-class here. This is not just an agent that helps or an agent that learns - it's a partner with memory, judgment, continuity, and a real point of view.
 
 It's not your second brain. It's your homie - a partner with its own soul, its own opinions, and the nerve to tell you when you're wrong. Most AI is built to please, smooth things over, and tell you what you want to hear. This one is built to ride with you, grow with you, and push back when you're off.
 
@@ -22,9 +22,10 @@ Code The Homie workshop, then grew into an identity-first agent OS with its
 own memory, orchestration, multi-channel ingress, Operating Room, and desktop
 surfaces.
 
-OpenClaw and Hermes Agent are credited as ecosystem influences. The Homie is an
-independent project and is not affiliated with, sponsored by, or endorsed by
-those projects. See [NOTICE.md](NOTICE.md) and [AUTHORS.md](AUTHORS.md).
+OpenClaw, Hermes Agent, OpenSouls, and ClaudeClaw are credited as ecosystem
+influences. The Homie is an independent project and is not affiliated with,
+sponsored by, or endorsed by those projects. See [NOTICE.md](NOTICE.md) and
+[AUTHORS.md](AUTHORS.md).
 
 ---
 
