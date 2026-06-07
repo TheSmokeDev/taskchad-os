@@ -20,12 +20,38 @@
  */
 
 import { Hono } from 'hono';
-import { authedFetchStream } from '../framework-client.js';
+import { authedFetchJson, authedFetchStream } from '../framework-client.js';
 import { inboundPersonaId, outboundPersonaId } from '../translate.js';
 
 void outboundPersonaId; // imported for static-invariants grep gate.
 
 export const conversationRoute = new Hono();
+
+conversationRoute.get('/api/conversation/:id/history', async (c) => {
+  const browserId = c.req.param('id');
+  const frameworkId = inboundPersonaId(browserId) ?? browserId;
+  const url = new URL(c.req.url);
+  const upstreamPath = `/api/conversation/${encodeURIComponent(frameworkId)}/history${
+    url.search ? `?${url.searchParams.toString()}` : ''
+  }`;
+  const upstream = await authedFetchJson(upstreamPath, { method: 'GET' });
+  return c.json(upstream.json, upstream.status as 200);
+});
+
+conversationRoute.post('/api/conversation/:id/send', async (c) => {
+  const browserId = c.req.param('id');
+  const frameworkId = inboundPersonaId(browserId) ?? browserId;
+  const body = await c.req.json().catch(() => ({}));
+  const upstream = await authedFetchJson(
+    `/api/conversation/${encodeURIComponent(frameworkId)}/send`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  return c.json(upstream.json, upstream.status as 200);
+});
 
 conversationRoute.get('/api/conversation/:id/stream', async (c) => {
   const browserId = c.req.param('id');

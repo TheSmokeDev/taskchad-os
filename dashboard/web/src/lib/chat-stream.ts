@@ -1,5 +1,10 @@
 import { signal } from '@preact/signals';
-import { tokenizedSseUrl, dashboardToken, chatId } from './api';
+import {
+  DASHBOARD_CHAT_CONVERSATION_ID,
+  DASHBOARD_CHAT_PERSONA_ID,
+  tokenizedSseUrl,
+  chatId,
+} from './api';
 
 // SSE consumer for /api/conversation/<id>/stream.
 //
@@ -29,23 +34,19 @@ export function subscribeChatStream(fn: Listener): () => void {
 export function resetUnread() { chatUnread.value = 0; }
 
 let started = false;
-let currentConversationId: string | null = null;
+let currentStreamKey: string | null = null;
 
 /** Start the global chat SSE for the lifetime of the page. Idempotent. */
-export function startChatStream(conversationId?: string): void {
-  // No token → can't auth → don't open SSE. Pages just won't get live
-  // updates; manual refresh still works.
-  if (!dashboardToken) return;
-
-  // Resolve conversation id: explicit param > query chatId > skip.
-  const targetId = conversationId || chatId;
-  if (!targetId) return;
+export function startChatStream(personaId?: string, conversationId?: string): void {
+  const targetPersonaId = personaId || chatId || DASHBOARD_CHAT_PERSONA_ID;
+  const targetConversationId = conversationId || (chatId ? 'default' : DASHBOARD_CHAT_CONVERSATION_ID);
+  const streamKey = `${targetPersonaId}:${targetConversationId}`;
 
   // Already started for this conversation — no-op.
-  if (started && currentConversationId === targetId) return;
+  if (started && currentStreamKey === streamKey) return;
 
   started = true;
-  currentConversationId = targetId;
+  currentStreamKey = streamKey;
 
   let es: EventSource | null = null;
   let activeRoute = window.location.pathname;
@@ -66,7 +67,10 @@ export function startChatStream(conversationId?: string): void {
   function open() {
     if (es) return;
 
-    const sseUrl = tokenizedSseUrl(`/api/conversation/${encodeURIComponent(targetId)}/stream`);
+    const params = new URLSearchParams({ conversation_id: targetConversationId });
+    const sseUrl = tokenizedSseUrl(
+      `/api/conversation/${encodeURIComponent(targetPersonaId)}/stream?${params.toString()}`,
+    );
     es = new EventSource(sseUrl);
 
     es.onopen = () => {

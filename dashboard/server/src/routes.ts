@@ -71,6 +71,8 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/agents/:id/tasks',
 
   // conversation.ts — SSE stream
+  '/api/conversation/:id/history',
+  '/api/conversation/:id/send',
   '/api/conversation/:id/stream',
 
   // scheduled.ts

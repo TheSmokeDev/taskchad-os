@@ -115,6 +115,17 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
 ## Latest Proof
 
 - Date: 2026-06-06
+- Dashboard chat write smoke is now part of Desktop route proof:
+  - the smoke loads `/chat` inside Electron
+  - submits `/provider` through the dashboard composer
+  - waits for `Runtime Provider Status`
+  - fails if the dashboard chat response does not arrive
+  - unpacked package smoke passed on `45124/33142` with chat proof
+    `hasProviderStatus=true`
+  - portable smoke passed on `45136/33154` with chat proof
+    `hasProviderStatus=true`
+  - explicit port checks confirmed `45124/33142` and `45136/33154` closed
+- Date: 2026-06-06
 - Fresh public user smoke: passed from a clean temp install at
   `.codex/artifacts/fresh-public-user-smoke-20260606-080641/thehomie`
   using the public Windows installer and `THEHOMIE_DIR`

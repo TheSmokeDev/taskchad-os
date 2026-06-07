@@ -44,6 +44,15 @@ test('electron smoke checks dashboard routes for raw fetch errors', () => {
   assert.match(source, /!probe\?\.hasRawFetchError/);
 });
 
+test('electron smoke sends a dashboard chat slash command', () => {
+  const source = readFileSync(new URL('../main.cjs', import.meta.url), 'utf8');
+
+  assert.match(source, /loadDashboardPath\('\/chat'\)/);
+  assert.match(source, /textarea\.value = '\/provider'/);
+  assert.match(source, /Runtime Provider Status/);
+  assert.match(source, /report\.chat/);
+});
+
 test('electron-builder config uses asInvoker packaging and bundled web assets', () => {
   const source = readFileSync(new URL('../electron-builder.cjs', import.meta.url), 'utf8');
   const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));

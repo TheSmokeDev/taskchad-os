@@ -39,8 +39,18 @@ if (cachedChatId) {
   try { cachedChatId = sessionStorage.getItem('homie.chatId') || ''; } catch {}
 }
 
+let cachedConversationId = url?.searchParams.get('conversationId') || '';
+if (cachedConversationId) {
+  try { sessionStorage.setItem('homie.conversationId', cachedConversationId); } catch {}
+} else {
+  try { cachedConversationId = sessionStorage.getItem('homie.conversationId') || ''; } catch {}
+}
+
 export const dashboardToken = cachedToken;
 export const chatId = cachedChatId;
+export const DASHBOARD_CHAT_PERSONA_ID = 'main';
+export const DASHBOARD_CHAT_CONVERSATION_ID = cachedConversationId || 'dashboard-main';
+export const dashboardChatReadOnly = Boolean(cachedChatId);
 
 function bearerHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...(extra ?? {}) };

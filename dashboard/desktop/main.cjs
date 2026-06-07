@@ -177,6 +177,7 @@ async function runSmoke() {
     paths: { ...stackManager.paths },
     renderer: null,
     routes: {},
+    chat: null,
     dashboard: null,
     pythonHealth: null,
     honoHealth: null,
@@ -224,6 +225,37 @@ async function runSmoke() {
         hasRawFetchError: Boolean(result?.hasRawFetchError),
       };
     }
+    const chatUrl = await loadDashboardPath('/chat');
+    const submitted = await waitForRendererProbe(`
+      (() => {
+        const textarea = document.querySelector('textarea');
+        const button = document.querySelector('button[title="Send"]');
+        if (!textarea || !button) {
+          return { submitted: false, hasTextarea: Boolean(textarea), hasButton: Boolean(button), text: document.body.innerText };
+        }
+        textarea.value = '/provider';
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        button.click();
+        return { submitted: true, hasTextarea: true, hasButton: true, text: document.body.innerText };
+      })()
+    `, (probe) => probe?.submitted);
+    const chatResult = await waitForRendererProbe(`
+      ({
+        url: window.location.href,
+        hasUserProviderMessage: document.body.innerText.includes('/provider'),
+        hasProviderStatus: document.body.innerText.includes('Runtime Provider Status'),
+        hasRawFetchError: /typeerror:\\s*failed to fetch|failed to fetch/i.test(document.body.innerText),
+        text: document.body.innerText
+      })
+    `, (probe) => probe?.hasProviderStatus && !probe?.hasRawFetchError, { timeoutMs: 20000 });
+    report.chat = {
+      ok: Boolean(submitted?.submitted && chatResult?.hasProviderStatus && !chatResult?.hasRawFetchError),
+      url: chatUrl,
+      submitted: Boolean(submitted?.submitted),
+      hasUserProviderMessage: Boolean(chatResult?.hasUserProviderMessage),
+      hasProviderStatus: Boolean(chatResult?.hasProviderStatus),
+      hasRawFetchError: Boolean(chatResult?.hasRawFetchError),
+    };
     report.dashboard = await waitForEndpoint(stackManager.targetUrl(), {
       match: (text) => text.includes('<div id="app"') || text.includes('The Homie Dashboard'),
     });
@@ -240,6 +272,7 @@ async function runSmoke() {
       && report.beforeStop?.running
       && report.beforeStop?.services?.every((service) => service.running)
       && Object.values(report.routes).every((route) => route.ok)
+      && report.chat?.ok
       && report.dashboard?.ok
       && report.pythonHealth?.ok
       && report.honoHealth?.ok

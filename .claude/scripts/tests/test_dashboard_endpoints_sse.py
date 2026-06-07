@@ -220,3 +220,130 @@ def test_sse_disconnects_cleanly_on_client_abort(client):
     """
     status, body, _ = _read_first_few_events(client)
     assert status == 200
+
+
+def test_sse_stream_yields_events_appended_after_open(client):
+    """Open SSE streams must deliver new buffered events without reconnect."""
+    import asyncio
+
+    import dashboard_api as da
+
+    async def _drive() -> bytes:
+        from starlette.datastructures import Headers
+
+        class _FakeRequest:
+            _headers = Headers(raw=[])
+            _calls = 0
+
+            @property
+            def headers(self):
+                return self._headers
+
+            async def is_disconnected(self):
+                self._calls += 1
+                return self._calls > 5
+
+        response = await da.conversation_stream(
+            persona_id="default",
+            request=_FakeRequest(),
+            conversation_id="live-dashboard",
+        )
+        iterator = response.body_iterator
+        first = await anext(iterator)
+        assert b"event: processing" in first
+        da._conversation_event_append(
+            "default",
+            "live-dashboard",
+            "assistant_message",
+            {"text": "hello dashboard"},
+        )
+        second = await anext(iterator)
+        return second if isinstance(second, bytes) else second.encode("utf-8")
+
+    body = asyncio.run(_drive())
+    assert b"event: assistant_message" in body
+    assert b"hello dashboard" in body
+
+
+def test_dashboard_chat_send_builds_web_incoming_and_user_sse(client, monkeypatch):
+    """POST /api/conversation/{id}/send delegates to the canonical WEB router path."""
+    import asyncio
+
+    import dashboard_api as da
+
+    captured = {}
+
+    class _FakeAdapter:
+        def track(self, **kwargs):
+            captured["track"] = kwargs
+
+    class _FakeRouter:
+        def _queue_incoming(self, adapter, incoming):
+            captured["adapter"] = adapter
+            captured["incoming"] = incoming
+
+    monkeypatch.setattr(
+        da,
+        "_get_dashboard_chat_runtime",
+        lambda: {"router": _FakeRouter(), "adapter": _FakeAdapter()},
+    )
+
+    result = asyncio.run(
+        da.conversation_send(
+            "default",
+            da.DashboardChatSendBody(
+                text="/provider",
+                conversation_id="dashboard-test",
+                client_message_id="client-1",
+                user_id="operator",
+            ),
+        )
+    )
+
+    incoming = captured["incoming"]
+    assert result["ok"] is True
+    assert result["queued"] is True
+    assert incoming.platform.value == "web"
+    assert incoming.text == "/provider"
+    assert incoming.channel.platform_id == "dashboard-test"
+    assert incoming.thread.thread_id == "dashboard-test"
+    assert captured["track"] == {
+        "persona_id": "default",
+        "conversation_id": "dashboard-test",
+    }
+    buf = da._SSE_REPLAY_BUFFERS[("default", "dashboard-test")]
+    assert buf[-1][1] == "user_message"
+    assert "/provider" in buf[-1][2]
+
+
+def test_dashboard_chat_adapter_serializes_components_to_sse(client):
+    """Router buttons are preserved for dashboard Queue/Steer-style actions."""
+    import asyncio
+    import json
+
+    import dashboard_api as da
+    from models import Channel, MessageComponent, OutgoingMessage, Platform, Thread
+
+    adapter = da._DashboardChatAdapter()
+    adapter.track(persona_id="default", conversation_id="dashboard-buttons")
+    message = OutgoingMessage(
+        text="How should I apply this follow-up?",
+        channel=Channel(Platform.WEB, "dashboard-buttons", is_dm=True),
+        thread=Thread(thread_id="dashboard-buttons"),
+        components=[
+            MessageComponent("Queue Next", "turn_queue:abc", "secondary"),
+            MessageComponent("Steer Current", "turn_steer:abc", "primary"),
+        ],
+    )
+
+    asyncio.run(adapter.send(message))
+
+    _event_id, event_type, payload_json = da._SSE_REPLAY_BUFFERS[
+        ("default", "dashboard-buttons")
+    ][-1]
+    payload = json.loads(payload_json)
+    assert event_type == "assistant_message"
+    assert [component["custom_id"] for component in payload["components"]] == [
+        "turn_queue:abc",
+        "turn_steer:abc",
+    ]

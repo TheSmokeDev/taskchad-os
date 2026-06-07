@@ -78,7 +78,7 @@ ship.
 
 ---
 
-## Tokens and Chat IDs
+## Tokens and Dashboard Chat
 
 ### Token aliases
 
@@ -119,6 +119,20 @@ referrer` on the response, and never forwards the query string to the
 Python framework. Token-in-query-string is permitted ONLY for browser→
 Hono SSE; anywhere else it is forbidden.
 
+### Dashboard chat conversation
+
+The default dashboard chat uses persona `main` and conversation
+`dashboard-main`. It loads history through
+`GET /api/conversation/main/history`, opens the SSE stream through
+`GET /api/conversation/main/stream?conversation_id=dashboard-main`,
+and sends text, slash commands, or follow-up button actions through
+`POST /api/conversation/main/send`.
+
+The send path is intentionally thin. Hono proxies to Python, and Python
+routes the message through the same chat router and WEB adapter contract
+used by the rest of the framework. Linked channel streams opened with a
+legacy `chatId` remain read-only in the dashboard.
+
 ---
 
 ## Browser Routing Map (15 routes)
@@ -132,7 +146,7 @@ The Vite + Preact bundle uses `wouter` for routing. The 15 routes are:
 | `/agents` | `Agents` | Persona dashboard — list, create wizard, toggle activate. |
 | `/agents/:id` | `AgentDetail` | Single persona — config files, conversation, tokens, tasks. |
 | `/agents/:id/files` | `AgentFiles` | Identity-file editor (config.yaml, SOUL.md, USER.md, etc.). |
-| `/chat` | `Chat` | Live chat overlay — uses `/api/conversation/:id/stream` SSE. |
+| `/chat` | `Chat` | Dashboard WEB chat — history, send, follow-up buttons, and SSE stream. |
 | `/memories` | `Memories` | Memory search proxying `recall_service`. |
 | `/hive` | `HiveMind` | 3D Hive Mind brain visualization (Three.js). |
 | `/usage` | `Usage` | Lane-aware token/cost rollups. |
@@ -185,11 +199,10 @@ in Phase 4 (Voices), Phase 5 (Cabinet, StandupConfig), and Phase 7
 
 ## Future Work
 
-- **Phase 3.1 — operator send-from-dashboard slice (OQ3 deferred).**
-  Today the dashboard reads chat conversations; sending an operator
-  message from the dashboard back into the bot's conversation pipeline
-  is deferred. Telegram/CLI inbound continues to be the authoritative
-  send path.
+- **Dashboard chat attachments.** The current dashboard chat write path
+  supports text, slash commands, and follow-up buttons only. File upload,
+  voice, and richer attachment parity should be added only after the
+  channel attachment contract is explicitly designed and tested.
 - **Telegram avatar fetch + bot avatar PUT (OQ4 deferred).** Today
   avatar upload is local: PNG/JPEG/WEBP files via
   `PUT /api/agents/{id}/avatar`. Reading the bot's existing avatar

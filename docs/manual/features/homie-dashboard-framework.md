@@ -2,7 +2,7 @@
 
 Status: canonical operator shell
 Owner: `thehomie/dashboard` thin UI over Python-owned framework APIs
-Last updated: 2026-05-31
+Last updated: 2026-06-06
 
 ## What It Does
 
@@ -19,6 +19,9 @@ features through Hono proxy routes over Python-owned APIs.
 - Python orchestration/dashboard API: `http://127.0.0.1:4322`
 - Key routes: `/mission`, `/work`, `/convoy`, `/agents`, `/chat`, `/browser`,
   `/mobile`, `/teams`, `/cabinet`, `/memories`, `/hive`
+- `/chat` is the dashboard-native WEB conversation surface. It sends text,
+  slash commands, and follow-up buttons through Python chat routing; Hono only
+  proxies the send/history/SSE contracts.
 - Internal cognitive status routes stay hidden from the public dashboard nav
   until that surface is re-proven.
 
@@ -40,6 +43,9 @@ features through Hono proxy routes over Python-owned APIs.
   and proxying.
 - Dashboard web renders operator controls and state; it must not fork Python
   behavior into UI-local logic.
+- Dashboard chat uses the Python chat router as source of truth. The web UI
+  must not run a parallel assistant, bypass command routing, or invent local
+  memory/session writes.
 - Donor dashboards are references only. `thehomie/dashboard` is canonical.
 - Public framework export uses `scripts/sanitize.py`; never manually copy
   dashboard files into `thehomie-framework`.
@@ -91,6 +97,13 @@ focused suite.
 
 ## Latest Live Proof
 
+- Date: 2026-06-06
+- Dashboard chat write surface passed on isolated ports `45139/33157`:
+  `/chat` sent `/provider` from the dashboard composer and streamed back
+  `Runtime Provider Status` through Python-owned routing. Desktop and mobile
+  screenshots were inspected; no raw fetch errors or console warnings appeared.
+- The isolated services were stopped and ports `45139/33157` were confirmed
+  closed.
 - Date: 2026-05-31
 - Dashboard stack proved across multiple slices:
   - Team Room controls live smoke at `/teams`

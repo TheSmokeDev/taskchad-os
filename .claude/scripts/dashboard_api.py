@@ -45,6 +45,7 @@ import sys
 import tempfile
 import time
 import uuid
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -104,6 +105,29 @@ _redact = _redact_mod.redact
 # ── Router ───────────────────────────────────────────────────────────────
 
 router = APIRouter()
+
+
+_DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID = "dashboard-main"
+_DASHBOARD_CHAT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _normalize_dashboard_chat_id(value: str | None, *, fallback: str) -> str:
+    candidate = (value or fallback).strip()
+    if not candidate:
+        candidate = fallback
+    if not _DASHBOARD_CHAT_ID_RE.fullmatch(candidate):
+        raise HTTPException(status_code=400, detail="invalid conversation id")
+    return candidate
+
+
+class DashboardChatSendBody(BaseModel):
+    text: str | None = Field(default=None, max_length=20000)
+    conversation_id: str | None = Field(default=None, max_length=128)
+    client_message_id: str | None = Field(default=None, max_length=128)
+    user_id: str | None = Field(default=None, max_length=128)
+    display_name: str | None = Field(default=None, max_length=128)
+    source: str | None = Field(default=None, max_length=32)
+    button_custom_id: str | None = Field(default=None, max_length=512)
 
 
 # ── Browser Viewer (read-only) ───────────────────────────────────────────
@@ -3851,6 +3875,297 @@ def _sse_format_no_id(event_type: str, data: str) -> str:
     return f"event: {event_type}\ndata: {data}\n\n"
 
 
+def _conversation_event_append(
+    persona_id: str,
+    conversation_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+) -> int:
+    buf = _sse_buffer_for(persona_id, conversation_id)
+    next_id = (buf[-1][0] + 1) if buf else 1
+    event_payload = {
+        "event_id": next_id,
+        "persona_id": persona_id,
+        "conversation_id": conversation_id,
+        "timestamp": time.time(),
+        **payload,
+    }
+    data = json.dumps(event_payload, default=str)
+    _sse_buffer_append(persona_id, conversation_id, next_id, event_type, data)
+    return next_id
+
+
+def _serialize_chat_components(components: list[Any] | None) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for component in components or []:
+        serialized.append(
+            {
+                "label": getattr(component, "label", ""),
+                "custom_id": getattr(component, "custom_id", ""),
+                "style": getattr(component, "style", "primary"),
+                "disabled": bool(getattr(component, "disabled", False)),
+            }
+        )
+    return serialized
+
+
+class _DashboardChatAdapter:
+    """Local HTTP dashboard adapter that publishes router output into SSE."""
+
+    def __init__(self) -> None:
+        from models import Platform  # noqa: PLC0415
+
+        self._platform = Platform.WEB
+        self._conversation_personas: dict[str, str] = {}
+
+    @property
+    def platform(self):
+        return self._platform
+
+    def track(self, *, persona_id: str, conversation_id: str) -> None:
+        self._conversation_personas[conversation_id] = persona_id
+
+    async def connect(self) -> None:
+        return None
+
+    async def disconnect(self) -> None:
+        return None
+
+    async def listen(self):
+        if False:
+            yield None
+
+    def _target(self, message: Any) -> tuple[str, str]:
+        thread = getattr(message, "thread", None)
+        channel = getattr(message, "channel", None)
+        conversation_id = (
+            getattr(thread, "thread_id", None)
+            or getattr(channel, "platform_id", None)
+            or _DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID
+        )
+        persona_id = self._conversation_personas.get(conversation_id, "default")
+        return persona_id, conversation_id
+
+    async def send(self, message: Any) -> str | None:
+        persona_id, conversation_id = self._target(message)
+        text = getattr(message, "text", "") or ""
+        components = _serialize_chat_components(getattr(message, "components", None))
+        is_error = bool(getattr(message, "is_error", False))
+
+        if text == "Thinking..." and not components and not is_error:
+            event_type = "processing"
+        elif is_error:
+            event_type = "error"
+        else:
+            event_type = "assistant_message"
+
+        event_id = _conversation_event_append(
+            persona_id,
+            conversation_id,
+            event_type,
+            {
+                "text": text,
+                "content": text,
+                "components": components,
+                "is_error": is_error,
+                "is_update": bool(getattr(message, "is_update", False)),
+            },
+        )
+        return f"dashboard-sse-{event_id}"
+
+    async def update(self, message: Any) -> str | None:
+        text = getattr(message, "text", "") or ""
+        if text.startswith("Working..."):
+            persona_id, conversation_id = self._target(message)
+            event_id = _conversation_event_append(
+                persona_id,
+                conversation_id,
+                "progress",
+                {"text": text, "content": text, "components": []},
+            )
+            return f"dashboard-sse-{event_id}"
+        return await self.send(message)
+
+    async def send_typing(self, channel: Any) -> None:
+        return None
+
+
+_DASHBOARD_CHAT_RUNTIME: dict[str, Any] | None = None
+
+
+def _get_dashboard_chat_runtime() -> dict[str, Any]:
+    global _DASHBOARD_CHAT_RUNTIME
+    if _DASHBOARD_CHAT_RUNTIME is not None:
+        return _DASHBOARD_CHAT_RUNTIME
+
+    from commands import CATEGORIES, COMMANDS, CORE_INTENTS  # noqa: PLC0415
+    from core_handlers import CORE_HANDLERS, set_context  # noqa: PLC0415
+    from engine import ConversationEngine  # noqa: PLC0415
+    from extension_manager import ExtensionManager, set_manager  # noqa: PLC0415
+    from router import ChatRouter  # noqa: PLC0415
+    from session import get_session_store  # noqa: PLC0415
+
+    try:
+        from runtime.langfuse_setup import init_langfuse  # noqa: PLC0415
+
+        init_langfuse()
+    except Exception:
+        pass
+
+    store = get_session_store(config.CHAT_DB_PATH)
+    engine = ConversationEngine(
+        store,
+        config.PROJECT_ROOT,
+        config.CHAT_MAX_TURNS,
+        config.CHAT_MAX_BUDGET_USD,
+    )
+
+    manager = ExtensionManager()
+    manager.register_core_commands(COMMANDS, CATEGORIES, CORE_HANDLERS)
+    manager.register_core_intents(CORE_INTENTS)
+    if config.EXTENSIONS_ENABLED:
+        allow = [x.strip() for x in config.EXTENSIONS_ALLOW.split(",") if x.strip()] if config.EXTENSIONS_ALLOW else None
+        deny = [x.strip() for x in config.EXTENSIONS_DENY.split(",") if x.strip()] if config.EXTENSIONS_DENY else None
+        manager.configure_allow_deny(allow=allow, deny=deny)
+        ext_paths = [Path(config.EXTENSIONS_BUNDLED_PATH)]
+        global_ext = Path.home() / ".claude" / "extensions"
+        if global_ext.exists() and global_ext not in ext_paths:
+            ext_paths.append(global_ext)
+        manager.discover(ext_paths)
+
+    set_manager(manager)
+    adapter = _DashboardChatAdapter()
+    router_obj = ChatRouter(engine, manager)
+    router_obj.register(adapter)
+    set_context(engine=engine, adapters=router_obj.adapters, bot_start_time=datetime.now())
+    _DASHBOARD_CHAT_RUNTIME = {"router": router_obj, "adapter": adapter}
+    return _DASHBOARD_CHAT_RUNTIME
+
+
+@router.get("/api/conversation/{persona_id}/history")
+def conversation_history(
+    persona_id: str,
+    conversation_id: str = Query(default=_DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID),
+    limit: int = Query(default=80, ge=1, le=300),
+) -> dict:
+    _reject_main_translation(persona_id)
+    conversation_id = _normalize_dashboard_chat_id(
+        conversation_id,
+        fallback=_DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID,
+    )
+    chat_db_path = Path(config.CHAT_DB_PATH)
+    if not chat_db_path.is_file():
+        return {"turns": [], "next_before_id": None}
+
+    session_id = f"web:{conversation_id}:{conversation_id}"
+    try:
+        conn = sqlite3.connect(str(chat_db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, session_id, role, content, created_at, tool_calls_json
+                FROM chat_messages
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return {"turns": [], "next_before_id": None}
+
+    turns = []
+    for row in reversed(rows):
+        created_at = row["created_at"]
+        timestamp = time.time()
+        try:
+            timestamp = datetime.fromisoformat(created_at).timestamp()
+        except Exception:
+            pass
+        turns.append(
+            {
+                "id": row["id"],
+                "session_id": row["session_id"],
+                "role": row["role"],
+                "content": row["content"],
+                "created_at": created_at,
+                "timestamp": timestamp,
+                "tool_calls_json": row["tool_calls_json"] if "tool_calls_json" in row.keys() else "[]",
+            }
+        )
+    next_before = turns[0]["id"] if turns and len(turns) >= limit else None
+    return {"turns": turns, "next_before_id": next_before}
+
+
+@router.post("/api/conversation/{persona_id}/send")
+async def conversation_send(persona_id: str, body: DashboardChatSendBody) -> dict:
+    _reject_main_translation(persona_id)
+    conversation_id = _normalize_dashboard_chat_id(
+        body.conversation_id,
+        fallback=_DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID,
+    )
+    user_id = _normalize_dashboard_chat_id(body.user_id, fallback="dashboard-user")
+    display_name = (body.display_name or "Dashboard").strip()[:128] or "Dashboard"
+    raw_text = (body.text or "").strip()
+    button_custom_id = (body.button_custom_id or "").strip()
+    if not raw_text and not button_custom_id:
+        raise HTTPException(status_code=400, detail="text or button_custom_id required")
+
+    from models import Channel, IncomingMessage, Platform, Thread, User  # noqa: PLC0415
+
+    request_id = body.client_message_id or f"dash-{uuid.uuid4().hex}"
+    incoming_text = f"__button:{button_custom_id}" if button_custom_id else raw_text
+    user = User(Platform.WEB, user_id, display_name)
+    channel = Channel(Platform.WEB, conversation_id, is_dm=True)
+    thread = Thread(thread_id=conversation_id, parent_message_id=request_id)
+    incoming = IncomingMessage(
+        text=incoming_text,
+        user=user,
+        channel=channel,
+        platform=Platform.WEB,
+        thread=thread,
+        platform_message_id=request_id,
+        agent_type="thehomie",
+        user_role="admin",
+        raw_event={
+            "surface": "dashboard",
+            "request_id": request_id,
+            "button_custom_id": button_custom_id,
+        },
+        source=body.source or "interactive",
+    )
+
+    runtime = _get_dashboard_chat_runtime()
+    adapter = runtime["adapter"]
+    adapter.track(persona_id=persona_id, conversation_id=conversation_id)
+
+    if not button_custom_id:
+        _conversation_event_append(
+            persona_id,
+            conversation_id,
+            "user_message",
+            {
+                "text": raw_text,
+                "content": raw_text,
+                "request_id": request_id,
+                "components": [],
+            },
+        )
+
+    runtime["router"]._queue_incoming(adapter, incoming)
+    await asyncio.sleep(0)
+    return {
+        "ok": True,
+        "queued": True,
+        "persona_id": persona_id,
+        "conversation_id": conversation_id,
+        "request_id": request_id,
+    }
+
+
 @router.get("/api/conversation/{persona_id}/stream")
 async def conversation_stream(
     persona_id: str,
@@ -3881,12 +4196,15 @@ async def conversation_stream(
             )
 
     async def event_gen() -> AsyncIterator[bytes]:
+        cursor = last_event_id or 0
+
         # Replay buffered events with id > last_event_id (R1 B7 — no
         # duplicates, no skipped events).
         if last_event_id is not None:
             for ev_id, ev_type, ev_data in buf:
                 if ev_id > last_event_id:
                     yield _sse_format(ev_id, ev_type, ev_data).encode("utf-8")
+                    cursor = ev_id
 
         # Initial 'processing' event if we're starting fresh.
         if last_event_id is None:
@@ -3895,12 +4213,17 @@ async def conversation_stream(
             data = json.dumps({"persona_id": persona_id, "status": "processing"})
             _sse_buffer_append(persona_id, conversation_id, next_id, "processing", data)
             yield _sse_format(next_id, "processing", data).encode("utf-8")
+            cursor = next_id
 
         # Keepalive loop — emit `: keepalive\n\n` every 20s.
         last_keepalive = time.monotonic()
         while True:
             if await request.is_disconnected():
                 return
+            for ev_id, ev_type, ev_data in _sse_buffer_for(persona_id, conversation_id):
+                if ev_id > cursor:
+                    yield _sse_format(ev_id, ev_type, ev_data).encode("utf-8")
+                    cursor = ev_id
             now = time.monotonic()
             if now - last_keepalive >= 20:
                 yield b": keepalive\n\n"
