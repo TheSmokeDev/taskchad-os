@@ -116,7 +116,6 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/mailbox/ack/:delivery_id',
   '/api/mailbox/convoy/:id',
   '/api/team',
-  '/api/team/taskchad-drill',
   '/api/team/room/run',
   '/api/team/operating-room/run',
   '/api/team/:id',

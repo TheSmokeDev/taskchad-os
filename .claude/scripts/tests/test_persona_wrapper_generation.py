@@ -182,7 +182,7 @@ def test_launchd_plist_content_parses_via_plistlib():
     profile_root = Path("/tmp/sales-profile")
     content = _launchd_plist_content("sales", profile_root, "/usr/local/bin/thehomie")
     parsed = plistlib.loads(content.encode("utf-8"))
-    assert parsed["Label"] == "com.smokedev.homie.sales"
+    assert parsed["Label"] == "com.thehomie.framework.sales"
     assert parsed["ProgramArguments"] == [
         "/usr/local/bin/thehomie", "-p", "sales", "chat"
     ]

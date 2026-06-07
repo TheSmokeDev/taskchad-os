@@ -14,7 +14,7 @@ export interface FetchState<T> {
  * deps change.
  *
  * NOTE — INTENTIONAL DEVIATION FROM DONOR (R3 Rule 2 fix):
- * The donor (`~/.refs/claudeclaw-os/web/src/lib/useFetch.ts:16`)
+ * The donor reference hook
  * declares a module-level `const _cache = new Map<string, unknown>()` for
  * stale-while-revalidate. That is a classic Rule 2 violation — module-
  * scope mutable state surviving across components silently caches stale

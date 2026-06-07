@@ -25,7 +25,6 @@ Tailscale/Dashboard/Serve status.
 | Hono/dashboard server | `dashboard/server/src/routes/settings.ts`, `dashboard/server/src/routes.ts` |
 | Dashboard web | `dashboard/web/src/pages/MobileAccess.tsx`, `dashboard/web/src/lib/routes.ts`, `dashboard/web/src/App.tsx` |
 | Tests | `.claude/scripts/tests/test_dashboard_api.py`, `dashboard/server/src/__tests__/settings.test.ts`, `dashboard/web/src/__tests__/mobile-access.test.tsx` |
-| Tracker/proof | `PRPs/active/TRACKER.md` |
 
 ## Safety Boundaries
 
@@ -41,18 +40,18 @@ Tailscale/Dashboard/Serve status.
 ## How To Run It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run python -m orchestration.run_api
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\server
+cd <repo>\dashboard\server
 $env:DASHBOARD_DEV_MODE_NO_AUTH='true'
 npm start
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\web
+cd <repo>\dashboard\web
 npm run dev -- --host <tailscale-ip>
 ```
 
@@ -65,19 +64,19 @@ http://<tailscale-ip>:5173/mobile
 ## How To Test It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_dashboard_api.py -q -k "mobile_access or dashboard_settings"
 uv run python -m py_compile dashboard_api.py
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\server
+cd <repo>\dashboard\server
 npm run test -- src/__tests__/settings.test.ts src/__tests__/routes-manifest.test.ts
 npm run typecheck
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\web
+cd <repo>\dashboard\web
 npm run test -- src/__tests__/mobile-access.test.tsx src/__tests__/donor-route-manifest.test.ts
 npm run typecheck
 ```
@@ -89,15 +88,10 @@ npm run typecheck
 - Result: page rendered, API returned sanitized status, Browser Viewer link
   pointed to the working raw-IP phone URL, Copy showed success, and console
   logs had no relevant warnings/errors.
-- Commit: private `3fb2138 feat: add dashboard mobile access`
-
-## Related Handoffs
-
-- No separate handoff yet; tracker contains the live proof summary.
 
 ## Public Export Status
 
-Private repo only at initial ship. Public framework export was not run.
+Public-safe operator manual exported through `scripts/sanitize.py`.
 
 ## Next Slices
 

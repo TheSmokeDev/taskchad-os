@@ -447,11 +447,11 @@ uv run python vault_lint.py --vault-dir "vault/memory" --format json
 | `concepts/` | Auto-compiled entity pages — accumulate claims from multiple sources | Compilation cascade |
 | `connections/` | Cross-cutting insight articles linking 2+ related concepts | Compilation cascade |
 | `qa/` | Filed Q&A answers from `/file` bot command | `/file` command |
-| `raw/` | Immutable original sources (never modified) | `/vault-ingest` |
+| `raw/` | Immutable original sources (never modified) | Vault ingest workflow |
 | `BUILD-LOG.md` | Chronological record of every compilation run | Compilation cascade |
 
 **When compilation fires automatically:**
-- `/vault-ingest` — Steps 2.5 (raw copy), 3.5 (entity cascade), 3.6 (contradictions)
+- Vault ingest workflow — Steps 2.5 (raw copy), 3.5 (entity cascade), 3.6 (contradictions)
 - `/file` — Instant filing of bot answers with entity cascade
 - Daily reflection (8 AM) — Compiles entities from yesterday's log
 - Weekly synthesis (Sunday 8 PM) — Compiles entities from the weekly note
@@ -459,7 +459,7 @@ uv run python vault_lint.py --vault-dir "vault/memory" --format json
 
 **Vault health:** `vault_lint.py` runs 8 checks (orphans, broken wikilinks, frontmatter, tag audit against SCHEMA.md, stale content, page size, index completeness, contradiction scan). Zero LLM cost — pure Python. Wired into daily reflection as an automatic post-step.
 
-Provider-agnostic: entity extraction is pure Python (heuristic — headings, bold, wikilinks, frontmatter). No API calls needed. Heading numbers (`1. `, `3- `) auto-stripped from slugs. The vault-ingest skill's LLM enhances extraction when running in an LLM context.
+Provider-agnostic: entity extraction is pure Python (heuristic — headings, bold, wikilinks, frontmatter). No API calls needed. Heading numbers (`1. `, `3- `) auto-stripped from slugs. The ingest workflow can enhance extraction when running in an LLM context.
 
 ---
 

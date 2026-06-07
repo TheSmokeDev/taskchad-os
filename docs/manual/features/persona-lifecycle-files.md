@@ -44,7 +44,7 @@ http://127.0.0.1:5173/agents
 CLI:
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run thehomie profile list
 uv run thehomie profile show default
 ```
@@ -52,7 +52,7 @@ uv run thehomie profile show default
 ## How To Test It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_dashboard_api.py tests/test_dashboard_bot_lifecycle.py -q
 ```
 
@@ -62,11 +62,6 @@ Run dashboard agent/component tests for UI changes.
 
 Use current dashboard/API state before making a new live claim. Existing
 tracker entries cover profile lifecycle and multi-persona Windows support.
-
-## Related Handoffs
-
-- `PRPs/active/TRACKER.md`
-- `docs/mc-profile-contract.md`
 
 ## Public Export Status
 

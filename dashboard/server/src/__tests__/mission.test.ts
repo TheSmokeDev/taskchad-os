@@ -18,7 +18,6 @@ describe('mission orchestration route', () => {
     expect(ROUTE_MANIFEST).toContain('/api/mailbox/claim/:agent');
     expect(ROUTE_MANIFEST).toContain('/api/mailbox/convoy/:id');
     expect(ROUTE_MANIFEST).toContain('/api/team');
-    expect(ROUTE_MANIFEST).toContain('/api/team/taskchad-drill');
     expect(ROUTE_MANIFEST).toContain('/api/team/room/run');
     expect(ROUTE_MANIFEST).toContain('/api/team/operating-room/run');
     expect(ROUTE_MANIFEST).toContain('/api/team/:id');

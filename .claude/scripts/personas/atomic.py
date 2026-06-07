@@ -505,7 +505,7 @@ def quiesce_profile(
             try:
                 if _wrappers._uninstall_launchd_plist(name):
                     result.scheduled_units_disabled.append(
-                        f"launchd:com.smokedev.homie.{name}"
+                        f"launchd:com.thehomie.framework.{name}"
                     )
             except Exception:
                 # Best-effort — never block delete on unit cleanup failure.

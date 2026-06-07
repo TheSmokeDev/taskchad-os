@@ -1671,172 +1671,6 @@ async def handle_teamtick(
     return _format_team_tick_reply(result)
 
 
-def _parse_taskchad_drill_args(args: str) -> dict[str, Any] | str:
-    usage = "Usage: /taskchaddrill [--runtime] [--lane <lane>] [--target-url <url>]"
-    try:
-        tokens = shlex.split(args or "")
-    except ValueError as exc:
-        return f"{usage}\nParse error: {exc}"
-
-    opts: dict[str, Any] = {
-        "target_url": "https://www.taskchad.com/",
-        "use_runtime": False,
-        "runtime_lane": None,
-    }
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
-        if token == "--runtime":
-            opts["use_runtime"] = True
-            i += 1
-            continue
-        if token in ("--lane", "--runtime-lane", "--target-url", "--url"):
-            if i + 1 >= len(tokens):
-                return f"Missing value for {token}"
-            value = tokens[i + 1].strip()
-            if token in ("--lane", "--runtime-lane"):
-                opts["runtime_lane"] = value
-                opts["use_runtime"] = True
-            else:
-                if not value.startswith(("http://", "https://")):
-                    return "TaskChad drill target URL must be absolute http(s)."
-                opts["target_url"] = value
-            i += 2
-            continue
-        return f"Unknown option: {token}\n{usage}"
-    return opts
-
-
-def _clip_taskchad_drill_text(text: str, *, max_chars: int = 1800) -> str:
-    stripped = (text or "").strip()
-    if len(stripped) <= max_chars:
-        return stripped
-    return stripped[: max_chars - 14].rstrip() + "\n...[truncated]"
-
-
-def _format_taskchad_drill_reply(result: Any, *, use_runtime: bool, runtime_lane: str | None) -> str:
-    convoy = result.convoy.convoy
-    final_plan = _clip_taskchad_drill_text(result.final_plan)
-    runtime_summary = _summarize_taskchad_runtime(result)
-    lines = [
-        "*TaskChad Team Drill*",
-        f"Target: {_teamtick_code(result.target_url)}",
-        f"Team: {_teamtick_code(f'#{result.team.session.id}')}",
-        f"Convoy: {_teamtick_code(f'#{convoy.id}')}",
-        f"Progress: {_teamtick_code(f'{convoy.completed_subtasks}/{convoy.total_subtasks}')} subtasks",
-        (
-            "Turns: "
-            f"{len(result.role_turns)} proposals, "
-            "1 adversarial critique, "
-            f"{len(result.revision_turns)} revisions, 1 final synthesis"
-        ),
-        f"Runtime turns: {_teamtick_code('on' if use_runtime else 'off')}",
-    ]
-    if runtime_lane:
-        lines.append(f"Runtime lane: {_teamtick_code(runtime_lane)}")
-    if use_runtime:
-        lines.append(
-            "Runtime metadata: "
-            f"{_teamtick_code(str(runtime_summary['turn_count']))} turns; "
-            f"lanes {_teamtick_code(', '.join(runtime_summary['lanes']) or 'unknown')}; "
-            f"providers {_teamtick_code(', '.join(runtime_summary['providers']) or 'unknown')}; "
-            f"models {_teamtick_code(', '.join(runtime_summary['models']) or 'unknown')}; "
-            f"tools {_teamtick_code(str(runtime_summary['tool_call_count']))}; "
-            f"cost {_teamtick_code(_format_taskchad_cost(runtime_summary['cost_usd']))}; "
-            f"elapsed {_teamtick_code(str(runtime_summary['execution_time_ms'] or 0) + 'ms')}"
-        )
-        if runtime_summary["errors"]:
-            clipped_errors = "; ".join(runtime_summary["errors"])[:280]
-            lines.append(f"Runtime errors: {_teamtick_code(clipped_errors)}")
-    lines.extend(["", "*Final Plan*", final_plan])
-    return "\n".join(lines)
-
-
-def _summarize_taskchad_runtime(result: Any) -> dict[str, Any]:
-    turns = [
-        *getattr(result, "role_turns", []),
-        getattr(result, "reviewer_turn", None),
-        *getattr(result, "revision_turns", []),
-        getattr(result, "final_turn", None),
-    ]
-    runtime_steps = [
-        turn.step
-        for turn in turns
-        if turn is not None and getattr(turn.step, "runtime", None) is not None
-    ]
-    costs = [
-        step.runtime.cost_usd
-        for step in runtime_steps
-        if isinstance(step.runtime.cost_usd, (int, float))
-    ]
-    elapsed = [
-        step.runtime_execution_time_ms
-        for step in runtime_steps
-        if isinstance(step.runtime_execution_time_ms, int)
-    ]
-    return {
-        "turn_count": len(runtime_steps),
-        "lanes": sorted(
-            {step.runtime.runtime_lane for step in runtime_steps if step.runtime.runtime_lane}
-        ),
-        "providers": sorted(
-            {step.runtime.provider for step in runtime_steps if step.runtime.provider}
-        ),
-        "models": sorted(
-            {step.runtime.model for step in runtime_steps if step.runtime.model}
-        ),
-        "tool_call_count": sum(
-            int(step.runtime.tool_call_count or 0) for step in runtime_steps
-        ),
-        "cost_usd": round(sum(costs), 6) if costs else (0.0 if runtime_steps else None),
-        "execution_time_ms": sum(elapsed) if elapsed else (0 if runtime_steps else None),
-        "errors": [
-            str(step.runtime_error)
-            for step in runtime_steps
-            if getattr(step, "runtime_error", None)
-        ],
-    }
-
-
-def _format_taskchad_cost(cost: Any) -> str:
-    if not isinstance(cost, (int, float)):
-        return "n/a"
-    return f"${cost:.6f}"
-
-
-async def handle_taskchaddrill(
-    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
-) -> str:
-    """Run the bounded TaskChad role/review/revision team drill."""
-    parsed = _parse_taskchad_drill_args(args)
-    if isinstance(parsed, str):
-        return parsed
-
-    from config import ORCHESTRATION_DB_PATH, ensure_directories
-    from orchestration.db import OrchestrationDB
-    from orchestration.observability import init_orchestration_observability
-    from orchestration.team_drill import TaskChadTeamDrillService
-
-    def _run_drill() -> Any:
-        ensure_directories()
-        init_orchestration_observability()
-        db = OrchestrationDB(ORCHESTRATION_DB_PATH)
-        try:
-            return TaskChadTeamDrillService(db).run_taskchad_drill(**parsed)
-        finally:
-            db.close()
-
-    if parsed["use_runtime"]:
-        result = await asyncio.to_thread(_run_drill)
-    else:
-        result = _run_drill()
-    return _format_taskchad_drill_reply(
-        result,
-        use_runtime=bool(parsed["use_runtime"]),
-        runtime_lane=parsed["runtime_lane"],
-    )
-
-
 def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
     usage = (
         "Usage: /teamroom [--v2] [--runtime] [--lane <lane>] "
@@ -1919,6 +1753,12 @@ def _clip_team_room_text(text: str, *, max_chars: int = 1800) -> str:
     return stripped[: max_chars - 14].rstrip() + "\n...[truncated]"
 
 
+def _format_runtime_cost(cost: Any) -> str:
+    if not isinstance(cost, (int, float)):
+        return "n/a"
+    return f"${cost:.6f}"
+
+
 def _format_team_room_reply(result: Any, *, use_runtime: bool, runtime_lane: str | None) -> str:
     from orchestration.team_room import team_room_runtime_summary, team_room_turn_summary
 
@@ -1954,7 +1794,7 @@ def _format_team_room_reply(result: Any, *, use_runtime: bool, runtime_lane: str
             f"providers {_teamtick_code(', '.join(runtime_summary['providers']) or 'unknown')}; "
             f"models {_teamtick_code(', '.join(runtime_summary['models']) or 'unknown')}; "
             f"tools {_teamtick_code(str(runtime_summary['tool_call_count']))}; "
-            f"cost {_teamtick_code(_format_taskchad_cost(runtime_summary['cost_usd']))}; "
+            f"cost {_teamtick_code(_format_runtime_cost(runtime_summary['cost_usd']))}; "
             f"elapsed {_teamtick_code(str(runtime_summary['execution_time_ms'] or 0) + 'ms')}"
         )
         if runtime_summary["errors"]:
@@ -2434,7 +2274,6 @@ CORE_HANDLERS: dict[str, Any] = {
     "standup": handle_standup,
     "discuss": handle_discuss,
     "teamtick": handle_teamtick,
-    "taskchaddrill": handle_taskchaddrill,
     "teamroom": handle_teamroom,
     "send": handle_send,
     "brief": handle_brief,

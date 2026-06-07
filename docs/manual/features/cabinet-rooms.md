@@ -38,7 +38,7 @@ chat-routed operator commands for meetings, standups, and discussions.
 ## How To Run It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run thehomie chat -q "/cabinet list" -Q
 uv run thehomie chat -q "/standup What matters today?" -Q
 ```
@@ -56,13 +56,13 @@ Use the focused Cabinet suites listed in `docs/cabinet-room-manual.md`.
 Common dashboard checks:
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\server
+cd <repo>\dashboard\server
 npm run test -- src/__tests__/cabinet.test.ts src/__tests__/routes-manifest.test.ts
 npm run typecheck
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\web
+cd <repo>\dashboard\web
 npm run test -- src/__tests__/cabinet.test.tsx
 npm run typecheck
 ```

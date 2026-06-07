@@ -34,7 +34,6 @@ from orchestration.models import (
 )
 from orchestration.observability import orchestration_span, update_observation
 from orchestration.operating_room import OperatingRoomService, operating_room_result_to_dict
-from orchestration.team_drill import TaskChadTeamDrillService, taskchad_drill_result_to_dict
 from orchestration.team_executor import TeamExecutorService, executor_result_to_dict
 from orchestration.team_loop import (
     TeamLoopService,
@@ -253,12 +252,6 @@ class AddTeamMemberBody(BaseModel):
 
 class TeamPingBody(BaseModel):
     agent_id: str | None = None
-
-
-class TaskChadDrillBody(BaseModel):
-    target_url: str = "https://www.taskchad.com/"
-    use_runtime: bool = False
-    runtime_lane: str | None = None
 
 
 class TeamRoomRunBody(BaseModel):
@@ -762,46 +755,6 @@ def list_teams(request: Request, status: str | None = None):
         teams = _team_svc.list_team_sessions(status=status)
         update_observation(metadata={"team_count": len(teams)})
         return [dataclasses.asdict(t) for t in teams]
-
-
-@app.post("/api/team/taskchad-drill")
-def run_taskchad_drill(request: Request, body: TaskChadDrillBody | None = None):
-    surface = _operator_surface(request)
-    payload_body = body or TaskChadDrillBody()
-    with orchestration_span(
-        "orchestration.api.taskchad_drill",
-        metadata={
-            "surface": surface,
-            "target_url": payload_body.target_url,
-            "use_runtime": payload_body.use_runtime,
-            "runtime_lane": payload_body.runtime_lane,
-        },
-        trace_metadata={"surface": surface, "feature_phase": 11},
-        expected_exceptions=(HTTPException,),
-    ):
-        try:
-            result = TaskChadTeamDrillService(_db).run_taskchad_drill(
-                target_url=payload_body.target_url,
-                use_runtime=payload_body.use_runtime,
-                runtime_lane=payload_body.runtime_lane,
-            )
-        except ValueError as e:
-            update_observation(
-                level="WARNING",
-                status_message=str(e),
-                metadata={"error_type": "taskchad_drill_validation"},
-            )
-            raise HTTPException(status_code=400, detail=str(e))
-        payload = taskchad_drill_result_to_dict(result)
-        update_observation(
-            metadata={
-                "team_id": payload["team_id"],
-                "convoy_id": payload["convoy_id"],
-                "role_turn_count": len(payload["role_turns"]),
-            },
-            output={"final_plan_chars": len(payload["final_plan"])},
-        )
-        return payload
 
 
 @app.post("/api/team/room/run")

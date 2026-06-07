@@ -38,7 +38,7 @@ tasks in the dashboard.
 ## How To Run It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run thehomie convoy list
 uv run thehomie mailbox --help
 ```
@@ -53,27 +53,20 @@ http://127.0.0.1:5173/work
 ## How To Test It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_convoy_service.py tests/test_mailbox_service.py tests/test_typed_mailbox.py -q
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\server
+cd <repo>\dashboard\server
 npm run test -- src/__tests__/mission.test.ts src/__tests__/work.test.ts
 npm run typecheck
 ```
 
 ## Latest Live Proof
 
-Recent Team Room, TaskChad drill, and team scheduler proofs all created and
-completed convoys through this backbone. Use the feature-specific proof pages
-for concrete IDs.
-
-## Related Handoffs
-
-- `docs/HANDOFF-team-room-v3-live-proof-closeout-2026-05-31.md`
-- `docs/HANDOFF-taskchad-runtime-mode-drill-closeout-2026-05-29.md`
-- `PRPs/active/TRACKER.md`
+Recent Team Room and team scheduler proofs created and completed convoys
+through this backbone. Use the feature-specific proof pages for details.
 
 ## Public Export Status
 

@@ -1094,11 +1094,11 @@ class ChatRouter:
         """Keep router-command quiet metadata aligned with current selection."""
 
         parsed = self._parse_command((getattr(incoming, "text", "") or "").strip())
-        if not parsed or parsed[0] not in {"model", "provider", "taskchaddrill", "teamroom"}:
+        if not parsed or parsed[0] not in {"model", "provider", "teamroom"}:
             return
         command, args = parsed
         requested_runtime_lane: str | None = None
-        if command in {"taskchaddrill", "teamroom"}:
+        if command == "teamroom":
             runtime_requested, requested_runtime_lane = self._router_runtime_request(args)
             if not runtime_requested:
                 return

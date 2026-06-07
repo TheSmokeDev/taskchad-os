@@ -51,10 +51,6 @@ One short paragraph describing the user-facing capability.
 - Result:
 - Proof docs/artifacts:
 
-## Related Handoffs
-
-- `docs/HANDOFF-...`
-
 ## Public Export Status
 
 Private only / public-exported / not applicable.

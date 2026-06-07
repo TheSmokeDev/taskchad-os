@@ -28,7 +28,6 @@ transitions.
 | Chat/router | `.claude/chat/core_handlers.py`, `.claude/chat/commands.py` |
 | API/dashboard | `.claude/scripts/orchestration/api.py`, `dashboard/web/src/pages/Teams.tsx`, `dashboard/server/src/routes.ts` |
 | Tests | `.claude/scripts/tests/test_team_loop.py`, `.claude/scripts/tests/test_team_executor.py`, `.claude/scripts/tests/test_team_cli.py`, dashboard Teams tests |
-| Docs/proof | `docs/HANDOFF-taskchad-team-drill-2026-05-27.md`, `PRPs/active/TRACKER.md` |
 
 ## Safety Boundaries
 
@@ -42,7 +41,7 @@ transitions.
 ## How To Run It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run thehomie team tick <team_id>
 uv run thehomie chat -q "/teamtick <team_id>" -Q
 ```
@@ -56,7 +55,7 @@ http://127.0.0.1:5173/teams
 ## How To Test It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_team_loop.py tests/test_team_executor.py tests/test_team_cli.py -q
 ```
 
@@ -65,15 +64,9 @@ Run dashboard Teams tests when changing the UI controls.
 ## Latest Live Proof
 
 - Date: 2026-05-25
-- Surface: Telegram Web to `@YourBot`
+- Surface: chat adapter and orchestration database verification.
 - Commands: `/teamtick 5` and `/teamtick 5 --complete-running`
-- Result: DB verification showed `convoy_id=15` and `subtask_id=10`
-  completed.
-
-## Related Handoffs
-
-- `docs/HANDOFF-taskchad-team-drill-2026-05-27.md`
-- `PRPs/active/TRACKER.md`
+- Result: database verification showed the active convoy/subtask completed.
 
 ## Public Export Status
 

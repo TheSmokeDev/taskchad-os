@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
-import { Bot, Brain, CheckCircle2, CircleAlert, ClipboardList, Inbox, MessageSquare, Play, Plus, RefreshCw, Scale, Send, ShieldAlert, Terminal, Trash2, UserPlus, Vote } from 'lucide-preact';
+import { Bot, Brain, CheckCircle2, CircleAlert, Inbox, MessageSquare, Play, Plus, RefreshCw, Scale, Send, ShieldAlert, Terminal, Trash2, UserPlus, Vote } from 'lucide-preact';
 import { TopBar } from '@/components/TopBar';
 import { Empty } from '@/components/Empty';
 import { Spinner } from '@/components/Spinner';
@@ -112,30 +112,6 @@ interface TeamExecutorStepResponse {
   stderr: string;
   completed: boolean;
   convoy_completed: boolean;
-}
-
-interface TaskChadDrillTurnResponse {
-  role: string;
-  role_name: string;
-  agent_id: string;
-  subtask_id: number;
-  action: string;
-  status?: string | null;
-  completed: boolean;
-  reply?: AgentMessage | null;
-}
-
-interface TaskChadDrillResponse {
-  target_url: string;
-  team_id: number;
-  convoy_id: number;
-  initial_message_count: number;
-  revision_message_count?: number;
-  role_turns: TaskChadDrillTurnResponse[];
-  reviewer_turn: TaskChadDrillTurnResponse;
-  revision_turns?: TaskChadDrillTurnResponse[];
-  final_turn: TaskChadDrillTurnResponse;
-  final_plan: string;
 }
 
 interface TeamRoomRuntimeMetadata {
@@ -659,11 +635,9 @@ export function Teams() {
   const [executorCwd, setExecutorCwd] = useState('');
   const [executorCompleteOnSuccess, setExecutorCompleteOnSuccess] = useState(false);
   const [lastExecutorStep, setLastExecutorStep] = useState<TeamExecutorStepResponse | null>(null);
-  const [lastTaskChadDrill, setLastTaskChadDrill] = useState<TaskChadDrillResponse | null>(null);
-  const [drillUseRuntime, setDrillUseRuntime] = useState(false);
   const [lastTeamRoomRun, setLastTeamRoomRun] = useState<TeamRoomRunResponse | null>(null);
   const [lastOperatingRoomRun, setLastOperatingRoomRun] = useState<OperatingRoomRunResponse | null>(null);
-  const [teamRoomGoal, setTeamRoomGoal] = useState('How do we get TaskChad to one million dollars?');
+  const [teamRoomGoal, setTeamRoomGoal] = useState('How should the team prioritize the next release?');
   const [teamRoomContext, setTeamRoomContext] = useState('');
   const [teamRoomUseV2, setTeamRoomUseV2] = useState(true);
   const [teamRoomUseRuntime, setTeamRoomUseRuntime] = useState(false);
@@ -910,28 +884,6 @@ export function Teams() {
     }
   }
 
-  async function runTaskChadDrill() {
-    setBusy(true);
-    try {
-      const result = await apiPost<TaskChadDrillResponse>('/api/team/taskchad-drill', {
-        target_url: 'https://www.taskchad.com/',
-        use_runtime: drillUseRuntime,
-      });
-      setLastTaskChadDrill(result);
-      setSelectedId(result.team_id);
-      pushToast({
-        tone: 'success',
-        title: 'TaskChad drill complete',
-        description: `Team #${result.team_id} · Convoy #${result.convoy_id}`,
-      });
-      refreshAll();
-    } catch (err: unknown) {
-      pushToast({ tone: 'error', title: 'TaskChad drill failed', description: errorMessage(err) });
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function runTeamRoom(event: Event) {
     event.preventDefault();
     const goal = teamRoomGoal.trim();
@@ -984,22 +936,6 @@ export function Teams() {
               class="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[12px] text-[var(--color-text)] hover:border-[var(--color-accent)]"
             >
               <RefreshCw size={14} /> Refresh
-            </button>
-            <label class="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[12px] text-[var(--color-text-muted)]">
-              <input
-                type="checkbox"
-                checked={drillUseRuntime}
-                onChange={(event) => setDrillUseRuntime((event.target as HTMLInputElement).checked)}
-              />
-              Runtime turns
-            </label>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={runTaskChadDrill}
-              class="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[12px] text-[var(--color-text)] hover:border-[var(--color-accent)] disabled:opacity-60"
-            >
-              <ClipboardList size={14} /> TaskChad Drill
             </button>
             <button
               type="button"
@@ -1433,49 +1369,6 @@ export function Teams() {
                           ))}
                         </div>
                       </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {lastTaskChadDrill && lastTaskChadDrill.team_id === session.id && (
-                <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
-                    <div class="flex min-w-0 items-center gap-2 text-[13px] font-medium text-[var(--color-text)]">
-                      <ClipboardList size={15} /> TaskChad Drill Result
-                    </div>
-                    <Badge className="bg-[var(--color-elevated)] text-[var(--color-text-muted)]">
-                      Convoy #{lastTaskChadDrill.convoy_id}
-                    </Badge>
-                  </div>
-                  <div class="mt-3 text-[12px] font-medium text-[var(--color-text)]">Round 1 Proposals</div>
-                  <div class="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                    {lastTaskChadDrill.role_turns.map((turn) => (
-                      <div key={turn.agent_id} class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2 text-[11px] text-[var(--color-text-muted)]">
-                        <div class="truncate font-medium text-[var(--color-text)]">{turn.role_name}</div>
-                        <div class="mt-1 break-words">{turn.role} · subtask #{turn.subtask_id}</div>
-                        <div>{turn.status || 'unknown'} · {turn.completed ? 'complete' : 'open'}</div>
-                      </div>
-                    ))}
-                  </div>
-                  {lastTaskChadDrill.revision_turns && lastTaskChadDrill.revision_turns.length > 0 && (
-                    <>
-                      <div class="mt-3 text-[12px] font-medium text-[var(--color-text)]">Round 2 Revisions</div>
-                      <div class="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                        {lastTaskChadDrill.revision_turns.map((turn) => (
-                          <div key={`${turn.agent_id}-revision`} class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-2 text-[11px] text-[var(--color-text-muted)]">
-                            <div class="truncate font-medium text-[var(--color-text)]">{turn.role_name}</div>
-                            <div class="mt-1 break-words">{turn.role} · revised subtask #{turn.subtask_id}</div>
-                            <div>{turn.status || 'unknown'} · {turn.completed ? 'complete' : 'open'}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                  <div class="mt-3 rounded border border-[var(--color-border)] bg-[var(--color-elevated)] p-3">
-                    <div class="mb-2 text-[12px] font-medium text-[var(--color-text)]">Final Plan</div>
-                    <div class="whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--color-text-muted)]">
-                      {lastTaskChadDrill.final_plan}
                     </div>
                   </div>
                 </div>

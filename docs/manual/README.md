@@ -62,7 +62,6 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Team Operations And Executor | Active baseline | [team-operations-executor](features/team-operations-executor.md) | `/teams`, team APIs |
 | Dashboard Mobile Access | Shipped, live-proven | [dashboard-mobile-access](features/dashboard-mobile-access.md) | `/mobile` |
 | Team Room | V3 shipped, live-proven | [team-room](features/team-room.md) | `/teamroom`, `/teams` |
-| TaskChad Team Drill | Runtime mode shipped, live-proven | [taskchad-team-drill](features/taskchad-team-drill.md) | `/taskchaddrill`, `/teams` |
 | Autonomous Team Scheduler | Shipped, Telegram-proven | [autonomous-team-scheduler](features/autonomous-team-scheduler.md) | `/teamtick`, `/teams` |
 | BrowserOps + Browser Viewer | Shipped, live-proven | [browserops-browser-viewer](features/browserops-browser-viewer.md) | `/browserops`, `/browser` |
 | Telegram Command Menu | Curated native menu | [telegram-command-menu](features/telegram-command-menu.md) | `/commands`, Telegram slash menu |
@@ -104,7 +103,7 @@ When a feature ships or materially changes:
 2. Add it to the Active Feature Manuals table if it is new.
 3. Keep private agent instructions slim; add only pointers or invariants that
    all agents need.
-4. Keep `PRPs/active/TRACKER.md` focused on current state and next work, not a
+4. Keep the internal tracker focused on current state and next work, not a
    full feature manual.
 5. Link proof handoffs from the feature page instead of copying whole handoffs.
 6. Do not paste secrets, account IDs, token values, cookies, raw browser state,

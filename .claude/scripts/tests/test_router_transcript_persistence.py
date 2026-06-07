@@ -28,10 +28,10 @@ class _RouterOnlyManager:
     command_regex = re.compile(r"^/(\w+)\b(.*)$")
 
     def get_router_commands(self):
-        return {"status", "clear", "model", "provider", "taskchaddrill", "teamroom"}
+        return {"status", "clear", "model", "provider", "teamroom"}
 
     def get_all_command_names(self):
-        return ["status", "clear", "model", "provider", "taskchaddrill", "teamroom"]
+        return ["status", "clear", "model", "provider", "teamroom"]
 
     async def dispatch(self, command, adapter, incoming, args, collect_only=False):
         if command == "clear":
@@ -42,8 +42,6 @@ class _RouterOnlyManager:
             return "Switched runtime"
         if command == "provider":
             return "Runtime Provider Status"
-        if command == "taskchaddrill":
-            return "TaskChad Team Drill"
         if command == "teamroom":
             return "Team Room Workflow"
         return None
@@ -169,36 +167,6 @@ async def test_provider_command_persists_current_claude_selection(
 
 
 @pytest.mark.asyncio
-async def test_taskchad_runtime_command_persists_requested_runtime_lane(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-):
-    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", "claude_native")
-    monkeypatch.setenv("SECOND_BRAIN_GENERIC_PROVIDER", "openai-codex")
-    monkeypatch.setenv("SECOND_BRAIN_CODEX_MODEL", "gpt-5.5")
-    store = SQLiteSessionStore(tmp_path / "chat.db")
-    router = ChatRouter(_FakeEngine(store), _RouterOnlyManager())
-    adapter = _RecordingAdapter()
-
-    incoming = IncomingMessage(
-        text="/taskchaddrill --runtime --lane generic_runtime",
-        user=User(Platform.CLI, "cli-user", "User"),
-        channel=Channel(Platform.CLI, "cli-test", is_dm=True),
-        platform=Platform.CLI,
-        timestamp=datetime.now(),
-    )
-
-    await router._handle(adapter, incoming)
-
-    session = store.get("cli", "cli-test", "cli-test")
-    assert session is not None
-    assert session.runtime_lane == "generic_runtime"
-    assert session.runtime_provider == "auto"
-    assert session.runtime_model == ""
-    assert session.runtime_session_id == ""
-
-
-@pytest.mark.asyncio
 async def test_teamroom_runtime_command_persists_requested_runtime_lane(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -211,7 +179,7 @@ async def test_teamroom_runtime_command_persists_requested_runtime_lane(
     adapter = _RecordingAdapter()
 
     incoming = IncomingMessage(
-        text="/teamroom --runtime --lane generic_runtime How do we get TaskChad to one million dollars?",
+        text="/teamroom --runtime --lane generic_runtime How should the team prioritize the next release?",
         user=User(Platform.CLI, "cli-user", "User"),
         channel=Channel(Platform.CLI, "cli-test", is_dm=True),
         platform=Platform.CLI,

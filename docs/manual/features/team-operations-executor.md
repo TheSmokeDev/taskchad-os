@@ -8,13 +8,13 @@ Last updated: 2026-05-31
 
 Team Operations covers team sessions, team members, loop steps, executor steps,
 team memory, and scheduler ticks. It is the shared substrate used by Team Room,
-TaskChad drills, autonomous team scheduler, and dashboard `/teams` controls.
+autonomous team scheduler, executor controls, and dashboard `/teams` controls.
 
 ## Operator Entry Points
 
 - Dashboard: `/teams`
 - CLI: `thehomie team ...`
-- Chat/Telegram: `/teamtick`, `/taskchaddrill`, `/teamroom`
+- Chat/Telegram: `/teamtick`, `/teamroom`
 - API: `/api/team`, `/api/team/:id`, `/api/team/:id/members`,
   `/api/team/:id/loop-step`, `/api/team/:id/tick`,
   `/api/team/:id/executor-step`, `/api/team/:id/memory`
@@ -40,7 +40,7 @@ TaskChad drills, autonomous team scheduler, and dashboard `/teams` controls.
 ## How To Run It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run thehomie team list
 uv run thehomie team --help
 ```
@@ -54,21 +54,14 @@ http://127.0.0.1:5173/teams
 ## How To Test It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_team_state.py tests/test_team_loop.py tests/test_team_executor.py tests/test_team_memory.py tests/test_team_cli.py -q
 ```
 
 ## Latest Live Proof
 
-Team Operations is proven indirectly through late-May Team Room, TaskChad, and
-autonomous team scheduler proofs. Use those feature pages for current IDs and
-proof details.
-
-## Related Handoffs
-
-- `docs/HANDOFF-taskchad-team-drill-2026-05-27.md`
-- `docs/HANDOFF-taskchad-runtime-mode-drill-closeout-2026-05-29.md`
-- `docs/HANDOFF-team-room-v3-live-proof-closeout-2026-05-31.md`
+Team Operations is proven indirectly through Team Room and autonomous team
+scheduler proofs. Use those feature pages for current proof details.
 
 ## Public Export Status
 

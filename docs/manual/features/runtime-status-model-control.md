@@ -41,7 +41,7 @@ the runtime layer.
 ## How To Run It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run thehomie chat -q "/provider" -Q
 uv run thehomie chat -q "/model auto" -Q
 uv run thehomie status --json
@@ -51,19 +51,14 @@ uv run thehomie doctor
 ## How To Test It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_runtime_selection.py tests/test_diagnostics.py tests/test_runtime_registry.py tests/test_cli.py tests/test_lane_router.py tests/test_runtime_routing.py tests/test_chat_runtime_engine.py -q
 ```
 
 ## Latest Live Proof
 
 Use current CLI/status checks before making a new live claim. Tracker entries
-record multiple runtime proofs for TaskChad drill and Team Room runtime lanes.
-
-## Related Handoffs
-
-- `PRPs/active/TRACKER.md`
-- `AGENTS.md`
+record runtime proofs for Team Room and other runtime-backed lanes.
 
 ## Public Export Status
 

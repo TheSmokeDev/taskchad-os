@@ -1,4 +1,4 @@
-Chat with The Homie through Telegram (`@YourBot`). Each thread is a persistent conversation backed by the runtime layer — survives restarts.
+Chat with The Homie through the configured Telegram bot. Each thread is a persistent conversation backed by the runtime layer — survives restarts.
 
 **Location:** `.claude/chat/`
 
@@ -73,7 +73,7 @@ Three router-typed slash commands let an operator drive multi-persona text meeti
 | `/standup [question]` | Create meeting + send standup question as operator turn (default question via `CABINET_STANDUP_QUESTION` env) | `POST /api/cabinet/new` then `POST /api/cabinet/send` |
 | `/discuss <topic>` | Create meeting + send the topic as the seed turn | `POST /api/cabinet/new` then `POST /api/cabinet/send` |
 
-**Cross-process invariant:** the chat process (`.claude/chat/main.py`) and the orchestration API process (`.claude/scripts/orchestration/run_api.py`) are SEPARATE Python processes. Module-local channel registries cannot bridge them. Cabinet handlers MUST go via HTTP through `.claude/scripts/integrations/cabinet_api.py` — NOT direct `from cabinet.text_orchestrator import …` (which would land in the chat-process's empty `_CHANNELS`, never reaching the SSE subscribers in the API process). See `PRPs/active/PRP-prd-8-phase-5b-cabinet-chat-routing.md` for the full architectural rationale.
+**Cross-process invariant:** the chat process (`.claude/chat/main.py`) and the orchestration API process (`.claude/scripts/orchestration/run_api.py`) are SEPARATE Python processes. Module-local channel registries cannot bridge them. Cabinet handlers MUST go via HTTP through `.claude/scripts/integrations/cabinet_api.py` — NOT direct `from cabinet.text_orchestrator import …` (which would land in the chat-process's empty `_CHANNELS`, never reaching the SSE subscribers in the API process).
 
 **Roster behavior:** Phase 5a's `_roster_from_personas()` (`.claude/scripts/cabinet/text_orchestrator.py:81-130`) auto-snapshots whichever cabinet-eligible personas are registered at meeting-create time. Operators manage the active roster via `/persona` BEFORE running `/cabinet create`. There is NO persona-selection arg at the chat-command level (R1 B4 fix). When no cabinet-eligible personas are registered, `_roster_from_personas()` falls back to a Main-only single-turn reply.
 
@@ -93,7 +93,6 @@ Browser sends use an additive audience contract:
 | `/all <message>` | slash command | Server rewrites to an all-room turn without sending the command text to the LLM. |
 | `/add @finance` / `/remove @finance` | slash command | Server updates `roster_json` and `cabinet_meetings.broadcast_order` in one transaction, then emits `meeting_state_update`. |
 | `/pin @sales` / `/unpin` / `/voice` / `/end` / `/help` | slash command | Server-side command path; command text never enters the LLM prompt. |
-| `/taskchaddrill [--runtime] [--lane <lane>]` | slash command | Runs the bounded TaskChad Sales/Marketing/Product/Ops/reviewer/synthesis drill; tools are off by default and runtime turns are opt-in. |
 
 Each non-default participant turn resolves the current Homie profile for that participant ID before runtime execution. The roster snapshot owns membership/order/display; the selected profile owns identity, memory files, config, runtime/auth settings, tools, and voice configuration.
 

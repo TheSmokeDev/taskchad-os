@@ -35,7 +35,7 @@ def test_team_room_runs_growth_boardroom_workflow() -> None:
     db = OrchestrationDB(":memory:")
     try:
         result = TeamRoomWorkflowService(db).run_team_room(
-            goal="Get TaskChad to one million dollars",
+            goal="Prioritize the next product release",
             context="Focus on first practical growth motion.",
         )
 
@@ -73,7 +73,7 @@ def test_team_room_v2_runs_facilitated_multi_round_workflow() -> None:
     db = OrchestrationDB(":memory:")
     try:
         result = TeamRoomWorkflowService(db).run_team_room(
-            goal="Get TaskChad to one million dollars",
+            goal="Prioritize the next product release",
             meeting_mode="facilitated_boardroom",
         )
         payload = team_room_workflow_result_to_dict(result)
@@ -133,11 +133,11 @@ def test_team_room_v3_role_memory_persists_between_meetings() -> None:
     db = OrchestrationDB(":memory:")
     try:
         first = TeamRoomWorkflowService(db).run_team_room(
-            goal="Get TaskChad to one million dollars",
+            goal="Prioritize the next product release",
             meeting_mode="facilitated_boardroom",
         )
         second = TeamRoomWorkflowService(db).run_team_room(
-            goal="Get TaskChad to one million dollars",
+            goal="Prioritize the next product release",
             meeting_mode="facilitated_boardroom",
         )
         payload = team_room_workflow_result_to_dict(second)
@@ -180,7 +180,7 @@ def test_team_room_runtime_runs_no_tools_and_sanitizes_metadata(monkeypatch) -> 
     db = OrchestrationDB(":memory:")
     try:
         result = TeamRoomWorkflowService(db).run_team_room(
-            goal="Get TaskChad to one million dollars",
+            goal="Prioritize the next product release",
             use_runtime=True,
             runtime_lane="generic_runtime",
         )
@@ -237,7 +237,7 @@ def test_team_room_v2_runtime_keeps_tools_off_and_counts_facilitator(monkeypatch
     db = OrchestrationDB(":memory:")
     try:
         result = TeamRoomWorkflowService(db).run_team_room(
-            goal="Get TaskChad to one million dollars",
+            goal="Prioritize the next product release",
             max_rounds=2,
             use_runtime=True,
             runtime_lane="generic_runtime",
@@ -274,7 +274,7 @@ def test_team_room_api_creates_completed_workflow(tmp_path) -> None:
             client = TestClient(api_mod.app)
             response = client.post(
                 "/api/team/room/run",
-                json={"goal": "Get TaskChad to one million dollars"},
+                json={"goal": "Prioritize the next product release"},
             )
 
             assert response.status_code == 200
@@ -311,7 +311,7 @@ def test_team_room_api_runs_v2_facilitated_workflow(tmp_path) -> None:
             response = client.post(
                 "/api/team/room/run",
                 json={
-                    "goal": "Get TaskChad to one million dollars",
+                    "goal": "Prioritize the next product release",
                     "v2": True,
                 },
             )
@@ -352,7 +352,7 @@ def test_teamroom_chat_command_is_registered_and_runs(monkeypatch, tmp_path) -> 
         core_handlers.handle_teamroom(
             adapter=None,
             incoming=None,
-            args="How do we get TaskChad to one million dollars?",
+            args="How should the team prioritize the next release?",
         )
     )
 
@@ -371,7 +371,7 @@ def test_teamroom_chat_v2_command_runs_facilitated_meeting(monkeypatch, tmp_path
         core_handlers.handle_teamroom(
             adapter=None,
             incoming=None,
-            args="--v2 How do we get TaskChad to one million dollars?",
+            args="--v2 How should the team prioritize the next release?",
         )
     )
 
@@ -413,7 +413,7 @@ def test_teamroom_chat_runtime_command_uses_lane(monkeypatch, tmp_path) -> None:
         core_handlers.handle_teamroom(
             adapter=None,
             incoming=None,
-            args="--runtime --lane generic_runtime How do we get TaskChad to one million dollars?",
+            args="--runtime --lane generic_runtime How should the team prioritize the next release?",
         )
     )
 
@@ -437,7 +437,7 @@ def test_team_room_cli_run_json(monkeypatch, tmp_path) -> None:
             "room",
             "run",
             "--goal",
-            "Get TaskChad to one million dollars",
+            "Prioritize the next product release",
             "--json",
         ],
     )
@@ -461,7 +461,7 @@ def test_team_room_cli_v2_run_json(monkeypatch, tmp_path) -> None:
             "run",
             "--v2",
             "--goal",
-            "Get TaskChad to one million dollars",
+            "Prioritize the next product release",
             "--json",
         ],
     )

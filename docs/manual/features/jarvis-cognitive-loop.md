@@ -26,7 +26,6 @@ truth surfaces. Some internal files still carry the legacy Jarvis name.
 | Dashboard API | `.claude/scripts/dashboard_api.py`, `.claude/scripts/tests/test_jarvis_dashboard_status.py` |
 | Dashboard server/web | `dashboard/server/src/routes/jarvis.ts`, `dashboard/web/src/pages/Jarvis.tsx` remains an internal status component; it is hidden from the public dashboard nav until the public surface is re-proven |
 | Tests | cognition/status/scheduled-loop tests under `.claude/scripts/tests/`, `dashboard/server/src/__tests__/jarvis.test.ts` |
-| Tracker/proof | `PRPs/active/TRACKER.md` Jarvis autonomy entries |
 
 ## Safety Boundaries
 
@@ -40,7 +39,7 @@ truth surfaces. Some internal files still carry the legacy Jarvis name.
 ## How To Run It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run thehomie status --json
 uv run thehomie doctor
 uv run thehomie chat -q "/diagnostics" -Q
@@ -55,27 +54,21 @@ Use focused cognition/status/scheduled-loop tests for the touched slice. For
 dashboard status:
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_jarvis_dashboard_status.py -q
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\server
+cd <repo>\dashboard\server
 npm run test -- src/__tests__/jarvis.test.ts
 npm run typecheck
 ```
 
 ## Latest Live Proof
 
-Tracker records the cognition-loop closeout: live-runtime activation,
-real-vault apply proof, Telegram E2E proof, Langfuse trace, Sentry event, and
-public export. Recheck current live bot process state before claiming a new live
-proof.
-
-## Related Handoffs
-
-- `PRPs/active/TRACKER.md`
-- `docs/production-v1-lessons-to-v2-framework.md`
+The cognition-loop closeout covered live-runtime activation, durable-memory
+apply proof, adapter proof, observability proof, and public export. Recheck
+current live bot process state before claiming a new live proof.
 
 ## Public Export Status
 

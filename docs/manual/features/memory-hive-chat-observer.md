@@ -53,13 +53,13 @@ http://127.0.0.1:5173/chat
 ## How To Test It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\web
+cd <repo>\dashboard\web
 npm run test -- src/__tests__/memory-graph.test.tsx src/__tests__/brain-graph-3d.test.tsx
 npm run typecheck
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\server
+cd <repo>\dashboard\server
 npm run test -- src/__tests__/brain.test.ts src/__tests__/routes-manifest.test.ts
 npm run typecheck
 ```
@@ -70,12 +70,12 @@ shapes change.
 Dashboard chat write-path tests:
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_dashboard_endpoints_sse.py -q
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie
+cd <repo>
 npm --prefix dashboard/server test -- src/__tests__/conversation.test.ts
 npm --prefix dashboard/web test -- src/__tests__/chat.test.tsx src/__tests__/chat-stream.test.ts
 ```
@@ -116,11 +116,6 @@ npm --prefix dashboard/web test -- src/__tests__/chat.test.tsx src/__tests__/cha
   were closed afterward.
 - Memory graph and brain views retain prior May 2026 browser validation; re-run
   Browser validation when those UI claims change.
-
-## Related Handoffs
-
-- `PRPs/active/TRACKER.md`
-- `docs/vault-setup.md`
 
 ## Public Export Status
 

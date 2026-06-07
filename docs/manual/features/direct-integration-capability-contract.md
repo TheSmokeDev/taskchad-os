@@ -28,7 +28,6 @@ callers must use before posting, writing, archiving, sending, or deleting.
 | Integration wrappers | `.claude/skills/direct-integrations/scripts/query.py`, `.claude/scripts/integrations/gmail.py`, `.claude/scripts/integrations/outlook.py`, `.claude/scripts/integrations/slack_api.py`, `.claude/scripts/integrations/sheets_api.py` |
 | Background jobs | `.claude/scripts/notifications.py`, `.claude/scripts/heartbeat.py` |
 | Tests | `.claude/scripts/tests/test_integration_capabilities.py`, `.claude/scripts/tests/test_prompt_builder.py`, `.claude/scripts/tests/test_extension_manager.py`, `.claude/scripts/tests/test_email_sanitizer.py` |
-| Docs/proof | `PRPs/active/PRP-direct-integration-capability-contract.md`, `PRPs/active/TRACKER.md`, `.claude/sections/05_integrations.md`, `.claude/skills/direct-integrations/SKILL.md` |
 
 ## Safety Boundaries
 
@@ -82,14 +81,14 @@ read-only through the current wrapper policy.
 List direct wrapper commands:
 
 ```powershell
-cd C:\Users\YourUser\thehomie
+cd <repo>
 python .claude\skills\direct-integrations\scripts\query.py --help
 ```
 
 Run framework status surfaces:
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run thehomie status --json
 uv run thehomie doctor
 uv run thehomie chat -q "/diagnostics" -Q
@@ -98,7 +97,7 @@ uv run thehomie chat -q "/diagnostics" -Q
 Use read-only direct integrations when configured:
 
 ```powershell
-cd C:\Users\YourUser\thehomie
+cd <repo>
 python .claude\skills\direct-integrations\scripts\query.py gmail unread
 python .claude\skills\direct-integrations\scripts\query.py analytics overview
 ```
@@ -106,7 +105,7 @@ python .claude\skills\direct-integrations\scripts\query.py analytics overview
 Use mutating commands only from explicit operator-confirmed flows:
 
 ```powershell
-cd C:\Users\YourUser\thehomie
+cd <repo>
 python .claude\skills\direct-integrations\scripts\query.py slack send <channel> <message>
 python .claude\skills\direct-integrations\scripts\query.py sheets append <spreadsheet_id> --range "A:Z" --values '[["value"]]'
 ```
@@ -116,14 +115,14 @@ python .claude\skills\direct-integrations\scripts\query.py sheets append <spread
 Focused policy bundle:
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_integration_capabilities.py tests/test_prompt_builder.py tests/test_extension_manager.py tests/test_email_sanitizer.py -q
 ```
 
 Smoke the chat/status surfaces:
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run python ../chat/main.py --test
 uv run thehomie status --json
 ```
@@ -147,18 +146,9 @@ Expected proof points:
   pre-existing unrelated repo lint debt; do not claim a full-repo Ruff pass for
   this slice.
 
-## Related Handoffs
-
-- `PRPs/active/PRP-direct-integration-capability-contract.md`
-- `PRPs/active/TRACKER.md`
-- `.claude/handoffs/2026-05-22-cognitive-loop-to-direct-integration-clear.md`
-
 ## Public Export Status
 
 Policy code is public-exported through `scripts/sanitize.py`.
-
-- Private code commit: `83719827`
-- Public framework code commit: `c1d33d5`
 - Manual page status: public-exported through the `docs/manual/` sanitizer
   allowlist.
 

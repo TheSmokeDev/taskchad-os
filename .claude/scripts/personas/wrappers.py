@@ -186,9 +186,9 @@ def _posix_wrapper_content(name: str, profile_root: Path) -> str:
     regardless of the caller's environment.
 
     R2 NM2: both ``profile_root`` and ``name`` go through ``shlex.quote()``
-    so a path like ``/Users/owner Smoke/.homie/profiles/sales`` doesn't
-    fall apart into ``HOMIE_HOME=/Users/owner Smoke/.homie/profiles/sales
-    exec ...`` (where only ``/Users/owner`` would be assigned and the
+    so a path like ``/Users/Operator Name/.homie/profiles/sales`` doesn't
+    fall apart into ``HOMIE_HOME=/Users/Operator Name/.homie/profiles/sales
+    exec ...`` (where only ``/Users/Operator`` would be assigned and the
     rest parsed as a shell command).
     """
     quoted_root = shlex.quote(str(profile_root))
@@ -249,7 +249,7 @@ def _launchd_plist_content(
     output.
     """
     plist_dict = {
-        "Label": f"com.smokedev.homie.{name}",
+        "Label": f"com.thehomie.framework.{name}",
         "ProgramArguments": [thehomie_path, "-p", name, "chat"],
         "EnvironmentVariables": {"HOMIE_HOME": str(profile_root)},
         "WorkingDirectory": str(profile_root),
@@ -280,7 +280,7 @@ def _systemd_unit_content(
     AND ``WorkingDirectory=`` (consistent quoting). systemd unit files
     accept quoted values for both keys per ``man systemd.exec``. Without
     quotes systemd strips at the first whitespace, breaking paths that
-    contain spaces (e.g. ``/home/owner Smoke/.homie/profiles/sales``).
+    contain spaces (e.g. ``/home/Operator Name/.homie/profiles/sales``).
     Backslash + double-quote + dollar-sign characters are escaped per
     ``man systemd.exec``.
     """
@@ -419,12 +419,12 @@ def _create_windows_wrappers(
 def _launchd_plist_path(name: str) -> Path:
     """Return the canonical path for the launchd plist.
 
-    ``~/Library/LaunchAgents/com.smokedev.homie.<name>.plist`` per
+    ``~/Library/LaunchAgents/com.thehomie.framework.<name>.plist`` per
     PRD §9.1 + Cross-Platform Notes table.
     """
     return (
         Path.home() / "Library" / "LaunchAgents"
-        / f"com.smokedev.homie.{name}.plist"
+        / f"com.thehomie.framework.{name}.plist"
     ).resolve(strict=False)
 
 
@@ -469,7 +469,7 @@ def _uninstall_launchd_plist(name: str) -> bool:
     found and removed (best-effort ``launchctl unload`` first).
 
     ``profile_root`` is NOT needed — the unit name is
-    ``com.smokedev.homie.<name>`` deterministically.
+    ``com.thehomie.framework.<name>`` deterministically.
     """
     plist_path = _launchd_plist_path(name)
     if not plist_path.exists():
@@ -606,7 +606,7 @@ def create_wrapper_alias(
             in every template; the wrapper sets ``HOMIE_HOME=<profile_root>``
             BEFORE invoking ``thehomie -p <name>``.
         install_launchd: macOS-only. Install launchd plist at
-            ``~/Library/LaunchAgents/com.smokedev.homie.<name>.plist``.
+            ``~/Library/LaunchAgents/com.thehomie.framework.<name>.plist``.
         install_systemd: Linux-only. Install systemd user unit at
             ``~/.config/systemd/user/homie-<name>.service``.
         bin_dir: None-sentinel. Resolved via

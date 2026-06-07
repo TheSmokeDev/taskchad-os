@@ -1,13 +1,13 @@
 # Homie Dashboard Framework
 
 Status: canonical operator shell
-Owner: `thehomie/dashboard` thin UI over Python-owned framework APIs
+Owner: dashboard thin UI over Python-owned framework APIs
 Last updated: 2026-06-07
 
 ## What It Does
 
 The Homie Dashboard is the canonical local operator shell for the Homie runtime
-inside `thehomie`. It is not a donor clone and not a separate product
+inside the framework repo. It is not a donor clone and not a separate product
 surface from the framework. The dashboard renders and controls framework
 features through Hono proxy routes over Python-owned APIs.
 
@@ -33,7 +33,6 @@ features through Hono proxy routes over Python-owned APIs.
 | Hono/dashboard server | `dashboard/server/src/app.ts`, `dashboard/server/src/routes.ts`, `dashboard/server/src/routes/*` |
 | Dashboard web | `dashboard/web/src/App.tsx`, `dashboard/web/src/lib/routes.ts`, `dashboard/web/src/pages/*` |
 | Tests | `dashboard/server/src/__tests__/routes-manifest.test.ts`, `dashboard/web/src/__tests__/donor-route-manifest.test.ts`, feature-specific tests |
-| Docs/proof | `docs/mission-control-donor-cross-reference.md`, `docs/homie-dashboard-feature-gap-map-2026-05-24.md`, `docs/mc-profile-contract.md` |
 
 ## Safety Boundaries
 
@@ -46,7 +45,7 @@ features through Hono proxy routes over Python-owned APIs.
 - Dashboard chat uses the Python chat router as source of truth. The web UI
   must not run a parallel assistant, bypass command routing, or invent local
   memory/session writes.
-- Donor dashboards are references only. `thehomie/dashboard` is canonical.
+- Donor dashboards are references only. The repo-local dashboard is canonical.
 - Public framework export uses `scripts/sanitize.py`; never manually copy
   dashboard files into `thehomie-framework`.
 - Dashboard routes that observe browser state must preserve the BrowserOps
@@ -55,18 +54,18 @@ features through Hono proxy routes over Python-owned APIs.
 ## How To Run It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run python -m orchestration.run_api
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\server
+cd <repo>\dashboard\server
 $env:DASHBOARD_DEV_MODE_NO_AUTH='true'
 npm start
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\web
+cd <repo>\dashboard\web
 npm run dev
 ```
 
@@ -81,13 +80,13 @@ http://127.0.0.1:5173
 Run feature-specific tests first. The baseline manifest checks are:
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\server
+cd <repo>\dashboard\server
 npm run test -- src/__tests__/routes-manifest.test.ts
 npm run typecheck
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\web
+cd <repo>\dashboard\web
 npm run test -- src/__tests__/donor-route-manifest.test.ts
 npm run typecheck
 ```
@@ -125,17 +124,10 @@ focused suite.
   - Vite web `5173`
   - visible Chrome CDP `9222`
 
-## Related Handoffs
-
-- `docs/mission-control-donor-cross-reference.md`
-- `docs/homie-dashboard-feature-gap-map-2026-05-24.md`
-- `docs/HANDOFF-team-room-dashboard-controls-closeout-2026-05-31.md`
-- `docs/HANDOFF-team-room-v3-live-proof-closeout-2026-05-31.md`
-
 ## Public Export Status
 
 Dashboard framework files are public-exported only when a slice explicitly runs
-`scripts/sanitize.py` and pushes `C:\Users\YourUser\thehomie-framework`.
+`scripts/sanitize.py` and updates the public framework mirror.
 
 ## Next Slices
 

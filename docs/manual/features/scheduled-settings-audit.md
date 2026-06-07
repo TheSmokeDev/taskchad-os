@@ -45,18 +45,18 @@ http://127.0.0.1:5173/mobile
 ## How To Test It
 
 ```powershell
-cd C:\Users\YourUser\thehomie\.claude\scripts
+cd <repo>\.claude\scripts
 uv run pytest tests/test_dashboard_api.py -q -k "scheduled or dashboard_settings or mobile_access"
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\server
+cd <repo>\dashboard\server
 npm run test -- src/__tests__/settings.test.ts src/__tests__/routes-manifest.test.ts
 npm run typecheck
 ```
 
 ```powershell
-cd C:\Users\YourUser\thehomie\dashboard\web
+cd <repo>\dashboard\web
 npm run test -- src/__tests__/mobile-access.test.tsx src/__tests__/kill-switch-banner.test.tsx
 npm run typecheck
 ```
@@ -66,14 +66,9 @@ npm run typecheck
 Mobile Access was live-proven on 2026-05-31. Scheduled/settings/audit surfaces
 should be re-smoked before making fresh live claims.
 
-## Related Handoffs
-
-- `docs/manual/features/dashboard-mobile-access.md`
-- `PRPs/active/TRACKER.md`
-
 ## Public Export Status
 
-Verify per slice. Mobile Access was private-only at initial ship.
+Verify per slice before claiming current export state.
 
 ## Next Slices
 

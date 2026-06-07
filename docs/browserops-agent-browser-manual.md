@@ -373,8 +373,8 @@ Telegram Homie seems stale after merge:
 - Homie Telegram owns the default health port `8787`. If another local helper
   is using `8787`, move that helper instead of leaving Homie on a temporary
   alternate health port.
-- TaskChad voice's documented local health/server port is `8765`; an extra
-  TaskChad tools process on `8787` is not the main voice service.
+- Keep helper services on their documented local ports; an extra helper process
+  on the chat health port is not the main chat service.
 - On Windows, keep `.claude/chat/run_chat.bat` CRLF with no BOM. If `cmd.exe`
   prints chopped comment text as commands, normalize the batch file line
   endings before restarting Telegram.
@@ -425,7 +425,7 @@ Next likely slice:
 
 Possible future write slice:
 
-- LinkedIn or social writes require explicit approval UX, workflow registry updates, audit proof, tests, and live-proof boundaries. Current controlling plan: `PRPs/active/PRP-linkedin-operator-workflows-2026-06-02.md`; PR #35 remains the first connection-request dependency. Keep default-deny until each bounded workflow lands.
+- LinkedIn or social writes require explicit approval UX, workflow registry updates, audit proof, tests, and live-proof boundaries. Keep default-deny until each bounded workflow lands.
 
 Non-goals for this manual:
 
