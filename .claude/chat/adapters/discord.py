@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from models import (
@@ -21,6 +22,7 @@ from models import (
 
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
 import voice as voice_mod
+from attachment_context import is_supported_document_attachment
 from voice_markers import parse_send_markers, strip_send_markers
 
 # PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
@@ -103,9 +105,12 @@ class DiscordAdapter:
                 await self._queue.put(incoming)
                 return
 
-            # Download image attachments to local disk
+            # Download image/document attachments to local disk.
             img_text, img_attachments = await self._download_image_attachments(msg)
-            incoming = self._normalize_message(msg, is_dm, img_text, img_attachments)
+            doc_text, doc_attachments = await self._download_document_attachments(msg)
+            context_text = "\n".join(part for part in (img_text, doc_text) if part)
+            attachments = [*img_attachments, *doc_attachments]
+            incoming = self._normalize_message(msg, is_dm, context_text, attachments)
             await self._queue.put(incoming)
 
         @self._client.event
@@ -530,6 +535,70 @@ class DiscordAdapter:
                 text_parts.append(f"[Failed to download {att.filename}: {e}]")
 
         return "\n".join(text_parts), downloaded
+
+    async def _download_document_attachments(self, msg: Any) -> tuple[str, list]:
+        """Download supported document attachments for engine-side parsing.
+
+        The returned user text intentionally does not include local filesystem
+        paths. The local file path stays internal on Attachment.url so the
+        engine can parse bounded document context before runtime dispatch.
+        """
+        if not msg.attachments:
+            return "", []
+
+        import tempfile
+        from pathlib import Path
+        import httpx
+
+        tmp_dir = Path(tempfile.gettempdir()) / "thehomie_discord_documents"
+        tmp_dir.mkdir(exist_ok=True)
+
+        text_parts: list[str] = []
+        downloaded: list[Attachment] = []
+
+        for att in msg.attachments:
+            ct = att.content_type or ""
+            if not is_supported_document_attachment(att.filename, ct):
+                continue
+            if att.size and att.size > 8 * 1024 * 1024:
+                text_parts.append(f"[Skipped document {att.filename}: exceeds 8MB parser limit]")
+                continue
+
+            safe_name = self._safe_attachment_filename(att.filename)
+            ext = Path(safe_name).suffix or ".bin"
+            local_path = tmp_dir / f"{msg.id}_{att.id}{ext}"
+
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(str(att.url))
+                    resp.raise_for_status()
+                    local_path.write_bytes(resp.content)
+
+                text_parts.append(
+                    f"[User uploaded document: {safe_name}. "
+                    "Bounded attachment context will be provided to the runtime.]"
+                )
+                downloaded.append(Attachment(
+                    filename=safe_name,
+                    mimetype=ct,
+                    url=str(local_path),
+                    size_bytes=att.size,
+                ))
+                print(
+                    f"[{datetime.now()}] Discord document saved: "
+                    f"{local_path} ({att.size or 0} bytes)"
+                )
+            except Exception as e:
+                print(f"[{datetime.now()}] Discord document download failed ({att.filename}): {e}")
+                text_parts.append(f"[Failed to download document {att.filename}: {type(e).__name__}]")
+
+        return "\n".join(text_parts), downloaded
+
+    @staticmethod
+    def _safe_attachment_filename(filename: str) -> str:
+        name = Path(filename or "attachment").name
+        name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
+        return name or "attachment"
 
     def _split_message(self, text: str, max_length: int = 1900) -> list[str]:
         """Split long messages for Discord's 2000 char limit."""

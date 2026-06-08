@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "chat"))
 
 from adapters.discord import DiscordAdapter
-from models import Platform
+from models import Attachment, Platform
 
 
 def _make_adapter(
@@ -63,6 +64,7 @@ def _mock_message(
         msg.guild.id = guild_id
 
     msg.thread = None
+    msg.attachments = []
     return msg
 
 
@@ -207,3 +209,57 @@ def test_split_message_at_newline():
 def test_split_message_empty():
     adapter = _make_adapter()
     assert adapter._split_message("", max_length=1900) == [""]
+
+
+@pytest.mark.asyncio
+async def test_download_document_attachment_without_exposing_local_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _make_adapter()
+    msg = _mock_message(message_id=777)
+    msg.attachments = [
+        SimpleNamespace(
+            filename="report.txt",
+            content_type="text/plain",
+            size=17,
+            id=888,
+            url="https://cdn.example/report.txt",
+        )
+    ]
+
+    class FakeResponse:
+        content = b"Discord doc body"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url: str) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    text, attachments = await adapter._download_document_attachments(msg)
+
+    assert "report.txt" in text
+    assert str(tmp_path) not in text
+    assert attachments == [
+        Attachment(
+            filename="report.txt",
+            mimetype="text/plain",
+            url=str(tmp_path / "thehomie_discord_documents" / "777_888.txt"),
+            size_bytes=17,
+        )
+    ]
+    assert Path(attachments[0].url or "").read_text(encoding="utf-8") == "Discord doc body"

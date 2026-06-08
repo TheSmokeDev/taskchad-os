@@ -16,6 +16,7 @@ CHARS_PER_TOKEN = 4  # Same heuristic as memory_index.py
 # Default budgets in characters (~4 chars/token)
 DEFAULT_REGION_BUDGETS: dict[str, int] = {
     "identity": 16000,          # ~4K tokens — SOUL.md
+    "current_speaker": 1200,    # bounded per-turn active speaker metadata
     "self_model": 8000,         # ~2K tokens — SELF.md
     "user_model": 12000,        # ~3K tokens — USER.md
     "durable_memory": 16000,    # ~4K tokens — MEMORY.md
@@ -23,6 +24,7 @@ DEFAULT_REGION_BUDGETS: dict[str, int] = {
     "recalled_memory": 16000,   # ~4K tokens — tiered recall results
     "procedural_memory": 8000,  # ~2K tokens — skills index (stub Move 1)
     "prefetched_context": 24000,  # ~6K tokens — router pre-fetch
+    "attachment_context": 4500,   # bounded parsed upload text
     "recent_conversation": 600,  # ~2.4K chars — last 4-6 turns, engine-injected
 }
 
@@ -191,11 +193,13 @@ def prompt_regions_from_working_memory(
             meta["sources"].append(source)
         if memory.source not in {
             "vault",
+            "speaker_context",
             "inference-tracker",
             "continuity",
             "recall",
             "session_store",
             "router",
+            "attachment_parser",
             "skills/",
         }:
             meta["frozen"] = False

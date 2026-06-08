@@ -54,6 +54,46 @@ def _extract_session_id(context_file: Path) -> str:
     return "unknown"
 
 
+def build_memory_flush_prompt(context_content: str, *, test_mode: bool = False) -> str:
+    """Build the prompt used by the pre-compaction memory flush."""
+
+    dry_run_note = (
+        "\n\nDRY RUN: Do NOT edit any files. Just describe what you would save.\n"
+        if test_mode
+        else ""
+    )
+
+    return f"""Pre-compaction memory flush. The session is near auto-compaction.
+{dry_run_note}
+Review the conversation context below and respond with a concise summary of important items.
+Do NOT use any tools — just return plain text.
+
+Format your response as bullet points covering:
+- Decisions made and their rationale
+- Lessons learned or mistakes to avoid
+- Important facts, configurations, or patterns discovered
+- Action items or follow-ups mentioned
+- Key context that would be lost after compaction
+- Repository/codebase activity, when present:
+  - repo slug
+  - workflow or dispatch name
+  - branch or worktree path
+  - outcome or current status
+  - notable repo-scoped lessons
+
+Skip anything that is:
+- Routine tool calls or file reads
+- Content that's already in memory files
+- Trivial back-and-forth or clarification exchanges
+
+If nothing is worth saving, respond with exactly: FLUSH_OK
+
+## Conversation Context
+
+{context_content}
+"""
+
+
 # =============================================================================
 # MAIN FLUSH FUNCTION
 # =============================================================================
@@ -111,35 +151,7 @@ async def _run_flush_inner(context_file: Path, test_mode: bool = False) -> str |
     if len(context_content) > 15_000:
         context_content = context_content[-15_000:]
 
-    dry_run_note = (
-        "\n\nDRY RUN: Do NOT edit any files. Just describe what you would save.\n"
-        if test_mode
-        else ""
-    )
-
-    flush_prompt = f"""Pre-compaction memory flush. The session is near auto-compaction.
-{dry_run_note}
-Review the conversation context below and respond with a concise summary of important items.
-Do NOT use any tools — just return plain text.
-
-Format your response as bullet points covering:
-- Decisions made and their rationale
-- Lessons learned or mistakes to avoid
-- Important facts, configurations, or patterns discovered
-- Action items or follow-ups mentioned
-- Key context that would be lost after compaction
-
-Skip anything that is:
-- Routine tool calls or file reads
-- Content that's already in memory files
-- Trivial back-and-forth or clarification exchanges
-
-If nothing is worth saving, respond with exactly: FLUSH_OK
-
-## Conversation Context
-
-{context_content}
-"""
+    flush_prompt = build_memory_flush_prompt(context_content, test_mode=test_mode)
 
     print(f"[{now_local()}] Running memory flush (test={test_mode})...")
 

@@ -7,7 +7,7 @@ import engine as engine_module
 import pytest
 import voice as voice_module
 from engine import ConversationEngine
-from models import Channel, IncomingMessage, Platform, Thread, User
+from models import Attachment, Channel, IncomingMessage, Platform, Thread, User
 from session import Session, SQLiteSessionStore
 
 from runtime.base import (
@@ -25,6 +25,25 @@ def _make_message(text: str = "Need a summary") -> IncomingMessage:
         channel=Channel(platform=Platform.TELEGRAM, platform_id="chat-1", is_dm=True),
         platform=Platform.TELEGRAM,
         thread=Thread(thread_id="thread-1"),
+    )
+
+
+def _make_discord_message(
+    text: str = "what should I do next?",
+    *,
+    platform_id: str = "111",
+    display_name: str | None = "Alice",
+) -> IncomingMessage:
+    return IncomingMessage(
+        text=text,
+        user=User(
+            platform=Platform.DISCORD,
+            platform_id=platform_id,
+            display_name=display_name,
+        ),
+        channel=Channel(platform=Platform.DISCORD, platform_id="discord-chan", is_dm=False),
+        platform=Platform.DISCORD,
+        thread=Thread(thread_id="discord-thread"),
     )
 
 
@@ -357,6 +376,158 @@ async def test_short_execution_phrases_keep_tools_enabled(
     assert outputs[-1].text == "working"
     assert captured["capability"] == "tool_reasoning"
     assert "Bash" in captured["allowed_tools"]
+
+
+@pytest.mark.asyncio
+async def test_discord_speaker_context_varies_per_active_user(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    captured_prompts: list[str] = []
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        captured_prompts.append(request.system_prompt["append"])
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    first_outputs = [
+        out
+        async for out in convo.handle_message(
+            _make_discord_message(platform_id="111", display_name="Alice")
+        )
+    ]
+    second_outputs = [
+        out
+        async for out in convo.handle_message(
+            _make_discord_message(platform_id="222", display_name="Bob")
+        )
+    ]
+
+    assert first_outputs[-1].text == "ok"
+    assert second_outputs[-1].text == "ok"
+    assert len(captured_prompts) == 2
+    assert "# Current Speaker" in captured_prompts[0]
+    assert "display_name: Alice" in captured_prompts[0]
+    assert "platform_user_id: 111" in captured_prompts[0]
+    assert "display_name: Bob" in captured_prompts[1]
+    assert "platform_user_id: 222" in captured_prompts[1]
+    assert captured_prompts[0] != captured_prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_unknown_discord_speaker_context_warns_without_owner_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    captured: dict[str, object] = {}
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        captured["system_prompt"] = request.system_prompt["append"]
+        captured["metadata"] = request.metadata
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [
+        out
+        async for out in convo.handle_message(
+            _make_discord_message(platform_id="", display_name=None)
+        )
+    ]
+
+    assert outputs[-1].text == "ok"
+    append_text = str(captured["system_prompt"])
+    assert "status: unknown_unverified" in append_text
+    assert "warning: Active speaker identity is incomplete" in append_text
+    assert "Do not use owner/default identity" in append_text
+    assert captured["metadata"] == {
+        "speaker_context": {
+            "status": "unknown_unverified",
+            "platform": "discord",
+            "channel_scope": "shared_channel",
+            "has_display_name": False,
+            "has_platform_user_id": False,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_document_attachment_context_reaches_runtime_without_local_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    document_path = tmp_path / "report.txt"
+    document_path.write_text("Attachment body for the model.", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        captured["prompt"] = request.prompt
+        captured["system_prompt"] = request.system_prompt["append"]
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    message = _make_discord_message("Please summarize the uploaded report")
+    message.attachments = [
+        Attachment(
+            filename="report.txt",
+            mimetype="text/plain",
+            url=str(document_path),
+            size_bytes=document_path.stat().st_size,
+        )
+    ]
+
+    outputs = [out async for out in convo.handle_message(message)]
+
+    assert outputs[-1].text == "ok"
+    append_text = str(captured["system_prompt"])
+    assert "# Attachment Context" in append_text
+    assert "Attachment body for the model." in append_text
+    assert str(document_path) not in append_text
+    assert str(document_path) not in str(captured["prompt"])
 
 
 def test_sqlite_session_store_adds_runtime_columns(tmp_path: Path) -> None:

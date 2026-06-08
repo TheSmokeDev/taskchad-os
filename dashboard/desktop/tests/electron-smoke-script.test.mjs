@@ -53,6 +53,14 @@ test('electron smoke sends a dashboard chat slash command', () => {
   assert.match(source, /report\.chat/);
 });
 
+test('electron smoke matrix covers browser and teams dashboard routes', () => {
+  const source = readFileSync(new URL('../main.cjs', import.meta.url), 'utf8');
+
+  assert.match(source, /'\/browser': 'Browser Viewer'/);
+  assert.match(source, /'\/teams': 'Operating Room'/);
+  assert.match(source, /hasRawFetchError/);
+});
+
 test('electron-builder config uses asInvoker packaging and bundled web assets', () => {
   const source = readFileSync(new URL('../electron-builder.cjs', import.meta.url), 'utf8');
   const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));

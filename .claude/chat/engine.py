@@ -11,9 +11,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from attachment_context import build_attachment_context
 from models import IncomingMessage, OutgoingMessage
 from session import HeartbeatThread, PostgresSessionStore, Session, SQLiteSessionStore
 from session_keys import build_session_key, resolve_thread_id
+from speaker_context import (
+    render_speaker_context,
+    resolve_speaker_context,
+    speaker_context_metadata,
+)
 
 # Add scripts dir for shared utilities
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -488,6 +494,8 @@ class ConversationEngine:
 
         # Identity context — single agent (The Homie)
         identity_context = self._soul_context
+        current_speaker = resolve_speaker_context(message)
+        current_speaker_block = render_speaker_context(current_speaker)
         chat_rules = (
             "\n\n# Chat Interface Rules\n"
             "You are responding through a chat interface. "
@@ -553,8 +561,15 @@ class ConversationEngine:
         system_prompt = {
             "type": "preset",
             "preset": "claude_code",
-            "append": identity_context + chat_rules,
+            "append": (
+                identity_context
+                + "\n\n# Current Speaker\n"
+                + current_speaker_block
+                + chat_rules
+            ),
         }
+        if _trace_decisions is not None:
+            _trace_decisions["speaker_context"] = speaker_context_metadata(current_speaker)
 
         # Add plan mode guidance to system prompt
         if mode == "plan":
@@ -735,6 +750,7 @@ class ConversationEngine:
                 "that needs attention, and keep it concise.\n\n"
                 f"{message.prefetched_context}"
             )
+        attachment_context_text = build_attachment_context(message.attachments)
 
         current_wm = (
             self._build_base_working_memory(prefetched_context=prefetched_region_text)
@@ -781,6 +797,20 @@ class ConversationEngine:
         if _COGNITION_AVAILABLE:
             budgets = adjusted_budgets if adjusted_budgets else REGION_BUDGETS
             turn_wm = current_wm
+            if current_speaker_block.strip():
+                turn_wm = turn_wm.with_memory(Memory(
+                    role="system",
+                    content=current_speaker_block,
+                    region="current_speaker",
+                    source="speaker_context",
+                ))
+            if attachment_context_text.strip():
+                turn_wm = turn_wm.with_memory(Memory(
+                    role="system",
+                    content=attachment_context_text,
+                    region="attachment_context",
+                    source="attachment_parser",
+                ))
             # Continuity — inject whenever state carries real content (was gated behind recall before).
             if continuity_state:
                 continuity_text = continuity_state.to_region_text()
@@ -821,6 +851,8 @@ class ConversationEngine:
         elif recall_response and recall_response.formatted_text:
             # Cognition unavailable but got keyword results — append plainly.
             system_prompt["append"] += recall_response.formatted_text
+        if not _COGNITION_AVAILABLE and attachment_context_text.strip():
+            system_prompt["append"] += "\n\n# Attachment Context\n" + attachment_context_text
 
         if _trace_decisions is not None:
             _trace_decisions["recent_conversation"] = recent_region_meta
@@ -881,6 +913,7 @@ class ConversationEngine:
             env={"CLAUDECODE": ""},
             stderr=lambda line: print(f"[CLI-STDERR] {line}", flush=True),
             resume=resume_session_id or None,
+            metadata={"speaker_context": speaker_context_metadata(current_speaker)},
         )
 
         # Run through runtime (propagate_attributes is at the outer scope)

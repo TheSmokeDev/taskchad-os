@@ -1,8 +1,8 @@
 # Multi-Channel Adapters
 
-Status: active baseline, Telegram document ingress and turn controls live-proven
+Status: active baseline, Telegram document ingress and turn controls live-proven; Discord document parsing locally proven
 Owner: `.claude/chat/adapters/`
-Last updated: 2026-06-04
+Last updated: 2026-06-08
 
 ## What It Does
 
@@ -11,11 +11,14 @@ message model. Platform-specific events become `IncomingMessage` objects with
 stable user, channel, thread, message id, raw event, and attachment fields.
 
 Telegram text, voice, photo, and document updates are adapter-owned ingress
-paths. Document uploads are downloaded to a local temp directory, attached to
-the normalized message, and described in the user-visible turn so the runtime
-can read Markdown/text files with normal tool access. Telegram document albums
-with a shared media group id are buffered briefly and queued as one normalized
-turn with multiple attachments.
+paths. Discord text, voice/audio, image, and supported document uploads follow
+the same normalized message contract. Document uploads are downloaded to local
+temp storage, attached to the normalized message, and parsed by the chat engine
+into bounded attachment context for supported PDF, DOCX, CSV/TSV, Markdown, and
+text files. Local temp paths stay internal; model-visible attachment context
+names the uploaded file and includes extracted text, not filesystem locations.
+Telegram document albums with a shared media group id are buffered briefly and
+queued as one normalized turn with multiple attachments.
 
 The chat router buffers quick conversational bursts per user/channel/thread
 before invoking the engine. Back-to-back messages become one turn. If a
@@ -42,18 +45,23 @@ natural-language chat should not auto-fetch Gmail/Outlook context.
 | Adapter protocol | `.claude/chat/adapters/base.py` |
 | Shared message models | `.claude/chat/models.py` |
 | Telegram adapter | `.claude/chat/adapters/telegram.py` |
+| Discord adapter | `.claude/chat/adapters/discord.py` |
+| Attachment parser | `.claude/chat/attachment_context.py` |
 | Router and engine | `.claude/chat/router.py`, `.claude/chat/engine.py` |
 | Windows launcher | `.claude/chat/run_chat.bat` |
-| Tests | `.claude/scripts/tests/test_adapter_telegram.py` |
+| Tests | `.claude/scripts/tests/test_adapter_telegram.py`, `.claude/scripts/tests/test_adapter_discord.py`, `.claude/scripts/tests/test_attachment_context.py` |
 | Public reference | `docs/adapters.md` |
 
 ## Safety Boundaries
 
 - Attachments are external input. Treat filenames, captions, and file contents
   as untrusted data.
-- Telegram document uploads are downloaded to a local temp directory and passed
-  to the engine as `IncomingMessage.attachments`; the adapter does not execute
-  file contents.
+- Telegram and Discord document uploads are downloaded to local temp directories
+  and passed to the engine as `IncomingMessage.attachments`; adapters do not
+  execute file contents.
+- Supported document text is extracted into bounded runtime context. Unsupported
+  files remain attachments, but are not parsed into model-visible document text.
+- Do not expose local attachment temp paths in user-visible responses.
 - Telegram document updates consumed before this handler existed do not replay
   automatically. Re-upload documents that were dropped by an older live bot.
 - Gmail/Outlook and inbox triage are sensitive data surfaces. Use explicit
@@ -82,11 +90,25 @@ Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/health
 ```powershell
 cd .claude/scripts
 uv run python -m py_compile ..\chat\adapters\telegram.py
-uv run pytest tests/test_adapter_telegram.py -q
+uv run python -m py_compile ..\chat\attachment_context.py ..\chat\adapters\discord.py ..\chat\engine.py
+uv run pytest tests/test_adapter_telegram.py tests/test_adapter_discord.py tests/test_attachment_context.py -q
 uv run pytest tests/test_extension_manager.py tests/test_skill_intent_gates.py -q
 ```
 
 ## Current Regression Proof
+
+- Date: 2026-06-08
+- Local proof: `py_compile` passed for the shared attachment parser, Discord
+  adapter, chat engine, and prompt-region modules.
+- Focused tests: `tests/test_attachment_context.py`,
+  `tests/test_adapter_discord.py`, `tests/test_adapter_voice_discord.py`,
+  `tests/test_adapter_telegram.py`, and `tests/test_chat_runtime_engine.py`
+  passed.
+- Targeted runtime/router/cognition lane passed.
+- Scope: local code and fixture proof only; no Discord restart or live Discord
+  propagation proof was run.
+
+## Previous Live Proof
 
 - Date: 2026-06-04
 - Local proof: `py_compile` passed for Telegram adapter, chat router, and
@@ -114,7 +136,7 @@ uv run pytest tests/test_extension_manager.py tests/test_skill_intent_gates.py -
   - no Gmail/inbox data pull occurred during the Queue/Steer or attachment
     batch proof windows
 
-## Previous Live Proof
+## Earlier Live Proof
 
 - Date: 2026-06-03 23:41-23:42 America/Los_Angeles
 - Surface: Telegram Web to the configured Telegram bot
@@ -134,7 +156,5 @@ This feature page is public-framework safe. Public export must still go through
 
 ## Next Slices
 
-- Add document-ingress coverage for non-Telegram adapters as each platform
-  grows native file upload support.
 - Decide whether selected text documents should be summarized by a deterministic
   preprocessor before runtime invocation.

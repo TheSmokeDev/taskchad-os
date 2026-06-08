@@ -64,6 +64,7 @@ class WorkingMemory:
     memories: tuple[Memory, ...] = ()
     region_order: tuple[str, ...] = (
         "identity",
+        "current_speaker",
         "self_model",
         "user_model",
         "user_inferences",
@@ -73,6 +74,7 @@ class WorkingMemory:
         "recalled_memory",
         "procedural_memory",
         "prefetched_context",
+        "attachment_context",
         "recent_conversation",
     )
 
