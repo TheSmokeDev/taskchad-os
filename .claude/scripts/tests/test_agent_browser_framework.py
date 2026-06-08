@@ -539,3 +539,87 @@ async def test_linkedin_profile_edit_blocks_without_approval(
     assert "linkedin.profile.edit" in message
     assert audits[0]["workflow_id"] == "linkedin.profile.edit"
     assert audits[0]["outcome"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_linkedin_profile_nl_open_phrase_infers_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #36 — NL intent dispatch passes args=""; an "open" navigation signal in
+    # the message text must infer the gated open subcommand.
+    calls: list[tuple[list[str], int]] = []
+
+    def fake_run_agent_browser(args: list[str], *, port: int) -> browser_control.CommandResult:
+        calls.append((args, port))
+        return browser_control.CommandResult(
+            ok=True,
+            returncode=0,
+            stdout="opened",
+            stderr="",
+            command_label="agent-browser --cdp 9222 open",
+        )
+
+    monkeypatch.setattr(browser_control, "resolve_cdp_port", lambda *_, **__: 9222)
+    monkeypatch.setattr(
+        browser_control,
+        "browser_readiness",
+        lambda *, port: {"cdp_port": port, "cdp_reachable": True},
+    )
+    monkeypatch.setattr(
+        browser_control,
+        "resolve_linkedin_profile_url",
+        lambda: "https://www.linkedin.com/in/test/",
+    )
+    monkeypatch.setattr(browser_control, "run_agent_browser", fake_run_agent_browser)
+    monkeypatch.setattr(core_handlers, "_audit_browser_action", lambda **_kwargs: None)
+
+    incoming = SimpleNamespace(text="open my LinkedIn profile")
+    message = await core_handlers.handle_linkedin_profile(None, incoming, "")
+
+    assert "Opened LinkedIn profile" in message
+    assert calls == [(["open", "https://www.linkedin.com/in/test/"], 9222)]
+
+
+@pytest.mark.asyncio
+async def test_linkedin_profile_nl_check_phrase_infers_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #36 — without a navigation signal the NL path must default to the
+    # read-only "status" subcommand and never open the browser.
+    calls: list[tuple[list[str], int]] = []
+
+    def fake_run_agent_browser(args: list[str], *, port: int) -> browser_control.CommandResult:
+        calls.append((args, port))
+        return browser_control.CommandResult(
+            ok=True, returncode=0, stdout="", stderr="", command_label="",
+        )
+
+    monkeypatch.setattr(browser_control, "resolve_cdp_port", lambda *_, **__: 9222)
+    monkeypatch.setattr(
+        browser_control,
+        "browser_readiness",
+        lambda *, port: {"cdp_port": port, "cdp_reachable": True},
+    )
+    monkeypatch.setattr(
+        browser_control,
+        "browser_status",
+        lambda *, port: {"cdp_port": port, "cdp_reachable": True},
+    )
+    monkeypatch.setattr(
+        browser_control,
+        "format_browser_status",
+        lambda status, label: f"{label} status: reachable",
+    )
+    monkeypatch.setattr(
+        browser_control,
+        "resolve_linkedin_profile_url",
+        lambda: pytest.fail("status path must not resolve the profile URL"),
+    )
+    monkeypatch.setattr(browser_control, "run_agent_browser", fake_run_agent_browser)
+    monkeypatch.setattr(core_handlers, "_audit_browser_action", lambda **_kwargs: None)
+
+    incoming = SimpleNamespace(text="check my LinkedIn profile")
+    message = await core_handlers.handle_linkedin_profile(None, incoming, "")
+
+    assert "LinkedIn Browser status: reachable" in message
+    assert calls == []

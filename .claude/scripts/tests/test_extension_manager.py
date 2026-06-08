@@ -247,6 +247,67 @@ class TestIntentDetection:
         assert "budget" in brief
 
 
+class TestLinkedInProfileIntentRouting:
+    """Issue #36 — profile-anchored phrases route to the deterministic
+    `linkedin_profile` router command, not the prefetch-only `browserops`
+    intent (which falls through to the engine and replies as if it has no
+    tools). Broader content/planning phrases must still route to browserops."""
+
+    def test_profile_open_phrase_routes_to_linkedin_profile(
+        self, populated_manager: ExtensionManager,
+    ):
+        detected = populated_manager.detect_intents("open my LinkedIn profile")
+        assert "linkedin_profile" in detected
+        assert "browserops" not in detected
+
+    def test_profile_open_up_phrase_routes_to_linkedin_profile(
+        self, populated_manager: ExtensionManager,
+    ):
+        detected = populated_manager.detect_intents("open up my LinkedIn profile")
+        assert "linkedin_profile" in detected
+        assert "browserops" not in detected
+
+    def test_profile_check_phrase_routes_to_linkedin_profile(
+        self, populated_manager: ExtensionManager,
+    ):
+        detected = populated_manager.detect_intents("check my LinkedIn profile")
+        assert "linkedin_profile" in detected
+        assert "browserops" not in detected
+
+    def test_profile_phrase_without_my_routes_to_linkedin_profile(
+        self, populated_manager: ExtensionManager,
+    ):
+        # The most natural phrasing omits "my"; it must still route deterministically.
+        detected = populated_manager.detect_intents("open linkedin profile")
+        assert "linkedin_profile" in detected
+        assert "browserops" not in detected
+
+    def test_linkedin_content_request_still_routes_to_browserops(
+        self, populated_manager: ExtensionManager,
+    ):
+        # Broader content/planning stays in browserops so the engine gets context.
+        detected = populated_manager.detect_intents("work on my LinkedIn content")
+        assert "browserops" in detected
+        assert "linkedin_profile" not in detected
+
+    def test_general_browser_work_still_routes_to_browserops_only(
+        self, populated_manager: ExtensionManager,
+    ):
+        # Regression guard: a general "operate the browser" request must NOT be
+        # hijacked by the new linkedin_profile intent.
+        detected = populated_manager.detect_intents(
+            "open up your browser and go to LinkedIn"
+        )
+        assert detected == ["browserops"]
+
+    def test_linkedin_post_request_still_routes_to_browserops_only(
+        self, populated_manager: ExtensionManager,
+    ):
+        # Regression guard: posting/content phrasing must keep its BrowserOps path.
+        detected = populated_manager.detect_intents("post this to LinkedIn now")
+        assert detected == ["browserops"]
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------

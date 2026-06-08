@@ -182,10 +182,21 @@ CORE_INTENTS: list[tuple[list[str], str, bool]] = [
     (["analytics", "traffic", "ga4", "sessions", "pageviews"], "analytics", False),
     (["gsc", "search console", "seo ranking", "queries", "impressions"], "gsc", False),
     (["social media accounts", "social accounts"], "accounts", False),
+    # Issue #36 — profile navigation routes to the deterministic, workflow-gated
+    # /linkedin_profile command (NOT prefetch-only), so "open/check my LinkedIn
+    # profile" gets a direct gated reply instead of a no-tools engine fallback.
+    # Keywords are profile-anchored; broader content/planning phrases stay on
+    # browserops below so the engine still receives BrowserOps context.
+    (["open my linkedin profile", "open up my linkedin profile",
+      "open linkedin profile", "check my linkedin profile",
+      "check linkedin profile", "view my linkedin profile",
+      "show my linkedin profile", "pull up my linkedin profile",
+      "go to my linkedin profile", "go to my linkedin",
+      "linkedin profile status"], "linkedin_profile", False),
     (["agent browser", "agent-browser", "browser automation", "browserops", "browser homie",
       "open browser", "open up your browser", "web browser", "visible chrome", "cdp",
-      "browse the web", "browse this", "go online", "go to linkedin", "open linkedin",
-      "check linkedin", "to linkedin", "linkedin profile", "inspect website", "check this website",
+      "browse the web", "browse this", "go online", "go to linkedin", "to linkedin",
+      "inspect website", "check this website",
       "open this website", "use the browser", "work on my linkedin", "work on linkedin",
       "linkedin account", "linkedin operator", "linkedin browser", "boost my linkedin",
       "linkedin content", "linkedin post", "linkedin connection request",

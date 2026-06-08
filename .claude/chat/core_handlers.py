@@ -1054,7 +1054,16 @@ async def handle_linkedin_profile(
     )
     from browser_workflows import require_browser_workflow_permission
 
-    raw = (args or "status").strip()
+    raw = (args or "").strip()
+    if not raw:
+        # Issue #36 — natural-language intent dispatch passes args="" (router.py);
+        # infer the subcommand from the message text. Explicit slash commands always
+        # carry the subcommand, so this branch only affects the NL path. Default is
+        # the read-only "status"; "open" fires only on an explicit navigation signal
+        # and still passes through the linkedin.profile.open workflow gate below.
+        nl_text = (getattr(incoming, "text", "") or "").lower()
+        open_signals = ("open", "navigate", "go to", "pull up", "launch", "show me")
+        raw = "open" if any(sig in nl_text for sig in open_signals) else "status"
     try:
         parts = shlex.split(raw)
     except ValueError as exc:
