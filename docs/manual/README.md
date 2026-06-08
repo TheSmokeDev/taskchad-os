@@ -60,6 +60,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Persona Lifecycle And Files | Active baseline | [persona-lifecycle-files](features/persona-lifecycle-files.md) | `/agents`, `/agents/:id/files` |
 | Convoy, Work Queue, And Mailbox | Active baseline | [convoy-work-mailbox](features/convoy-work-mailbox.md) | `/convoy`, `/work`, mailbox APIs |
 | Team Operations And Executor | Active baseline | [team-operations-executor](features/team-operations-executor.md) | `/teams`, team APIs |
+| Archon Repo Dispatch | Public-safe pattern and templates | [archon-repo-dispatch](features/archon-repo-dispatch.md) | `thehomie profile init-archon`, `thehomie archon ...`, `templates/repository-dispatch/` |
 | Dashboard Mobile Access | Shipped, live-proven | [dashboard-mobile-access](features/dashboard-mobile-access.md) | `/mobile` |
 | Team Room | V3 shipped, live-proven | [team-room](features/team-room.md) | `/teamroom`, `/teams` |
 | Autonomous Team Scheduler | Shipped, Telegram-proven | [autonomous-team-scheduler](features/autonomous-team-scheduler.md) | `/teamtick`, `/teams` |

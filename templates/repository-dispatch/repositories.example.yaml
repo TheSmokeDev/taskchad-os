@@ -1,0 +1,15 @@
+# Copy this shape into profile-owned config when repository runtime support is
+# available. Do not commit real local paths or private repository maps.
+repositories:
+  enabled: false
+  items:
+    - slug: "<repo-slug>"
+      github_repo: "<owner>/<repo>"
+      default_branch: "<default-branch>"
+      local_path: "<path-to-local-repo>"
+      archon_enabled: false
+      dispatch_mode: "manual"
+
+# Suggested dispatch modes:
+# - manual: operator confirms the repository and runs the workflow manually.
+# - archon-preferred: operator prefers Archon when the work packet is scoped.

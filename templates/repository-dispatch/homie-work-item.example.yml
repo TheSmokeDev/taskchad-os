@@ -1,0 +1,72 @@
+name: Homie Work Item
+description: Scoped work packet for an operator-managed repository workflow.
+title: "[Work Item] <short-summary>"
+labels:
+  - work-item
+body:
+  - type: input
+    id: repository
+    attributes:
+      label: Repository
+      description: Target GitHub repository.
+      placeholder: "<owner>/<repo>"
+    validations:
+      required: true
+  - type: input
+    id: local_path
+    attributes:
+      label: Local checkout
+      description: Operator-owned local checkout path.
+      placeholder: "<path-to-local-repo>"
+    validations:
+      required: false
+  - type: input
+    id: default_branch
+    attributes:
+      label: Default branch
+      placeholder: "<default-branch>"
+    validations:
+      required: true
+  - type: dropdown
+    id: dispatch_mode
+    attributes:
+      label: Dispatch mode
+      description: This example is manual by default.
+      options:
+        - manual
+        - archon-preferred
+      default: 0
+    validations:
+      required: true
+  - type: textarea
+    id: source_of_truth
+    attributes:
+      label: Source of truth
+      description: Link or describe the tracker, PRP, runbook, or plan that owns this work.
+      placeholder: "<tracker-or-plan-path>"
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Describe the bounded change requested.
+      placeholder: "Implement only the scoped docs, tests, or code listed here."
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Proof required
+      description: List the validation commands, manual proof, or review artifact expected before closeout.
+      placeholder: "Run targeted tests and attach the relevant output summary."
+    validations:
+      required: true
+  - type: textarea
+    id: stop_conditions
+    attributes:
+      label: Stop conditions
+      description: Conditions that require human review before continuing.
+      placeholder: "Stop if the change needs auto-dispatch, credentials, production access, or unrelated cleanup."
+    validations:
+      required: true
