@@ -8,6 +8,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from config import DAILY_DIR, MEMORY_DIR, PROJECT_ROOT, now_local
+from repository_config import build_repository_config_briefing
 
 _CHAT_DIR = Path(__file__).resolve().parent.parent.parent / "chat"
 if str(_CHAT_DIR) not in sys.path:
@@ -282,11 +283,12 @@ def build_session_briefing(
       3. USER.md capsule — profile + operating instructions
       4. Global Rules + Preferences verbatim
       5. Active Projects with terse status
-      6. Urgents (date-filtered)
-      7. Last session context
-      8. Goals snapshot
-      9. Finance summary verbatim
-      10. Memory index with repo-relative paths
+      6. Profile-owned repository config (only when enabled and valid)
+      7. Urgents (date-filtered)
+      8. Last session context
+      9. Goals snapshot
+      10. Finance summary verbatim
+      11. Memory index with repo-relative paths
 
     Fail-open: if required sections (identity, capabilities, rules) are
     missing, falls back to the full-dump behavior.
@@ -342,7 +344,12 @@ def build_session_briefing(
     if projects:
         parts.append("### Active Projects\n" + projects)
 
-    # 6. Urgents (date-filtered)
+    # 6. Profile-owned repository runtime config (validation/briefing only).
+    repository_config = build_repository_config_briefing()
+    if repository_config:
+        parts.append(repository_config)
+
+    # 7. Urgents (date-filtered)
     urgents = _extract_urgents(memory) if memory else ""
     if urgents:
         parts.append("### Urgents\n" + urgents)

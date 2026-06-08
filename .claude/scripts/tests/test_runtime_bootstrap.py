@@ -221,6 +221,21 @@ def test_project_status_extraction(tmp_path: Path) -> None:
     assert "Backend:" not in projects or len(projects) < len(SAMPLE_MEMORY)
 
 
+def test_briefing_includes_enabled_repository_config(monkeypatch, tmp_path: Path) -> None:
+    memory_dir, daily_dir = _setup_memory_dir(tmp_path)
+    monkeypatch.setattr(
+        "runtime.bootstrap.build_repository_config_briefing",
+        lambda: "### Configured Repositories\n- repo-a: owner/repo-a (branch: main)",
+    )
+
+    briefing = build_session_briefing(memory_dir=memory_dir, daily_dir=daily_dir)
+
+    assert "### Configured Repositories" in briefing
+    assert "repo-a: owner/repo-a" in briefing
+    assert briefing.index("### Active Projects") < briefing.index("### Configured Repositories")
+    assert briefing.index("### Configured Repositories") < briefing.index("### Urgents")
+
+
 def test_goal_names_extraction() -> None:
     names = _extract_goal_names(SAMPLE_GOALS)
     assert "YourBusiness Revenue" in names

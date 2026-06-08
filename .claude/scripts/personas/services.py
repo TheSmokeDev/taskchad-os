@@ -631,6 +631,20 @@ def _resolve_profile_config_path(profile_name: str) -> Path:
     return paths["state"].parent / "config.yaml"
 
 
+def get_profile_config_path(profile_name: str | None = None) -> Path:
+    """Return the existing profile-owned ``config.yaml`` path."""
+    actual = profile_name if profile_name is not None else _activity.get_active_profile_name()
+    return _resolve_profile_config_path(actual)
+
+
+def read_profile_config(profile_name: str | None = None, *, strict: bool = False) -> dict[str, Any]:
+    """Read the profile-owned ``config.yaml`` using the canonical YAML reader."""
+    path = get_profile_config_path(profile_name)
+    if strict:
+        return _read_yaml_strict(path)
+    return _read_yaml_safe(path)
+
+
 def _read_persisted_port(config_path: Path, service: str) -> int | None:
     """Read ``ports.<service>`` from ``$HOMIE_HOME/config.yaml``; None if absent."""
     if not config_path.is_file():

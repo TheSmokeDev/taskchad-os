@@ -3052,5 +3052,69 @@ def archon_status(json_mode):
             # R3 NM-minor: status is diagnostic. Do NOT exit 1 here.
 
 
+@main.group()
+def repositories():
+    """Validate profile-owned repository config."""
+    pass
+
+
+def _load_repository_report():
+    from repository_config import load_repository_config
+
+    return load_repository_config()
+
+
+@repositories.command("status")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def repositories_status(json_mode):
+    """Show profile-owned repository config status."""
+    report = _load_repository_report()
+    if json_mode:
+        click.echo(json_mod.dumps(report.to_dict(), indent=2))
+        return
+
+    state = "enabled" if report.enabled else "disabled"
+    click.echo(f"Repositories: {state}")
+    click.echo(f"Profile: {report.profile}")
+    exists = "present" if report.config_exists else "missing"
+    click.echo(f"Config: {report.config_path} ({exists})")
+    click.echo(f"Valid: {'yes' if report.valid else 'no'}")
+    if report.enabled and report.items:
+        click.echo(f"Configured: {len(report.items)}")
+        for item in report.items:
+            archon = "yes" if item.archon_enabled else "no"
+            click.echo(
+                f"  - {item.slug}: {item.github_repo} "
+                f"(branch={item.default_branch}, dispatch={item.dispatch_mode}, "
+                f"archon={archon})"
+            )
+    if report.errors:
+        click.echo("Errors:")
+        for error in report.errors:
+            click.echo(f"  - {error}")
+    if report.warnings:
+        click.echo("Warnings:")
+        for warning in report.warnings:
+            click.echo(f"  - {warning}")
+
+
+@repositories.command("validate")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def repositories_validate(json_mode):
+    """Validate profile-owned repository config."""
+    report = _load_repository_report()
+    if json_mode:
+        click.echo(json_mod.dumps(report.to_dict(), indent=2))
+    elif report.valid:
+        state = "enabled" if report.enabled else "disabled"
+        click.echo(f"Repository config valid ({state}; {len(report.items)} configured).")
+    else:
+        click.echo("Repository config invalid:", err=True)
+        for error in report.errors:
+            click.echo(f"  - {error}", err=True)
+    if not report.valid:
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()
