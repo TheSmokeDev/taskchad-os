@@ -179,7 +179,10 @@ async def test_teamroom_runtime_command_persists_requested_runtime_lane(
     adapter = _RecordingAdapter()
 
     incoming = IncomingMessage(
-        text="/teamroom --runtime --lane generic_runtime How should the team prioritize the next release?",
+        text=(
+            "/teamroom --allow-live-agent-run --runtime --lane generic_runtime "
+            "How should the team prioritize the next release?"
+        ),
         user=User(Platform.CLI, "cli-user", "User"),
         channel=Channel(Platform.CLI, "cli-test", is_dm=True),
         platform=Platform.CLI,

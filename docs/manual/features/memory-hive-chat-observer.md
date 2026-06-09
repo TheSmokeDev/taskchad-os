@@ -2,7 +2,7 @@
 
 Status: active baseline
 Owner: Python memory/brain APIs, chat router, and dashboard views
-Last updated: 2026-06-07
+Last updated: 2026-06-08
 
 ## What It Does
 
@@ -24,7 +24,7 @@ Python-owned chat router used by CLI and channel adapters.
 
 | Layer | Files |
 |---|---|
-| Python/runtime | `.claude/scripts/dashboard_api.py`, memory/recall modules under `.claude/scripts/` and `.claude/chat/` |
+| Python/runtime | `.claude/scripts/dashboard_api.py`, `.claude/hooks/session-end-flush.py`, `.claude/scripts/memory_flush.py`, `.claude/scripts/entity_extractor.py`, `.claude/scripts/vault_lint.py`, memory/recall modules under `.claude/scripts/` and `.claude/chat/` |
 | Hono/dashboard server | `dashboard/server/src/routes/memories.ts`, `dashboard/server/src/routes/brain.ts`, `dashboard/server/src/routes/hive-mind.ts`, `dashboard/server/src/routes/conversation.ts`, `dashboard/server/src/routes.ts` |
 | Dashboard web | `dashboard/web/src/pages/Memories.tsx`, `dashboard/web/src/pages/HiveMind.tsx`, `dashboard/web/src/pages/Chat.tsx`, graph components/hooks |
 | Tests | `dashboard/web/src/__tests__/memory-graph.test.tsx`, `dashboard/web/src/__tests__/brain-graph-3d.test.tsx`, `dashboard/web/src/__tests__/chat.test.tsx`, `dashboard/web/src/__tests__/chat-stream.test.ts`, `dashboard/server/src/__tests__/brain.test.ts`, `dashboard/server/src/__tests__/conversation.test.ts`, SSE/token-hardening tests |
@@ -41,6 +41,11 @@ Python-owned chat router used by CLI and channel adapters.
 - SSE query tokens are limited to the SSE route contract and must be scrubbed.
 - Graph/list views must use scoped API contracts, not ad hoc vault mutation.
 - Memory writes belong to canonical memory APIs and cognition policy gates.
+- `/clear` session-end flush admits any session with at least two readable
+  conversation turns; `memory_flush.py` remains the semantic save/drop gate.
+- Vault `compile`, `backfill`, and `sweep` refuse source Markdown missing
+  `tags` or `date` frontmatter before writing concept pages, build logs,
+  indexes, source `related:` updates, or reindex side effects.
 
 ## How To Run It
 
@@ -67,6 +72,13 @@ npm run typecheck
 Run the matching `.claude/scripts/tests/test_dashboard_api.py` cases when API
 shapes change.
 
+Memory flush and vault frontmatter tests:
+
+```powershell
+cd <repo>\.claude\scripts
+uv run pytest tests/test_memory_flush_gate.py tests/test_entity_extractor.py tests/test_vault_lint.py tests/test_chat_lifecycle_hooks.py tests/test_repository_memory.py tests/test_url_fetch.py -q
+```
+
 Dashboard chat write-path tests:
 
 ```powershell
@@ -82,6 +94,11 @@ npm --prefix dashboard/web test -- src/__tests__/chat.test.tsx src/__tests__/cha
 
 ## Latest Live Proof
 
+- Date: 2026-06-08
+- Local memory/frontmatter proof: focused memory/frontmatter tests passed; adjacent
+  lifecycle, vault lint, repository-memory prompt, URL ingest, and concept
+  drafter compile tests passed. No Telegram/Discord restart or public export
+  was included.
 - Date: 2026-06-07
 - Dashboard chat reliability pass ran on isolated ports `45139/33157`.
 - `/chat` sent a real model-backed `/linkedin ... Do not post.` command

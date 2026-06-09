@@ -314,6 +314,62 @@ def status(json_mode):
         _print_profile_lifecycle_contract(lifecycle)
 
 
+@main.group("live-safety")
+def live_safety_group():
+    """Inspect the live agent/factory opt-in contract."""
+    pass
+
+
+@live_safety_group.command("proof")
+@click.option("--allow-live-agent-run", is_flag=True, default=False, help="Explicitly opt in for this gate-only proof.")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def live_safety_proof(allow_live_agent_run, json_mode):
+    """Gate-only proof for the live execution contract.
+
+    This command does not run an agent, executor, browser workflow, direct
+    integration, or Cabinet turn. It only exercises the shared live gate.
+    """
+    from orchestration.live_safety import (
+        LiveExecutionRefused,
+        require_live_agent_run,
+    )
+
+    try:
+        status = require_live_agent_run(
+            "gate-only proof command",
+            explicit_opt_in=allow_live_agent_run,
+        )
+    except LiveExecutionRefused as exc:
+        if json_mode:
+            click.echo(
+                json_mod.dumps(
+                    {
+                        "success": False,
+                        "allowed": False,
+                        "error": str(exc),
+                        "proof": "gate-only; no live action executed",
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            click.echo(str(exc), err=True)
+            click.echo("Proof boundary: gate-only; no live action executed.", err=True)
+        sys.exit(1)
+
+    payload = {
+        "success": True,
+        "allowed": True,
+        "live_execution": status.to_dict(),
+        "proof": "gate-only; no live action executed",
+    }
+    if json_mode:
+        click.echo(json_mod.dumps(payload, indent=2))
+        return
+    click.echo("Live agent/factory gate allowed for this proof command.")
+    click.echo("Proof boundary: gate-only; no live action executed.")
+
+
 def _print_profile_lifecycle_contract(contract: dict) -> None:
     """Human-readable rendering of the F5 lifecycle contract block."""
     click.echo("\nProfile lifecycle:")
@@ -428,6 +484,7 @@ def doctor():
     click.echo(f"Cognition: {'active' if report.cognition_available else 'unavailable'}")
     _print_cognitive_loop(report.cognitive_loop)
     _print_browser_readiness(report.browser)
+    _print_live_execution(report.live_execution)
     click.echo(f"Sessions: {report.sessions_active} active")
     if report.clear_lifecycle_recent_failures:
         click.echo(
@@ -586,8 +643,20 @@ def convoy_show(convoy_id, json_mode):
 
 @convoy.command("dispatch")
 @click.argument("subtask_id", type=int)
-def convoy_dispatch(subtask_id):
+@click.option("--allow-live-agent-run", is_flag=True, default=False, help="Explicitly opt in to live agent/factory execution.")
+def convoy_dispatch(subtask_id, allow_live_agent_run):
     """Dispatch a ready subtask for execution."""
+    from orchestration.live_safety import LiveExecutionRefused, require_live_agent_run
+
+    try:
+        require_live_agent_run(
+            "convoy dispatch",
+            explicit_opt_in=allow_live_agent_run,
+        )
+    except LiveExecutionRefused as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
     _, cs, _ = _get_orchestration_services()
     try:
         cs.dispatch_subtask(subtask_id)
@@ -1007,6 +1076,7 @@ def team_ping(team_id, agent_id):
 @click.option("--executor-command", default="git_status", help="Approved executor command preset")
 @click.option("--executor-cwd", default=None, help="Optional executor working directory")
 @click.option("--complete-on-executor-success", is_flag=True, default=False, help="Complete subtask after successful executor command")
+@click.option("--allow-live-agent-run", is_flag=True, default=False, help="Explicitly opt in to live agent/factory execution.")
 @click.option("--json", "json_mode", is_flag=True, help="JSON output")
 def team_tick(
     team_id,
@@ -1018,9 +1088,11 @@ def team_tick(
     executor_command,
     executor_cwd,
     complete_on_executor_success,
+    allow_live_agent_run,
     json_mode,
 ):
     """Run one autonomous team scheduler tick."""
+    from orchestration.live_safety import LiveExecutionRefused, require_live_agent_run
     from orchestration.observability import orchestration_span, update_observation
     from orchestration.team_loop import TeamTickService, tick_result_to_dict
 
@@ -1035,6 +1107,7 @@ def team_tick(
             "execute_running": execute_running,
             "executor_command": executor_command,
             "complete_on_executor_success": complete_on_executor_success,
+            "live_agent_opt_in": allow_live_agent_run,
             "surface": "cli",
         },
         trace_metadata={"surface": "cli", "feature_phase": 9, "team_id": team_id},
@@ -1042,6 +1115,10 @@ def team_tick(
     ):
         db, _ts, _ms = _get_team_services()
         try:
+            require_live_agent_run(
+                "team tick",
+                explicit_opt_in=allow_live_agent_run,
+            )
             result = TeamTickService(db).run_team_tick(
                 team_id,
                 agent_id=agent_id,
@@ -1053,8 +1130,20 @@ def team_tick(
                 executor_cwd=executor_cwd,
                 complete_on_executor_success=complete_on_executor_success,
             )
-        except ValueError as e:
-            click.echo(f"Error: {e}", err=True)
+        except (LiveExecutionRefused, ValueError) as e:
+            if json_mode:
+                click.echo(
+                    json_mod.dumps(
+                        {
+                            "success": False,
+                            "error": str(e),
+                            "live_agent_run_allowed": False,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                click.echo(f"Error: {e}", err=True)
             sys.exit(1)
         finally:
             db.close()
@@ -1125,6 +1214,7 @@ def _clip_team_room_cli_text(text: str, *, max_chars: int = 1800) -> str:
 @click.option("--max-rounds", default=None, type=int, help="Cross-talk rounds; >1 enables facilitated V2")
 @click.option("--meeting-mode", default=None, help="classic_boardroom or facilitated_boardroom")
 @click.option("--v2", "use_v2", is_flag=True, default=False, help="Run the facilitated V2 meeting")
+@click.option("--allow-live-agent-run", is_flag=True, default=False, help="Explicitly opt in to live agent/factory execution.")
 @click.option("--json", "json_mode", is_flag=True, help="JSON output")
 @click.argument("goal_words", nargs=-1)
 def team_room_run(
@@ -1137,10 +1227,12 @@ def team_room_run(
     max_rounds,
     meeting_mode,
     use_v2,
+    allow_live_agent_run,
     json_mode,
     goal_words,
 ):
     """Run a Homie-native team room workflow."""
+    from orchestration.live_safety import LiveExecutionRefused, require_live_agent_run
     from orchestration.observability import orchestration_span, update_observation
     from orchestration.team_room import (
         TeamRoomWorkflowService,
@@ -1165,6 +1257,7 @@ def team_room_run(
             "use_runtime": use_runtime,
             "runtime_lane": runtime_lane,
             "max_rounds": max_rounds,
+            "live_agent_opt_in": allow_live_agent_run,
             "surface": "cli",
         },
         trace_metadata={"surface": "cli", "feature_phase": 12},
@@ -1172,6 +1265,10 @@ def team_room_run(
     ):
         db, _ts, _ms = _get_team_services()
         try:
+            require_live_agent_run(
+                "team room run",
+                explicit_opt_in=allow_live_agent_run,
+            )
             result = TeamRoomWorkflowService(db).run_team_room(
                 goal=goal_text,
                 workflow_id=workflow_id,
@@ -1185,8 +1282,20 @@ def team_room_run(
                     else meeting_mode
                 ),
             )
-        except ValueError as e:
-            click.echo(f"Error: {e}", err=True)
+        except (LiveExecutionRefused, ValueError) as e:
+            if json_mode:
+                click.echo(
+                    json_mod.dumps(
+                        {
+                            "success": False,
+                            "error": str(e),
+                            "live_agent_run_allowed": False,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                click.echo(f"Error: {e}", err=True)
             sys.exit(1)
         finally:
             db.close()
@@ -1321,6 +1430,8 @@ def _print_status_human(report):
             )
         )
 
+    _print_live_execution(report.live_execution)
+
     click.echo("\nRuntime providers:")
     for name, status in report.runtime_providers.items():
         click.echo(f"  {name}: {status}")
@@ -1359,6 +1470,24 @@ def _print_status_human(report):
             if count > 3:
                 preview += ", ..."
             click.echo(f"  | {name:<20} | {count:>5} | {preview[:30]:<30} |")
+
+
+def _print_live_execution(live_execution: dict[str, object]) -> None:
+    """Render the live agent/factory safety contract."""
+    if not live_execution:
+        return
+    mode = live_execution.get("mode", "unknown")
+    allowed = bool(live_execution.get("live_agent_run_allowed"))
+    sources = live_execution.get("opt_in_sources") or []
+    source_text = ", ".join(str(s) for s in sources) if sources else "none"
+    click.echo("\nLive agent/factory execution:")
+    click.echo(f"  Mode: {'live' if allowed else mode}")
+    click.echo(f"  Live opt-in: {'allowed' if allowed else 'refused by default'}")
+    click.echo(f"  Opt-in sources: {source_text}")
+    click.echo(
+        "  Default contract: "
+        f"{live_execution.get('default_contract', 'dry-run/read-only')}"
+    )
 
 
 def _print_browser_readiness(browser):

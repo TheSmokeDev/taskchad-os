@@ -41,29 +41,6 @@ Full-quality MP4 is attached on the
 
 ---
 
-## Battle-Tested In Real Operator Loops
-
-The Homie has been proven through repeated smoke and operator-loop testing, not
-just happy-path unit tests:
-
-- Fresh public Windows install smoke from a clean clone.
-- Real CLI chat proof after setup, using the same runtime path as channels.
-- Desktop package and portable-app smokes with Python/Hono lifecycle startup,
-  route checks, and clean shutdown.
-- Dashboard route smokes across `/mission`, `/chat`, `/mobile`, `/browser`,
-  `/work`, `/convoy`, and `/teams`.
-- Langfuse trace validation for the message lifecycle: session lookup, process
-  detection, recall, region assembly, runtime execution where supported, and
-  post-response.
-- Sanitizer/export leak checks before public release so private vault data,
-  local tokens, and machine-specific proof artifacts stay out of the framework.
-
-The public README keeps exact test-count badges out unless the active public
-suite has just been rerun. The current claim is deliberately narrower: an active
-suite, repeated smoke proof, and explicit proof boundaries.
-
----
-
 ## Quick Install
 
 ```bash

@@ -274,7 +274,10 @@ def test_team_room_api_creates_completed_workflow(tmp_path) -> None:
             client = TestClient(api_mod.app)
             response = client.post(
                 "/api/team/room/run",
-                json={"goal": "Prioritize the next product release"},
+                json={
+                    "goal": "Prioritize the next product release",
+                    "allow_live_agent_run": True,
+                },
             )
 
             assert response.status_code == 200
@@ -313,6 +316,7 @@ def test_team_room_api_runs_v2_facilitated_workflow(tmp_path) -> None:
                 json={
                     "goal": "Prioritize the next product release",
                     "v2": True,
+                    "allow_live_agent_run": True,
                 },
             )
 
@@ -352,7 +356,7 @@ def test_teamroom_chat_command_is_registered_and_runs(monkeypatch, tmp_path) -> 
         core_handlers.handle_teamroom(
             adapter=None,
             incoming=None,
-            args="How should the team prioritize the next release?",
+            args="--allow-live-agent-run How should the team prioritize the next release?",
         )
     )
 
@@ -371,7 +375,7 @@ def test_teamroom_chat_v2_command_runs_facilitated_meeting(monkeypatch, tmp_path
         core_handlers.handle_teamroom(
             adapter=None,
             incoming=None,
-            args="--v2 How should the team prioritize the next release?",
+            args="--allow-live-agent-run --v2 How should the team prioritize the next release?",
         )
     )
 
@@ -387,6 +391,22 @@ def test_teamroom_chat_v2_command_runs_facilitated_meeting(monkeypatch, tmp_path
     assert "Agreement:" in reply
     assert "Disagreement:" in reply
     assert "Final Team Room brief" in reply
+
+
+def test_teamroom_chat_command_refuses_without_live_opt_in(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(config, "ORCHESTRATION_DB_PATH", tmp_path / "teamroom_refusal.db")
+    monkeypatch.delenv("HOMIE_ALLOW_LIVE_AGENT_RUN", raising=False)
+
+    reply = asyncio.run(
+        core_handlers.handle_teamroom(
+            adapter=None,
+            incoming=None,
+            args="How should the team prioritize the next release?",
+        )
+    )
+
+    assert "Live agent/factory action refused" in reply
+    assert "chat /teamroom" in reply
 
 
 def test_teamroom_chat_runtime_command_uses_lane(monkeypatch, tmp_path) -> None:
@@ -413,7 +433,10 @@ def test_teamroom_chat_runtime_command_uses_lane(monkeypatch, tmp_path) -> None:
         core_handlers.handle_teamroom(
             adapter=None,
             incoming=None,
-            args="--runtime --lane generic_runtime How should the team prioritize the next release?",
+            args=(
+                "--allow-live-agent-run --runtime --lane generic_runtime "
+                "How should the team prioritize the next release?"
+            ),
         )
     )
 
@@ -438,6 +461,7 @@ def test_team_room_cli_run_json(monkeypatch, tmp_path) -> None:
             "run",
             "--goal",
             "Prioritize the next product release",
+            "--allow-live-agent-run",
             "--json",
         ],
     )
@@ -462,6 +486,7 @@ def test_team_room_cli_v2_run_json(monkeypatch, tmp_path) -> None:
             "--v2",
             "--goal",
             "Prioritize the next product release",
+            "--allow-live-agent-run",
             "--json",
         ],
     )

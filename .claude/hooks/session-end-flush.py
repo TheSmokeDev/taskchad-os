@@ -33,7 +33,7 @@ from shared import log_hook_execution  # noqa: E402
 # === Constants ===
 MAX_TURNS = 30
 MAX_CONTEXT_CHARS = 15_000
-MIN_TURNS_TO_FLUSH = 5  # Skip trivial sessions
+MIN_TURNS_TO_FLUSH = 2  # Admit short sessions; memory_flush.py is the semantic gate.
 
 
 def extract_text_from_content(content: object) -> str:

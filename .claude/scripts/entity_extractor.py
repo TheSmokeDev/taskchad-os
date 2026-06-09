@@ -95,6 +95,27 @@ class CompilationReport:
     entities_skipped: int = 0
 
 
+@dataclass(frozen=True)
+class VaultFrontmatterIssue:
+    """A source note frontmatter finding that blocks compilation writes."""
+
+    file: str
+    message: str
+
+
+class VaultFrontmatterError(ValueError):
+    """Raised when vault compilation would write from malformed source notes."""
+
+    def __init__(self, operation: str, issues: list[VaultFrontmatterIssue]):
+        self.operation = operation
+        self.issues = issues
+        preview = "; ".join(f"{issue.file}: {issue.message}" for issue in issues[:5])
+        extra = f"; +{len(issues) - 5} more" if len(issues) > 5 else ""
+        super().__init__(
+            f"{operation} blocked by source frontmatter gate: {preview}{extra}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Schema loading
 # ---------------------------------------------------------------------------
@@ -770,6 +791,65 @@ def _read_summary(md_file: Path) -> str | None:
     if m:
         return m.group(1).strip().strip('"').strip("'")
     return None
+
+
+def _display_source_path(source_path: Path, vault_dir: Path) -> str:
+    try:
+        resolved_source = source_path.resolve(strict=False)
+        resolved_vault = vault_dir.resolve(strict=False)
+        return str(resolved_source.relative_to(resolved_vault))
+    except ValueError:
+        return str(source_path)
+
+
+def _source_frontmatter_issues(source_path: Path, vault_dir: Path) -> list[VaultFrontmatterIssue]:
+    """Return frontmatter gate issues for an existing markdown source note."""
+    if source_path.suffix.lower() != ".md" or not source_path.exists():
+        return []
+
+    rel = _display_source_path(source_path, vault_dir)
+    try:
+        content = source_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return [VaultFrontmatterIssue(rel, f"Unreadable source note: {exc}")]
+
+    fm = re.match(r"^---\r?\n(.*?)\r?\n---", content, re.DOTALL)
+    if not fm:
+        return [VaultFrontmatterIssue(rel, "Missing frontmatter block")]
+
+    fm_text = fm.group(1)
+    issues: list[VaultFrontmatterIssue] = []
+    if not re.search(r"^tags:\s*\[[^\]]*\]", fm_text, re.MULTILINE):
+        issues.append(VaultFrontmatterIssue(rel, "Missing required field: tags"))
+    if not re.search(r"^date:\s*\d{4}-\d{2}-\d{2}\s*\r?$", fm_text, re.MULTILINE):
+        issues.append(VaultFrontmatterIssue(rel, "Missing required field: date"))
+    return issues
+
+
+def _enforce_source_frontmatter(
+    source_path: str | Path,
+    vault_dir: Path,
+    *,
+    operation: str,
+) -> None:
+    if not source_path:
+        return
+    issues = _source_frontmatter_issues(Path(source_path), vault_dir)
+    if issues:
+        raise VaultFrontmatterError(operation, issues)
+
+
+def _enforce_sources_frontmatter(
+    source_paths: list[Path],
+    vault_dir: Path,
+    *,
+    operation: str,
+) -> None:
+    issues: list[VaultFrontmatterIssue] = []
+    for source_path in source_paths:
+        issues.extend(_source_frontmatter_issues(source_path, vault_dir))
+    if issues:
+        raise VaultFrontmatterError(operation, issues)
 
 
 def create_concept_page(
@@ -1506,6 +1586,9 @@ def compile_entities(
     report.entities_skipped = len(entities) - len(eligible)
     report.entities_processed = len(eligible)
 
+    if eligible:
+        _enforce_source_frontmatter(source_path, vault_dir, operation=event_type)
+
     concept_names: list[str] = []
 
     for entity in eligible:
@@ -1637,6 +1720,7 @@ def backfill_vault(
     memory_dir: Path | None = None,
     skip_compiled: bool = True,
     dry_run: bool = False,
+    operation: str = "backfill",
 ) -> dict[str, int]:
     """Compile entities from all uncompiled vault notes.
 
@@ -1649,6 +1733,7 @@ def backfill_vault(
     # Load schema once for the entire backfill run
     schema = load_schema(vault_dir)
 
+    candidates: list[Path] = []
     for md_file in sorted(vault_dir.rglob("*.md")):
         # Skip infrastructure dirs
         rel_parts = md_file.relative_to(vault_dir).parts
@@ -1664,6 +1749,11 @@ def backfill_vault(
             totals["files_skipped"] += 1
             continue
 
+        candidates.append(md_file)
+
+    _enforce_sources_frontmatter(candidates, vault_dir, operation=operation)
+
+    for md_file in candidates:
         if dry_run:
             content = md_file.read_text(encoding="utf-8")
             entities = extract_entities_heuristic(content, str(md_file), schema=schema)
@@ -1710,7 +1800,13 @@ def sweep_uncompiled(
     Lighter than backfill — only processes notes that have zero concept page references.
     Designed to run on a schedule (e.g., nightly cron).
     """
-    return backfill_vault(vault_dir, memory_dir, skip_compiled=True, dry_run=dry_run)
+    return backfill_vault(
+        vault_dir,
+        memory_dir,
+        skip_compiled=True,
+        dry_run=dry_run,
+        operation="sweep",
+    )
 
 
 def find_archivable(vault_dir: Path, days_threshold: int = 180) -> list[Path]:
@@ -1963,7 +2059,11 @@ def main() -> None:
             print("Error: provide either source file or --entities JSON", file=sys.stderr)
             sys.exit(1)
 
-        report = compile_entities(entities, source_path, vault_dir, memory_dir)
+        try:
+            report = compile_entities(entities, source_path, vault_dir, memory_dir)
+        except VaultFrontmatterError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         _print_report(report)
 
     elif args.command == "contradictions":
@@ -1981,11 +2081,15 @@ def main() -> None:
         vault_dir = Path(args.vault_dir)
         memory_dir = Path(args.memory_dir) if args.memory_dir else None
         print(f"{'[DRY RUN] ' if args.dry_run else ''}Backfilling vault: {vault_dir}")
-        totals = backfill_vault(
-            vault_dir, memory_dir,
-            skip_compiled=not args.include_compiled,
-            dry_run=args.dry_run,
-        )
+        try:
+            totals = backfill_vault(
+                vault_dir, memory_dir,
+                skip_compiled=not args.include_compiled,
+                dry_run=args.dry_run,
+            )
+        except VaultFrontmatterError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         print(f"\n=== Backfill {'Preview' if args.dry_run else 'Complete'} ===")
         print(f"Files scanned: {totals['files_scanned']}")
         print(f"Files compiled: {totals['files_compiled']}")
@@ -1999,7 +2103,11 @@ def main() -> None:
         vault_dir = Path(args.vault_dir)
         memory_dir = Path(args.memory_dir) if args.memory_dir else None
         print(f"{'[DRY RUN] ' if args.dry_run else ''}Sweeping for uncompiled notes: {vault_dir}")
-        totals = sweep_uncompiled(vault_dir, memory_dir, dry_run=args.dry_run)
+        try:
+            totals = sweep_uncompiled(vault_dir, memory_dir, dry_run=args.dry_run)
+        except VaultFrontmatterError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         print(f"\n=== Sweep {'Preview' if args.dry_run else 'Complete'} ===")
         print(f"Files scanned: {totals['files_scanned']}")
         print(f"Files compiled: {totals['files_compiled']}")
@@ -2098,7 +2206,11 @@ def main() -> None:
             memory_dir = Path(args.memory_dir) if args.memory_dir else vault_dir
             md_text = md_path.read_text(encoding="utf-8")
             ents = extract_entities_heuristic(md_text, str(md_path))
-            report = compile_entities(ents, str(md_path), vault_dir, memory_dir)
+            try:
+                report = compile_entities(ents, str(md_path), vault_dir, memory_dir)
+            except VaultFrontmatterError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
             print(
                 f"Compiled '{content.title or md_path.stem}': "
                 f"{len(report.pages_created)} created, "

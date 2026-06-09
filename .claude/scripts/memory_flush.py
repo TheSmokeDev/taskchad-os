@@ -67,6 +67,10 @@ def build_memory_flush_prompt(context_content: str, *, test_mode: bool = False) 
 {dry_run_note}
 Review the conversation context below and respond with a concise summary of important items.
 Do NOT use any tools — just return plain text.
+Judge value semantically, not by transcript length. A short two-turn exchange can
+be worth saving when it contains a decision, durable fact, repo/worktree status,
+lesson, or follow-up. A longer exchange should still be dropped when it is only
+routine chatter, tool noise, or clarification.
 
 Format your response as bullet points covering:
 - Decisions made and their rationale

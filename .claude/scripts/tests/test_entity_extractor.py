@@ -14,9 +14,11 @@ from entity_extractor import (
     Contradiction,
     DetectedConnection,
     ExtractedEntity,
+    VaultFrontmatterError,
     _classify_connection,
     _rotate_build_log_if_needed,
     archive_concept,
+    backfill_vault,
     check_contradictions,
     compile_entities,
     create_concept_page,
@@ -26,6 +28,7 @@ from entity_extractor import (
     generate_index,
     insert_contradiction_callouts,
     load_schema,
+    sweep_uncompiled,
     update_concept_page,
     update_source_frontmatter,
 )
@@ -412,6 +415,8 @@ class TestCompileEntities:
         source = vault / "SOURCE.md"
         source.write_text(textwrap.dedent("""\
         ---
+        tags: [documentation]
+        date: 2026-04-07
         related:
           - "[[Existing]]"
         ---
@@ -480,13 +485,108 @@ class TestCompileEntities:
         vault.mkdir()
 
         source = vault / "SOURCE.md"
-        source.write_text("---\nrelated:\n  - \"[[Existing]]\"\n---\n# Doc\n")
+        source.write_text(
+            "---\ntags: [documentation]\ndate: 2026-04-07\n"
+            "related:\n  - \"[[Existing]]\"\n---\n# Doc\n"
+        )
 
         entities = [ExtractedEntity(name="New Concept", confidence=0.9)]
         compile_entities(entities, str(source), vault)
 
         content = source.read_text()
         assert "[[NEW-CONCEPT]]" in content
+
+    def test_blocks_existing_source_missing_frontmatter_before_writes(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        source = vault / "SOURCE.md"
+        source.write_text("# Source\n\n## Durable Memory Gate\n", encoding="utf-8")
+
+        entities = [ExtractedEntity(name="Durable Memory Gate", confidence=0.9)]
+
+        with pytest.raises(VaultFrontmatterError) as excinfo:
+            compile_entities(entities, str(source), vault)
+
+        assert "compile blocked by source frontmatter gate" in str(excinfo.value)
+        assert "SOURCE.md: Missing frontmatter block" in str(excinfo.value)
+        assert not (vault / "concepts").exists()
+
+    def test_blocks_existing_source_missing_date_before_writes(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        source = vault / "SOURCE.md"
+        source.write_text(
+            "---\ntags: [documentation]\n---\n# Source\n\n## Durable Memory Gate\n",
+            encoding="utf-8",
+        )
+
+        entities = [ExtractedEntity(name="Durable Memory Gate", confidence=0.9)]
+
+        with pytest.raises(VaultFrontmatterError) as excinfo:
+            compile_entities(entities, str(source), vault)
+
+        assert "SOURCE.md: Missing required field: date" in str(excinfo.value)
+        assert not (vault / "concepts").exists()
+
+
+class TestVaultCompilationFrontmatterGate:
+    def _write_note(self, vault: Path, rel_path: str, content: str) -> Path:
+        path = vault / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_backfill_refuses_invalid_source_before_partial_writes(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        self._write_note(
+            vault,
+            "GOOD.md",
+            textwrap.dedent("""\
+            ---
+            tags: [documentation]
+            date: 2026-04-07
+            related:
+            ---
+            # Good Source
+
+            ## Durable Memory Gate
+
+            The **Durable Memory Gate** keeps compile output trustworthy.
+            """),
+        )
+        self._write_note(
+            vault,
+            "BAD.md",
+            "# Bad Source\n\n## Frontmatter Enforcement\n\n"
+            "This source is long enough to enter backfill and must block writes.\n"
+            "The **Frontmatter Enforcement** concept should not compile.\n",
+        )
+
+        with pytest.raises(VaultFrontmatterError) as excinfo:
+            backfill_vault(vault, skip_compiled=False)
+
+        assert "backfill blocked by source frontmatter gate" in str(excinfo.value)
+        assert "BAD.md: Missing frontmatter block" in str(excinfo.value)
+        assert not (vault / "concepts").exists()
+
+    def test_sweep_reports_its_own_frontmatter_gate(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        self._write_note(
+            vault,
+            "BAD.md",
+            "# Bad Source\n\n## Sweep Frontmatter Gate\n\n"
+            "This source is long enough to enter sweep and must block writes.\n"
+            "The **Sweep Frontmatter Gate** concept should not compile.\n",
+        )
+
+        with pytest.raises(VaultFrontmatterError) as excinfo:
+            sweep_uncompiled(vault)
+
+        assert "sweep blocked by source frontmatter gate" in str(excinfo.value)
+        assert "BAD.md: Missing frontmatter block" in str(excinfo.value)
+        assert not (vault / "concepts").exists()
 
 
 # ---------------------------------------------------------------------------

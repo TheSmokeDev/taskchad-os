@@ -216,6 +216,35 @@ class TestDiagnosticsReport:
         assert report.runtime_generic_text_route
         assert report.runtime_generic_tool_route
 
+    def test_collect_diagnostics_reports_live_execution_dry_run(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import diagnostics as diagnostics_module
+
+        monkeypatch.delenv("HOMIE_ALLOW_LIVE_AGENT_RUN", raising=False)
+        monkeypatch.setattr(diagnostics_module, "CHAT_DB_PATH", Path("missing.db"))
+
+        report = collect_diagnostics()
+
+        assert report.live_execution["mode"] == "dry_run"
+        assert report.live_execution["live_agent_run_allowed"] is False
+        assert report.live_execution["default_contract"] == "dry-run/read-only"
+        assert "browserops_workflow_policy" in report.live_execution["lower_level_gates"]
+
+    def test_collect_diagnostics_reports_live_execution_env_opt_in(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import diagnostics as diagnostics_module
+
+        monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
+        monkeypatch.setattr(diagnostics_module, "CHAT_DB_PATH", Path("missing.db"))
+
+        report = collect_diagnostics()
+
+        assert report.live_execution["mode"] == "live"
+        assert report.live_execution["live_agent_run_allowed"] is True
+        assert report.live_execution["opt_in_sources"] == ["HOMIE_ALLOW_LIVE_AGENT_RUN"]
+
     def test_collect_diagnostics_sessions(self):
         report = collect_diagnostics()
         assert isinstance(report.sessions_active, int)

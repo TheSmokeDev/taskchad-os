@@ -206,7 +206,10 @@ def test_team_executor_step_api(client, tmp_path):
             "subtask_id": subtask_id,
         },
     )
-    client.post(f"/api/convoy/{convoy_id}/subtask/{subtask_id}/dispatch", json={})
+    client.post(
+        f"/api/convoy/{convoy_id}/subtask/{subtask_id}/dispatch",
+        json={"allow_live_agent_run": True},
+    )
     client.post(
         f"/api/convoy/{convoy_id}/subtask/{subtask_id}/transition",
         json={"status": "running"},
@@ -217,6 +220,7 @@ def test_team_executor_step_api(client, tmp_path):
         json={
             "agent_id": "frontend-worker",
             "command_key": "git_status",
+            "allow_live_agent_run": True,
         },
     )
 

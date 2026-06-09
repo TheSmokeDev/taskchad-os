@@ -54,6 +54,9 @@ class DiagnosticsReport:
     runtime_provider_details: dict[str, str] = field(default_factory=dict)
     runtime_auth_issues: dict[str, str] = field(default_factory=dict)
 
+    # Live agent/factory execution safety
+    live_execution: dict[str, object] = field(default_factory=dict)
+
     # Browser readiness
     browser: dict[str, object] = field(default_factory=dict)
 
@@ -89,6 +92,7 @@ def collect_diagnostics() -> DiagnosticsReport:
     _check_recall(report)
     _check_memory_db(report)
     _check_runtime(report)
+    _check_live_execution(report)
     _check_browser(report)
     _check_sessions(report)
     _check_clear_lifecycle(report)
@@ -286,6 +290,26 @@ def _runtime_auth_issue(provider: str, detail: str) -> str | None:
         "`uv run thehomie doctor`. Detail: "
         + _short_detail(detail)
     )
+
+
+def _check_live_execution(report: DiagnosticsReport) -> None:
+    """Expose the framework-wide live agent/factory opt-in state."""
+    try:
+        from orchestration.live_safety import live_execution_status
+
+        report.live_execution = live_execution_status().to_dict()
+    except Exception as exc:
+        report.live_execution = {
+            "mode": "unknown",
+            "live_agent_run_allowed": False,
+            "default_contract": "dry-run/read-only",
+            "refusal_message": _short_detail(str(exc)),
+            "lower_level_gates": [
+                "browserops_workflow_policy",
+                "direct_integration_capability_policy",
+                "cabinet_tool_policy",
+            ],
+        }
 
 
 def _check_browser(report: DiagnosticsReport) -> None:

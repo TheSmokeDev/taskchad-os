@@ -822,6 +822,7 @@ export function Teams() {
         agent_id: loopAgent,
         use_runtime: loopUseRuntime,
         complete: loopComplete,
+        allow_live_agent_run: true,
       });
       setLastLoopStep(result);
       pushToast({ tone: 'success', title: 'Loop step ran', description: `${result.agent_id}: ${result.action}` });
@@ -846,6 +847,7 @@ export function Teams() {
         execute_running: tickExecuteRunning,
         executor_command: tickExecutorCommand,
         complete_on_executor_success: tickCompleteOnExecutorSuccess,
+        allow_live_agent_run: true,
       });
       setLastTeamTick(result);
       pushToast({ tone: result.error ? 'error' : 'success', title: 'Team tick ran', description: `${result.selected_action}: ${result.reason}` });
@@ -869,6 +871,7 @@ export function Teams() {
         command_key: executorCommand,
         cwd: executorCwd.trim() || null,
         complete_on_success: executorCompleteOnSuccess,
+        allow_live_agent_run: true,
       });
       setLastExecutorStep(result);
       pushToast({
@@ -905,6 +908,7 @@ export function Teams() {
         use_runtime: teamRoomUseRuntime,
         runtime_lane: teamRoomUseRuntime ? (teamRoomRuntimeLane.trim() || null) : null,
         run_tick: operatingRoomRunTick,
+        allow_live_agent_run: true,
       });
       setLastOperatingRoomRun(result);
       setLastTeamRoomRun(result.team_room);

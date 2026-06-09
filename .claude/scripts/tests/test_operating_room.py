@@ -75,7 +75,10 @@ def test_operating_room_api_returns_proof_packet(tmp_path) -> None:
         try:
             response = TestClient(api_mod.app).post(
                 "/api/team/operating-room/run",
-                json={"goal": "Launch the Homie Operating Room demo"},
+                json={
+                    "goal": "Launch the Homie Operating Room demo",
+                    "allow_live_agent_run": True,
+                },
             )
 
             assert response.status_code == 200

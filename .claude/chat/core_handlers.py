@@ -1542,7 +1542,7 @@ def _parse_teamtick_args(args: str) -> tuple[int, dict[str, Any]] | str:
     usage = (
         "Usage: /teamtick <team_id> [--agent <id>] [--runtime] [--lane <lane>] "
         "[--complete] [--execute-running] [--command <preset>] [--cwd <path>] "
-        "[--complete-on-success]"
+        "[--complete-on-success] [--allow-live-agent-run]"
     )
     try:
         tokens = shlex.split(args or "")
@@ -1564,6 +1564,7 @@ def _parse_teamtick_args(args: str) -> tuple[int, dict[str, Any]] | str:
         "executor_command": "git_status",
         "executor_cwd": None,
         "complete_on_executor_success": False,
+        "allow_live_agent_run": False,
     }
     i = 1
     while i < len(tokens):
@@ -1582,6 +1583,10 @@ def _parse_teamtick_args(args: str) -> tuple[int, dict[str, Any]] | str:
             continue
         if token in ("--complete-on-success", "--complete-on-executor-success"):
             opts["complete_on_executor_success"] = True
+            i += 1
+            continue
+        if token == "--allow-live-agent-run":
+            opts["allow_live_agent_run"] = True
             i += 1
             continue
         if token in (
@@ -1667,8 +1672,18 @@ async def handle_teamtick(
 
     from config import ORCHESTRATION_DB_PATH, ensure_directories
     from orchestration.db import OrchestrationDB
+    from orchestration.live_safety import LiveExecutionRefused, require_live_agent_run
     from orchestration.observability import init_orchestration_observability
     from orchestration.team_loop import TeamTickService
+
+    allow_live_agent_run = bool(opts.pop("allow_live_agent_run", False))
+    try:
+        require_live_agent_run(
+            "chat /teamtick",
+            explicit_opt_in=allow_live_agent_run,
+        )
+    except LiveExecutionRefused as exc:
+        return str(exc)
 
     ensure_directories()
     init_orchestration_observability()
@@ -1683,7 +1698,8 @@ async def handle_teamtick(
 def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
     usage = (
         "Usage: /teamroom [--v2] [--runtime] [--lane <lane>] "
-        "[--workflow growth_boardroom] [--context <text>] [--max-rounds <n>] <goal>"
+        "[--workflow growth_boardroom] [--context <text>] [--max-rounds <n>] "
+        "[--allow-live-agent-run] <goal>"
     )
     try:
         tokens = shlex.split(args or "")
@@ -1698,6 +1714,7 @@ def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
         "runtime_lane": None,
         "max_rounds": None,
         "meeting_mode": None,
+        "allow_live_agent_run": False,
     }
     goal_parts: list[str] = []
     i = 0
@@ -1709,6 +1726,10 @@ def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
             continue
         if token == "--v2":
             opts["meeting_mode"] = "facilitated_boardroom"
+            i += 1
+            continue
+        if token == "--allow-live-agent-run":
+            opts["allow_live_agent_run"] = True
             i += 1
             continue
         if token in (
@@ -1823,8 +1844,18 @@ async def handle_teamroom(
 
     from config import ORCHESTRATION_DB_PATH, ensure_directories
     from orchestration.db import OrchestrationDB
+    from orchestration.live_safety import LiveExecutionRefused, require_live_agent_run
     from orchestration.observability import init_orchestration_observability
     from orchestration.team_room import TeamRoomWorkflowService
+
+    allow_live_agent_run = bool(parsed.pop("allow_live_agent_run", False))
+    try:
+        require_live_agent_run(
+            "chat /teamroom",
+            explicit_opt_in=allow_live_agent_run,
+        )
+    except LiveExecutionRefused as exc:
+        return str(exc)
 
     def _run_team_room() -> Any:
         ensure_directories()

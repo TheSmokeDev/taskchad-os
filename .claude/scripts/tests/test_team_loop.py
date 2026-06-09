@@ -286,6 +286,7 @@ def test_teamtick_chat_command_is_registered_and_parses_options():
         "executor_command": "git_status",
         "executor_cwd": None,
         "complete_on_executor_success": False,
+        "allow_live_agent_run": False,
     }
 
     parsed = _parse_teamtick_args(
@@ -298,6 +299,11 @@ def test_teamtick_chat_command_is_registered_and_parses_options():
     assert opts["execute_running"] is True
     assert opts["executor_command"] == "git_status"
     assert opts["complete_on_executor_success"] is True
+
+    parsed = _parse_teamtick_args("9 --allow-live-agent-run")
+    assert not isinstance(parsed, str)
+    _team_id, opts = parsed
+    assert opts["allow_live_agent_run"] is True
 
     reply = _format_team_tick_reply(
         SimpleNamespace(
@@ -339,6 +345,21 @@ def test_teamtick_chat_command_is_registered_and_parses_options():
     )
     assert "Action: `executor_step`" in executor_reply
     assert "Executor: `git_status`; exit `0`; success `True`" in executor_reply
+
+
+def test_teamtick_chat_command_refuses_without_live_opt_in(monkeypatch):
+    import asyncio
+
+    from core_handlers import handle_teamtick
+
+    monkeypatch.delenv("HOMIE_ALLOW_LIVE_AGENT_RUN", raising=False)
+
+    reply = asyncio.run(
+        handle_teamtick(adapter=None, incoming=None, args="9 --agent sales-worker")
+    )
+
+    assert "Live agent/factory action refused" in reply
+    assert "chat /teamtick" in reply
 
 
 @pytest.fixture
@@ -403,6 +424,7 @@ def test_team_loop_step_api(client):
         json={
             "agent_id": "marketing-worker",
             "reply_body": "Positioning is ready for sales.",
+            "allow_live_agent_run": True,
         },
     )
 
@@ -456,7 +478,7 @@ def test_team_tick_api(client):
 
     response = client.post(
         f"/api/team/{team_id}/tick",
-        json={"complete_running": False},
+        json={"complete_running": False, "allow_live_agent_run": True},
     )
 
     assert response.status_code == 200

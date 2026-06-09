@@ -19,9 +19,10 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 
 @pytest.fixture
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
     """Each test gets an isolated orchestration DB via tmp_path."""
     db_path = tmp_path / "test_orch_api.db"
+    monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     with patch("config.ORCHESTRATION_DB_PATH", db_path):
         # Must re-import to pick up the patched config
         import importlib
@@ -177,6 +178,47 @@ def test_dispatch_subtask(client):
     data = r.json()
     assert data["status"] == "accepted"
     assert data["executor_name"] == "local"
+
+
+def test_dispatch_subtask_refuses_without_live_opt_in(client, monkeypatch):
+    monkeypatch.delenv("HOMIE_ALLOW_LIVE_AGENT_RUN", raising=False)
+    create = client.post("/api/convoy", json={"title": "Dispatch", "created_by": "sb"})
+    cid = create.json()["convoy"]["id"]
+    subs = client.post(
+        f"/api/convoy/{cid}/subtasks",
+        json={
+            "subtasks": [{"title": "Dispatchable"}],
+        },
+    ).json()
+    sid = subs[0]["id"]
+
+    r = client.post(f"/api/convoy/{cid}/subtask/{sid}/dispatch", json={})
+
+    assert r.status_code == 403
+    detail = r.json()["detail"]
+    assert "Live agent/factory action refused" in detail
+    assert "HOMIE_ALLOW_LIVE_AGENT_RUN=1" in detail
+
+
+def test_dispatch_subtask_allows_per_request_live_opt_in(client, monkeypatch):
+    monkeypatch.delenv("HOMIE_ALLOW_LIVE_AGENT_RUN", raising=False)
+    create = client.post("/api/convoy", json={"title": "Dispatch", "created_by": "sb"})
+    cid = create.json()["convoy"]["id"]
+    subs = client.post(
+        f"/api/convoy/{cid}/subtasks",
+        json={
+            "subtasks": [{"title": "Dispatchable"}],
+        },
+    ).json()
+    sid = subs[0]["id"]
+
+    r = client.post(
+        f"/api/convoy/{cid}/subtask/{sid}/dispatch",
+        json={"allow_live_agent_run": True},
+    )
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "accepted"
 
 
 def test_dispatch_unknown_executor_returns_400(client):

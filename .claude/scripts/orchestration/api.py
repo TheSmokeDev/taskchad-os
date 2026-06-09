@@ -22,6 +22,7 @@ from orchestration.capability_gateway import collect_capability_gateway_status
 from orchestration.convoy_service import ConvoyService
 from orchestration.db import OrchestrationDB
 from orchestration.executor import ExecutorRegistry, create_default_registry
+from orchestration.live_safety import LiveExecutionRefused, require_live_agent_run
 from orchestration.mailbox_service import MailboxService
 from orchestration.models import (
     AddSubtaskInput,
@@ -137,6 +138,13 @@ def _require_subtask_in_convoy(convoy_id: int, subtask_id: int):
     return subtask
 
 
+def _require_live_agent_action(action: str, allow_live_agent_run: bool) -> None:
+    try:
+        require_live_agent_run(action, explicit_opt_in=allow_live_agent_run)
+    except LiveExecutionRefused as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
 # ── Pydantic request models ──────────────────────────────────────────────
 
 
@@ -181,6 +189,7 @@ class DispatchBody(BaseModel):
     paperclip_issue_id: str | None = None
     executor_name: str | None = None
     team_id: int | None = None
+    allow_live_agent_run: bool = False
 
 
 class ProgressBody(BaseModel):
@@ -263,6 +272,7 @@ class TeamRoomRunBody(BaseModel):
     max_rounds: int | None = None
     meeting_mode: str | None = None
     v2: bool = False
+    allow_live_agent_run: bool = False
 
 
 class OperatingRoomRunBody(BaseModel):
@@ -280,6 +290,7 @@ class OperatingRoomRunBody(BaseModel):
     tick_executor_command: str = "git_status"
     tick_executor_cwd: str | None = None
     tick_complete_on_executor_success: bool = False
+    allow_live_agent_run: bool = False
 
 
 class TeamLoopStepBody(BaseModel):
@@ -289,6 +300,7 @@ class TeamLoopStepBody(BaseModel):
     use_runtime: bool = False
     runtime_lane: str | None = None
     complete: bool = False
+    allow_live_agent_run: bool = False
 
 
 class TeamTickBody(BaseModel):
@@ -300,6 +312,7 @@ class TeamTickBody(BaseModel):
     executor_command: str = "git_status"
     executor_cwd: str | None = None
     complete_on_executor_success: bool = False
+    allow_live_agent_run: bool = False
 
 
 class TeamExecutorStepBody(BaseModel):
@@ -309,6 +322,7 @@ class TeamExecutorStepBody(BaseModel):
     cwd: str | None = None
     timeout_seconds: int | None = None
     complete_on_success: bool = False
+    allow_live_agent_run: bool = False
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────
@@ -477,10 +491,15 @@ def dispatch_subtask(
             "subtask_id": subtask_id,
             "team_id": body.team_id if body else None,
             "requested_backend": body.executor_name if body else None,
+            "live_agent_opt_in": body.allow_live_agent_run if body else False,
         },
         trace_metadata={"surface": surface, "feature_phase": 6},
         expected_exceptions=(HTTPException,),
     ):
+        _require_live_agent_action(
+            "convoy subtask dispatch",
+            body.allow_live_agent_run if body else False,
+        )
         _require_subtask_in_convoy(convoy_id, subtask_id)
         executor_name = body.executor_name if body else None
         team_id = body.team_id if body else None
@@ -770,10 +789,12 @@ def run_team_room(request: Request, body: TeamRoomRunBody):
             "use_runtime": body.use_runtime,
             "runtime_lane": body.runtime_lane,
             "max_rounds": body.max_rounds,
+            "live_agent_opt_in": body.allow_live_agent_run,
         },
         trace_metadata={"surface": surface, "feature_phase": 12},
         expected_exceptions=(HTTPException,),
     ):
+        _require_live_agent_action("team room run", body.allow_live_agent_run)
         try:
             result = TeamRoomWorkflowService(_db).run_team_room(
                 goal=body.goal,
@@ -823,10 +844,12 @@ def run_operating_room(request: Request, body: OperatingRoomRunBody):
             "use_runtime": body.use_runtime,
             "runtime_lane": body.runtime_lane,
             "run_tick": body.run_tick,
+            "live_agent_opt_in": body.allow_live_agent_run,
         },
         trace_metadata={"surface": surface, "feature_phase": 13},
         expected_exceptions=(HTTPException,),
     ):
+        _require_live_agent_action("operating room run", body.allow_live_agent_run)
         try:
             result = OperatingRoomService(_db).run_operating_room(
                 goal=body.goal,
@@ -1009,10 +1032,12 @@ def run_team_loop_step(team_id: int, request: Request, body: TeamLoopStepBody):
             "use_runtime": body.use_runtime,
             "runtime_lane": body.runtime_lane,
             "complete": body.complete,
+            "live_agent_opt_in": body.allow_live_agent_run,
         },
         trace_metadata={"surface": surface, "feature_phase": 8, "team_id": team_id},
         expected_exceptions=(HTTPException,),
     ):
+        _require_live_agent_action("team loop step", body.allow_live_agent_run)
         try:
             result = TeamLoopService(_db).run_member_step(
                 team_id,
@@ -1062,10 +1087,12 @@ def run_team_tick(team_id: int, request: Request, body: TeamTickBody | None = No
             "execute_running": payload_body.execute_running,
             "executor_command": payload_body.executor_command,
             "complete_on_executor_success": payload_body.complete_on_executor_success,
+            "live_agent_opt_in": payload_body.allow_live_agent_run,
         },
         trace_metadata={"surface": surface, "feature_phase": 9, "team_id": team_id},
         expected_exceptions=(HTTPException,),
     ):
+        _require_live_agent_action("team tick", payload_body.allow_live_agent_run)
         try:
             result = TeamTickService(_db).run_team_tick(
                 team_id,
@@ -1111,10 +1138,12 @@ def run_team_executor_step(team_id: int, request: Request, body: TeamExecutorSte
             "subtask_id": body.subtask_id,
             "command_key": body.command_key,
             "complete_on_success": body.complete_on_success,
+            "live_agent_opt_in": body.allow_live_agent_run,
         },
         trace_metadata={"surface": surface, "feature_phase": 10, "team_id": team_id},
         expected_exceptions=(HTTPException,),
     ):
+        _require_live_agent_action("team executor step", body.allow_live_agent_run)
         try:
             result = TeamExecutorService(_db).run_executor_step(
                 team_id,

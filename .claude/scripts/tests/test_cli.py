@@ -91,6 +91,38 @@ class TestCLIHelp:
         result = runner.invoke(cli_main, ["doctor", "--help"])
         assert result.exit_code == 0
 
+    def test_live_safety_proof_refuses_without_opt_in(self, monkeypatch):
+        from click.testing import CliRunner
+
+        monkeypatch.delenv("HOMIE_ALLOW_LIVE_AGENT_RUN", raising=False)
+        runner = CliRunner()
+        result = runner.invoke(cli_main, ["live-safety", "proof", "--json"])
+
+        payload = json.loads(result.output)
+        assert result.exit_code == 1
+        assert payload["success"] is False
+        assert payload["allowed"] is False
+        assert "Live agent/factory action refused" in payload["error"]
+        assert payload["proof"] == "gate-only; no live action executed"
+
+    def test_live_safety_proof_allows_explicit_flag(self, monkeypatch):
+        from click.testing import CliRunner
+
+        monkeypatch.delenv("HOMIE_ALLOW_LIVE_AGENT_RUN", raising=False)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli_main,
+            ["live-safety", "proof", "--allow-live-agent-run", "--json"],
+        )
+
+        payload = json.loads(result.output)
+        assert result.exit_code == 0
+        assert payload["success"] is True
+        assert payload["allowed"] is True
+        assert payload["live_execution"]["mode"] == "live"
+        assert payload["live_execution"]["opt_in_sources"] == ["explicit_flag"]
+        assert payload["proof"] == "gate-only; no live action executed"
+
     def test_desktop_dry_run_shows_local_stack(self):
         from click.testing import CliRunner
 
