@@ -17,7 +17,7 @@ Within that framework, behavior is organized as vertical slices. Group behavior 
 | `.claude/scripts/orchestration/` | Convoy/mailbox service layer, executor adapters, local API (port 4322), contract |
 | `.claude/scripts/integrations/` | Direct platform API integrations |
 | `.claude/scripts/integrations/finance_*` | Personal finance: bank sync, budget queries, Teller/Plaid clients |
-| `.claude/scripts/dashboard_*.py` + `dashboard/server/` + `dashboard/web/` | Dashboard slice — framework HTTP API on port 4322 (dashboard_api.py + dashboard_db.py + dashboard_bot_lifecycle.py), Hono thin proxy on port 3141 (dashboard/server/), Vite+Preact web bundle (dashboard/web/) |
+| `.claude/scripts/dashboard_*.py` + `dashboard/server/` + `dashboard/web/` | Dashboard slice — Python framework HTTP API (port 4322), Hono thin proxy (port 3141), Vite+Preact web bundle. Deep context: `dashboard/README.md` (canonical dashboard doc — components, ports, auth, routes) |
 | `.claude/scripts/security/` | Cross-cutting security primitives — `patterns.py` (SECRET_PREFIXES single-source-of-truth, ≥27 vendor key prefixes, length-desc sorted), `kill_switches.py` (operator-toggleable refusal counters, KillSwitchDisabled exception, /api/health rich snapshot), `redact.py` (Hermes verbatim port — log-message secret scrubbing at all log call sites; default ON via `_REDACT_ENABLED` import-time snapshot; lazy `__getattr__` re-export so non-redact consumers don't snapshot config-dependent state). Module-only re-exports enforce Rule 3 across consumers (sanitize.py, runtime/subprocess_env.py, lane_router/registry/recall_service, heartbeat HARO, engine/memory_*, voice cascade, persona lifecycle/dashboard_api). PRD-8 Phase 7a introduced kill_switches/patterns; Phase 7b commit-1 added redact.py + voice + persona_mutation/persona_operations switches; Phase 7b commit-2 added cabinet kill-switches at chat-process chokepoints (handle_cabinet/standup/discuss in core_handlers.py) for symmetric refusal counting alongside Phase 5a's API-process gate. |
 | `vault/memory/` | Canonical memory substrate |
 | `mission-control/src/app/api/` | Hub / Mission Control control-plane APIs |
@@ -48,6 +48,10 @@ Important:
 - provider identity and auth method are separate concerns
 - voice STT/TTS stays separate from the main reasoning runtime
 - business behavior and slash-command semantics must not depend on one vendor-specific auth path
+
+**Lane-First Routing:**
+
+Tasks route by lane first — `claude_native` vs `generic_runtime` — and only then by a provider inside the lane. Business behavior, slash-command semantics, and scheduled tasks stay lane-agnostic: the assembled prompt/request IS the task, and it must survive a Claude → Codex → Gemini fallback. Provider-specific model economy (e.g. a heartbeat-only Codex model override) belongs in provider profiles or per-request configuration, never in global chat/model state.
 
 **Claude Agent SDK + Max subscription — policy and why the lanes stay separate:**
 
@@ -116,6 +120,8 @@ Key implications:
 ### Canonical Memory Contract
 
 The Obsidian vault remains the source of truth. `memory.db` and `chat.db` are derived state and caches.
+
+The derived-state framing is an instance of Rule 2 (meta/cache is derived state, never source of truth) — canonical rule text: `vault/memory/MEMORY.md` → Reference → Global Rules.
 
 Preserve these behaviors when changing execution:
 

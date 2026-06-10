@@ -44,6 +44,27 @@ cd .claude/scripts && uv run python ../chat/main.py --test
 
 **Config:** `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` in `.claude/scripts/.env`.
 
+### Import Convention — Flat sys.path (decided 2026-06-10, #53)
+
+The chat slice uses **flat sys.path imports** (`import voice`, `import config`,
+`from voice_markers import ...`) — the launchers put `.claude/chat/` itself on
+`sys.path` instead of packaging the slice. Consequences:
+
+- **No static import resolver can see intra-slice edges.** IDEs, graphify, rope,
+  and dead-code analyzers report false orphans here — `voice.py` shows zero
+  cross-file edges despite all five adapters importing it via
+  `import voice as voice_mod`.
+- **A "dead code" verdict inside `.claude/chat/` requires grep confirmation**,
+  never resolver/graph output alone. The retirement standard is the #54 bar:
+  no importers + no listener + no scheduler entry + no consumers.
+- Same invisibility class: `cli_entry.py` is reached through the `thehomie`
+  console-script entry point (`.claude/scripts/pyproject.toml`), which AST
+  tooling cannot see either.
+
+Decision: **document-only** (this section). Package-ifying the slice (relative
+imports + `__init__` wiring) would touch every chat file plus the launch
+scripts for zero behavioral gain. Revisit only if a refactor forces it.
+
 ### BrowserOps Slash Commands
 
 BrowserOps is the visible-browser specialist surface for requests that need the existing local Chrome/Chromium CDP session. Load `docs/browserops-agent-browser-manual.md` before changing BrowserOps, direct `agent-browser`, LinkedIn browser, or dashboard `/browser` behavior.

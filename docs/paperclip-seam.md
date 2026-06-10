@@ -172,6 +172,8 @@ future `homie-paperclip-adapter` Python package can be authored against
 a stable contract. The Homie commits to maintaining the surface below
 across minor versions; breaking changes ship a new major.
 
+> Canonical doc for the forward-only-additive policy rationale (what counts as an allowed vs breaking change): [`docs/mc-profile-contract.md`](mc-profile-contract.md) § 7 — this seam keeps only its own envelope field tables and exit codes.
+
 ### 4.1 Surface The Homie commits to
 
 | Surface                                  | Location                                         | Stability |
@@ -249,8 +251,7 @@ adds a real `import paperclip` to core.
 - This document does NOT link to private files (PRDs, AGENTS.md,
   `vault/memory/...`, PRPs). When private context matters, the
   relevant text is quoted in-place above.
-- The Mission Control / `mc-profile-contract.md` companion document is
-  intentionally NOT shipped as part of this phase — Mission Control is
-  being retired in favor of a frontend swap (PRD-8). When that lands,
-  a new document will define the GUI-side contract; the wire format
-  defined here is unchanged.
+- The companion `docs/mc-profile-contract.md` (PRD-8 dashboard HTTP API
+  contract) now defines the GUI-side contract and owns the
+  forward-only-additive policy rationale (§ 7). The wire format defined
+  here is unchanged.

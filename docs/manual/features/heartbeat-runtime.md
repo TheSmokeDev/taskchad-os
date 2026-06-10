@@ -64,9 +64,9 @@ route prefers Codex and can fall back to Gemini. If the operator pins Gemini,
 heartbeat runs through Gemini. If the operator pins Claude native, heartbeat
 runs through the Claude SDK lane.
 
-The heartbeat must stay lane-first and provider-agnostic at the routing layer.
-Provider-specific model economy belongs in provider-specific profile or request
-configuration, not in global chat model mutation.
+> Canonical doc: Lane-First Routing in `.claude/sections/01_architecture.md`
+> § Runtime And Auth Boundary — this page keeps only the heartbeat-specific
+> lane behavior above.
 
 ## Safety Boundaries
 

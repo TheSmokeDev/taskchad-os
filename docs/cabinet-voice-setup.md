@@ -296,6 +296,7 @@ These are tracked as separate sub-PRDs.
 ## Architecture references
 
 * Upstream port sources: `https://github.com/seandearnaley/claudeclaw-os` — `warroom/{server,router,personas,agent_bridge,config}.py` + `src/warroom-html.ts` (BSD-2 attributed in `cabinet/voice/static/client.bundle.js` header).
+* Canonical doc for the general ClaudeClaw lineage/attribution story: `dashboard/README.md` § Dashboard Lineage — this page keeps only the voice (war room) port sources above.
 * In-repo Phase 4 cascade: `.claude/chat/voice.py`.
 * In-repo Phase 5a brain: `.claude/scripts/cabinet/text_orchestrator.py`.
 * In-repo Phase 5b HTTP client: `.claude/scripts/integrations/cabinet_api.py`.

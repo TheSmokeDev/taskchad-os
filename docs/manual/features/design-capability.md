@@ -44,9 +44,9 @@ Flags: `--system <slug>` · `--direction <id>` · `--tone <tone>` · `--accent "
 2. **Assemble one self-contained brief** (`build_design_brief`): the request +
    `USAGE` → `DESIGN.md` → `tokens.css` (pasted byte-for-byte) → components
    summary + anti-slop rules + a 5-dimensional self-critique + the exact output
-   path. All of it goes in `RuntimeRequest.prompt` (lane-agnostic — it survives a
-   Claude → Codex → Gemini fallback; the brief is the task, not a Claude-only
-   side channel).
+   path. All of it goes in `RuntimeRequest.prompt`, lane-agnostic per
+   Lane-First Routing in `.claude/sections/01_architecture.md` § Runtime And
+   Auth Boundary — this page keeps only what goes into the brief.
 3. **Run through the runtime** (`run_with_runtime_lanes`, `TOOL_REASONING`,
    tools `Read/Write/Edit/Glob/Grep`, `cwd` = the artifact dir). Whatever
    coding-agent lane is live becomes the design engine.
