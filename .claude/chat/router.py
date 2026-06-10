@@ -33,6 +33,26 @@ DEFAULT_ENGINE_TIMEOUT_SECONDS = 180.0
 ENGINE_TIMEOUT_SECONDS: float | None = None
 PREFETCH_ONLY_INTENTS = {"browserops"}
 
+_LINKEDIN_PROFILE_MARKERS = (
+    "linkedin profile",
+    "linked in profile",
+    "my linkedin",
+    "my linked in",
+    "linkedin account",
+    "linked in account",
+)
+_LINKEDIN_PROFILE_OPEN_MARKERS = (
+    "open",
+    "open up",
+    "pull up",
+    "bring up",
+    "load",
+    "go to",
+    "show me",
+    "take me to",
+    "look at",
+)
+
 
 def _engine_timeout_seconds() -> float:
     """Return the configured whole-turn engine timeout in seconds."""
@@ -74,6 +94,19 @@ def _incoming_display_text(incoming: Any) -> str:
         if isinstance(candidate, str) and candidate.strip():
             return candidate
     return getattr(incoming, "text", "") or ""
+
+
+def _linkedin_profile_natural_action(text: str) -> str | None:
+    """Map explicit LinkedIn profile browser requests to the safe router command."""
+
+    lowered = " ".join((text or "").lower().split())
+    if "linkedin" not in lowered and "linked in" not in lowered:
+        return None
+    if not any(marker in lowered for marker in _LINKEDIN_PROFILE_MARKERS):
+        return None
+    if any(marker in lowered for marker in _LINKEDIN_PROFILE_OPEN_MARKERS):
+        return "open"
+    return None
 
 
 class ChatRouter:
@@ -565,6 +598,41 @@ class ChatRouter:
                 )
                 self._persist_router_turn(incoming, reply)
                 return
+
+            linkedin_profile_action = _linkedin_profile_natural_action(text)
+            if linkedin_profile_action and "linkedin_profile" in router_commands:
+                user_role = getattr(incoming, "user_role", "admin")
+                min_role = get_command_min_role("linkedin_profile")
+                role_level = {"viewer": 0, "operator": 1, "admin": 2}
+                if role_level.get(user_role, 0) < role_level.get(min_role, 0):
+                    await adapter.send(
+                        OutgoingMessage(
+                            text=(
+                                "Permission denied: /linkedin_profile "
+                                f"requires {min_role} role."
+                            ),
+                            channel=incoming.channel,
+                            thread=incoming.thread,
+                        )
+                    )
+                    return
+
+                reply = await self.manager.dispatch(
+                    "linkedin_profile",
+                    adapter,
+                    incoming,
+                    linkedin_profile_action,
+                )
+                if reply is not None:
+                    await adapter.send(
+                        OutgoingMessage(
+                            text=reply,
+                            channel=incoming.channel,
+                            thread=incoming.thread,
+                        )
+                    )
+                    self._persist_router_turn(incoming, reply)
+                    return
 
             intents = self.manager.detect_intents(text)
             if intents:

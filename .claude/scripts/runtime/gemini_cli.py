@@ -22,7 +22,7 @@ from .errors import (
     RuntimeUnsupportedCapabilityError,
 )
 from .profiles import RuntimeProfile
-from .prompt_builder import render_cli_prompt
+from .prompt_builder import GEMINI_GUIDANCE, render_cli_prompt
 
 
 class GeminiCliRuntime:
@@ -63,7 +63,7 @@ class GeminiCliRuntime:
                 f"Check the local Gemini CLI login. Detail: {status.detail}"
             )
 
-        prompt_text = render_cli_prompt(request)
+        prompt_text = render_cli_prompt(request, model_guidance=GEMINI_GUIDANCE)
         command = self.profile.command or "gemini"
         # Windows npm shims are .CMD files — resolve full path for subprocess
         resolved = shutil.which(command) or command
@@ -138,9 +138,10 @@ class GeminiCliRuntime:
 def _candidate_models(profile: RuntimeProfile, request: RuntimeRequest) -> tuple[str, ...]:
     """Resolve the ordered Gemini model ladder for a request."""
 
-    # Use the profile's own model — request.model is provider-specific
-    # (e.g. claude-sonnet-4-6 won't work on Gemini)
-    primary = request.fallback_model or profile.model
+    # Use the profile's own model — request.model AND request.fallback_model are
+    # provider-specific (e.g. claude-sonnet-4-6 / gpt-4.1-mini won't work on
+    # Gemini), so the gemini lane ignores them and uses its resolved model.
+    primary = profile.model
     ladder = list(profile.candidate_models) or [profile.model]
     return tuple(
         model

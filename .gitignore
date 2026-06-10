@@ -72,6 +72,10 @@ PRPs/planning/.clutch-tmp/
 /concepts/
 /connections/
 
+# Graphify knowledge-graph output — graph.json can embed vault/doc content;
+# stays local. Sanitizer sources from git ls-files, so gitignore = export-proof.
+graphify-out/
+
 # Dashboard slice (PRD-8 Phase 3)
 dashboard/server/dist/
 dashboard/server/node_modules/

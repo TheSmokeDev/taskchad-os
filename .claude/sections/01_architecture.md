@@ -60,6 +60,41 @@ The `claude_native` lane runs through the Claude Agent SDK backed by a personal 
 Do not switch the `claude_native` lane to an API key path — that loses the Max plan compute budget and agentic tool access. Do not try to add API-key-based features (e.g. `cache_control` breakpoints) to the Agent SDK path — the SDK goes through `cli.js` and does not expose those knobs to the caller. Keep the two lanes clean and separate.
 
 
+### Default-Deny Mutation Policy
+
+Any surface that can mutate the outside world — post, send, edit, connect, DM,
+write to an external account — ships **default-denied** and only acts through
+an explicit, named gate with an audit trail. Discussing an action is never
+authorization to run it; a new capability is OFF until an operator (or a
+dedicated write PRP) turns the specific gate on.
+
+The pattern: default-deny → explicit capability gate → audit row.
+
+Existing implementations (greppable examples of the invariant):
+
+1. **Integration actions** — `require_integration_action()` + the
+   `IntegrationAction` policy in `.claude/scripts/integrations/capabilities.py`
+   gate every mutating direct-integration entrypoint (send, post, archive,
+   write). See `docs/manual/features/direct-integration-capability-contract.md`.
+2. **Capability Gateway** — `.claude/scripts/orchestration/capability_gateway.py`
+   (operating-room surface). See `docs/manual/features/capability-gateway.md`.
+3. **BrowserOps** — the dashboard `/browser` viewer is read-only; navigation
+   goes through registered workflow gates with audit rows; browser write
+   actions (post/edit/DM/connect) are default-denied. See
+   `docs/manual/features/browserops-browser-viewer.md`.
+4. **LinkedIn write-gates** — `/linkedin_profile edit` is expected-blocked until
+   a dedicated write PRP lands; the nudge job DRAFTS and QUEUES only, never
+   posts or connects. See `docs/linkedin-automation-playbook.md`.
+5. **Cabinet participant turns** — room personas default-deny tools and answer
+   directly. See `docs/manual/features/cabinet-rooms.md`.
+
+Same family: the live-lane opt-in gate (dry-run is the default), operator
+kill-switches (`.claude/scripts/security/kill_switches.py`), and the skill
+discussion/action gates (talking about a skill is not authorization to run it).
+
+When adding a new mutating surface, implement this invariant from day one:
+default-deny, explicit gate, audit row.
+
 ### Framework vs. Adapter Boundary
 
 The Homie is provider-agnostic. Claude Code, Codex, Gemini, Kimi, OpenRouter — they're interchangeable batteries. The framework doesn't care which one is running.

@@ -200,3 +200,53 @@ async def test_gemini_cli_runtime_advances_to_next_model_on_retryable(
     assert attempts == ["gemini-3-flash-preview", "gemini-3-pro-preview"]
     assert result.model == "gemini-3-pro-preview"
     assert result.text == "GEMINI_LADDER_OK"
+
+
+@pytest.mark.asyncio
+async def test_gemini_cli_runtime_injects_gemini_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The Gemini lane must ride brevity discipline into the prompt (the only
+    output-control vector — the gemini CLI has no max-tokens flag)."""
+    runtime = gemini_cli.GeminiCliRuntime(_gemini_profile(key_prefix="primary"))
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        gemini_cli,
+        "gemini_auth_status",
+        lambda _profile=None: AuthProfileStatus(True, 'Authenticated via "oauth-personal"'),
+    )
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                captured["input"] = input
+                return (b"OK\n", b"")
+
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    await runtime.run(RuntimeRequest(prompt="yo", cwd=tmp_path, task_name="summary"))
+
+    sent = captured["input"].decode("utf-8")
+    assert "Gemini operational directives" in sent
+    assert "Conciseness" in sent
+
+
+def test_gemini_default_ladder_excludes_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GEMINI_MODEL_LADDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_MODEL", raising=False)
+    ladder = profiles._gemini_model_ladder()
+    assert ladder[0] == "gemini-2.5-flash"
+    assert all("preview" not in model for model in ladder)
+
+
+def test_gemini_primary_model_is_ga(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_MODEL", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GEMINI_MODEL", raising=False)
+    assert profiles._primary_model_for_provider("gemini-cli") == "gemini-2.5-flash"

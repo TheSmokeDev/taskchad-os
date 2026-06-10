@@ -24,6 +24,9 @@ machine-specific proof artifacts stay outside the public manual.
    Queue/Steer follow-up controls.
 5. Read [Runtime Status And Model Control](features/runtime-status-model-control.md)
    before changing provider, lane, or quiet JSON behavior.
+6. Read [Heartbeat Runtime](features/heartbeat-runtime.md) before changing
+   proactive background reasoning, heartbeat model overrides, or scheduler
+   behavior.
 
 ## Ecosystem Positioning
 
@@ -71,9 +74,11 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Cabinet Rooms | Shipped baseline, manual exists | [cabinet-rooms](features/cabinet-rooms.md) | `/cabinet`, `/standup`, `/discuss`, `/cabinet` dashboard |
 | Cabinet Voice | Single-session lifecycle controls shipped | [cabinet-voice](features/cabinet-voice.md) | `/cabinet voice`, `/voices`, `/api/cabinet/voice/*` |
 | Cognitive Loop | Shipped/live-runtime proven; dashboard route hidden from public nav | [jarvis-cognitive-loop](features/jarvis-cognitive-loop.md) | status/doctor, scheduled loops |
+| Heartbeat Runtime | Active baseline, runtime contract corrected | [heartbeat-runtime](features/heartbeat-runtime.md) | `heartbeat.py`, `HEARTBEAT.md`, scheduled loop |
 | Direct Integration Capability Contract | Shipped, policy-enforced | [direct-integration-capability-contract](features/direct-integration-capability-contract.md) | direct integration wrapper, `/send`, status/doctor |
 | Memory, Knowledge Graph, And Dashboard Chat | Active baseline, dashboard chat reliability proven | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
 | Scheduled Jobs, Settings, And Audit | Active baseline | [scheduled-settings-audit](features/scheduled-settings-audit.md) | `/scheduled`, `/settings`, `/audit` |
+| Native Design (`/design`) | Phase 1 + B1 shipped, live-proven | [design-capability](features/design-capability.md) | `/design`, `/design system <slug>` |
 
 ### Existing Deep Public Manuals
 

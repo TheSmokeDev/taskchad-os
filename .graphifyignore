@@ -1,0 +1,105 @@
+# Graphify scope control — pass 1 is CODE-ONLY (local tree-sitter AST, zero API calls).
+# .graphifyignore takes priority over .gitignore, so big excludes are duplicated here.
+
+# === Personal / private data — never index ===
+TheHomie/
+PRPs/
+PRDs/
+drafts/
+proof-package/
+example-vault/
+.claude/handoffs/
+.claude/projects/
+.claude/research/
+.claude/reviews/
+.claude/data/
+.env
+.env.*
+*.env
+master.env*
+google_token*.json
+google_credentials.json
+*.pem
+*.key
+*.p8
+*.p12
+.claude/settings*.json
+teller.zip
+
+# === Out-of-scope surfaces (separate repos / deploy templates) ===
+mission-control/
+deploy/
+templates/
+.refs/
+
+# === Build artifacts / caches / heavy dirs ===
+# NOTE: .graphifyignore REPLACES .gitignore (no merge) — big .gitignore entries duplicated here.
+.tmp/
+tmp/
+.agents/
+.archon/
+.claude/worktrees/
+.claude/plans/
+.claude/discussions/
+.claude/debug/
+.claude/screenshots/
+node_modules/
+dist/
+out/
+*.bundle.js
+*.min.js
+*.min.css
+# Locally synced vault skills (canonical copies live outside this checkout) + vendored reference code
+.claude/skills/vault/
+.claude/skills/vault-*/
+references/
+.venv/
+venv/
+__pycache__/
+.worktrees/
+.codex/
+.codex-worktrees/
+.codex-remote-attachments/
+.omx/
+.omc/
+.context/
+data/
+graphify-out/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.lock
+*.pid
+*.onnx
+
+# === Docs & media — excluded by default (these route through LLM extraction; code does not) ===
+*.md
+*.mdx
+*.txt
+*.rst
+*.yaml
+*.yml
+*.html
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.svg
+*.mp4
+*.mov
+*.mp3
+*.wav
+*.csv
+*.zip
+*.excalidraw
+
+# === Pass 2 re-includes: framework docs ONLY (the "why" layer) ===
+# Negations cannot reach dir-excluded trees (TheHomie/, PRPs/ etc.) — vault stays out.
+!CLAUDE.md
+!README.md
+!.claude/sections/*.md
+!docs/*.md
+!docs/**/*.md

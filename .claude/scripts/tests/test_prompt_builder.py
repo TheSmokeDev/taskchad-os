@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from runtime.base import RuntimeRequest
 from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
-from runtime.prompt_builder import INTEGRATION_HINTS, render_cli_prompt
+from runtime.prompt_builder import GEMINI_GUIDANCE, INTEGRATION_HINTS, render_cli_prompt
 
 
 def test_tool_reasoning_includes_preamble_and_hints() -> None:
@@ -106,3 +106,40 @@ def test_integration_hints_constant_matches_expected_content() -> None:
     assert "Search Console" in INTEGRATION_HINTS
     assert "Analytics" in INTEGRATION_HINTS
     assert "Memory search" in INTEGRATION_HINTS
+
+
+def test_text_preamble_has_output_discipline() -> None:
+    req = RuntimeRequest(prompt="yo", cwd=".", task_name="t", capability=TEXT_REASONING)
+    result = render_cli_prompt(req)
+    assert "Match the length of your response" in result
+
+
+def test_tool_preamble_has_output_discipline() -> None:
+    req = RuntimeRequest(prompt="go", cwd=".", task_name="t", capability=TOOL_REASONING)
+    result = render_cli_prompt(req, framework_tool_map="")
+    assert "Match the length of your response" in result
+
+
+def test_model_guidance_appended_on_text_path() -> None:
+    req = RuntimeRequest(prompt="yo", cwd=".", task_name="t", capability=TEXT_REASONING)
+    result = render_cli_prompt(req, model_guidance="MODELGUIDE_MARKER")
+    assert "MODELGUIDE_MARKER" in result
+
+
+def test_model_guidance_appended_on_tool_path() -> None:
+    req = RuntimeRequest(prompt="go", cwd=".", task_name="t", capability=TOOL_REASONING)
+    result = render_cli_prompt(
+        req, framework_tool_map="", model_guidance="MODELGUIDE_MARKER"
+    )
+    assert "MODELGUIDE_MARKER" in result
+
+
+def test_model_guidance_absent_by_default() -> None:
+    req = RuntimeRequest(prompt="yo", cwd=".", task_name="t", capability=TEXT_REASONING)
+    result = render_cli_prompt(req)
+    assert "Gemini operational directives" not in result
+
+
+def test_gemini_guidance_constant_leads_with_conciseness() -> None:
+    assert "Gemini operational directives" in GEMINI_GUIDANCE
+    assert "Conciseness" in GEMINI_GUIDANCE

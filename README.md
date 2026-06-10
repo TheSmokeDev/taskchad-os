@@ -41,6 +41,29 @@ Full-quality MP4 is attached on the
 
 ---
 
+## Battle-Tested In Real Operator Loops
+
+The Homie has been proven through repeated smoke and operator-loop testing, not
+just happy-path unit tests:
+
+- Fresh public Windows install smoke from a clean clone.
+- Real CLI chat proof after setup, using the same runtime path as channels.
+- Desktop package and portable-app smokes with Python/Hono lifecycle startup,
+  route checks, and clean shutdown.
+- Dashboard route smokes across `/mission`, `/chat`, `/mobile`, `/browser`,
+  `/work`, `/convoy`, and `/teams`.
+- Langfuse trace validation for the message lifecycle: session lookup, process
+  detection, recall, region assembly, runtime execution where supported, and
+  post-response.
+- Sanitizer/export leak checks before public release so private vault data,
+  local tokens, and machine-specific proof artifacts stay out of the framework.
+
+The public README keeps exact test-count badges out unless the active public
+suite has just been rerun. The current claim is deliberately narrower: an
+active suite, repeated smoke proof, and explicit proof boundaries.
+
+---
+
 ## Quick Install
 
 ```bash
@@ -85,6 +108,8 @@ thehomie team list               # Inspect team sessions
 <tr><td><b>Gets smarter from experience</b></td><td>Per-turn auto-capture (6 regex triggers) → staging store → batch promotion in daily reflection. Auto-skill generation after 5+ tool calls. InferenceTracker with confidence decay and contradiction detection. Theory of mind built on USER.md. Human-gated amendment proposals can target SELF/SOUL/USER/MEMORY without auto-applying durable identity changes.</td></tr>
 <tr><td><b>One brain, six channels</b></td><td>Telegram, Slack, Discord, WhatsApp, Web relay, CLI — all enter through a single canonical ingress. One session model, one recall service, one runtime. Transport identity is separated from conversation identity so sessions survive reconnects.</td></tr>
 <tr><td><b>Any model, no lock-in</b></td><td>Claude SDK, OpenAI Codex, Gemini CLI, OpenRouter, OpenAI-compatible — with health-aware fallback, manual <code>/provider</code> + <code>/model</code> control, lane-first runtime (<code>selection.py</code>, <code>lane_router.py</code>), cost tracking, and automatic retry on transient failures.</td></tr>
+<tr><td><b>Many homies, one framework</b></td><td>Multi-persona roster — register specialized homies (a business homie, a finance homie, a sales homie), each with its own identity, memory, tools, and voice. Drop them in a Cabinet room and they debate, vote, and ship proof together, with roster and turn order owned by the framework, not improvised by the model.</td></tr>
+<tr><td><b>Watch the browser homie work</b></td><td>The browser homie drives a real visible Chrome session you watch live in the dashboard's read-only viewer — not a headless black box. Navigation goes through workflow gates with audit rows, and write actions like posting, editing, and DMs are default-denied until you greenlight them.</td></tr>
 <tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs for multi-subtask dependency tracking. Typed mailbox for agent-to-agent messaging. Team sessions with typed roles, backend fallback, and shared memory. All exposed via a local API on port 4322.</td></tr>
 <tr><td><b>Full observability</b></td><td>Every message → one nested Langfuse trace: session lookup → process detection → recall (tier + pipeline) → region assembly → runtime where supported → post-response. Cost, provider, model, and tool calls are tracked when the active runtime exposes them. Sentry/GlitchTip captures unexpected orchestration errors when a DSN is configured.</td></tr>
 </table>

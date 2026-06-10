@@ -23,6 +23,11 @@ See `.claude/sections/` for detailed documentation on each layer:
 | 05 | Platform integrations |
 | 08 | Observability (Langfuse) |
 
+Framework-wide security invariant: every surface that can mutate the outside
+world (post, send, edit, connect) ships **default-denied** behind an explicit
+capability gate with an audit trail — see "Default-Deny Mutation Policy" in
+`.claude/sections/01_architecture.md`.
+
 ## Configuration
 
 All configuration is via environment variables in `.claude/scripts/.env`.

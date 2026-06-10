@@ -98,7 +98,7 @@ GENERIC_PROVIDER_REGISTRY: dict[str, GenericProviderOverlay] = {
         auth_type="gemini",
         display_name="Gemini",
         model_env_var="SECOND_BRAIN_GEMINI_MODEL",
-        default_model="gemini-3-flash-preview",
+        default_model="gemini-2.5-flash",
         text_route_priority=3,
         tool_route_priority=1,
         aliases=("gemini", "gemini-cli", "google"),
@@ -144,9 +144,10 @@ def _gemini_model_ladder(
         for part in os.getenv(env_var, "").split(",")
         if part.strip()
     ]
+    # gemini-2.5-* are reachable on the free oauth/Code-Assist tier the CLI uses.
+    # gemini-3.5-flash is GA but requires a paid Gemini API tier (returns 404 on
+    # the oauth lane), so it is opt-in via SECOND_BRAIN_GEMINI_MODEL, not a default.
     defaults = [
-        "gemini-3-flash-preview",
-        "gemini-3-pro-preview",
         "gemini-2.5-flash",
         "gemini-2.5-pro",
     ]

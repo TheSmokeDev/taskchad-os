@@ -78,6 +78,7 @@ from shared import (
 
 # Dedup configuration
 ALERT_TTL_HOURS = 8  # Hours before an alert expires from history
+DEFAULT_HEARTBEAT_CODEX_MODEL = "gpt-5.4-mini"
 
 BUSINESS_NAME = os.getenv("BUSINESS_NAME", "the business")
 BUSINESS_WEBSITE = os.getenv("BUSINESS_WEBSITE", os.getenv("BUSINESS_DOMAIN", ""))
@@ -978,6 +979,13 @@ def build_alert_entry(response_text: str, source_ids: list[str]) -> dict[str, st
     }
 
 
+def _heartbeat_codex_model() -> str | None:
+    """Return the Codex model override for heartbeat-only runtime calls."""
+
+    model = os.getenv("HEARTBEAT_CODEX_MODEL", DEFAULT_HEARTBEAT_CODEX_MODEL).strip()
+    return model or None
+
+
 # =============================================================================
 # HEARTBEAT THREAD TRACKING
 # =============================================================================
@@ -1151,6 +1159,15 @@ async def run_heartbeat(test_mode: bool = False) -> str | None:
     # Re-gather active drafts AFTER reconciliation + expiry so Claude only sees remaining ones
     active_drafts_ctx = gather_active_drafts_context()
 
+    heartbeat_codex_model = _heartbeat_codex_model()
+    if heartbeat_codex_model:
+        print(
+            f"[{now_local()}] Running heartbeat runtime reasoning "
+            f"(Codex model override: {heartbeat_codex_model})"
+        )
+    else:
+        print(f"[{now_local()}] Running heartbeat runtime reasoning")
+
     # Build the heartbeat prompt with pre-fetched context
     owner = OWNER_NAME or "the user"
     cognition_section = _assemble_heartbeat_cognition_section(MEMORY_DIR)
@@ -1272,6 +1289,7 @@ Your final text response goes directly to {owner}'s phone. Keep it to just bulle
                 cwd=PROJECT_ROOT,
                 task_name="heartbeat",
                 capability=TOOL_REASONING,
+                fallback_model=heartbeat_codex_model,
                 setting_sources=["user", "project"],
                 system_prompt={"type": "preset", "preset": "claude_code"},
                 allowed_tools=[

@@ -44,7 +44,7 @@ dependencies = [
     # Phase 10: Additional Chat Adapters (Move 4)
     "discord.py>=2.4.0",
     "httpx>=0.27.0",
-    # Gateway: WebSocket server
+    # WebSockets: relay client (chat/ws_client.py)
     "websockets>=13.0",
     "pytest-asyncio>=1.3.0",
     "pdfplumber>=0.11.9",

@@ -341,6 +341,27 @@ async def test_linkedin_operator_language_prefetches_browserops_context():
 
 
 @pytest.mark.asyncio
+async def test_linkedin_profile_open_language_routes_to_router_not_engine():
+    async def fake_linkedin_profile(adapter, incoming, args, *, collect_only=False):
+        assert collect_only is False
+        assert args == "open"
+        return "Opening LinkedIn profile in the visible browser."
+
+    manager = _build_manager()
+    manager._commands["linkedin_profile"].handler = fake_linkedin_profile
+    engine = _RecordingEngine()
+    router = ChatRouter(engine, manager)
+    adapter = _RecordingAdapter()
+    text = "Why don't you open up my LinkedIn profile and check it out?"
+
+    await router._handle_inner(adapter, _incoming(text))
+
+    assert engine.messages == []
+    assert adapter.sent[-1].text == "Opening LinkedIn profile in the visible browser."
+    assert adapter.updates == []
+
+
+@pytest.mark.asyncio
 async def test_linkedin_slash_command_uses_deterministic_operator_prompt():
     engine = _RecordingEngine()
     router = ChatRouter(engine, _build_manager())
