@@ -24,6 +24,7 @@ for _p in (_SCRIPTS_DIR, _CHAT_DIR):
 
 from evolve.compare import (  # noqa: E402
     QueryDelta,
+    QueryIdentityMismatch,
     ReportDelta,
     compare_reports,
     format_delta_table,
@@ -89,6 +90,7 @@ __all__ = [
     "ReplayReport",
     "ReplaySummary",
     "QueryDelta",
+    "QueryIdentityMismatch",
     "ReportDelta",
     "compare_reports",
     "format_delta_table",

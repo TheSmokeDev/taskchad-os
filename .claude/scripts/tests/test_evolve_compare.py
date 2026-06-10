@@ -276,3 +276,131 @@ class TestWithCi:
         assert "95% CI" in with_ci
         # Both metric lines should have the suffix
         assert with_ci.count("[95% CI:") == 2  # hit_rate + avg_top_score
+
+
+# --- Issue #20: typed mismatch exception + error detail rendering ---
+
+
+class TestQueryIdentityMismatchTyped:
+    """F1 — mismatch guard raises the typed exception the CLI catches."""
+
+    def test_length_mismatch_raises_typed_exception(self):
+        from evolve.compare import QueryIdentityMismatch
+
+        baseline = _make_report([_result("A"), _result("B"), _result("C")])
+        candidate = _make_report([_result("A"), _result("B")])
+        with pytest.raises(QueryIdentityMismatch, match="length mismatch"):
+            compare_reports(baseline, candidate)
+
+    def test_identity_mismatch_raises_typed_exception(self):
+        from evolve.compare import QueryIdentityMismatch
+
+        baseline = _make_report([_result("A"), _result("B")])
+        candidate = _make_report([_result("B"), _result("A")])
+        with pytest.raises(QueryIdentityMismatch, match="identity mismatch"):
+            compare_reports(baseline, candidate)
+
+    def test_typed_exception_is_valueerror_subclass(self):
+        """Backward compat — existing `except ValueError` callers keep working."""
+        from evolve.compare import QueryIdentityMismatch
+
+        assert issubclass(QueryIdentityMismatch, ValueError)
+
+
+class TestErrorVerdictDetailRows:
+    """F2 — error verdicts render bounded error text + result counts."""
+
+    def test_new_error_row_shows_candidate_error_and_counts(self):
+        baseline = _make_report([_result("Q", results=3)])
+        candidate = _make_report([_result("Q", results=0, error="timeout contacting embedder")])
+        table = format_delta_table(compare_reports(baseline, candidate))
+        assert "err: timeout contacting embedder" in table
+        assert "(results 3 -> 0)" in table
+
+    def test_fixed_error_row_falls_back_to_baseline_error(self):
+        baseline = _make_report([_result("Q", results=0, error="db locked")])
+        candidate = _make_report([_result("Q", results=2)])
+        table = format_delta_table(compare_reports(baseline, candidate))
+        assert "err: db locked" in table
+        assert "(results 0 -> 2)" in table
+
+    def test_still_errored_row_shows_candidate_error(self):
+        baseline = _make_report([_result("Q", results=0, error="old failure")])
+        candidate = _make_report([_result("Q", results=0, error="new failure")])
+        table = format_delta_table(compare_reports(baseline, candidate))
+        assert "err: new failure" in table
+
+    def test_error_text_is_bounded_to_60_chars(self):
+        long_error = "x" * 200
+        baseline = _make_report([_result("Q", results=1)])
+        candidate = _make_report([_result("Q", results=0, error=long_error)])
+        table = format_delta_table(compare_reports(baseline, candidate))
+        assert "x" * 60 in table
+        assert "x" * 61 not in table
+
+    def test_non_error_rows_have_no_detail_line(self):
+        """Parity — tables without error verdicts are unchanged (no err: lines)."""
+        baseline = _make_report([_result("A"), _result("B", results=0)])
+        candidate = _make_report([_result("A"), _result("B", results=2)])
+        table = format_delta_table(compare_reports(baseline, candidate))
+        assert "err:" not in table
+
+
+class TestEvolveCompareCLI:
+    """F1 — the CLI emits a concise error, not an unhandled traceback."""
+
+    @staticmethod
+    def _write_report(path, exp_id, queries):
+        import json
+
+        payload = {
+            "experiment_id": exp_id,
+            "summary": {"query_count": len(queries)},
+            "per_query": [
+                {"query": q, "results_count": 1, "top_scores": [0.9]} for q in queries
+            ],
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _invoke_compare(self, tmp_path, baseline_queries, candidate_queries):
+        from click.testing import CliRunner
+
+        import cli as cli_mod
+
+        b = tmp_path / "baseline.json"
+        c = tmp_path / "candidate.json"
+        self._write_report(b, "base", baseline_queries)
+        self._write_report(c, "cand", candidate_queries)
+        runner = CliRunner()
+        return runner.invoke(cli_mod.evolve_compare, [str(b), str(c)])
+
+    def test_mismatched_reports_exit_1_with_concise_error(self, tmp_path):
+        result = self._invoke_compare(tmp_path, ["A", "B", "C"], ["A", "B"])
+        assert result.exit_code == 1
+        combined = result.output
+        try:
+            combined += result.stderr
+        except (ValueError, AttributeError):
+            pass  # click <8.2 with mix_stderr=True folds stderr into output
+        assert "Error: Query list length mismatch" in combined
+        assert "Traceback" not in combined
+        # The failure must surface as a clean exit, not an escaped ValueError.
+        assert result.exc_info[0] is SystemExit
+
+    def test_identity_mismatch_exit_1_with_concise_error(self, tmp_path):
+        result = self._invoke_compare(tmp_path, ["A", "B"], ["B", "A"])
+        assert result.exit_code == 1
+        combined = result.output
+        try:
+            combined += result.stderr
+        except (ValueError, AttributeError):
+            pass
+        assert "Error: Query identity mismatch" in combined
+        assert "Traceback" not in combined
+        assert result.exc_info[0] is SystemExit
+
+    def test_matching_reports_still_print_delta_table(self, tmp_path):
+        result = self._invoke_compare(tmp_path, ["A", "B"], ["A", "B"])
+        assert result.exit_code == 0
+        assert "baseline:  base" in result.output
+        assert "Per-query:" in result.output

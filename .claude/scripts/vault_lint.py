@@ -56,7 +56,11 @@ def _strip_code_blocks(content: str) -> str:
 
 # Directories that are auto-generated or infrastructure (not user content)
 _SKIP_LINT_DIRS = {".obsidian", "_templates", "_canvas", "_state", ".conversations",
-                   ".conversations-archived", ".nexus", ".workspaces", ".workspaces-archived"}
+                   ".conversations-archived", ".nexus", ".workspaces", ".workspaces-archived",
+                   # Native /design artifacts + bundled DESIGN.md systems: HTML
+                   # artifacts and brand-system docs do not follow the vault-note
+                   # frontmatter schema (see .claude/scripts/design/).
+                   "design"}
 
 
 def _all_md_files(vault_dir: Path) -> list[Path]:

@@ -58,6 +58,16 @@ if [ "$1" = "--kill-all-homies" ]; then
   KILL_ALL_HOMIES=1
 fi
 
+# Issue #34 — --dry-run/--paths: print resolved paths and exit before the
+# kill branch and the status scan. Scans the whole argv so it composes with
+# --profile.
+_HOMIE_DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run|--paths) _HOMIE_DRY_RUN=1 ;;
+  esac
+done
+
 # Resolve venv python (Windows path takes priority on Git Bash).
 if [ -f "$SCRIPTS_DIR/.venv/Scripts/python.exe" ]; then
   VENV_PYTHON="$SCRIPTS_DIR/.venv/Scripts/python.exe"
@@ -68,6 +78,32 @@ else
 fi
 
 export PYTHONPATH="$SCRIPTS_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
+# Issue #34 — path translation. Git Bash (MSYS) converts whole-arg POSIX
+# paths before Windows python.exe sees them, but WSL bash passes /mnt/c/...
+# verbatim (Windows python reads it as C:\mnt\c\...). The embedded `r'...'`
+# sys.path strings in the resolver program text are NOT arg-converted by
+# MSYS either, so normalize to Windows form whenever the target python is
+# a Windows .exe. Mirrors run_chat.sh.
+_to_win_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1" 2>/dev/null || echo "$1"
+  elif command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "$1" 2>/dev/null || echo "$1"
+  else
+    echo "$1"
+  fi
+}
+case "$VENV_PYTHON" in
+  *.exe)
+    SCRIPTS_DIR_PY="$(_to_win_path "$SCRIPTS_DIR")"
+    VENV_PYTHON_WIN="$(_to_win_path "$VENV_PYTHON")"
+    ;;
+  *)
+    SCRIPTS_DIR_PY="$SCRIPTS_DIR"
+    VENV_PYTHON_WIN="$VENV_PYTHON"
+    ;;
+esac
 
 # Resolve profile-aware paths via personas.services. Two newline-separated
 # paths: pid file, log dir.
@@ -80,7 +116,7 @@ export PYTHONPATH="$SCRIPTS_DIR${PYTHONPATH:+:$PYTHONPATH}"
 # justification.
 _PATHS=$("$VENV_PYTHON" -c "
 import sys
-sys.path.insert(0, r'$SCRIPTS_DIR')
+sys.path.insert(0, r'$SCRIPTS_DIR_PY')
 from personas import apply_persona_override
 apply_persona_override()
 from personas.services import get_bot_pid_path, get_log_dir
@@ -88,8 +124,11 @@ print(get_bot_pid_path())
 print(get_log_dir())
 " "$@" 2>/dev/null)
 
-PID_FILE=$(echo "$_PATHS" | sed -n '1p')
-LOG_DIR=$(echo "$_PATHS" | sed -n '2p')
+# Issue #34 — explicit `tr -d '\r'` CR hardening. MSYS2 sed strips the
+# trailing CR from the resolver's CRLF output by accident; WSL/non-MSYS sed
+# does not, leaving a \r that breaks `test -f` and the stale-pid grep.
+PID_FILE=$(echo "$_PATHS" | sed -n '1p' | tr -d '\r')
+LOG_DIR=$(echo "$_PATHS" | sed -n '2p' | tr -d '\r')
 
 # F4 — fail loudly if the service resolver could not run. Hardcoded
 # install-dir fallbacks were removed because they ship the wrong path for
@@ -104,13 +143,23 @@ if [ -z "$PID_FILE" ] || [ -z "$LOG_DIR" ]; then
 fi
 LOG_FILE="$LOG_DIR/bot.log"
 
+# Issue #34 — DRY RUN exit. MUST stay ABOVE the --kill-all-homies branch so
+# `bot-status.sh --dry-run` can never reach a kill path.
+if [ "$_HOMIE_DRY_RUN" = "1" ]; then
+  echo "DRY RUN: read-only path resolution"
+  echo "PYTHON: $VENV_PYTHON_WIN"
+  echo "PID_FILE: $PID_FILE"
+  echo "LOG_FILE: $LOG_FILE"
+  exit 0
+fi
+
 # Operator-driven broad cleanup path — bypass health check, run legacy
 # kill-all-homies, exit.
 if [ "$KILL_ALL_HOMIES" = "1" ]; then
   echo "==[ --kill-all-homies: legacy broad cleanup across ALL profiles ]=="
   killed=$("$VENV_PYTHON" -c "
 import sys
-sys.path.insert(0, r'$SCRIPTS_DIR')
+sys.path.insert(0, r'$SCRIPTS_DIR_PY')
 from personas import apply_persona_override
 apply_persona_override()
 from shared import cleanup_all_homie_bots_in_repo
@@ -130,7 +179,9 @@ cmdline_pids=()
 
 # 1. Check pid file
 if [ -f "$PID_FILE" ]; then
-  pid_file_pid=$(cat "$PID_FILE")
+  # Issue #34 — strip CR/space: a CRLF-written pid file makes `kill -0`
+  # fail silently → false [STALE] verdicts and a grep -qx mismatch below.
+  pid_file_pid=$(tr -d '\r ' < "$PID_FILE")
   if kill -0 "$pid_file_pid" 2>/dev/null; then
     pid_file_alive=true
   fi
@@ -151,7 +202,7 @@ while IFS= read -r pid; do
   [ -n "$pid" ] && cmdline_pids+=("$pid")
 done < <("$VENV_PYTHON" -c "
 import sys
-sys.path.insert(0, r'$SCRIPTS_DIR')
+sys.path.insert(0, r'$SCRIPTS_DIR_PY')
 from personas import apply_persona_override
 apply_persona_override()
 from shared import list_bot_pids_in_active_profile

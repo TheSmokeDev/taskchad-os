@@ -20,6 +20,17 @@ from evolve.models import ReplayQueryResult, ReplayReport
 SCORE_NOISE_FLOOR = 0.01
 # Absolute latency delta in ms below this is treated as "same".
 LATENCY_NOISE_FLOOR_MS = 5.0
+# Error text shown on error-verdict rows is bounded to this many chars.
+ERROR_TEXT_MAX_CHARS = 60
+
+
+class QueryIdentityMismatch(ValueError):
+    """Baseline and candidate reports were built from different query sets.
+
+    Subclasses ValueError so existing ``except ValueError`` callers keep
+    working; the CLI catches this type to emit a concise operator error
+    instead of an unhandled traceback (issue #20).
+    """
 
 
 @dataclass
@@ -177,14 +188,14 @@ def compare_reports(
     b_queries = [r.query for r in baseline.per_query]
     c_queries = [r.query for r in candidate.per_query]
     if len(b_queries) != len(c_queries):
-        raise ValueError(
+        raise QueryIdentityMismatch(
             f"Query list length mismatch: baseline has {len(b_queries)} queries, "
             f"candidate has {len(c_queries)}. Re-run both reports against the same query set."
         )
     mismatches = [(i, bq, cq) for i, (bq, cq) in enumerate(zip(b_queries, c_queries)) if bq != cq]
     if mismatches:
         first = mismatches[0]
-        raise ValueError(
+        raise QueryIdentityMismatch(
             f"Query identity mismatch at index {first[0]}: "
             f"baseline={first[1]!r}, candidate={first[2]!r}. "
             f"Ensure both reports use the same query set in the same order."
@@ -320,4 +331,12 @@ def format_delta_table(delta: ReportDelta) -> str:
             f"  {arrow} [{q.verdict:<13}] {q.score_delta:+.4f}  "
             f"{q.latency_delta_ms:+6.1f}ms  {q.query[:60]}"
         )
+        if q.verdict in ("new_error", "fixed_error", "still_errored"):
+            # candidate_error is the live failure; for fixed_error it is empty,
+            # so fall back to the baseline error that got fixed.
+            err = q.candidate_error or q.baseline_error
+            lines.append(
+                f"      err: {err[:ERROR_TEXT_MAX_CHARS]}  "
+                f"(results {q.baseline_results_count} -> {q.candidate_results_count})"
+            )
     return "\n".join(lines)

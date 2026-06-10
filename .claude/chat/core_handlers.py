@@ -2277,6 +2277,242 @@ def _switch_provider(choice: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# /design — native brand-grade design capability (Open Design power, no daemon)
+# ---------------------------------------------------------------------------
+
+
+def _parse_design_flags(text: str) -> tuple[str, dict[str, str]]:
+    """Pull --system/--direction/--tone/--accent flags out of a design brief.
+
+    Windows-safe (Codex MEDIUM): tokenizes on whitespace honouring quotes but
+    WITHOUT shlex's POSIX backslash-escaping, which would mangle a Windows path
+    like ``C:\\Users\\x`` in a brief into ``C:Usersx``. A flag whose value is
+    missing or is itself another flag is dropped (Codex MEDIUM), not silently
+    consumed.
+    """
+    import re
+
+    flag_keys = {"--system": "system", "--direction": "direction",
+                 "--tone": "tone", "--accent": "accent"}
+    tokens = re.findall(r"\"[^\"]*\"|'[^']*'|\S+", text or "")
+
+    def _unquote(tok: str) -> str:
+        if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+            return tok[1:-1]
+        return tok
+
+    opts: dict[str, str] = {}
+    rest: list[str] = []
+    i = 0
+    while i < len(tokens):
+        key = flag_keys.get(tokens[i])
+        if key:
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+            if nxt is not None and not nxt.startswith("--"):
+                opts[key] = _unquote(nxt)
+                i += 2
+                continue
+            i += 1  # flag with no value or a flag-as-value → drop it
+            continue
+        rest.append(_unquote(tokens[i]))
+        i += 1
+    return " ".join(rest).strip(), opts
+
+
+async def handle_design(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Generate brand-grade design artifacts natively through the runtime.
+
+    Ports Open Design's taste loop (brief -> direction-lock -> artifact ->
+    critique) onto The Homie's own runtime. No external daemon, no install:
+    generation routes through ``run_with_runtime_lanes`` (auto-fallback
+    claude -> codex -> gemini); artifacts persist to the firewalled vault
+    substrate at ``vault/memory/design/``.
+
+    Subcommands:
+        /design html <brief>          generate a single-file HTML artifact
+        /design system <name> <brief> generate using a bundled brand system
+        /design systems               list bundled brand systems
+        /design directions            list the 5 built-in visual directions
+    """
+    from datetime import datetime
+
+    import config
+    from design import (
+        artifact_dir,
+        build_design_brief,
+        list_systems,
+        load_system,
+        pick_direction,
+    )
+    from design.directions import DESIGN_DIRECTIONS, find_direction
+
+    raw = args.strip()
+    subcmd = (raw.split()[0].lower() if raw else "")
+    rest = raw[len(subcmd):].strip() if subcmd else ""
+
+    usage = (
+        "Native design. Usage:\n"
+        "`/design html <brief>` — build a single-file HTML artifact\n"
+        "`/design system <name> <brief>` — build using a bundled brand system\n"
+        "`/design systems` — list brand systems\n"
+        "`/design directions` — list visual directions\n"
+        "Flags: `--system <slug>` `--direction <id>` `--tone <tone>` `--accent \"<override>\"`"
+    )
+
+    if not subcmd or subcmd in {"help", "?"}:
+        return usage
+
+    if subcmd in {"systems", "system-list"}:
+        systems = list_systems()
+        if not systems:
+            return "No brand systems bundled yet under `vault/memory/design/_systems/`."
+        return "Bundled brand systems:\n" + "\n".join(f"- {s}" for s in systems)
+
+    if subcmd in {"directions", "dirs"}:
+        return "Visual directions:\n" + "\n".join(
+            f"- `{d.id}` — {d.label}" for d in DESIGN_DIRECTIONS
+        )
+
+    # Generation subcommands: html | system
+    system = None  # DesignSystemPackage | None
+    system_name: str | None = None
+    brief_text = rest
+
+    if subcmd == "system":
+        parts = rest.split(None, 1)
+        if len(parts) < 2:
+            return "Usage: `/design system <name> <brief>`. List names with `/design systems`."
+        system_name = parts[0].strip().lower()
+        brief_text = parts[1].strip()
+        system = load_system(system_name)
+        if system is None:
+            avail = ", ".join(list_systems()) or "(none bundled)"
+            return f"No brand system named `{system_name}`. Available: {avail}"
+    elif subcmd not in {"html", "page", "build"}:
+        # Treat unknown subcommand as part of the brief for the html path.
+        brief_text = raw
+
+    brief_text, opts = _parse_design_flags(brief_text)
+    if not brief_text:
+        return usage
+
+    # `--system <slug>` selects a system only when the `system <name>` subcommand
+    # path did not already set one (the subcommand wins if both are given).
+    if opts.get("system") and system is None:
+        system_name = opts["system"].strip().lower()
+        system = load_system(system_name)
+        if system is None:
+            avail = ", ".join(list_systems()) or "(none bundled)"
+            return f"No brand system named `{system_name}`. Available: {avail}"
+
+    # Resolve the visual direction when no brand system is chosen.
+    direction = None
+    brand_locked = system is not None
+    if system is None:
+        if opts.get("direction"):
+            direction = find_direction(opts["direction"])
+            brand_locked = direction is not None
+        if direction is None:
+            direction = pick_direction(opts.get("tone") or brief_text)
+
+    if collect_only:
+        # Design generation is an explicit action, never part of a passive
+        # data-sweep. Surface usage instead of spending a generation.
+        return usage
+
+    # Resolve artifact paths under the firewalled vault substrate.
+    date_str = datetime.now().strftime("%Y%m%d")
+    slug = _design_slug(brief_text)
+    if system is not None:
+        # Keep multi-system runs of the same brief in distinct dirs (fleet: one
+        # brief, many brand systems) instead of overwriting one finalized.html.
+        slug = f"{system.slug}-{slug}"
+    out_dir = artifact_dir(slug, "html", date_str=date_str)
+    finalized = out_dir / "finalized.html"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt = build_design_brief(
+        kind="html",
+        brief_text=brief_text,
+        finalized_path=str(finalized),
+        out_dir=str(out_dir),
+        direction=direction,
+        system=system,
+        accent_override=opts.get("accent"),
+        brand_locked=brand_locked,
+    )
+
+    try:
+        from runtime.base import RuntimeRequest
+        from runtime.capabilities import TOOL_REASONING
+        from runtime.lane_router import run_with_runtime_lanes
+
+        request = RuntimeRequest(
+            prompt=prompt,
+            # Containment (Codex HIGH): cwd is the artifact dir, NOT repo root, so
+            # relative writes land in the firewalled vault dir; and no Bash tool,
+            # so a single standalone-HTML task has no shell escape hatch. A full
+            # write-sandbox is future hardening — this bounds the obvious vectors.
+            cwd=out_dir,
+            task_name="design_generate",
+            capability=TOOL_REASONING,
+            allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
+            permission_mode="acceptEdits",
+            max_turns=20,
+            max_budget_usd=1.0,
+            # Brief lives in `prompt` (lane-agnostic). system_prompt left None so
+            # the generic CLI lanes (codex/gemini) receive identical instructions
+            # — prompt_builder only forwards string system_prompts.
+        )
+        result = await run_with_runtime_lanes(request)
+    except Exception as exc:
+        # Kill-switch (HOMIE_KILLSWITCH_LLM=disabled) → friendly message. Use
+        # isinstance via a late import (Codex LOW), not a class-name string.
+        try:
+            from security.kill_switches import KillSwitchDisabled
+            if isinstance(exc, KillSwitchDisabled):
+                return "Design is unavailable: the LLM kill-switch is disabled (`HOMIE_KILLSWITCH_LLM`)."
+        except ImportError:
+            pass
+        return f"Design generation failed: {exc}"
+
+    try:
+        wrote = finalized.is_file() and finalized.stat().st_size > 0
+    except OSError:
+        wrote = False
+
+    rel = finalized
+    try:
+        rel = finalized.relative_to(config.PROJECT_ROOT)
+    except ValueError:
+        pass
+
+    report = (result.text or "").strip()
+    if len(report) > 1800:
+        report = report[:1800].rstrip() + "\n…(truncated)"
+
+    cost = f"${result.cost_usd:.4f}" if result.cost_usd is not None else "n/a"
+    meta = f"via {result.provider}/{result.model} · {cost}"
+    used = f"system `{system.slug}`" if system else f"direction `{direction.id}`"
+
+    if wrote:
+        header = f"Design ready ({used}, {meta})\n`{rel}`"
+    else:
+        header = (
+            f"Design ran ({used}, {meta}) but no finalized.html landed at `{rel}`. "
+            "Agent report below."
+        )
+    return f"{header}\n\n{report}" if report else header
+
+
+def _design_slug(brief_text: str) -> str:
+    """Short slug from the first words of a design brief."""
+    from design import slugify
+
+    return slugify(" ".join(brief_text.split()[:6]))
+
+
+# ---------------------------------------------------------------------------
 # Handler lookup — maps command name to handler function
 # ---------------------------------------------------------------------------
 
@@ -2319,4 +2555,6 @@ CORE_HANDLERS: dict[str, Any] = {
     "brief": handle_brief,
     "working": handle_working,
     "extensions": handle_extensions,
+    # Native design — Open Design power, no daemon (brief -> artifact -> critique).
+    "design": handle_design,
 }

@@ -2,6 +2,12 @@
 
 This is the on-demand context manual for BrowserOps, Browser Homie, and the Homie Dashboard browser viewer. Load this when work touches `agent-browser`, visible Chrome/CDP, `/browser`, `/browserops`, `/linkedin_profile`, or the dashboard `/browser` page.
 
+> For the validated step-by-step **methods** of editing a LinkedIn profile or company page
+> through the visible CDP session (headline/About/experience/skills/Featured, company-page
+> create + enrich), load `docs/linkedin-automation-playbook.md`. That playbook is the single
+> source of truth for LinkedIn automation technique. It is a **method reference only** — the
+> LinkedIn write-gates below remain default-deny pending a dedicated write PRP.
+
 ## Table Of Contents
 
 1. What BrowserOps Is
@@ -119,6 +125,9 @@ Shipped:
 Not shipped:
 
 - Live LinkedIn posting, profile edits, DMs, or connection requests
+  (the **methods** are documented in `docs/linkedin-automation-playbook.md` as the
+  reference a future LinkedIn-write PRP/agent implements against; documenting technique
+  does not open the `linkedin.profile.edit` / `linkedin.post.create` gates)
 - Autonomous LinkedIn growth loops from heartbeat
 - Dashboard browser input, navigation, or tab URL inspection
 - Hotbox clone or external viewer fork

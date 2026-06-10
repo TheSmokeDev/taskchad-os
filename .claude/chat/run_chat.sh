@@ -82,6 +82,46 @@ if [ -n "$_HOMIE_PROFILE_OVERRIDE" ]; then
   fi
 fi
 
+# Issue #34 — --dry-run: resolve and print paths, then exit BEFORE any
+# kill / pid write / spawn / log truncation. Parsed in a separate scan so
+# `--profile X --dry-run` detects both flags (the profile loop above breaks
+# on the first --profile match).
+_HOMIE_DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) _HOMIE_DRY_RUN=1 ;;
+  esac
+done
+
+# Issue #34 — path translation. Git Bash (MSYS) converts whole-arg POSIX
+# paths (/c/...) before Windows python.exe sees them, but WSL bash passes
+# /mnt/c/... verbatim and Windows python reads it as C:\mnt\c\... — the
+# exact restart failure from the issue. Normalize to Windows form whenever
+# the target python is a Windows .exe. The embedded `r'...'` sys.path
+# strings inside the resolver subprocess program text are NOT arg-converted
+# by MSYS, so they need the normalized form too.
+_to_win_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1" 2>/dev/null || echo "$1"
+  elif command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "$1" 2>/dev/null || echo "$1"
+  else
+    echo "$1"
+  fi
+}
+case "$VENV_PYTHON" in
+  *.exe)
+    MAIN_PY="$(_to_win_path "$SCRIPT_DIR/main.py")"
+    SCRIPTS_DIR_PY="$(_to_win_path "$SCRIPTS_DIR")"
+    VENV_PYTHON_WIN="$(_to_win_path "$VENV_PYTHON")"
+    ;;
+  *)
+    MAIN_PY="$SCRIPT_DIR/main.py"
+    SCRIPTS_DIR_PY="$SCRIPTS_DIR"
+    VENV_PYTHON_WIN="$VENV_PYTHON"
+    ;;
+esac
+
 # Resolve profile-aware paths via personas.services. Single python -c call
 # emits three newline-separated paths so we don't pay 3x interpreter startup.
 #
@@ -94,7 +134,7 @@ fi
 # closes the asymmetry — both the resolver AND the bot see the same flag.
 _PATHS=$("$VENV_PYTHON" -c "
 import sys
-sys.path.insert(0, r'$SCRIPTS_DIR')
+sys.path.insert(0, r'$SCRIPTS_DIR_PY')
 from personas import apply_persona_override
 apply_persona_override()
 from personas.services import get_bot_pid_path, get_bot_lock_path, get_log_dir
@@ -103,9 +143,14 @@ print(get_bot_lock_path())
 print(get_log_dir())
 " "$@" 2>/dev/null)
 
-PID_FILE=$(echo "$_PATHS" | sed -n '1p')
-LOCK_FILE=$(echo "$_PATHS" | sed -n '2p')
-LOG_DIR=$(echo "$_PATHS" | sed -n '3p')
+# Issue #34 — explicit `tr -d '\r'` CR hardening. Windows venv python
+# prints CRLF; MSYS2 sed happens to strip the trailing CR but WSL/non-MSYS
+# sed does not, leaving a \r that breaks `test -f`, `kill -0`, and the
+# stale-pid grep downstream. Matches the existing precedent at the WIN_PID
+# capture below.
+PID_FILE=$(echo "$_PATHS" | sed -n '1p' | tr -d '\r')
+LOCK_FILE=$(echo "$_PATHS" | sed -n '2p' | tr -d '\r')
+LOG_DIR=$(echo "$_PATHS" | sed -n '3p' | tr -d '\r')
 
 # F4 — fail loudly if the service resolver could not run. The hardcoded
 # install-dir fallback paths were removed (they shipped the wrong location
@@ -121,6 +166,21 @@ if [ -z "$PID_FILE" ] || [ -z "$LOG_DIR" ]; then
 fi
 LOG_FILE="$LOG_DIR/bot.log"
 
+# Issue #34 — DRY RUN exit. MUST stay ABOVE the _kill_existing() call (and
+# therefore above the pid-file delete, the profile-filtered Python kill,
+# the LOG_FILE truncation at spawn, the pid write, and main.py's global
+# mutex acquisition). Prints the fully-resolved Windows-safe paths so an
+# operator can prove what a real restart WOULD use without side effects.
+if [ "$_HOMIE_DRY_RUN" = "1" ]; then
+  echo "DRY RUN: no kill / no pid write / no spawn"
+  echo "PYTHON: $VENV_PYTHON_WIN"
+  echo "MAIN_PY: $MAIN_PY"
+  echo "PID_FILE: $PID_FILE"
+  echo "LOCK_FILE: $LOCK_FILE"
+  echo "LOG_FILE: $LOG_FILE"
+  exit 0
+fi
+
 # Kill existing bot — check pid file first, then delegate to the Python
 # profile-aware cleanup helper. The Python helper uses psutil.environ() to
 # read each candidate process's HOMIE_HOME and filters by exact match against
@@ -130,7 +190,9 @@ LOG_FILE="$LOG_DIR/bot.log"
 _kill_existing() {
   # 1. Try pid file (cheap path — kills the canonical recorded PID).
   if [ -f "$PID_FILE" ]; then
-    OLD_PID=$(cat "$PID_FILE")
+    # Issue #34 — strip CR/space: a CRLF-written pid file makes `kill -0`
+    # fail silently (2>/dev/null) and the old bot is never stopped.
+    OLD_PID=$(tr -d '\r ' < "$PID_FILE")
     if kill -0 "$OLD_PID" 2>/dev/null; then
       echo "Stopping old bot (PID $OLD_PID from pid file)..."
       kill "$OLD_PID" 2>/dev/null
@@ -146,7 +208,7 @@ _kill_existing() {
   # kills processes that belong to THIS profile.
   KILLED_OUT=$("$VENV_PYTHON" -c "
 import sys
-sys.path.insert(0, r'$SCRIPTS_DIR')
+sys.path.insert(0, r'$SCRIPTS_DIR_PY')
 from personas import apply_persona_override
 apply_persona_override()
 from shared import cleanup_all_bot_processes
@@ -166,13 +228,13 @@ cd "$SCRIPTS_DIR"
 if [ "$1" = "--fg" ]; then
   # Foreground mode (for debugging)
   shift
-  PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8 exec "$VENV_PYTHON" "$SCRIPT_DIR/main.py" "$@"
+  PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8 exec "$VENV_PYTHON" "$MAIN_PY" "$@"
 else
   # Background mode — same approach for both Windows and Unix.
   # Using the real cpython binary (not the venv launcher shim) avoids
   # the double-spawn problem entirely.
   mkdir -p "$LOG_DIR"
-  PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8 "$VENV_PYTHON" "$SCRIPT_DIR/main.py" "$@" > "$LOG_FILE" 2>&1 &
+  PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8 "$VENV_PYTHON" "$MAIN_PY" "$@" > "$LOG_FILE" 2>&1 &
 
   # Wait for bot to initialize
   sleep 5
@@ -186,7 +248,7 @@ else
   WIN_PID=""
   WIN_PID=$("$VENV_PYTHON" -c "
 import sys
-sys.path.insert(0, r'$SCRIPTS_DIR')
+sys.path.insert(0, r'$SCRIPTS_DIR_PY')
 from personas import apply_persona_override
 apply_persona_override()
 from shared import list_bot_pids_in_active_profile

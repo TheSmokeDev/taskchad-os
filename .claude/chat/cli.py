@@ -1938,6 +1938,7 @@ def evolve_compare(baseline_report, candidate_report, with_ci, ci_seed):
     from pathlib import Path as _Path
 
     from evolve import (
+        QueryIdentityMismatch,
         ReplayQueryResult,
         ReplayReport,
         ReplaySummary,
@@ -1964,7 +1965,11 @@ def evolve_compare(baseline_report, candidate_report, with_ci, ci_seed):
 
     baseline = _load(baseline_report)
     candidate = _load(candidate_report)
-    delta = compare_reports(baseline, candidate, with_ci=with_ci, ci_seed=ci_seed)
+    try:
+        delta = compare_reports(baseline, candidate, with_ci=with_ci, ci_seed=ci_seed)
+    except QueryIdentityMismatch as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
     click.echo(format_delta_table(delta))
 
 

@@ -13,14 +13,11 @@ Meta is no longer the truth source for dim-drift detection.
 
 from __future__ import annotations
 
-import importlib
 import io
 import sqlite3
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
-
-import pytest
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -78,36 +75,47 @@ def test_sqlite_schema_introspection_returns_none_when_table_missing(tmp_path: P
 # -----------------------------------------------------------------------------
 
 def test_sync_index_rebuilds_when_meta_missing_but_schema_stale(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, isolated_db_modules
 ):
     """The core bug this issue fixes: meta rows are gone (copied DB,
     partial rebuild) but vec_chunks still has the old dim baked into DDL.
 
-    Set up vec_chunks at dim=512 with NO meta rows, then bump config to 768.
+    Set up vec_chunks at dim=512 with NO meta rows, then bump config to 1024.
     sync_index() must detect the mismatch via schema introspection and
     trigger bulk_clear().
+
+    1024 is deliberately NOT the real config default (768) — if the
+    isolation fixture silently stopped re-importing the modules under the
+    patched config, the `config=1024` assertions below would fail instead
+    of passing by coincidence.
     """
     # Create an isolated SQLite DB manually so we control exactly what's there.
     db_path = tmp_path / "stale_schema.db"
+    # Empty memory dir so sync_index has nothing to index.
+    empty_memory = tmp_path / "empty_memory"
+    empty_memory.mkdir()
 
-    # Point the SQLite backend at our tmp path by clobbering DATABASE_PATH.
-    # We need to do this BEFORE importing memory_index (which caches config
-    # values via `from config import ...`).
-    import config as config_mod
-    monkeypatch.setattr(config_mod, "DATABASE_PATH", db_path)
-    monkeypatch.setattr(config_mod, "DATABASE_URL", "")  # force SQLite
-    # Pretend config is at 768 dims / new model
-    monkeypatch.setattr(config_mod, "EMBEDDING_DIMENSIONS", 768)
-    monkeypatch.setattr(config_mod, "EMBEDDING_MODEL", "new-model-v2")
+    # db.py and memory_index.py copy config values at import time
+    # (`from config import ...`), so patching config alone never reaches
+    # them. The fixture pops both modules from sys.modules and fresh-imports
+    # them under the patched config (the same import-time binding path a
+    # real import takes), then restores the pristine originals on teardown
+    # so nothing leaks to later tests — see tests/module_isolation.py.
+    iso = isolated_db_modules(
+        DATABASE_PATH=db_path,
+        DATABASE_URL="",  # force SQLite
+        EMBEDDING_DIMENSIONS=1024,
+        EMBEDDING_MODEL="new-model-v2",
+        MEMORY_DIR=empty_memory,
+    )
+    db_mod = iso.db
+    mi = iso.memory_index
 
-    # Reload db + memory_index so they pick up the patched config.
-    # (Both modules do `from config import EMBEDDING_DIMENSIONS` at import time.)
-    import db as db_mod
-    importlib.reload(db_mod)
-    monkeypatch.setattr(db_mod, "DATABASE_PATH", db_path)
-    monkeypatch.setattr(db_mod, "DATABASE_URL", "")
-    monkeypatch.setattr(db_mod, "EMBEDDING_DIMENSIONS", 768)
-    monkeypatch.setattr(db_mod, "EMBEDDING_MODEL", "new-model-v2")
+    # Liveness check: the patched values must be visible in the fresh
+    # modules. Fails loudly if the fixture stops re-importing.
+    assert db_mod.EMBEDDING_DIMENSIONS == 1024
+    assert mi.EMBEDDING_DIMENSIONS == 1024
+    assert mi.EMBEDDING_MODEL == "new-model-v2"
 
     # Manually create a DB with vec_chunks at dim=512 and NO meta rows.
     # We bypass init_schema() so meta stays empty.
@@ -137,18 +145,8 @@ def test_sync_index_rebuilds_when_meta_missing_but_schema_stale(
     assert meta_row is None, "meta table should NOT exist yet (staging the bug)"
     conn.close()
 
-    # Now reload memory_index and call sync_index with generate_embeddings=False
-    # so we don't need a real embedding model.
-    import memory_index as mi
-    importlib.reload(mi)
-    monkeypatch.setattr(mi, "EMBEDDING_DIMENSIONS", 768)
-    monkeypatch.setattr(mi, "EMBEDDING_MODEL", "new-model-v2")
-
-    # Patch MEMORY_DIR to an empty tmp dir so sync_index has nothing to index.
-    empty_memory = tmp_path / "empty_memory"
-    empty_memory.mkdir()
-    monkeypatch.setattr(mi, "MEMORY_DIR", empty_memory)
-
+    # Call sync_index with generate_embeddings=False so we don't need a
+    # real embedding model.
     stdout_buf = io.StringIO()
     with redirect_stdout(stdout_buf):
         mi.sync_index(memory_dir=empty_memory, generate_embeddings=False)
@@ -159,13 +157,13 @@ def test_sync_index_rebuilds_when_meta_missing_but_schema_stale(
         f"expected dim mismatch message in stdout, got: {output!r}"
     )
     assert "vec schema=512" in output
-    assert "config=768" in output
+    assert "config=1024" in output
 
     # After rebuild, the physical schema must be at the new dim.
     db_after = db_mod.SQLiteMemoryDB(db_path=str(db_path))
     try:
         actual = db_after.get_actual_embedding_dim()
-        assert actual == 768, f"expected vec_chunks recreated at 768, got {actual}"
+        assert actual == 1024, f"expected vec_chunks recreated at 1024, got {actual}"
     finally:
         db_after.close()
 
@@ -175,21 +173,25 @@ def test_sync_index_rebuilds_when_meta_missing_but_schema_stale(
 # -----------------------------------------------------------------------------
 
 def test_sync_index_skips_rebuild_when_schema_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, isolated_db_modules
 ):
     """Happy path: DB already at current config dim. sync_index() must NOT
     print the dim-mismatch rebuild message. (Model-change message stays
     separate -- covered by a different check.)"""
     db_path = tmp_path / "fresh.db"
+    empty_memory = tmp_path / "empty_memory"
+    empty_memory.mkdir()
 
-    import config as config_mod
-    monkeypatch.setattr(config_mod, "DATABASE_PATH", db_path)
-    monkeypatch.setattr(config_mod, "DATABASE_URL", "")
-
-    import db as db_mod
-    importlib.reload(db_mod)
-    monkeypatch.setattr(db_mod, "DATABASE_PATH", db_path)
-    monkeypatch.setattr(db_mod, "DATABASE_URL", "")
+    # Paths-only isolation: dims/model stay at the real config values, but
+    # the fresh import points db/memory_index at the tmp DB + empty memory
+    # dir (import-time bindings — see tests/module_isolation.py).
+    iso = isolated_db_modules(
+        DATABASE_PATH=db_path,
+        DATABASE_URL="",  # force SQLite
+        MEMORY_DIR=empty_memory,
+    )
+    db_mod = iso.db
+    mi = iso.memory_index
 
     # Initialize the DB once -- this bakes the current EMBEDDING_DIMENSIONS
     # into vec_chunks AND seeds meta rows with the current model.
@@ -198,13 +200,6 @@ def test_sync_index_skips_rebuild_when_schema_matches(
         db_first.init_schema()
     finally:
         db_first.close()
-
-    import memory_index as mi
-    importlib.reload(mi)
-
-    empty_memory = tmp_path / "empty_memory"
-    empty_memory.mkdir()
-    monkeypatch.setattr(mi, "MEMORY_DIR", empty_memory)
 
     stdout_buf = io.StringIO()
     with redirect_stdout(stdout_buf):

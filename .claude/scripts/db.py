@@ -482,7 +482,11 @@ class PostgresMemoryDB:
 
     def get_actual_embedding_dim(self) -> int | None:
         """Read the vector dimension from chunks.embedding column type.
-        atttypmod on pgvector columns encodes the dimension (+ 4 for padding).
+        pgvector stores the dimension directly in atttypmod -- no VARHDRSZ
+        offset (that +4 applies to varchar typmods, not pgvector). Proven
+        against live pgvector in tests/test_postgres_live_integration.py:
+        vector(512) -> atttypmod 512. The previous `- 4` decode made every
+        Postgres sync_index() see false dim drift and force a full rebuild.
         Returns None if the table or column doesn't exist yet.
         Truth source for dim-drift detection -- meta can lie if DB was copied."""
         cur = self._get_conn().cursor()
@@ -493,9 +497,9 @@ class PostgresMemoryDB:
                 """
             )
             row = cur.fetchone()
-            if not row or row[0] is None or row[0] < 4:
-                return None
-            return int(row[0]) - 4  # pgvector encodes dim + 4
+            if not row or row[0] is None or row[0] < 1:
+                return None  # -1 = typmod-less (unconstrained vector) column
+            return int(row[0])  # pgvector typmod IS the dimension
         except Exception:
             return None  # Table doesn't exist yet
 

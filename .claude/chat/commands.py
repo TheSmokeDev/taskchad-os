@@ -109,6 +109,8 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("sysreview", "System review — analyze plan vs execution", "engine", "admin"),
     ("execreport", "Generate post-implementation execution report", "engine", "admin"),
     ("clutch", "CLUTCH orchestrator — multi-phase team execution", "engine", "admin"),
+    # -- Design --
+    ("design", "Generate brand-grade single-file HTML pages and dashboards natively", "router", "admin"),
     # -- Dev Tools --
     ("diagram", "Create an Excalidraw architecture diagram", "engine", "admin"),
     ("pdf", "Work with PDFs — extract, merge, split, create", "engine", "admin"),
@@ -135,6 +137,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ("Communication", ["send", "brief"]),
     ("Memory", ["search", "file", "working"]),
     ("Content Creation", ["blog", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts"]),
+    ("Design", ["design"]),
     (
         "PIV Workflow",
         ["prime", "planning", "implement", "validate", "review", "reviewfix",
@@ -174,6 +177,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "blog",
     "tweet",
     "instagram",
+    "design",
 )
 
 # Core data intents: (keywords, command, included_in_brief)

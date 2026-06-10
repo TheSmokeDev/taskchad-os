@@ -17,7 +17,10 @@ set "VENV_PYTHON=%SCRIPTS_DIR%\.venv\Scripts\python.exe"
 
 if not exist "%VENV_PYTHON%" (
     echo Creating venv...
-    cd /d "%SCRIPTS_DIR%" ^&^& uv sync
+    REM Issue #34 — `^&^&` inside a parenthesized block makes cd receive the
+    REM literal `&& uv sync` ("The system cannot find the path specified"),
+    REM so the venv bootstrap never ran. Unescaped && works inside parens.
+    cd /d "%SCRIPTS_DIR%" && uv sync
 )
 
 set "PYTHONPATH=%SCRIPTS_DIR%;%PYTHONPATH%"
@@ -36,6 +39,12 @@ REM CALL to a subroutine that uses its own argv frame — exits leave %1..%9
 REM and %* in the parent intact.
 set "_HOMIE_PROFILE_OVERRIDE="
 call :_homie_parse_profile %*
+
+REM Issue #34 — --dry-run parse. Separate subroutine (NOT folded into the
+REM profile loop) because :_homie_parse_profile returns on the FIRST
+REM --profile match — `--profile X --dry-run` must detect both flags.
+set "_HOMIE_DRY_RUN="
+call :_homie_parse_dryrun %*
 
 if not "!_HOMIE_PROFILE_OVERRIDE!"=="" (
     if /i "!_HOMIE_PROFILE_OVERRIDE!"=="default" (
@@ -74,6 +83,18 @@ if /i "%_HOMIE_ARG:~0,10%"=="--profile=" (
 )
 shift
 goto _homie_parse_profile
+
+:_homie_parse_dryrun
+REM Issue #34 — scan our own argv frame for --dry-run; sets the parent's
+REM _HOMIE_DRY_RUN. `shift` here cannot consume the parent's %1/%* because
+REM this runs inside a CALL'd subroutine frame.
+if "%~1"=="" goto :eof
+if /i "%~1"=="--dry-run" (
+    set "_HOMIE_DRY_RUN=1"
+    goto :eof
+)
+shift
+goto _homie_parse_dryrun
 
 :_homie_parse_done
 
@@ -123,6 +144,20 @@ if "!LOG_DIR!"=="" (
     exit /b 1
 )
 set "LOG_FILE=!LOG_DIR!\bot.log"
+
+REM Issue #34 — DRY RUN exit. MUST stay ABOVE the `start /b` spawn so a
+REM dry run can never fork the bot or acquire main.py's global mutex.
+REM `exit /b 0` (implicit endlocal) — a bare `exit 0` would kill the parent
+REM cmd of an interactive operator. Delayed-expansion reads only: a literal
+REM `)` in a %-expanded value would close this block at parse time.
+if "!_HOMIE_DRY_RUN!"=="1" (
+    echo DRY RUN: no spawn
+    echo PYTHON: !VENV_PYTHON!
+    echo MAIN_PY: !SCRIPT_DIR!main.py
+    echo PID_FILE: !PID_FILE!
+    echo LOG_FILE: !LOG_FILE!
+    exit /b 0
+)
 
 cd /d "%SCRIPTS_DIR%"
 

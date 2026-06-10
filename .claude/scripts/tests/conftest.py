@@ -388,3 +388,45 @@ def live_pid_fixture():
                     proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     pass
+
+
+# === Issue #27 — module-isolation fixture for import-time config binding ===
+# db.py and memory_index.py copy config values into their namespaces at
+# import time (`from config import ...`), so tests that need a patched
+# EMBEDDING_DIMENSIONS / DATABASE_PATH to actually flow into their behavior
+# must re-execute the module bodies. The old pattern in
+# test_dim_drift_guard.py (importlib.reload + post-reload monkeypatch.setattr)
+# leaked patched module state for the rest of the session — monkeypatch
+# recorded the post-reload PATCHED values as "originals", so teardown
+# "restored" the leak. The fixture below wraps
+# tests/module_isolation.isolated_db_modules_ctx, which:
+#   stash sys.modules entries -> apply config overrides -> pop + fresh-import
+#   db then memory_index -> yield -> restore the pristine originals.
+# Scoped FUNCTION (factory style), not session: consumers need per-test
+# tmp_path-derived paths and different override sets per test, and
+# session-scoped restore-at-exit would preserve the very inter-test leak
+# this fixture exists to fix. Full pattern docs: tests/module_isolation.py.
+
+
+@pytest.fixture
+def isolated_db_modules():
+    """Factory: ``iso = isolated_db_modules(EMBEDDING_DIMENSIONS=1024, ...)``.
+
+    Each call applies the given config overrides via a private MonkeyPatch,
+    fresh-imports ``db`` and ``memory_index`` under them, and returns a
+    namespace with ``config`` / ``db`` / ``memory_index`` attributes. All
+    contexts unwind LIFO at test teardown (originals restored, patches
+    undone) via ExitStack.
+    """
+    from contextlib import ExitStack
+
+    from tests.module_isolation import isolated_db_modules_ctx
+
+    with ExitStack() as stack:
+
+        def _factory(**config_overrides):
+            return stack.enter_context(
+                isolated_db_modules_ctx(**config_overrides)
+            )
+
+        yield _factory
