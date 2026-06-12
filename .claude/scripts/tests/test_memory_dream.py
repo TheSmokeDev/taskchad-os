@@ -401,6 +401,7 @@ def _patch_dream(mock_memory_dir, tmp_path, threshold=1):
              patch("memory_dream.SELF_FILE", mock_memory_dir / "SELF.md"), \
              patch("memory_dream.GOALS_FILE", mock_memory_dir / "GOALS.md"), \
              patch("memory_dream.STATE_DIR", tmp_path), \
+             patch("memory_dream.AMENDMENT_LEDGER_FILE", tmp_path / "amendment-proposals.jsonl"), \
              patch("memory_dream.DREAM_SIGNAL_THRESHOLD", threshold):
             yield
 

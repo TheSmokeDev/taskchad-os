@@ -36,6 +36,7 @@ if str(_CHAT_DIR) not in sys.path:
 from cognition.amendments import (  # noqa: E402
     ProposalLedger,
     build_amendment_gate_section,
+    ledger_file_lock,
     process_amendment_output,
 )
 from cognition.proactive_brief import build_proactive_brief_section  # noqa: E402
@@ -44,7 +45,9 @@ from cognition.scheduled_payload import (  # noqa: E402
 )
 
 from config import (  # noqa: E402
+    AMENDMENT_APPLY_LIMIT,
     AMENDMENT_LEDGER_FILE,
+    AMENDMENT_SECTION_CAP,
     DAILY_DIR,
     GOALS_FILE,
     MEMORY_DIR,
@@ -199,11 +202,22 @@ def _assemble_reflect_cognition_section(
 
 
 def _assemble_reflect_amendment_section(
-    ledger_file: Path = AMENDMENT_LEDGER_FILE,
+    ledger_file: Path | None = None,
 ) -> str:
-    """Assemble the human-gated amendment proposal instructions."""
+    """Assemble the human-gated amendment proposal instructions.
 
-    return build_amendment_gate_section(ledger_file, source="memory_reflect")
+    ``ledger_file`` is a ``None`` sentinel resolved to
+    ``AMENDMENT_LEDGER_FILE`` at call time (Rule 1 — never bind tunable
+    config in default args).
+    """
+
+    if ledger_file is None:
+        ledger_file = AMENDMENT_LEDGER_FILE
+    return build_amendment_gate_section(
+        ledger_file,
+        source="memory_reflect",
+        ledger=ProposalLedger(ledger_file),
+    )
 
 
 # =============================================================================
@@ -401,12 +415,17 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
             + (f" cost=${result.cost_usd:.4f}" if result.cost_usd else "")
         )
         if not test_mode:
-            apply_results = process_amendment_output(
-                response_text,
-                ProposalLedger(AMENDMENT_LEDGER_FILE),
-                MEMORY_DIR,
-                default_source="memory_reflect",
-            )
+            # Reentrant ledger lock — shared.file_lock here would deadlock
+            # against the ledger mutations inside (per-handle OS locks).
+            with ledger_file_lock(AMENDMENT_LEDGER_FILE):
+                apply_results = process_amendment_output(
+                    response_text,
+                    ProposalLedger(AMENDMENT_LEDGER_FILE),
+                    MEMORY_DIR,
+                    default_source="memory_reflect",
+                    apply_limit=AMENDMENT_APPLY_LIMIT,
+                    section_cap=AMENDMENT_SECTION_CAP,
+                )
             applied = [item for item in apply_results if item.status == "applied"]
             if applied:
                 print(

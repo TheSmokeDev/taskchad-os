@@ -292,6 +292,9 @@ RECENT_CONVERSATION_COUNT = int(os.getenv("RECENT_CONVERSATION_COUNT", "6"))
 # Staging store
 STAGING_STORE_PATH = STATE_DIR / "memory-candidates.jsonl"
 AMENDMENT_LEDGER_FILE = STATE_DIR / "amendment-proposals.jsonl"
+# Bounded auto-apply per scheduled run + Autonomous Amendments section cap (refs #58)
+AMENDMENT_APPLY_LIMIT = int(os.getenv("AMENDMENT_APPLY_LIMIT", "3"))
+AMENDMENT_SECTION_CAP = int(os.getenv("AMENDMENT_SECTION_CAP", "20"))
 COGNITIVE_DRIFT_LEDGER_FILE = STATE_DIR / "cognitive-drift-findings.jsonl"
 STAGING_MAX_CAPTURES_PER_TURN = int(os.getenv("STAGING_MAX_CAPTURES", "3"))
 STAGING_DECAY_DAYS = int(os.getenv("STAGING_DECAY_DAYS", "30"))

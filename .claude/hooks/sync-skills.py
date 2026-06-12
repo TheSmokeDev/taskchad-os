@@ -57,6 +57,11 @@ SKILLS_TO_SYNC = [
     # CLUTCH v3 — added 2026-04-29 alongside adversarial-review reference + templates.
     # Project-level clutch is the source of truth; user-level is the cache Claude Code loads.
     "clutch",
+    # Video pipeline skills — added 2026-06-11. homie-video = house loop
+    # (sanitizer-denied, private); video-director = generic public capability
+    # (ships via the export). Project-level is the source of truth.
+    "homie-video",
+    "video-director",
 ]
 
 

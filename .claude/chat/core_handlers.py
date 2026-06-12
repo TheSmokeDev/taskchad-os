@@ -1231,6 +1231,236 @@ async def handle_linkedin_profile(
     return "Unknown LinkedIn profile command. Use: /linkedin_profile status or /linkedin_profile open"
 
 
+def _import_x_scout() -> Any:
+    """Import the scripts-dir x_scout module from the chat slice.
+
+    x_scout.py lives in ``.claude/scripts/``; core_handlers.py lives in
+    ``.claude/chat/``. Add the scripts dir to sys.path once so the read-only
+    scout brain (planner + browser collector + rate guard) is importable from
+    the router process. x_scout itself imports ``browser_control`` (already on
+    the chat path) for the cookie-free visible-browser collector.
+    """
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import x_scout  # type: ignore[import-not-found]
+
+    return x_scout
+
+
+async def handle_x(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """X scout - read-only timeline/search/scout via the visible Chrome CDP session.
+
+    Cookie-free: drives the EXISTING logged-in browser on CDP 9222 (no cookie
+    read/seed/export). Every subcommand is gated through the browser workflow
+    registry (x.scout / x.timeline / x.search are read-classification) and
+    audited via append_browser_audit_record. The scout NEVER posts.
+
+    Subcommands:
+      /x scout [angle] [intent...]   - scouted signal digest (default angle: latest)
+      /x timeline [angle]            - alias for scout on the bare-feed angles
+      /x search <subject>            - scout the LATEST angle for a subject
+    """
+
+    from browser_control import browser_readiness, redact_text_urls, resolve_cdp_port
+    from browser_workflows import require_browser_workflow_permission
+
+    raw = (args or "").strip()
+    if not raw or raw.lower() in {"help", "-h", "--help"}:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/x help",
+            workflow_id=None,
+            outcome="succeeded",
+            reason="help displayed",
+        )
+        return (
+            "*X Scout (read-only)*\n"
+            "  /x scout [angle] [intent]   - signal digest (angles: latest, trusted, breaking, threads, who, projects)\n"
+            "  /x timeline [angle]         - read the timeline for a bare-feed angle\n"
+            "  /x search <subject>         - scout the latest angle for a subject\n\n"
+            "Drives the existing logged-in visible Chrome (CDP). No cookies handled, "
+            "no posting. @your-x-handle is never automated."
+        )
+
+    try:
+        parts = shlex.split(raw)
+    except ValueError as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/x",
+            workflow_id=None,
+            outcome="failed",
+            reason=f"command parse error: {exc}",
+        )
+        return f"X command parse error: {exc}"
+
+    subcommand = parts[0].lower()
+    rest = parts[1:]
+
+    workflow_by_sub = {
+        "scout": "x.scout",
+        "timeline": "x.timeline",
+        "search": "x.search",
+    }
+    if subcommand not in workflow_by_sub:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/x {subcommand}",
+            workflow_id=None,
+            outcome="failed",
+            reason="unknown x command",
+        )
+        return "Unknown X command. Use: /x scout, /x timeline, /x search <subject>"
+
+    workflow_id = workflow_by_sub[subcommand]
+
+    try:
+        port = resolve_cdp_port()
+    except ValueError as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/x {subcommand}",
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=str(exc),
+        )
+        return f"X browser config error: {exc}"
+
+    readiness = browser_readiness(port=port)
+
+    # Default-deny gate (read-classification workflows pass without approval).
+    decision = require_browser_workflow_permission(workflow_id, raw)
+    _audit_browser_action(
+        adapter=adapter,
+        incoming=incoming,
+        command=f"/x {subcommand}",
+        workflow_id=workflow_id,
+        outcome=decision.outcome,
+        reason=decision.reason,
+        readiness=readiness,
+    )
+    if not decision.allowed:
+        return _format_browser_blocked(decision)
+
+    # CDP readiness gate - refuse cleanly instead of spawning a headless fallback.
+    if not readiness.get("cdp_reachable"):
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/x {subcommand}",
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=str(readiness.get("reason") or "CDP unreachable"),
+            readiness=readiness,
+        )
+        return (
+            "X scout needs the visible Chrome CDP session.\n"
+            f"  {readiness.get('reason') or 'CDP unreachable'}\n"
+            "Start real visible Chrome with the debug port and retry. No headless fallback."
+        )
+
+    # Resolve angle + subject/intent per subcommand.
+    valid_angles = {"latest", "trusted", "breaking", "threads", "who", "projects"}
+    angle = "latest"
+    subject = ""
+    intent = ""
+
+    if subcommand == "search":
+        if not rest:
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/x search",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason="search needs a subject",
+                readiness=readiness,
+            )
+            return "Usage: /x search <subject>"
+        subject = " ".join(rest)
+    else:
+        # scout / timeline: optional leading angle, remainder is a free intent.
+        if rest and rest[0].lower() in valid_angles:
+            angle = rest[0].lower()
+            intent = " ".join(rest[1:])
+        else:
+            intent = " ".join(rest)
+
+    try:
+        x_scout = _import_x_scout()
+    except Exception as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/x {subcommand}",
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=f"x_scout import failed: {exc}",
+            readiness=readiness,
+        )
+        return f"X scout unavailable: {redact_text_urls(str(exc))}"
+
+    # Planner fan-out: when an intent is given, translate it to 1-3 signal-dense
+    # subjects via the Pass-0 planner (subscription lane).
+    #
+    # TODO(ask-user-preview): the QM server gated planned-intent digests behind
+    # an auq_bridge.ask preview (Run all / Run #1 / Broaden / Narrow / Cancel)
+    # before searching X. No local ask-user bridge exists in the chat slice yet
+    # (grep for auq_bridge / AskUserQuestion: none). Until one lands, run the
+    # planned subjects directly. When a bridge exists, preview the planned
+    # subjects here and only run the approved set.
+    subjects = None
+    if intent.strip():
+        try:
+            planned = await x_scout.plan(intent.strip())
+            subjects = [s["search_query"] for s in planned] or None
+        except Exception:
+            subjects = None  # planner never raises, but stay defensive
+
+    # run_scout is sync + does blocking subprocess/sleep against the browser;
+    # run it off the event loop.
+    try:
+        output = await asyncio.to_thread(
+            x_scout.run_scout,
+            angle,
+            subject,
+            None,
+            False,
+            kind="adhoc",
+            subjects=subjects,
+            port=port,
+        )
+    except Exception as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/x {subcommand}",
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=f"scout error: {exc}",
+            readiness=readiness,
+        )
+        return f"X scout failed: {redact_text_urls(str(exc))}"
+
+    _audit_browser_action(
+        adapter=adapter,
+        incoming=incoming,
+        command=f"/x {subcommand}",
+        workflow_id=workflow_id,
+        outcome="succeeded",
+        reason="scout rendered",
+        readiness=readiness,
+    )
+    return output
+
+
 async def handle_inbox(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Scan inbox for triage briefing."""
     try:
@@ -2540,6 +2770,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "browser": handle_browser,
     "browserops": handle_browserops,
     "linkedin_profile": handle_linkedin_profile,
+    "x": handle_x,
     "inbox": handle_inbox,
     "cleanup": handle_cleanup,
     "analytics": handle_analytics,
