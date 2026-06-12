@@ -64,6 +64,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("browserops", "Browser Homie specialist context - agent-browser guide, readiness, policy", "router", "admin"),
     ("linkedin_profile", "LinkedIn profile browser ops - status or open via visible Chrome CDP", "router", "admin"),
     ("x", "X scout - scout|timeline|search the X timeline via visible Chrome CDP (read-only)", "router", "admin"),
+    ("video", "Generate a branded video from a brief - styles|status|<brief> [--style name]", "router", "admin"),
     ("post", "Post to social media — /post x Hello! or /post facebook Check out our new rates!", "engine", "admin"),
     ("calendar", "Check Google Calendar — today or upcoming events", "engine", "admin"),
     ("tasks", "Check Asana tasks — my tasks, overdue, due soon", "engine", "admin"),

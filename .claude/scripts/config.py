@@ -206,6 +206,15 @@ DASHBOARD_BOT_GRACE_SECONDS = int(os.getenv("DASHBOARD_BOT_GRACE_SECONDS", "5"))
 CHAT_MAX_TURNS = int(os.getenv("CHAT_MAX_TURNS", "25"))
 CHAT_MAX_BUDGET_USD = float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0"))
 CHAT_ENGINE_TIMEOUT_SECONDS = float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "180"))
+# doc-upload-truthful-reads Phase 2 — attachment full-read caps + attachment-turn
+# timeout. Consumers resolve these at CALL TIME via None-sentinel params
+# (Rule 1) so /reload takes effect without a restart.
+CHAT_ATTACHMENT_MAX_BYTES = int(os.getenv("CHAT_ATTACHMENT_MAX_BYTES", str(8 * 1024 * 1024)))
+CHAT_ATTACHMENT_MAX_CHARS = int(os.getenv("CHAT_ATTACHMENT_MAX_CHARS", "100000"))
+CHAT_ATTACHMENT_TOTAL_MAX_CHARS = int(os.getenv("CHAT_ATTACHMENT_TOTAL_MAX_CHARS", "120000"))
+CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS = float(
+    os.getenv("CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS", "300")
+)
 CHAT_ALLOWED_USERS = os.getenv("CHAT_ALLOWED_USERS", SLACK_OWNER_USER_ID).split(",")
 
 # Telegram
@@ -428,6 +437,8 @@ def reload_config() -> dict[str, tuple[str, str]]:
         "VOICE_STT_ENABLE_OPENAI", "VOICE_TTS_ENGINE", "VOICE_TTS_VOICE_EDGE",
         "VOICE_TTS_VOICE_OPENAI",
         "CHAT_MAX_TURNS", "CHAT_MAX_BUDGET_USD", "CHAT_ENGINE_TIMEOUT_SECONDS",
+        "CHAT_ATTACHMENT_MAX_BYTES", "CHAT_ATTACHMENT_MAX_CHARS",
+        "CHAT_ATTACHMENT_TOTAL_MAX_CHARS", "CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS",
         "GOOGLE_CALENDAR_ID", "HEARTBEAT_INTERVAL_MINUTES",
         "HEARTBEAT_ACTIVE_START", "HEARTBEAT_ACTIVE_END",
     ]
@@ -453,6 +464,16 @@ def reload_config() -> dict[str, tuple[str, str]]:
         "CHAT_MAX_TURNS": int(os.getenv("CHAT_MAX_TURNS", "25")),
         "CHAT_MAX_BUDGET_USD": float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0")),
         "CHAT_ENGINE_TIMEOUT_SECONDS": float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "180")),
+        "CHAT_ATTACHMENT_MAX_BYTES": int(
+            os.getenv("CHAT_ATTACHMENT_MAX_BYTES", str(8 * 1024 * 1024))
+        ),
+        "CHAT_ATTACHMENT_MAX_CHARS": int(os.getenv("CHAT_ATTACHMENT_MAX_CHARS", "100000")),
+        "CHAT_ATTACHMENT_TOTAL_MAX_CHARS": int(
+            os.getenv("CHAT_ATTACHMENT_TOTAL_MAX_CHARS", "120000")
+        ),
+        "CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS": float(
+            os.getenv("CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS", "300")
+        ),
         "GOOGLE_CALENDAR_ID": os.getenv("GOOGLE_CALENDAR_ID", ""),
         "HEARTBEAT_INTERVAL_MINUTES": int(os.getenv("HEARTBEAT_INTERVAL_MINUTES", "30")),
         "HEARTBEAT_ACTIVE_START": os.getenv("HEARTBEAT_ACTIVE_HOURS_START", "08:00"),

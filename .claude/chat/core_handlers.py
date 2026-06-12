@@ -2743,6 +2743,236 @@ def _design_slug(brief_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# /video — native, model-agnostic video generation (all adapters)
+# ---------------------------------------------------------------------------
+#
+# Router-typed on purpose: the pipeline is deterministic Python and its only
+# LLM moments run through run_with_runtime_lanes inside video_pipeline, so the
+# command behaves identically on claude/codex/gemini lanes. No Skill-tool
+# dependency (that path is claude_native-only). Renders run as a background
+# asyncio task; the finished MP4 is delivered back through the SAME adapter
+# via OutgoingMessage.attachments. Mirrors the /x graceful-degrade pattern:
+# the backing module/system deps may be absent on a given install.
+
+_VIDEO_RENDER_STATE: dict[str, Any] = {"running": False, "started": "", "brief": ""}
+
+
+def _import_video_pipeline() -> Any:
+    """Import the scripts-dir video_pipeline module from the chat slice.
+
+    video_pipeline.py lives in ``.claude/scripts/``; core_handlers.py lives in
+    ``.claude/chat/`` with the chat dir itself on sys.path (flat-import
+    convention), so the scripts dir must be appended explicitly. Mirrors
+    _import_x_scout.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    scripts_dir = str(_Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import video_pipeline  # type: ignore[import-not-found]
+
+    return video_pipeline
+
+
+def _parse_video_flags(tokens: list[str]) -> tuple[str, dict[str, Any]]:
+    """Split ``/video`` args into (brief, options). Unknown flags stay in the brief."""
+    opts: dict[str, Any] = {"style": None, "design_file": None, "aspect": "16:9", "duration": 30}
+    brief_parts: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        low = tok.lower()
+        if low == "--style" and i + 1 < len(tokens):
+            opts["style"] = tokens[i + 1]
+            i += 2
+        elif low == "--design" and i + 1 < len(tokens):
+            opts["design_file"] = tokens[i + 1]
+            i += 2
+        elif low == "--aspect" and i + 1 < len(tokens):
+            opts["aspect"] = tokens[i + 1]
+            i += 2
+        elif low == "--duration" and i + 1 < len(tokens):
+            try:
+                opts["duration"] = max(8, min(120, int(tokens[i + 1])))
+            except ValueError:
+                pass
+            i += 2
+        else:
+            brief_parts.append(tok)
+            i += 1
+    return " ".join(brief_parts).strip(), opts
+
+
+async def _run_video_render(
+    adapter: Any,
+    incoming: Any,
+    pipeline: Any,
+    brief: str,
+    opts: dict[str, Any],
+) -> None:
+    """Background render + same-adapter delivery. Never raises."""
+    from models import Attachment, OutgoingMessage
+
+    try:
+        result = await asyncio.to_thread(
+            pipeline.render_brief,
+            brief,
+            style=opts.get("style"),
+            design_file=opts.get("design_file"),
+            aspect=opts.get("aspect", "16:9"),
+            duration_target_s=opts.get("duration", 30),
+        )
+    except Exception as exc:  # defensive: render_brief should return ok=False instead
+        result = {"ok": False, "error": str(exc), "mp4_path": "", "output_dir": ""}
+    finally:
+        _VIDEO_RENDER_STATE.update({"running": False, "started": "", "brief": ""})
+
+    try:
+        if result.get("ok"):
+            mp4 = result.get("mp4_path", "")
+            size = 0
+            try:
+                size = Path(mp4).stat().st_size
+            except OSError:
+                pass
+            score = result.get("score") or {}
+            text = (
+                "Video ready.\n"
+                f"  style: {result.get('style', 'neutral')}  |  "
+                f"length: {result.get('duration_s', 0):.1f}s  |  "
+                f"score: {score.get('final', 'n/a')}\n"
+                f"  copy via: {result.get('provider', 'runtime lane')}\n"
+                f"  file: {mp4}"
+            )
+            await adapter.send(
+                OutgoingMessage(
+                    text=text,
+                    channel=incoming.channel,
+                    attachments=[
+                        Attachment(
+                            filename=Path(mp4).name or "video.mp4",
+                            mimetype="video/mp4",
+                            url=mp4,
+                            size_bytes=size or None,
+                        )
+                    ],
+                )
+            )
+        else:
+            await adapter.send(
+                OutgoingMessage(
+                    text=(
+                        "Video render failed.\n"
+                        f"  {result.get('error', 'unknown error')}\n"
+                        + (f"  artifacts: {result.get('output_dir')}" if result.get("output_dir") else "")
+                    ),
+                    channel=incoming.channel,
+                    is_error=True,
+                )
+            )
+    except Exception as exc:
+        print(f"[video] delivery failed: {exc}")
+
+
+async def handle_video(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """/video — generate a branded video from a brief, any adapter, any model lane.
+
+    Subcommands:
+      /video styles                      list the style library
+      /video status                      show whether a render is running
+      /video <brief> [--style name] [--aspect 16:9|9:16|1:1] [--design file] [--duration s]
+    """
+    tokens = args.split() if args else []
+    sub = tokens[0].lower() if tokens else ""
+
+    try:
+        pipeline = _import_video_pipeline()
+    except Exception as exc:
+        return f"Video pipeline unavailable: {exc}"
+
+    if sub == "styles":
+        try:
+            import video_styles  # type: ignore[import-not-found]
+
+            rows = video_styles.list_styles()
+        except Exception as exc:
+            return f"Style registry unavailable: {exc}"
+        lines = ["Video styles (use --style <name>):"]
+        lines += [f"  {row['name']} - {row['tagline']}" for row in rows]
+        lines.append("Or derive from your brand: /video <brief> --design <your design.md>")
+        return "\n".join(lines)
+
+    if sub == "status":
+        if _VIDEO_RENDER_STATE["running"]:
+            return (
+                f"Render running since {_VIDEO_RENDER_STATE['started']}\n"
+                f"  brief: {_VIDEO_RENDER_STATE['brief']}"
+            )
+        return "No render running. /video <brief> to start one."
+
+    brief, opts = _parse_video_flags(tokens)
+    if not brief:
+        return (
+            "Usage: /video <brief> [--style name] [--aspect 16:9|9:16|1:1] [--duration s]\n"
+            "       /video styles | /video status"
+        )
+
+    missing = pipeline.check_dependencies()
+    if missing:
+        return (
+            "Video rendering needs these tools installed first: " + ", ".join(missing) + "\n"
+            "  node + npx (nodejs.org), ffmpeg/ffprobe (ffmpeg.org), edge-tts (pip install edge-tts).\n"
+            "  Then retry /video."
+        )
+
+    if _VIDEO_RENDER_STATE["running"]:
+        return (
+            "A render is already running (one at a time).\n"
+            f"  started: {_VIDEO_RENDER_STATE['started']}  brief: {_VIDEO_RENDER_STATE['brief']}\n"
+            "  /video status to check on it."
+        )
+
+    platform_name = str(getattr(getattr(incoming, "platform", ""), "value", getattr(incoming, "platform", ""))).lower()
+    _VIDEO_RENDER_STATE.update(
+        {"running": True, "started": datetime.now().strftime("%H:%M:%S"), "brief": brief[:120]}
+    )
+
+    if collect_only or platform_name == "cli":
+        # One-shot surfaces (CLI quiet mode, brief prefetch) cannot outlive the
+        # turn, so render inline instead of backgrounding.
+        try:
+            result = await asyncio.to_thread(
+                pipeline.render_brief,
+                brief,
+                style=opts.get("style"),
+                design_file=opts.get("design_file"),
+                aspect=opts.get("aspect", "16:9"),
+                duration_target_s=opts.get("duration", 30),
+            )
+        finally:
+            _VIDEO_RENDER_STATE.update({"running": False, "started": "", "brief": ""})
+        if result.get("ok"):
+            score = result.get("score") or {}
+            return (
+                "Video ready.\n"
+                f"  style: {result.get('style', 'neutral')}  score: {score.get('final', 'n/a')}\n"
+                f"  file: {result.get('mp4_path')}"
+            )
+        return f"Video render failed: {result.get('error', 'unknown error')}"
+
+    asyncio.create_task(_run_video_render(adapter, incoming, pipeline, brief, opts))
+    style_note = opts.get("style") or "auto (use /video styles to pick)"
+    return (
+        "Rendering your video now. This usually takes a few minutes; "
+        "I'll send the MP4 here when it's done.\n"
+        f"  brief: {brief[:160]}\n"
+        f"  style: {style_note}  aspect: {opts.get('aspect')}  target: ~{opts.get('duration')}s"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Handler lookup — maps command name to handler function
 # ---------------------------------------------------------------------------
 
@@ -2771,6 +3001,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "browserops": handle_browserops,
     "linkedin_profile": handle_linkedin_profile,
     "x": handle_x,
+    "video": handle_video,
     "inbox": handle_inbox,
     "cleanup": handle_cleanup,
     "analytics": handle_analytics,

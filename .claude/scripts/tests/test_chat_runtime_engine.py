@@ -523,11 +523,135 @@ async def test_document_attachment_context_reaches_runtime_without_local_path(
     outputs = [out async for out in convo.handle_message(message)]
 
     assert outputs[-1].text == "ok"
+    # Phase 2 relocation: attachment content rides the turn prompt, NOT the
+    # system append (win32 27K cap + region budgets made that path a dead end).
+    prompt_text = str(captured["prompt"])
+    assert "# Uploaded Document Content" in prompt_text
+    assert "Attachment body for the model." in prompt_text
+    assert str(document_path) not in prompt_text
     append_text = str(captured["system_prompt"])
-    assert "# Attachment Context" in append_text
-    assert "Attachment body for the model." in append_text
+    assert "Attachment body for the model." not in append_text
+    assert "# Attachment Context" not in append_text
     assert str(document_path) not in append_text
-    assert str(document_path) not in str(captured["prompt"])
+
+
+@pytest.mark.asyncio
+async def test_large_document_reaches_prompt_fully_and_never_persists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Phase 2 core invariants: an 85K-char document is fully present in the
+    captured turn prompt, absent from the system append, and the document
+    body NEVER enters chat.db messages (history persists message.text)."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    document_path = tmp_path / "transcript.txt"
+    body = ("lorem ipsum " * 7_082).strip() + "\nTAIL-SENTINEL-END"  # ~85K chars
+    document_path.write_text(body, encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        captured["prompt"] = request.prompt
+        captured["system_prompt"] = request.system_prompt["append"]
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    message = _make_message("Summarize the upload")
+    message.attachments = [
+        Attachment(
+            filename="transcript.txt",
+            mimetype="text/plain",
+            url=str(document_path),
+            size_bytes=document_path.stat().st_size,
+        )
+    ]
+
+    outputs = [out async for out in convo.handle_message(message)]
+
+    assert outputs[-1].text == "ok"
+    prompt_text = str(captured["prompt"])
+    assert "TAIL-SENTINEL-END" in prompt_text, "85K document must inline FULLY"
+    assert "[TRUNCATED" not in prompt_text
+    assert "PARTIAL CONTENT" not in prompt_text
+    assert "TAIL-SENTINEL-END" not in str(captured["system_prompt"])
+
+    persisted = store.list_messages("telegram:chat-1:thread-1")
+    assert [msg.role for msg in persisted] == ["user", "assistant"]
+    assert persisted[0].content == "Summarize the upload"
+    for msg in persisted:
+        assert "TAIL-SENTINEL-END" not in msg.content, (
+            "document body must NEVER enter chat history"
+        )
+        assert "lorem ipsum lorem ipsum" not in msg.content
+
+
+@pytest.mark.asyncio
+async def test_discord_built_document_attachment_reaches_runtime_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """2f (R1 B1): a Discord-BUILT document attachment — on-disk filename
+    `{message_id}_{attachment_id}.txt` DIFFERENT from the display filename,
+    mirroring discord.py _download_document_attachments — reaches the captured
+    turn prompt and never the system append."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    docs_dir = tmp_path / "thehomie_discord_documents"
+    docs_dir.mkdir()
+    document_path = docs_dir / "777_888.txt"  # discord.py:569 naming shape
+    document_path.write_text("Discord doc body for the model.", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        captured["prompt"] = request.prompt
+        captured["system_prompt"] = request.system_prompt["append"]
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    message = _make_discord_message("Please read the upload")
+    message.attachments = [
+        Attachment(
+            filename="meeting-notes.txt",  # display name != on-disk name
+            mimetype="text/plain",
+            url=str(document_path),
+            size_bytes=document_path.stat().st_size,
+        )
+    ]
+
+    outputs = [out async for out in convo.handle_message(message)]
+
+    assert outputs[-1].text == "ok"
+    prompt_text = str(captured["prompt"])
+    assert "Discord doc body for the model." in prompt_text
+    assert "meeting-notes.txt" in prompt_text
+    assert str(document_path) not in prompt_text
+    assert "Discord doc body for the model." not in str(captured["system_prompt"])
 
 
 def test_sqlite_session_store_adds_runtime_columns(tmp_path: Path) -> None:
@@ -1076,3 +1200,53 @@ def test_frozen_regions_parity_with_shim(
         f"Identity region ordering drift: got {identity_present}, "
         f"expected {expected_identity_order}"
     )
+
+
+@pytest.mark.asyncio
+async def test_grounding_rule_reaches_runtime_system_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """GROUNDING_RULES must be the literal PREFIX of the runtime system-prompt
+    append — prefix position, not mere containment, so the win32 head-keeping
+    truncation can never drop it."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    captured: dict[str, object] = {}
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        captured["system_prompt"] = request.system_prompt["append"]
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [out async for out in convo.handle_message(_make_message())]
+
+    assert outputs[-1].text == "ok"
+    append_text = str(captured["system_prompt"])
+    assert append_text.startswith("# Grounding")
+    assert append_text.startswith(engine_module.GROUNDING_RULES)
+
+
+def test_grounding_survives_win32_truncation() -> None:
+    """R1 B3 regression: a head-keeping truncation of an oversized append must
+    preserve the full GROUNDING_RULES prefix while dropping the tail."""
+    oversized = engine_module.GROUNDING_RULES + "x" * 40000
+
+    result = engine_module._truncate_win32_append(oversized)
+
+    assert result.startswith(engine_module.GROUNDING_RULES)
+    assert result.endswith("[TRUNCATED]")
+    assert len(result) == 27000 + len("\n[TRUNCATED]")

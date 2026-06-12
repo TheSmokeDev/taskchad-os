@@ -182,6 +182,10 @@ async def test_on_document_downloads_and_queues_attachment(
     incoming = adapter._queue.get_nowait()
     assert incoming.text.startswith("[User uploaded a document: game-plan.md]")
     assert "Please read this" in incoming.text
+    # Phase 2 lane-agnostic wording — no tool instructions a no-tools lane
+    # cannot follow.
+    assert "Read tool" not in incoming.text
+    assert "provided to the model" in incoming.text
     assert incoming.platform_message_id == "42"
     assert incoming.attachments == [
         Attachment(
@@ -242,11 +246,51 @@ async def test_on_document_media_group_queues_single_combined_turn(
     assert "one.md" in incoming.text
     assert "two.md" in incoming.text
     assert "Read these together" in incoming.text
+    # Merged-group path concatenates per-doc texts — inherits the Phase 2
+    # lane-agnostic wording (verified, not assumed).
+    assert "Read tool" not in incoming.text
+    assert "provided to the model" in incoming.text
     assert [attachment.filename for attachment in incoming.attachments] == [
         "one.md",
         "two.md",
     ]
     assert incoming.platform_message_id == "42,43"
+
+
+def test_document_turn_text_uses_lane_agnostic_wording() -> None:
+    """Phase 2 (2d): the document turn text must not instruct lane-impossible
+    tool use — pure staticmethod, no Telegram Application needed."""
+    text = TelegramAdapter._document_turn_text(
+        filename="game-plan.md",
+        file_path="C:/tmp/unique-123_game-plan.md",
+        mime_type="text/markdown",
+        file_size=29,
+        caption="",
+    )
+
+    assert text.startswith("[User uploaded a document: game-plan.md]")
+    assert "Saved at: C:/tmp/unique-123_game-plan.md" in text
+    assert "MIME type: text/markdown" in text
+    assert "Size: 29 bytes" in text
+    assert "provided to the model" in text
+    assert "If the content is missing or partial, say so explicitly" in text
+    assert "Read tool" not in text
+    assert "User's message:" not in text
+
+
+def test_document_turn_text_folds_caption_and_skips_missing_fields() -> None:
+    text = TelegramAdapter._document_turn_text(
+        filename="notes.txt",
+        file_path="/tmp/x_notes.txt",
+        mime_type=None,
+        file_size=None,
+        caption="Please read this",
+    )
+
+    assert text.endswith("User's message: Please read this")
+    assert "MIME type:" not in text
+    assert "Size:" not in text
+    assert "Read tool" not in text
 
 
 @pytest.mark.asyncio

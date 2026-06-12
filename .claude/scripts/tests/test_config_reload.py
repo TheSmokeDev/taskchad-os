@@ -190,6 +190,38 @@ class TestReloadConfigFunction:
 
             rc()
 
+    def test_detects_attachment_cap_and_timeout_changes(self) -> None:
+        """reload_config reloads all 4 Phase 2 attachment constants (R1 M1):
+        the three caps (int) and the attachment turn timeout (float)."""
+        import config
+
+        cases: dict[str, tuple[str, int | float]] = {
+            "CHAT_ATTACHMENT_MAX_BYTES": ("4194304", 4194304),
+            "CHAT_ATTACHMENT_MAX_CHARS": ("50000", 50000),
+            "CHAT_ATTACHMENT_TOTAL_MAX_CHARS": ("60000", 60000),
+            "CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS": ("450", 450.0),
+        }
+        originals = {key: getattr(config, key) for key in cases}
+
+        try:
+            for key, (env_val, _expected) in cases.items():
+                os.environ[key] = env_val
+            from config import reload_config
+
+            changes = reload_config()
+            for key, (_env_val, expected) in cases.items():
+                assert key in changes, f"{key} change not reported"
+                assert getattr(config, key) == expected
+                assert type(getattr(config, key)) is type(expected), (
+                    f"{key} parse shape drift"
+                )
+        finally:
+            for key in cases:
+                os.environ[key] = str(originals[key])
+            from config import reload_config as rc
+
+            rc()
+
     def test_sensitive_values_masked(self) -> None:
         """API keys should be masked in the change report."""
         import config

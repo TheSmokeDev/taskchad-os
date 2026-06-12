@@ -2,7 +2,7 @@
 
 Status: active baseline, Telegram document ingress and turn controls live-proven; Discord document parsing locally proven
 Owner: `.claude/chat/adapters/`
-Last updated: 2026-06-08
+Last updated: 2026-06-11
 
 ## What It Does
 
@@ -14,8 +14,11 @@ Telegram text, voice, photo, and document updates are adapter-owned ingress
 paths. Discord text, voice/audio, image, and supported document uploads follow
 the same normalized message contract. Document uploads are downloaded to local
 temp storage, attached to the normalized message, and parsed by the chat engine
-into bounded attachment context for supported PDF, DOCX, CSV/TSV, Markdown, and
-text files. Local temp paths stay internal; model-visible attachment context
+into attachment context for supported PDF, DOCX, CSV/TSV, Markdown, and text
+files — prose formats (PDF, DOCX, Markdown, text) are read in full up to
+env-tunable caps, delivered on the turn prompt, with partial reads disclosed;
+CSV/TSV stay a deliberate tabular preview (first 60 rows, 12 cells per row,
+120 chars per cell), not a full read. Local temp paths stay internal; model-visible attachment context
 names the uploaded file and includes extracted text, not filesystem locations.
 Telegram document albums with a shared media group id are buffered briefly and
 queued as one normalized turn with multiple attachments.
@@ -59,8 +62,15 @@ natural-language chat should not auto-fetch Gmail/Outlook context.
 - Telegram and Discord document uploads are downloaded to local temp directories
   and passed to the engine as `IncomingMessage.attachments`; adapters do not
   execute file contents.
-- Supported document text is extracted into bounded runtime context. Unsupported
-  files remain attachments, but are not parsed into model-visible document text.
+- Prose document text (PDF, DOCX, Markdown, plain text) is read in full up to
+  env-tunable caps (`CHAT_ATTACHMENT_MAX_BYTES`, `CHAT_ATTACHMENT_MAX_CHARS`,
+  `CHAT_ATTACHMENT_TOTAL_MAX_CHARS`) and rides the turn prompt, not the
+  system-prompt append. CSV/TSV are parsed as a bounded tabular preview
+  (60 rows / 12 cells / 120-char cells); the full-read char caps do not apply
+  to them. Reads clipped by a cap are disclosed to the model as
+  PARTIAL CONTENT with an instruction to tell the user only part was read.
+  Unsupported files remain attachments, but are not parsed into model-visible
+  document text.
 - Do not expose local attachment temp paths in user-visible responses.
 - Telegram document updates consumed before this handler existed do not replay
   automatically. Re-upload documents that were dropped by an older live bot.

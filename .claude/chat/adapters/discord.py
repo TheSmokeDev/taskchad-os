@@ -541,7 +541,7 @@ class DiscordAdapter:
 
         The returned user text intentionally does not include local filesystem
         paths. The local file path stays internal on Attachment.url so the
-        engine can parse bounded document context before runtime dispatch.
+        engine can parse document context before runtime dispatch.
         """
         if not msg.attachments:
             return "", []
@@ -576,7 +576,9 @@ class DiscordAdapter:
 
                 text_parts.append(
                     f"[User uploaded document: {safe_name}. "
-                    "Bounded attachment context will be provided to the runtime.]"
+                    "The document's content is provided to the model along with "
+                    "this message. If the content is missing or partial, say so "
+                    "explicitly instead of guessing.]"
                 )
                 downloaded.append(Attachment(
                     filename=safe_name,

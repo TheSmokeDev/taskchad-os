@@ -188,6 +188,17 @@ re-render per round.
 | Audio drifts from visuals | Re-measure with ffprobe and rebuild the adelay concat; timing is always derived, never guessed. |
 | Render passes but looks wrong | The gates prove integrity, not taste. View the stills; iterate the design system, not just the tweens. |
 
+## Native /video command
+
+The framework also exposes this capability as a native chat command: `/video
+<brief> [--style name] [--aspect 16:9|9:16|1:1] [--design file]` works from
+Telegram, Discord, Slack, the web dashboard, and the CLI, with `/video
+styles` listing the built-in style library. The command is model-agnostic
+(its LLM moments run through the runtime lanes) and delivers the finished
+MP4 back into the same conversation. Use the command for one-shot renders;
+use this skill when directing a richer, multi-revision production. Details:
+`docs/manual/features/video-generation.md`.
+
 ## Boundaries
 
 - This skill never posts to any platform; it produces files.

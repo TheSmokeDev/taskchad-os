@@ -54,13 +54,25 @@ _LINKEDIN_PROFILE_OPEN_MARKERS = (
 )
 
 
-def _engine_timeout_seconds() -> float:
-    """Return the configured whole-turn engine timeout in seconds."""
+def _engine_timeout_seconds(has_attachments: bool = False) -> float:
+    """Return the configured whole-turn engine timeout in seconds.
+
+    Attachment turns (document uploads) get the longer
+    CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS budget. The module-level
+    ENGINE_TIMEOUT_SECONDS test override keeps ABSOLUTE precedence.
+    """
 
     if ENGINE_TIMEOUT_SECONDS is not None:
         try:
             return max(0.001, float(ENGINE_TIMEOUT_SECONDS))
         except (TypeError, ValueError):
+            return DEFAULT_ENGINE_TIMEOUT_SECONDS
+
+    if has_attachments:
+        try:
+            from config import CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS
+            return max(0.001, float(CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS))
+        except Exception:
             return DEFAULT_ENGINE_TIMEOUT_SECONDS
 
     try:
@@ -77,8 +89,19 @@ def _format_seconds(seconds: float) -> str:
     return f"{seconds:.3f}".rstrip("0").rstrip(".")
 
 
-def _engine_timeout_message(timeout_seconds: float) -> str:
+def _engine_timeout_message(timeout_seconds: float, attachments: list[Any] | None = None) -> str:
     formatted = _format_seconds(timeout_seconds)
+    if attachments:
+        names = [getattr(a, "filename", "") or "attachment" for a in attachments]
+        shown = ", ".join(names[:3]) + (f" (+{len(names) - 3} more)" if len(names) > 3 else "")
+        plural = len(names) > 1
+        return (
+            f"I hit the chat runtime timeout after {formatted}s. "
+            f"Your uploaded {'files were' if plural else 'file was'} NOT read, "
+            f"ingested, or saved: {shown}. Nothing from "
+            f"{'them' if plural else 'it'} was processed. The bot is still online — "
+            "send the file again, or ask about a specific section, to retry."
+        )
     return (
         f"I hit the chat runtime timeout after {formatted}s before the model "
         "returned. I did not finish that turn or make changes from it. "
@@ -751,14 +774,18 @@ class ChatRouter:
                 if yielded_components:
                     final_components = list(yielded_components)
 
-        timeout_seconds = _engine_timeout_seconds()
+        timeout_seconds = _engine_timeout_seconds(
+            bool(getattr(incoming, "attachments", None))
+        )
 
         try:
             await asyncio.wait_for(_run_engine(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             formatted_timeout = _format_seconds(timeout_seconds)
             print(f"[{datetime.now()}] Engine timed out after {formatted_timeout}s")
-            final_text = _engine_timeout_message(timeout_seconds)
+            final_text = _engine_timeout_message(
+                timeout_seconds, getattr(incoming, "attachments", None)
+            )
             final_is_error = True
         except Exception as e:
             print(f"[{datetime.now()}] Engine error: {e}")

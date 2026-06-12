@@ -749,20 +749,13 @@ class TelegramAdapter:
             return
 
         caption = msg.caption or ""
-        details = [
-            f"[User uploaded a document: {filename}]",
-            f"Saved at: {file_path}",
-        ]
-        if document.mime_type:
-            details.append(f"MIME type: {document.mime_type}")
-        if document.file_size is not None:
-            details.append(f"Size: {document.file_size} bytes")
-        details.append(
-            "Use the Read tool to inspect Markdown or text documents at the path above, then respond."
+        text = self._document_turn_text(
+            filename=filename,
+            file_path=str(file_path),
+            mime_type=document.mime_type,
+            file_size=document.file_size,
+            caption=caption,
         )
-        text = "\n".join(details)
-        if caption:
-            text += f"\n\nUser's message: {caption}"
 
         chat_id = str(msg.chat_id)
         thread_id = chat_id
@@ -814,6 +807,40 @@ class TelegramAdapter:
             return
 
         await self._queue.put(incoming)
+
+    @staticmethod
+    def _document_turn_text(
+        filename: str,
+        file_path: str,
+        mime_type: str | None,
+        file_size: int | None,
+        caption: str,
+    ) -> str:
+        """Build the user-turn text for a document upload.
+
+        Lane-agnostic wording (Phase 2, doc-upload-truthful-reads): the
+        document content is delivered to the model via the turn prompt on
+        every lane, so the text must not instruct tool use that generic
+        (no-tools) lanes cannot perform.
+        """
+        details = [
+            f"[User uploaded a document: {filename}]",
+            f"Saved at: {file_path}",
+        ]
+        if mime_type:
+            details.append(f"MIME type: {mime_type}")
+        if file_size is not None:
+            details.append(f"Size: {file_size} bytes")
+        details.append(
+            "The document's content is provided to the model along with this "
+            "message. If file tools are available, the full original is at the "
+            "saved path; otherwise rely on the provided content. If the content "
+            "is missing or partial, say so explicitly instead of guessing."
+        )
+        text = "\n".join(details)
+        if caption:
+            text += f"\n\nUser's message: {caption}"
+        return text
 
     async def _flush_document_group_after_delay(self, group_key: str) -> None:
         try:

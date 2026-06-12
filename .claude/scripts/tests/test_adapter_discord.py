@@ -254,6 +254,11 @@ async def test_download_document_attachment_without_exposing_local_path(
 
     assert "report.txt" in text
     assert str(tmp_path) not in text
+    # Phase 2 (2f) full-read contract wording — the stale "bounded" phrasing
+    # must be gone.
+    assert "The document's content is provided to the model along with this message." in text
+    assert "say so explicitly instead of guessing" in text
+    assert "Bounded attachment context" not in text
     assert attachments == [
         Attachment(
             filename="report.txt",

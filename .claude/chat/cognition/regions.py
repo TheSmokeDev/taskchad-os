@@ -24,7 +24,7 @@ DEFAULT_REGION_BUDGETS: dict[str, int] = {
     "recalled_memory": 16000,   # ~4K tokens — tiered recall results
     "procedural_memory": 8000,  # ~2K tokens — skills index (stub Move 1)
     "prefetched_context": 24000,  # ~6K tokens — router pre-fetch
-    "attachment_context": 4500,   # bounded parsed upload text
+    "attachment_context": 4500,   # legacy/unused — attachment content moved to RuntimeRequest.prompt (Phase 2)
     "recent_conversation": 600,  # ~2.4K chars — last 4-6 turns, engine-injected
 }
 

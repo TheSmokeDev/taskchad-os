@@ -143,3 +143,9 @@ def test_model_guidance_absent_by_default() -> None:
 def test_gemini_guidance_constant_leads_with_conciseness() -> None:
     assert "Gemini operational directives" in GEMINI_GUIDANCE
     assert "Conciseness" in GEMINI_GUIDANCE
+
+
+def test_text_preamble_grounds_against_fabricated_action_claims() -> None:
+    req = RuntimeRequest(prompt="yo", cwd=".", task_name="t", capability=TEXT_REASONING)
+    result = render_cli_prompt(req)
+    assert "never claim to have read files" in result
