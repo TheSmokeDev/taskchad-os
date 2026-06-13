@@ -139,6 +139,8 @@ class SignalResult:
     repeated_entities: list[str] = field(default_factory=list)
     files_scanned: int = 0
     signal_score: int = 0
+    # Living Mind Act 3 — open episodes scanned this run (additive field).
+    episode_paths: list[Path] = field(default_factory=list)
 
 
 # =============================================================================
@@ -219,6 +221,24 @@ def _assemble_dream_drift_section(
 
     status = cognitive_loop_status or collect_cognitive_loop_status()
     return build_drift_detection_section(project_root, status)
+
+
+def _assemble_episodes_section(episode_paths: list[Path]) -> str:
+    """Assemble the consolidate-phase open-episodes digest section.
+
+    Living Mind Act 3. Returns ``""`` for empty paths so the consolidate
+    prompt stays byte-identical to pre-Act-3 assembly when no episodes
+    exist. Digest caps come from ``config.get_episode_settings()`` (Rule 1,
+    resolved inside ``render_episodes_digest``).
+    """
+    if not episode_paths:
+        return ""
+    from episodes import render_episodes_digest
+
+    digest = render_episodes_digest(episode_paths)
+    if not digest:
+        return ""
+    return "## Recent Episodes (open)\n\n" + digest
 
 
 def _assemble_prune_memory_section(memory_dir: Path) -> str:
@@ -308,11 +328,15 @@ def _extract_entities(text: str) -> list[str]:
     return entities
 
 
-def gather_signal(daily_logs: list[Path], days: int = 7) -> SignalResult:
+def gather_signal(
+    daily_logs: list[Path], days: int = 7, memory_dir: Path | None = None
+) -> SignalResult:
     """Scan logs for consolidation-worthy signal. No LLM call.
 
-    Greps daily logs and session flush files for corrections, saves,
-    stalls, and repeated entities. Returns a signal digest.
+    Greps daily logs, session flush files, and open episodes for
+    corrections, saves, stalls, and repeated entities. Returns a signal
+    digest. ``memory_dir`` is a None sentinel resolved to the module's
+    ``MEMORY_DIR`` inside the body (Rule 1 — existing call sites unchanged).
     """
     result = SignalResult()
     all_corrections: list[str] = []
@@ -340,7 +364,11 @@ def gather_signal(daily_logs: list[Path], days: int = 7) -> SignalResult:
         except Exception:
             continue
 
-    # Scan session flush files (filtered by mtime — only recent ones)
+    # Scan session flush files (filtered by mtime — only recent ones).
+    # This legacy scan mines raw leftovers of FAILED flushes (successful
+    # flushes unlink their context file) — kept verbatim; episodes below are
+    # the summary-grade source for successful flushes. Additive, not
+    # replacement.
     flush_cutoff = datetime.now().timestamp() - (days * 86400)
     for flush_file in sorted(STATE_DIR.glob("session-flush-*.md")):
         try:
@@ -358,6 +386,35 @@ def gather_signal(daily_logs: list[Path], days: int = 7) -> SignalResult:
             for entity in _extract_entities(content):
                 entity_counter[entity] += 1
                 entity_sources.setdefault(entity, set()).add(flush_file.name)
+        except Exception:
+            continue
+
+    # Living Mind Act 3 — scan open episodes (window + status filtered,
+    # newest-first). Substantive episodes RAISE the weighted score so
+    # sessions with real decisions make the dream fire.
+    if memory_dir is None:
+        memory_dir = MEMORY_DIR
+    try:
+        from episodes import list_open_episodes
+
+        open_episodes = list_open_episodes(memory_dir, days=days)
+    except Exception:
+        open_episodes = []
+    for episode_path in open_episodes:
+        try:
+            content = episode_path.read_text(encoding="utf-8")
+            if len(content) > MAX_LOG_CHARS_PER_FILE:
+                content = content[-MAX_LOG_CHARS_PER_FILE:]
+            result.files_scanned += 1
+
+            all_corrections.extend(_extract_matches(_CORRECTION_RE, content))
+            all_saves.extend(_extract_matches(_SAVE_RE, content))
+            all_stalls.extend(_extract_matches(_STALL_RE, content))
+
+            for entity in _extract_entities(content):
+                entity_counter[entity] += 1
+                entity_sources.setdefault(entity, set()).add(episode_path.name)
+            result.episode_paths.append(episode_path)
         except Exception:
             continue
 
@@ -438,6 +495,19 @@ async def consolidate(
     amendment_section = _assemble_dream_amendment_section()
     drift_section = _assemble_dream_drift_section()
 
+    # Living Mind Act 3 — open-episodes digest. Both the section and its
+    # instruction bullet are empty strings when no episodes exist, keeping
+    # the assembled prompt byte-identical to pre-Act-3 for that case.
+    episodes_section = _assemble_episodes_section(signal.episode_paths)
+    episodes_instruction = ""
+    if episodes_section:
+        episodes_section = episodes_section + "\n"
+        episodes_instruction = (
+            "\n5. **Mine the open episodes**: recurring themes, durable lessons, "
+            "decisions, or self-knowledge across episodes belong in the amendment "
+            "proposals above. Do not copy episode text verbatim — distill.\n"
+        )
+
     today_str = now_local().strftime("%Y-%m-%d")
 
     post_weekly_note = ""
@@ -466,7 +536,7 @@ async def consolidate(
 {cognition_section}
 {amendment_section}
 {drift_section}
-{post_weekly_note}
+{episodes_section}{post_weekly_note}
 ## Instructions
 
 Today is {today_str}. Consolidate the signal above into memory:
@@ -489,7 +559,7 @@ Today is {today_str}. Consolidate the signal above into memory:
    propose the replacement or deletion through the amendment ledger. Include source evidence.
 
 4. Log a brief summary of changes to today's daily log ({get_today_log_path()}).
-
+{episodes_instruction}
 If nothing in the signal warrants changes, respond with exactly: CONSOLIDATION_OK
 """
 
@@ -753,7 +823,8 @@ async def _run_dream_inner(
         f"{len(signal.corrections)} corrections, "
         f"{len(signal.saves)} saves, "
         f"{len(signal.stalls)} stalls, "
-        f"{len(signal.repeated_entities)} repeated entities"
+        f"{len(signal.repeated_entities)} repeated entities, "
+        f"{len(signal.episode_paths)} open episodes"
     )
 
     # === PHASE 2.5: Age working memory (always — maintenance, not signal-gated) ===
@@ -812,6 +883,7 @@ async def _run_dream_inner(
     phases_completed = ["orient", "gather"]
     consolidation_result = ""
     prune_result = ""
+    episodes_marked = 0
 
     try:
         # === PHASE 3: Consolidate (LLM) ===
@@ -820,6 +892,36 @@ async def _run_dream_inner(
             signal, orientation, test_mode=test_mode, post_weekly=post_weekly
         )
         phases_completed.append("consolidate")
+
+        # Living Mind Act 3 — deterministic episode flip. "Consolidated"
+        # means "a successful dream Phase 3 reviewed it" (either LLM
+        # outcome; reviewed-and-empty is still reviewed). Sits AFTER the
+        # successful consolidate() return inside its OWN try/except so it
+        # can NEVER reach the outer exception path: a consolidate() raise
+        # leaves episodes open for the retry run; a flip raise is
+        # warning-logged and the dream still reports success (R1 M1).
+        if signal.episode_paths and not test_mode:
+            try:
+                from episodes import mark_episodes_consolidated
+
+                episodes_marked = mark_episodes_consolidated(signal.episode_paths)
+                if episodes_marked:
+                    print(
+                        f"[{now_local()}] Marked {episodes_marked} episode(s) consolidated"
+                    )
+            except Exception as e:
+                # EpisodeFlipError carries the partial flip count (Rule 2:
+                # those files physically say consolidated); any other raise
+                # reports 0. Failed episodes stay open — next run re-feeds.
+                episodes_marked = getattr(e, "flipped", 0)
+                print(
+                    f"[{now_local()}] WARNING: episode flip failed (non-fatal): {e}"
+                )
+        elif signal.episode_paths and test_mode:
+            print(
+                f"[{now_local()}] DRY RUN - would mark "
+                f"{len(signal.episode_paths)} episode(s) consolidated"
+            )
 
         # Re-read MEMORY.md line count after Phase 3 may have modified it
         if MEMORY_FILE.exists():
@@ -878,6 +980,11 @@ async def _run_dream_inner(
         f"{len(signal.corrections)} corrections, {len(signal.saves)} saves, "
         f"{len(signal.stalls)} stalls, {len(signal.repeated_entities)} repeated entities",
     ]
+    if signal.episode_paths:
+        summary_parts.append(
+            f"episodes: {len(signal.episode_paths)} reviewed, "
+            f"{episodes_marked} consolidated"
+        )
     if "CONSOLIDATION_OK" in consolidation_result:
         summary_parts.append("Consolidation: nothing to merge")
     else:
@@ -900,6 +1007,11 @@ async def _run_dream_inner(
                 f"corrections: {len(signal.corrections)}, saves: {len(signal.saves)}, "
                 f"stalls: {len(signal.stalls)}, repeated: {len(signal.repeated_entities)}",
             ]
+            if signal.episode_paths:
+                bullets.append(
+                    f"episodes: {len(signal.episode_paths)} reviewed, "
+                    f"{episodes_marked} consolidated"
+                )
             if "CONSOLIDATION_OK" not in consolidation_result:
                 bullets.append("consolidation: merged signal into memory")
             if "PRUNE_OK" not in (prune_result or ""):

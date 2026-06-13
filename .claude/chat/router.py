@@ -27,6 +27,51 @@ _VAULT_INGEST_URL_RE = re.compile(
     r"^/vault-ingest\s+(https?://\S+)\s*$", re.IGNORECASE
 )
 
+# Phase 3 document ingest — matched against IncomingMessage.caption (NOT the
+# rendered turn text). Default-deny: only a caption that is EXACTLY the
+# command (whitespace-tolerant) triggers ingest of an upload. Prose captions
+# mentioning vault-ingest, bare command text sent AFTER an upload, and
+# caption-less uploads all fall through to the engine unchanged.
+_VAULT_INGEST_DOC_RE = re.compile(r"^/vault-ingest\s*$", re.IGNORECASE)
+
+
+class _DocumentCompileError(RuntimeError):
+    """Document ingest failed AFTER the raw archive landed (Phase 1 honesty
+    contract): the reply must name the archived raw file and state that
+    concept compilation did not happen — never claim total failure when the
+    raw copy exists on disk."""
+
+    def __init__(self, raw_name: str, original: Exception) -> None:
+        self.raw_name = raw_name
+        self.original = original
+        super().__init__(f"{type(original).__name__}: {original}")
+
+
+_DISPLAY_FILENAME_MAX_CHARS = 80
+# Telegram legacy-Markdown sensitive characters — the Telegram adapter sends
+# router replies with parse_mode="Markdown" (telegram.py), so an unescaped
+# filename could open/close a formatting span or a link inside the reply.
+_MARKDOWN_SENSITIVE_RE = re.compile(r"([`*_\[\]])")
+
+
+def _display_filename(name: Any) -> str:
+    """Render an attacker-controlled filename safe for reply text (post-build F3).
+
+    DISPLAY concern only — archive naming is preserve_raw's central
+    `_sanitize_archive_name` (storage layer; keep the two separate). Strips
+    control chars including CR/LF (a filename must never inject reply lines),
+    collapses to a single line, caps length, and escapes legacy-Markdown
+    tokens for the adapter's Markdown parse path.
+    """
+    text = str(name or "")
+    text = "".join(ch for ch in text if ord(ch) >= 0x20 and ch != "\x7f")
+    text = " ".join(text.split())
+    if len(text) > _DISPLAY_FILENAME_MAX_CHARS:
+        text = text[: _DISPLAY_FILENAME_MAX_CHARS - 3] + "..."
+    text = _MARKDOWN_SENSITIVE_RE.sub(r"\\\1", text)
+    return text or "attachment"
+
+
 DEFAULT_ENGINE_TIMEOUT_SECONDS = 180.0
 # Test/legacy override. Normal runtime reads config.CHAT_ENGINE_TIMEOUT_SECONDS
 # at call time so /reload can update the guard without restarting the process.
@@ -92,7 +137,7 @@ def _format_seconds(seconds: float) -> str:
 def _engine_timeout_message(timeout_seconds: float, attachments: list[Any] | None = None) -> str:
     formatted = _format_seconds(timeout_seconds)
     if attachments:
-        names = [getattr(a, "filename", "") or "attachment" for a in attachments]
+        names = [_display_filename(getattr(a, "filename", "")) for a in attachments]
         shown = ", ".join(names[:3]) + (f" (+{len(names) - 3} more)" if len(names) > 3 else "")
         plural = len(names) > 1
         return (
@@ -231,7 +276,20 @@ class ChatRouter:
     @staticmethod
     def _can_coalesce(incoming: Any) -> bool:
         text = (getattr(incoming, "text", "") or "").strip()
-        return not text.startswith("/") and not text.startswith("__button:")
+        if text.startswith("/") or text.startswith("__button:"):
+            return False
+        # Phase 3 document ingest (post-build F1): an upload captioned exactly
+        # /vault-ingest IS a slash command riding the caption field, so it gets
+        # the same bypass as text slash commands and is handled as its own
+        # serialized turn. Generic coalescing would breach default-deny in
+        # BOTH orderings: merged-first-caption widening consent onto bystander
+        # files, or a captionless first message silently dropping the intended
+        # ingest.
+        if getattr(incoming, "attachments", None) and _VAULT_INGEST_DOC_RE.match(
+            (getattr(incoming, "caption", "") or "").strip()
+        ):
+            return False
+        return True
 
     @staticmethod
     def _is_turn_followup_button(incoming: Any) -> bool:
@@ -311,6 +369,16 @@ class ChatRouter:
 
         first.text = "\n\n".join(parts)
         first.attachments = attachments
+        # Defensive merge invariant (post-build F1): a merged turn must never
+        # fabricate upload consent. The caption survives ONLY when every
+        # constituent carried the identical non-empty caption; any mix
+        # (including empty) merges to "" so a coalesced burst can never
+        # satisfy the /vault-ingest caption gate by accident. Telegram album
+        # caption propagation (_merge_document_group) is a DIFFERENT layer —
+        # one album is one user action — and is intentionally untouched.
+        captions = [(getattr(incoming, "caption", "") or "") for incoming in batch]
+        if not (captions[0].strip() and all(c == captions[0] for c in captions)):
+            first.caption = ""
         if message_ids:
             first.platform_message_id = ",".join(message_ids)
         first.raw_event = {"coalesced": True, "events": raw_events}
@@ -458,6 +526,16 @@ class ChatRouter:
             await self._handle_button(adapter, incoming, text[len("__button:"):])
             return
 
+        # --- Guided /video wizard: a pending wizard consumes typed input
+        # stage-gated (pickers are match-only; the input step takes the
+        # brief; the vision step takes redo feedback). State set by
+        # core_handlers; TTL-bounded; commands always pass through.
+        if text and not text.lstrip().startswith("/"):
+            import core_handlers as _video_handlers
+
+            if await _video_handlers.try_consume_video_message(adapter, incoming):
+                return
+
         # --- gap-4 URL ingest: /vault-ingest <url> short-circuits to deterministic
         # router-side fetch + archive + compile. Raw-regex match on the message
         # text — does NOT route through _parse_command (vault-ingest is a Skill,
@@ -469,6 +547,18 @@ class ChatRouter:
         if m:
             url = m.group(1)
             await self._handle_vault_ingest_url(adapter, incoming, url)
+            return
+
+        # --- Phase 3 document ingest: an upload captioned EXACTLY
+        # /vault-ingest short-circuits to the deterministic router-side
+        # preserve_raw → companion → compile pipeline. Default-deny: the
+        # caption must be the bare command (whitespace-tolerant) — prose
+        # captions, command text without attachments, and caption-less
+        # uploads fall through unchanged. No retroactive state tracking.
+        if getattr(incoming, "attachments", None) and _VAULT_INGEST_DOC_RE.match(
+            (getattr(incoming, "caption", "") or "").strip()
+        ):
+            await self._handle_vault_ingest_document(adapter, incoming)
             return
 
         router_commands = self.manager.get_router_commands()
@@ -1015,6 +1105,181 @@ class ChatRouter:
         report = compile_entities(ents, str(md_path), vault_dir, MEMORY_DIR)
         return html_path, md_path, content, report
 
+    async def _handle_vault_ingest_document(self, adapter: Any, incoming: Any) -> None:
+        """Router-side document ingest (Phase 3, doc-upload-truthful-reads).
+
+        An upload captioned exactly ``/vault-ingest`` runs the deterministic
+        preserve_raw → companion → extract → compile pipeline per supported
+        attachment, with a counted confirmation per file. Unsupported files
+        get an explicit per-file refusal — no silent skips. Never reaches the
+        engine — the engine timeout does not apply. The persisted turn is the
+        audit row (default-deny mutation policy).
+        """
+        from attachment_context import is_supported_document_attachment
+
+        attachments = list(getattr(incoming, "attachments", []) or [])
+        flags = [
+            is_supported_document_attachment(att.filename or "", att.mimetype)
+            for att in attachments
+        ]
+
+        if any(flags):
+            names = ", ".join(
+                _display_filename(att.filename)
+                for att, ok in zip(attachments, flags)
+                if ok
+            )
+            try:
+                await adapter.send(
+                    OutgoingMessage(
+                        text=f"Ingesting {names}...",
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                    )
+                )
+            except Exception:
+                # Placeholder send is best-effort; ingest proceeds regardless.
+                pass
+
+        lines: list[str] = []
+        had_error = False
+
+        for att, ok in zip(attachments, flags):
+            filename = att.filename or "attachment"
+            # Display vs storage separation (post-build F3): the pipeline
+            # gets the RAW filename (preserve_raw sanitizes centrally for
+            # storage); reply text only ever carries the display-safe form.
+            display_name = _display_filename(att.filename)
+            if not ok:
+                # Explicit per-file refusal — no silent skips.
+                lines.append(
+                    f"Cannot ingest '{display_name}': unsupported document type "
+                    "for /vault-ingest. Supported: .txt, .md, .csv, .tsv, "
+                    ".pdf, .docx."
+                )
+                had_error = True
+                continue
+            try:
+                raw_path, report = await asyncio.to_thread(
+                    self._document_ingest_pipeline,
+                    att.url,
+                    filename,
+                    att.mimetype,
+                )
+            except _DocumentCompileError as e:
+                # Partial-state honesty: the raw archive landed; only the
+                # compile stage failed. Never claim total failure here.
+                lines.append(
+                    f"Raw file archived as '{_display_filename(e.raw_name)}', "
+                    f"but concept compilation FAILED "
+                    f"({type(e.original).__name__}). "
+                    "No concept pages were created or updated for this file."
+                )
+                had_error = True
+            except Exception as e:
+                # Failure at/before preserve_raw (incl. missing/unreadable
+                # Attachment.url): nothing reached the vault for this file.
+                lines.append(
+                    f"Ingest of '{display_name}' FAILED ({type(e).__name__}). "
+                    "Nothing was saved to the vault for this file. "
+                    "Re-send it with the /vault-ingest caption to retry."
+                )
+                had_error = True
+            else:
+                n_concepts = len(report.pages_created) + len(report.pages_updated)
+                n_connections = len(report.connections_created)
+                n_contradictions = len(report.contradictions_found)
+                lines.append(
+                    f"Ingested '{display_name}'. "
+                    f"{n_concepts} concepts, {n_connections} connections, "
+                    f"{n_contradictions} contradictions. "
+                    f"Raw: {_display_filename(raw_path.name)}."
+                )
+
+        reply = "\n".join(lines)
+        await adapter.send(
+            OutgoingMessage(
+                text=reply,
+                channel=incoming.channel,
+                thread=incoming.thread,
+                is_error=had_error,
+            )
+        )
+        self._persist_router_turn(incoming, reply)
+
+    @staticmethod
+    def _document_ingest_pipeline(
+        file_path: str, filename: str, mimetype: str | None
+    ) -> tuple[Any, Any]:
+        """Synchronous preserve_raw → companion → extract → compile pipeline.
+
+        Orchestration ONLY — ingest logic stays in entity_extractor /
+        attachment_context. Runs off the event loop (called via
+        ``asyncio.to_thread``). Returns ``(raw_path, report)``.
+
+        Compile-surface contract: the raw archive is NEVER passed to
+        ``compile_entities()``. Every uploaded format compiles against a
+        generated ``{raw_stem}.ingest.md`` companion carrying valid Homie
+        frontmatter — ``compile_entities()`` enforces frontmatter on ``.md``
+        sources AND mutates its source via ``update_source_frontmatter()``;
+        the companion is the designated mutation surface, the raw archive
+        stays byte-identical.
+        """
+        import os
+        from datetime import date
+        from pathlib import Path
+
+        from attachment_context import extract_document_text
+        from config import MEMORY_DIR
+        from entity_extractor import (
+            compile_entities,
+            extract_entities_heuristic,
+            preserve_raw,
+        )
+
+        vault_dir = MEMORY_DIR
+        # preserve_raw sanitizes dest_name centrally and already falls back to
+        # a date-prefixed destination on collision — no caller-side retry. A
+        # FileExistsError that still escapes means nothing new was saved.
+        raw_path = preserve_raw(
+            Path(file_path), vault_dir, subdir="uploads", dest_name=filename
+        )
+        try:
+            # FULL text — the inline attachment-context caps DO NOT apply.
+            text = extract_document_text(raw_path, raw_path.name, mimetype)
+            # Companion: ALWAYS generated, every format (.txt/.md/pdf/docx/
+            # csv) — ONE naming rule, no per-format branching. An uploaded
+            # .md's own frontmatter survives verbatim as BODY text.
+            # Written atomically (tmp + os.replace — the living_memory.py
+            # pattern) so disk-full/encoding failures cannot leave a partial
+            # .ingest.md beside the raw archive.
+            compile_path = raw_path.with_name(raw_path.stem + ".ingest.md")
+            companion_text = (
+                "---\n"
+                "tags: [upload, auto-ingested]\n"
+                f"date: {date.today().isoformat()}\n"
+                f"source: {raw_path.name}\n"
+                "related: []\n"
+                "---\n\n" + text
+            )
+            tmp_companion = compile_path.with_name(compile_path.name + ".tmp")
+            try:
+                tmp_companion.write_text(companion_text, encoding="utf-8")
+                os.replace(tmp_companion, compile_path)
+            except BaseException:
+                try:
+                    tmp_companion.unlink()
+                except OSError:
+                    pass
+                raise
+            ents = extract_entities_heuristic(text, str(compile_path))
+            report = compile_entities(ents, str(compile_path), vault_dir, MEMORY_DIR)
+        except Exception as exc:
+            # Raw landed; the compile stage failed — surface as the
+            # partial-state honesty shape, never "nothing was saved".
+            raise _DocumentCompileError(raw_path.name, exc) from exc
+        return raw_path, report
+
     def _extract_result_buttons(self, text: str) -> list[Any]:
         """Parse <<BLOG_RESULTS>> or <<QUOTE_RESULTS>> markers and return action buttons.
 
@@ -1134,12 +1399,27 @@ class ChatRouter:
                     thread=incoming.thread,
                 )
             )
+        elif custom_id.startswith("video_"):
+            # Guided /video wizard steps: kind -> input -> style -> voice ->
+            # vision gate (video_kind/video_style/video_voice/video_vision).
+            # core_handlers owns the flow and the per-channel pending state.
+            import core_handlers as _video_handlers
+
+            await _video_handlers.handle_video_button(adapter, incoming, custom_id)
         else:
             # Unknown button — log and ignore
             print(f"[{datetime.now()}] Unknown button: {custom_id}")
 
     def _persist_router_turn(self, incoming: Any, reply: str) -> None:
         """Persist direct router-path turns into the transcript store."""
+
+        # Living Mind Act 4 (R1 B4): capture the brief-owed marker BEFORE the
+        # store bump below closes the away gap — ONE seam covers every
+        # persisting router path. Defensive getattr keeps fake engines
+        # (tests) green; the engine method is whole-body fail-open.
+        note_router_activity = getattr(self.engine, "note_router_activity", None)
+        if callable(note_router_activity):
+            note_router_activity(incoming)
 
         store = getattr(self.engine, "session_store", None)
         if store is None or not hasattr(store, "add_message"):

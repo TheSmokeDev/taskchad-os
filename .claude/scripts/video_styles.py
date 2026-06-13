@@ -19,6 +19,9 @@ is the offline source of truth.
 Public API (frozen):
     list_styles() -> list[dict]            # [{"name": ..., "tagline": ...}]
     resolve_design(style=None, design_file=None) -> dict
+    suggest_style(brief, dossier=None) -> str   # ranked[0]; never raises
+    suggest_styles_ranked(brief, dossier=None, *, kind="") -> list[str]
+    design_from_tokens(name, colors, fonts, tagline="") -> dict
 
 Resolution precedence:
     design_file param > style param > env VIDEO_DESIGN_FILE > env VIDEO_STYLE
@@ -115,7 +118,13 @@ _REGISTRY: dict[str, dict] = {
             ),
         },
         "motion": {"entrance_ease": "power3.out", "transition": "crossfade"},
-        "flags": {},
+        "flags": {
+            "grain": False,
+            "vignette": True,
+            "hud_scanline": False,
+            "typed_eyebrow": False,
+            "shader_transitions": False,
+        },
     },
     "blockframe": {
         "name": "blockframe",
@@ -149,6 +158,11 @@ _REGISTRY: dict[str, dict] = {
             "hard_borders": True,
             "offset_shadow": True,
             "uppercase_display": True,
+            "grain": False,
+            "vignette": False,
+            "hud_scanline": False,
+            "typed_eyebrow": False,
+            "shader_transitions": False,
         },
     },
     "coral": {
@@ -178,6 +192,11 @@ _REGISTRY: dict[str, dict] = {
             "uppercase_display": True,
             "color_region_split": True,
             "wallpaper_numeral": True,
+            "grain": False,
+            "vignette": False,
+            "hud_scanline": False,
+            "typed_eyebrow": False,
+            "shader_transitions": False,
         },
     },
     "capsule": {
@@ -212,7 +231,15 @@ _REGISTRY: dict[str, dict] = {
             ),
         },
         "motion": {"entrance_ease": "back.out(1.4)", "transition": "crossfade"},
-        "flags": {"pill_shapes": True, "decorative_pills": True},
+        "flags": {
+            "pill_shapes": True,
+            "decorative_pills": True,
+            "grain": False,
+            "vignette": False,
+            "hud_scanline": False,
+            "typed_eyebrow": False,
+            "shader_transitions": False,
+        },
     },
     "cobalt-grid": {
         "name": "cobalt-grid",
@@ -239,7 +266,15 @@ _REGISTRY: dict[str, dict] = {
             ),
         },
         "motion": {"entrance_ease": "power2.inOut", "transition": "crossfade"},
-        "flags": {"graph_grid": True, "hairline_rules": True},
+        "flags": {
+            "graph_grid": True,
+            "hairline_rules": True,
+            "grain": False,
+            "vignette": True,
+            "hud_scanline": False,
+            "typed_eyebrow": False,
+            "shader_transitions": False,
+        },
     },
     "editorial-forest": {
         "name": "editorial-forest",
@@ -270,7 +305,15 @@ _REGISTRY: dict[str, dict] = {
             ),
         },
         "motion": {"entrance_ease": "power3.out", "transition": "crossfade"},
-        "flags": {"topbar_rule": True, "footline": True},
+        "flags": {
+            "topbar_rule": True,
+            "footline": True,
+            "grain": False,
+            "vignette": False,
+            "hud_scanline": False,
+            "typed_eyebrow": False,
+            "shader_transitions": False,
+        },
     },
     "bold-poster": {
         "name": "bold-poster",
@@ -300,6 +343,11 @@ _REGISTRY: dict[str, dict] = {
             "tilted_display": True,
             "progress_bar": True,
             "stacked_text_shadow": True,
+            "grain": True,
+            "vignette": False,
+            "hud_scanline": False,
+            "typed_eyebrow": False,
+            "shader_transitions": False,
         },
     },
     "broadside": {
@@ -330,7 +378,15 @@ _REGISTRY: dict[str, dict] = {
             ),
         },
         "motion": {"entrance_ease": "expo.out", "transition": "cut"},
-        "flags": {"lowercase_display": True, "hairline_rules": True},
+        "flags": {
+            "lowercase_display": True,
+            "hairline_rules": True,
+            "grain": True,
+            "vignette": True,
+            "hud_scanline": False,
+            "typed_eyebrow": False,
+            "shader_transitions": False,
+        },
     },
     "blue-professional": {
         "name": "blue-professional",
@@ -360,7 +416,15 @@ _REGISTRY: dict[str, dict] = {
             ),
         },
         "motion": {"entrance_ease": "power3.out", "transition": "crossfade"},
-        "flags": {"pill_tags": True, "card_chrome": True},
+        "flags": {
+            "pill_tags": True,
+            "card_chrome": True,
+            "grain": False,
+            "vignette": False,
+            "hud_scanline": False,
+            "typed_eyebrow": False,
+            "shader_transitions": False,
+        },
     },
 }
 
@@ -598,3 +662,306 @@ def _finalize_palette(design: dict) -> None:
         # registry values follow when the source palette has no soft token).
         dim = blend_hex(palette["bg"], palette["accent"], 0.25)
     palette["accent_dim"] = dim.upper()
+
+
+# =============================================================================
+# TOKENS -> DESIGN (research/scrape seam; additive public API)
+# =============================================================================
+
+
+def design_from_tokens(
+    name: str,
+    colors: dict[str, str],
+    fonts: list[str],
+    tagline: str = "",
+) -> dict:
+    """Scraped tokens -> a COMPLETE validated design dict.
+
+    The research stage hands in whatever it found on a page: ``colors`` is a
+    name -> hex mapping (names may be CSS custom-prop names, role words, or
+    synthetic keys; invalid hex values are dropped), ``fonts`` is an ordered
+    family list. Role mapping reuses the design-file rules: preference keys
+    first (_BG_KEYS/_FG_KEYS/_ACCENT_KEYS), then first-color/most-contrasting
+    fallbacks; unmapped colors land in ``extras``. Fonts map display/body
+    from the list order with the first mono-named family as ``mono`` (the
+    neutral mono as fallback); a Google Fonts URL is built when any fonts
+    were given. Everything else (motion, flags) starts from the neutral
+    default, and ``_finalize_palette`` guarantees the four roles are valid
+    hex with a derived ``accent_dim``.
+    """
+
+    design = copy.deepcopy(_REGISTRY[DEFAULT_STYLE])
+    design["name"] = _slugify(str(name or "")) or "derived"
+    if tagline:
+        # Em-dashes never ship in user-facing text (the dash is kept as an
+        # escape so this source file itself stays clean).
+        design["tagline"] = str(tagline).replace("\u2014", ",")
+
+    cleaned: dict[str, str] = {}
+    for key, value in (colors or {}).items():
+        candidate = str(value or "").strip().upper()
+        if _HEX_RE.match(candidate):
+            cleaned.setdefault(str(key or "").strip().lower(), candidate)
+    if cleaned:
+        ordered = list(cleaned.items())
+        bg = _first_for_keys(cleaned, _BG_KEYS) or ordered[0][1]
+        fg = _first_for_keys(cleaned, _FG_KEYS) or _most_contrasting(cleaned, bg)
+        accent = _first_for_keys(cleaned, _ACCENT_KEYS) or _first_not_in(cleaned, {bg, fg})
+        accent_dim = _first_for_keys(cleaned, _ACCENT_DIM_KEYS)
+        design["palette"] = {
+            "bg": bg,
+            "fg": fg,
+            "accent": accent or fg,
+            "accent_dim": accent_dim or "",
+        }
+        design["extras"] = {
+            k: v for k, v in cleaned.items() if v not in {bg, fg, accent}
+        }
+
+    families = list(dict.fromkeys(f.strip() for f in (fonts or []) if str(f or "").strip()))
+    if families:
+        display = families[0]
+        body = families[1] if len(families) > 1 else families[0]
+        mono = next(
+            (f for f in families if "mono" in f.lower()),
+            _REGISTRY[DEFAULT_STYLE]["fonts"]["mono"],
+        )
+        design["fonts"] = {
+            "display": display,
+            "body": body,
+            "mono": mono,
+            "google_fonts_url": _google_fonts_url([display, body, mono]),
+        }
+
+    _finalize_palette(design)
+    return design
+
+
+# =============================================================================
+# STYLE SUGGESTION (brief -> best style; heuristic-first, never raises)
+# =============================================================================
+# Ordered rules: the FIRST matching bucket wins. Corporate runs before sports
+# so "win customers" style briefs land professional, not poster.
+
+_SUGGEST_RULES: tuple[tuple[re.Pattern, str], ...] = tuple(
+    (re.compile(pattern, re.IGNORECASE), style)
+    for pattern, style in (
+        (
+            r"\b(corporate|b2b|business|enterprise|saas|quarterly|revenue|earnings|"
+            r"investors?|board|finance|fintech|customers?|clients?|sales|roi|webinar)\b",
+            "blue-professional",
+        ),
+        (
+            r"\b(nature|forest|garden|organic|eco|sustainab\w*|farm\w*|wildlife|"
+            r"outdoors?|wellness|botanic\w*|hiking|harvest)\b",
+            "editorial-forest",
+        ),
+        (
+            r"\b(news|headlines?|breaking|press|bulletin|newsroom|journalis\w*|dispatch)\b",
+            "broadside",
+        ),
+        (
+            r"\b(editorial|essay|analysis|op-ed|longform|deep dive|magazine|journal|retrospective)\b",
+            "cobalt-grid",
+        ),
+        (
+            r"\b(sports?|match|game|team|league|cup|championship|tournament|finals?|"
+            r"playoffs?|goal|derby|olympics?|soccer|football|basketball|baseball|"
+            r"racing|athletes?|stadium|world cup|fifa|win|wins|won|victory)\b",
+            "bold-poster",
+        ),
+        (
+            r"\b(hype|energy|launch|drop|festival|concert|party|anthem|loud|electric|tour)\b",
+            "coral",
+        ),
+        (
+            r"\b(playful|fun|kids|children|family|cute|candy|whimsical|birthday|"
+            r"celebrat\w*|toys?)\b",
+            "capsule",
+        ),
+        (
+            r"\b(tech|developer|software|coding|code|programming|ai|startup|hacker|"
+            r"brutalis\w*|terminal|api|engineer\w*|open[- ]source)\b",
+            "blockframe",
+        ),
+    )
+)
+
+
+def _suggest_by_keywords(brief: str) -> str:
+    lowered = str(brief or "").lower()
+    for pattern, style in _SUGGEST_RULES:
+        if pattern.search(lowered):
+            return style
+    return DEFAULT_STYLE
+
+
+def _suggest_via_lane(brief: str) -> str:
+    """One-word style pick through the runtime lanes. "" on any failure.
+
+    Lazy imports keep this module pure for offline use; the lane call is a
+    single no-tools, single-turn request with a strict one-word parse.
+    """
+
+    try:
+        import asyncio
+
+        from runtime.base import RuntimeRequest
+        from runtime.capabilities import TEXT_REASONING
+        from runtime.lane_router import run_with_runtime_lanes
+
+        names = ", ".join(_REGISTRY.keys())
+        prompt = (
+            "Pick the single best visual style for this video brief. Reply "
+            f"with EXACTLY one name from this list and nothing else: {names}\n\n"
+            f"BRIEF: {str(brief)[:600]}"
+        )
+        result = asyncio.run(
+            run_with_runtime_lanes(
+                RuntimeRequest(
+                    prompt=prompt,
+                    cwd=Path(__file__).resolve().parents[2],
+                    task_name="video_style_suggest",
+                    capability=TEXT_REASONING,
+                    max_turns=1,
+                    allowed_tools=[],
+                )
+            )
+        )
+        text = (result.text or "").strip()
+        word = _slugify(text.split()[0]) if text else ""
+        return word if word in _REGISTRY else ""
+    except Exception:
+        return ""
+
+
+# Wizard-kind affinities: a picked video kind nudges styles that carry its
+# energy. Applied only when the caller passes ``kind`` (the wizard does).
+_KIND_AFFINITY: dict[str, tuple[str, ...]] = {
+    "hype": ("bold-poster", "broadside"),
+    "explainer": ("blue-professional", "neutral"),
+    "launch": ("blockframe", "cobalt-grid"),
+}
+
+# Serif display faces we can recognize by name (derived designs carry only
+# family names, never font metadata).
+_SERIF_MARKERS = (
+    "serif",
+    "bodoni",
+    "newsreader",
+    "playfair",
+    "baskerville",
+    "garamond",
+    "georgia",
+    "times",
+    "merriweather",
+    "lora",
+    "spectral",
+)
+
+
+def _looks_serif(family: str) -> bool:
+    name = str(family or "").lower()
+    if not name or "sans" in name:
+        return False
+    return any(marker in name for marker in _SERIF_MARKERS)
+
+
+def _is_bright(value: str) -> bool:
+    """Vivid accent check: a strong channel plus real chroma (not white/gray)."""
+
+    r, g, b = hex_to_rgb(value)
+    return max(r, g, b) >= 208 and (max(r, g, b) - min(r, g, b)) >= 60
+
+
+def _dossier_signal_scores(dossier: dict | None) -> dict[str, int]:
+    """Style boosts from a research dossier's derived design. Never raises."""
+
+    scores: dict[str, int] = {}
+    derived = (dossier or {}).get("derived_design") if isinstance(dossier, dict) else None
+    if not isinstance(derived, dict):
+        return scores
+    palette = derived.get("palette") or {}
+    fonts = derived.get("fonts") or {}
+    try:
+        if relative_luminance(str(palette.get("bg") or "")) < 0.5:
+            scores["blockframe"] = scores.get("blockframe", 0) + 2
+            scores["cobalt-grid"] = scores.get("cobalt-grid", 0) + 2
+    except ValueError:
+        pass
+    if _looks_serif(str(fonts.get("display") or "")):
+        scores["editorial-forest"] = scores.get("editorial-forest", 0) + 1
+        scores["broadside"] = scores.get("broadside", 0) + 1
+    try:
+        if _is_bright(str(palette.get("accent") or "")):
+            scores["coral"] = scores.get("coral", 0) + 1
+            scores["capsule"] = scores.get("capsule", 0) + 1
+    except ValueError:
+        pass
+    return scores
+
+
+def suggest_styles_ranked(
+    brief: str,
+    dossier: dict | None = None,
+    *,
+    kind: str = "",
+) -> list[str]:
+    """Rank EVERY registered style for a brief, best first. Never raises.
+
+    Scoring (deterministic): the first matching keyword rule scores +3
+    (exactly the ordered-bucket semantics ``suggest_style`` always had), a
+    wizard ``kind`` affinity scores +2, and dossier-derived signals (dark
+    palette, serif display, bright accent) score +1..2. Ties break on
+    registry order. When env VIDEO_SUGGEST_LLM is truthy, one runtime-lane
+    one-word call may promote its strict-parsed pick to the front; any
+    failure leaves the heuristic ranking untouched.
+    """
+
+    try:
+        text = str(brief or "")
+        scores = {name: 0 for name in _REGISTRY}  # insertion order = registry order
+        lowered = text.lower()
+        for pattern, style in _SUGGEST_RULES:
+            if pattern.search(lowered):
+                scores[style] += 3
+                break  # first matching bucket wins, exactly like before
+        for name in _KIND_AFFINITY.get(str(kind or "").strip().lower(), ()):
+            if name in scores:
+                scores[name] += 2
+        for name, boost in _dossier_signal_scores(dossier).items():
+            if name in scores:
+                scores[name] += boost
+
+        order = {name: i for i, name in enumerate(_REGISTRY)}
+        ranked = sorted(scores, key=lambda name: (-scores[name], order[name]))
+
+        # Env reads happen at call time (never at def time) so overrides and
+        # monkeypatching always take effect.
+        if os.environ.get("VIDEO_SUGGEST_LLM", "").strip().lower() in {"1", "true", "on", "yes"}:
+            refined = _suggest_via_lane(text)
+            if refined and refined in scores and ranked[0] != refined:
+                ranked.remove(refined)
+                ranked.insert(0, refined)
+        return ranked
+    except Exception:
+        return list(_REGISTRY)
+
+
+def suggest_style(brief: str, dossier: dict | None = None) -> str:
+    """Pick the best registered style for a brief. Never raises.
+
+    Back-compatible wrapper over ``suggest_styles_ranked``: the top-ranked
+    style ships. One-arg calls keep working; passing a research ``dossier``
+    lets its derived-design signals influence the pick. When env
+    VIDEO_SUGGEST_LLM is truthy ("1"/"true"/"on"/"yes"), one runtime-lane
+    one-word call may refine the pick; a strict parse rejects anything that
+    is not a registry name and falls back to the heuristic. Always returns a
+    valid style name.
+    """
+
+    try:
+        ranked = suggest_styles_ranked(brief, dossier)
+        return ranked[0] if ranked else DEFAULT_STYLE
+    except Exception:
+        return DEFAULT_STYLE

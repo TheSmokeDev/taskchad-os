@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,7 @@ apply_persona_override()
 
 from config import (  # noqa: E402
     LOCAL_TZ,
+    MEMORY_DIR,
     PROJECT_ROOT,
     STATE_DIR,
     ensure_directories,
@@ -72,18 +74,36 @@ be worth saving when it contains a decision, durable fact, repo/worktree status,
 lesson, or follow-up. A longer exchange should still be dropped when it is only
 routine chatter, tool noise, or clarification.
 
-Format your response as bullet points covering:
+Format your response under exactly these four markdown headings (headings are
+exact; emit them verbatim):
+
+## Summary
+A 2-4 sentence narrative of what the session was about and how it went.
+
+## Key Decisions
+Bullet points covering:
 - Decisions made and their rationale
 - Lessons learned or mistakes to avoid
 - Important facts, configurations, or patterns discovered
-- Action items or follow-ups mentioned
-- Key context that would be lost after compaction
 - Repository/codebase activity, when present:
   - repo slug
   - workflow or dispatch name
   - branch or worktree path
   - outcome or current status
   - notable repo-scoped lessons
+
+## Open Threads
+Bullet points covering:
+- Action items or follow-ups mentioned
+- Unresolved questions
+- Key context that would be lost after compaction
+
+## Texture
+Optional - 1-2 lines of emotional/contextual texture: operator mood, friction,
+momentum. Omit this section entirely when there is nothing real to note.
+
+When nothing is worth saving, the FLUSH_OK marker below replaces everything -
+no headings.
 
 Skip anything that is:
 - Routine tool calls or file reads
@@ -207,10 +227,47 @@ async def _run_flush_inner(context_file: Path, test_mode: bool = False) -> str |
     if test_mode:
         print(f"[{now_local()}] DRY RUN - would have saved:\n{response_text[:500]}")
     else:
-        # Write the analysis to the daily log directly
+        # Write the analysis to the daily log directly (daily log consumer
+        # stays first and unchanged — dream's regex scan is content-based).
         append_to_daily_log(response_text, "Pre-Compaction Flush")
         print(f"[{now_local()}] Flush saved items to daily log")
+        # Living Mind Act 3: restructure the SAME response into a narrative
+        # episode. The writer receives only the response text + the context
+        # FILENAME (metadata) — the transcript never reaches it. Fail-open:
+        # episode failure never breaks the flush.
+        try:
+            from episodes import write_episode_from_flush
+
+            status, episode_path = write_episode_from_flush(
+                MEMORY_DIR,
+                context_filename=context_file.name,
+                response_text=response_text,
+            )
+            print(f"[{now_local()}] Episode {status.value}: {episode_path}")
+            if episode_path is not None:
+                _reindex_episode(episode_path)
+        except Exception as e:
+            print(f"[{now_local()}] Episode write failed (non-fatal): {e}")
     return response_text
+
+
+def _reindex_episode(path: Path) -> None:
+    """Best-effort single-file reindex so the episode is searchable same-day.
+
+    Embedding/index runtime work (FastEmbed load + memory.db write) — not an
+    LLM call — acceptable in this background flush process. Failure is
+    print-only and never breaks the flush.
+    """
+    try:
+        _chat_dir = Path(__file__).resolve().parent.parent / "chat"
+        if str(_chat_dir) not in sys.path:
+            sys.path.insert(0, str(_chat_dir))
+        from recall_service import reindex_file
+
+        chunks = reindex_file(path, MEMORY_DIR)
+        print(f"[{now_local()}] Episode reindexed ({chunks} chunks)")
+    except Exception as e:
+        print(f"[{now_local()}] Episode reindex failed (non-fatal): {e}")
 
 
 # =============================================================================

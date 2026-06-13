@@ -1,0 +1,195 @@
+name: video-production
+description: |
+  Agent-crafted video production rail: intake -> research -> vision ->
+  HUMAN APPROVAL GATE -> compose -> lint -> render -> stills -> QA ->
+  bounded fix loop -> report. The composition tier is richer than the
+  native /video command's archetype renderer; the vision step is
+  pipeline-parity (same generate_vision engine), so the gate artifact
+  matches what the chat wizard shows.
+
+  Run discipline: invoke from a REGULAR shell only (archon workflow run
+  video-production "<brief or url>"). Running from inside a Claude Code
+  session hangs (CLAUDECODE=1 nested-session issue). Renders, stills, and
+  all media land under the run's artifacts directory (the composition dir
+  inside it) and are never committed.
+
+provider: claude
+model: sonnet
+
+nodes:
+  - id: preflight
+    bash: |
+      echo "--- archon binary ---"
+      archon --version
+      echo "--- node (drift guard: a stale npm-linked archon shadows the binary) ---"
+      node --version
+      echo "--- pipeline dependencies ---"
+      cd .claude/scripts && uv run python video_pipeline.py --check-deps
+      echo "--- hyperframes CLI ---"
+      npx --yes hyperframes --version
+    timeout: 300000
+
+  - id: intake
+    command: video-intake
+    depends_on: [preflight]
+    output_format:
+      type: object
+      properties:
+        brief:
+          type: string
+        kind:
+          type: string
+        url:
+          type: string
+        duration:
+          type: string
+        aspect:
+          type: string
+        style:
+          type: string
+      required: [brief, kind, url, duration, aspect, style]
+
+  - id: research
+    command: video-research
+    depends_on: [intake]
+    when: "$intake.output.url != ''"
+    context: fresh
+
+  - id: vision
+    command: video-vision
+    depends_on: [intake, research]
+    trigger_rule: one_success
+    context: fresh
+    output_format:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        angle:
+          type: string
+        beats:
+          type: array
+          items:
+            type: object
+        imagery:
+          type: object
+        duration_s:
+          type: number
+        aspect:
+          type: string
+        style:
+          type: string
+        provider:
+          type: string
+      required: [ok, angle, beats, imagery, duration_s, aspect]
+
+  - id: vision-gate
+    approval:
+      message: |
+        THE VISION (approve to compose and render; reject with notes to redo)
+
+        $vision.output
+
+        Binding on approve: the beat outline seeds the composition, the
+        imagery treatment and duration/aspect are honored, and every number
+        must trace to the brief or the research dossier.
+      capture_response: true
+      on_reject:
+        prompt: |
+          The operator rejected the vision with this feedback:
+
+          $REJECTION_REASON
+
+          Regenerate the vision as a DIFFERENT take that applies the
+          feedback. Follow .archon/commands/video-vision.md exactly, using
+          its redo round: pass the feedback string as feedback=... and the
+          previous $ARTIFACTS_DIR/vision.json content as prior_vision=...
+          so the engine cannot repeat the prior outline. Overwrite
+          $ARTIFACTS_DIR/vision.json and output ONLY the new vision JSON.
+        max_attempts: 3
+    depends_on: [vision]
+
+  - id: compose
+    command: video-compose
+    depends_on: [vision-gate]
+    context: fresh
+    model: opus
+    idle_timeout: 900000
+
+  - id: lint
+    bash: |
+      cd "$ARTIFACTS_DIR/composition"
+      npx --yes hyperframes lint
+      npx --yes hyperframes validate
+    depends_on: [compose]
+    timeout: 600000
+
+  - id: render
+    bash: |
+      cd "$ARTIFACTS_DIR/composition"
+      npx --yes hyperframes render --output video.mp4
+      ls -la video.mp4
+    depends_on: [lint]
+    timeout: 1800000
+
+  - id: stills
+    bash: |
+      mkdir -p "$ARTIFACTS_DIR/stills"
+      cd "$ARTIFACTS_DIR/composition"
+      TIMES=$(grep -o '"start"[: ]*[0-9.]*' "$ARTIFACTS_DIR/scenes.json" 2>/dev/null | grep -o '[0-9.]*$' | sort -un)
+      if [ -z "$TIMES" ]; then
+        TIMES=$(grep -o 'data-start="[0-9.]*"' index.html | grep -o '[0-9.]*' | sort -un)
+      fi
+      i=0
+      for t in $TIMES; do
+        ffmpeg -y -loglevel error -ss "$t" -i video.mp4 -frames:v 1 "$ARTIFACTS_DIR/stills/scene-$i-at-${t}s.png"
+        i=$((i+1))
+      done
+      echo "extracted $i first-frame stills to $ARTIFACTS_DIR/stills"
+    depends_on: [render]
+    timeout: 300000
+
+  - id: qa
+    command: video-qa-stills
+    depends_on: [stills]
+    context: fresh
+    output_format:
+      type: object
+      properties:
+        pass:
+          type: string
+          enum: ["true", "false"]
+        issues:
+          type: array
+          items:
+            type: object
+      required: [pass, issues]
+
+  - id: fix-loop
+    loop:
+      prompt: |
+        One numbered fix round for the video composition at
+        $ARTIFACTS_DIR/composition. The QA verdict that failed:
+
+        $qa.output
+
+        Follow .archon/commands/video-fix.md exactly: fix ONLY the flagged
+        issues in order, keep the pre-hide discipline, then re-run
+        `npx hyperframes lint` and `npx hyperframes validate`, re-render
+        video.mp4, and re-extract the per-scene first-frame stills into
+        $ARTIFACTS_DIR/stills (one PNG per scene start from
+        $ARTIFACTS_DIR/scenes.json). Then re-run the QA procedure from
+        .archon/commands/video-qa-stills.md on the fresh stills yourself.
+
+        End your output with exactly QA_PASS when no blocker issues remain,
+        otherwise end with QA_FAIL plus the remaining numbered issues.
+      until: "QA_PASS"
+      max_iterations: 3
+    depends_on: [qa]
+    when: "$qa.output.pass == 'false'"
+
+  - id: report
+    command: video-report
+    depends_on: [qa, fix-loop]
+    trigger_rule: one_success
+    context: fresh

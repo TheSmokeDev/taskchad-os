@@ -261,3 +261,254 @@ def test_blend_hex_endpoints() -> None:
     assert video_styles.blend_hex("#000000", "#FFFFFF", 1.0) == "#FFFFFF"
     mid = video_styles.blend_hex("#000000", "#FFFFFF", 0.5)
     assert _HEX.match(mid)
+
+
+# =============================================================================
+# 6. SUGGEST_STYLE (brief -> best style; heuristic, never raises)
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("brief", "expected"),
+    [
+        ("Championship match highlights, the team lifted the cup", "bold-poster"),
+        ("Mexico just won the world cup final", "bold-poster"),
+        ("Quarterly revenue review for enterprise clients", "blue-professional"),
+        ("Close more deals and win new customers this quarter", "blue-professional"),
+        ("Breaking news headlines from the newsroom tonight", "broadside"),
+        ("A longform editorial analysis of the housing market", "cobalt-grid"),
+        ("A calm forest documentary on sustainable farming", "editorial-forest"),
+        ("A playful birthday surprise reel for the kids", "capsule"),
+        ("High energy festival launch party announcement", "coral"),
+        ("Developer tools for terminal coding workflows", "blockframe"),
+        ("A quiet morning routine, nothing else", "neutral"),
+        ("", "neutral"),
+    ],
+)
+def test_suggest_style_keyword_heuristics(brief: str, expected: str) -> None:
+    assert video_styles.suggest_style(brief) == expected
+
+
+def test_suggest_style_always_returns_valid_name() -> None:
+    names = {entry["name"] for entry in list_styles()}
+    for brief in ("", "zzz qqq", "a" * 5000, "1234567890"):
+        assert video_styles.suggest_style(brief) in names
+
+
+def test_suggest_style_never_raises_on_weird_input() -> None:
+    # Non-string input is coerced, never raised on.
+    names = {entry["name"] for entry in list_styles()}
+    assert video_styles.suggest_style(None) == "neutral"  # type: ignore[arg-type]
+    assert video_styles.suggest_style(12345) in names  # type: ignore[arg-type]
+
+
+def test_suggest_style_llm_refine_is_opt_in_and_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Off by default: the lane is never consulted.
+    monkeypatch.delenv("VIDEO_SUGGEST_LLM", raising=False)
+
+    def _boom(brief: str) -> str:
+        raise AssertionError("lane must not be consulted when refinement is off")
+
+    monkeypatch.setattr(video_styles, "_suggest_via_lane", _boom)
+    assert video_styles.suggest_style("world cup final") == "bold-poster"
+
+    # Opted in: a valid lane answer wins; an empty/invalid one falls back.
+    monkeypatch.setenv("VIDEO_SUGGEST_LLM", "on")
+    monkeypatch.setattr(video_styles, "_suggest_via_lane", lambda brief: "capsule")
+    assert video_styles.suggest_style("world cup final") == "capsule"
+    monkeypatch.setattr(video_styles, "_suggest_via_lane", lambda brief: "")
+    assert video_styles.suggest_style("world cup final") == "bold-poster"
+
+
+# =============================================================================
+# 7. DESIGN_FROM_TOKENS (scraped tokens -> complete validated design)
+# =============================================================================
+
+
+def test_design_from_tokens_role_mapping_and_extras() -> None:
+    design = video_styles.design_from_tokens(
+        "Acme Site",
+        {
+            "background": "#101014",
+            "ink": "#FAFAF5",
+            "accent": "#FF5500",
+            "spark": "#22AA88",
+        },
+        ["Space Grotesk", "Inter"],
+        tagline="from the site",
+    )
+    assert design["name"] == "acme-site"
+    assert design["tagline"] == "from the site"
+    assert design["palette"]["bg"] == "#101014"
+    assert design["palette"]["fg"] == "#FAFAF5"
+    assert design["palette"]["accent"] == "#FF5500"
+    # The unmapped color lands in extras, untouched.
+    assert design["extras"].get("spark") == "#22AA88"
+
+
+def test_design_from_tokens_derives_dim_and_drops_invalid_hex() -> None:
+    design = video_styles.design_from_tokens(
+        "x", {"bg": "#000000", "fg": "#FFFFFF", "accent": "#FF0000"}, []
+    )
+    # accent_dim was not supplied: derived blend, still valid hex.
+    assert _HEX.match(design["palette"]["accent_dim"])
+    junk = video_styles.design_from_tokens(
+        "x", {"bg": "not-a-color", "fg": "#FFFFFF", "accent": "rgb(1,2,3)"}, []
+    )
+    # Invalid tokens are dropped; every role still resolves to valid hex.
+    for role in ("bg", "fg", "accent", "accent_dim"):
+        assert _HEX.match(junk["palette"][role]), role
+
+
+def test_design_from_tokens_fonts_mapping_and_neutral_fallbacks() -> None:
+    design = video_styles.design_from_tokens(
+        "x", {"bg": "#101014", "fg": "#FAFAF5"}, ["Playfair Display", "Inter"]
+    )
+    assert design["fonts"]["display"] == "Playfair Display"
+    assert design["fonts"]["body"] == "Inter"
+    assert design["fonts"]["mono"]  # neutral mono fallback (no mono family given)
+    assert "Playfair+Display" in design["fonts"]["google_fonts_url"]
+
+    mono = video_styles.design_from_tokens(
+        "x", {"bg": "#101014", "fg": "#FAFAF5"}, ["IBM Plex Mono"]
+    )
+    assert mono["fonts"]["mono"] == "IBM Plex Mono"
+
+    bare = video_styles.design_from_tokens("x", {"bg": "#101014", "fg": "#FAFAF5"}, [])
+    for key in ("display", "body", "mono"):
+        assert isinstance(bare["fonts"][key], str) and bare["fonts"][key]
+    assert bare["fonts"]["google_fonts_url"].startswith(
+        "https://fonts.googleapis.com/css2?"
+    )
+
+
+def test_design_from_tokens_returns_complete_dict() -> None:
+    design = video_styles.design_from_tokens(
+        "brand", {"bg": "#0B0B10", "text": "#F2F2F2", "primary": "#3355FF"}, ["Inter"]
+    )
+    for section in ("palette", "extras", "fonts", "motion", "flags"):
+        assert isinstance(design.get(section), dict), section
+    for role in ("bg", "fg", "accent", "accent_dim"):
+        assert _HEX.match(design["palette"][role]), role
+    assert design["palette"]["accent"] == "#3355FF"  # "primary" maps onto accent
+    assert design["motion"]["transition"] in {"crossfade", "cut", "slide"}
+    assert design["name"] == "brand"
+    empty = video_styles.design_from_tokens("", {}, [])
+    assert empty["name"] == "derived"
+    for role in ("bg", "fg", "accent", "accent_dim"):
+        assert _HEX.match(empty["palette"][role])
+
+
+# =============================================================================
+# 8. SUGGEST_STYLES_RANKED (+ suggest_style back-compat)
+# =============================================================================
+
+
+def _dark_dossier() -> dict:
+    return {
+        "derived_design": {
+            "palette": {
+                "bg": "#111111",
+                "fg": "#F0ECE5",
+                "accent": "#555555",
+                "accent_dim": "#222222",
+            },
+            "fonts": {"display": "Inter", "body": "Inter", "mono": "Inter"},
+        }
+    }
+
+
+def test_suggest_styles_ranked_full_permutation_and_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIDEO_SUGGEST_LLM", raising=False)
+    names = {entry["name"] for entry in list_styles()}
+    ranked = video_styles.suggest_styles_ranked("world cup final highlights")
+    assert set(ranked) == names and len(ranked) == len(names)
+    assert ranked[0] == "bold-poster"
+    assert ranked == video_styles.suggest_styles_ranked("world cup final highlights")
+
+
+def test_suggest_styles_ranked_no_signal_is_registry_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIDEO_SUGGEST_LLM", raising=False)
+    ranked = video_styles.suggest_styles_ranked("a quiet morning routine, nothing else")
+    assert ranked == [entry["name"] for entry in list_styles()]
+
+
+def test_suggest_styles_ranked_dossier_dark_palette_boost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIDEO_SUGGEST_LLM", raising=False)
+    brief = "a quiet morning routine, nothing else"
+    base = video_styles.suggest_styles_ranked(brief)
+    boosted = video_styles.suggest_styles_ranked(brief, _dark_dossier())
+    assert boosted[:2] == ["blockframe", "cobalt-grid"]
+    assert boosted != base
+    assert set(boosted) == set(base)  # still a full permutation
+
+
+def test_suggest_styles_ranked_keyword_outranks_dossier_signals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIDEO_SUGGEST_LLM", raising=False)
+    ranked = video_styles.suggest_styles_ranked(
+        "world cup final highlights", _dark_dossier()
+    )
+    assert ranked[0] == "bold-poster"  # +3 keyword beats the +2 dossier boost
+
+
+def test_suggest_styles_ranked_kind_affinity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIDEO_SUGGEST_LLM", raising=False)
+    brief = "a quiet morning routine, nothing else"
+    ranked = video_styles.suggest_styles_ranked(brief, kind="hype")
+    assert ranked[:2] == ["bold-poster", "broadside"]  # registry-order tie-break
+    explainer = video_styles.suggest_styles_ranked(brief, kind="explainer")
+    assert explainer[:2] == ["neutral", "blue-professional"]
+    assert video_styles.suggest_styles_ranked(brief, kind="unknown") == [
+        entry["name"] for entry in list_styles()
+    ]
+
+
+def test_suggest_styles_ranked_lane_refine_promotes_pick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_SUGGEST_LLM", "on")
+    monkeypatch.setattr(video_styles, "_suggest_via_lane", lambda brief: "capsule")
+    ranked = video_styles.suggest_styles_ranked("world cup final")
+    assert ranked[0] == "capsule"
+    assert set(ranked) == {entry["name"] for entry in list_styles()}
+
+
+def test_suggest_styles_ranked_never_raises_on_garbage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIDEO_SUGGEST_LLM", raising=False)
+    names = {entry["name"] for entry in list_styles()}
+    assert set(video_styles.suggest_styles_ranked(None)) == names  # type: ignore[arg-type]
+    assert set(video_styles.suggest_styles_ranked("x", {"derived_design": "junk"})) == names
+    assert set(
+        video_styles.suggest_styles_ranked("x", {"derived_design": {"palette": "no"}})
+    ) == names
+
+
+def test_suggest_style_one_arg_back_compat_equals_ranked_top(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIDEO_SUGGEST_LLM", raising=False)
+    for brief in (
+        "world cup final",
+        "quarterly revenue review for enterprise clients",
+        "a quiet morning routine, nothing else",
+    ):
+        assert video_styles.suggest_style(brief) == video_styles.suggest_styles_ranked(brief)[0]
+    # Two-arg form with a dossier follows the dossier-aware ranking.
+    assert (
+        video_styles.suggest_style("a quiet morning routine, nothing else", _dark_dossier())
+        == "blockframe"
+    )

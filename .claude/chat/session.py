@@ -1409,6 +1409,88 @@ class PostgresSessionStore:
             self._conn.close()
 
 
+def read_operator_user_turns(
+    window_start: datetime,
+    *,
+    store: SQLiteSessionStore | PostgresSessionStore | None = None,
+) -> list[str]:
+    """Read the operator's VERBATIM ``role == "user"`` turns over a window (Living Self Act 1, B2).
+
+    This is the ONLY place the operator's exact words live — the engine persists
+    every turn here, so the reflection belief-extractor reads chat.db (NOT the
+    daily-log paraphrase, which is the bot's third-person restatement, and NOT
+    staging, which carries no role marker). Reads the SAME store recall uses; no
+    schema change. Works for SQLite AND Postgres because ``list_active`` /
+    ``list_messages`` are on both stores.
+
+    NB1 (tz no-op fix — the load-bearing correctness fix): ``window_start`` may
+    be tz-aware (``now_local()``) while SQLite ``created_at`` is NAIVE and
+    Postgres ``created_at`` is AWARE. A raw ``naive >= aware`` comparison raises
+    ``TypeError``, gets swallowed by the fail-open, and returns ``[]`` forever —
+    the self never forms a belief. We normalize BOTH sides to naive-local via the
+    canonical ``normalize_physical_timestamp`` owner before comparing.
+
+    NM1 (window prefilter): ``list_active`` orders by ``updated_at DESC``, so we
+    descend ONLY into sessions whose ``updated_at`` is within the window and break
+    once a session is older than the window — instead of reading the full message
+    history of every interactive session ever. KNOWN LIMITATION: ``list_messages``
+    has a hard ``limit=200`` and returns oldest-first, so a single session with
+    >200 messages drops its oldest turns; the ``updated_at`` prefilter keeps the
+    read bounded and this is an accepted, documented bound for Act 1.
+
+    NM2 (slash-command drop): rows whose stripped text starts with ``/`` are
+    commands (``/help``, ``/status``, ``/video`` …), not stated beliefs — they are
+    dropped so they don't dilute the extractor's claim budget or tempt a weak
+    provider to hallucinate a belief from a command verb.
+
+    Whole-body try/except -> ``[]`` on ANY error (non-blocking — reflection
+    survives an empty/locked store).
+    """
+    try:
+        from cognition.proactive_brief import normalize_physical_timestamp
+
+        if store is None:
+            store = get_session_store()
+
+        window_naive = normalize_physical_timestamp(window_start)
+        turns: list[str] = []
+        for sess in store.list_active(source="interactive"):
+            # NM1: list_active is updated_at DESC — once a session's last
+            # activity predates the window, every later session is older too.
+            sess_updated = normalize_physical_timestamp(sess.updated_at)
+            if (
+                window_naive is not None
+                and sess_updated is not None
+                and sess_updated < window_naive
+            ):
+                break
+            for m in store.list_messages(sess.session_id):
+                if m.role != "user":
+                    continue
+                created = normalize_physical_timestamp(m.created_at)
+                if (
+                    window_naive is not None
+                    and created is not None
+                    and created < window_naive
+                ):
+                    continue
+                text = (m.content or "").strip()
+                if not text:
+                    continue
+                # NM2: drop slash commands — not stated beliefs.
+                if text.startswith("/"):
+                    continue
+                turns.append(text)
+        return turns
+    except Exception as exc:
+        # non-blocking — reflection survives an empty/locked store, but the
+        # failure MUST be visible: a silent [] is indistinguishable from a
+        # legitimately quiet window (the project's recurring silent-failure
+        # class — cf. the R2 timestamp no-op + Act-3 episode-flip swallow).
+        print(f"[read_operator_user_turns] read failed (non-fatal): {exc!r}", flush=True)
+        return []
+
+
 def get_session_store(
     chat_db_path: Path | None = None,
 ) -> SQLiteSessionStore | PostgresSessionStore:

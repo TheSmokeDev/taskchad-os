@@ -36,6 +36,10 @@ class ClearLifecycleResult:
     session_id: str
     transcript_path: Path | None = None
     events: list[LifecycleEvent] = field(default_factory=list)
+    # Living Mind Act 4 (R1 B1): WHO triggered the clear ("interactive" /
+    # "cron" / "tool" / "hook") — distinct from the EVENT label `source`
+    # ("clear"). Only interactive-trigger events prove operator presence.
+    trigger_source: str = "interactive"
 
     def add(self, step: str, status: str, detail: str = "") -> None:
         self.events.append(LifecycleEvent(step=step, status=status, detail=detail))
@@ -190,6 +194,7 @@ def clear_session_with_lifecycle(
     thread_id: str,
     engine: Any = None,
     source: str = "clear",
+    trigger_source: str = "interactive",
 ) -> ClearLifecycleResult:
     """Run clear lifecycle steps and delete the session after hook attempts."""
 
@@ -198,7 +203,10 @@ def clear_session_with_lifecycle(
         channel_id,
         thread_id,
     )
-    result = ClearLifecycleResult(session_id=session_id)
+    result = ClearLifecycleResult(
+        session_id=session_id,
+        trigger_source=trigger_source,
+    )
 
     try:
         result.transcript_path = write_clear_transcript(
@@ -280,6 +288,10 @@ def _log_result(result: ClearLifecycleResult) -> None:
         row = {
             "timestamp": datetime.now().isoformat(),
             "session_id": result.session_id,
+            # Additive key (Living Mind Act 4, R1 B1). Readers treat a
+            # missing key as "interactive" — all 17 legacy rows on disk
+            # (verified 2026-06-12) were historical operator /clear runs.
+            "trigger_source": result.trigger_source,
             "transcript_path": str(result.transcript_path or ""),
             "events": [
                 {

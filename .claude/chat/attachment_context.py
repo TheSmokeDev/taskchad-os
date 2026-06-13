@@ -255,6 +255,18 @@ def extract_attachment_context(
     return AttachmentContext(filename, mimetype, stat.st_size, "parsed", content=content)
 
 
+def extract_document_text(path: Path, filename: str, mimetype: str | None = None) -> str:
+    """Extract the FULL text of a supported local document — no char caps.
+
+    Thin public wrapper over the format dispatch so non-prompt consumers
+    (router-side /vault-ingest document pipeline) import no private name.
+    Prompt-bound extraction stays on extract_attachment_context, which
+    applies the runtime caps; this path deliberately does not.
+    """
+    mime = (mimetype or "").split(";")[0].strip().lower()
+    return _extract_path_text(Path(path), filename, mime)
+
+
 def _extract_path_text(path: Path, filename: str, mimetype: str) -> str:
     ext = Path(filename).suffix.lower()
     if ext in _PDF_EXTENSIONS or mimetype in _PDF_MIMES:
@@ -338,5 +350,6 @@ __all__ = [
     "AttachmentContext",
     "build_attachment_context",
     "extract_attachment_context",
+    "extract_document_text",
     "is_supported_document_attachment",
 ]

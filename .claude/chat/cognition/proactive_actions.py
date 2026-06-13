@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +15,33 @@ try:
     from integrations.capabilities import require_integration_action
 except Exception:  # pragma: no cover - optional when imported outside scripts env
     require_integration_action = None  # type: ignore[assignment]
+
+try:
+    # Cross-process file lock (F3): the read-then-write dedupe must be atomic
+    # across concurrent CROSS-SESSION turns (the router serializes per
+    # conversation key only, so two different threads/channels/adapters write
+    # the SAME global proactive-actions.jsonl concurrently). Without the lock
+    # both turns read _active_dedupe_keys() before either writes -> a duplicate
+    # operator nudge or an interleaved JSONL line on win32.
+    from shared import file_lock as _file_lock
+except Exception:  # pragma: no cover - optional when imported outside scripts env
+    _file_lock = None  # type: ignore[assignment]
+
+
+@contextlib.contextmanager
+def _append_lock(path: Path) -> Iterator[None]:
+    """Guard the queue read-then-write with the shared cross-process lock (F3).
+
+    Fail-open: if ``shared.file_lock`` is unavailable (module imported outside
+    the scripts env) the append proceeds unlocked — best-effort agency must
+    never hard-fail a turn, and the in-call/per-turn dedupe still bounds the
+    common single-process case.
+    """
+    if _file_lock is None:
+        yield
+        return
+    with _file_lock(path):
+        yield
 
 ACTION_STATUSES = frozenset({
     "queued",
@@ -78,16 +107,25 @@ class ProactiveActionQueue:
         return self._path
 
     def append(self, action: ProactiveAction) -> bool:
-        """Queue an action unless an active duplicate already exists."""
+        """Queue an action unless an active duplicate already exists.
+
+        F3: the dedupe READ (``_active_dedupe_keys``) and the WRITE happen under
+        ONE cross-process ``file_lock`` so the dedupe guarantee holds across
+        concurrent cross-session turns (two turns in different threads/channels
+        writing the same global queue). Without the lock both could read before
+        either writes -> a duplicate nudge, or an interleaved JSONL line on
+        win32 (no PIPE_BUF atomicity on ``open("a")``).
+        """
 
         if not action.message.strip():
             return False
-        if action.dedupe_key in self._active_dedupe_keys():
-            return False
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(action), ensure_ascii=False) + "\n")
-            handle.flush()
+        with _append_lock(self._path):
+            if action.dedupe_key in self._active_dedupe_keys():
+                return False
+            with open(self._path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(asdict(action), ensure_ascii=False) + "\n")
+                handle.flush()
         return True
 
     def read_all(self) -> list[ProactiveAction]:

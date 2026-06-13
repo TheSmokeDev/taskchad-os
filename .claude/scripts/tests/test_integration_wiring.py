@@ -272,23 +272,34 @@ class TestProtocolInterfaces:
 
 
 class TestInferenceFromCapture:
-    """auto_capture_from_turn should feed preference captures to InferenceTracker."""
+    """Living Self Act 1 (B2): capture NEVER writes an inference.
 
-    def test_preference_capture_creates_inference(self, tmp_path, monkeypatch):
-        """Preference-type captures should call add_inference()."""
+    Pre-Act-1, auto_capture_from_turn wrote the raw matched sentence straight
+    into self-model-inferences.json as source="auto_capture" (the entire poison
+    corpus). Act 1 deleted that block — operator beliefs are now formed only by
+    the LLM extractor over verbatim operator words in the reflection loop. These
+    are post-change CONTRACT tests (the old versions guarded on
+    ``if inference_file.exists()`` which never holds now, so they passed while
+    testing nothing — M3/NMi1).
+    """
+
+    def test_preference_capture_writes_zero_inferences(self, tmp_path, monkeypatch):
+        """A preference turn must NOT create any inference record (capture cut)."""
         from cognition.capture import auto_capture_from_turn
+        from cognition.self_model import InferenceTracker
         from cognition.staging import StagingStore
 
-        # Set up staging store
-        staging_path = tmp_path / "staging.jsonl"
-        store = StagingStore(staging_path)
-
-        # Set up inference tracker state file
+        store = StagingStore(tmp_path / "staging.jsonl")
         inference_file = tmp_path / "inferences.json"
         monkeypatch.setattr("config.INFERENCE_STATE_FILE", inference_file)
 
-        # Capture a preference
-        written = auto_capture_from_turn(
+        calls = []
+        monkeypatch.setattr(
+            InferenceTracker, "add_inference",
+            lambda self, *a, **k: calls.append((a, k)),
+        )
+
+        auto_capture_from_turn(
             "I prefer dark mode for everything",
             "Got it, I'll remember that preference.",
             store,
@@ -296,25 +307,26 @@ class TestInferenceFromCapture:
             turn_number=1,
         )
 
-        if written > 0:
-            # Check inference tracker was called
-            if inference_file.exists():
-                import json
-                inferences = json.loads(inference_file.read_text())
-                assert len(inferences) >= 1
-                assert inferences[0]["source"] == "auto_capture"
+        # No inference written, no add_inference call, no auto_capture file.
+        assert calls == []
+        assert not inference_file.exists()
 
-    def test_non_preference_skips_inference(self, tmp_path, monkeypatch):
-        """Non-preference captures should NOT create inferences."""
+    def test_non_preference_writes_zero_inferences(self, tmp_path, monkeypatch):
+        """A non-preference turn also writes no inference (consistent post-change)."""
         from cognition.capture import auto_capture_from_turn
+        from cognition.self_model import InferenceTracker
         from cognition.staging import StagingStore
 
-        staging_path = tmp_path / "staging.jsonl"
-        store = StagingStore(staging_path)
+        store = StagingStore(tmp_path / "staging.jsonl")
         inference_file = tmp_path / "inferences.json"
         monkeypatch.setattr("config.INFERENCE_STATE_FILE", inference_file)
 
-        # Capture a fact (not a preference)
+        calls = []
+        monkeypatch.setattr(
+            InferenceTracker, "add_inference",
+            lambda self, *a, **k: calls.append((a, k)),
+        )
+
         auto_capture_from_turn(
             "Remember that the server IP is 72.60.69.129",
             "Noted.",
@@ -322,16 +334,8 @@ class TestInferenceFromCapture:
             session_id="test",
         )
 
-        # Inference file should not exist or be empty
-        if inference_file.exists():
-            import json
-            inferences = json.loads(inference_file.read_text())
-            # Facts don't trigger add_inference, only preferences/decisions
-            pref_inferences = [
-                i for i in inferences
-                if "prefer" in i.get("inference", "").lower()
-            ]
-            assert len(pref_inferences) == 0
+        assert calls == []
+        assert not inference_file.exists()
 
 
 # === Skill nudge (5a.3) ===

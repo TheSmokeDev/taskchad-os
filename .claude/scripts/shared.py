@@ -163,9 +163,20 @@ def load_state(state_file: Path) -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any], state_file: Path) -> None:
-    """Save state to a JSON file."""
+    """Save state to a JSON file atomically (tmp + os.replace).
+
+    Serialization happens before any file is touched, and the payload lands
+    in a sibling tmp file that replaces the target in a single os.replace()
+    step — an interrupted or failed save can never leave partial/corrupt JSON
+    behind for load_state() to fail-open into ``{}`` (which would erase alert
+    history and blocker counters). Behavior contract unchanged: same
+    signature, same target path, same JSON shape.
+    """
+    payload = json.dumps(state, indent=2, default=str)
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
+    tmp_file = state_file.with_suffix(state_file.suffix + ".tmp")
+    tmp_file.write_text(payload, encoding="utf-8")
+    os.replace(tmp_file, state_file)
 
 
 # =============================================================================

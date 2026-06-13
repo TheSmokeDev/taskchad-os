@@ -12,6 +12,7 @@ Mirrors pre-compact-flush.py architecture.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import time as _time
@@ -34,6 +35,19 @@ from shared import log_hook_execution  # noqa: E402
 MAX_TURNS = 30
 MAX_CONTEXT_CHARS = 15_000
 MIN_TURNS_TO_FLUSH = 2  # Admit short sessions; memory_flush.py is the semantic gate.
+
+
+def _safe_filename_component(value: str) -> str:
+    """Sanitize one filename component (win32 root-cause fix, Living Mind Act 3).
+
+    Chat lifecycle session ids are colon-bearing composites
+    (``platform:channel_id:thread_id``) — embedding them verbatim in a Windows
+    filename makes ``write_text`` raise and the hook exit 1. Same character
+    policy as ``session_lifecycle_hooks._safe_filename``. Applied ONLY at
+    filename composition; dedup compares and the lifecycle payload keep the
+    raw id (sanitize-at-composition, compare-raw-with-raw).
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(value)).strip("-") or "unknown"
 
 
 def extract_text_from_content(content: object) -> str:
@@ -172,7 +186,7 @@ def main() -> None:
 
     # Write context file for background process
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    context_filename = f"session-flush-{session_id}-{timestamp}.md"
+    context_filename = f"session-flush-{_safe_filename_component(session_id)}-{timestamp}.md"
     context_path = STATE_DIR / context_filename
     context_path.write_text(context, encoding="utf-8")
 

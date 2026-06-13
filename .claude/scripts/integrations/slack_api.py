@@ -61,8 +61,14 @@ def get_slack_client() -> Any:
     return client
 
 
-def get_channel_id(channel_name: str) -> str | None:
-    """Resolve a channel name (without #) to its ID."""
+def get_channel_id(channel_name: str, *, raise_on_error: bool = False) -> str | None:
+    """Resolve a channel name (without #) to its ID.
+
+    ``raise_on_error=False`` (the contract default) keeps today's graceful
+    degradation: API errors print and return ``None``. ``True`` re-raises so
+    a rejected token (``invalid_auth`` etc.) is detectable instead of looking
+    like a missing channel — only the heartbeat gather path passes ``True``.
+    """
     client = get_slack_client()
     name = channel_name.lstrip("#")
 
@@ -88,6 +94,8 @@ def get_channel_id(channel_name: str) -> str | None:
                 break
 
     except Exception as e:
+        if raise_on_error:
+            raise
         print(f"Error listing channels: {e}")
 
     return None
@@ -115,6 +123,8 @@ def get_recent_messages(
     channel_id: str,
     hours_ago: int = 2,
     limit: int = 20,
+    *,
+    raise_on_error: bool = False,
 ) -> list[SlackMessage]:
     """
     Get recent messages from a channel.
@@ -123,6 +133,9 @@ def get_recent_messages(
         channel_id: Channel ID (not name — use get_channel_id() to resolve)
         hours_ago: How far back to look
         limit: Max messages to return
+        raise_on_error: ``False`` (default) keeps today's swallow-to-empty
+            behavior; ``True`` re-raises API errors so credential failures
+            are detectable (heartbeat gather only).
     """
     client = get_slack_client()
 
@@ -154,6 +167,8 @@ def get_recent_messages(
 
         return messages
     except Exception as e:
+        if raise_on_error:
+            raise
         print(f"Error fetching messages: {e}")
         return []
 
@@ -204,6 +219,8 @@ def send_notification(
 def check_for_important_messages(
     channels: list[str] | None = None,
     hours_ago: int = 2,
+    *,
+    raise_on_error: bool = False,
 ) -> list[SlackMessage]:
     """
     Check monitored channels for important messages.
@@ -211,18 +228,25 @@ def check_for_important_messages(
     Args:
         channels: Channel names to check (defaults to SLACK_MONITORED_CHANNELS)
         hours_ago: How far back to look
+        raise_on_error: threaded into ``get_channel_id`` and
+            ``get_recent_messages`` — ``True`` propagates API/auth errors
+            (heartbeat gather only). A channel that resolves to nothing is
+            data absence, not an error: the warning + continue is unchanged
+            under both flag states.
     """
     channel_names = channels or SLACK_MONITORED_CHANNELS
     all_messages: list[SlackMessage] = []
 
     for ch_name in channel_names:
         ch_name = ch_name.strip()
-        ch_id = get_channel_id(ch_name)
+        ch_id = get_channel_id(ch_name, raise_on_error=raise_on_error)
         if not ch_id:
             print(f"Warning: Could not find channel #{ch_name}")
             continue
 
-        messages = get_recent_messages(ch_id, hours_ago=hours_ago, limit=10)
+        messages = get_recent_messages(
+            ch_id, hours_ago=hours_ago, limit=10, raise_on_error=raise_on_error
+        )
 
         # Filter for potentially important messages (mentions owner or keywords)
         for msg in messages:

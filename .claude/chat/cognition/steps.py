@@ -256,12 +256,15 @@ def create_cognitive_step(
         post_process: Optional (wm, value) -> (Memory, value) transform
 
     Returns:
-        async (wm, arg?) -> (WorkingMemory, value)
+        async (wm, arg?, *, processor?, cwd?) -> (WorkingMemory, value)
     """
 
     async def step(
         wm: Any,
         arg: Any = None,
+        *,
+        processor: str = "claude",
+        cwd: Any = None,
     ) -> tuple[Any, Any]:
 
         # Build instruction
@@ -272,10 +275,15 @@ def create_cognitive_step(
             if arg:
                 instruction = f"{command}\n\nContext: {arg}"
 
-        # Transform through WM
+        # Transform through WM. ``processor`` selects the model tier (F2: the
+        # monologue runs on the cheap "fast"/haiku tier, not the default
+        # expensive reply profile); ``cwd`` makes the call run in the project
+        # root (F4), matching the reply path.
         new_wm, value = await wm.transform(
             instruction=instruction,
+            processor=processor,
             schema=schema,
+            cwd=cwd,
         )
 
         # Apply post-processing if provided

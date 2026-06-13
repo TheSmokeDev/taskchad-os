@@ -153,50 +153,126 @@ def get_process_weights(process: MentalProcess) -> dict[str, float]:
     return PROCESS_WEIGHTS.get(process, {})
 
 
-# === Move 5b: Executable process functions ===
-# MentalProcess Protocol: async (wm, params?) -> WM | (WM, next_process_fn)
-# These are the executable versions of what MentalProcess enum describes.
+# === Move 5b / Living Self Act 3: Executable process functions ===
+# CONTRACT (Act 3): every *_process is an async (wm, params?) -> a CONSISTENT
+# 3-tuple (WorkingMemory, monologue_text, list[ProactiveAction]) — THINKING, not
+# a user-facing reply. The process functions NO LONGER call external_dialog (the
+# engine's single RuntimeRequest is the only reply generator). internal_monologue
+# already produces internal thinking (not a reply) via wm.transform. The actions
+# list is a deterministic parse of the SAME thought (no second LLM call) and may
+# be empty — never None. DEFAULT never fires the pass, so default_process returns
+# (wm, "", []) for contract consistency.
 
 
-async def default_process(wm, params=None):
-    """Default conversation — respond to the user."""
-    from cognition.steps import external_dialog
+def _propose_actions(wm, thought: str, *, source: str):
+    """Pure, deterministic parse of a monologue into operator_notification proposals (B2).
 
-    new_wm, response = await external_dialog(wm)
-    return new_wm
+    Builds at most ONE ``ProactiveAction(channel="operator_notification")`` from
+    the SAME thought the monologue produced — NO second LLM call. The message is
+    derived deterministically from ``thought`` (an operator-facing nudge), never
+    free-form external text. Returns ``[]`` when the thought is too thin to
+    warrant a nudge. ``evaluate_action_policy`` + the engine's
+    ``maybe_queue_actions`` (operator_notification-only filter) gate it; queuing
+    != dispatch. ``ProactiveAction`` is imported lazily to avoid an import cycle
+    (mirrors the lazy ``from cognition.steps import ...`` pattern).
+    """
+    text = (thought or "").strip()
+    # A thin thought (sub-floor) is not worth an operator nudge — stay silent.
+    if len(text) < 40:
+        return []
+    from cognition.proactive_actions import ProactiveAction
 
-
-async def planning_process(wm, params=None):
-    """Planning mode — think internally, then respond with a plan."""
-    from cognition.steps import external_dialog, internal_monologue
-
-    wm, _thought = await internal_monologue(wm, "What approach should we take?")
-    wm, response = await external_dialog(wm)
-    return wm
-
-
-async def monitoring_process(wm, params=None):
-    """Monitoring mode — summarize status, flag issues."""
-    from cognition.steps import external_dialog
-
-    wm, response = await external_dialog(wm, "Summarize current status and flag issues.")
-    return wm
-
-
-async def learning_process(wm, params=None):
-    """Learning mode — acknowledge new info, update model."""
-    from cognition.steps import external_dialog
-
-    wm, response = await external_dialog(wm, "Acknowledge this new information.")
-    return wm
+    # Operator-facing nudge derived from the thought (deterministic truncation).
+    snippet = " ".join(text.split())[:200]
+    return [ProactiveAction(
+        source=source,
+        channel="operator_notification",
+        effect="notify",
+        reason="cognitive_pass_followup",
+        message=f"While thinking this through, the Homie noted: {snippet}",
+    )]
 
 
-async def execution_process(wm, params=None):
-    """Execution mode — do the requested work."""
-    from cognition.steps import external_dialog
+# CONTRACT (Act 3 / F2+F4): each *_process accepts a ``processor`` model-tier
+# hint (default ``"fast"`` = haiku — a "think before replying" pass is a classic
+# cheap-model job; the default expensive reply profile would ~2x the input cost)
+# and a ``cwd`` (so the monologue's RuntimeRequest runs in the project root like
+# the reply, not Path.cwd()). Both thread straight through to internal_monologue
+# -> wm.transform -> render_runtime_request. ``run_cognitive_monologue`` resolves
+# the tier from the Rule-1 ``CognitivePassSettings.model`` knob and the project
+# root from the engine seam.
 
-    wm, response = await external_dialog(wm, "Execute the requested task.")
-    return wm
+
+async def default_process(wm, params=None, *, processor="fast", cwd=None):
+    """Default conversation — no internal monologue (the engine replies directly).
+
+    DEFAULT never fires the cognitive pass; this stays contract-consistent
+    (returns the 3-tuple) so ``execute_process`` callers never special-case it.
+    """
+    return wm, "", []
+
+
+async def planning_process(wm, params=None, *, processor="fast", cwd=None):
+    """Planning mode — think internally about the approach (no reply)."""
+    from cognition.steps import internal_monologue
+
+    wm, thought = await internal_monologue(
+        wm,
+        "Think through the approach before replying: the plan, the risks, the "
+        "next step. If a concrete operator_notification is warranted, name it. "
+        "Do NOT produce a user-facing reply — internal thinking only.",
+        processor=processor,
+        cwd=cwd,
+    )
+    actions = _propose_actions(wm, thought, source="cognition.planning")
+    return wm, thought, actions
+
+
+async def monitoring_process(wm, params=None, *, processor="fast", cwd=None):
+    """Monitoring mode — think internally about status/issues (no reply)."""
+    from cognition.steps import internal_monologue
+
+    wm, thought = await internal_monologue(
+        wm,
+        "Think internally about the current status: what is healthy, what is "
+        "drifting, what needs attention. If a concrete operator_notification is "
+        "warranted, name it. Do NOT produce a user-facing reply.",
+        processor=processor,
+        cwd=cwd,
+    )
+    actions = _propose_actions(wm, thought, source="cognition.monitoring")
+    return wm, thought, actions
+
+
+async def learning_process(wm, params=None, *, processor="fast", cwd=None):
+    """Learning mode — think internally about the new info (no reply)."""
+    from cognition.steps import internal_monologue
+
+    wm, thought = await internal_monologue(
+        wm,
+        "Think internally about this new information: what it changes, what to "
+        "remember. Do NOT produce a user-facing reply — internal thinking only.",
+        processor=processor,
+        cwd=cwd,
+    )
+    # Eligible to widen later; OFF by default in Act 3.
+    return wm, thought, []
+
+
+async def execution_process(wm, params=None, *, processor="fast", cwd=None):
+    """Execution mode — think internally about the work (no reply)."""
+    from cognition.steps import internal_monologue
+
+    wm, thought = await internal_monologue(
+        wm,
+        "Think internally about the requested work: the steps, the risks, what "
+        "could go wrong. Do NOT produce a user-facing reply — internal thinking "
+        "only.",
+        processor=processor,
+        cwd=cwd,
+    )
+    # Eligible to widen later; OFF by default in Act 3.
+    return wm, thought, []
 
 
 # Map enum -> executable function

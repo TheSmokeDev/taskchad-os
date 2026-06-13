@@ -792,6 +792,7 @@ class TelegramAdapter:
                     size_bytes=document.file_size,
                 )
             ],
+            caption=caption,
             raw_event=msg.to_dict(),
         )
 
@@ -880,6 +881,13 @@ class TelegramAdapter:
 
         first.text = "\n\n".join(parts)
         first.attachments = attachments
+        # Telegram attaches a media-group caption to ONE item in the album —
+        # propagate the first non-empty caption so a caption command (e.g.
+        # /vault-ingest) applies to the whole group.
+        for incoming in batch:
+            if (incoming.caption or "").strip():
+                first.caption = incoming.caption
+                break
         if message_ids:
             first.platform_message_id = ",".join(message_ids)
         first.raw_event = {

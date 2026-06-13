@@ -182,6 +182,9 @@ async def test_on_document_downloads_and_queues_attachment(
     incoming = adapter._queue.get_nowait()
     assert incoming.text.startswith("[User uploaded a document: game-plan.md]")
     assert "Please read this" in incoming.text
+    # Phase 3: the raw caption rides the platform-agnostic caption field so
+    # the router can match explicit caption commands (e.g. /vault-ingest).
+    assert incoming.caption == "Please read this"
     # Phase 2 lane-agnostic wording — no tool instructions a no-tools lane
     # cannot follow.
     assert "Read tool" not in incoming.text
@@ -246,6 +249,8 @@ async def test_on_document_media_group_queues_single_combined_turn(
     assert "one.md" in incoming.text
     assert "two.md" in incoming.text
     assert "Read these together" in incoming.text
+    # Phase 3: the group caption propagates onto the merged turn.
+    assert incoming.caption == "Read these together"
     # Merged-group path concatenates per-doc texts — inherits the Phase 2
     # lane-agnostic wording (verified, not assumed).
     assert "Read tool" not in incoming.text
@@ -255,6 +260,60 @@ async def test_on_document_media_group_queues_single_combined_turn(
         "two.md",
     ]
     assert incoming.platform_message_id == "42,43"
+
+
+@pytest.mark.asyncio
+async def test_on_document_media_group_propagates_first_nonempty_caption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3: Telegram attaches an album caption to ONE item — when it rides
+    a LATER item, the merged turn must still carry it (first NON-empty caption,
+    not first item's caption) so a /vault-ingest caption covers the group."""
+    monkeypatch.setattr(telegram_adapter.tempfile, "gettempdir", lambda: str(tmp_path))
+    bot = FakeTelegramBot()
+    bot.files["file-a"] = FakeTelegramFile(b"# One")
+    bot.files["file-b"] = FakeTelegramFile(b"# Two")
+    adapter = _adapter_with_fake_bot(bot)
+
+    def message(file_id: str, unique_id: str, filename: str, message_id: int, caption: str):
+        return SimpleNamespace(
+            document=SimpleNamespace(
+                file_id=file_id,
+                file_unique_id=unique_id,
+                file_name=filename,
+                mime_type="text/markdown",
+                file_size=5,
+            ),
+            from_user=SimpleNamespace(id=123456, first_name="Operator"),
+            chat_id=123456,
+            chat=SimpleNamespace(type="private"),
+            reply_to_message=None,
+            caption=caption,
+            message_id=message_id,
+            media_group_id="album-2",
+            to_dict=lambda: {
+                "message_id": message_id,
+                "media_group_id": "album-2",
+                "document": {"file_name": filename},
+            },
+        )
+
+    await adapter._on_document(
+        SimpleNamespace(message=message("file-a", "unique-a", "one.md", 50, "")), None
+    )
+    await adapter._on_document(
+        SimpleNamespace(message=message("file-b", "unique-b", "two.md", 51, "/vault-ingest")),
+        None,
+    )
+    await telegram_adapter.asyncio.sleep(0.05)
+
+    incoming = adapter._queue.get_nowait()
+    assert incoming.caption == "/vault-ingest"
+    assert [attachment.filename for attachment in incoming.attachments] == [
+        "one.md",
+        "two.md",
+    ]
 
 
 def test_document_turn_text_uses_lane_agnostic_wording() -> None:

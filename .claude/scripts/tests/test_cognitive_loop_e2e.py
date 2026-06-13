@@ -37,7 +37,10 @@ def test_chat_frozen_regions_use_temp_identity_inferences_and_working_memory(
         "The user requires file-line evidence for validation claims.",
         "Seeded by cognitive-loop E2E harness.",
         confidence=0.95,
-        source="validation_harness",
+        # Living Self Act 1 (B1): the renderer now injects ONLY trustworthy
+        # operator-belief sources {reflection, explicit}. Use "reflection" so
+        # this loop test still proves inferences reach the system prompt.
+        source="reflection",
     )
 
     monkeypatch.setattr(config, "MEMORY_DIR", vault)
@@ -81,7 +84,10 @@ async def test_chat_turn_uses_working_memory_as_runtime_owner(
         "The user wants the full living mental loop proven.",
         "Seeded by cognitive-loop E2E harness.",
         confidence=0.95,
-        source="validation_harness",
+        # Living Self Act 1 (B1): the renderer now injects ONLY trustworthy
+        # operator-belief sources {reflection, explicit}. Use "reflection" so
+        # this loop test still proves inferences reach the system prompt.
+        source="reflection",
     )
 
     monkeypatch.setattr(config, "MEMORY_DIR", vault)

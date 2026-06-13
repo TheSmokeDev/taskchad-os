@@ -13,6 +13,31 @@ from dataclasses import dataclass
 
 CHARS_PER_TOKEN = 4  # Same heuristic as memory_index.py
 
+# Windows CreateProcess command-line limit is 32767 chars; the Claude Agent SDK
+# passes the assembled system prompt as --append-system-prompt on argv, so the
+# final append must be capped (~5000 chars reserved for CLI args/prompt/overhead).
+# Single source of truth for BOTH the reply path (engine assembles regions then
+# caps) AND the cognitive-pass monologue (which must cap the WM it thinks over so
+# its OWN RuntimeRequest append cannot WinError-206 on the native Claude lane).
+WIN32_APPEND_MAX_CHARS = 27000
+
+
+def truncate_for_win32_argv(
+    append_text: str, max_append: int = WIN32_APPEND_MAX_CHARS,
+) -> str:
+    """Head-keeping cap for the win32 CreateProcess command-line limit.
+
+    Keeps the FIRST ``max_append`` chars (a PREFIX — late-appended content can be
+    tail-truncated, a prefix cannot) and marks the cut. Pure + platform-agnostic
+    so it is testable on any OS; the ``sys.platform == "win32"`` gate + the log
+    line stay at the call sites. Reused by ``engine._truncate_win32_append`` (the
+    reply path) and ``cognitive_pass.run_cognitive_monologue`` (the monologue
+    context bound) so there is ONE truncation mechanism, not two.
+    """
+    if len(append_text) <= max_append:
+        return append_text
+    return append_text[:max_append] + "\n[TRUNCATED]"
+
 # Default budgets in characters (~4 chars/token)
 DEFAULT_REGION_BUDGETS: dict[str, int] = {
     "identity": 16000,          # ~4K tokens — SOUL.md

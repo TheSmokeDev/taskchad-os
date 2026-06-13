@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "description": "Living Self Act 4 — falsifiable belief-behavior checks. Each entry is a deterministic, zero-LLM property a candidate self-amendment must satisfy over its own fields + the READ bytes of its cited evidence (Rule 2). The .failed list feeds the UNCHANGED evolve.veto.evaluate_veto for the --force-proof floor. The seed encodes the system's OWN documented failure modes (the SELF.md doc-read-truthfulness incident). These checks are NECESSARY, not SUFFICIENT — evidence_fidelity measures shared VOCABULARY, not support; the LLM judge (evolve/judge.py) is the load-bearing support-decider.",
+  "entries": [
+    {
+      "check_id": "no-unread-claim",
+      "kind": "no_unread_claim",
+      "description": "If the proposed belief asserts a document was READ/verified, every cited evidence_path must have non-empty READ content on disk. Citing only a missing/empty/metadata-only path fails. The doc-read-truthfulness floor (SELF.md doc-read incident).",
+      "params": {}
+    },
+    {
+      "check_id": "evidence-fidelity",
+      "kind": "evidence_fidelity",
+      "description": "The claim's salient tokens must hit a minimum token-overlap against the UNION of cited evidence. Zero overlap = the claim shares NO vocabulary with what it cites. CHEAP pre-filter (M2): measures vocabulary, NOT support.",
+      "params": { "min_overlap": 0.10 }
+    },
+    {
+      "check_id": "explicit-provenance",
+      "kind": "explicit_provenance",
+      "description": "OFF in the seed (require_explicit false). When enabled: a candidate that claims to encode an OPERATOR-stated belief must cite an explicit-source record, not a reflection synthesis.",
+      "params": { "require_explicit": false }
+    }
+  ]
+}

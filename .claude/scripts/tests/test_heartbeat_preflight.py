@@ -15,11 +15,18 @@ def _install_quiet_heartbeat(monkeypatch: pytest.MonkeyPatch) -> list[heartbeat.
     captured_requests: list[heartbeat.RuntimeRequest] = []
 
     async def fake_gather_heartbeat_context():
+        # Four-value gather contract (Living Mind Act 2): context, source
+        # IDs, blocker candidates, sense facts. No dual-shape tolerance —
+        # run_heartbeat() consumes the third and fourth elements
+        # (consumption proven in test_heartbeat_blockers.py ordering tests
+        # and test_heartbeat_observations.py pipeline tests).
         return (
             "## Email\n\nNo urgent emails.\n\n"
             "## Slack\n\nNo important messages.\n\n"
             "## Calendar\n\nNo meetings starting soon.",
             [],
+            [],
+            {},
         )
 
     async def fake_run_with_runtime_lanes(request: heartbeat.RuntimeRequest) -> RuntimeResult:

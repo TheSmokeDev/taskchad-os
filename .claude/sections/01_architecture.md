@@ -13,7 +13,8 @@ Within that framework, behavior is organized as vertical slices. Group behavior 
 | `.claude/scripts/runtime/` | Reasoning runtime boundary, provider selection, auth-profile resolution, fallback, Langfuse tracing |
 | `.claude/hooks/` | Session lifecycle hooks and flush behavior |
 | `.claude/scripts/` | Scheduled jobs, memory pipelines, orchestration scripts |
-| `.claude/chat/cognition/` | Cognitive modules — recall, processes, regions, capture, promotion, graph, continuity, self-model |
+| `.claude/chat/cognition/` | Cognitive modules — recall, processes, regions, capture, promotion, graph, continuity, self-model. **The Living Self slice** (cognitive system, 2026-06-13): `operator_beliefs` (Act 1 — model the operator from verbatim turns), `belief_conflicts` (Act 2 — the contradiction engine; distinct from `contradictions.py`, a docs-drift linter), `cognitive_pass` + `proactive_actions` (Act 3 — the gated inner monologue), `evidence_gate` + `amendments` (Act 4 — the evidence-read + default-deny adoption gate). Operator/architecture manual: `docs/the-living-self-manual.md` |
+| `.claude/scripts/evolve/` | The Living Self test-and-keep engine (ASI-Evolve-inspired) — `evolve_loop.py` (the `propose` recall rail + the `propose-belief` identity rail), `judge.py` (scheduled belief judge), `belief_regression.py` (the deterministic floor), plus the recall replay/compare/veto harness. Archon drives candidate search; this slice is the fitness oracle |
 | `.claude/scripts/orchestration/` | Convoy/mailbox service layer, executor adapters, local API (port 4322), contract |
 | `.claude/scripts/integrations/` | Direct platform API integrations |
 | `.claude/scripts/integrations/finance_*` | Personal finance: bank sync, budget queries, Teller/Plaid clients |

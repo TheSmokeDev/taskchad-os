@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -38,7 +40,8 @@ from personas import apply_persona_override  # noqa: E402
 
 apply_persona_override()
 
-from datetime import datetime  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from datetime import date, datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 
@@ -61,6 +64,8 @@ from config import (  # noqa: E402
     OWNER_NAME,
     PROJECT_ROOT,
     ensure_directories,
+    get_heartbeat_blocker_settings,
+    get_heartbeat_observation_settings,
     is_within_active_hours,
     now_local,
 )
@@ -109,7 +114,9 @@ def _business_signature() -> str:
 # =============================================================================
 
 
-async def gather_heartbeat_context() -> tuple[str, list[str]]:
+async def gather_heartbeat_context() -> tuple[
+    str, list[str], list[tuple[str, str]], dict[str, dict[str, Any]]
+]:
     """
     Gather context from all direct integrations for Claude to reason about.
 
@@ -117,11 +124,26 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
     Each integration is wrapped in try/except for graceful degradation.
 
     Returns:
-        Tuple of (formatted context string, list of source IDs for dedup tracking).
-        Source IDs use prefix convention: email:{id}, event:{id}, task:{gid}, slack:{channel}:{ts}
+        Tuple of (formatted context string, list of source IDs for dedup
+        tracking, list of blocker candidates, sense facts). Source IDs use
+        prefix convention: email:{id}, event:{id}, task:{gid},
+        slack:{channel}:{ts}.
+        Blocker candidates are ``(integration_name, str(exception))`` tuples
+        appended by each integration's except branch — the Python-side input
+        to blocker classification (Living Mind Act 1; the runtime's response
+        text is never parsed for blockers).
+        Sense facts (Living Mind Act 2) carry per-group counts/labels for the
+        ambient-observation predicates: a group key exists ONLY when its
+        integration block succeeded (facts presence == sense healthy; error →
+        key absent AND a blocker candidate appended — never both). No facts
+        field ever carries sender/subject/title/body text from email,
+        calendar, Slack, Asana, or HARO content — counts, dates, and
+        operator-owned labels only.
     """
     sections: list[str] = []
     source_ids: list[str] = []
+    blocker_candidates: list[tuple[str, str]] = []
+    sense_facts: dict[str, dict[str, Any]] = {}
 
     # Gmail
     try:
@@ -156,10 +178,12 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
         source_ids.extend(f"email:{eid}" for eid in seen_email_ids)
 
         sections.append(email_section)
+        sense_facts["email"] = {"unread_count": unread, "urgent_count": len(urgent)}
         print(f"[{now_local()}] Gmail: {unread} unread, {len(urgent)} urgent")
     except Exception as e:
         sections.append(f"## Email\n\n**Error fetching email:** {e}")
         print(f"[{now_local()}] Gmail error (non-fatal): {e}")
+        blocker_candidates.append(("gmail", str(e)))
 
     # Calendar
     try:
@@ -184,10 +208,15 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
         source_ids.extend(f"event:{eid}" for eid in seen_event_ids)
 
         sections.append(cal_section)
+        sense_facts["calendar"] = {
+            "today_count": len(today_events),
+            "upcoming_count": len(upcoming),
+        }
         print(f"[{now_local()}] Calendar: {len(today_events)} today, {len(upcoming)} upcoming")
     except Exception as e:
         sections.append(f"## Calendar\n\n**Error fetching calendar:** {e}")
         print(f"[{now_local()}] Calendar error (non-fatal): {e}")
+        blocker_candidates.append(("calendar", str(e)))
 
     # Asana
     try:
@@ -197,8 +226,11 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
             get_overdue_tasks,
         )
 
-        overdue = get_overdue_tasks()
-        due_soon = get_due_soon_tasks(days=3)
+        # raise_on_error=True — credential failures must travel the REAL
+        # except branch below into blocker_candidates instead of being
+        # swallowed into empty task lists (Living Mind Act 2, R1 B5).
+        overdue = get_overdue_tasks(raise_on_error=True)
+        due_soon = get_due_soon_tasks(days=3, raise_on_error=True)
 
         asana_section = "## Asana Tasks\n\n"
         if overdue:
@@ -213,10 +245,15 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
             source_ids.append(f"task:{t.gid}")
 
         sections.append(asana_section)
+        sense_facts["tasks"] = {
+            "overdue_count": len(overdue),
+            "due_soon_count": len(due_soon),
+        }
         print(f"[{now_local()}] Asana: {len(overdue)} overdue, {len(due_soon)} due soon")
     except Exception as e:
         sections.append(f"## Asana Tasks\n\n**Error fetching Asana:** {e}")
         print(f"[{now_local()}] Asana error (non-fatal): {e}")
+        blocker_candidates.append(("asana", str(e)))
 
     # Slack
     try:
@@ -225,7 +262,9 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
             format_messages_for_context,
         )
 
-        important = check_for_important_messages(hours_ago=2)
+        # raise_on_error=True — a rejected token must reach the except branch
+        # below, not look like "no messages" (Living Mind Act 2, R1 B5).
+        important = check_for_important_messages(hours_ago=2, raise_on_error=True)
 
         if important:
             imp_fmt = format_messages_for_context(important)
@@ -238,10 +277,12 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
             source_ids.append(f"slack:{m.channel}:{m.ts}")
 
         sections.append(slack_section)
+        sense_facts.setdefault("community", {})["slack_important_count"] = len(important)
         print(f"[{now_local()}] Slack: {len(important)} important messages")
     except Exception as e:
         sections.append(f"## Slack\n\n**Error fetching Slack:** {e}")
         print(f"[{now_local()}] Slack error (non-fatal): {e}")
+        blocker_candidates.append(("slack", str(e)))
 
     # Bank Sync — pull latest transactions and balances from Teller/Plaid
     try:
@@ -258,6 +299,7 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
                 print(f"[{now_local()}] Bank sync warning: {err}")
     except Exception as e:
         print(f"[{now_local()}] Bank sync error (non-fatal): {e}")
+        blocker_candidates.append(("bank_sync", str(e)))
 
     # Personal Finances — alert on upcoming bills / expiring loans / low balances
     try:
@@ -269,6 +311,8 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
 
         # Category overspend check (non-fatal — never crashes heartbeat)
         overspend: list[str] = []
+        overspend_facts: list[dict[str, Any]] = []
+        overspend_ok = False
         try:
             # finance integration removed — configure separately
 
@@ -281,8 +325,13 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
                         f"**{label}: {s.category} at {pct_display}% "
                         f"(${s.spent:,.2f}/${s.limit:,.2f})**"
                     )
+                    overspend_facts.append(
+                        {"category": s.category, "pct_used": pct_display}
+                    )
+            overspend_ok = True
         except Exception as e:
             print(f"[{now_local()}] Category budget check error (non-fatal): {e}")
+            blocker_candidates.append(("category_budget", str(e)))
 
         if bills_due or expiring or low_balance or overspend:
             parts = ["## Personal Finances\n"]
@@ -318,8 +367,26 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
             print(f"[{now_local()}] Finances: {', '.join(alert_parts)}")
         else:
             print(f"[{now_local()}] Finances: no upcoming alerts")
+        # Facts set on SUCCESS even when all lists are empty (unlike the
+        # prompt section above, which only renders on alerts). Labels are
+        # operator-owned (his own Supabase rows) — never external text.
+        finance_facts: dict[str, Any] = {
+            "low_balance_accounts": [
+                {"name": a.name, "balance": a.balance} for a in low_balance
+            ],
+            "bills_due_count": len(bills_due),
+            "expiring_loans": [
+                {"label": ln.collateral or ln.lender, "due_date": str(ln.due_date)}
+                for ln in expiring
+            ],
+        }
+        if overspend_ok:
+            # Set only when the inner category-budget sub-check succeeded.
+            finance_facts["overspend"] = overspend_facts
+        sense_facts["finance"] = finance_facts
     except Exception as e:
         print(f"[{now_local()}] Finance check error (non-fatal): {e}")
+        blocker_candidates.append(("finance", str(e)))
 
     # HARO monitoring
     try:
@@ -382,7 +449,16 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
                             f"[{now_local()}] HARO pitch generation skipped: "
                             f"kill-switch '{getattr(_exc, 'switch_name', 'llm')}' disabled"
                         )
-                        return  # exit cleanly — operator turned off LLM
+                        # Exit cleanly with everything gathered so far —
+                        # operator turned off LLM. Must honor the 4-tuple
+                        # contract (a bare return would crash the caller's
+                        # unpack with None).
+                        return (
+                            "\n\n---\n\n".join(sections),
+                            source_ids,
+                            blocker_candidates,
+                            sense_facts,
+                        )
                     raise
 
                 from claude_agent_sdk import (
@@ -488,13 +564,21 @@ async def gather_heartbeat_context() -> tuple[str, list[str]]:
             haro_section += "<!-- END UNTRUSTED EXTERNAL DATA -->\n"
             sections.append(haro_section)
             source_ids.extend(f"email:{e.id}" for e in haro_emails)
+            # Counts only — never query text (untrusted external data).
+            sense_facts.setdefault("community", {}).update(
+                {
+                    "haro_matched_count": len(matched_queries),
+                    "haro_drafts_created": len(drafts_created),
+                }
+            )
             print(f"[{now_local()}] HARO: {len(haro_emails)} email(s), {len(matched_queries)} relevant queries, {len(drafts_created)} AI drafts created")
         else:
             print(f"[{now_local()}] HARO: no new emails this cycle")
     except Exception as e:
         print(f"[{now_local()}] HARO check error (non-fatal): {e}")
+        blocker_candidates.append(("haro", str(e)))
 
-    return "\n\n---\n\n".join(sections), source_ids
+    return "\n\n---\n\n".join(sections), source_ids, blocker_candidates, sense_facts
 
 
 # =============================================================================
@@ -987,6 +1071,868 @@ def _heartbeat_codex_model() -> str | None:
 
 
 # =============================================================================
+# BLOCKER OBSERVATION & ESCALATION (Living Mind Act 1)
+# =============================================================================
+#
+# Closes the observe → remember loop: integration failures the gather except
+# branches see are classified Python-side into stable signatures, counted as
+# distinct calendar days in heartbeat state, and — for allowlisted signatures
+# that keep recurring — promoted into a WORKING.md Open Thread through
+# living_memory.append_open_thread (the only WORKING.md writer). Zero LLM in
+# detection, counting, and promotion; runtime response text is never parsed.
+
+
+@dataclass(frozen=True)
+class BlockerObservation:
+    """A classified integration failure observed at gather time."""
+
+    signature: str
+    summary: str
+    fix_hint: str | None
+
+
+# Known-patterns registry (widened by Living Mind Act 2): entries are
+# ``(scope, pattern, signature, summary, fix_hint)`` — first match wins.
+# ``scope`` is a frozenset of integration names the entry may classify, or
+# None for any integration (the Google entry stays any-integration and first
+# — Act 1 precedence preserved). Scoping prevents cross-classification: a
+# Gmail HttpError string containing "401" must NOT classify as
+# ``asana:auth_failed``. Signatures are stable across runs for the same
+# failure class — no timestamps, memory addresses, or request IDs.
+# ``token_missing`` (env unset — deliberate non-configuration) is counted but
+# NOT on the default promotion allowlist; ``auth_failed`` (token present,
+# rejected by the API — the truly swallowed class, surfaced via
+# raise_on_error) IS on the default allowlist.
+_BLOCKER_PATTERNS: tuple[
+    tuple[frozenset[str] | None, re.Pattern[str], str, str, str], ...
+] = (
+    (
+        None,
+        re.compile(r"invalid_grant|RefreshError"),
+        "google:oauth_invalid_grant",
+        "Google OAuth refresh broken (invalid_grant) — Gmail/Calendar blind",
+        "uv run python setup_auth.py",
+    ),
+    (
+        frozenset({"asana"}),
+        re.compile(r"ASANA_ACCESS_TOKEN not set"),
+        "asana:token_missing",
+        "Asana token not configured — task checks blind",
+        "set ASANA_ACCESS_TOKEN in .claude/scripts/.env or leave Asana unconfigured",
+    ),
+    (
+        frozenset({"slack"}),
+        re.compile(r"SLACK_BOT_TOKEN not set"),
+        "slack:token_missing",
+        "Slack token not configured — Slack checks blind",
+        "set SLACK_BOT_TOKEN in .claude/scripts/.env or leave Slack unconfigured",
+    ),
+    (
+        frozenset({"asana"}),
+        re.compile(r"\(401\)|Not Authorized|Unauthorized"),
+        "asana:auth_failed",
+        "Asana auth rejected (401) — task checks blind",
+        "rotate ASANA_ACCESS_TOKEN at app.asana.com/0/developer-console",
+    ),
+    (
+        frozenset({"slack"}),
+        re.compile(
+            r"invalid_auth|token_revoked|token_expired|account_inactive|not_authed"
+        ),
+        "slack:auth_failed",
+        "Slack auth rejected — Slack checks blind",
+        "rotate SLACK_BOT_TOKEN at api.slack.com/apps",
+    ),
+)
+
+# Active-guardrail scan: an Open Threads bullet promoted by the heartbeat.
+_HEARTBEAT_THREAD_RE = re.compile(r"^- \[\d{4}-\d{2}-\d{2}\] \[heartbeat\]")
+
+_BLOCKER_SUMMARY_MAX_CHARS = 120
+
+
+def _resolve_blocker_now(now: datetime | None) -> datetime:
+    """Resolve the injectable clock — ``config.now_local()`` at call time."""
+    return now if now is not None else now_local()
+
+
+def _blocker_day_in_window(day_str: str, today: date, window_days: int) -> bool:
+    """True when `day_str` falls inside the rolling window ending today.
+
+    A day counts while ``0 <= (today - day).days <= window_days``. The
+    boundary is inclusive per the acceptance-normative example: days 1, 2, 9
+    with a 7-day window leave 2 effective days at day 9 (day 2 still counts
+    at delta 7; day 1 is out at delta 8). Future-dated days never count.
+    """
+    try:
+        day = date.fromisoformat(day_str)
+    except (TypeError, ValueError):
+        return False
+    delta = (today - day).days
+    return 0 <= delta <= window_days
+
+
+def classify_blocker(integration: str, error_text: str) -> BlockerObservation:
+    """Map a gather-produced candidate to a stable blocker signature.
+
+    Known classes come from the registry (entries scoped to an integration
+    are skipped for candidates from other integrations); anything else
+    becomes the generic ``{integration}:error`` class (observed and counted
+    in state, but never promoted — the promotion allowlist gates it out).
+    Consumes only gather-produced ``(integration, error_text)`` candidates.
+    """
+    text = str(error_text or "")
+    name = str(integration)
+    for scope, pattern, signature, summary, fix_hint in _BLOCKER_PATTERNS:
+        if scope is not None and name not in scope:
+            continue
+        if pattern.search(text):
+            return BlockerObservation(
+                signature=signature, summary=summary, fix_hint=fix_hint
+            )
+    collapsed = re.sub(r"\s+", " ", text).strip()[:_BLOCKER_SUMMARY_MAX_CHARS]
+    return BlockerObservation(
+        signature=f"{integration}:error",
+        summary=collapsed or f"{integration} integration error",
+        fix_hint=None,
+    )
+
+
+def normalize_blocker_state(state: dict[str, Any]) -> None:
+    """Normalize/migrate ``state['blocker_observations']`` in place (idempotent).
+
+    Runs on every state load, fail-open:
+      - a missing key initializes ``{}`` (pre-Act-1 live state carries only
+        ``alert_history`` + ``last_run``)
+      - a non-dict ``blocker_observations`` resets to ``{}`` (logged)
+      - non-dict entries are dropped (logged); wrong-typed fields coerce to
+        the canonical shape; invalid/duplicate days are dropped/deduped and
+        the day list is sorted
+      - unknown top-level state keys are never touched
+    Normalizing twice yields identical state.
+    """
+    observations = state.get("blocker_observations")
+    if not isinstance(observations, dict):
+        if observations is not None:
+            print(
+                f"[{now_local()}] Blocker state malformed "
+                f"(expected dict, got {type(observations).__name__}) — reset to empty"
+            )
+        state["blocker_observations"] = {}
+        return
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for signature, entry in observations.items():
+        if not isinstance(entry, dict):
+            print(f"[{now_local()}] Blocker entry malformed, dropped: {signature}")
+            continue
+        days: set[str] = set()
+        raw_days = entry.get("distinct_days")
+        if isinstance(raw_days, list):
+            for raw_day in raw_days:
+                if not isinstance(raw_day, str):
+                    continue
+                try:
+                    date.fromisoformat(raw_day)
+                except ValueError:
+                    continue
+                days.add(raw_day)
+        first_seen = entry.get("first_seen")
+        last_seen = entry.get("last_seen")
+        summary = entry.get("summary")
+        fix_hint = entry.get("fix_hint")
+        last_promoted = entry.get("last_promoted")
+        normalized[str(signature)] = {
+            "first_seen": first_seen if isinstance(first_seen, str) else None,
+            "last_seen": last_seen if isinstance(last_seen, str) else None,
+            "distinct_days": sorted(days),
+            "summary": summary if isinstance(summary, str) else "",
+            "fix_hint": fix_hint if isinstance(fix_hint, str) else None,
+            "last_promoted": last_promoted if isinstance(last_promoted, str) else None,
+        }
+    state["blocker_observations"] = normalized
+
+
+def record_blocker_observations(
+    state: dict[str, Any],
+    candidates: list[tuple[str, str]],
+    *,
+    now: datetime | None = None,
+) -> list[BlockerObservation]:
+    """Classify gather candidates and count distinct calendar days per signature.
+
+    Set semantics: 48 same-day observations count once. EVERY candidate is
+    recorded (full visibility — Act 2 fuel); promotion eligibility is gated
+    separately by the allowlist. Returns the classified observations (one per
+    candidate; signatures may repeat).
+    """
+    current = _resolve_blocker_now(now)
+    today = current.date().isoformat()
+    observations = state.setdefault("blocker_observations", {})
+    observed: list[BlockerObservation] = []
+    for integration, error_text in candidates:
+        obs = classify_blocker(str(integration), str(error_text))
+        observed.append(obs)
+        entry = observations.get(obs.signature)
+        if entry is None:
+            observations[obs.signature] = {
+                "first_seen": current.isoformat(),
+                "last_seen": current.isoformat(),
+                "distinct_days": [today],
+                "summary": obs.summary,
+                "fix_hint": obs.fix_hint,
+                "last_promoted": None,
+            }
+        else:
+            days = set(entry.get("distinct_days") or [])
+            days.add(today)
+            entry["distinct_days"] = sorted(days)
+            entry["last_seen"] = current.isoformat()
+            entry["summary"] = obs.summary
+            entry["fix_hint"] = obs.fix_hint
+    return observed
+
+
+def effective_blocker_days(
+    entry: dict[str, Any],
+    *,
+    window_days: int | None = None,
+    now: datetime | None = None,
+) -> list[str]:
+    """Return the entry's distinct days that fall inside the rolling window."""
+    if window_days is None:
+        window_days = get_heartbeat_blocker_settings().window_days
+    today = _resolve_blocker_now(now).date()
+    return [
+        d
+        for d in entry.get("distinct_days", [])
+        if _blocker_day_in_window(d, today, window_days)
+    ]
+
+
+def prune_blocker_observations(
+    state: dict[str, Any],
+    *,
+    window_days: int | None = None,
+    now: datetime | None = None,
+) -> list[str]:
+    """Drop signatures whose last observation aged out of the window.
+
+    The problem stopped happening — insert-only history lives in WORKING.md
+    and the daily logs, not in the counter. Surviving entries also have
+    out-of-window days trimmed (they can never count again; the window only
+    moves forward). Returns the pruned signatures.
+    """
+    if window_days is None:
+        window_days = get_heartbeat_blocker_settings().window_days
+    today = _resolve_blocker_now(now).date()
+    observations = state.get("blocker_observations")
+    if not isinstance(observations, dict):
+        return []
+    pruned: list[str] = []
+    for signature in list(observations.keys()):
+        entry = observations[signature]
+        last_seen_day: date | None = None
+        last_seen = entry.get("last_seen")
+        if isinstance(last_seen, str):
+            try:
+                last_seen_day = datetime.fromisoformat(last_seen).date()
+            except ValueError:
+                last_seen_day = None
+        if last_seen_day is None:
+            days = entry.get("distinct_days") or []
+            if days:
+                try:
+                    last_seen_day = date.fromisoformat(days[-1])
+                except ValueError:
+                    last_seen_day = None
+        if last_seen_day is None or (today - last_seen_day).days > window_days:
+            del observations[signature]
+            pruned.append(signature)
+            print(
+                f"[{now_local()}] Blocker pruned "
+                f"(aged out of {window_days}d window): {signature}"
+            )
+            continue
+        entry["distinct_days"] = [
+            d
+            for d in entry.get("distinct_days", [])
+            if _blocker_day_in_window(d, today, window_days)
+        ]
+    return pruned
+
+
+def _count_active_heartbeat_threads(memory_dir: Path) -> int:
+    """Count active Open Threads bullets carrying the ``[heartbeat]`` tag."""
+    from living_memory import read_working_memory
+
+    data = read_working_memory(memory_dir)
+    return sum(
+        1 for bullet in data.open_threads if _HEARTBEAT_THREAD_RE.match(bullet.strip())
+    )
+
+
+def promote_eligible_blockers(
+    state: dict[str, Any],
+    memory_dir: Path,
+    *,
+    promote_days: int | None = None,
+    window_days: int | None = None,
+    repromote_days: int | None = None,
+    max_active: int | None = None,
+    promote_allowlist: str | set[str] | frozenset[str] | None = None,
+    now: datetime | None = None,
+) -> dict[str, list[str]]:
+    """Promote allowlisted blockers that crossed the distinct-day threshold.
+
+    Trigger (all required): signature on the promotion allowlist, at least
+    ``promote_days`` distinct days inside the window, not promoted within
+    ``repromote_days`` calendar days (blocked while ``days_since <
+    repromote_days``, eligible at ``>=``), and fewer than ``max_active``
+    active ``[heartbeat]`` Open Threads (guardrail — at the cap the skip is
+    logged and the counters persist so the blocker promotes when a slot
+    frees).
+
+    Promotion writes through ``living_memory.append_open_thread`` — never a
+    hand-rolled WORKING.md write. ``last_promoted`` is set on a written
+    thread (returned 1) AND on a dedup skip (returned 0 — an equivalent
+    thread already exists). Fail-open per signature: a write failure logs and
+    skips without touching ``last_promoted`` so the next run retries.
+    """
+    settings = get_heartbeat_blocker_settings(
+        promote_days=promote_days,
+        window_days=window_days,
+        repromote_days=repromote_days,
+        max_active=max_active,
+        promote_allowlist=promote_allowlist,
+    )
+    current = _resolve_blocker_now(now)
+    today = current.date()
+    report: dict[str, list[str]] = {
+        "promoted": [],
+        "deduped": [],
+        "skipped_guardrail": [],
+    }
+    observations = state.get("blocker_observations")
+    if not isinstance(observations, dict):
+        return report
+
+    for signature, entry in observations.items():
+        if signature not in settings.promote_allowlist:
+            continue
+        effective = effective_blocker_days(
+            entry, window_days=settings.window_days, now=current
+        )
+        if len(effective) < settings.promote_days:
+            continue
+        last_promoted = entry.get("last_promoted")
+        if isinstance(last_promoted, str) and last_promoted:
+            promoted_day: date | None = None
+            try:
+                promoted_day = datetime.fromisoformat(last_promoted).date()
+            except ValueError:
+                promoted_day = None
+            if (
+                promoted_day is not None
+                and (today - promoted_day).days < settings.repromote_days
+            ):
+                continue
+        try:
+            active = _count_active_heartbeat_threads(memory_dir)
+            if active >= settings.max_active:
+                report["skipped_guardrail"].append(signature)
+                print(
+                    f"[{now_local()}] Blocker promotion skipped "
+                    f"(guardrail: {active} active [heartbeat] threads >= "
+                    f"max_active={settings.max_active}): {signature}"
+                )
+                continue
+
+            from living_memory import append_open_thread
+
+            summary = entry.get("summary") or signature
+            fix_hint = entry.get("fix_hint")
+            subject = f"[heartbeat] {summary}"
+            if fix_hint:
+                subject += f" — fix: {fix_hint}"
+            written = append_open_thread(memory_dir, subject=subject, status="open")
+            entry["last_promoted"] = current.isoformat()
+            if written:
+                report["promoted"].append(signature)
+                print(f"[{now_local()}] Blocker promoted to WORKING.md: {signature}")
+            else:
+                report["deduped"].append(signature)
+                print(
+                    f"[{now_local()}] Blocker promotion deduped "
+                    f"(equivalent open thread exists): {signature}"
+                )
+        except Exception as e:
+            print(
+                f"[{now_local()}] Blocker promotion failed (non-fatal): "
+                f"{signature}: {e}"
+            )
+    return report
+
+
+def process_heartbeat_blockers(
+    state: dict[str, Any],
+    candidates: list[tuple[str, str]],
+    memory_dir: Path,
+    *,
+    promote_days: int | None = None,
+    window_days: int | None = None,
+    repromote_days: int | None = None,
+    max_active: int | None = None,
+    promote_allowlist: str | set[str] | frozenset[str] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Run the full blocker pipeline: normalize → record → prune → promote.
+
+    Mutates ``state`` in place; the caller persists it (pre-runtime save).
+    Zero LLM — classification, counting, and promotion never consume the
+    runtime response text. All knobs resolve at call time through
+    ``config.get_heartbeat_blocker_settings()`` (Rule 1).
+    """
+    settings = get_heartbeat_blocker_settings(
+        promote_days=promote_days,
+        window_days=window_days,
+        repromote_days=repromote_days,
+        max_active=max_active,
+        promote_allowlist=promote_allowlist,
+    )
+    current = _resolve_blocker_now(now)
+    normalize_blocker_state(state)
+    observed = record_blocker_observations(state, candidates, now=current)
+    pruned = prune_blocker_observations(
+        state, window_days=settings.window_days, now=current
+    )
+
+    observations = state.get("blocker_observations", {})
+    seen: set[str] = set()
+    for obs in observed:
+        if obs.signature in seen:
+            continue
+        seen.add(obs.signature)
+        entry = observations.get(obs.signature)
+        if entry is None:
+            continue
+        effective = effective_blocker_days(
+            entry, window_days=settings.window_days, now=current
+        )
+        print(
+            f"[{now_local()}] Blocker observed: {obs.signature} "
+            f"({len(effective)} distinct day(s) in {settings.window_days}d window)"
+        )
+
+    promotion = promote_eligible_blockers(
+        state,
+        memory_dir,
+        promote_days=settings.promote_days,
+        window_days=settings.window_days,
+        repromote_days=settings.repromote_days,
+        max_active=settings.max_active,
+        promote_allowlist=settings.promote_allowlist,
+        now=current,
+    )
+    return {
+        "observed": [obs.signature for obs in observed],
+        "pruned": pruned,
+        **promotion,
+    }
+
+
+# =============================================================================
+# AMBIENT OBSERVATIONS (Living Mind Act 2)
+# =============================================================================
+#
+# Every heartbeat run derives deterministic, non-blocker observations
+# (events, anomalies, deltas) from the sense facts the gather step already
+# produced and writes them into the "Heartbeat Observations" section of
+# WORKING.md through living_memory.append_heartbeat_observation (the only
+# WORKING.md writer). Zero LLM calls anywhere in this path — the heartbeat
+# fires ~48×/day. Observation text is template-generated only: counts,
+# dates, code-generated blocker signatures, and operator-owned labels.
+# External free text (email subjects, calendar titles, Slack/Asana text)
+# never enters WORKING.md — it would be a durable prompt-injection vector.
+
+
+@dataclass(frozen=True)
+class AmbientObservation:
+    """A deterministic, template-generated observation candidate."""
+
+    group: str
+    subject: str
+    detail: str
+
+
+# Mirrors _dedup_match's prefix window (living_memory.py — needle is the
+# first 40 chars of the dedup subject, case-insensitive). Label-bearing
+# subjects must keep their disambiguator INSIDE this window (R1 M2).
+_DEDUP_PREFIX_CHARS = 40
+
+# Groups the predicate table knows how to derive. Unknown names configured in
+# HEARTBEAT_OBSERVATION_GROUPS are ignored with a logged warning (fail-open).
+_KNOWN_OBSERVATION_GROUPS = frozenset(
+    {"calendar", "email", "finance", "tasks", "community", "habits", "blockers"}
+)
+
+
+def _dedup_safe_subject(group: str, prefix: str, label: str) -> tuple[str, bool]:
+    """Build a collision-resistant subject for label-bearing templates.
+
+    ``_dedup_match`` compares only the first ``_DEDUP_PREFIX_CHARS`` chars of
+    ``[group] <subject>`` case-insensitively — two distinct operator labels
+    sharing a long common prefix would silently collapse into one bullet.
+    When the label does not fit the visible window, it is trimmed and a
+    ``~`` + 6-hex-char sha1 disambiguator (lowercase, matching dedup's
+    case-insensitivity) lands INSIDE the window: distinct labels → distinct
+    dedup keys; the same label → a stable key.
+
+    Returns ``(subject, shortened)``; when shortened, the caller appends the
+    full label to the detail so the operator still sees it.
+    """
+    visible = _DEDUP_PREFIX_CHARS - len(f"[{group}] ") - len(prefix)
+    if len(label) <= visible:
+        return f"{prefix}{label}", False
+    digest = hashlib.sha1(label.lower().encode("utf-8")).hexdigest()[:6]
+    trimmed = label[: visible - 7]
+    return f"{prefix}{trimmed}~{digest}", True
+
+
+def _habits_observation_facts(now: datetime | None = None) -> dict[str, Any] | None:
+    """Derive habits facts from HABITS.md checkbox lines (fail-open).
+
+    Counts ``- [ ]`` vs ``- [x]`` checkbox lines and extracts unchecked
+    pillar names with markdown stripped. Missing/unreadable file → ``None``
+    → no habits candidates (HABITS.md does not exist in every vault).
+    """
+    if not HABITS_FILE.exists():
+        return None
+    try:
+        content = HABITS_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    unchecked_names: list[str] = []
+    checked_count = 0
+    for line in content.splitlines():
+        m = re.match(r"^\s*- \[( |x|X)\]\s+(.+)$", line)
+        if not m:
+            continue
+        if m.group(1) in ("x", "X"):
+            checked_count += 1
+            continue
+        name = m.group(2).replace("**", "").replace("`", "").replace("__", "")
+        name = re.sub(r"\s+", " ", name).strip()
+        if name:
+            unchecked_names.append(name)
+    return {
+        "unchecked_count": len(unchecked_names),
+        "checked_count": checked_count,
+        "unchecked_names": unchecked_names,
+    }
+
+
+def derive_ambient_observations(
+    sense_facts: dict[str, dict[str, Any]],
+    state: dict[str, Any],
+    *,
+    settings: Any,
+    blocker_settings: Any,
+    now: datetime,
+) -> list[AmbientObservation]:
+    """Derive observation candidates from sense facts — pure, deterministic.
+
+    No I/O, no env reads — everything is injected. Candidates are produced
+    in configured-group order, then predicate-table order within a group. A
+    group not in ``settings.groups`` produces zero candidates even when its
+    predicate is true. Facts keys absent (block failed or sense not
+    configured) produce zero candidates for that group.
+
+    The ``blockers`` group READS Act 1's ``state["blocker_observations"]``
+    counters (sorted for determinism) and writes nothing. Allowlisted
+    signatures are skipped — the promotion path owns them (no
+    double-reporting). Subjects use the code-generated signature only, never
+    the entry's summary (generic-class summaries contain raw error text).
+    """
+    candidates: list[AmbientObservation] = []
+    for group in settings.groups:
+        if group not in _KNOWN_OBSERVATION_GROUPS:
+            print(
+                f"[{now_local()}] Ambient observation group unknown, ignored: {group}"
+            )
+            continue
+
+        if group == "calendar":
+            facts = sense_facts.get("calendar")
+            if facts is None:
+                continue
+            upcoming = int(facts.get("upcoming_count", 0))
+            today_n = int(facts.get("today_count", 0))
+            if upcoming >= 1:
+                candidates.append(
+                    AmbientObservation(
+                        "calendar",
+                        "meeting within 4h",
+                        f"{upcoming} upcoming, {today_n} today",
+                    )
+                )
+            if today_n >= settings.busy_day_min:
+                candidates.append(
+                    AmbientObservation(
+                        "calendar", "busy calendar day", f"{today_n} events today"
+                    )
+                )
+
+        elif group == "email":
+            facts = sense_facts.get("email")
+            if facts is None:
+                continue
+            urgent = int(facts.get("urgent_count", 0))
+            unread = int(facts.get("unread_count", 0))
+            if urgent >= settings.urgent_email_min:
+                candidates.append(
+                    AmbientObservation(
+                        "email",
+                        "urgent email waiting",
+                        f"{urgent} urgent, {unread} unread",
+                    )
+                )
+            if unread >= settings.unread_min:
+                candidates.append(
+                    AmbientObservation(
+                        "email", "unread backlog high", f"{unread} unread"
+                    )
+                )
+
+        elif group == "finance":
+            facts = sense_facts.get("finance")
+            if facts is None:
+                continue
+            for acct in facts.get("low_balance_accounts", []):
+                name = str(acct.get("name", ""))
+                balance = float(acct.get("balance", 0.0))
+                subject, shortened = _dedup_safe_subject(
+                    "finance", "low balance: ", name
+                )
+                detail = f"${balance:.0f}"
+                if shortened:
+                    detail += f" ({name})"
+                candidates.append(AmbientObservation("finance", subject, detail))
+            bills = int(facts.get("bills_due_count", 0))
+            if bills >= 1:
+                candidates.append(
+                    AmbientObservation(
+                        "finance", "bills due within 3 days", f"{bills} bill(s)"
+                    )
+                )
+            for loan in facts.get("expiring_loans", []):
+                label = str(loan.get("label", ""))
+                due = str(loan.get("due_date", ""))
+                subject, shortened = _dedup_safe_subject(
+                    "finance", "loan expiring: ", label
+                )
+                detail = f"due {due}"
+                if shortened:
+                    detail += f" ({label})"
+                candidates.append(AmbientObservation("finance", subject, detail))
+            for entry in facts.get("overspend", []):
+                category = str(entry.get("category", ""))
+                pct = int(entry.get("pct_used", 0))
+                subject, shortened = _dedup_safe_subject(
+                    "finance", "category overspend: ", category
+                )
+                detail = f"{pct}% of budget"
+                if shortened:
+                    detail += f" ({category})"
+                candidates.append(AmbientObservation("finance", subject, detail))
+
+        elif group == "tasks":
+            facts = sense_facts.get("tasks")
+            if facts is None:
+                continue
+            overdue = int(facts.get("overdue_count", 0))
+            due_soon = int(facts.get("due_soon_count", 0))
+            if overdue >= 1:
+                candidates.append(
+                    AmbientObservation(
+                        "tasks",
+                        "overdue Asana tasks",
+                        f"{overdue} overdue, {due_soon} due soon",
+                    )
+                )
+
+        elif group == "community":
+            facts = sense_facts.get("community")
+            if facts is None:
+                continue
+            slack_n = int(facts.get("slack_important_count", 0))
+            if slack_n >= 1:
+                candidates.append(
+                    AmbientObservation(
+                        "community", "Slack messages flagged", f"{slack_n} important"
+                    )
+                )
+            haro_n = int(facts.get("haro_matched_count", 0))
+            if haro_n >= 1:
+                drafts_n = int(facts.get("haro_drafts_created", 0))
+                candidates.append(
+                    AmbientObservation(
+                        "community",
+                        "HARO queries matched",
+                        f"{haro_n} matched, {drafts_n} draft(s)",
+                    )
+                )
+
+        elif group == "habits":
+            facts = sense_facts.get("habits")
+            if facts is None:
+                continue
+            unchecked = int(facts.get("unchecked_count", 0))
+            if now.hour >= settings.evening_hour and unchecked >= 1:
+                names = [str(n) for n in facts.get("unchecked_names", [])]
+                names_txt = ", ".join(names[:5])
+                candidates.append(
+                    AmbientObservation(
+                        "habits",
+                        "habit pillars unchecked by evening",
+                        f"{unchecked} unchecked: {names_txt}",
+                    )
+                )
+
+        elif group == "blockers":
+            observations = state.get("blocker_observations")
+            if not isinstance(observations, dict):
+                continue
+            for signature, entry in sorted(observations.items()):
+                if signature in blocker_settings.promote_allowlist:
+                    continue  # the promotion path owns allowlisted signatures
+                if not isinstance(entry, dict):
+                    continue
+                days = effective_blocker_days(
+                    entry, window_days=blocker_settings.window_days, now=now
+                )
+                if len(days) >= settings.blocker_min_days:
+                    candidates.append(
+                        AmbientObservation(
+                            "blockers",
+                            f"{signature} keeps failing",
+                            f"{len(days)} day(s) in "
+                            f"{blocker_settings.window_days}d window",
+                        )
+                    )
+
+    return candidates
+
+
+def process_heartbeat_observations(
+    state: dict[str, Any],
+    sense_facts: dict[str, dict[str, Any]],
+    memory_dir: Path,
+    *,
+    groups: str | tuple[str, ...] | list[str] | None = None,
+    max_per_run: int | None = None,
+    busy_day_min: int | None = None,
+    urgent_email_min: int | None = None,
+    unread_min: int | None = None,
+    evening_hour: int | None = None,
+    blocker_min_days: int | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Run the ambient-observation pipeline: derive → cap → append → report.
+
+    Reads ``state`` (the blockers group), never writes it — the WORKING.md
+    section itself is the dedup memory (Rule 2: zero new state). Knobs
+    resolve at call time through ``config.get_heartbeat_observation_settings``
+    (Rule 1). Appends candidates in order until ``max_per_run`` WRITES land —
+    ``DEDUP`` / ``EMPTY_AFTER_SANITIZE`` don't consume the budget; remaining
+    candidates drop for this run. Per-candidate fail-open: an append failure
+    logs and continues.
+
+    Prints an operator-auditable summary: the exact written count, every
+    written subject, and deduped/skipped/dropped counts (the LIVE smoke's
+    audit record).
+    """
+    settings = get_heartbeat_observation_settings(
+        groups=groups,
+        max_per_run=max_per_run,
+        busy_day_min=busy_day_min,
+        urgent_email_min=urgent_email_min,
+        unread_min=unread_min,
+        evening_hour=evening_hour,
+        blocker_min_days=blocker_min_days,
+    )
+    blocker_settings = get_heartbeat_blocker_settings()
+    current = _resolve_blocker_now(now)
+
+    facts: dict[str, dict[str, Any]] = dict(sense_facts or {})
+    if "habits" in settings.groups:
+        habits_facts = _habits_observation_facts(now=current)
+        if habits_facts is not None:
+            facts["habits"] = habits_facts
+
+    candidates = derive_ambient_observations(
+        facts,
+        state,
+        settings=settings,
+        blocker_settings=blocker_settings,
+        now=current,
+    )
+
+    from living_memory import ObservationAppendStatus, append_heartbeat_observation
+
+    report: dict[str, Any] = {
+        "written": [],
+        "deduped": [],
+        "skipped_empty": [],
+        "dropped_over_cap": [],
+        "groups": list(settings.groups),
+    }
+    written_count = 0
+    for candidate in candidates:
+        tagged = f"[{candidate.group}] {candidate.subject}"
+        if written_count >= settings.max_per_run:
+            report["dropped_over_cap"].append(tagged)
+            continue
+        try:
+            status = append_heartbeat_observation(
+                memory_dir, candidate.group, candidate.subject, candidate.detail
+            )
+        except Exception as e:
+            print(
+                f"[{now_local()}] Ambient observation append failed "
+                f"(non-fatal): {tagged}: {e}"
+            )
+            continue
+        # Each status routes to its own report key off the enum — never
+        # inferred from a bare int (R1 minor 3). Only WRITTEN consumes budget.
+        if status is ObservationAppendStatus.WRITTEN:
+            written_count += 1
+            report["written"].append(tagged)
+        elif status is ObservationAppendStatus.DEDUP:
+            report["deduped"].append(tagged)
+        elif status is ObservationAppendStatus.EMPTY_AFTER_SANITIZE:
+            report["skipped_empty"].append(tagged)
+
+    if report["dropped_over_cap"]:
+        print(
+            f"[{now_local()}] Ambient observations over per-run cap "
+            f"({settings.max_per_run}), dropped this run: "
+            f"{'; '.join(report['dropped_over_cap'])}"
+        )
+    written_detail = (
+        " (" + "; ".join(report["written"]) + ")" if report["written"] else ""
+    )
+    print(
+        f"[{now_local()}] Ambient observations: "
+        f"{len(report['written'])} written{written_detail}, "
+        f"{len(report['deduped'])} deduped, "
+        f"{len(report['skipped_empty'])} skipped, "
+        f"{len(report['dropped_over_cap'])} dropped"
+    )
+    return report
+
+
+# =============================================================================
 # HEARTBEAT THREAD TRACKING
 # =============================================================================
 
@@ -1097,8 +2043,14 @@ async def run_heartbeat(test_mode: bool = False) -> str | None:
 
     # Gather context from all integrations directly in Python
     print(f"[{now_local()}] Gathering context from integrations...")
-    context, source_ids = await gather_heartbeat_context()
-    print(f"[{now_local()}] Context gathered ({len(context)} chars, {len(source_ids)} source IDs)")
+    context, source_ids, blocker_candidates, sense_facts = (
+        await gather_heartbeat_context()
+    )
+    print(
+        f"[{now_local()}] Context gathered ({len(context)} chars, "
+        f"{len(source_ids)} source IDs, {len(blocker_candidates)} blocker candidate(s), "
+        f"{len(sense_facts)} sense fact group(s))"
+    )
 
     # Proactive recall — search memory for context relevant to gathered data
     recalled_context = ""
@@ -1138,6 +2090,35 @@ async def run_heartbeat(test_mode: bool = False) -> str | None:
     # Prune expired alerts and build dedup context
     active_history = prune_expired_alerts(state)
     previous_context = format_alert_history_for_prompt(active_history)
+
+    # Living Mind Act 1 — blocker observation counting + promotion into
+    # WORKING.md Open Threads. Runs BEFORE the runtime turn, and in --test
+    # mode too (it is a memory write, not a notification). Fail-open: a
+    # blocker failure never crashes or delays the heartbeat run.
+    try:
+        process_heartbeat_blockers(state, blocker_candidates, MEMORY_DIR)
+    except Exception as e:
+        print(f"[{now_local()}] Blocker escalation error (non-fatal): {e}")
+
+    # Living Mind Act 2 — ambient observations into the WORKING.md
+    # "Heartbeat Observations" section. Blockers first (they mutate the
+    # counters the blockers group reads), observations second (they write
+    # only WORKING.md), state save third. Runs in --test mode too (memory
+    # write, not a notification). Observations must be on disk BEFORE the
+    # runtime call so they survive a runtime failure.
+    try:
+        process_heartbeat_observations(state, sense_facts, MEMORY_DIR)
+    except Exception as e:
+        print(f"[{now_local()}] Ambient observation error (non-fatal): {e}")
+
+    # Pre-runtime state persistence: persist blocker counters and
+    # last_promoted now — a runtime failure must not drop them while
+    # WORKING.md keeps the promoted thread (which would cause repeated
+    # promotion attempts). The post-run save below re-saves harmlessly.
+    try:
+        save_state(state, HEARTBEAT_STATE_FILE)
+    except Exception as e:
+        print(f"[{now_local()}] Pre-runtime state save failed (non-fatal): {e}")
 
     # Gather additional context for drafts and habits
     print(f"[{now_local()}] Gathering draft and habits context...")
@@ -1266,11 +2247,14 @@ For NEW unreplied items (Circle DMs, Circle posts, important emails per USER.md 
 Your final text response goes directly to {owner}'s phone. Keep it to just bullets + priority (see Response Format at top).
 """
 
-    # Langfuse attribution — wraps heartbeat runtime calls so they don't create orphan traces
+    # Langfuse attribution — wraps heartbeat runtime calls so they don't create
+    # orphan traces. Gated on the runtime-owned observation-client accessor via
+    # module-attribute lookup (Rule 3) — no direct is_langfuse_enabled import.
     _hb_prop_ctx = None
     try:
-        from runtime.langfuse_setup import is_langfuse_enabled
-        if is_langfuse_enabled():
+        from runtime import langfuse_setup
+
+        if langfuse_setup.get_observation_client() is not None:
             from langfuse import propagate_attributes
             _hb_prop_ctx = propagate_attributes(
                 session_id="heartbeat",

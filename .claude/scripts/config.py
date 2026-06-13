@@ -25,6 +25,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -284,15 +285,25 @@ TIER1_GRAPH_MAX_NEIGHBORS = int(os.getenv("TIER1_GRAPH_MAX_NEIGHBORS", "5"))
 # ~6500 tokens * 4 = ~26K chars + ~3K overhead = fits under limit.
 REGION_BUDGETS = {
     "identity": int(os.getenv("REGION_BUDGET_IDENTITY", "1500")),
-    "self_model": int(os.getenv("REGION_BUDGET_SELF_MODEL", "400")),
+    # Living Self Act 1 (M4): SELF_MODEL 400->700, USER_INFERENCES 300->500,
+    # PREFETCHED 3000->2500 — net-zero BASE-budget reallocation (-500 +300 +200
+    # == 0) so the now-clean SELF.md + operator-belief regions get room while the
+    # final 27K win32 clamp guarantees no new overflow. DEFAULTS only; the env
+    # override path is unchanged.
+    "self_model": int(os.getenv("REGION_BUDGET_SELF_MODEL", "700")),
     "user_model": int(os.getenv("REGION_BUDGET_USER_MODEL", "1000")),
     "durable_memory": int(os.getenv("REGION_BUDGET_MEMORY", "2000")),
     "continuity": int(os.getenv("REGION_BUDGET_CONTINUITY", "500")),
     "recalled_memory": int(os.getenv("REGION_BUDGET_RECALLED", "750")),
     "procedural_memory": int(os.getenv("REGION_BUDGET_PROCEDURAL", "500")),
-    "prefetched_context": int(os.getenv("REGION_BUDGET_PREFETCHED", "3000")),
-    "user_inferences": int(os.getenv("REGION_BUDGET_USER_INFERENCES", "300")),
+    "prefetched_context": int(os.getenv("REGION_BUDGET_PREFETCHED", "2500")),
+    "user_inferences": int(os.getenv("REGION_BUDGET_USER_INFERENCES", "500")),
     "working_memory": int(os.getenv("REGION_BUDGET_WORKING_MEMORY", "600")),
+    # Living Self Act 3: the gated cognitive-pass monologue renders here as a
+    # role="system", region="internal" memory. 500 tokens (~2000 chars) caps a
+    # runaway monologue; assemble_regions truncates per the budget. Without this
+    # row the cap would fall back to DEFAULT_REGION_BUDGETS.get == 1000.
+    "internal": int(os.getenv("REGION_BUDGET_INTERNAL_MONOLOGUE", "500")),
     "recent_conversation": int(os.getenv("REGION_BUDGET_RECENT_CONVERSATION", "600")),
 }
 
@@ -301,6 +312,18 @@ RECENT_CONVERSATION_COUNT = int(os.getenv("RECENT_CONVERSATION_COUNT", "6"))
 # Staging store
 STAGING_STORE_PATH = STATE_DIR / "memory-candidates.jsonl"
 AMENDMENT_LEDGER_FILE = STATE_DIR / "amendment-proposals.jsonl"
+
+# Living Self Act 3 — proactive action queue (append-only JSONL, physical state,
+# Rule 2). The cognitive pass queues operator_notification proposals here; the
+# queue is read fresh each call by ProactiveActionQueue. Dispatch/drain is Act 4.
+PROACTIVE_ACTION_QUEUE_FILE = STATE_DIR / "proactive-actions.jsonl"
+
+# Living Self Act 4 — the scheduled evolve loop's belief-decision artifacts land
+# here (sibling to the recall harness's reports/ dir). `evolve_loop.py
+# propose-belief` writes one decision-<proposal.id>.json per candidate run; the
+# recall `propose` subcommand keeps writing to the recall reports dir (it has a
+# real ReportDelta). Physical audit trail (Rule 2), NOT a recall ReportDelta.
+BELIEF_EVOLVE_DECISION_DIR = DATA_DIR / "evolve" / "belief"
 # Bounded auto-apply per scheduled run + Autonomous Amendments section cap (refs #58)
 AMENDMENT_APPLY_LIMIT = int(os.getenv("AMENDMENT_APPLY_LIMIT", "3"))
 AMENDMENT_SECTION_CAP = int(os.getenv("AMENDMENT_SECTION_CAP", "20"))
@@ -415,6 +438,601 @@ def is_within_active_hours() -> bool:
     """Check if current time is within active hours (local timezone)."""
     current_time = now_local().strftime("%H:%M")
     return HEARTBEAT_ACTIVE_START <= current_time <= HEARTBEAT_ACTIVE_END
+
+
+class HeartbeatBlockerSettings(NamedTuple):
+    """Effective heartbeat blocker-escalation knobs (call-time resolved)."""
+
+    promote_days: int
+    window_days: int
+    repromote_days: int
+    max_active: int
+    promote_allowlist: frozenset[str]
+
+
+def get_heartbeat_blocker_settings(
+    promote_days: int | None = None,
+    window_days: int | None = None,
+    repromote_days: int | None = None,
+    max_active: int | None = None,
+    promote_allowlist: str | set[str] | frozenset[str] | None = None,
+) -> HeartbeatBlockerSettings:
+    """Resolve heartbeat blocker-escalation knobs at CALL TIME (Rule 1).
+
+    Every arg uses the None-sentinel pattern: explicit values pass through;
+    ``None`` resolves the matching ``HEARTBEAT_BLOCKER_*`` env var inside the
+    body. These knobs deliberately do NOT exist as module-level constants —
+    env overrides (and ``monkeypatch.setenv`` in tests) take effect on the
+    next call with no module reload and no ``reload_config()`` involvement.
+
+    The allowlist accepts a comma-separated string or an iterable of
+    signatures and is returned as a frozenset.
+    """
+    if promote_days is None:
+        promote_days = int(os.getenv("HEARTBEAT_BLOCKER_PROMOTE_DAYS", "3"))
+    if window_days is None:
+        window_days = int(os.getenv("HEARTBEAT_BLOCKER_WINDOW_DAYS", "7"))
+    if repromote_days is None:
+        repromote_days = int(os.getenv("HEARTBEAT_BLOCKER_REPROMOTE_DAYS", "3"))
+    if max_active is None:
+        max_active = int(os.getenv("HEARTBEAT_BLOCKER_MAX_ACTIVE", "3"))
+    if promote_allowlist is None:
+        promote_allowlist = os.getenv(
+            "HEARTBEAT_BLOCKER_PROMOTE_ALLOWLIST",
+            "google:oauth_invalid_grant,asana:auth_failed,slack:auth_failed",
+        )
+    if isinstance(promote_allowlist, str):
+        allowlist = frozenset(
+            sig.strip() for sig in promote_allowlist.split(",") if sig.strip()
+        )
+    else:
+        allowlist = frozenset(
+            str(sig).strip() for sig in promote_allowlist if str(sig).strip()
+        )
+    return HeartbeatBlockerSettings(
+        promote_days=promote_days,
+        window_days=window_days,
+        repromote_days=repromote_days,
+        max_active=max_active,
+        promote_allowlist=allowlist,
+    )
+
+
+class HeartbeatObservationSettings(NamedTuple):
+    """Effective heartbeat ambient-observation knobs (call-time resolved)."""
+
+    groups: tuple[str, ...]
+    max_per_run: int
+    busy_day_min: int
+    urgent_email_min: int
+    unread_min: int
+    evening_hour: int
+    blocker_min_days: int
+
+
+def get_heartbeat_observation_settings(
+    groups: str | tuple[str, ...] | list[str] | None = None,
+    max_per_run: int | None = None,
+    busy_day_min: int | None = None,
+    urgent_email_min: int | None = None,
+    unread_min: int | None = None,
+    evening_hour: int | None = None,
+    blocker_min_days: int | None = None,
+) -> HeartbeatObservationSettings:
+    """Resolve heartbeat ambient-observation knobs at CALL TIME (Rule 1).
+
+    Every arg uses the None-sentinel pattern: explicit values pass through;
+    ``None`` resolves the matching ``HEARTBEAT_OBSERVATION_*`` env var inside
+    the body. These knobs deliberately do NOT exist as module-level constants.
+
+    ``groups`` accepts a comma-separated string or an iterable of group names
+    and is returned as an order-preserving lowercased tuple (empties dropped).
+    The default is the locked 2026-06-12 operator decision — ALL groups on,
+    including ``blockers``. The env knob is narrowing/kill-switch only: an
+    empty string disables ambient observations entirely.
+
+    The living_memory-side knobs (``HEARTBEAT_OBSERVATION_CAP`` /
+    ``HEARTBEAT_OBSERVATION_DEDUP_DAYS`` / ``HEARTBEAT_OBSERVATION_AGE_DAYS``)
+    are deliberately NOT in this resolver — they body-resolve inside
+    ``living_memory`` (ownership split, no duplicated resolution).
+    """
+    if groups is None:
+        groups = os.getenv(
+            "HEARTBEAT_OBSERVATION_GROUPS",
+            "calendar,email,finance,tasks,community,blockers",
+        )
+    if isinstance(groups, str):
+        parsed_groups = tuple(
+            g.strip().lower() for g in groups.split(",") if g.strip()
+        )
+    else:
+        parsed_groups = tuple(
+            str(g).strip().lower() for g in groups if str(g).strip()
+        )
+    if max_per_run is None:
+        max_per_run = int(os.getenv("HEARTBEAT_OBSERVATION_MAX_PER_RUN", "3"))
+    if busy_day_min is None:
+        busy_day_min = int(os.getenv("HEARTBEAT_OBSERVATION_BUSY_DAY_MIN", "5"))
+    if urgent_email_min is None:
+        urgent_email_min = int(
+            os.getenv("HEARTBEAT_OBSERVATION_URGENT_EMAIL_MIN", "1")
+        )
+    if unread_min is None:
+        unread_min = int(os.getenv("HEARTBEAT_OBSERVATION_UNREAD_MIN", "50"))
+    if evening_hour is None:
+        evening_hour = int(os.getenv("HEARTBEAT_OBSERVATION_EVENING_HOUR", "18"))
+    if blocker_min_days is None:
+        blocker_min_days = int(
+            os.getenv("HEARTBEAT_OBSERVATION_BLOCKER_MIN_DAYS", "2")
+        )
+    return HeartbeatObservationSettings(
+        groups=parsed_groups,
+        max_per_run=max_per_run,
+        busy_day_min=busy_day_min,
+        urgent_email_min=urgent_email_min,
+        unread_min=unread_min,
+        evening_hour=evening_hour,
+        blocker_min_days=blocker_min_days,
+    )
+
+
+class EpisodeSettings(NamedTuple):
+    """Effective episode writer/dream-digest knobs (call-time resolved)."""
+
+    min_chars: int
+    max_per_day: int
+    dream_max_files: int
+    dream_max_chars_per: int
+    dream_max_total_chars: int
+
+
+def get_episode_settings(
+    min_chars: int | None = None,
+    max_per_day: int | None = None,
+    dream_max_files: int | None = None,
+    dream_max_chars_per: int | None = None,
+    dream_max_total_chars: int | None = None,
+) -> EpisodeSettings:
+    """Resolve episode knobs at CALL TIME (Rule 1) — Living Mind Act 3.
+
+    Every arg uses the None-sentinel pattern: explicit values pass through;
+    ``None`` resolves the matching ``EPISODE_*`` env var inside the body.
+    These knobs deliberately do NOT exist as module-level constants — env
+    overrides (and ``monkeypatch.setenv`` in tests) take effect on the next
+    call with no module reload.
+
+    Knobs:
+        EPISODE_MIN_CHARS (80) — minimum parsed-body chars for a NEW episode.
+        EPISODE_MAX_PER_DAY (20) — cap on NEW episode files per lifecycle-date
+            (counted against physical ``episodes/{date}-*.md`` files, Rule 2);
+            same-key updates are exempt.
+        EPISODE_DREAM_MAX_FILES (10) — newest-first cap on episodes fed to
+            the dream consolidate phase.
+        EPISODE_DREAM_MAX_CHARS_PER (600) — per-episode digest excerpt cap.
+        EPISODE_DREAM_MAX_TOTAL_CHARS (4000) — total digest cap.
+    """
+    if min_chars is None:
+        min_chars = int(os.getenv("EPISODE_MIN_CHARS", "80"))
+    if max_per_day is None:
+        max_per_day = int(os.getenv("EPISODE_MAX_PER_DAY", "20"))
+    if dream_max_files is None:
+        dream_max_files = int(os.getenv("EPISODE_DREAM_MAX_FILES", "10"))
+    if dream_max_chars_per is None:
+        dream_max_chars_per = int(os.getenv("EPISODE_DREAM_MAX_CHARS_PER", "600"))
+    if dream_max_total_chars is None:
+        dream_max_total_chars = int(
+            os.getenv("EPISODE_DREAM_MAX_TOTAL_CHARS", "4000")
+        )
+    return EpisodeSettings(
+        min_chars=min_chars,
+        max_per_day=max_per_day,
+        dream_max_files=dream_max_files,
+        dream_max_chars_per=dream_max_chars_per,
+        dream_max_total_chars=dream_max_total_chars,
+    )
+
+
+class InferenceExtractionSettings(NamedTuple):
+    """Effective operator-belief extraction + dedup knobs (call-time resolved)."""
+
+    dedup_threshold: float
+    extraction_enabled: bool
+    max_claims: int
+    min_chars: int
+
+
+def get_inference_extraction_settings(
+    dedup_threshold: float | None = None,
+    extraction_enabled: bool | None = None,
+    max_claims: int | None = None,
+    min_chars: int | None = None,
+) -> InferenceExtractionSettings:
+    """Resolve operator-belief extraction knobs at CALL TIME (Rule 1) — Living Self Act 1.
+
+    Every arg uses the None-sentinel pattern: explicit values pass through;
+    ``None`` resolves the matching ``INFERENCE_*`` env var inside the body.
+    None of these values become import-time globals — env overrides (and
+    ``monkeypatch.setenv`` in tests) take effect on the next call with no
+    module reload. ``_cosine_similar`` and ``extract_operator_beliefs`` read
+    this resolver at call time.
+
+    Knobs:
+        INFERENCE_DEDUP_THRESHOLD (0.72) — cosine threshold above which a fresh
+            belief strengthens an existing record instead of inserting a new one.
+            0.72 sits in the EMPIRICALLY-MEASURED BGE-base-en-v1.5 gap for this
+            corpus's short belief phrasings (measured this session against the
+            live model): paraphrase pairs land 0.759-0.900 (e.g. "prefers concise
+            answers" / "likes short replies" == 0.787; "wants dark mode" /
+            "prefers a dark theme" == 0.900) while distinct-but-topical beliefs
+            land 0.532-0.660 (e.g. "prefers concise answers" / "prefers dark
+            mode" == 0.614). 0.72 is above every observed distinct pair (max
+            0.660) and below every observed paraphrase pair (min 0.759), so it
+            converges real paraphrases without fusing distinct beliefs. (The
+            PRP's pre-build 0.82 estimate assumed a 0.85-0.95 paraphrase band
+            that the real model does NOT produce for these short phrasings — 0.82
+            would have left most paraphrases un-merged. The value stays a Rule-1
+            knob so it is tunable without a code change.) Conservative-by-default:
+            when in doubt, DON'T merge — a missed merge costs one slow
+            convergence; a wrong merge fuses two real beliefs.
+        INFERENCE_EXTRACTION_ENABLED ("true") — kill switch for the reflection
+            operator-belief extractor.
+        INFERENCE_EXTRACTION_MAX_CLAIMS (8) — cap on claims emitted per
+            reflection run.
+        INFERENCE_EXTRACTION_MIN_CHARS (12) — floor on a single claim's length.
+    """
+    if dedup_threshold is None:
+        dedup_threshold = float(os.getenv("INFERENCE_DEDUP_THRESHOLD", "0.72"))
+    if extraction_enabled is None:
+        extraction_enabled = (
+            os.getenv("INFERENCE_EXTRACTION_ENABLED", "true").lower() == "true"
+        )
+    if max_claims is None:
+        max_claims = int(os.getenv("INFERENCE_EXTRACTION_MAX_CLAIMS", "8"))
+    if min_chars is None:
+        min_chars = int(os.getenv("INFERENCE_EXTRACTION_MIN_CHARS", "12"))
+    return InferenceExtractionSettings(
+        dedup_threshold=dedup_threshold,
+        extraction_enabled=extraction_enabled,
+        max_claims=max_claims,
+        min_chars=min_chars,
+    )
+
+
+class ContradictionSettings(NamedTuple):
+    """Effective belief-contradiction knobs (call-time resolved) — Living Self Act 2."""
+
+    enabled: bool
+    pair_min_cosine: float
+    pair_max_cosine: float  # defaults to the dedup threshold when env unset (coupling)
+    max_pairs: int  # cap on pairs sent to the JUDGE
+    max_eligible: int  # cap on eligible records BEFORE the upper-triangle (M3)
+    min_records: int
+    allow_explicit_vs_explicit: bool  # B1 gate; default false
+
+
+def get_contradiction_settings(
+    enabled: bool | None = None,
+    pair_min_cosine: float | None = None,
+    pair_max_cosine: float | None = None,
+    max_pairs: int | None = None,
+    max_eligible: int | None = None,
+    min_records: int | None = None,
+    allow_explicit_vs_explicit: bool | None = None,
+) -> ContradictionSettings:
+    """Resolve belief-contradiction knobs at CALL TIME (Rule 1) — Living Self Act 2.
+
+    Mirrors ``get_inference_extraction_settings``: every arg uses the
+    None-sentinel pattern (explicit values pass through; ``None`` resolves the
+    matching ``CONTRADICTION_*`` env var inside the body), bool knobs via
+    ``.lower() == "true"``. NONE of these become import-time globals — env
+    overrides and ``monkeypatch.setenv`` take effect on the next call with no
+    module reload. ``belief_conflicts`` reads this resolver at call time.
+
+    Knobs:
+        CONTRADICTION_ENABLED ("true") — kill switch for the whole pass.
+        CONTRADICTION_PAIR_MIN_COSINE (0.45) — lower bound; below this two
+            beliefs are unrelated.
+            MEASURED THIS SESSION against the live BGE-base-en-v1.5 model
+            (G3 closure — the opposed-valence band was the one Act-1 value left
+            unmeasured). Opposed-valence belief pairs that SURVIVE Act-1 dedup as
+            two distinct records (cosine < the 0.72 dedup threshold) land
+            0.664-0.691 ("ship lean" / "build enterprise" == 0.664; "want
+            frequent check-ins" / "want to be left alone" == 0.680; "move fast
+            and iterate" / "prefer careful upfront planning" == 0.691).
+            Distinct-but-topical (non-opposed) beliefs land 0.523-0.649 and
+            unrelated beliefs land 0.387-0.452. A 0.45 floor admits every
+            surviving-opposed pair AND the distinct-topical band while excluding
+            unrelated noise — so the LLM judge sees the real candidates and is
+            spared the obviously-unrelated. (The KEY structural finding: opposed
+            pairs with cosine >= 0.72 — "prefers concise" / "wants verbose" ==
+            0.746; "prefers dark mode" / "prefers light mode" == 0.931; "trusts"
+            / "distrusts automated tests" == 0.869 — are MERGED by Act-1 dedup
+            into ONE record on ingest, so they can never reach the judge as two
+            records. The engine's window is therefore exactly "survived dedup" =
+            [pair_min_cosine, dedup_threshold), and 0.45 is below the weakest
+            surviving-opposed pair (0.664).) Stays a Rule-1 knob so it can be
+            lowered without a code change if a real opposed pair ever lands below
+            it.
+        CONTRADICTION_PAIR_MAX_COSINE (= the dedup threshold, 0.72) — upper
+            bound: at/above the dedup threshold the pair was ALREADY merged into
+            one record by Act-1 dedup (measured: every opposed pair >= 0.72 is a
+            single record on ingest), so no two-record conflict can live there.
+            COUPLED to ``get_inference_extraction_settings().dedup_threshold`` by
+            default (resolved INSIDE the body at call time so the band and the
+            merge boundary never drift), but it is its own env-overridable knob.
+        CONTRADICTION_MAX_PAIRS (20) — cap on pairs sent to the JUDGE per
+            reflection.
+        CONTRADICTION_MAX_ELIGIBLE (100) — cap on the eligible set (recency desc,
+            then confidence desc) BEFORE the O(N^2) upper-triangle (M3), so the
+            pair build stays bounded (<=4,950 dot-products/night at the cap) as
+            the corpus grows over months.
+        CONTRADICTION_MIN_RECORDS (2) — floor: <2 eligible records -> nothing to
+            compare.
+        CONTRADICTION_ALLOW_EXPLICIT_VS_EXPLICIT ("false") — B1 gate. Default
+            OFF: an explicit<->explicit conflict is HELD on both (no drop),
+            surfaced for operator resolution; only the operator may flip it on (a
+            deliberate audited choice). DEFAULT never lowers an operator-stated
+            belief.
+    """
+    if enabled is None:
+        enabled = os.getenv("CONTRADICTION_ENABLED", "true").lower() == "true"
+    if pair_min_cosine is None:
+        pair_min_cosine = float(os.getenv("CONTRADICTION_PAIR_MIN_COSINE", "0.45"))
+    if pair_max_cosine is None:
+        env_max = os.getenv("CONTRADICTION_PAIR_MAX_COSINE")
+        if env_max is not None:
+            pair_max_cosine = float(env_max)
+        else:
+            # Coupling (Rule 1 honored): call-time read of the dedup threshold so
+            # the candidate band's upper bound tracks the merge boundary. NOT a
+            # module-level constant.
+            pair_max_cosine = get_inference_extraction_settings().dedup_threshold
+    if max_pairs is None:
+        max_pairs = int(os.getenv("CONTRADICTION_MAX_PAIRS", "20"))
+    if max_eligible is None:
+        max_eligible = int(os.getenv("CONTRADICTION_MAX_ELIGIBLE", "100"))
+    if min_records is None:
+        min_records = int(os.getenv("CONTRADICTION_MIN_RECORDS", "2"))
+    if allow_explicit_vs_explicit is None:
+        allow_explicit_vs_explicit = (
+            os.getenv("CONTRADICTION_ALLOW_EXPLICIT_VS_EXPLICIT", "false").lower()
+            == "true"
+        )
+    return ContradictionSettings(
+        enabled=enabled,
+        pair_min_cosine=pair_min_cosine,
+        pair_max_cosine=pair_max_cosine,
+        max_pairs=max_pairs,
+        max_eligible=max_eligible,
+        min_records=min_records,
+        allow_explicit_vs_explicit=allow_explicit_vs_explicit,
+    )
+
+
+class BeliefEvolveSettings(NamedTuple):
+    """Effective belief-evolve knobs (call-time resolved) — Living Self Act 4."""
+
+    enabled: bool  # kill switch for the whole evolve loop (both subcommands)
+    min_supporting_paths: int  # cited paths that must CONFINE + EXIST + be non-empty
+    min_overlap: float  # deterministic token-overlap floor for support
+    max_bytes: int  # M4 read bound: oversized -> non-supporting; reads capped to this
+    min_correctness: float  # judge correctness floor for adoption
+    min_fidelity: float  # judge evidence-fidelity floor for adoption
+    corpus_path: str | None  # None -> evolve/belief_regression_corpus.json sibling
+
+
+def get_belief_evolve_settings(
+    enabled: bool | None = None,
+    min_supporting_paths: int | None = None,
+    min_overlap: float | None = None,
+    max_bytes: int | None = None,
+    min_correctness: float | None = None,
+    min_fidelity: float | None = None,
+    corpus_path: str | None = None,
+) -> BeliefEvolveSettings:
+    """Resolve belief-evolve knobs at CALL TIME (Rule 1) — Living Self Act 4.
+
+    Mirrors ``get_contradiction_settings`` / ``get_cognitive_pass_settings``:
+    every arg uses the None-sentinel pattern (explicit values pass through;
+    ``None`` resolves the matching ``EVOLVE_*`` / ``BELIEF_*`` env var inside the
+    body), bool knobs via ``.lower() == "true"``, floats via ``float(...)``, ints
+    via ``int(...)``. NONE of these become import-time globals — env overrides and
+    ``monkeypatch.setenv`` take effect on the NEXT call with no module reload.
+    ``evolve_loop`` / ``evidence_gate`` / ``judge`` read this resolver at call time.
+
+    Knobs:
+        EVOLVE_ENABLED ("true") — kill switch for the whole evolve loop. Checked
+            at the ENTRYPOINT of BOTH ``propose`` and ``propose_belief``: disabled
+            -> write NO artifact, mutate NOTHING, exit cleanly with a visible
+            print (mirrors the ``settings.enabled`` early-return in
+            ``judge_contradictions``).
+        BELIEF_EVIDENCE_MIN_SUPPORTING_PATHS (1) — min cited paths that must
+            CONFINE under a trusted root + EXIST + be non-empty for support.
+        BELIEF_EVIDENCE_MIN_OVERLAP (0.10, float) — deterministic token-overlap
+            floor for support (the cheap NECESSARY pre-filter; M2 — measures
+            shared VOCABULARY, NOT genuine support; the LLM judge is the
+            sufficient support-decider, this is the cheapest of three layers).
+        BELIEF_EVIDENCE_MAX_BYTES (524288, int — 512 KiB) — M4 read bound: a
+            cited evidence file larger than this is treated as non-supporting (no
+            read); reads are capped to this many bytes even from an in-range file,
+            and the cap is re-applied to any injected ``read_text`` return (the
+            fake reader bypasses ``stat``). Bounds the arbitrary-file-read / OOM /
+            judge-prompt-injection surface.
+        BELIEF_JUDGE_MIN_CORRECTNESS (0.6, float) — judge correctness floor for
+            adoption (the scheduled LLM judge, never the hot path).
+        BELIEF_JUDGE_MIN_FIDELITY (0.6, float) — judge evidence-fidelity floor
+            for adoption.
+        BELIEF_REGRESSION_CORPUS_PATH (None -> the sibling
+            ``evolve/belief_regression_corpus.json``) — Rule-2 path to the
+            deterministic falsifiable-check corpus (data, extendable without a
+            code change).
+    """
+    if enabled is None:
+        enabled = os.getenv("EVOLVE_ENABLED", "true").lower() == "true"
+    if min_supporting_paths is None:
+        min_supporting_paths = int(
+            os.getenv("BELIEF_EVIDENCE_MIN_SUPPORTING_PATHS", "1")
+        )
+    if min_overlap is None:
+        min_overlap = float(os.getenv("BELIEF_EVIDENCE_MIN_OVERLAP", "0.10"))
+    if max_bytes is None:
+        max_bytes = int(os.getenv("BELIEF_EVIDENCE_MAX_BYTES", "524288"))
+    if min_correctness is None:
+        min_correctness = float(os.getenv("BELIEF_JUDGE_MIN_CORRECTNESS", "0.6"))
+    if min_fidelity is None:
+        min_fidelity = float(os.getenv("BELIEF_JUDGE_MIN_FIDELITY", "0.6"))
+    if corpus_path is None:
+        env_corpus = os.getenv("BELIEF_REGRESSION_CORPUS_PATH")
+        corpus_path = env_corpus if env_corpus else None
+    return BeliefEvolveSettings(
+        enabled=enabled,
+        min_supporting_paths=min_supporting_paths,
+        min_overlap=min_overlap,
+        max_bytes=max_bytes,
+        min_correctness=min_correctness,
+        min_fidelity=min_fidelity,
+        corpus_path=corpus_path,
+    )
+
+
+class CognitivePassSettings(NamedTuple):
+    """Effective cognitive-pass knobs (call-time resolved) — Living Self Act 3."""
+
+    enabled: bool
+    fire_processes: frozenset[str]  # process VALUES that fire the pass (default {"planning"})
+    min_chars: int  # message-length floor below which even a substantive turn stays one call
+    max_actions_per_turn: int  # proactive-action cap per turn
+    timeout_s: float  # hard wall on the monologue round-trip (M2)
+    model: str  # processor model-tier hint for the monologue (F2; default "fast" = haiku)
+
+
+def get_cognitive_pass_settings(
+    enabled: bool | None = None,
+    fire_processes: frozenset[str] | None = None,
+    min_chars: int | None = None,
+    max_actions_per_turn: int | None = None,
+    timeout_s: float | None = None,
+    model: str | None = None,
+) -> CognitivePassSettings:
+    """Resolve gated-cognitive-pass knobs at CALL TIME (Rule 1) — Living Self Act 3.
+
+    Mirrors ``get_contradiction_settings`` / ``get_session_brief_settings``:
+    every arg uses the None-sentinel pattern (explicit values pass through;
+    ``None`` resolves the matching ``COGNITIVE_PASS_*`` env var inside the
+    body), bool knobs via ``.lower() == "true"``. NONE of these become
+    import-time globals — env overrides and ``monkeypatch.setenv`` take effect
+    on the next call with no module reload. ``cognitive_pass`` reads this
+    resolver at call time.
+
+    Knobs:
+        COGNITIVE_PASS_ENABLED ("true") — kill switch for the whole pass.
+        COGNITIVE_PASS_FIRE_PROCESSES ("planning") — comma-separated process
+            VALUES that fire the pass (parsed to a frozenset of lowercased,
+            stripped, non-empty names). DEFAULT is never in it by construction,
+            so the dominant trivial-turn case never fires. Widen to
+            "planning,execution" etc. by env without a code change.
+        COGNITIVE_PASS_MIN_CHARS (40) — message-length floor below which even a
+            substantive-process turn stays one call (a belt against a short
+            message that trips a process signal, e.g. "do it" -> EXECUTION).
+        COGNITIVE_PASS_MAX_ACTIONS_PER_TURN (1) — cap on proactive actions
+            queued per turn (rate-limits the default-deny operator_notification
+            wire alongside the queue's own dedupe).
+        COGNITIVE_PASS_TIMEOUT_S (5.0) — hard wall on the monologue round-trip
+            (M2). The monologue is a real provider call; ``asyncio.wait_for``
+            bounds it so a hung/slow provider times out -> bare turn, never a
+            stalled reply. Tightened from 8.0 -> 5.0 (F6) now that F1+F2 make the
+            monologue a cheap, budgeted haiku call (a ~23K-char append on the
+            fast tier, not a ~90K-char append on the default tier) — a tighter
+            ceiling better honors the cognition-budget intent; operator-tunable.
+        COGNITIVE_PASS_MODEL ("fast") — the processor model-tier hint for the
+            monologue (F2). ``"fast"`` maps to claude-haiku-4-5 via
+            ``runtime_bridge._PROCESSOR_MODEL_HINTS``; a "think before replying"
+            pass is a classic cheap-model job, so the default avoids the
+            expensive reply profile that would ~2x the per-turn input cost.
+            ``"claude"`` (default profile) / ``"quality"`` (sonnet) are the other
+            documented tiers; operator-tunable.
+    """
+    if enabled is None:
+        enabled = os.getenv("COGNITIVE_PASS_ENABLED", "true").lower() == "true"
+    if fire_processes is None:
+        raw = os.getenv("COGNITIVE_PASS_FIRE_PROCESSES", "planning")
+        fire_processes = frozenset(
+            part.strip().lower()
+            for part in raw.split(",")
+            if part.strip()
+        )
+    if min_chars is None:
+        min_chars = int(os.getenv("COGNITIVE_PASS_MIN_CHARS", "40"))
+    if max_actions_per_turn is None:
+        max_actions_per_turn = int(os.getenv("COGNITIVE_PASS_MAX_ACTIONS_PER_TURN", "1"))
+    if timeout_s is None:
+        timeout_s = float(os.getenv("COGNITIVE_PASS_TIMEOUT_S", "5.0"))
+    if model is None:
+        model = os.getenv("COGNITIVE_PASS_MODEL", "fast").strip() or "fast"
+    return CognitivePassSettings(
+        enabled=enabled,
+        fire_processes=fire_processes,
+        min_chars=min_chars,
+        max_actions_per_turn=max_actions_per_turn,
+        timeout_s=timeout_s,
+        model=model,
+    )
+
+
+class SessionBriefSettings(NamedTuple):
+    """Effective session-opening-brief knobs (call-time resolved)."""
+
+    enabled: bool
+    away_hours: float
+    min_fresh_items: int
+    max_per_section: int
+    max_chars: int
+
+
+def get_session_brief_settings(
+    enabled: bool | None = None,
+    away_hours: float | None = None,
+    min_fresh_items: int | None = None,
+    max_per_section: int | None = None,
+    max_chars: int | None = None,
+) -> SessionBriefSettings:
+    """Resolve session-opening-brief knobs at CALL TIME (Rule 1) — Living Mind Act 4.
+
+    Every arg uses the None-sentinel pattern: explicit values pass through;
+    ``None`` resolves the matching ``SESSION_BRIEF_*`` env var inside the
+    body. None of these values become import-time globals — env overrides
+    (and ``monkeypatch.setenv`` in tests) take effect on the next call with
+    no module reload.
+
+    Knobs:
+        SESSION_BRIEF_ENABLED ("true") — kill switch for the brief.
+        SESSION_BRIEF_AWAY_HOURS ("8") — away-gate threshold in hours,
+            INCLUSIVE boundary (exactly the threshold fires).
+        SESSION_BRIEF_MIN_FRESH_ITEMS ("1") — boredom threshold; fewer fresh
+            change-source items than this -> total silence, no brief.
+        SESSION_BRIEF_MAX_PER_SECTION ("5") — per-source item cap
+            (observations, episodes, threads, amendments each).
+        SESSION_BRIEF_MAX_CHARS ("2400") — total block cap with priority
+            semantics (instruction reserved; one item per fired fresh source
+            reserved; context-only threads dropped first).
+    """
+    if enabled is None:
+        enabled = os.getenv("SESSION_BRIEF_ENABLED", "true").lower() == "true"
+    if away_hours is None:
+        away_hours = float(os.getenv("SESSION_BRIEF_AWAY_HOURS", "8"))
+    if min_fresh_items is None:
+        min_fresh_items = int(os.getenv("SESSION_BRIEF_MIN_FRESH_ITEMS", "1"))
+    if max_per_section is None:
+        max_per_section = int(os.getenv("SESSION_BRIEF_MAX_PER_SECTION", "5"))
+    if max_chars is None:
+        max_chars = int(os.getenv("SESSION_BRIEF_MAX_CHARS", "2400"))
+    return SessionBriefSettings(
+        enabled=enabled,
+        away_hours=away_hours,
+        min_fresh_items=min_fresh_items,
+        max_per_section=max_per_section,
+        max_chars=max_chars,
+    )
 
 
 def ensure_directories() -> None:

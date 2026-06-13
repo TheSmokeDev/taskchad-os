@@ -291,14 +291,26 @@ async def handle_clear(adapter: Any, incoming: Any, args: str, *, collect_only: 
     if existing:
         from session_lifecycle_hooks import clear_session_with_lifecycle
 
+        engine = _ctx.get("engine")
+        # Living Mind Act 4 (R1 B4): /clear skips _persist_router_turn but its
+        # interactive clear event counts as presence and closes the away gap —
+        # capture the brief-owed marker FIRST. Defensive getattr keeps fake
+        # engines green; the engine method is whole-body fail-open.
+        note_router_activity = getattr(engine, "note_router_activity", None)
+        if callable(note_router_activity):
+            note_router_activity(incoming)
+
         result = clear_session_with_lifecycle(
             store=store,
             session=existing,
             platform=platform_str,
             channel_id=channel_id,
             thread_id=thread_id,
-            engine=_ctx.get("engine"),
+            engine=engine,
             source="clear",
+            # The EVENT label above stays "clear"; trigger identity is a
+            # different fact (R1 B1).
+            trigger_source=getattr(incoming, "source", "interactive"),
         )
         warning = result.warning_summary()
         if warning:
@@ -2269,8 +2281,14 @@ async def handle_working(adapter: Any, incoming: Any, args: str, *, collect_only
     _render("Open Threads", data.open_threads)
     _render("Active Hypotheses", data.active_hypotheses)
     _render("Unresolved Questions", data.unresolved_questions)
+    _render("Heartbeat Observations", data.heartbeat_observations)
 
-    if not (data.open_threads or data.active_hypotheses or data.unresolved_questions):
+    if not (
+        data.open_threads
+        or data.active_hypotheses
+        or data.unresolved_questions
+        or data.heartbeat_observations
+    ):
         lines.append("\n(all sections empty — nothing tracked yet)")
 
     arch_count = len(data.archived)
@@ -2777,8 +2795,29 @@ def _import_video_pipeline() -> Any:
 
 
 def _parse_video_flags(tokens: list[str]) -> tuple[str, dict[str, Any]]:
-    """Split ``/video`` args into (brief, options). Unknown flags stay in the brief."""
-    opts: dict[str, Any] = {"style": None, "design_file": None, "aspect": "16:9", "duration": 30}
+    """Split ``/video`` args into (brief, options). Unknown flags stay in the brief.
+
+    Every option is a None sentinel unless its flag is given: an explicit
+    value here overrides intent the pipeline extracts from the brief itself
+    ("two minute vertical video" must win over a handler default).
+
+    V3 wizard flags: ``--kind`` (validated against _VIDEO_KINDS),
+    ``--url`` (research source), ``--research on|off``, ``--voice``
+    (a curated voice key resolves via _VIDEO_VOICES; anything else is
+    treated as a raw 'ShortName|+N%' spec), ``--imagery stylized|photos|css``.
+    """
+    opts: dict[str, Any] = {
+        "style": None,
+        "design_file": None,
+        "aspect": None,
+        "duration": None,
+        "kind": None,
+        "url": None,
+        "research": None,
+        "voice": None,
+        "voice_key": None,
+        "imagery": None,
+    }
     brief_parts: list[str] = []
     i = 0
     while i < len(tokens):
@@ -2799,10 +2838,53 @@ def _parse_video_flags(tokens: list[str]) -> tuple[str, dict[str, Any]]:
             except ValueError:
                 pass
             i += 2
+        elif low == "--kind" and i + 1 < len(tokens):
+            value = tokens[i + 1].lower()
+            if value in {k for k, _, _ in _VIDEO_KINDS}:
+                opts["kind"] = value
+            i += 2
+        elif low == "--url" and i + 1 < len(tokens):
+            opts["url"] = tokens[i + 1]
+            i += 2
+        elif low == "--research" and i + 1 < len(tokens):
+            value = tokens[i + 1].lower()
+            if value in ("on", "off"):
+                opts["research"] = value == "on"
+            i += 2
+        elif low == "--voice" and i + 1 < len(tokens):
+            raw = tokens[i + 1]
+            spec = _video_voice_for_key(raw.lower())
+            if spec:
+                opts["voice"], opts["voice_key"] = spec, raw.lower()
+            else:
+                opts["voice"], opts["voice_key"] = raw, raw.split("|", 1)[0]
+            i += 2
+        elif low == "--imagery" and i + 1 < len(tokens):
+            value = tokens[i + 1].lower()
+            if value in ("stylized", "photos", "css"):
+                opts["imagery"] = value
+            i += 2
         else:
             brief_parts.append(tok)
             i += 1
     return " ".join(brief_parts).strip(), opts
+
+
+def _video_render_kwargs(opts: dict[str, Any]) -> dict[str, Any]:
+    """Optional render_brief kwargs from parsed/bound opts (None-sentinel
+    passthrough; absent keys keep the pipeline's own resolution order)."""
+    kwargs: dict[str, Any] = {}
+    for opt_key, kw in (
+        ("voice", "voice"),
+        ("research_dossier", "research_dossier"),
+        ("vision", "vision"),
+        ("imagery", "imagery"),
+        ("research_query", "research"),
+        ("art_max", "art_max"),
+    ):
+        if opts.get(opt_key) is not None:
+            kwargs[kw] = opts[opt_key]
+    return kwargs
 
 
 async def _run_video_render(
@@ -2816,13 +2898,16 @@ async def _run_video_render(
     from models import Attachment, OutgoingMessage
 
     try:
+        kwargs = _video_render_kwargs(opts)
         result = await asyncio.to_thread(
-            pipeline.render_brief,
-            brief,
-            style=opts.get("style"),
-            design_file=opts.get("design_file"),
-            aspect=opts.get("aspect", "16:9"),
-            duration_target_s=opts.get("duration", 30),
+            lambda: pipeline.render_brief(
+                brief,
+                style=opts.get("style"),
+                design_file=opts.get("design_file"),
+                aspect=opts.get("aspect"),
+                duration_target_s=opts.get("duration"),
+                **kwargs,
+            )
         )
     except Exception as exc:  # defensive: render_brief should return ok=False instead
         result = {"ok": False, "error": str(exc), "mp4_path": "", "output_dir": ""}
@@ -2876,13 +2961,27 @@ async def _run_video_render(
         print(f"[video] delivery failed: {exc}")
 
 
-async def handle_video(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
-    """/video — generate a branded video from a brief, any adapter, any model lane.
+_VIDEO_USAGE = (
+    "Usage: /video <brief> [--style name] [--aspect 16:9|9:16|1:1] [--duration s]\n"
+    "       /video --kind promo --url https://yoursite.example   (flagged wizard, text vision)\n"
+    "       /video styles | /video status | bare /video for the guided wizard\n"
+    "       /video approve | /video redo [notes] | /video cancel"
+)
+
+
+async def handle_video(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str | None:
+    """/video — generate a branded video: guided wizard with a vision approval
+    gate, or a one-shot power path. Any adapter, any model lane.
 
     Subcommands:
+      /video                             guided wizard (kind > input > style > voice > vision)
       /video styles                      list the style library
-      /video status                      show whether a render is running
-      /video <brief> [--style name] [--aspect 16:9|9:16|1:1] [--design file] [--duration s]
+      /video status                      render state + wizard stage
+      /video approve|redo [notes]|cancel drive a pending vision
+      /video <brief> [--style name] [--aspect 16:9|9:16|1:1] [--design file]
+             [--duration s] [--voice key] [--url u] [--research on|off]
+             [--imagery stylized|photos|css]   (power path: no wizard, no gate)
+      /video --kind k [--url u] ...      flagged wizard: text vision + /video approve
     """
     tokens = args.split() if args else []
     sub = tokens[0].lower() if tokens else ""
@@ -2891,6 +2990,16 @@ async def handle_video(adapter: Any, incoming: Any, args: str, *, collect_only: 
         pipeline = _import_video_pipeline()
     except Exception as exc:
         return f"Video pipeline unavailable: {exc}"
+
+    key = _video_channel_key(incoming)
+
+    if not tokens:
+        if collect_only:
+            # Prefetch surfaces can't host a wizard; describe the command instead.
+            return _VIDEO_USAGE
+        restarted = _video_wizard_get(key) is not None
+        await _send_video_kind_keyboard(adapter, incoming, restarted=restarted)
+        return None
 
     if sub == "styles":
         try:
@@ -2905,19 +3014,86 @@ async def handle_video(adapter: Any, incoming: Any, args: str, *, collect_only: 
         return "\n".join(lines)
 
     if sub == "status":
+        lines = []
         if _VIDEO_RENDER_STATE["running"]:
-            return (
+            lines.append(
                 f"Render running since {_VIDEO_RENDER_STATE['started']}\n"
                 f"  brief: {_VIDEO_RENDER_STATE['brief']}"
             )
-        return "No render running. /video <brief> to start one."
+        else:
+            lines.append("No render running. /video <brief> to start one.")
+        pending = _video_wizard_get(key)
+        if pending:
+            stage = pending.get("stage") or "?"
+            kind = pending.get("kind")
+            lines.append(f"Wizard: stage {stage}" + (f", kind {kind}" if kind else ""))
+        return "\n".join(lines)
+
+    if sub == "cancel" and len(tokens) == 1:
+        if _VIDEO_PENDING.pop(key, None) is not None:
+            return _VIDEO_CANCEL_TEXT
+        return "Nothing to cancel. /video to start a video."
+
+    if sub == "approve" and len(tokens) == 1:
+        pending = _video_wizard_get(key)
+        if not pending or not pending.get("vision"):
+            return "Nothing awaiting approval. /video to start a video."
+        return await _video_approve(adapter, incoming, pending, collect_only=collect_only)
+
+    if sub == "redo":
+        pending = _video_wizard_get(key)
+        if pending and pending.get("vision"):
+            feedback = " ".join(tokens[1:]).strip()
+            return await _advance_to_vision(
+                adapter,
+                incoming,
+                feedback=feedback,
+                prior=pending.get("vision"),
+                as_text=pending.get("text_mode", False),
+            )
+        if len(tokens) == 1:
+            return "Nothing to redo. /video to start a video."
+        # "/video redo ..." with no pending vision falls through as a brief.
 
     brief, opts = _parse_video_flags(tokens)
+
     if not brief:
-        return (
-            "Usage: /video <brief> [--style name] [--aspect 16:9|9:16|1:1] [--duration s]\n"
-            "       /video styles | /video status"
-        )
+        if opts.get("kind") or opts.get("url"):
+            if collect_only:
+                return _VIDEO_USAGE
+            return await _run_flagged_wizard(adapter, incoming, pipeline, opts)
+        return _VIDEO_USAGE
+
+    # POWER PATH: an explicit brief bypasses the wizard and the vision gate.
+    _VIDEO_PENDING.pop(key, None)
+    if opts.get("url") and opts.get("research") is not False:
+        opts["research_query"] = opts["url"]
+    return await _kickoff_video_render(adapter, incoming, pipeline, brief, opts, collect_only=collect_only)
+
+
+async def _kickoff_video_render(
+    adapter: Any,
+    incoming: Any,
+    pipeline: Any,
+    brief: str,
+    opts: dict[str, Any],
+    *,
+    collect_only: bool = False,
+) -> str:
+    """Shared render kickoff: dep preflight, concurrency guard, inline-vs-background."""
+    # "auto" style (the guided flow's surprise-me) resolves against the BRIEF
+    # (and the research dossier when one rode along), so the pick matches the
+    # idea instead of being random.
+    if (opts.get("style") or "").lower() == "auto":
+        try:
+            import video_styles  # type: ignore[import-not-found]
+
+            if hasattr(video_styles, "suggest_style"):
+                opts["style"] = video_styles.suggest_style(brief, opts.get("research_dossier"))
+            else:
+                opts["style"] = None
+        except Exception:
+            opts["style"] = None
 
     missing = pipeline.check_dependencies()
     if missing:
@@ -2943,13 +3119,16 @@ async def handle_video(adapter: Any, incoming: Any, args: str, *, collect_only: 
         # One-shot surfaces (CLI quiet mode, brief prefetch) cannot outlive the
         # turn, so render inline instead of backgrounding.
         try:
+            kwargs = _video_render_kwargs(opts)
             result = await asyncio.to_thread(
-                pipeline.render_brief,
-                brief,
-                style=opts.get("style"),
-                design_file=opts.get("design_file"),
-                aspect=opts.get("aspect", "16:9"),
-                duration_target_s=opts.get("duration", 30),
+                lambda: pipeline.render_brief(
+                    brief,
+                    style=opts.get("style"),
+                    design_file=opts.get("design_file"),
+                    aspect=opts.get("aspect", "16:9"),
+                    duration_target_s=opts.get("duration", 30),
+                    **kwargs,
+                )
             )
         finally:
             _VIDEO_RENDER_STATE.update({"running": False, "started": "", "brief": ""})
@@ -2964,12 +3143,839 @@ async def handle_video(adapter: Any, incoming: Any, args: str, *, collect_only: 
 
     asyncio.create_task(_run_video_render(adapter, incoming, pipeline, brief, opts))
     style_note = opts.get("style") or "auto (use /video styles to pick)"
+    aspect_note = opts.get("aspect") or "from brief"
+    duration_note = f"~{opts.get('duration')}s" if opts.get("duration") else "from brief"
     return (
         "Rendering your video now. This usually takes a few minutes; "
         "I'll send the MP4 here when it's done.\n"
         f"  brief: {brief[:160]}\n"
-        f"  style: {style_note}  aspect: {opts.get('aspect')}  target: ~{opts.get('duration')}s"
+        f"  style: {style_note}  aspect: {aspect_note}  target: {duration_note}"
     )
+
+
+# Guided /video wizard (V3): bare /video -> kind -> raw material (URL/theme/
+# brief, with optional site research) -> ranked style -> voice -> a VISION
+# card the operator approves BEFORE anything renders. State is per-channel
+# with a TTL refreshed on every transition; every step carries a numbered
+# typed fallback so buttonless adapters degrade to plain text. Pickers are
+# MATCH-ONLY: a non-matching reply falls through to normal chat.
+
+_VIDEO_PENDING: dict[str, dict[str, Any]] = {}
+_VIDEO_PENDING_TTL_S = 600
+
+_VIDEO_STAGES = (
+    "await_kind",
+    "await_input",
+    "researching",
+    "await_style",
+    "await_voice",
+    "await_vision",
+)
+
+# (key, label, default duration seconds) - the kind picker, in display order.
+_VIDEO_KINDS: list[tuple[str, str, int]] = [
+    ("event", "event recap", 30),
+    ("promo", "brand promo", 30),
+    ("launch", "product launch", 30),
+    ("explainer", "explainer", 45),
+    ("hype", "hype reel", 20),
+    ("surprise", "surprise me", 30),
+]
+
+_VIDEO_EXPIRED_TEXT = "That video setup expired (10 min). /video to start fresh."
+_VIDEO_CANCEL_TEXT = "Scrapped. /video when you want back in."
+
+_VIDEO_IMAGERY_LABELS = {
+    "stylized": "stylized identity-locked art",
+    "photos": "real photos from the site",
+    "css": "pure CSS scenes",
+}
+
+
+def _video_channel_key(incoming: Any) -> str:
+    ch = getattr(incoming, "channel", None)
+    platform = str(getattr(ch, "platform", "") or getattr(incoming, "platform", ""))
+    pid = str(getattr(ch, "platform_id", "") or "")
+    return f"{platform}:{pid}"
+
+
+def _video_wizard_get(key: str) -> dict[str, Any] | None:
+    """Live pending wizard state, or None (expired/legacy entries are popped)."""
+    pending = _VIDEO_PENDING.get(key)
+    if not pending:
+        return None
+    if pending.get("v") != 2 or time.time() > pending.get("expires", 0):
+        _VIDEO_PENDING.pop(key, None)
+        return None
+    return pending
+
+
+def _video_wizard_set(key: str, **updates: Any) -> dict[str, Any]:
+    """Create-or-update the pending wizard state; every call refreshes the TTL."""
+    pending = _VIDEO_PENDING.get(key)
+    if not pending or pending.get("v") != 2:
+        pending = {
+            "v": 2,
+            "stage": "await_kind",
+            "kind": None,
+            "input": "",
+            "url": None,
+            "dossier_path": None,
+            "dossier": None,
+            "style": None,
+            "voice": None,
+            "voice_key": None,
+            "aspect": None,
+            "duration": None,
+            "imagery": None,
+            "vision": None,
+            "text_mode": False,
+            "expires": 0.0,
+        }
+        _VIDEO_PENDING[key] = pending
+    pending.update(updates)
+    pending["expires"] = time.time() + _VIDEO_PENDING_TTL_S
+    return pending
+
+
+def _extract_url(text: str) -> str | None:
+    """First http(s) URL in the text, trailing punctuation stripped."""
+    import re
+
+    match = re.search(r"https?://\S+", text or "")
+    if not match:
+        return None
+    return match.group(0).rstrip(".,;:!?)>]}\"'")
+
+
+def _url_host(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(url).netloc or url
+    except Exception:
+        return url
+
+
+def _video_kind_label(kind: str | None) -> str:
+    return next((label for k, label, _ in _VIDEO_KINDS if k == kind), "video")
+
+
+def _video_effective_brief(pending: dict[str, Any]) -> str:
+    """The render/vision brief: typed input > dossier title > URL > kind."""
+    text = (pending.get("input") or "").strip()
+    if text:
+        return text
+    dossier = pending.get("dossier")
+    if isinstance(dossier, dict):
+        title = str(dossier.get("title") or "").strip()
+        if title:
+            return f"a video about {title}"
+    if pending.get("url"):
+        return f"a video about {pending['url']}"
+    kind_label = _video_kind_label(pending.get("kind"))
+    return f"a short {kind_label if kind_label != 'video' else 'brand'} video"
+
+
+# Curated voice menu for the guided flow (label, key, "ShortName|rate").
+# All free edge-tts neural voices; andrew-fast is the default and the
+# operator's bake-off winner.
+_VIDEO_VOICES: list[tuple[str, str, str]] = [
+    ("andrew (fast, natural)", "andrew", "en-US-AndrewMultilingualNeural|+14%"),
+    ("brian (deep narrator)", "brian", "en-US-BrianMultilingualNeural|-4%"),
+    ("ryan (british announcer)", "ryan", "en-GB-RyanNeural|-8%"),
+    ("roger (upbeat)", "roger", "en-US-RogerNeural|+12%"),
+    ("ava (female, natural)", "ava", "en-US-AvaMultilingualNeural|+6%"),
+    ("ana (cartoon)", "ana", "en-US-AnaNeural|+18%"),
+]
+
+
+def _video_voice_for_key(key: str) -> str | None:
+    for _, k, spec in _VIDEO_VOICES:
+        if k == key:
+            return spec
+    return None
+
+
+def _import_video_research() -> Any:
+    """Import the scripts-dir video_research module (mirrors _import_x_scout).
+
+    The research stage is optional: a checkout without ``video_research``
+    keeps the wizard alive in theme-only mode.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    scripts_dir = str(_Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import video_research  # type: ignore[import-not-found]
+
+    return video_research
+
+
+async def _video_send(adapter: Any, incoming: Any, text: str, components: list | None = None) -> None:
+    """One wizard message on the incoming channel. Never raises."""
+    from models import OutgoingMessage
+
+    try:
+        await adapter.send(
+            OutgoingMessage(
+                text=text,
+                channel=incoming.channel,
+                thread=incoming.thread,
+                components=components or [],
+            )
+        )
+    except Exception as exc:
+        print(f"[video] wizard send failed: {exc}")
+
+
+async def _send_video_kind_keyboard(adapter: Any, incoming: Any, *, restarted: bool = False) -> None:
+    """STEP 1: what kind of video? Buttons + numbered typed fallback."""
+    from models import MessageComponent
+
+    key = _video_channel_key(incoming)
+    _VIDEO_PENDING.pop(key, None)
+    _video_wizard_set(key, stage="await_kind")
+    components = [
+        MessageComponent(
+            label=label,
+            custom_id=f"video_kind:{kind}",
+            style="secondary" if kind == "surprise" else "primary",
+        )
+        for kind, label, _ in _VIDEO_KINDS
+    ]
+    text = (
+        "Let's make a video. What kind?\n"
+        "  1 event recap  2 brand promo  3 product launch\n"
+        "  4 explainer  5 hype reel  6 surprise me\n"
+        "(reply with a number, or skip everything: /video <brief> --style <name>)"
+    )
+    if restarted:
+        text = "Restarting the video setup.\n" + text
+    await _video_send(adapter, incoming, text, components)
+
+
+async def _send_video_input_prompt(adapter: Any, incoming: Any, pending: dict[str, Any]) -> None:
+    """STEP 2: the raw material. Plain-text reply; flags ride along."""
+    kind_label = _video_kind_label(pending.get("kind"))
+    await _video_send(
+        adapter,
+        incoming,
+        (
+            f"{kind_label} it is. Now the raw material - drop a URL to build from, "
+            "a theme, or a full brief. Flags ride along: --aspect 9:16 --duration 20."
+        ),
+    )
+
+
+def _video_style_options(pending: dict[str, Any]) -> list[tuple[str, str]]:
+    """Ranked (label, value) style options for STEP 3. Never raises.
+
+    Order: "your brand (from the site)" first (only when the dossier derived
+    a usable design), then the ranked registry styles with the top pick
+    tagged recommended, then "surprise me" (auto) last.
+    """
+    options: list[tuple[str, str]] = []
+    dossier = pending.get("dossier")
+    if (
+        isinstance(dossier, dict)
+        and dossier.get("ok")
+        and isinstance(dossier.get("derived_design"), dict)
+    ):
+        options.append(("your brand (from the site)", "derived"))
+    ranked: list[str] = []
+    try:
+        _import_video_pipeline()  # puts the scripts dir on sys.path
+        import video_styles  # type: ignore[import-not-found]
+
+        basis = _video_effective_brief(pending)
+        ranked = list(
+            video_styles.suggest_styles_ranked(
+                basis, dossier if isinstance(dossier, dict) else None,
+                kind=pending.get("kind") or "",
+            )
+        )
+    except Exception:
+        ranked = []
+    for i, name in enumerate(ranked):
+        label = f"* {name} (recommended)" if i == 0 else name
+        options.append((label, name))
+    options.append(("surprise me", "auto"))
+    return options
+
+
+async def _send_video_style_keyboard(adapter: Any, incoming: Any, *, intro: str = "") -> None:
+    """STEP 3: ranked style picker (derived-first), numbered typed fallback."""
+    from models import MessageComponent
+
+    key = _video_channel_key(incoming)
+    pending = _video_wizard_set(key, stage="await_style")
+    options = _video_style_options(pending)
+    components = []
+    for label, value in options:
+        if value == "derived":
+            bstyle = "success"
+        elif value == "auto":
+            bstyle = "secondary"
+        else:
+            bstyle = "primary"
+        components.append(
+            MessageComponent(label=label[:80], custom_id=f"video_style:{value}", style=bstyle)
+        )
+    numbered = "\n".join(f"  {i}. {label}" for i, (label, _v) in enumerate(options, 1))
+    text = "Here's how I'd style it:\n" + numbered + "\n(reply with a number or a name)"
+    if intro:
+        text = intro + "\n" + text
+    await _video_send(adapter, incoming, text, components)
+
+
+async def _send_video_voice_keyboard(adapter: Any, incoming: Any, pending: dict[str, Any]) -> None:
+    """STEP 4: narration voice picker, numbered typed fallback."""
+    from models import MessageComponent
+
+    key = _video_channel_key(incoming)
+    _video_wizard_set(key, stage="await_voice")
+    style = pending.get("style")
+    if style == "derived":
+        style_note = "your brand (from the site)"
+    elif style == "auto" or not style:
+        style_note = "matched to your idea"
+    else:
+        style_note = str(style)
+    components = [
+        MessageComponent(label=label, custom_id=f"video_voice:{voice_key}")
+        for label, voice_key, _ in _VIDEO_VOICES
+    ]
+    numbered = "\n".join(
+        f"  {i}. {label}" for i, (label, _k, _s) in enumerate(_VIDEO_VOICES, 1)
+    )
+    await _video_send(
+        adapter,
+        incoming,
+        (
+            f"Style locked: {style_note}. Pick the narration voice:\n"
+            f"{numbered}\n(reply with a number or a name)"
+        ),
+        components,
+    )
+
+
+def _format_vision_card(pending: dict[str, Any]) -> str:
+    """The STEP 5 vision card (exact card format; text-first by design)."""
+    vision = pending.get("vision") or {}
+    lines = ["THE VISION", str(vision.get("angle") or "")]
+    lines.append("")
+    lines.append("beats:")
+    for i, beat in enumerate(vision.get("beats") or [], 1):
+        kind = str((beat or {}).get("kind") or "caption")
+        summary = str((beat or {}).get("summary") or "")
+        lines.append(f"  {i}. [{kind}] {summary}")
+    imagery = vision.get("imagery") or {}
+    treatment = str(imagery.get("treatment") or "stylized")
+    imagery_label = _VIDEO_IMAGERY_LABELS.get(treatment, treatment)
+    note = str(imagery.get("note") or "").strip()
+    lines.append(f"imagery: {imagery_label}" + (f" - {note}" if note else ""))
+    style = pending.get("style")
+    look = "your brand (from the site)" if style == "derived" else (style or "auto")
+    voice_key = pending.get("voice_key") or "andrew"
+    duration = int(vision.get("duration_s") or 0)
+    aspect = str(vision.get("aspect") or "")
+    lines.append(f"look: {look}   voice: {voice_key}   ~{duration}s   {aspect}")
+    lines.append("")
+    lines.append("Reply with notes to redo it your way.")
+    return "\n".join(lines)
+
+
+async def _send_video_vision_card(adapter: Any, incoming: Any, pending: dict[str, Any]) -> None:
+    """STEP 5: the vision card + the approval gate buttons."""
+    from models import MessageComponent
+
+    components = [
+        MessageComponent(label="Approve & render", custom_id="video_vision:approve", style="success"),
+        MessageComponent(label="Change style", custom_id="video_vision:style", style="secondary"),
+        MessageComponent(label="Redo vision", custom_id="video_vision:redo", style="secondary"),
+        MessageComponent(label="Cancel", custom_id="video_vision:cancel", style="danger"),
+    ]
+    await _video_send(adapter, incoming, _format_vision_card(pending), components)
+
+
+async def _run_video_research(adapter: Any, incoming: Any, url: str) -> None:
+    """Wizard research step: build the dossier off-loop, then the style step.
+
+    Failure never stalls the wizard: an unreadable site (or a checkout
+    without video_research at all) drops to theme-only with a notice.
+    """
+    key = _video_channel_key(incoming)
+    _video_wizard_set(key, stage="researching", url=url)
+    try:
+        await adapter.send_typing(incoming.channel)
+    except Exception:
+        pass
+    await _video_send(adapter, incoming, "Reading the site... a few seconds.")
+
+    dossier: dict[str, Any] | None = None
+    failure = ""
+    research_mod = None
+    try:
+        research_mod = _import_video_research()
+    except Exception:
+        failure = "site research isn't wired yet - going theme-only."
+    if research_mod is not None:
+        try:
+            dossier = await asyncio.to_thread(research_mod.build_dossier, url)
+        except Exception as exc:
+            failure = (
+                f"Couldn't read {_url_host(url)} ({type(exc).__name__}). "
+                "Going theme-only - your words carry it."
+            )
+            dossier = None
+        if dossier is not None and not dossier.get("ok"):
+            notes = [str(n) for n in (dossier.get("notes") or []) if str(n).strip()]
+            reason = (notes[0][:80] if notes else "no readable content")
+            failure = (
+                f"Couldn't read {_url_host(url)} ({reason}). "
+                "Going theme-only - your words carry it."
+            )
+            dossier = None
+
+    _video_wizard_set(key, dossier=dossier)
+    if failure:
+        await _video_send(adapter, incoming, failure)
+    await _send_video_style_keyboard(adapter, incoming)
+
+
+def _apply_imagery_override(vision: dict[str, Any], pending: dict[str, Any]) -> None:
+    """An explicit --imagery flag overrides the vision's proposed treatment.
+
+    "photos" is only honored when the dossier carries images or a cached
+    fetched page (mirrors the pipeline's own coercion rule).
+    """
+    forced = str(pending.get("imagery") or "").strip().lower()
+    if forced not in ("stylized", "photos", "css"):
+        return
+    if forced == "photos":
+        dossier = pending.get("dossier")
+        has_visuals = isinstance(dossier, dict) and bool(
+            dossier.get("images") or (dossier.get("html_text") and dossier.get("url"))
+        )
+        if not has_visuals:
+            return
+    if not isinstance(vision.get("imagery"), dict):
+        vision["imagery"] = {}
+    vision["imagery"]["treatment"] = forced
+    vision["imagery"]["note"] = "operator override"
+
+
+async def _advance_to_vision(
+    adapter: Any,
+    incoming: Any,
+    *,
+    feedback: str = "",
+    prior: dict[str, Any] | None = None,
+    as_text: bool = False,
+) -> str | None:
+    """Draft (or redraft) the vision off-loop, then present the gate.
+
+    Returns the card as text when ``as_text`` (the flagged-wizard/CLI path);
+    otherwise sends the card with buttons and returns None.
+    """
+    key = _video_channel_key(incoming)
+    pending = _video_wizard_get(key)
+    if pending is None:
+        await _video_send(adapter, incoming, _VIDEO_EXPIRED_TEXT)
+        return None
+    try:
+        pipeline = _import_video_pipeline()
+    except Exception as exc:
+        message = f"Video pipeline unavailable: {exc}"
+        if as_text:
+            return message
+        await _video_send(adapter, incoming, message)
+        return None
+
+    try:
+        await adapter.send_typing(incoming.channel)
+    except Exception:
+        pass
+    if not as_text:
+        await _video_send(adapter, incoming, "Drafting the vision...")
+
+    # Late "surprise me" resolution: with brief + dossier + kind in hand the
+    # pick can actually match the idea, and the card shows a real name.
+    if (pending.get("style") or "").lower() == "auto":
+        try:
+            import video_styles  # type: ignore[import-not-found]
+
+            ranked = video_styles.suggest_styles_ranked(
+                _video_effective_brief(pending),
+                pending.get("dossier"),
+                kind=pending.get("kind") or "",
+            )
+            if ranked:
+                pending = _video_wizard_set(key, style=ranked[0])
+        except Exception:
+            pass
+
+    brief = _video_effective_brief(pending)
+    vision = await asyncio.to_thread(
+        pipeline.generate_vision,
+        brief,
+        kind=pending.get("kind"),
+        dossier=pending.get("dossier"),
+        style=pending.get("style"),
+        voice_label=pending.get("voice_key"),
+        duration_s=pending.get("duration"),
+        aspect=pending.get("aspect"),
+        feedback=feedback,
+        prior_vision=prior,
+    )
+    _apply_imagery_override(vision, pending)
+    pending = _video_wizard_set(key, vision=vision, stage="await_vision")
+    if as_text:
+        return (
+            _format_vision_card(pending)
+            + "\n\n-> /video approve | /video redo [notes] | /video cancel"
+        )
+    await _send_video_vision_card(adapter, incoming, pending)
+    return None
+
+
+async def _video_approve(
+    adapter: Any,
+    incoming: Any,
+    pending: dict[str, Any],
+    *,
+    collect_only: bool = False,
+) -> str:
+    """Bind the approved vision into render opts and kick off.
+
+    The pending wizard is popped ONLY after the guards pass (render already
+    running / missing dependencies keep it, so approve can be retried).
+    """
+    key = _video_channel_key(incoming)
+    vision = pending.get("vision")
+    if not isinstance(vision, dict):
+        return "Nothing awaiting approval. /video to start a video."
+    try:
+        pipeline = _import_video_pipeline()
+    except Exception as exc:
+        return f"Video pipeline unavailable: {exc}"
+    if _VIDEO_RENDER_STATE["running"]:
+        return (
+            "A render is already running (one at a time).\n"
+            f"  started: {_VIDEO_RENDER_STATE['started']}  brief: {_VIDEO_RENDER_STATE['brief']}\n"
+            "  Your vision is saved - /video approve to retry once it finishes."
+        )
+    missing = pipeline.check_dependencies()
+    if missing:
+        return (
+            "Video rendering needs these tools installed first: " + ", ".join(missing) + "\n"
+            "  node + npx (nodejs.org), ffmpeg/ffprobe (ffmpeg.org), edge-tts (pip install edge-tts).\n"
+            "  Your vision is saved - /video approve once they're in."
+        )
+
+    style = pending.get("style")
+    imagery = str((vision.get("imagery") or {}).get("treatment") or "").strip().lower()
+    opts: dict[str, Any] = {
+        "style": None if style == "derived" else (style or None),
+        "design_file": None,
+        "aspect": vision.get("aspect"),
+        "duration": vision.get("duration_s"),
+        "voice": pending.get("voice"),
+        "research_dossier": pending.get("dossier"),
+        "vision": vision,
+        "imagery": imagery or None,
+    }
+    brief = _video_effective_brief(pending)
+    _VIDEO_PENDING.pop(key, None)  # the guards passed; kickoff cannot refuse now
+    return await _kickoff_video_render(
+        adapter, incoming, pipeline, brief, opts, collect_only=collect_only
+    )
+
+
+async def _run_flagged_wizard(
+    adapter: Any, incoming: Any, pipeline: Any, opts: dict[str, Any]
+) -> str:
+    """No-brief flagged /video (--kind/--url): inline research + ranked style +
+    a TEXT vision with the approve/redo/cancel footer. Works on every adapter
+    (no buttons needed) - this is the CLI path."""
+    key = _video_channel_key(incoming)
+    _VIDEO_PENDING.pop(key, None)
+
+    kind = opts.get("kind")
+    url = opts.get("url")
+    lines: list[str] = []
+    dossier: dict[str, Any] | None = None
+    if url and opts.get("research") is not False:
+        try:
+            research_mod = _import_video_research()
+            dossier = await asyncio.to_thread(research_mod.build_dossier, url)
+        except Exception:
+            dossier = None
+        if dossier is not None and not dossier.get("ok"):
+            dossier = None
+        if dossier is None:
+            lines.append(f"Couldn't read {_url_host(url)}. Going theme-only.")
+
+    pending = _video_wizard_set(
+        key,
+        stage="await_vision",
+        kind=kind,
+        input="",
+        url=url,
+        dossier=dossier,
+        aspect=opts.get("aspect"),
+        duration=opts.get("duration"),
+        imagery=opts.get("imagery"),
+        text_mode=True,
+    )
+
+    style = opts.get("style")
+    if not style:
+        try:
+            import video_styles  # type: ignore[import-not-found]
+
+            ranked = video_styles.suggest_styles_ranked(
+                _video_effective_brief(pending), dossier, kind=kind or ""
+            )
+            style = ranked[0] if ranked else None
+        except Exception:
+            style = None
+    voice_key = opts.get("voice_key") or "andrew"
+    voice_spec = opts.get("voice") or _video_voice_for_key(voice_key)
+    _video_wizard_set(key, style=style, voice=voice_spec, voice_key=voice_key)
+
+    card = await _advance_to_vision(adapter, incoming, as_text=True)
+    if card:
+        lines.append(card)
+    return "\n".join(lines)
+
+
+async def handle_video_button(adapter: Any, incoming: Any, custom_id: str) -> None:
+    """Button steps of the guided /video wizard.
+
+    video_kind:<key>       store the kind, prompt for the raw material
+    video_style:<value>    store the style; voice step (or straight back to
+                           the vision on a change-style loopback). A stale
+                           tap with no pending starts fresh at the voice step.
+    video_voice:<key>      store the voice, draft the vision (legacy 3-part
+                           video_voice:<style>:<key> tolerated)
+    video_vision:<action>  approve | style | redo | cancel
+
+    Buttons act on the CURRENT pending state, never on message identity, so
+    re-sent or stale cards stay safe.
+    """
+    key = _video_channel_key(incoming)
+    pending = _video_wizard_get(key)
+
+    if custom_id.startswith("video_kind:"):
+        if pending is None:
+            await _video_send(adapter, incoming, _VIDEO_EXPIRED_TEXT)
+            return
+        kind = custom_id.split(":", 1)[1]
+        if kind not in {k for k, _, _ in _VIDEO_KINDS}:
+            kind = "surprise"
+        pending = _video_wizard_set(key, kind=kind, stage="await_input")
+        await _send_video_input_prompt(adapter, incoming, pending)
+        return
+
+    if custom_id.startswith("video_style:"):
+        choice = custom_id.split(":", 1)[1] or "auto"
+        if choice == "surprise":  # legacy v1 custom_id value
+            choice = "auto"
+        if pending is None:
+            # Stale pre-wizard style button: start fresh at the voice step
+            # with that style (kind unknown is fine - it only tunes ranking).
+            pending = _video_wizard_set(key, style=choice, stage="await_voice")
+            await _send_video_voice_keyboard(adapter, incoming, pending)
+            return
+        pending = _video_wizard_set(key, style=choice)
+        if pending.get("voice"):
+            # Change-style loopback: the voice is already chosen, so skip
+            # straight to a fresh vision in the new look.
+            await _advance_to_vision(adapter, incoming)
+        else:
+            await _send_video_voice_keyboard(adapter, incoming, pending)
+        return
+
+    if custom_id.startswith("video_voice:"):
+        parts = custom_id.split(":")
+        if len(parts) > 2:
+            legacy_style, voice_key = parts[1], parts[2]
+        else:
+            legacy_style, voice_key = None, (parts[1] if len(parts) > 1 else "andrew")
+        spec = _video_voice_for_key(voice_key) or _video_voice_for_key("andrew")
+        if pending is None:
+            if legacy_style is None:
+                await _video_send(adapter, incoming, _VIDEO_EXPIRED_TEXT)
+                return
+            # Legacy 3-part tap on a dead wizard: restore style + voice and
+            # ask for the raw material (mirrors the old v1 flow).
+            pending = _video_wizard_set(
+                key, style=legacy_style, voice=spec, voice_key=voice_key, stage="await_input"
+            )
+            await _send_video_input_prompt(adapter, incoming, pending)
+            return
+        updates: dict[str, Any] = {"voice": spec, "voice_key": voice_key}
+        if legacy_style and not pending.get("style"):
+            updates["style"] = legacy_style
+        _video_wizard_set(key, **updates)
+        await _advance_to_vision(adapter, incoming)
+        return
+
+    if custom_id.startswith("video_vision:"):
+        action = custom_id.split(":", 1)[1]
+        if pending is None or not isinstance(pending.get("vision"), dict):
+            await _video_send(adapter, incoming, _VIDEO_EXPIRED_TEXT)
+            return
+        if action == "approve":
+            reply = await _video_approve(adapter, incoming, pending)
+            if reply:
+                await _video_send(adapter, incoming, reply)
+            return
+        if action == "style":
+            await _send_video_style_keyboard(
+                adapter, incoming, intro="New look, same raw material."
+            )
+            return
+        if action == "redo":
+            await _advance_to_vision(adapter, incoming, prior=pending.get("vision"))
+            return
+        if action == "cancel":
+            _VIDEO_PENDING.pop(key, None)
+            await _video_send(adapter, incoming, _VIDEO_CANCEL_TEXT)
+            return
+
+
+def _match_wizard_option(text: str, options: list[tuple[str, str]]) -> str | None:
+    """EXACT-token option matching for picker stages.
+
+    The whole message must BE the option: its 1-based number, its value, its
+    label, or an unambiguous prefix (>= 2 chars) of exactly one option.
+    Returns the option value, or None so the message falls through to chat
+    ("2" matches; "2pm works for me" does not).
+    """
+    import re
+
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower()).rstrip(".!")
+    if not normalized:
+        return None
+    for i, (value, label) in enumerate(options, 1):
+        if normalized in (str(i), value.lower(), label.lower()):
+            return value
+    if len(normalized) < 2:
+        return None
+    hits = [
+        value
+        for value, label in options
+        if label.lower().startswith(normalized) or value.lower().startswith(normalized)
+    ]
+    unique = list(dict.fromkeys(hits))
+    return unique[0] if len(unique) == 1 else None
+
+
+async def try_consume_video_message(adapter: Any, incoming: Any) -> bool:
+    """Router hook: stage-gated typed input for the /video wizard.
+
+    Returns True when the message was consumed. Rules:
+      - commands ("/...") and button events ("__...") always pass through
+      - "cancel"/"stop" cancels at any stage
+      - pickers (kind/style/voice) are MATCH-ONLY: non-matching messages fall
+        through to normal chat with the wizard kept pending
+      - await_input consumes any plain text (flags parsed, URL extracted)
+      - researching answers option-ish replies with a hold-on note
+      - await_vision consumes any plain text as redo feedback
+    """
+    import re
+
+    key = _video_channel_key(incoming)
+    pending = _video_wizard_get(key)
+    if not pending:
+        return False
+
+    text = (getattr(incoming, "text", "") or "").strip()
+    if not text or text.startswith("/") or text.startswith("__"):
+        return False
+
+    lowered = text.lower()
+    stage = pending.get("stage")
+
+    if lowered in ("cancel", "stop"):
+        _VIDEO_PENDING.pop(key, None)
+        await _video_send(adapter, incoming, _VIDEO_CANCEL_TEXT)
+        return True
+
+    if stage == "await_kind":
+        options = [(kind, label) for kind, label, _ in _VIDEO_KINDS]
+        choice = _match_wizard_option(lowered, options)
+        if choice is None:
+            return False
+        pending = _video_wizard_set(key, kind=choice, stage="await_input")
+        await _send_video_input_prompt(adapter, incoming, pending)
+        return True
+
+    if stage == "await_input":
+        brief, opts = _parse_video_flags(text.split())
+        url = opts.get("url") or _extract_url(brief)
+        if url and not opts.get("url"):
+            brief = re.sub(r"\s+", " ", brief.replace(url, " ")).strip()
+        updates: dict[str, Any] = {"input": brief, "url": url}
+        for field in ("aspect", "duration", "imagery", "style"):
+            if opts.get(field) is not None:
+                updates[field] = opts[field]
+        if opts.get("voice"):
+            updates["voice"] = opts["voice"]
+            updates["voice_key"] = opts.get("voice_key")
+        _video_wizard_set(key, **updates)
+        if url and opts.get("research") is not False:
+            await _run_video_research(adapter, incoming, url)
+        else:
+            await _send_video_style_keyboard(adapter, incoming)
+        return True
+
+    if stage == "researching":
+        # Option-ish replies get a hold-on note; real messages fall through.
+        if re.fullmatch(r"[\w*.()-]{1,16}", lowered):
+            await _video_send(adapter, incoming, "Still reading the site - hold on.")
+            return True
+        return False
+
+    if stage == "await_style":
+        options = [(value, label) for label, value in _video_style_options(pending)]
+        choice = _match_wizard_option(lowered, options)
+        if choice is None:
+            return False
+        pending = _video_wizard_set(key, style=choice)
+        if pending.get("voice"):
+            await _advance_to_vision(adapter, incoming)
+        else:
+            await _send_video_voice_keyboard(adapter, incoming, pending)
+        return True
+
+    if stage == "await_voice":
+        options = [(voice_key, label) for label, voice_key, _ in _VIDEO_VOICES]
+        choice = _match_wizard_option(lowered, options)
+        if choice is None:
+            return False
+        _video_wizard_set(key, voice=_video_voice_for_key(choice), voice_key=choice)
+        await _advance_to_vision(adapter, incoming)
+        return True
+
+    if stage == "await_vision":
+        reply = await _advance_to_vision(
+            adapter,
+            incoming,
+            feedback=text,
+            prior=pending.get("vision"),
+            as_text=pending.get("text_mode", False),
+        )
+        if reply:
+            await _video_send(adapter, incoming, reply)
+        return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------

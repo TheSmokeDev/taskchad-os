@@ -9,7 +9,10 @@ Public API:
     append_open_thread(memory_dir, subject, status)
     append_hypothesis(memory_dir, hypothesis, evidence)
     append_question(memory_dir, question)
-    archive_stale_working_items(memory_dir, days=7) -> ArchiveReport
+    append_heartbeat_observation(memory_dir, group, subject, detail="")
+        -> ObservationAppendStatus
+    archive_stale_working_items(memory_dir, days=7, observation_days=None)
+        -> ArchiveReport
     append_open_threads_from_flush(memory_dir, flush_md) -> int
 
 Design invariants:
@@ -24,6 +27,7 @@ Design invariants:
 
 from __future__ import annotations
 
+import enum
 import os
 import re
 from dataclasses import dataclass, field
@@ -48,7 +52,9 @@ ALL_SECTIONS = (
 OPEN_THREADS_CAP = int(os.getenv("WORKING_MEMORY_OPEN_THREADS_CAP", "10"))
 OTHER_ACTIVE_CAP = int(os.getenv("WORKING_MEMORY_OTHER_CAP", "5"))
 DEDUP_WINDOW_DAYS = int(os.getenv("WORKING_MEMORY_DEDUP_DAYS", "3"))
-MAX_FLUSH_THREADS = int(os.getenv("WORKING_MEMORY_MAX_FLUSH_THREADS", "3"))
+# WORKING_MEMORY_MAX_FLUSH_THREADS (default 3) is resolved at CALL TIME inside
+# _extract_thread_candidates (Rule 1 — the flush path was rewritten by Living
+# Mind Act 1 and its knob moved off import-time binding with it).
 
 # Regex — single-line bullet with leading date: `- [YYYY-MM-DD] content`
 _BULLET_RE = re.compile(r"^- \[(\d{4}-\d{2}-\d{2})\] (.+)$")
@@ -82,6 +88,20 @@ class ArchiveReport:
     sections_touched: list[str] = field(default_factory=list)
 
 
+class ObservationAppendStatus(enum.Enum):
+    """Outcome of append_heartbeat_observation — each path is distinct.
+
+    A bare ``0`` return conflated dedup-skips with sanitize-drops and made the
+    heartbeat report lie (Act 2 R1 minor 3). ``EMPTY_AFTER_SANITIZE`` is
+    decided before any file I/O; only ``WRITTEN`` consumes the heartbeat's
+    per-run write budget.
+    """
+
+    WRITTEN = "written"
+    DEDUP = "dedup"
+    EMPTY_AFTER_SANITIZE = "empty_after_sanitize"
+
+
 # =============================================================================
 # Langfuse helper (lazy — no hard dep on runtime being importable)
 # =============================================================================
@@ -91,15 +111,16 @@ def _langfuse_span(name: str):
     """Return a context manager for a Langfuse span, or a no-op if disabled.
 
     Never breaks runtime — any import / auth failure falls back to no-op.
+    Langfuse is reached only through the runtime-owned accessor
+    ``langfuse_setup.get_observation_client()`` via module-attribute lookup
+    (Rule 3) so a monkeypatch on the accessor propagates to this call site.
     """
     try:
-        from runtime.langfuse_setup import is_langfuse_enabled
+        from runtime import langfuse_setup
 
-        if not is_langfuse_enabled():
+        client = langfuse_setup.get_observation_client()
+        if client is None:
             return _NoOpSpan()
-        from langfuse import get_client
-
-        client = get_client()
         return client.start_as_current_observation(name=name)
     except Exception:
         return _NoOpSpan()
@@ -160,7 +181,7 @@ _Updated automatically by session-end hook and dream cycle. Manual edits allowed
 
 ## Heartbeat Observations
 
-<!-- RESERVED for Phase 3. Empty in Phase 1. -->
+<!-- Ambient observations written by the heartbeat (Living Mind Act 2). Each item: `- [YYYY-MM-DD] [group] <subject> — <detail>`. Counts/dates/operator-owned labels only — never external free text. Capped, deduped, aged automatically. -->
 
 
 ## Archived (Cold)
@@ -253,6 +274,7 @@ def read_working_memory(memory_dir: Path) -> WorkingMemoryData:
                 threads_count=0,
                 hypotheses_count=0,
                 questions_count=0,
+                observations_count=0,
             )
             return WorkingMemoryData(exists=False)
 
@@ -274,6 +296,7 @@ def read_working_memory(memory_dir: Path) -> WorkingMemoryData:
             threads_count=len(data.open_threads),
             hypotheses_count=len(data.active_hypotheses),
             questions_count=len(data.unresolved_questions),
+            observations_count=len(data.heartbeat_observations),
         )
         return data
 
@@ -297,7 +320,12 @@ _SECTION_COMMENTS: dict[str, str] = {
         "<!-- Things the bot asked the user or itself that remain open. "
         "Each item: `- [YYYY-MM-DD] <question>`. -->"
     ),
-    "Heartbeat Observations": "<!-- RESERVED for Phase 3. Empty in Phase 1. -->",
+    "Heartbeat Observations": (
+        "<!-- Ambient observations written by the heartbeat (Living Mind Act 2). "
+        "Each item: `- [YYYY-MM-DD] [group] <subject> — <detail>`. "
+        "Counts/dates/operator-owned labels only — never external free text. "
+        "Capped, deduped, aged automatically. -->"
+    ),
     "Archived (Cold)": (
         "<!-- Items aged out of active sections by dream cycle. "
         "NEVER hard-deleted. Chronological, newest first. "
@@ -458,10 +486,19 @@ def _append_to_section(
     subject_for_dedup: str,
     cap: int,
     span_name: str,
+    dedup_days: int | None = None,
+    age_days: int | None = None,
 ) -> int:
     """Common append path — locked, atomic, dedup-aware, cap-aware.
 
     Returns 1 if appended, 0 if skipped (dedup).
+
+    ``dedup_days=None`` keeps the existing ``_dedup_match`` default window —
+    the three existing append helpers are byte-identical in behavior.
+    ``age_days=None`` means no in-write aging (existing behavior). When set,
+    bullets in the TARGET section older than ``age_days`` move to
+    "Archived (Cold)" BEFORE dedup/append — same lock, same render, same
+    atomic write. In-write aging touches only the target section.
     """
     from shared import file_lock  # local import keeps test collection side-effect free
 
@@ -470,13 +507,41 @@ def _append_to_section(
         content = path.read_text(encoding="utf-8") if path.exists() else _bootstrap_file(path)
         sections = _split_sections(content)
 
-        if _dedup_match(sections.get(section_name, []), subject_for_dedup):
+        aged: list[str] = []
+        if age_days is not None:
+            today = _date.today()
+            today_str = _today_str()
+            keep: list[str] = []
+            for bullet in sections.get(section_name, []):
+                dt = _parse_date(bullet)
+                if dt is not None and (today - dt).days > age_days:
+                    aged.append(_format_archived(bullet, dt, today_str))
+                else:
+                    keep.append(bullet)
+            if aged:
+                sections[section_name] = keep
+                sections["Archived (Cold)"] = aged + sections.get("Archived (Cold)", [])
+
+        if dedup_days is None:
+            is_duplicate = _dedup_match(sections.get(section_name, []), subject_for_dedup)
+        else:
+            is_duplicate = _dedup_match(
+                sections.get(section_name, []), subject_for_dedup, window_days=dedup_days
+            )
+        if is_duplicate:
+            # Persist in-write aging even on a dedup skip — the lifecycle is
+            # structural: a permanently-deduped subject must not block other
+            # stale bullets from aging out of the section.
+            dedup_bytes = 0
+            if aged:
+                rendered = _render_document(sections, content)
+                dedup_bytes = _atomic_write(path, rendered)
             _safe_update(
                 span,
                 section=section_name,
                 threads_appended=0,
                 threads_skipped_dedup=1,
-                bytes_written=0,
+                bytes_written=dedup_bytes,
             )
             return 0
 
@@ -544,6 +609,94 @@ def append_question(memory_dir: Path, question: str) -> int:
 
 
 # =============================================================================
+# Heartbeat observations (Living Mind Act 2)
+# =============================================================================
+
+
+def _sanitize_observation_text(text: str, max_chars: int) -> str:
+    """Deterministic observation sanitizer (defense in depth).
+
+    Strips control chars/newlines, collapses whitespace, strips backticks and
+    HTML-comment markers (``<!--``/``-->``), and trims to ``max_chars`` at a
+    word boundary. Observation content is template-generated (counts, dates,
+    operator-owned labels) — this is the belt-and-braces layer, not the
+    primary defense.
+    """
+    s = str(text or "")
+    s = s.replace("<!--", " ").replace("-->", " ")
+    s = s.replace("`", "")
+    s = "".join(" " if (ord(ch) < 32 or ord(ch) == 127) else ch for ch in s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if len(s) > max_chars:
+        cut = s[:max_chars]
+        boundary = cut.rfind(" ")
+        if boundary > 0:
+            cut = cut[:boundary]
+        s = cut.strip()
+    return s
+
+
+def append_heartbeat_observation(
+    memory_dir: Path,
+    group: str,
+    subject: str,
+    detail: str = "",
+    *,
+    cap: int | None = None,
+    dedup_days: int | None = None,
+    age_days: int | None = None,
+) -> ObservationAppendStatus:
+    """Append a Heartbeat Observations bullet — locked, atomic, deduped,
+    capped, in-write aged.
+
+    Bullet shape: ``- [YYYY-MM-DD] [group] <subject>`` plus
+    `` — <detail>`` when detail is non-empty. The dedup subject is
+    ``[group] <subject>`` (stable, template-fixed); volatile numbers live in
+    the detail, outside the dedup prefix window.
+
+    None-sentinel knobs body-resolve at call time (Rule 1 — the
+    ``_extract_thread_candidates`` precedent, NOT import-time constants):
+    ``HEARTBEAT_OBSERVATION_CAP`` (10), ``HEARTBEAT_OBSERVATION_DEDUP_DAYS``
+    (3), ``HEARTBEAT_OBSERVATION_AGE_DAYS`` (7).
+    """
+    if cap is None:
+        cap = int(os.getenv("HEARTBEAT_OBSERVATION_CAP", "10"))
+    if dedup_days is None:
+        dedup_days = int(os.getenv("HEARTBEAT_OBSERVATION_DEDUP_DAYS", "3"))
+    if age_days is None:
+        age_days = int(os.getenv("HEARTBEAT_OBSERVATION_AGE_DAYS", "7"))
+
+    group_s = _sanitize_observation_text(group, 20)
+    subject_s = _sanitize_observation_text(subject, 80)
+    detail_s = _sanitize_observation_text(detail, 120)
+    if not subject_s:
+        # Decided before any file I/O — a sanitize-drop never touches the file.
+        return ObservationAppendStatus.EMPTY_AFTER_SANITIZE
+
+    today = _today_str()
+    dedup_subject = f"[{group_s}] {subject_s}"
+    bullet = f"- [{today}] {dedup_subject}"
+    if detail_s:
+        bullet += f" — {detail_s}"
+
+    written = _append_to_section(
+        memory_dir,
+        "Heartbeat Observations",
+        bullet,
+        subject_for_dedup=dedup_subject,
+        cap=cap,
+        span_name="living_memory_write",
+        dedup_days=dedup_days,
+        age_days=age_days,
+    )
+    return (
+        ObservationAppendStatus.WRITTEN
+        if written == 1
+        else ObservationAppendStatus.DEDUP
+    )
+
+
+# =============================================================================
 # Session flush → threads extraction
 # =============================================================================
 
@@ -557,24 +710,89 @@ _FLUSH_SIGNALS = (
     re.compile(r"need to verify (.+?)(?:[.!?\n]|$)", re.IGNORECASE),
 )
 
+# Bare pronouns that disqualify a subject when they lead it — a thread that
+# starts with "it"/"this"/... is a context-free fragment, not a subject.
+_SUBJECT_PRONOUNS = frozenset({"it", "this", "that", "they", "them"})
 
-def _extract_thread_candidates(flush_md: str) -> list[str]:
-    """Return up to MAX_FLUSH_THREADS candidate subject strings from session flush."""
+_SUBJECT_MAX_CHARS = 140
+_SUBJECT_MIN_WORDS = 4
+
+# Leading line structure to strip from a candidate: heading hashes, list
+# markers (with optional checkbox), numbered-list markers.
+_LEADING_STRUCTURE_RE = re.compile(
+    r"^(?:#{1,6}\s+|[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)+"
+)
+
+
+def _line_containing(text: str, pos: int) -> str:
+    """Return the full line of `text` containing character offset `pos`."""
+    start = text.rfind("\n", 0, pos) + 1
+    end = text.find("\n", pos)
+    if end == -1:
+        end = len(text)
+    return text[start:end]
+
+
+def _normalize_subject(line: str) -> str | None:
+    """Normalize a candidate subject line; return None when rejected.
+
+    Full-line subject quality contract (Living Mind Act 1, behavior 6):
+      - strip leading list markers / checkboxes / heading hashes and a
+        leading ``TODO:`` marker (signal structure, not content)
+      - strip markdown decoration (``**``, backticks), collapse whitespace
+      - reject empty or punctuation-only fragments, subjects under
+        ``_SUBJECT_MIN_WORDS`` words, and subjects led by a bare pronoun
+      - trim to ``_SUBJECT_MAX_CHARS`` at a word boundary
+    """
+    text = line.strip()
+    text = _LEADING_STRUCTURE_RE.sub("", text).strip()
+    text = re.sub(r"^TODO:\s*", "", text, flags=re.IGNORECASE).strip()
+    text = text.replace("**", "").replace("`", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.rstrip(".,;:").strip()
+    if not text or not re.search(r"[A-Za-z0-9]", text):
+        return None
+    words = text.split()
+    if len(words) < _SUBJECT_MIN_WORDS:
+        return None
+    first_word = words[0].strip("\"'()*_[]").lower()
+    if first_word in _SUBJECT_PRONOUNS:
+        return None
+    if len(text) > _SUBJECT_MAX_CHARS:
+        cut = text[:_SUBJECT_MAX_CHARS]
+        boundary = cut.rfind(" ")
+        if boundary > 0:
+            cut = cut[:boundary]
+        text = cut.rstrip(".,;:").strip()
+    return text
+
+
+def _extract_thread_candidates(
+    flush_md: str, max_threads: int | None = None
+) -> list[str]:
+    """Return up to `max_threads` normalized full-line subjects from a flush.
+
+    The candidate is the SIGNAL LINE'S content, never the regex group tail —
+    tail capture produced fragments like "the verdict" and "** line (so it
+    surfaces even in a fresh session)". `max_threads` uses the None-sentinel
+    pattern (Rule 1): resolved from WORKING_MEMORY_MAX_FLUSH_THREADS at call
+    time (default 3).
+    """
+    if max_threads is None:
+        max_threads = int(os.getenv("WORKING_MEMORY_MAX_FLUSH_THREADS", "3"))
     seen: set[str] = set()
     candidates: list[str] = []
     for pattern in _FLUSH_SIGNALS:
         for m in pattern.finditer(flush_md):
-            text = m.group(1).strip()
-            text = re.sub(r"\s+", " ", text)
-            text = text.rstrip(".,;:").strip()
-            if not text or len(text) < 4:
+            subject = _normalize_subject(_line_containing(flush_md, m.start()))
+            if subject is None:
                 continue
-            key = text.lower()[:60]
+            key = subject.lower()[:60]
             if key in seen:
                 continue
             seen.add(key)
-            candidates.append(text[:140])
-            if len(candidates) >= MAX_FLUSH_THREADS:
+            candidates.append(subject)
+            if len(candidates) >= max_threads:
                 return candidates
     return candidates
 
@@ -583,7 +801,7 @@ def append_open_threads_from_flush(memory_dir: Path, flush_md: str) -> int:
     """Extract TODO-ish lines from a session flush markdown and append as open threads.
 
     Returns the count appended (deduped items don't count). Caps at
-    MAX_FLUSH_THREADS per session.
+    WORKING_MEMORY_MAX_FLUSH_THREADS (default 3) per session.
     """
     candidates = _extract_thread_candidates(flush_md or "")
     if not candidates:
@@ -643,13 +861,23 @@ def resolve_open_thread(memory_dir: Path, index: int) -> tuple[bool, str]:
 # =============================================================================
 
 
-def archive_stale_working_items(memory_dir: Path, days: int = 7) -> ArchiveReport:
+def archive_stale_working_items(
+    memory_dir: Path, days: int = 7, observation_days: int | None = None
+) -> ArchiveReport:
     """Move items older than `days` from active sections to Archived (Cold).
 
     Insert-only — active sections lose bullets, archive gains them. Never
     hard-deletes. Emits `living_memory_archive` span.
+
+    "Heartbeat Observations" ages with its OWN window: ``observation_days``,
+    or ``HEARTBEAT_OBSERVATION_AGE_DAYS`` (default 7) when None — the same
+    env knob the in-write ager uses. The ``ACTIVE_SECTIONS`` tuple itself is
+    unchanged; existing callers (``memory_dream.py``) need zero changes.
     """
     from shared import file_lock
+
+    if observation_days is None:
+        observation_days = int(os.getenv("HEARTBEAT_OBSERVATION_AGE_DAYS", "7"))
 
     report = ArchiveReport(archived_count=0, days=days, sections_touched=[])
     path = memory_dir / WORKING_FILE_NAME
@@ -672,13 +900,16 @@ def archive_stale_working_items(memory_dir: Path, days: int = 7) -> ArchiveRepor
 
         archived: list[str] = []
         per_section_counts: dict[str, int] = {}
-        for section_name in ACTIVE_SECTIONS:
+        section_thresholds: dict[str, int] = {s: days for s in ACTIVE_SECTIONS}
+        section_thresholds["Heartbeat Observations"] = observation_days
+        for section_name in (*ACTIVE_SECTIONS, "Heartbeat Observations"):
+            threshold = section_thresholds[section_name]
             bullets = sections.get(section_name, [])
             keep: list[str] = []
             moved_from_section: list[str] = []
             for bullet in bullets:
                 dt = _parse_date(bullet)
-                if dt is not None and (today - dt).days > days:
+                if dt is not None and (today - dt).days > threshold:
                     moved_from_section.append(_format_archived(bullet, dt, today_str))
                 else:
                     keep.append(bullet)
@@ -700,7 +931,8 @@ def archive_stale_working_items(memory_dir: Path, days: int = 7) -> ArchiveRepor
                 from entity_extractor import append_vault_log
 
                 bullets_log = [
-                    f"{s}: {per_section_counts[s]} items > {days}d old moved to cold"
+                    f"{s}: {per_section_counts[s]} items > "
+                    f"{section_thresholds[s]}d old moved to cold"
                     for s in report.sections_touched
                 ]
                 append_vault_log(
@@ -754,6 +986,7 @@ def build_briefing_section(memory_dir: Path, max_items_per_section: int = 3) -> 
     _fmt(data.open_threads, "Open threads")
     _fmt(data.active_hypotheses, "Active hypotheses")
     _fmt(data.unresolved_questions, "Unresolved")
+    _fmt(data.heartbeat_observations, "Heartbeat observations")
 
     if not lines:
         return ""

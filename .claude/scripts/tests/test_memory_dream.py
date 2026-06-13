@@ -179,8 +179,14 @@ class TestOrient:
 class TestGatherSignal:
     @pytest.fixture(autouse=True)
     def isolate_state_dir(self, tmp_path):
-        """Prevent real session-flush files from leaking into signal tests."""
-        with patch("memory_dream.STATE_DIR", tmp_path):
+        """Prevent real session-flush files from leaking into signal tests.
+
+        Living Mind Act 3 extended gather_signal with an episodes/ scan that
+        default-resolves the module MEMORY_DIR, so the live vault must be
+        isolated here too (pytest never reads live files).
+        """
+        with patch("memory_dream.STATE_DIR", tmp_path), \
+             patch("memory_dream.MEMORY_DIR", tmp_path):
             yield
 
     def test_gather_signal_corrections(self, mock_daily_logs):
@@ -707,3 +713,515 @@ def test_prune_prompt_parity_with_shim_missing_memory(tmp_path):
 
     assert legacy == new
     assert "## Current MEMORY.md (0 lines)" in new
+
+
+# =============================================================================
+# LIVING MIND ACT 3 — EPISODE GATHER (PRP test category 8)
+# =============================================================================
+#
+# Existing classes above are UNTOUCHED (TestStateSchema proves the
+# dream-state schema carries no episode registry — Rule 2). Fixture ids are
+# the synthetic telegram-1111111111-2222222222 family (R2 NM2).
+
+
+def _write_dream_episode(
+    memory_dir: Path,
+    name: str,
+    *,
+    status: str = "open",
+    date: str | None = None,
+    body: str = (
+        "## Key Decisions\n\n"
+        "- lesson learned: episodes feed the dream cycle directly\n"
+        "- lesson learned: the gather scan stays pure python\n"
+        "- key decision: substantive episodes break dream silence\n"
+    ),
+) -> Path:
+    """Drop a fixture episode into {memory_dir}/episodes/."""
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
+    episodes_dir = memory_dir / "episodes"
+    episodes_dir.mkdir(parents=True, exist_ok=True)
+    path = episodes_dir / name
+    path.write_text(
+        "---\n"
+        "tags: [system, memory, living-mind]\n"
+        f"status: {status}\n"
+        f"date: {date}\n"
+        'session_id: "telegram-1111111111-2222222222"\n'
+        "surface: telegram\n"
+        'lifecycle: "20260612-100000"\n'
+        'summary: "fixture"\n'
+        "---\n\n"
+        "# Episode: fixture\n\n"
+        f"{body}",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestEpisodeGather:
+    @pytest.fixture(autouse=True)
+    def isolate_state_dir(self, tmp_path):
+        """Prevent real session-flush leftovers from leaking into counts."""
+        state_dir = tmp_path / "gather-state"
+        state_dir.mkdir()
+        with patch("memory_dream.STATE_DIR", state_dir):
+            yield state_dir
+
+    def test_substantive_episode_breaks_dream_silence(
+        self, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        """The silence-breaker discriminator: same vault minus the episode is
+        DREAM_SILENT; with it the weighted score crosses the threshold."""
+        from memory_dream import gather_signal
+
+        with patch("memory_dream.DREAM_SIGNAL_THRESHOLD", 4):
+            baseline = gather_signal(
+                mock_daily_logs_no_signal, days=7, memory_dir=mock_memory_dir
+            )
+            assert baseline.found is False
+            assert baseline.episode_paths == []
+
+            episode = _write_dream_episode(
+                mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+            )
+            result = gather_signal(
+                mock_daily_logs_no_signal, days=7, memory_dir=mock_memory_dir
+            )
+
+        assert result.found is True
+        assert result.signal_score >= 4
+        assert result.episode_paths == [episode]
+        assert result.files_scanned == baseline.files_scanned + 1
+
+    def test_consolidated_episode_excluded(
+        self, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        from memory_dream import gather_signal
+
+        _write_dream_episode(
+            mock_memory_dir,
+            "2026-06-12-telegram-aaaa1111-100000.md",
+            status="consolidated",
+        )
+        result = gather_signal(
+            mock_daily_logs_no_signal, days=7, memory_dir=mock_memory_dir
+        )
+        assert result.episode_paths == []
+
+    def test_out_of_window_episode_excluded(
+        self, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        from datetime import timedelta as _td
+
+        from memory_dream import gather_signal
+
+        stale = (datetime.now() - _td(days=30)).strftime("%Y-%m-%d")
+        _write_dream_episode(
+            mock_memory_dir,
+            f"{stale}-telegram-aaaa1111-100000.md",
+            date=stale,
+        )
+        result = gather_signal(
+            mock_daily_logs_no_signal, days=7, memory_dir=mock_memory_dir
+        )
+        assert result.episode_paths == []
+
+    def test_missing_episodes_dir_is_noop(
+        self, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        """Migration-free: vaults without episodes/ behave exactly as before."""
+        from memory_dream import gather_signal
+
+        assert not (mock_memory_dir / "episodes").exists()
+        result = gather_signal(
+            mock_daily_logs_no_signal, days=7, memory_dir=mock_memory_dir
+        )
+        assert result.episode_paths == []
+        assert result.found is False
+
+    def test_episode_paths_newest_first(
+        self, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        from datetime import timedelta as _td
+
+        from memory_dream import gather_signal
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - _td(days=1)).strftime("%Y-%m-%d")
+        older = _write_dream_episode(
+            mock_memory_dir, f"{yesterday}-telegram-aaaa1111-090000.md", date=yesterday
+        )
+        newer = _write_dream_episode(
+            mock_memory_dir, f"{today}-telegram-aaaa1111-100000.md", date=today
+        )
+        result = gather_signal(
+            mock_daily_logs_no_signal, days=7, memory_dir=mock_memory_dir
+        )
+        assert result.episode_paths == [newer, older]
+
+    def test_existing_call_shape_resolves_module_memory_dir(
+        self, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        """gather_signal(logs, days=d) — the pre-Act-3 call shape — resolves
+        memory_dir from the module attribute at call time (Rule 1)."""
+        episode = _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+        )
+        with patch("memory_dream.MEMORY_DIR", mock_memory_dir):
+            from memory_dream import gather_signal
+
+            result = gather_signal(mock_daily_logs_no_signal, days=7)
+        assert result.episode_paths == [episode]
+
+    def test_legacy_state_dir_flush_scan_untouched(
+        self, mock_memory_dir, mock_daily_logs_no_signal, isolate_state_dir
+    ):
+        """A raw failed-flush leftover in STATE_DIR is still counted."""
+        from memory_dream import gather_signal
+
+        leftover = isolate_state_dir / (
+            "session-flush-telegram-1111111111-2222222222-20260612-090000.md"
+        )
+        leftover.write_text(
+            "**User:** lesson learned: raw leftovers still feed the dream\n",
+            encoding="utf-8",
+        )
+        result = gather_signal(
+            mock_daily_logs_no_signal, days=7, memory_dir=mock_memory_dir
+        )
+        assert result.files_scanned >= 2  # daily log + leftover
+        assert any("raw leftovers" in s for s in result.saves)
+        assert result.episode_paths == []  # leftovers are NOT episodes
+
+    def test_bland_episode_alone_stays_silent(
+        self, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        """Intentional (post-build review 🟡): an open episode whose body has
+        no signal terms is scanned and carried, but does NOT fire the dream
+        by itself — it stays open and re-feeds a later run that has real
+        signal (dream firing depends on the regex signal inside bodies)."""
+        from memory_dream import gather_signal
+
+        episode = _write_dream_episode(
+            mock_memory_dir,
+            "2026-06-12-telegram-aaaa1111-100000.md",
+            body="## Summary\n\nQuiet session. Routine upkeep only.\n",
+        )
+        with patch("memory_dream.DREAM_SIGNAL_THRESHOLD", 4):
+            result = gather_signal(
+                mock_daily_logs_no_signal, days=7, memory_dir=mock_memory_dir
+            )
+        assert result.found is False  # bland episode does not fire the dream
+        assert result.episode_paths == [episode]  # but it IS scanned/carried
+
+
+# =============================================================================
+# LIVING MIND ACT 3 — CONSOLIDATE SECTION + DETERMINISTIC FLIP (category 9)
+# =============================================================================
+
+
+class TestEpisodeConsolidateFlip:
+    def test_assemble_episodes_section_empty_is_empty_string(self):
+        """Empty paths -> "" so the consolidate prompt stays byte-identical
+        to pre-Act-3 assembly for the no-episodes case."""
+        from memory_dream import _assemble_episodes_section
+
+        assert _assemble_episodes_section([]) == ""
+
+    def test_assemble_episodes_section_renders_digest(self, mock_memory_dir):
+        from memory_dream import _assemble_episodes_section
+
+        episode = _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+        )
+        section = _assemble_episodes_section([episode])
+        assert section.startswith("## Recent Episodes (open)")
+        assert episode.stem in section
+        assert "lesson learned: episodes feed the dream" in section
+
+    @pytest.mark.asyncio
+    async def test_full_dream_flips_episodes_and_reports(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        from episodes import read_episode_frontmatter
+        from memory_dream import _run_dream_inner
+
+        episode = _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+        )
+        daily_entries: list[tuple[str, str]] = []
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal into MEMORY.md"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"), \
+             patch(
+                 "memory_dream.append_to_daily_log",
+                 lambda text, section: daily_entries.append((text, section)),
+             ):
+            result = await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        assert result is not None and result != "DREAM_SILENT"
+        # The consolidate prompt carried the digest + mining instruction.
+        prompt = mock_rwf.call_args_list[0][0][0].prompt
+        assert "## Recent Episodes (open)" in prompt
+        assert "Mine the open episodes" in prompt
+        # Deterministic flip happened after the successful Phase 3.
+        fm = read_episode_frontmatter(episode)
+        assert fm["status"] == "consolidated"
+        assert "consolidated_at" in fm
+        # State + summary report the counts.
+        state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+        assert state["result"] == "consolidated"
+        summary_text = "\n".join(t for t, _s in daily_entries)
+        assert "episodes: 1 reviewed, 1 consolidated" in summary_text
+
+    @pytest.mark.asyncio
+    async def test_no_episodes_prompt_carries_no_episode_section(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        from memory_dream import _run_dream_inner
+
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("CONSOLIDATION_OK"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"), \
+             patch("memory_dream.append_to_daily_log", lambda *_a, **_k: None):
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        prompt = mock_rwf.call_args_list[0][0][0].prompt
+        assert "Recent Episodes" not in prompt
+        assert "Mine the open episodes" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_consolidate_failure_leaves_episodes_open(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """Crash-safe retry: a consolidate() raise never reaches the flip."""
+        from episodes import read_episode_frontmatter
+        from memory_dream import _run_dream_inner
+
+        episode = _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+        )
+        mock_rwf = AsyncMock(side_effect=RuntimeError("LLM down"))
+
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream.append_to_daily_log", lambda *_a, **_k: None):
+            with pytest.raises(RuntimeError, match="LLM down"):
+                await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        assert read_episode_frontmatter(episode)["status"] == "open"
+        state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+        assert state["result"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_test_mode_scans_and_sections_but_never_flips(
+        self, tmp_path, mock_memory_dir, mock_daily_logs, capsys
+    ):
+        from episodes import read_episode_frontmatter
+        from memory_dream import _run_dream_inner
+
+        episode = _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+        )
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("CONSOLIDATION_OK"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream.append_to_daily_log", lambda *_a, **_k: None):
+            await _run_dream_inner(test_mode=True, force=True, days=7)
+
+        prompt = mock_rwf.call_args_list[0][0][0].prompt
+        assert "## Recent Episodes (open)" in prompt  # dry-run visibility
+        assert read_episode_frontmatter(episode)["status"] == "open"  # no flip
+        assert "DRY RUN - would mark 1 episode(s) consolidated" in capsys.readouterr().out
+
+    @pytest.mark.asyncio
+    async def test_flip_failure_dream_still_reports_success(
+        self, tmp_path, mock_memory_dir, mock_daily_logs, capsys
+    ):
+        """R1 M1: flip raising -> warning logged, episodes_marked = 0,
+        MEMORY re-read + Phase 4 + summary all run, result = consolidated."""
+        import episodes as episodes_mod
+        from episodes import read_episode_frontmatter
+        from memory_dream import _run_dream_inner
+
+        episode = _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+        )
+        daily_entries: list[tuple[str, str]] = []
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+
+        def exploding_flip(*_args, **_kwargs):
+            raise RuntimeError("flip exploded")
+
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"), \
+             patch.object(episodes_mod, "mark_episodes_consolidated", exploding_flip), \
+             patch(
+                 "memory_dream.append_to_daily_log",
+                 lambda text, section: daily_entries.append((text, section)),
+             ):
+            result = await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        assert result is not None  # dream did NOT raise
+        out = capsys.readouterr().out
+        assert "WARNING: episode flip failed (non-fatal): flip exploded" in out
+        state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+        assert state["result"] == "consolidated"  # dream reports success
+        assert "prune" in state["phases_completed"]  # Phase 4 still ran
+        assert read_episode_frontmatter(episode)["status"] == "open"
+        summary_text = "\n".join(t for t, _s in daily_entries)
+        assert "episodes: 1 reviewed, 0 consolidated" in summary_text
+
+    @pytest.mark.asyncio
+    async def test_flip_io_failure_real_primitive_warns_and_keeps_episode_open(
+        self, tmp_path, mock_memory_dir, mock_daily_logs, capsys
+    ):
+        """F1 discriminator (post-build review): the REAL flip primitive runs
+        and its internal lock fails — the failure must surface through
+        EpisodeFlipError into the dream warning path (never a silent 0), and
+        the episode must stay open (re-feedable on the next run)."""
+        import episodes as episodes_mod
+        from episodes import read_episode_frontmatter
+        from memory_dream import _run_dream_inner
+
+        episode = _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+        )
+        daily_entries: list[tuple[str, str]] = []
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+
+        def timing_out_lock(_path, timeout=None):
+            raise TimeoutError("flip lock timeout (simulated)")
+
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"), \
+             patch.object(episodes_mod, "file_lock", timing_out_lock), \
+             patch(
+                 "memory_dream.append_to_daily_log",
+                 lambda text, section: daily_entries.append((text, section)),
+             ):
+            result = await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        assert result is not None  # dream did NOT raise
+        out = capsys.readouterr().out
+        assert "WARNING: episode flip failed (non-fatal):" in out
+        assert episode.name in out  # failure receipt names the file
+        assert "flip lock timeout (simulated)" in out
+        state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+        assert state["result"] == "consolidated"  # dream reports success
+        assert "prune" in state["phases_completed"]  # Phase 4 still ran
+        assert read_episode_frontmatter(episode)["status"] == "open"
+        summary_text = "\n".join(t for t, _s in daily_entries)
+        assert "episodes: 1 reviewed, 0 consolidated" in summary_text
+
+    @pytest.mark.asyncio
+    async def test_flip_partial_failure_reports_partial_count(
+        self, tmp_path, mock_memory_dir, mock_daily_logs, capsys
+    ):
+        """Collect-then-raise through the wrapper: one episode flips, one
+        fails — the warning fires AND the summary reports the partial truth
+        (Rule 2: the flipped file physically says consolidated)."""
+        import episodes as episodes_mod
+        from episodes import read_episode_frontmatter
+        from memory_dream import _run_dream_inner
+
+        # bbbb sorts first (newest-first), so the FAILURE happens before the
+        # success — proving the flip loop continues past a failed file.
+        bad = _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-bbbb2222-110000.md"
+        )
+        good = _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+        )
+        daily_entries: list[tuple[str, str]] = []
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        real_write = episodes_mod._atomic_write
+
+        def selective_write(path, content):
+            if path == bad:
+                raise PermissionError("bbbb write blocked (simulated)")
+            return real_write(path, content)
+
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"), \
+             patch.object(episodes_mod, "_atomic_write", selective_write), \
+             patch(
+                 "memory_dream.append_to_daily_log",
+                 lambda text, section: daily_entries.append((text, section)),
+             ):
+            result = await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        assert result is not None  # dream did NOT raise
+        out = capsys.readouterr().out
+        assert "WARNING: episode flip failed (non-fatal):" in out
+        assert bad.name in out
+        # Physical truth: the good episode really flipped; the bad stays open.
+        assert read_episode_frontmatter(good)["status"] == "consolidated"
+        assert read_episode_frontmatter(bad)["status"] == "open"
+        state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+        assert state["result"] == "consolidated"
+        summary_text = "\n".join(t for t, _s in daily_entries)
+        assert "episodes: 2 reviewed, 1 consolidated" in summary_text
+
+    @pytest.mark.asyncio
+    async def test_vault_log_bullets_carry_episode_counts(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        import entity_extractor
+        from memory_dream import _run_dream_inner
+
+        _write_dream_episode(
+            mock_memory_dir, "2026-06-12-telegram-aaaa1111-100000.md"
+        )
+        captured: dict = {}
+
+        def capture_vault_log(_vault, _event, _title, bullets=None):
+            captured["bullets"] = list(bullets or [])
+
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"), \
+             patch.object(entity_extractor, "append_vault_log", capture_vault_log), \
+             patch("memory_dream.append_to_daily_log", lambda *_a, **_k: None):
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        assert any(
+            "episodes: 1 reviewed, 1 consolidated" in bullet
+            for bullet in captured.get("bullets", [])
+        )

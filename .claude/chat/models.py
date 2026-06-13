@@ -83,6 +83,10 @@ class IncomingMessage:
     thread: Thread | None = None
     platform_message_id: str | None = None
     attachments: list[Attachment] = field(default_factory=list)
+    # Platform caption attached to an upload (e.g. Telegram document caption).
+    # Distinct from `text` (which folds the caption into the rendered turn);
+    # routers match explicit commands (e.g. /vault-ingest) against this field.
+    caption: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
     is_piv: bool = False           # True when message contains PIV instruction content
     piv_command: str = ""          # Original command name (e.g., "planning", "clutch")

@@ -11,6 +11,7 @@ This hook does NO API calls — pure local file I/O for speed (<10s).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import time as _time
@@ -32,6 +33,16 @@ from shared import log_hook_execution  # noqa: E402
 # === Constants ===
 MAX_TURNS = 30
 MAX_CONTEXT_CHARS = 15_000
+
+
+def _safe_filename_component(value: str) -> str:
+    """Sanitize one filename component (win32 fix — template pair with
+    session-end-flush.py; uuids today, defensive tomorrow).
+
+    Same character policy as ``session_lifecycle_hooks._safe_filename``.
+    Applied ONLY at filename composition; dedup compares keep the raw id.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(value)).strip("-") or "unknown"
 
 
 def extract_text_from_content(content: object) -> str:
@@ -160,7 +171,7 @@ def main() -> None:
 
     # Write context file for background process
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    context_filename = f"flush-context-{session_id}-{timestamp}.md"
+    context_filename = f"flush-context-{_safe_filename_component(session_id)}-{timestamp}.md"
     context_path = STATE_DIR / context_filename
     context_path.write_text(context, encoding="utf-8")
 

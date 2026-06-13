@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 _initialized = False
@@ -27,6 +28,29 @@ def is_langfuse_enabled() -> bool:
     if os.getenv("LANGFUSE_ENABLED", "true").lower() == "false":
         return False
     return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
+
+
+def get_observation_client() -> Any | None:
+    """Return the live Langfuse client for observation spans, or ``None``.
+
+    Runtime-owned accessor (Rule 3): consumers outside ``runtime/`` must
+    reach Langfuse through this function via module-attribute lookup
+    (``from runtime import langfuse_setup`` then
+    ``langfuse_setup.get_observation_client()``) instead of importing
+    ``is_langfuse_enabled`` or ``langfuse.get_client`` directly — that keeps
+    monkeypatches and kill-switch semantics propagating to every call site.
+
+    Fail-open: disabled config, a missing langfuse install, or any client
+    error returns ``None`` — never raises.
+    """
+    try:
+        if not is_langfuse_enabled():
+            return None
+        from langfuse import get_client
+
+        return get_client()
+    except Exception:
+        return None
 
 
 def _configure_otel_export_timeout() -> None:

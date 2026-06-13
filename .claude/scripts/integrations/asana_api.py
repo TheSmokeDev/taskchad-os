@@ -128,12 +128,19 @@ def get_my_tasks(
     max_results: int = 20,
     only_incomplete: bool = True,
     assignee: str | None = None,
+    *,
+    raise_on_error: bool = False,
 ) -> list[AsanaTask]:
     """
     Get tasks assigned to a user in the configured workspace.
 
     Uses v5 SDK: TasksApi.get_tasks() with assignee + workspace.
     Pass assignee as a friendly name ('sydney'), GID, or None for 'me'.
+
+    ``raise_on_error=False`` (the contract default) keeps today's graceful
+    degradation: API errors print and return empty. ``True`` re-raises so a
+    rejected token is detectable instead of looking like "no tasks" — only
+    the heartbeat gather passes ``True``.
     """
     import asana
 
@@ -159,6 +166,8 @@ def get_my_tasks(
                 continue
             result.append(task)
     except Exception as e:
+        if raise_on_error:
+            raise
         print(f"Error fetching Asana tasks: {e}")
 
     return result
@@ -168,8 +177,14 @@ def get_project_tasks(
     project_gid: str | None = None,
     only_incomplete: bool = True,
     max_results: int = 20,
+    *,
+    raise_on_error: bool = False,
 ) -> list[AsanaTask]:
-    """Get tasks from a specific project."""
+    """Get tasks from a specific project.
+
+    ``raise_on_error=True`` re-raises API errors instead of swallowing them
+    into an empty list (default ``False`` keeps today's behavior).
+    """
     import asana
 
     api_client = get_asana_client()
@@ -195,6 +210,8 @@ def get_project_tasks(
                 continue
             result.append(task)
     except Exception as e:
+        if raise_on_error:
+            raise
         print(f"Error fetching project tasks: {e}")
 
     return result
@@ -206,6 +223,8 @@ def search_tasks(
     completed: bool = False,
     max_results: int = 100,
     assignee: str | None = None,
+    *,
+    raise_on_error: bool = False,
 ) -> list[AsanaTask]:
     """Search tasks using Asana's server-side Search API.
 
@@ -213,7 +232,10 @@ def search_tasks(
     and completion status. Requires Asana Premium.
 
     Falls back to get_my_tasks() with client-side filtering if search API
-    is unavailable (non-premium workspace).
+    is unavailable (non-premium workspace). The 402 premium-fallback is
+    degradation BY DESIGN and is preserved even when ``raise_on_error=True``
+    (the fallback's own failure then propagates). Any other error re-raises
+    under ``True`` instead of returning empty.
     """
     import asana
 
@@ -251,7 +273,16 @@ def search_tasks(
         error_str = str(e)
         if "402" in error_str or "Payment Required" in error_str:
             print("Asana Search API requires Premium — falling back to client-side filtering")
-            return _fallback_search(due_before, due_after, completed, max_results, assignee)
+            return _fallback_search(
+                due_before,
+                due_after,
+                completed,
+                max_results,
+                assignee,
+                raise_on_error=raise_on_error,
+            )
+        if raise_on_error:
+            raise
         print(f"Error searching Asana tasks: {e}")
     return result
 
@@ -262,9 +293,16 @@ def _fallback_search(
     completed: bool,
     max_results: int,
     assignee: str | None = None,
+    *,
+    raise_on_error: bool = False,
 ) -> list[AsanaTask]:
     """Client-side filtering fallback if Search API is unavailable."""
-    tasks = get_my_tasks(max_results=200, only_incomplete=not completed, assignee=assignee)
+    tasks = get_my_tasks(
+        max_results=200,
+        only_incomplete=not completed,
+        assignee=assignee,
+        raise_on_error=raise_on_error,
+    )
     result: list[AsanaTask] = []
     for t in tasks:
         if not t.due_on:
@@ -388,17 +426,32 @@ def move_task(
         ).raise_for_status()
 
 
-def get_overdue_tasks(assignee: str | None = None) -> list[AsanaTask]:
+def get_overdue_tasks(
+    assignee: str | None = None, *, raise_on_error: bool = False
+) -> list[AsanaTask]:
     """Get incomplete tasks that are past their due date (server-side filtering)."""
     today = date.today()
-    return search_tasks(due_before=today, completed=False, assignee=assignee)
+    return search_tasks(
+        due_before=today,
+        completed=False,
+        assignee=assignee,
+        raise_on_error=raise_on_error,
+    )
 
 
-def get_due_soon_tasks(days: int = 3, assignee: str | None = None) -> list[AsanaTask]:
+def get_due_soon_tasks(
+    days: int = 3, assignee: str | None = None, *, raise_on_error: bool = False
+) -> list[AsanaTask]:
     """Get incomplete tasks due within N days (server-side filtering)."""
     today = date.today()
     deadline = today + timedelta(days=days)
-    return search_tasks(due_after=today, due_before=deadline, completed=False, assignee=assignee)
+    return search_tasks(
+        due_after=today,
+        due_before=deadline,
+        completed=False,
+        assignee=assignee,
+        raise_on_error=raise_on_error,
+    )
 
 
 def format_tasks_for_context(tasks: list[AsanaTask]) -> str:

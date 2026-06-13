@@ -219,9 +219,9 @@ Deep memory consolidation — merges cross-session signal, prunes stale entries,
 | Phase | Type | What It Does |
 |-------|------|-------------|
 | 1. Orient | Pure Python | Reads MEMORY.md stats, lists recent logs, counts concepts |
-| 2. Gather Signal | Pure Python | Regex grep for corrections, saves, stalls, repeated entities. Weighted scoring (threshold=4). If no signal → `DREAM_SILENT`, exits without LLM call |
-| 3. Consolidate | LLM | Merges signal into MEMORY.md/SELF.md, normalizes dates, resolves contradictions |
-| 4. Prune | LLM | Enforces 200-line limit, removes stale entries, verifies wikilink pointers |
+| 2. Gather Signal | Pure Python | Regex grep over daily logs, raw flush leftovers (STATE_DIR), and open episodes (`episodes/` — Living Mind Act 3) for corrections, saves, stalls, repeated entities. Weighted scoring (threshold=4). If no signal → `DREAM_SILENT`, exits without LLM call |
+| 3. Consolidate | LLM | Merges signal into MEMORY.md/SELF.md via the amendment ledger, normalizes dates, resolves contradictions. Prompt carries a capped `## Recent Episodes (open)` digest when open episodes exist; after a successful return, reviewed episodes flip to `status: consolidated` + `consolidated_at:` (pure Python, own try/except — flip failure never fails the dream; consolidate failure leaves episodes open for retry) |
+| 4. Prune | LLM | Enforces 200-line limit, removes stale entries, verifies wikilink pointers. Never touches `episodes/` (insert-only autobiography) |
 
 | File | Purpose |
 |------|---------|
@@ -254,16 +254,16 @@ Cross-session scratchpad — open threads, hypotheses, unresolved questions. Sol
 | File | Purpose |
 |------|---------|
 | `living_memory.py` | Read/write/age primitives — file_lock + atomic writes, regex section parsing, 3-day dedup, insert-only archive |
-| `vault/memory/WORKING.md` | Canonical scratchpad (5 fixed sections: Open Threads, Active Hypotheses, Unresolved Questions, Heartbeat Observations [reserved], Archived (Cold)) |
+| `vault/memory/WORKING.md` | Canonical scratchpad (5 fixed sections: Open Threads, Active Hypotheses, Unresolved Questions, Heartbeat Observations (live — ambient heartbeat bullets, Living Mind Act 2), Archived (Cold)) |
 | `runtime/bootstrap.py` | `_extract_working_memory()` — compact ~400-char briefing block between rules and active projects |
 | `chat/engine.py` | `working_memory` frozen region (600-token budget, full content, after `durable_memory`) |
-| `hooks/session-end-flush.py` | `append_open_threads_from_flush()` — 6 regex signals (TODO, waiting on, next up, need to verify, etc.), capped at 3/session, no LLM |
+| `hooks/session-end-flush.py` | `append_open_threads_from_flush()` — 6 regex signals (TODO, waiting on, next up, need to verify, etc.), capped at 3/session, no LLM. Win32 fix (Act 3): session-id sanitized at filename composition (`_safe_filename_component`, `[A-Za-z0-9._-]+`) so colon-bearing chat keys no longer kill the hook; raw id kept for dedup + payload. Spawned flush also writes an episode (see Episodes below) |
 | `memory_dream.py` | Phase 2.5 — `archive_stale_working_items()` moves items >`WORKING_MEMORY_AGE_DAYS` (default 7) |
 
 **Commands:**
-- `/working` — show active sections (Open Threads / Hypotheses / Questions)
+- `/working` — show active sections (Open Threads / Hypotheses / Questions / Heartbeat Observations)
 - `/working add "<text>"` — append to Open Threads with today's date
-- `/working resolve <N>` — move item N (1-based) to Archived with `[resolved YYYY-MM-DD]` prefix
+- `/working resolve <N>` — move item N (1-based) to Archived with `[resolved YYYY-MM-DD]` prefix (Open Threads only — observations are not resolvable; they age out)
 
 **Observability:** 3 Langfuse spans — `living_memory_read`, `living_memory_write`, `living_memory_archive`. Metadata includes `threads_count`, `bytes_read/written`, `archived_count`, `sections_touched`, `threads_skipped_dedup`. All spans fail-open (try/except wraps every Langfuse call).
 
@@ -274,11 +274,78 @@ Cross-session scratchpad — open threads, hypotheses, unresolved questions. Sol
 - 3-day dedup window via subject prefix match (40 chars, case-insensitive)
 - Atomic writes via `tmp + os.replace()` under `shared.file_lock()` (cross-platform, 5s timeout)
 - Frontmatter `date:` field refreshed on every write
-- Non-goals: Phase 2 episodes/, Phase 3 heartbeat observation writes (section reserved empty), Phase 4 proactive brief generator
+- Living Mind program COMPLETE: heartbeat observation writes SHIPPED in Act 2; episodes/ SHIPPED in Act 3; the composed first-person brief SHIPPED in Act 4 (Session Opening Brief — see below and `docs/manual/features/session-opening-brief.md`)
+
+**Heartbeat Observations (Living Mind Act 2):** every heartbeat run derives deterministic ambient observations (counts, dates, operator-owned labels — never external free text) from the gather step's sense facts and writes them into the reserved section via `living_memory.append_heartbeat_observation` (capped 10, deduped 3d, aged 7d in-write + by dream cycle). Default groups: `calendar,email,finance,tasks,community,blockers` (all on — locked 2026-06-12); `HEARTBEAT_OBSERVATION_GROUPS=""` disables. Knobs + group/predicate table: `docs/manual/features/heartbeat-runtime.md`.
 
 **Env vars:**
 - `REGION_BUDGET_WORKING_MEMORY` (default 600) — token budget for the engine region
-- `WORKING_MEMORY_AGE_DAYS` (default 7) — age threshold for dream cycle archival
+- `WORKING_MEMORY_AGE_DAYS` (default 7) — age threshold for dream cycle archival (threads/hypotheses/questions)
+- `HEARTBEAT_OBSERVATION_*` — ambient-observation knobs (groups, per-run cap, thresholds, section cap/dedup/age) — full table in the heartbeat-runtime manual page
 
 **Tests:** 19 tests (13 behavior + 5 Langfuse spans + 1 resolve integration)
 **Commit:** `1de11c0`
+
+### Episodes (Living Mind Act 3)
+
+The self's autobiography. Every meaningful flush leaves a structured narrative episode in `vault/memory/episodes/{YYYY-MM-DD}-{surface}-{sid8}-{HHMMSS}.md` — written by the EXISTING `memory_flush.py` (no new pipeline, no new LLM call: the flush prompt now emits its bullets under `## Summary` / `## Key Decisions` / `## Open Threads` / `## Texture`, parsed deterministically with an all-under-Summary fallback for provider variance). Episodes contain the LLM summary, NEVER the transcript — the writer receives only `response_text` + the context FILENAME.
+
+| File | Purpose |
+|------|---------|
+| `episodes.py` | Primitives — `derive_flush_meta`, `parse_flush_sections`, `write_episode_from_flush`, `list_open_episodes`, `render_episodes_digest`, `mark_episodes_consolidated`. Atomic writes under `file_lock`, lazy Langfuse spans (`episode_write`, `episode_consolidate_flip`) |
+| `memory_flush.py` | Calls the writer after the daily-log append (fail-open), then best-effort single-file reindex (`_reindex_episode` → `recall_service.reindex_file`) so episodes are searchable same-day |
+| `memory_dream.py` | Gather scans open episodes into the signal score + `SignalResult.episode_paths`; consolidate prompt gains `## Recent Episodes (open)`; post-consolidate flip marks them `consolidated` |
+| `config.py` | `get_episode_settings()` — Rule 1 call-time resolver for all `EPISODE_*` knobs |
+
+**Key behavior:**
+- Episode key = LIFECYCLE-unique (hook-run timestamp from the context filename), NOT the channel-stable chat session key — two `/clear`s of the same channel on the same day are two files; a same-lifecycle retry appends `## Update (HH:MM)` and re-opens the episode
+- Filename date = lifecycle START date (midnight crossover stays in one file); `sid8 = sha1(session_id)[:8]` groups a channel's episodes
+- Frontmatter: `tags: [system, memory, living-mind]` (existing taxonomy — lint-clean), `status: open|consolidated`, `consolidated_at:` set by the dream flip
+- `FLUSH_OK` never writes an episode; `EPISODE_MIN_CHARS` (80) floor; `EPISODE_MAX_PER_DAY` (20) caps NEW files per lifecycle-date (updates exempt)
+- Recall reach is free: `memory_index` rglob includes `episodes/`, search/recall code unchanged; `--path-prefix episodes/` scopes searches
+- Insert-only history: no archival, dream prune never touches episodes
+- Knobs: `EPISODE_MIN_CHARS`, `EPISODE_MAX_PER_DAY`, `EPISODE_DREAM_MAX_FILES` (10), `EPISODE_DREAM_MAX_CHARS_PER` (600), `EPISODE_DREAM_MAX_TOTAL_CHARS` (4000)
+
+**Operator page:** `docs/manual/features/episodes.md`
+**Tests:** `tests/test_episodes.py` (55) + `tests/test_session_flush_hooks.py` (13, win32 hook fix) + episode cases in `tests/test_memory_flush_gate.py` and `tests/test_memory_dream.py`
+
+### Session Opening Brief (Living Mind Act 4)
+
+The 6:30am moment — the composed first-person brief. The operator's first interactive ENGINE turn after a meaningful absence (default 8h, inclusive) opens with a deterministic "while you were out" block: fresh heartbeat observations + fresh `[heartbeat]`-tagged threads + episodes written while away (status-agnostic) + applied memory amendments, with open threads as Mid-flight context. **Zero new LLM calls** — the block rides the EXISTING turn's `RuntimeRequest.prompt` as a suffix (the attachment transport: stdin on the native lane, `User task:` on CLI lanes; never the win32-capped system append, never `message.text` — persisted history shows operator text only).
+
+| File | Purpose |
+|------|---------|
+| `cognition/proactive_brief.py` | `build_session_opening_brief` (gate → reads → boredom → cap-priority render), `normalize_physical_timestamp` (the ONE timestamp owner: SQLite naive / Postgres aware / clear-event ISO / amendment aware-UTC → naive local), brief-owed marker IO (`read/write/clear_brief_owed` over `STATE_DIR/session-brief-owed.json`). Existing `build_proactive_brief*` builders untouched |
+| `chat/engine.py` | `resolve_last_operator_activity` (max of newest INTERACTIVE session `updated_at` + newest interactive-trigger clear event — Rule 2, physical state only), `_maybe_session_brief` (per-turn decision, whole-body fail-open, `trace_decisions["session_brief"]` every turn), `note_router_activity` (marker seam), prompt suffix at the `RuntimeRequest` call site |
+| `chat/router.py` + `chat/core_handlers.py` | `note_router_activity` called at the `_persist_router_turn` pre-bump seam and before the `/clear` lifecycle — a `/status`-first morning cannot eat the brief (marker carries the pre-bump boundary; consumed exactly once by the first completed engine decision, fired OR silent) |
+| `chat/session_lifecycle_hooks.py` | Clear-event rows gain additive `trigger_source` (interactive/cron/tool/hook); resolver counts only interactive; missing field = legacy interactive (2026-06-12) |
+| `episodes.py` | `list_episodes_since` — strict-after lifecycle instant, date fallback, status-AGNOSTIC (overnight-consolidated episodes still surface) |
+| `config.py` | `get_session_brief_settings()` — Rule 1 call-time resolver for all `SESSION_BRIEF_*` knobs |
+
+**Key behavior:**
+- Boredom instinct (the `DREAM_SILENT` pattern): `fresh_items < SESSION_BRIEF_MIN_FRESH_ITEMS` → NO injection, not even a minimal line. Open threads NEVER count (fresh manual threads included) — only change sources do, plus the single explicit `[heartbeat]`-tag exception. Silence gets its own receipt (`[SessionBrief] silent` + trace decision)
+- Gate: raw `source == "interactive"` EXACT equality (fail-open `normalize_source` deliberately not trusted), non-PIV, away ≥ threshold (inclusive), fresh items ≥ min. Prefetched-context turns DO fire
+- Render priority: instruction reserved → one item per fired source reserved → deep-fill What changed → Self updates → Mid-flight (context drops first); newline-boundary `[TRUNCATED]`
+- Double-fire bound: in-memory `_session_brief_fired_at` fold; process restart inside a gap = at worst one extra brief (accepted)
+- Fail-open at every seam: builder/resolver/marker failures → bare turn, decision `error`, marker preserved for retry
+- Knobs: `SESSION_BRIEF_ENABLED` (true), `SESSION_BRIEF_AWAY_HOURS` (8), `SESSION_BRIEF_MIN_FRESH_ITEMS` (1), `SESSION_BRIEF_MAX_PER_SECTION` (5), `SESSION_BRIEF_MAX_CHARS` (2400)
+- Act 2 deferred pickup closed: `living_memory_read` span metadata now carries `observations_count` in both branches
+
+**Operator page:** `docs/manual/features/session-opening-brief.md`
+**Tests:** `tests/test_session_brief.py` (51) + Act 4 cases in `tests/test_chat_runtime_engine.py` (9), `tests/test_router_transcript_persistence.py` (5), `tests/test_chat_lifecycle_hooks.py` (3), `tests/test_episodes.py` (9), `tests/test_living_memory.py` (2)
+
+### The Living Self (Make The Self Real — Acts 1-4)
+
+Where Living Mind gave the assistant a substrate (sense → remember → brief), the Make The Self Real program turned the mimic into an individuated self that forms, holds, and earns its own beliefs. It is woven into the EXISTING scheduled cadence — the morning reflection now runs belief extraction + the contradiction pass alongside promotion/decay; no new pipeline. Full operator/architecture runbook: `docs/the-living-self-manual.md`.
+
+| Act | Module(s) | What it made real | Cadence |
+|-----|-----------|-------------------|---------|
+| 1 — self-model source | `cognition/operator_beliefs.py`, `self_model.py`, `capture.py` | Models the OPERATOR from verbatim `role==user` chat.db turns (not the bot's own replies); embedding cosine dedup (`INFERENCE_DEDUP_THRESHOLD=0.72`); `explicit`/`reflection` provenance sources wired; reversible `migrate-corpus` CLI quarantines keyword-capture poison; renderer source-filtered | Reflection (8 AM) extracts; per-turn capture stages |
+| 2 — contradiction engine | `cognition/belief_conflicts.py` | A belief can be HELD AGAINST CONFLICT — nightly embedding pre-filter + LLM judge; explicit beliefs SACROSANCT (an LLM can never lower an operator-stated belief; loser is always a `reflection` by construction); once-only via the `contradicted_by` audit key (drops once, never flaps); held-under-tension render | Reflection (8 AM), after extraction |
+| 3 — gated cognitive pass | `cognition/cognitive_pass.py`, `processes.py`, `proactive_actions.py` | The Homie THINKS BEFORE IT SPEAKS — gated inner monologue on substantive turns (the `*_process` functions refactored to return `(wm, thought, actions)` not BE the reply); haiku tier, `asyncio.wait_for` timeout, history-pure (never enters the transcript), win32-capped via the canonical `regions.truncate_for_win32_argv`; proactive action proposes through the default-deny integration gate | Per-turn, gated (`COGNITIVE_PASS_FIRE_PROCESSES=planning`, `MIN_CHARS=40`) |
+| 4 — evolve → identity | `scripts/evolve/evolve_loop.py`, `judge.py`, `belief_regression.py`, `cognition/evidence_gate.py`, the `amendments.py` seam | Belief is EARNED not asserted — three layers: evidence-READ gate (`evidence_gate` opens+CONFINES to the vault+BOUNDS each cited path), the deterministic `belief_regression` floor (reuses the never-softenable `evolve/veto` floor; seeded with the system's own failure modes), and a circularity-guarded scheduled LLM judge (fails CLOSED). The `amendments.py` default-deny gate is ADDITIVE-unchanged (`evidence_check=None` = byte parity). Archon drives candidate search; `evolve/` is the fitness oracle | `evolve propose` scheduled (recall-safe); `propose-belief` Archon-driven (identity) |
+
+**Key invariants:** the belief judge has ZERO chat-hot-path calls (scheduled/Archon only); the amendment ledger + rollback + audit are untouched (Act 4 inserts before them); the evidence gate confines reads to the vault (no `.env`/secret leakage to the judge prompt); every faculty fails open. The crux acceptance test (form → hold → persist-only-if-earned → act) passes: an empty-evidence high-confidence "I read the doc" belief is REJECTED on a real falsifiable check, SELF.md byte-unchanged.
+
+**Config resolvers (all Rule-1 call-time):** `get_inference_extraction_settings`, `get_contradiction_settings`, `get_cognitive_pass_settings`, `get_belief_evolve_settings` — knob tables in `docs/the-living-self-manual.md` §8.
+**Tests:** `tests/test_living_self_act{1,2,3,4}.py` + the contradiction/evolve/amendment suites.

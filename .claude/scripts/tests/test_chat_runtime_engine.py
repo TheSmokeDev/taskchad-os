@@ -1020,6 +1020,12 @@ def _legacy_build_frozen_regions(
             active = tracker.get_active(
                 min_confidence=_INFERENCE_PROMPT_MIN_CONFIDENCE,
             )
+            # Living Self Act 1 (B1): the live renderer now source-filters to
+            # trustworthy operator-belief sources {reflection, explicit}. The
+            # legacy reference must mirror that filter to stay a valid parity
+            # baseline (this test proves the identity-payload shim refactor is
+            # behavior-preserving, not the inference-source contract).
+            active = [r for r in active if r.source in ("reflection", "explicit")]
             if active:
                 active.sort(key=lambda r: r.last_updated or "", reverse=True)
                 active.sort(key=lambda r: r.confidence, reverse=True)
@@ -1250,3 +1256,370 @@ def test_grounding_survives_win32_truncation() -> None:
     assert result.startswith(engine_module.GROUNDING_RULES)
     assert result.endswith("[TRUNCATED]")
     assert len(result) == 27000 + len("\n[TRUNCATED]")
+
+
+# =============================================================================
+# Living Mind Act 4 — Session Opening Brief engine wiring
+# (categories 8-10 of the Act 4 validation plan: injection proof, gate skips,
+# trace decisions, double-fire guard, marker consumption, fail-open.)
+# =============================================================================
+
+from datetime import datetime as _dt_cls  # noqa: E402
+from datetime import timedelta as _td  # noqa: E402
+
+import cognition.proactive_brief as _pb  # noqa: E402
+from cognition.proactive_brief import SessionOpeningBrief  # noqa: E402
+
+_FIRED_BLOCK = (
+    "# Session Opening Brief (deliver first)\n\n"
+    "OPEN your reply with a short first-person brief.\n\n"
+    "## What changed while away\n- [2026-06-12] [calendar] busy day: 5 events"
+)
+
+
+def _fired_brief() -> SessionOpeningBrief:
+    return SessionOpeningBrief(_FIRED_BLOCK, True, 8.5, 1, "")
+
+
+def _suppressed_brief(reason: str, away: float | None = None) -> SessionOpeningBrief:
+    return SessionOpeningBrief("", False, away, 0, reason)
+
+
+def _patch_brief_seams(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    brief: SessionOpeningBrief | None = None,
+    builder=None,
+    owed: _dt_cls | None = None,
+    physical: _dt_cls | None = None,
+) -> dict[str, list]:
+    """Patch ALL Act 4 module seams so engine tests never touch live
+    STATE_DIR / vault files (the PRP test-isolation contract)."""
+    calls: dict[str, list] = {"build": [], "clear": []}
+
+    def _default_builder(memory_dir, **kwargs):
+        calls["build"].append(kwargs)
+        return brief if brief is not None else _suppressed_brief("not_away", 0.1)
+
+    monkeypatch.setattr(
+        _pb, "build_session_opening_brief", builder or _default_builder
+    )
+    monkeypatch.setattr(_pb, "read_brief_owed", lambda **kwargs: owed)
+    monkeypatch.setattr(
+        _pb, "clear_brief_owed", lambda **kwargs: calls["clear"].append(True)
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "resolve_last_operator_activity",
+        lambda store, **kwargs: physical,
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_session_brief_rides_runtime_prompt_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Category 8: the brief is a prompt SUFFIX — absent from the system
+    append (win32 argv guard), absent from persisted chat.db rows (history
+    purity), and the outgoing text is the runtime text unmodified."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="Morning rundown.",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+    calls = _patch_brief_seams(
+        monkeypatch,
+        brief=_fired_brief(),
+        physical=_dt_cls.now() - _td(hours=10),
+    )
+
+    message = _make_message("good morning, how are we looking?")
+    outputs = [out async for out in convo.handle_message(message)]
+
+    request = captured["request"]
+    assert request.prompt.endswith(_FIRED_BLOCK)
+    assert request.prompt.startswith("good morning, how are we looking?")
+    assert "# Session Opening Brief" not in request.system_prompt["append"]
+    assert outputs[-1].text == "Morning rundown."
+    # History purity: the persisted user row is the BARE operator text.
+    messages = store.list_messages("telegram:chat-1:thread-1")
+    assert messages[0].content == "good morning, how are we looking?"
+    assert "# Session Opening Brief" not in messages[0].content
+    assert "# Session Opening Brief" not in messages[1].content
+    assert len(calls["build"]) == 1
+    # fired -> the (absent) marker is still cleared best-effort
+    assert calls["clear"] == [True]
+    # In-memory guard armed.
+    assert convo._session_brief_fired_at is not None
+
+
+@pytest.mark.asyncio
+async def test_session_brief_coexists_with_attachment_brief_last(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+    monkeypatch.setattr(
+        engine_module, "build_attachment_context", lambda attachments: "DOC BODY"
+    )
+    _patch_brief_seams(
+        monkeypatch,
+        brief=_fired_brief(),
+        physical=_dt_cls.now() - _td(hours=10),
+    )
+
+    outputs = [out async for out in convo.handle_message(_make_message("summarize"))]
+    assert outputs[-1].text == "ok"
+    prompt = captured["request"].prompt
+    assert prompt.endswith(_FIRED_BLOCK)  # brief LAST
+    doc_idx = prompt.index("# Uploaded Document Content")
+    brief_idx = prompt.index("# Session Opening Brief")
+    assert doc_idx < brief_idx
+    assert "DOC BODY" in prompt
+
+
+@pytest.mark.asyncio
+async def test_session_brief_not_away_leaves_prompt_unmodified(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+    _patch_brief_seams(
+        monkeypatch,
+        brief=_suppressed_brief("not_away", 0.1),
+        physical=_dt_cls.now() - _td(minutes=5),
+    )
+
+    message = _make_message("quick follow-up question")
+    outputs = [out async for out in convo.handle_message(message)]
+    assert outputs[-1].text == "ok"
+    assert captured["request"].prompt == "quick follow-up question"
+
+
+def test_session_brief_gate_skips_piv_and_non_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Category 9: PIV turns and non-interactive sources never reach the
+    builder; the M5 fail-closed sweep proves raw exact-match (no
+    normalization rescue)."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+
+    def _boom_builder(memory_dir, **kwargs):
+        raise AssertionError("builder must not be called for gated turns")
+
+    def _boom_resolver(store, **kwargs):
+        raise AssertionError("resolver must not run for gated turns")
+
+    monkeypatch.setattr(_pb, "build_session_opening_brief", _boom_builder)
+    monkeypatch.setattr(
+        engine_module, "resolve_last_operator_activity", _boom_resolver
+    )
+
+    piv_message = _make_message("run the workflow")
+    piv_message.is_piv = True
+    trace: dict[str, object] = {}
+    assert convo._maybe_session_brief(piv_message, trace_decisions=trace) == ""
+    assert trace["session_brief"]["suppressed"] == "is_piv"
+    assert trace["session_brief"]["fired"] is False
+
+    # M5 fail-closed sweep: raw exact equality — whitespace, case, and empty
+    # variants all fail closed (normalize_source would have rescued them).
+    for source in ("cron", "tool", "hook", "cron ", "TOOL", ""):
+        message = _make_message("hello")
+        message.source = source
+        trace = {}
+        assert convo._maybe_session_brief(message, trace_decisions=trace) == ""
+        assert trace["session_brief"]["suppressed"] == "non_interactive", source
+
+
+def test_session_brief_negative_decisions_reach_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Category 9 (M1): every builder-suppressed reason lands in
+    trace_decisions — not only fired cases."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+
+    for reason, away in (
+        ("disabled", None),
+        ("no_history", None),
+        ("not_away", 0.25),
+        ("no_fresh_items", 12.0),
+    ):
+        _patch_brief_seams(
+            monkeypatch,
+            brief=_suppressed_brief(reason, away),
+            physical=_dt_cls.now() - _td(hours=1),
+        )
+        trace: dict[str, object] = {}
+        out = convo._maybe_session_brief(
+            _make_message("hello"), trace_decisions=trace
+        )
+        assert out == ""
+        decision = trace["session_brief"]
+        assert decision["suppressed"] == reason
+        assert decision["fired"] is False
+        if away is None:
+            assert decision["away_hours"] is None
+        else:
+            assert decision["away_hours"] == pytest.approx(away, abs=0.01)
+
+
+def test_session_brief_double_fire_guard_folds_fired_at(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Category 9: _session_brief_fired_at folds into the max so a second
+    message cannot re-fire even before the first turn persists."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    physical = _dt_cls(2026, 6, 11, 22, 0)
+    fired_at = _dt_cls(2026, 6, 12, 6, 30)
+    convo._session_brief_fired_at = fired_at
+    calls = _patch_brief_seams(
+        monkeypatch,
+        brief=_suppressed_brief("not_away", 0.1),
+        physical=physical,
+    )
+
+    convo._maybe_session_brief(_make_message("hello"), trace_decisions={})
+    assert len(calls["build"]) == 1
+    assert calls["build"][0]["last_activity"] == fired_at  # max(physical, fired_at)
+
+
+def test_session_brief_marker_min_defuses_post_bump_physical(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Category 10: with a marker present, the effective boundary is
+    min(marker, physical) — the marker predates the router bump."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    marker_boundary = _dt_cls(2026, 6, 11, 22, 0)
+    bumped_physical = _dt_cls(2026, 6, 12, 6, 29)  # the /status bump
+    calls = _patch_brief_seams(
+        monkeypatch,
+        brief=_fired_brief(),
+        owed=marker_boundary,
+        physical=bumped_physical,
+    )
+
+    out = convo._maybe_session_brief(_make_message("hello"), trace_decisions={})
+    assert out == _FIRED_BLOCK
+    assert calls["build"][0]["last_activity"] == marker_boundary
+    assert calls["clear"] == [True]  # consumed by the completed decision
+
+
+def test_session_brief_silent_decision_consumes_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Category 10: a silent (no_fresh_items) decision ALSO consumes the
+    marker — only-on-fire would defer the debt into an off-window fire."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _patch_brief_seams(
+        monkeypatch,
+        brief=_suppressed_brief("no_fresh_items", 10.0),
+        owed=_dt_cls(2026, 6, 11, 22, 0),
+        physical=_dt_cls(2026, 6, 12, 6, 29),
+    )
+
+    out = convo._maybe_session_brief(_make_message("hello"), trace_decisions={})
+    assert out == ""
+    assert calls["clear"] == [True]
+
+
+@pytest.mark.asyncio
+async def test_session_brief_builder_exception_fail_open_marker_intact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Category 9/10: a builder explosion never breaks the turn (decision
+    "error", bare prompt) and leaves the marker INTACT for retry."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="still works",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    def _boom_builder(memory_dir, **kwargs):
+        raise RuntimeError("builder exploded")
+
+    cleared: list[bool] = []
+    monkeypatch.setattr(_pb, "build_session_opening_brief", _boom_builder)
+    monkeypatch.setattr(
+        _pb, "read_brief_owed", lambda **kwargs: _dt_cls(2026, 6, 11, 22, 0)
+    )
+    monkeypatch.setattr(
+        _pb, "clear_brief_owed", lambda **kwargs: cleared.append(True)
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "resolve_last_operator_activity",
+        lambda store, **kwargs: _dt_cls(2026, 6, 12, 6, 0),
+    )
+
+    trace: dict[str, object] = {}
+    out = convo._maybe_session_brief(_make_message("hello"), trace_decisions=trace)
+    assert out == ""
+    assert trace["session_brief"]["suppressed"] == "error"
+    assert cleared == []  # marker survives for retry
+
+    # The turn itself completes bare through the real path.
+    outputs = [out async for out in convo.handle_message(_make_message("hello"))]
+    assert outputs[-1].text == "still works"
+    assert captured["request"].prompt == "hello"

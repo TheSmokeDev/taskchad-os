@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -391,6 +391,14 @@ class AmendmentPolicy:
     min_evidence_paths: int = 1
     max_content_chars: int = 1200
     allow_destructive: bool = False
+    # Living Self Act 4 — additive evidence-READ precondition. Default None = the
+    # EXACT pre-Act-4 behavior (parity: the seam below is skipped entirely). The
+    # 44-amendment producers leave this None; only evolve_loop.py binds it to
+    # cognition.evidence_gate.verify_evidence_support so a candidate's cited
+    # evidence is OPENED + CONFINED + verified before the unchanged gate. The
+    # check is DETERMINISTIC (no provider call) — the LLM judge lives in
+    # evolve/judge.py, scheduled-only, never this seam.
+    evidence_check: Callable[[AmendmentProposal, Path], tuple[bool, str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -598,6 +606,34 @@ def apply_amendment_if_allowed(
                 status="applied",
                 policy_decision="reconcile",
                 policy_reason="already_present_in_target",
+            )
+
+    # Living Self Act 4 — additive evidence-READ seam (default None = parity, the
+    # block is skipped). When bound (only by evolve_loop.py), a candidate whose
+    # cited evidence does not confine + exist + support is REJECTED here, BEFORE
+    # the UNCHANGED default-deny gate below — belief EARNED, not asserted. The
+    # rejection is a ledger STATUS mutation only (no .bak, no target write), shape-
+    # identical to the existing policy-reject path, so a rejected candidate leaves
+    # NO partial write. evaluate_amendment_policy and everything after stay
+    # byte-for-byte unchanged.
+    if active_policy.evidence_check is not None:
+        ev_ok, ev_reason = active_policy.evidence_check(proposal, memory_root)
+        if not ev_ok:
+            ledger._update_record(
+                proposal.id,
+                {
+                    "status": "policy_rejected",
+                    "policy_decision": "reject",
+                    "policy_reason": ev_reason,
+                    "reviewed_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            return AmendmentApplyResult(
+                proposal_id=proposal.id,
+                target_file=proposal.target_file,
+                status="policy_rejected",
+                policy_decision="reject",
+                policy_reason=ev_reason,
             )
 
     allowed, reason = evaluate_amendment_policy(proposal, active_policy)

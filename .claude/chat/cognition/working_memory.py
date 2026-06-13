@@ -75,6 +75,12 @@ class WorkingMemory:
         "procedural_memory",
         "prefetched_context",
         "attachment_context",
+        # Living Self Act 3: the gated cognitive-pass monologue (role="system",
+        # region="internal") sits LATE — after durable context, just before the
+        # live conversation — so current-turn thinking renders near the turn it
+        # informs. Additive entry; makes the ordering DETERMINISTIC (it was
+        # tail-dumped via default_order before).
+        "internal",
         "recent_conversation",
     )
 

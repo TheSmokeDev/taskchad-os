@@ -51,10 +51,12 @@ def extract_candidates(
     """
     candidates: list[StagingCandidate] = []
 
-    # Scan both user message and assistant response
+    # Living Self Act 1 (B2): scan ONLY the operator's own words. Scanning the
+    # assistant response produced bot-self-quotes (the bot's UX prose like
+    # "End by asking whether the user wants edits…" matched the preference
+    # trigger and became a "belief"). Operator beliefs need operator words.
     texts_to_scan = [
         (user_message, "user"),
-        (assistant_response, "assistant"),
     ]
 
     for text, source in texts_to_scan:
@@ -133,23 +135,12 @@ def auto_capture_from_turn(
         if staging_store.append(candidate):
             written += 1
 
-    # Move 5a: Feed preference/pattern captures to InferenceTracker
-    if written > 0:
-        try:
-            from cognition.self_model import InferenceTracker
-
-            from config import INFERENCE_STATE_FILE
-
-            tracker = InferenceTracker(INFERENCE_STATE_FILE)
-            for candidate in candidates:
-                if candidate.candidate_type in ("preference", "decision"):
-                    tracker.add_inference(
-                        inference=candidate.observation[:200],
-                        observation=candidate.observation,
-                        confidence=0.5,
-                        source="auto_capture",
-                    )
-        except (ImportError, Exception):
-            pass  # Non-blocking — inference tracking is optional
-
+    # Living Self Act 1 (B2): capture NEVER writes an inference again. The old
+    # Move-5a block wrote the raw matched sentence straight into
+    # self-model-inferences.json as source="auto_capture" — zero extraction, the
+    # entire poison corpus. Operator beliefs are now formed only by the real LLM
+    # extractor over VERBATIM operator words in the scheduled reflection loop
+    # (cognition.operator_beliefs). fact/decision/entity/self_model staging into
+    # StagingStore stays (a different, unpoisoned surface feeding MEMORY.md/SELF.md
+    # through the promotion gate).
     return written

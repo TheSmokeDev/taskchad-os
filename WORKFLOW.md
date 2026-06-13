@@ -7,6 +7,53 @@
 
 ---
 
+## PRD-doc-upload-truthful-reads — SHIPPED (2026-06-11, all 3 phases)
+
+**PRD:** `PRDs/active/PRD-doc-upload-truthful-reads.md` · **PRPs:** `PRPs/active/PRP-doc-upload-truthful-reads-phase-{1,2,3}.md` · **Analysis:** `PRPs/planning/doc-upload-truthful-reads-analysis.md`
+**Incident:** 2026-06-10 — 81KB transcript upload hit the 180s timeout on the Codex lane; "Did you ingest it?" got a confabulated YES; even success would have silently read 6K/82.8K chars.
+**Pre-build gate (consolidated R1→R2):** R1 **REJECT** (B1 Discord adapter missing from inventory, B2 compile_entities mutates/fails on raw .md archives, B3 grounding-in-chat_rules still tail-truncatable under the win32 27K head-keep, B4 stale test-file claims) → revise → R2 **ADOPT-WITH-FIXES** (3 Phase-3 PRP-text majors, applied; 0 new blockers). Artifacts: `PRPs/planning/doc-upload-truthful-reads-all-phases-adversarial-{r1,r2}.md`.
+
+### Phase 1: Truthfulness / contract fix
+- **Status**: completed
+- **Commit**: `9658940a` (fix(chat): truthful attachment-turn failures + lane-wide grounding prefix)
+- **Execution Mode**: solo (piv-executor)
+- **Team Failure**: none
+- **Workstreams**: truthfulness: completed (router.py, engine.py, prompt_builder.py + 3 test files)
+- **Tests**: 48 passing across 3 scoped suites (5 new: real-path attachment-timeout persistence, name-cap unit, grounding-prefix capture, win32-truncation survival regression, TEXT-preamble grounding)
+- **Files Changed**: +162 −7 across 6 files
+- **Validation**: validator PASS (0 gaps, byte-identity + truncation equivalence proven programmatically) → post-build adversarial **PASS** (0 findings; artifact `PRPs/planning/doc-upload-truthful-reads-phase-1-adversarial-post-build.md`)
+- **Key invariants**: generic no-attachment timeout text byte-identical; `GROUNDING_RULES` literal prefix at engine.py:588 + :875 (the only two append assignment sites); `_truncate_win32_append` behavior-identical extraction
+### Phase 2: Read the whole document
+- **Status**: completed
+- **Commit**: `c09b2398` (feat(chat): full-document reads — attachment content rides the turn prompt)
+- **Execution Mode**: solo (piv-executor) + piv-debugger fix loop
+- **Team Failure**: none
+- **Workstreams**: full-reads: completed (config.py, attachment_context.py, engine.py, regions.py, telegram.py, discord.py, router.py + 6 test files + .env.example + multi-channel-adapters manual)
+- **Tests**: 86 passing across 6 scoped suites (10 new + 2 updated-by-design + 3 fix-loop underflow regressions)
+- **Files Changed**: +609 −52 across 15 files
+- **Validation**: validator PASS (0 gaps — prompt_text leak-grep, live .env clean of new keys) → post-build **R1 FIX-REQUIRED** (F1: `_truncate` slices `text[:max_chars-50]`; runtime-tunable caps <50 go NEGATIVE → 32-char cap leaked 482/538 chars + lying PARTIAL math) → clamp fix + discriminating regressions + 4-sibling slice audit (1 fixed, 3 clean) → **R2** F1 closed incl. negative-typo caps, new F2 (manual overstated CSV/TSV as full-read; CSV stays 60-row preview by design) → reword → **R3 PASS**. Artifacts: `doc-upload-truthful-reads-phase-2-adversarial-post-build{,-r2,-r3}.md`
+- **Key invariants**: document body NEVER in chat.db (persistence uses message.text); GROUNDING_RULES prefix intact at both sites; caps resolve at call time (Rule 1) and thread build→extract (M2); module ENGINE_TIMEOUT_SECONDS override keeps absolute precedence
+- **Known follow-up (policy, not code)**: Claude SDK Langfuse auto-instrumentation may capture full document-bearing prompts in traces (local self-hosted Langfuse; the framework's own root span clips input to 200 chars) — operator decision whether to bound SDK capture
+- **Next Phase**: Phase 3 (explicit /vault-ingest document ingest, Telegram-caption-only, default-deny)
+- **Resume Instructions**: `/clutch PRDs/active/PRD-doc-upload-truthful-reads.md 3` — PRPs already R1/R2-gated (+R2 fixes applied in PRP), skip pre-build
+
+### Phase 3: Explicit /vault-ingest document ingest (default-deny)
+- **Status**: completed — PRD COMPLETE
+- **Commit**: `61f387bd` (feat(chat): /vault-ingest caption ingests uploaded documents)
+- **Execution Mode**: solo (piv-executor) + piv-debugger fix loop
+- **Team Failure**: none
+- **Workstreams**: doc-ingest: completed (models.py, telegram.py, router.py, attachment_context.py, entity_extractor.py, test_adapter_telegram.py + NEW test_vault_ingest_document.py)
+- **Tests**: 237 passing across 6 scoped suites (40 in the new ingest suite; 9 fix-loop regressions)
+- **Files Changed**: +1481 −35 across 7 files
+- **Validation**: validator PASS (0 gaps; independently confirmed the 2 sweep failures pre-date this work: test_session_source FakeManager gap at HEAD + test_url_fetch UTC-vs-local evening-PT flake) → post-build **R1 FIX-REQUIRED** with 3 real findings: F1 burst-coalescing widened/dropped the caption gate in the production queue path (default-deny breach — direct `_handle_inner` tests were structurally blind to `_queue_incoming`/`_merge_incoming_batch`), F2 TOCTOU in preserve_raw (concurrent same-name uploads last-writer-win over the immutable raw archive), F3 filename→Markdown-reply injection (forged-receipt spoofing) → fixes with discriminator proofs (ingest-captioned turns bypass coalescing + non-unanimous merge captions cleared; O_CREAT|O_EXCL atomic claim cascade; `_display_filename` escaping at every echo site; companion tmp+os.replace) → **R2 PASS** (0 new findings, residual probes clean). Artifacts: `doc-upload-truthful-reads-phase-3-adversarial-post-build{,-r2}.md`
+- **Key invariants**: raw archive NEVER the compile surface (sha256 byte-identity, both formats); default-deny holds through the PRODUCTION queue path both burst orderings; display names and storage names are separate layers; bare uploads byte-identical to pre-phase behavior
+- **Accepted (not built)**: Platform.TELEGRAM guard (caption population IS the contract); UNC/long-name/unicode-normalization extra probes (containment proven — follow-up issue candidate); Discord `message.content == "/vault-ingest"` route (named follow-up)
+- **Latent observation for a follow-up issue** (executor-found, out of scope): URL-ingest's clipped markdown carries no `tags:` frontmatter — `_enforce_source_frontmatter` would gate it when eligible entities exist; the upload companion design dodges that class, the URL path may want the same companion treatment
+- **Operator notes**: bot PID 121364 still on pre-fix code — restart required for the live Telegram surface (cron pipelines pick the code up automatically); public export pending (`/export-framework` next run carries phases 1-3 + the #58 fix)
+- **Resume Instructions**: PRD complete — nothing to resume. Live-smoke checklist in PRD §Verification (timeout honesty / full-read tail question / captioned ingest, both lanes)
+
+---
+
 ## PRD-8 Phase 6 — SHIPPED (cabinet voice, port-first verbatim from ClaudeClaw warroom + warroom-html.ts)
 
 **Ship:** merge commit `928da41` to master on 2026-05-10 (worktree `phase-6-cabinet-voice` merged with --no-ff). 4-round post-build adversarial chain returned R4 PASS; merged + sanitize-and-pushed to both repos.
@@ -1143,3 +1190,238 @@ Cole-pattern note: this is the **first time The Homie ships a JSON criteria cont
 ---
 
 *Phase 1 design checkpoint: 2026-05-04. Single interactive session, all 14 decisions locked, Phase 2 PRP + JSON contract drafted with full Cole-pattern adoption. YourAgent.*
+
+---
+
+# Living Mind (PRD-living-mind-2026-06-12) — CLUTCH v3 Program
+
+Operator green-lit Acts 1-4 in one orchestrated session (2026-06-12). Per-act decisions locked in the PRD's "Decided Questions". Directive binding all acts: "properly fixed, not band-aid, don't lose functionality, fully working, full cognition."
+
+## Act 1: Heartbeat Blocker Escalation → WORKING.md — COMPLETE
+
+- **Status**: COMMITTED `8fcec7ba` (2026-06-12)
+- **Execution mode**: Solo (piv-executor, fresh context); orchestrator = main session (operator override of fresh-context rule — context was load-bearing from same-day code inspection)
+- **Adversarial trajectory**: R1 ADOPT-WITH-FIXES (5 blockers/5 majors) → revise pass 1 (5/5+5/5) → R2 REJECT (NB1 accessor-outside-workstream + NM1-4) → revise pass 2 (root-cause: atomic shared.save_state, allowlist-gated promotion w/ full observation breadth, runtime accessor, migration contract) → R3 focused ADOPT → validator 23/23 PASS (0 gaps) → post-build PASS (0 findings)
+- **Workstreams**: WS1 solo — completed (9 files, 2166 insertions / 143 deletions)
+- **Tests**: 76 green in build suites (46 new in test_heartbeat_blockers.py) + 57 consumer-contract green; live smoke clean
+- **Live state after ship**: `google:oauth_invalid_grant` counted at 1/3 distinct days with fix hint; WORKING.md untouched (below threshold); promotion expected ~2026-06-14 from real heartbeats
+- **Artifacts**: `PRPs/active/PRP-living-mind-act1-heartbeat-blocker-escalation.md` (2 revision stamps + R1/R2 dispositions), `PRPs/planning/living-mind-act1-phase-1-adversarial-{r1,r2,r3,post-build}.md`
+- **Known non-blocking**: ProactorBasePipeTransport teardown noise on win32 smoke (pre-existing class); /tmp diff capture path invisible to codex on Windows — post-build reviewed working-tree diff directly (recommendation: repo-local capture path next act)
+- **Deferred to Act 2**: Asana/Slack swallowed-failure visibility (helpers return empty on error — invisible to except-branch detection), promotion-allowlist widening (operator watch-list decision)
+
+## Act 2: Generalized Ambient Observations — NEXT
+
+- Reserved "Heartbeat Observations" section gets writer/caps/dedup/aging + briefing surfacing; full-breadth counters from Act 1 are the input fuel; watch-list = operator decision (proposal pending)
+- Resume cold: `/clutch PRDs/active/PRD-living-mind-2026-06-12.md` — Act 1 SHA `8fcec7ba`; PRP for Act 2 generated by fresh research agent (CLUTCH Step 1); same adversarial mode (yes)
+
+
+## Act 2: Generalized Ambient Observations — COMPLETE
+
+- **Status**: COMMITTED `25bd5a9f` (2026-06-12)
+- **Execution mode**: Solo (piv-executor fresh context); same orchestrator session as Act 1
+- **Adversarial trajectory**: R1 ADOPT-WITH-FIXES (B1 watch-list default contradicted locked operator decision — blockers group missing from default; B2 default not falsifiable; M1-M4) → revise (9/9) → R2 ADOPT-WITH-FIXES (NM1 deterministic scoped smoke — handed to executor) → validator PASS 23/23 with independent fresh-process probe → post-build FIX-REQUIRED (1 stale doc-table row) → orchestrator-fixed + grep-verified → PASS
+- **Tests**: 174 green (96 new: 77 test_heartbeat_observations.py + 19 living_memory additions); grep gates clean
+- **Live receipts**: scheduled heartbeat (runs the working tree) wrote `[finance] low balance` observation at 09:04, next run deduped it (noise-death defense proven live pre-commit); asana/slack token_missing counting live in state via raise_on_error path
+- **Key design locked**: observation bullets carry NO external free text (durable prompt-injection defense); watch-list all-groups default-on (operator 2026-06-12); token_missing ambient-only vs auth_failed promotable; sense_facts <REDACTED-mailgun> contract
+- **Deferred/follow-ups**: living_memory_read span lacks heartbeat_observations_count metadata (→ Act 4 surfacing); clock unification (config.now_local vs living_memory datetime.now) near-midnight drift class — pre-existing, future cleanup; old generic asana:error/slack:error state entries age out (no migration by design)
+
+## Act 3: Episodes — NEXT
+
+- Structured per-session narrative units (upgrade of session-end flush, NOT a new pipeline); dream gains episode-consolidation pass; recall reaches them. Writer + ≥1 consumer ship together (PRD risk #7). No raw transcripts (privacy/size).
+- Resume cold: `/clutch PRDs/active/PRD-living-mind-2026-06-12.md` — Acts 1-2 SHAs `8fcec7ba`, `25bd5a9f`
+
+## Act 3: Episodes — COMPLETE
+
+- **Status**: COMMITTED `83c190c6` (2026-06-12)
+- **Adversarial trajectory**: R1 REJECT (B2 lossy episode key would merge distinct same-channel sessions — the act's defining catch; B1 overstated receipts; B3 unscoped dream smoke) → revise → R2 REJECT (sanitizer INCLUDE_FILES wiring, pwsh-primary validation, born-clean fixtures) → revise pass 2 → **R3 SKIPPED (operator one-revision/lean-gate policy set mid-act)** → executor → validator PASS zero gaps (~300 tests, both shells, extra R2-closure scrutiny) → post-build FIX-REQUIRED (F1 flip primitive swallowed real I/O failures — silent-failure class) → piv-debugger fix w/ discrimination proof (bug re-introduced, 5 tests fail, restored) → PASS
+- **Tests**: 163 + 131 sanitize + 6 parity (95 new); live receipts: production auto-compact flush wrote the first real episode mid-build; win32 /clear flush root-caused (16/17 receipt rows warned) and fixed at filename composition
+- **OPERATOR ITEM OPEN**: live /clear ceremony (restart bot → Telegram turns → /clear → receipt flips warn→ok → chat episode exists → next dream flips it)
+- **Policy change recorded**: pre-build gate = R1 → ONE revise → R2 → execute (R2 narrow findings ride to executor as instructions; no pass-2/R3); validator + post-build carry the verification weight
+
+## Act 4: The Composed Brief — FINAL ACT, NEXT
+
+- Flip proactive_brief from LLM input-context into the operator-facing 6:30am opening: working memory + heartbeat observations + episodic delta + self changes, Main persona voice, away-gated, with the boredom instinct (nothing worth saying → no brief)
+- Resume cold: `/clutch PRDs/active/PRD-living-mind-2026-06-12.md` — Acts 1-3 SHAs `8fcec7ba`, `25bd5a9f`, `83c190c6`
+
+## Act 4: The Composed Brief — COMPLETE
+
+- **Status**: COMMITTED `c226b74c` (2026-06-12)
+- **Adversarial trajectory**: R1 REJECT (4 blockers: cron-clear away-masking, boredom self-contradiction, naive/aware TypeError, router-eats-first-turn; 5 majors) → single revise (lean-gate policy; reviser died on Claude weekly limit mid-pass, re-run clean) → R2 unavailable (Codex quota + Gemini auth both down) → executor (conservative ambiguity resolutions documented) → independent validator PASS 19/19 (live files sha256-identical; pre-existing failures attributed at HEAD via detached worktree) → fresh-context post-build adversarial PASS (first run killed by /exit before persisting; re-run clean — injection/silent-failure/gas-station/concurrency all cleared)
+- **Tests**: 221 + 132 sanitize green (79 new); deterministic probe byte-identical both shells (`stale-thread vault silent; fired 8.5h/3-fresh`)
+- **5 non-blocking follow-ups** (in the post-build artifact): MAX_CHARS soft floor; per-turn resolver DB+jsonl scan (operator-paced, sub-ms); _sanitize_line doesn't strip '#' (cosmetic); **away-resolver legs swallow errors with no log line (closest to CLAUDE.md no-silent-errors — one-line warn = right future cleanup)**; global marker = one extra brief per surface (documented bound)
+- **OPERATOR ITEM OPEN**: live brief proof (needs a real ≥8h gap; non-gating)
+
+---
+
+# LIVING MIND PROGRAM — COMPLETE (2026-06-12)
+
+PRD `PRDs/active/PRD-living-mind-2026-06-12.md` — all 4 acts shipped in one orchestrated session.
+
+| Act | Commit | What |
+|-----|--------|------|
+| 1 | `8fcec7ba` | Heartbeat blocker escalation → WORKING.md (observe → remember) |
+| 2 | `25bd5a9f` | Ambient observations + credential-failure visibility (remember what it watched) |
+| 3 | `83c190c6` | Episodes — the autobiography + win32 /clear flush fix (the self's lived record) |
+| 4 | `c226b74c` | The composed session-opening brief — the 6:30am moment (report the watch) |
+
+The loop closed: **observe → remember → consolidate → brief**, self threaded through. master is 4 commits ahead of origin.
+
+## OPEN — operator-owned (none gate the program)
+1. **Push** master → origin (4 commits; never auto-pushed). NOTE: parallel /video session dirt + MEMORY.md auto-amendments + WORKFLOW.md are in the tree — push from clean state or knowingly.
+2. **`/export-framework`** — public repo missing all 4 acts + manual pages; sanitizer INCLUDE_FILES already wired for the 3 new manual pages (episodes, heartbeat-runtime additions, session-opening-brief); use detached-clean-worktree per two-repo rules.
+3. **Live proofs** (all non-gating, need real wall-clock): OAuth blocker promotes ~June 14 (day 3/3); a real `/clear` flips the lifecycle receipt warn→ok and writes a chat episode; a real ≥8h gap fires the first session brief; next dream run flips the live compact episode.
+4. **Docs-trail commit**: PRD + 4 PRPs + ~12 adversarial artifacts + WORKFLOW are uncommitted (the acts committed code only). Commit the trail when convenient.
+5. **Future hardening pass** (the 5 Act-4 non-blocking recs + engine.py issue-#19 Langfuse debt + the 2 pre-existing test_session_source/test_concept_drafter FakeManager failures).
+
+---
+
+# Make The Self Real (PRD-living-self-real-2026-06-12) — CLUTCH v3 Program
+
+Follows the Living Mind program. Turns the mimic into an individuated self: belief earned not
+asserted. Foundation-first, 4 acts, lean gate (R1 -> one revise -> R2 -> execute), adversarial
+rounds run on fresh-context agents (Codex + Gemini quota/auth both down this run). Evidence base:
+`docs/living-self-audit-2026-06-12.md` (30-agent audit). Plan: `~/.claude/plans/ultrathink-sure-we-would-stateful-lagoon.md`.
+
+## Act 1: Fix the self-model source — COMPLETE
+
+- **Status**: COMMITTED `fb17237a` (2026-06-13)
+- **What**: capture stops scanning the bot's own replies; real claim-extraction from VERBATIM
+  chat.db role==user turns batched into the nightly reflection loop (provider-agnostic); embedding
+  cosine dedup (0.72, measured) replacing exact-match so paraphrases converge + promote; explicit/
+  reflection sources wired; reversible+atomic+audited migration quarantines the 276-record
+  auto_capture poison class; renderer source-filtered to {reflection,explicit}; read budget 400->700.
+- **Adversarial trajectory**: R1 ADOPT-WITH-FIXES (3 blockers — incl. the daily-log-paraphrase
+  source defect → chat.db verbatim sourcing) → one revise → R2 ADOPT-WITH-FIXES (NB1 fatal
+  naive-vs-aware timestamp no-op → normalize_physical_timestamp) → executor + 3 binding fixes →
+  validator PASS 21/21 (live state byte-identical, NB1 reproduced+fixed, 0.72 measured) → post-build
+  PASS (poisoning-v2 ruled out, migration proven safe; 2 silent-failure log lines landed pre-commit)
+- **Tests**: 35 new + 98 standing green offline (133); zero FastEmbed download
+- **OPERATOR ITEMS**: (1) run the corpus migration when ready — `cd .claude/chat/cognition && uv run
+  python self_model.py migrate-corpus` (backs up to .bak.json first, reversible); (2) live nightly
+  extraction proves once a provider has quota (all exhausted this run — not a defect)
+- **Non-blocking follow-ups** (post-build R3-R6): --test now reads live chat.db + billed call (doc
+  note); single global cosine threshold; stale PRP prose 0.82 vs shipped 0.72; pre-existing
+  memory_reflect lint debt.
+
+## Act 2: Wire the contradiction engine (the keystone) — NEXT
+
+- Remove the `contradictions.py:271` live-skip; wire `self_model.py:154-166` contradict() into the
+  reflection sink with real inference<->finding linking; make disconfirmation first-class alongside
+  strengthen/decay. So a belief can be held against conflict.
+- Resume cold: PRD `PRDs/active/PRD-living-self-real-2026-06-12.md`; Act 1 SHA `fb17237a`.
+
+## Act 2: Wire the contradiction engine (the keystone) — COMPLETE
+
+- **Status**: COMMITTED `5b43a0c8` (2026-06-13)
+- **What**: NEW belief_conflicts.py — nightly reflection embeds operator-beliefs, pre-filters
+  topically-related pairs (measured cosine band [0.45,0.72)), a real LLM judge decides genuine
+  contradiction, the loser drops on evidence. contradict() (0/276 callers before) now wired.
+  A belief can be disconfirmed AND held under tension. Batched in reflection, never the hot path.
+- **Two correct-shape invariants the gate forced**: B1 explicit beliefs SACROSANCT (an LLM can
+  never lower what the operator directly stated — the dropping loser is always a reflection by
+  construction; proven impossible to bypass at runtime); B2 ONCE-ONLY (a static conflict drops
+  once 0.80→0.65 then holds, never flaps nightly — proven by line-ablation reproducing the
+  0.80→0.10 death-spiral when the dedup line is removed).
+- **Adversarial trajectory**: R1 ADOPT-WITH-FIXES (2 blockers: explicit-not-protected,
+  flap-every-night; 4 majors) → one revise → R2 ADOPT-WITH-FIXES (both closed; N1 line-ablation +
+  N2 held-path rerun) → executor → validator PASS (catastrophe guards proven at runtime, live
+  state pristine) → post-build PASS (both guards ablation-proved; winner-id-stability vector
+  traced to ground; 2 hardening recs landed: cross-module invariant comment + judge-injection
+  defense)
+- **Tests**: 50 new + 105 standing green offline; the 6 contradict() math tests byte-for-byte;
+  boundaries (contradictions.py drift-linter, amendments.py, evolve/, Act-3 mind modules) untouched
+- **OPERATOR NOTE**: a correct no-op on today's live corpus (still 276 auto_capture; operator
+  hasn't run migrate-corpus) — fires once reflection accrues reflection/explicit records.
+
+## Act 3: Wire the mind into live turns (gated) — NEXT
+
+- The OpenSouls cognitive layer (inner monologue, transform, cognitive steps, proactive_actions)
+  is built + unit-tested + never wired. Refactor the *_process functions to return (monologue,
+  context) instead of BEING the reply; cognitive pass at engine.py:1138 gated by detect_process
+  (already wired) — trivial turns one call, deep/planning turns + nightly think; provider-agnostic
+  runtime_bridge fix; proactive action through the default-deny gate.
+- Resume cold: PRD `PRDs/active/PRD-living-self-real-2026-06-12.md`; Acts 1-2 SHAs `fb17237a`, `5b43a0c8`.
+
+## Act 3: Wire the mind into live turns (gated) — COMPLETE
+
+- **Status**: COMMITTED `8921c818` (2026-06-13)
+- **What**: the OpenSouls cognitive layer (inner monologue, *_process execution, proactive_actions)
+  had ZERO live callers — built, unit-tested, switched off. Now genuinely wired: on a substantive
+  turn the Homie runs one internal monologue (region=internal/role=system) BEFORE replying, with
+  that thinking in scope. Trivial turns = one call. *_process refactored to return (wm, thought,
+  actions) not BE the reply; new cognitive_pass.py (gate + run_cognitive_monologue + maybe_queue_actions);
+  engine _maybe_cognitive_pass seam gated by the already-wired detect_process; four-outcome trace;
+  whole-body fail-open. Proactive action wired FOR REAL (R1 caught it as dead-scaffolding) — queues
+  operator_notification, external dispatch default-denied via require_integration_action.
+- **Adversarial trajectory**: R1 ADOPT-WITH-FIXES (2 blockers: false 'no test covers this' +
+  proactive dead-scaffolding; 4 majors) → revise (orchestrator reconciled the session-limited
+  revise's stale pseudocode/test-list/false-claims) → R2 ADOPT-WITH-FIXES → executor → validator
+  PASS 10/10 (history-purity + cost-bound proven at runtime; 32/49 fail on reverted code = honest)
+  → post-build FIX-REQUIRED (F1: monologue crashed EVERY planning turn on win32/native lane via
+  uncapped ~90K context = the program's anti-state in disguise; F2: expensive tier) → fix loop
+  (canonical regions.truncate_for_win32_argv cap shared by reply+monologue, 90,449→23,660; haiku
+  via COGNITIVE_PASS_MODEL; queue file-lock; cwd; timeout 8→5) → re-review PASS (both closed, 0 new)
+- **Tests**: 56 new + standing gate green; reply-path win32 regression byte-for-byte green
+- **Deferred (non-blocking)**: F5 win32 subprocess-cancellation leak lives in the runtime slice →
+  separate runtime-slice PRP (fail-open keeps the turn alive).
+
+## Act 4: evolve/ → identity (beliefs earned, not asserted) — FINAL ACT, NEXT
+
+- The full enterprise belief-testing shape: deterministic belief-regression floor + a REAL LLM-judge
+  analyzer (in the scheduled/Archon evolve loop, NEVER the hot path) + an evidence-READ amendment gate
+  (amendments.py:770-773 trusts the confidence float + COUNTS evidence_paths it never opens → must
+  OPEN+verify them + beat the regression floor before apply). Archon drives the loop; wake the
+  scheduler. A belief enters SELF.md only if it read its evidence, beat the floor, and survived the
+  judge. This is the crux re-test: form / hold / persist / act on a belief earned, not asserted.
+- Resume cold: PRD `PRDs/active/PRD-living-self-real-2026-06-12.md`; Acts 1-3 SHAs `fb17237a`,
+  `5b43a0c8`, `8921c818`.
+
+## Act 4: evolve/ → identity (beliefs earned, not asserted) — COMPLETE
+
+- **Status**: COMMITTED `7b51493c` (2026-06-13)
+- **What**: belief is now EARNED — a candidate self-amendment reaches SELF.md only if it (a) opened+read+
+  CONFINED its cited evidence (vault-only, M4-hardened), (b) beat the never-softenable deterministic floor
+  incl. its OWN falsifiable prediction (N1), (c) survived an independent circularity-guarded LLM judge —
+  through the UNCHANGED default-deny gate. The dormant ASI-Evolve-inspired evolve/ harness woken + aimed at
+  identity (its documented-but-unbuilt propose() seam completed). Archon drives candidate search; Second
+  Brain is the fitness oracle (vertical slice). Judge scheduled-only (0 hot-path calls), fails CLOSED.
+- **THE CRUX RE-TEST PASSES** (whole-program acceptance): an empty-evidence 0.99-confidence "I read the doc"
+  belief — judge saying yes — is REJECTED on the real no_unread_claim check, SELF.md byte-unchanged; a
+  genuinely-evidenced belief is ADOPTED + audited. "I hold this because it was tested and it held."
+- **Adversarial trajectory**: R1 ADOPT-WITH-FIXES (3 blockers/5 majors) → revise → R2 ADOPT (clean —
+  empirically proved sys.path hop + M4 confinement on win32) → executor + N1/N2 → validator PASS (crux
+  traced, own security re-attack: refused /etc/passwd + win32 hosts + symlink) → post-build FIX-REQUIRED
+  (F1 malformed-crash, F2 lying-artifact-to-Archon, F3 .env-into-judge) → fix loop → re-review PASS (all
+  closed, test-honesty proven by reverting each fix live)
+- **Tests**: 51 new + standing gate green; recall harness byte-untouched; live SELF.md + ledger md5-identical
+- **Deferred (non-blocking, future hardening pass)**: keyword-brittle no_unread_claim; missing-prediction
+  skip; vocab-stuffing; dual artifact ids / stable candidate id; encoding-error read; pre-existing recall-
+  harness ruff debt.
+
+---
+
+# MAKE THE SELF REAL PROGRAM — COMPLETE (2026-06-13)
+
+PRD `PRDs/active/PRD-living-self-real-2026-06-12.md` — all 4 acts shipped in one orchestrated session,
+foundation-first, CLUTCH v3 lean gate, adversarial rounds on fresh-context agents (Codex+Gemini down).
+Evidence base: the 30-agent audit `docs/living-self-audit-2026-06-12.md`.
+
+| Act | Commit | What it made real |
+|-----|--------|-------------------|
+| 1 | `fb17237a` | Models the OPERATOR from verbatim chat.db turns, not the bot's own echo (capture fixed, embedding dedup, explicit/reflection sources, reversible migration of 276 poison records) |
+| 2 | `5b43a0c8` | A belief can be HELD AGAINST CONFLICT (contradict() wired; explicit beliefs sacrosanct; once-only, no flapping) |
+| 3 | `8921c818` | The Homie THINKS BEFORE IT SPEAKS on substantive turns (the dormant OpenSouls mind wired, gated, haiku, win32-capped, never leaks) |
+| 4 | `7b51493c` | Belief is EARNED, not asserted (evidence-read + deterministic floor + scheduled judge; the crux re-test passes) |
+
+The loop closed: form (Act 1) → hold against conflict (Act 2) → think/propose (Act 3) → persist only if
+earned (Act 4). The crux the audit said FAILS now PASSES. master is 4 commits ahead of origin.
+
+## OPEN — operator-owned (none gate the program)
+1. **Push** master → origin (Living Mind 4 + Living Self 4 = the session's commits; never auto-pushed).
+2. **`/export-framework`** — public repo missing both programs; sanitizer INCLUDE wired for the manual pages.
+3. **Run `self_model.py migrate-corpus`** when ready (quarantines the 276 poison records; reversible .bak.json).
+4. **Live proofs** (own clock, providers were quota-walled this session): the nightly reflection forms the
+   first real operator belief + the contradiction pass + the evolve belief-judge all fire once a provider has
+   quota; the OAuth blocker (Living Mind Act 1) promotes; a real /clear flips the receipt; an 8h gap fires the brief.
+5. **Docs-trail commit**: 2 PRDs + 8 PRPs + ~24 adversarial artifacts + WORKFLOW are uncommitted (acts committed code only).
+6. **Future hardening**: the Act-4 non-blocking recs + the Act-3 F5 (runtime-slice subprocess-cancellation PRP) + engine.py issue-#19 Langfuse debt.

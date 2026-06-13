@@ -501,6 +501,81 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
         print(f"[{now_local()}] Promotion pipeline error (non-blocking): {e}")
         append_to_daily_log(f"**WARNING**: Promotion pipeline failed - {e}", "Promotion")
 
+    # --- Living Self Act 1 (B2): operator-belief extraction from VERBATIM
+    # chat.db user turns ---
+    # The real LLM claim-extractor over the operator's OWN words (NOT the
+    # daily-log paraphrase in log_context, NOT staging). Amortized once per
+    # reflection, provider-agnostic via reasoning_step. Whole-block try/except
+    # mirrors the promotion/decay non-blocking style; the count may legitimately
+    # be 0 on a quiet day or when no interactive user turns fall in the window.
+    try:
+        from cognition.operator_beliefs import (
+            apply_operator_beliefs,
+            extract_operator_beliefs,
+        )
+        from session import read_operator_user_turns
+
+        from config import INFERENCE_STATE_FILE
+
+        window_start = now_local() - timedelta(days=days)
+        user_turns = read_operator_user_turns(window_start)
+        claims = await extract_operator_beliefs(user_turns, cwd=PROJECT_ROOT)
+        belief_count = 0
+        if not test_mode:
+            belief_count = apply_operator_beliefs(claims, INFERENCE_STATE_FILE)
+        print(
+            f"[{now_local()}] Operator-belief extraction: "
+            f"{len(user_turns)} turns -> {len(claims)} claims -> {belief_count} written"
+        )
+        append_to_daily_log(
+            f"Operator-belief extraction: {len(claims)} claims from "
+            f"{len(user_turns)} verbatim turns, {belief_count} written to self-model",
+            "Self-Model",
+        )
+    except ImportError:
+        pass  # Cognition/session module not available — skip extraction
+    except Exception as e:
+        print(f"[{now_local()}] Operator-belief extraction error (non-blocking): {e}")
+
+    # --- Living Self Act 2 (the keystone): belief-contradiction pass ---
+    # Wires the disconfirmation primitive contradict() into a real caller. Runs
+    # AFTER the Act-1 extraction (so a belief written THIS cycle is judged against
+    # the corpus) and BEFORE decay (so decay sees post-contradiction confidences).
+    # Embedding PRE-FILTER -> LLM JUDGE (provider-agnostic) -> EXPLICIT-protective
+    # resolution policy -> audited contradict(). Whole-block try/except mirrors the
+    # extraction/decay non-blocking style; K may legitimately be 0 (no candidates,
+    # or the judge found no real conflict) — success is "completes + logs a count,"
+    # not ">=1 contradiction." test_mode runs the judge but skips the live apply.
+    try:
+        from cognition import belief_conflicts
+        from cognition.self_model import InferenceTracker
+
+        from config import INFERENCE_STATE_FILE
+
+        records = InferenceTracker(INFERENCE_STATE_FILE).load()
+        pairs = belief_conflicts.find_candidate_pairs(records)
+        conflicts = await belief_conflicts.judge_contradictions(
+            pairs, cwd=PROJECT_ROOT
+        )
+        applied = 0
+        if not test_mode:
+            applied = belief_conflicts.apply_contradictions(
+                conflicts, INFERENCE_STATE_FILE
+            )
+        print(
+            f"[{now_local()}] Contradiction pass: {len(pairs)} pairs -> "
+            f"{len(conflicts)} conflicts -> {applied} applied"
+        )
+        append_to_daily_log(
+            f"Contradiction pass: {len(pairs)} candidate pairs, "
+            f"{len(conflicts)} judged conflicts, {applied} applied",
+            "Self-Model",
+        )
+    except ImportError:
+        pass  # Cognition module not available — skip contradiction pass
+    except Exception as e:
+        print(f"[{now_local()}] Contradiction pass error (non-blocking): {e}")
+
     # --- Move 5a: Inference decay + state sync ---
     try:
         from cognition.self_model import InferenceTracker

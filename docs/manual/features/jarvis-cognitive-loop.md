@@ -77,6 +77,9 @@ should be rechecked before repeating export claims.
 
 ## Next Slices
 
-- Fold detailed cognition-loop subfeatures into separate manual pages:
-  scheduled cognition, WorkingMemory, self-amendment, proactive brief, and
-  status/diagnostics.
+- The detailed cognition-loop subfeatures now have a deep manual: see
+  [The Living Self Manual](../../the-living-self-manual.md) — it covers belief
+  formation, the contradiction engine, the gated cognitive pass, the
+  earned-belief adoption gate, the scheduled cadence, the knob tables, and the
+  verification surfaces. This frame page stays the quick entry point; the deep
+  manual is the runbook.

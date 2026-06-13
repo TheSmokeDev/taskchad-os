@@ -2,6 +2,13 @@
 
 Move 6c: active user inferences injected into the frozen prompt as a
 dedicated region separate from USER.md.
+
+Living Self Act 1 (B1): the renderer (_build_active_inference_region) now
+source-filters to trustworthy operator-belief sources {reflection, explicit} —
+legacy ``auto_capture`` records never reach the prompt. These tests therefore
+seed ``source="reflection"`` (the contract the renderer now trusts); every other
+assertion (confidence floor, cap, confirmed-first sort, 2-decimal render) is
+unchanged and still proves the renderer mechanics.
 """
 
 from __future__ import annotations
@@ -50,7 +57,7 @@ def test_inferences_injected_when_tracker_has_data(
             "contradiction_count": 0,
             "first_seen": "2026-03-01T00:00:00+00:00",
             "last_updated": "2026-04-01T00:00:00+00:00",
-            "source": "auto_capture",
+            "source": "reflection",
             "status": "confirmed",
         },
         {
@@ -62,7 +69,7 @@ def test_inferences_injected_when_tracker_has_data(
             "contradiction_count": 0,
             "first_seen": "2026-03-15T00:00:00+00:00",
             "last_updated": "2026-04-05T00:00:00+00:00",
-            "source": "auto_capture",
+            "source": "reflection",
             "status": "active",
         },
         {
@@ -74,7 +81,7 @@ def test_inferences_injected_when_tracker_has_data(
             "contradiction_count": 0,
             "first_seen": "2026-03-20T00:00:00+00:00",
             "last_updated": "2026-04-01T00:00:00+00:00",
-            "source": "auto_capture",
+            "source": "reflection",
             "status": "active",
         },
     ])
@@ -147,7 +154,7 @@ def test_no_inferences_region_when_all_decayed(
             "contradiction_count": 2,
             "first_seen": "2025-01-01T00:00:00+00:00",
             "last_updated": "2025-06-01T00:00:00+00:00",
-            "source": "auto_capture",
+            "source": "reflection",
             "status": "decayed",
         },
     ])
@@ -184,7 +191,7 @@ def test_inferences_sorted_confirmed_first_then_by_confidence(
             "contradiction_count": 0,
             "first_seen": "2026-03-01T00:00:00+00:00",
             "last_updated": "2026-04-10T00:00:00+00:00",
-            "source": "auto_capture", "status": "active",
+            "source": "reflection", "status": "active",
         },
         {
             "id": "b", "inference": "confirmed-mid",
@@ -192,7 +199,7 @@ def test_inferences_sorted_confirmed_first_then_by_confidence(
             "contradiction_count": 0,
             "first_seen": "2026-03-01T00:00:00+00:00",
             "last_updated": "2026-04-01T00:00:00+00:00",
-            "source": "auto_capture", "status": "confirmed",
+            "source": "reflection", "status": "confirmed",
         },
         {
             "id": "c", "inference": "active-mid",
@@ -200,7 +207,7 @@ def test_inferences_sorted_confirmed_first_then_by_confidence(
             "contradiction_count": 0,
             "first_seen": "2026-03-01T00:00:00+00:00",
             "last_updated": "2026-04-05T00:00:00+00:00",
-            "source": "auto_capture", "status": "active",
+            "source": "reflection", "status": "active",
         },
     ])
 
@@ -244,7 +251,7 @@ def test_inferences_cap_respects_INFERENCE_PROMPT_CAP(
             "contradiction_count": 0,
             "first_seen": "2026-03-01T00:00:00+00:00",
             "last_updated": f"2026-04-{(i % 28) + 1:02d}T00:00:00+00:00",
-            "source": "auto_capture",
+            "source": "reflection",
             "status": "active",
         }
         for i in range(15)
@@ -285,7 +292,7 @@ def test_inferences_use_prompt_min_confidence_from_config(
             "contradiction_count": 0,
             "first_seen": "2026-03-01T00:00:00+00:00",
             "last_updated": "2026-04-10T00:00:00+00:00",
-            "source": "auto_capture", "status": "active",
+            "source": "reflection", "status": "active",
         },
         {
             "id": "below", "inference": "stays-hidden",
@@ -293,7 +300,7 @@ def test_inferences_use_prompt_min_confidence_from_config(
             "contradiction_count": 0,
             "first_seen": "2026-03-01T00:00:00+00:00",
             "last_updated": "2026-04-10T00:00:00+00:00",
-            "source": "auto_capture", "status": "active",
+            "source": "reflection", "status": "active",
         },
     ])
 
@@ -331,7 +338,7 @@ def test_inference_confidence_renders_with_two_decimals(
             "contradiction_count": 0,
             "first_seen": "2026-03-01T00:00:00+00:00",
             "last_updated": "2026-04-10T00:00:00+00:00",
-            "source": "auto_capture", "status": "active",
+            "source": "reflection", "status": "active",
         },
     ])
 

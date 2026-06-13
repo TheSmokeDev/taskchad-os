@@ -1,11 +1,35 @@
-"""Tests for cognition.self_model — inference tracking, decay, strengthen."""
+"""Tests for cognition.self_model — inference tracking, decay, strengthen.
+
+Living Self Act 1: ``add_inference`` dedup is now embedding cosine (B3) with a
+fail-open to normalized exact-match. This file tests TRACKER MECHANICS (insert /
+strengthen / decay / contradict / get_active), NOT embedding semantics, and was
+written against the historical exact-match contract. The autouse fixture below
+forces the exact-match fallback (a raising embed) so every test here is
+DETERMINISTIC regardless of whether FastEmbed is cached on the host — short toy
+strings like "pref A"/"pref B" are near-duplicates by the real model (cosine
+0.900) and would merge, which is correct embedding behavior but not what these
+mechanics tests assert. The dedicated discriminating embedding-dedup coverage
+lives in ``test_living_self_act1.py`` (with injected fake/real vectors).
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from cognition.self_model import InferenceRecord, InferenceTracker
+
+
+@pytest.fixture(autouse=True)
+def _force_exact_match_dedup(monkeypatch):
+    """Force the B3 exact-match fallback so tracker-mechanics tests are deterministic."""
+    def _raise(*_a, **_k):
+        raise RuntimeError("forced offline — exercise exact-match fallback")
+
+    monkeypatch.setattr("embeddings.embed_batch", _raise)
+    monkeypatch.setattr("embeddings.embed_text", _raise)
 
 
 # === InferenceRecord tests ===

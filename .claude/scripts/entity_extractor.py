@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -621,6 +622,76 @@ def _today() -> str:
 # Vault-level helpers (Karpathy LLM Wiki pattern)
 # ---------------------------------------------------------------------------
 
+# Characters Windows forbids in filenames (besides the path separators, which
+# the final-segment reduction already removes).
+_WINDOWS_INVALID_FILENAME_CHARS_RE = re.compile(r'[<>:"|?*]')
+
+# Reserved DOS device basenames — Windows refuses these regardless of
+# extension (CON.md is as broken as CON). Checked case-insensitively against
+# the name up to the FIRST dot (the strict superset of Path.stem semantics).
+_WINDOWS_RESERVED_BASENAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def _sanitize_archive_name(dest_name: str) -> str:
+    """Sanitize a caller-supplied raw-archive filename (preserve_raw dest_name).
+
+    Callers are NOT trusted — chat surfaces put the user-controlled original
+    upload filename here. Centralized so every caller gets the same defense:
+
+    1. Reduce to the final path segment on BOTH separator conventions
+       (a POSIX Path won't split backslashes, so normalize first).
+    2. Strip CR/LF and all control characters (< 0x20) anywhere in the name.
+    3. Strip leading/trailing whitespace and dots.
+    4. Empty result → ValueError (refuse loudly, never invent a name).
+    5. Replace Windows-invalid characters (< > : " | ? *) with ``_``.
+    6. Prefix reserved device basenames (CON/PRN/AUX/NUL/COM1-9/LPT1-9,
+       case-insensitive, extension-stripped) with ``_``.
+    """
+    name = Path(str(dest_name).replace("\\", "/")).name
+    name = "".join(ch for ch in name if ord(ch) >= 0x20)
+    name = name.strip().strip(" .")
+    if not name:
+        raise ValueError(
+            "preserve_raw: dest_name is empty after sanitization; refusing "
+            f"to invent an archive name (got {dest_name!r})."
+        )
+    name = _WINDOWS_INVALID_FILENAME_CHARS_RE.sub("_", name)
+    if name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_BASENAMES:
+        name = f"_{name}"
+    return name
+
+
+def _claim_and_copy(source_path: Path, dest: Path) -> bool:
+    """Atomically claim ``dest`` via exclusive-create, then copy into it.
+
+    The O_CREAT|O_EXCL open is the atomic exists-check: concurrent callers
+    racing the same destination cannot both win, closing the TOCTOU between
+    ``dest.exists()`` and ``shutil.copy2()`` (post-build F2). Returns False
+    when ``dest`` already exists — lost race or genuine collision — WITHOUT
+    touching the existing file. If the copy fails after a successful claim,
+    the zero-byte claim is removed so a crashed copy never leaves a husk
+    that poisons future collision checks (and "FAILED → nothing saved"
+    reporting stays truthful).
+    """
+    try:
+        fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    try:
+        shutil.copy2(source_path, dest)
+    except BaseException:
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
+        raise
+    return True
+
 
 def preserve_raw(
     source_path: Path,
@@ -629,6 +700,7 @@ def preserve_raw(
     on_collision: Literal["raise", "skip", "overwrite"] = "raise",
     *,
     subdir: str | None = None,
+    dest_name: str | None = None,
 ) -> Path:
     """Copy a source file into {vault}/raw/ as an immutable archive.
 
@@ -658,21 +730,54 @@ def preserve_raw(
         ``{vault}/raw/{subdir}/`` instead of the top-level ``{vault}/raw/``.
         Used by URL ingest (gap-4) to land web clips in ``raw/clipped/`` while
         keeping all other raw collision/idempotency semantics identical.
+
+    dest_name (keyword-only, optional): archive filename override. None keeps
+        the existing ``source_path.name`` behavior. Used by chat document
+        ingest, where the staged tempdir file is ``{unique_id}_{filename}``
+        but the immutable archive must carry the user's real filename.
+        Sanitized CENTRALLY here (callers are not trusted — the value is the
+        user-controlled upload filename); the sanitized name feeds BOTH the
+        plain and the date-prefixed destination paths. Empty-after-
+        sanitization raises ValueError before any filesystem mutation.
     """
+    if dest_name is not None:
+        archive_name = _sanitize_archive_name(dest_name)
+    else:
+        archive_name = source_path.name
+
     raw_dir = vault_dir / "raw"
     if subdir:
         raw_dir = raw_dir / subdir
     raw_dir.mkdir(parents=True, exist_ok=True)
+
+    # Destination selection + copy use EXCLUSIVE-CREATE claims (post-build
+    # F2): the O_CREAT|O_EXCL open in _claim_and_copy IS the exists-check,
+    # atomically, so two concurrent same-name uploads cannot both observe
+    # "missing" and overwrite each other. The date-prefix fallback lives
+    # INSIDE the same claim cascade — losing the plain-name race is handled
+    # identically to the single-threaded "file already there" case. The
+    # candidate order reproduces the pre-existing selection exactly:
+    # always_date_prefix tries only {date}-{name}; default tries {name},
+    # then {date}-{name}.
     if always_date_prefix:
-        dest = raw_dir / f"{_today()}-{source_path.name}"
+        candidates = [raw_dir / f"{_today()}-{archive_name}"]
     else:
-        dest = raw_dir / source_path.name
-        if dest.exists():
-            dest = raw_dir / f"{_today()}-{source_path.name}"
+        candidates = [
+            raw_dir / archive_name,
+            raw_dir / f"{_today()}-{archive_name}",
+        ]
+
+    for candidate in candidates:
+        if _claim_and_copy(source_path, candidate):
+            return candidate
+
+    # Every candidate already exists — the chosen destination is the FINAL
+    # candidate, exactly like the pre-claim exists() cascade.
+    dest = candidates[-1]
 
     # Immutable raw/ contract - see .claude/sections/03_memory_pipelines.md:133-137.
-    # If the chosen destination (default OR date-prefixed fallback) already
-    # exists, on_collision dictates behavior:
+    # The chosen destination (default OR date-prefixed fallback) already
+    # exists, so on_collision dictates behavior:
     #   - "raise"     (default): fail loudly, FileExistsError. Caller investigates.
     #   - "skip"      : BYTE-AWARE idempotent — if existing archive bytes match
     #                   the incoming source (sha256 compare), return the existing
@@ -681,35 +786,35 @@ def preserve_raw(
     #                   the source that produced downstream artifacts. Silent
     #                   skip on differing bytes would break that contract (R3).
     #   - "overwrite" : explicit opt-in to legacy silent-overwrite behavior.
-    if dest.exists():
-        if on_collision == "skip":
-            # Byte-aware skip — only safe if existing archive matches incoming source
-            src_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
-            dst_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
-            if src_hash == dst_hash:
-                return dest
-            raise FileExistsError(
-                f"preserve_raw refusing skip-on-divergent-bytes: {dest} exists "
-                f"with sha256 {dst_hash[:12]}, but incoming source has sha256 "
-                f"{src_hash[:12]}. raw/ archive is the source-of-truth for "
-                f"downstream artifacts; silent skip would break provenance. "
-                f"Remove the existing target or investigate the source change."
+    if on_collision == "skip":
+        # Byte-aware skip — only safe if existing archive matches incoming source
+        src_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        dst_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
+        if src_hash == dst_hash:
+            return dest
+        raise FileExistsError(
+            f"preserve_raw refusing skip-on-divergent-bytes: {dest} exists "
+            f"with sha256 {dst_hash[:12]}, but incoming source has sha256 "
+            f"{src_hash[:12]}. raw/ archive is the source-of-truth for "
+            f"downstream artifacts; silent skip would break provenance. "
+            f"Remove the existing target or investigate the source change."
+        )
+    if on_collision == "raise":
+        if always_date_prefix:
+            msg = (
+                f"preserve_raw refusing to overwrite existing archive: {dest}. "
+                f"raw/ is immutable; remove the existing date-prefixed target "
+                f"or wait until tomorrow's date prefix changes the destination."
             )
-        if on_collision == "raise":
-            if always_date_prefix:
-                msg = (
-                    f"preserve_raw refusing to overwrite existing archive: {dest}. "
-                    f"raw/ is immutable; remove the existing date-prefixed target "
-                    f"or wait until tomorrow's date prefix changes the destination."
-                )
-            else:
-                msg = (
-                    f"preserve_raw refusing to overwrite existing archive: {dest}. "
-                    f"raw/ is immutable; rename source or remove the existing target."
-                )
-            raise FileExistsError(msg)
-        # on_collision == "overwrite": fall through to shutil.copy2 below.
+        else:
+            msg = (
+                f"preserve_raw refusing to overwrite existing archive: {dest}. "
+                f"raw/ is immutable; rename source or remove the existing target."
+            )
+        raise FileExistsError(msg)
 
+    # on_collision == "overwrite": explicit opt-in to legacy silent-overwrite
+    # behavior (inherently non-atomic — the escape hatch keeps its old shape).
     shutil.copy2(source_path, dest)
     return dest
 

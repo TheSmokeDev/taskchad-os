@@ -1,0 +1,316 @@
+"""Optional generated-art adapter for the video pipeline (public, provider-optional).
+
+Generates scene art for a render through the codex CLI's image_generation
+feature, when that CLI happens to be installed on the box. This module is
+the ONLY place the video pipeline touches the codex CLI; the rest of the
+pipeline stays provider-neutral and treats this adapter as a black box that
+either returns served-asset paths or nothing.
+
+Contract:
+    generate_image(prompt, design, aspect, assets_dir, *, name="hero",
+                   refs=None) -> str | None
+    generate_art_plan(beats, design, aspect, assets_dir, *, refs=None,
+                      max_images=None) -> dict[int, str]
+    generate_hero(prompt, design, aspect, assets_dir) -> str | None
+
+    - generate_image returns the RELATIVE served path (e.g. "assets/hero.png")
+      after copying the generated PNG into ``assets_dir``, or None. ``refs``
+      are local reference images attached via repeatable ``-i <path>`` args
+      (identity lock: the instruction tells the model to keep the subject
+      identity shown in the references while composing a new scene).
+    - generate_art_plan maps art-eligible beats (kind in ART_KINDS, priority
+      hero -> payoff -> quote) onto generated images, sequentially, capped by
+      ``max_images`` param > env VIDEO_ART_MAX (read at call time) >
+      DEFAULT_ART_MAX. Skip-on-fail: a failed candidate consumes its budget
+      slot and is simply absent from the plan. Beat 0 keeps the ``hero.<ext>``
+      name (back-compat with the art-drop discovery path); other beats are
+      named ``art<index>.<ext>``.
+    - generate_hero is the back-compat thin wrapper (UNCHANGED signature).
+    - Nothing here ever raises: CLI absence, quota walls, timeouts, parse
+      failures, and copy errors all return None / an empty plan so the
+      caller falls back to its CSS visuals.
+
+Mechanics:
+    - Detection: ``shutil.which("codex")``. Absent -> None immediately.
+    - Invocation: ``codex exec --enable image_generation
+      --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox``
+      (plus ``-i <path>`` per reference) with the instruction PIPED VIA
+      STDIN. codex exec reads the prompt from stdin when no positional
+      prompt is given; in non-interactive shells stdin MUST be
+      piped/redirected or the process hangs waiting for a terminal.
+    - Output discovery: newest NEW png under ``~/.codex/generated_images``
+      (snapshot before/after), falling back to an absolute .png path printed
+      on stdout.
+    - The instruction derives from the caller's subject prompt plus the
+      design's palette/mood tokens: one bold scene about the topic, with an
+      explicit no-text/no-logos rule so the renderer owns all copy.
+
+The pipeline-level off-switch (env VIDEO_ART=off or render_brief(art="off"))
+is enforced by the caller; this module only generates when asked.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+GENERATION_TIMEOUT_S = 300
+
+# Beat kinds that are eligible for generated art, and the default budget.
+ART_KINDS = ("hero", "quote", "payoff")
+DEFAULT_ART_MAX = 1
+
+# Generation order when the budget is tighter than the eligible beats.
+_ART_PRIORITY = ("hero", "payoff", "quote")
+
+_ASPECT_HINTS = {
+    "16:9": "wide 16:9 landscape, 1920x1080",
+    "9:16": "tall 9:16 portrait, 1080x1920",
+    "1:1": "square 1:1, 1080x1080",
+}
+
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+_IDENTITY_LOCK_LINE = (
+    "Match the subject identity shown in the attached reference image(s);"
+    " same character/product/brand subject, new scene."
+)
+
+
+def cli_available() -> bool:
+    """True when the codex CLI is on PATH."""
+
+    return shutil.which("codex") is not None
+
+
+def _generated_images_root() -> Path:
+    """Where the codex CLI writes generated images (session subdirs)."""
+
+    return Path.home() / ".codex" / "generated_images"
+
+
+def _snapshot_pngs(root: Path) -> set[Path]:
+    try:
+        if not root.is_dir():
+            return set()
+        return set(root.rglob("*.png"))
+    except OSError:
+        return set()
+
+
+def build_instruction(prompt: str, design: dict, aspect: str) -> str:
+    """Compose the image instruction from the subject + design tokens.
+
+    The image is a SCENE about the topic; readable copy stays out of the
+    image so the HTML renderer owns every word on screen.
+    """
+
+    palette = (design or {}).get("palette", {}) or {}
+    tagline = str((design or {}).get("tagline", "") or "")
+    hint = _ASPECT_HINTS.get(aspect, _ASPECT_HINTS["16:9"])
+
+    lines = [
+        f"Generate an image: {str(prompt).strip()}.",
+        f"One bold cinematic scene with a single strong focal point, {hint},"
+        " generous negative space, modern and clean.",
+    ]
+    if tagline:
+        lines.append(f"Mood reference: {tagline}")
+    bg, accent = palette.get("bg", ""), palette.get("accent", "")
+    if bg or accent:
+        lines.append(
+            f"Color world: background tones near {bg or 'neutral dark'},"
+            f" one accent near {accent or 'a single hue'}."
+        )
+    lines.append(
+        "Absolutely no text, no words, no letters, no numbers, no logos,"
+        " no watermarks, no UI chrome."
+    )
+    lines.append(
+        "Use your image generation tool. After generating, reply with ONLY"
+        " the absolute file path of the PNG you created."
+    )
+    return "\n".join(lines)
+
+
+def _newest_new_png(root: Path, before: set[Path]) -> Path | None:
+    fresh = [p for p in _snapshot_pngs(root) - before if p.is_file()]
+    if not fresh:
+        return None
+    try:
+        return max(fresh, key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return None
+
+
+def _png_from_stdout(stdout: str) -> Path | None:
+    """Fallback discovery: an absolute image path echoed on the last lines."""
+
+    for line in reversed((stdout or "").splitlines()):
+        candidate = line.strip().strip('"').strip("'")
+        if not candidate:
+            continue
+        if Path(candidate).suffix.lower() in _IMAGE_SUFFIXES:
+            path = Path(candidate)
+            if path.is_file():
+                return path
+    return None
+
+
+def generate_image(
+    prompt: str,
+    design: dict,
+    aspect: str,
+    assets_dir: str,
+    *,
+    name: str = "hero",
+    refs: list[str] | None = None,
+) -> str | None:
+    """Generate one image and copy it into the served assets dir.
+
+    Returns an "assets/<name>.png"-style relative path, or None on ANY
+    failure (absence, quota, timeout, no output, copy error). ``refs`` are
+    local reference image paths attached via repeatable ``-i <path>`` args;
+    when at least one exists, an identity-lock line rides on the
+    instruction so the generated scene keeps the referenced subject. Never
+    raises.
+    """
+
+    try:
+        if not str(prompt or "").strip():
+            return None
+        exe = shutil.which("codex")
+        if not exe:
+            return None
+
+        ref_paths = [Path(r) for r in (refs or []) if str(r or "").strip()]
+        ref_paths = [p for p in ref_paths if p.is_file()]
+
+        root = _generated_images_root()
+        before = _snapshot_pngs(root)
+
+        cmd = [
+            exe,
+            "exec",
+            "--enable",
+            "image_generation",
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+        for ref in ref_paths:
+            cmd += ["-i", str(ref)]
+
+        instruction = build_instruction(prompt, design, aspect)
+        if ref_paths:
+            instruction += "\n" + _IDENTITY_LOCK_LINE
+
+        # Prompt goes through stdin: codex exec reads instructions from stdin
+        # when no positional prompt is supplied, and a non-interactive run
+        # without piped stdin hangs waiting for a terminal.
+        result = subprocess.run(
+            cmd,
+            input=instruction,
+            capture_output=True,
+            text=True,
+            timeout=GENERATION_TIMEOUT_S,
+        )
+
+        png = _newest_new_png(root, before)
+        if png is None:
+            png = _png_from_stdout(result.stdout or "")
+        if png is None:
+            return None  # quota walls / refusals land here: no new image
+
+        dest_dir = Path(assets_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        suffix = png.suffix.lower() if png.suffix.lower() in _IMAGE_SUFFIXES else ".png"
+        dst = dest_dir / f"{str(name or 'hero')}{suffix}"
+        shutil.copyfile(png, dst)
+        return f"{dest_dir.name}/{dst.name}"
+    except Exception:
+        return None
+
+
+def generate_hero(prompt: str, design: dict, aspect: str, assets_dir: str) -> str | None:
+    """Back-compat wrapper: one opening-beat image named ``hero.<ext>``.
+
+    Returns "assets/hero.png"-style relative path, or None on ANY failure
+    (absence, quota, timeout, no output, copy error). Never raises.
+    """
+
+    return generate_image(prompt, design, aspect, assets_dir, name="hero")
+
+
+def _resolve_art_budget(max_images: int | None) -> int:
+    """Art budget at call time: param > env VIDEO_ART_MAX > DEFAULT_ART_MAX."""
+
+    if max_images is not None:
+        try:
+            return max(0, int(max_images))
+        except (TypeError, ValueError):
+            return DEFAULT_ART_MAX
+    raw = os.environ.get("VIDEO_ART_MAX", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass  # ambient config never breaks a render
+    return DEFAULT_ART_MAX
+
+
+def _beat_prompt(beat: object) -> str:
+    """The image subject for one beat: headline + subhead, else the narration."""
+
+    headline = str(getattr(beat, "headline", "") or "").strip()
+    subhead = str(getattr(beat, "subhead", "") or "").strip()
+    combined = " ".join(part for part in (headline, subhead) if part)
+    return combined or str(getattr(beat, "voice_text", "") or "").strip()
+
+
+def generate_art_plan(
+    beats: list,
+    design: dict,
+    aspect: str,
+    assets_dir: str,
+    *,
+    refs: list[str] | None = None,
+    max_images: int | None = None,
+) -> dict[int, str]:
+    """Generate art for the art-eligible beats. Returns {beat_index: rel_path}.
+
+    Eligible kinds: ``ART_KINDS``. Priority: hero scenes first, then payoff,
+    then quote (original beat order within each kind). Budget resolves at
+    call time (``max_images`` param > env VIDEO_ART_MAX > DEFAULT_ART_MAX).
+    Generation is sequential and skip-on-fail: a failed candidate consumes
+    its budget slot (no refund) and is absent from the plan. Beat 0 keeps
+    the ``hero.<ext>`` name; other beats are named ``art<index>.<ext>``.
+    Never raises.
+    """
+
+    try:
+        budget = _resolve_art_budget(max_images)
+        if budget <= 0:
+            return {}
+        beat_list = list(beats or [])
+        ordered: list[int] = []
+        for kind in _ART_PRIORITY:
+            for i, beat in enumerate(beat_list):
+                if str(getattr(beat, "kind", "") or "").strip().lower() == kind:
+                    ordered.append(i)
+        art_map: dict[int, str] = {}
+        for i in ordered[:budget]:
+            rel = generate_image(
+                _beat_prompt(beat_list[i]),
+                design,
+                aspect,
+                assets_dir,
+                name="hero" if i == 0 else f"art{i}",
+                refs=refs,
+            )
+            if rel:
+                art_map[i] = rel
+        return art_map
+    except Exception:
+        return {}
