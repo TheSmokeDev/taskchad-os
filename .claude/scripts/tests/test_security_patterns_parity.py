@@ -186,6 +186,8 @@ def test_no_local_copies_in_consumers() -> None:
         "_drafts",
         "_archive",
         "_holders",
+        ".venv",          # virtualenv — third-party deps, not framework code
+        "site-packages",  # belt: never scan installed packages
     }
     seen_assignment_files: list[str] = []
     for root in (SCRIPTS_DIR, REPO_ROOT / "scripts"):
@@ -199,7 +201,7 @@ def test_no_local_copies_in_consumers() -> None:
                 continue
             try:
                 tree = ast.parse(py_file.read_text(encoding="utf-8"))
-            except (SyntaxError, OSError):
+            except (SyntaxError, OSError, UnicodeDecodeError):
                 continue
             for node in ast.walk(tree):
                 if isinstance(node, ast.Assign):

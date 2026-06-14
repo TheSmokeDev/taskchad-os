@@ -183,4 +183,29 @@ def get_scrubbed_sdk_env(
     return out
 
 
-__all__ = ["get_scrubbed_sdk_env"]
+def scrub_nested_claude_state(
+    parent_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Copy *parent_env* with nested Claude-Code session markers removed and
+    EVERYTHING else preserved — including ``HOMIE_HOME`` exactly as-is.
+
+    For SELF-restart of an SDK process (the bot relaunching itself). The child
+    must NOT inherit ``CLAUDECODE`` / ``CLAUDE_CODE_ENTRYPOINT`` / etc. or the
+    Claude Agent SDK refuses to launch ("cannot be launched inside another
+    Claude Code session"). Unlike ``get_scrubbed_sdk_env`` this does NOT force
+    ``HOMIE_HOME`` or drop secret-shaped keys: a self-restart keeps the SAME
+    profile and the SAME process env, shedding only the nesting markers. Reuses
+    ``_NESTED_CLAUDE_CODE_STATE_KEYS`` as the single source of truth.
+
+    Rule 1: ``parent_env=None`` resolves to ``os.environ.copy()`` at call time.
+    """
+    if parent_env is None:
+        parent_env = os.environ.copy()
+    return {
+        key: value
+        for key, value in parent_env.items()
+        if key not in _NESTED_CLAUDE_CODE_STATE_KEYS
+    }
+
+
+__all__ = ["get_scrubbed_sdk_env", "scrub_nested_claude_state"]

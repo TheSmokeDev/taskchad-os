@@ -435,7 +435,10 @@ async def handle_restart(adapter: Any, incoming: Any, args: str, *, collect_only
     if collect_only:
         return "Cannot chain /restart — use it alone."
 
+    import sys
+
     from models import OutgoingMessage
+    from shared import spawn_detached
 
     reply = "Restarting myself... back in a few seconds."
     await adapter.send(
@@ -445,15 +448,13 @@ async def handle_restart(adapter: Any, incoming: Any, args: str, *, collect_only
             thread=incoming.thread,
         )
     )
+    # A process can't reliably restart itself — spawn the DETACHED relauncher
+    # (chat/relaunch.py). It survives our exit, waits for us to die, then spawns
+    # a fresh bot with the Claude-Code nesting markers scrubbed and the profile
+    # preserved. Pure Python (no bash dependency); see chat/relaunch.py.
     chat_dir = Path(__file__).resolve().parent
-    run_script = chat_dir / "run_chat.sh"
-    subprocess.Popen(
-        ["bash", str(run_script)],
-        cwd=str(chat_dir),
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    relaunch_script = chat_dir / "relaunch.py"
+    spawn_detached([sys.executable, str(relaunch_script)], cwd=str(chat_dir))
     await asyncio.sleep(1)
     print(f"[{datetime.now()}] Self-restart initiated — exiting (PID {os.getpid()})")
     os._exit(0)

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -495,6 +496,54 @@ def cleanup_stale_pid(pid_file: Path | None = None) -> int | None:
     pid_file.unlink(missing_ok=True)
     _remove_compat_shadow_if_default()
     return None
+
+
+def spawn_detached(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    log_path: Path | None = None,
+    cwd: str | Path | None = None,
+) -> int:
+    """Spawn *cmd* as a fully detached child that survives this process's exit.
+
+    Cross-platform detachment (mirrors the proven dashboard_bot_lifecycle
+    pattern): Windows ``CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS``; POSIX
+    ``start_new_session=True``. When *log_path* is given, stdout+stderr append to
+    it (merged); otherwise both go to ``DEVNULL``. stdin is always ``DEVNULL``.
+    Returns the child PID.
+
+    Used for bot self-restart (``chat/relaunch.py``) and any background relaunch
+    that must outlive its spawner. The child's std handles are dup'd by the OS,
+    so the parent closes its log handle immediately after spawn.
+    """
+    popen_kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL}
+    if env is not None:
+        popen_kwargs["env"] = env
+    if cwd is not None:
+        popen_kwargs["cwd"] = str(cwd)
+    log_handle = None
+    if log_path is not None:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        log_handle = open(log_path, "ab")  # noqa: SIM115 — inherited by child
+        popen_kwargs["stdout"] = log_handle
+        popen_kwargs["stderr"] = subprocess.STDOUT
+    else:
+        popen_kwargs["stdout"] = subprocess.DEVNULL
+        popen_kwargs["stderr"] = subprocess.DEVNULL
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+    finally:
+        if log_handle is not None:
+            log_handle.close()
+    return proc.pid
 
 
 def cleanup_all_bot_processes(pid_file: Path | None = None) -> list[int]:
