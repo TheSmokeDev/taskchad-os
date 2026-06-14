@@ -64,6 +64,7 @@ from config import (  # noqa: E402
     OWNER_NAME,
     PROJECT_ROOT,
     ensure_directories,
+    get_background_models,
     get_heartbeat_blocker_settings,
     get_heartbeat_observation_settings,
     is_within_active_hours,
@@ -461,13 +462,6 @@ async def gather_heartbeat_context() -> tuple[
                         )
                     raise
 
-                from claude_agent_sdk import (
-                    AssistantMessage,
-                    ClaudeAgentOptions,
-                    TextBlock,
-                    query as sdk_query,
-                )
-
                 drafts_dir = DRAFTS_ACTIVE_DIR
                 drafts_dir.mkdir(parents=True, exist_ok=True)
                 today = now_local().strftime("%Y-%m-%d")
@@ -514,16 +508,24 @@ async def gather_heartbeat_context() -> tuple[
 
                     pitch_text = "[Pitch generation failed — fill in manually]"
                     try:
-                        async for sdk_msg in sdk_query(
-                            prompt=pitch_prompt,
-                            options=ClaudeAgentOptions(model="haiku", max_turns=1, allowed_tools=[]),
-                        ):
-                            if isinstance(sdk_msg, AssistantMessage):
-                                pitch_text = "".join(
-                                    b.text for b in sdk_msg.content if isinstance(b, TextBlock)
-                                )
+                        pitch_result = await run_with_runtime_lanes(
+                            RuntimeRequest(
+                                prompt=pitch_prompt,
+                                cwd=PROJECT_ROOT,
+                                task_name="heartbeat_haro_pitch",
+                                capability=TEXT_REASONING,
+                                # FAST background tier (haiku) — trivial pitch
+                                # draft. Claude-lane alias; generic lanes use
+                                # their own model. Never the interactive flagship.
+                                model=get_background_models()["fast"],
+                                max_turns=1,
+                                allowed_tools=[],
+                            )
+                        )
+                        if pitch_result.text.strip():
+                            pitch_text = pitch_result.text.strip()
                     except Exception as pitch_err:
-                        print(f"[{now_local()}] Haiku pitch error (non-fatal): {pitch_err}")
+                        print(f"[{now_local()}] HARO pitch error (non-fatal): {pitch_err}")
 
                     draft_content = (
                         f"---\n"
@@ -2273,6 +2275,10 @@ Your final text response goes directly to {owner}'s phone. Keep it to just bulle
                 cwd=PROJECT_ROOT,
                 task_name="heartbeat",
                 capability=TOOL_REASONING,
+                # Background reasoning runs on the cheap FAST tier (haiku),
+                # never the operator's interactive flagship (Opus). Claude-lane
+                # alias; generic lanes use their own model + the codex override.
+                model=get_background_models()["fast"],
                 fallback_model=heartbeat_codex_model,
                 setting_sources=["user", "project"],
                 system_prompt={"type": "preset", "preset": "claude_code"},
@@ -2338,8 +2344,10 @@ Your final text response goes directly to {owner}'s phone. Keep it to just bulle
                     cwd=PROJECT_ROOT,
                     task_name="heartbeat_formatter",
                     capability=TEXT_REASONING,
-                    model="haiku",
-                    fallback_model="gpt-4.1-mini",
+                    # FAST background tier (haiku) — trivial format pass. Claude-
+                    # lane alias; ignored on generic lanes (each provider uses
+                    # its own model). Never the interactive flagship.
+                    model=get_background_models()["fast"],
                     max_turns=1,
                     allowed_tools=[],
                 )

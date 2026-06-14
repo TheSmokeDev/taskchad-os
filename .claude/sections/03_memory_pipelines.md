@@ -17,6 +17,26 @@ Proactively checks calendar, email, Asana, and content deadlines. Sends desktop 
 **State:** `.claude/data/state/heartbeat-state.json`
 **Checklist:** `vault/memory/HEARTBEAT.md`
 
+### Background Model Tiers (cost guard)
+
+Scheduled jobs must **never inherit the operator's interactive flagship model**
+(`SECOND_BRAIN_CLAUDE_MODEL`, e.g. Opus) — a cron job reasoning over pre-gathered
+data has no business burning Opus tokens ~48×/day. Each scheduled `RuntimeRequest`
+passes an explicit cheap `model=` resolved by `config.get_background_models()`
+(Rule 1, call-time), with two tiers:
+
+| Tier | Default | Jobs | Knob |
+|------|---------|------|------|
+| `fast` | `haiku` | heartbeat (main reasoning + alert formatter + HARO pitch) | `SECOND_BRAIN_BACKGROUND_FAST_MODEL` |
+| `quality` | `sonnet` | daily reflection, weekly synthesis, dream (consolidate + prune) | `SECOND_BRAIN_BACKGROUND_QUALITY_MODEL` |
+
+**Lane caveat:** these are Claude-lane aliases applied via `RuntimeRequest.model`.
+On generic lanes (Codex/Gemini) `request.model` is ignored and the provider's
+own configured model is used (`SECOND_BRAIN_CODEX_MODEL` etc.); the heartbeat
+keeps its tested `HEARTBEAT_CODEX_MODEL` override for the codex lane. Per-lane
+cheap-background for generic providers is a separate follow-up. The interactive
+chat path is unaffected — it still uses `SECOND_BRAIN_CLAUDE_MODEL`.
+
 ### Memory Search (On-demand)
 
 Hybrid search (keyword + semantic) over all memory files. Fully local — no API calls.

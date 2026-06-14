@@ -58,6 +58,7 @@ from config import (  # noqa: E402
     WEEKLY_DIR,
     WEEKLY_STATE_FILE,
     ensure_directories,
+    get_background_models,
     get_today_log_path,
     now_local,
 )
@@ -400,6 +401,9 @@ If there is no real cross-domain signal this week, write: `No cross-domain signa
                 cwd=PROJECT_ROOT,
                 task_name="memory_weekly",
                 capability=TOOL_REASONING,
+                # QUALITY background tier (sonnet) — deep synthesis that rewrites
+                # durable memory. Cheap vs Opus; never the interactive flagship.
+                model=get_background_models()["quality"],
                 setting_sources=["user", "project"],
                 system_prompt={"type": "preset", "preset": "claude_code"},
                 allowed_tools=[

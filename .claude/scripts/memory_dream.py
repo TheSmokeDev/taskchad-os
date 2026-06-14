@@ -75,6 +75,7 @@ from config import (  # noqa: E402
     SELF_FILE,
     STATE_DIR,
     ensure_directories,
+    get_background_models,
     get_today_log_path,
     now_local,
 )
@@ -569,6 +570,9 @@ If nothing in the signal warrants changes, respond with exactly: CONSOLIDATION_O
             cwd=PROJECT_ROOT,
             task_name="memory_dream_consolidate",
             capability=TOOL_REASONING,
+            # QUALITY background tier (sonnet) — deep consolidation that
+            # rewrites durable memory. Cheap vs Opus; never the flagship.
+            model=get_background_models()["quality"],
             setting_sources=["user", "project"],
             system_prompt={"type": "preset", "preset": "claude_code"},
             allowed_tools=["Read", "Edit", "Glob", "Grep", "Bash"],
@@ -671,6 +675,9 @@ If MEMORY.md is already clean and under 200 lines, respond with exactly: PRUNE_O
             cwd=PROJECT_ROOT,
             task_name="memory_dream_prune",
             capability=TOOL_REASONING,
+            # QUALITY background tier (sonnet) — deep prune that rewrites
+            # durable memory. Cheap vs Opus; never the flagship.
+            model=get_background_models()["quality"],
             setting_sources=["user", "project"],
             system_prompt={"type": "preset", "preset": "claude_code"},
             allowed_tools=["Read", "Edit", "Glob", "Grep", "Bash"],

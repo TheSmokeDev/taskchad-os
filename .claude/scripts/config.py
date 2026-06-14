@@ -979,6 +979,40 @@ def get_cognitive_pass_settings(
     )
 
 
+def get_background_models(
+    fast: str | None = None,
+    quality: str | None = None,
+) -> dict[str, str]:
+    """Resolve cheap models for scheduled/background jobs at CALL TIME (Rule 1).
+
+    Background jobs (heartbeat, daily reflection, weekly synthesis, dream) must
+    NOT inherit the operator's interactive flagship model
+    (``SECOND_BRAIN_CLAUDE_MODEL``, e.g. Opus). A cron job that reasons over
+    pre-gathered data has no business burning Opus tokens ~48x/day. Two tiers:
+
+        fast    — frequent/light jobs (the heartbeat family: reasoning pass,
+                  alert formatter, HARO pitch). Default ``"haiku"``.
+        quality — deep, infrequent synthesis (reflection, weekly, dream) that
+                  rewrites durable memory. Default ``"sonnet"``.
+
+    Lane note: these are Claude-lane model aliases applied via
+    ``RuntimeRequest.model``. On generic lanes (Codex/Gemini) ``request.model``
+    is ignored and the provider's own configured model is used — making those
+    cheap per-lane is separate (provider-model env knobs / the pinned-fallback
+    follow-up). None-sentinel args resolve the env at call time so
+    ``monkeypatch.setenv`` / a live ``.env`` edit take effect with no reload.
+
+    Knobs:
+        SECOND_BRAIN_BACKGROUND_FAST_MODEL ("haiku")
+        SECOND_BRAIN_BACKGROUND_QUALITY_MODEL ("sonnet")
+    """
+    if fast is None:
+        fast = os.getenv("SECOND_BRAIN_BACKGROUND_FAST_MODEL", "haiku").strip() or "haiku"
+    if quality is None:
+        quality = os.getenv("SECOND_BRAIN_BACKGROUND_QUALITY_MODEL", "sonnet").strip() or "sonnet"
+    return {"fast": fast, "quality": quality}
+
+
 class SessionBriefSettings(NamedTuple):
     """Effective session-opening-brief knobs (call-time resolved)."""
 
