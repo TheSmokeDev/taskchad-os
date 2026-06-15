@@ -182,6 +182,46 @@ class TestIntentDetection:
         detected = populated_manager.detect_intents("how are we looking across all boards")
         assert len(detected) >= 2  # brief intents
 
+    def test_detect_intents_disabled_returns_empty(
+        self, populated_manager: ExtensionManager, monkeypatch,
+    ):
+        """INTENT_AUTODISPATCH_ENABLED=false → natural language never auto-dispatches.
+
+        Each case is non-empty when enabled (keyword data intent, broad-query
+        briefing, action intent); all must collapse to [] when disabled so the
+        message falls through to the engine instead of auto-running a command.
+        """
+        import config
+
+        monkeypatch.setattr(config, "INTENT_AUTODISPATCH_ENABLED", False)
+        assert populated_manager.detect_intents("check email and budget") == []
+        assert populated_manager.detect_intents("how are we looking across all boards") == []
+        assert populated_manager.detect_intents("open up your browser and go to LinkedIn") == []
+
+    def test_detect_intents_enabled_still_dispatches(
+        self, populated_manager: ExtensionManager, monkeypatch,
+    ):
+        """With the flag enabled (code default), detection is unchanged."""
+        import config
+
+        monkeypatch.setattr(config, "INTENT_AUTODISPATCH_ENABLED", True)
+        assert populated_manager.detect_intents("check email and budget") == ["budget"]
+
+    def test_pitching_message_does_not_trigger_budget(
+        self, populated_manager: ExtensionManager, monkeypatch,
+    ):
+        """Regression for the bug report: a sales/pitching message must not fire
+        /budget. 'paid' was removed from the budget keyword set, so a stray
+        'get paid' in conversation no longer matches even with dispatch enabled.
+        """
+        import config
+
+        monkeypatch.setattr(config, "INTENT_AUTODISPATCH_ENABLED", True)
+        detected = populated_manager.detect_intents(
+            "she's gonna get paid tomorrow but i need to work on my pitch and pricing"
+        )
+        assert "budget" not in detected
+
     def test_discussion_only_skill_mentions_do_not_detect_intents(
         self, populated_manager: ExtensionManager,
     ):

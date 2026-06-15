@@ -112,3 +112,125 @@ def test_unknown_workflow_is_default_denied() -> None:
     assert decision.allowed is False
     assert decision.outcome == "blocked"
     assert "Unknown browser workflow" in decision.reason
+
+
+def test_registry_contains_reddit_workflows() -> None:
+    workflow_ids = {workflow.workflow_id for workflow in list_browser_workflows()}
+    assert {
+        "reddit.research",
+        "reddit.comment.create",
+        "reddit.post.create",
+    }.issubset(workflow_ids)
+    research = get_browser_workflow("reddit.research")
+    assert research is not None and research.classification == "read"
+    comment = get_browser_workflow("reddit.comment.create")
+    assert comment is not None and comment.classification == "write"
+    post = get_browser_workflow("reddit.post.create")
+    assert post is not None and post.classification == "write"
+
+
+def test_reddit_research_passes_without_approval() -> None:
+    decision = require_browser_workflow_permission(
+        "reddit.research", "research california sr-22 insurance"
+    )
+    assert decision.allowed is True
+    assert decision.outcome == "allowed"
+
+
+def test_reddit_writes_block_without_explicit_approval() -> None:
+    for workflow_id, text in (
+        ("reddit.comment.create", "comment https://reddit.com/r/x/comments/1/ | helpful reply"),
+        ("reddit.post.create", "post Insurance | Title | body text"),
+    ):
+        decision = require_browser_workflow_permission(workflow_id, text)
+        assert decision.allowed is False
+        assert decision.outcome == "blocked"
+        assert "requires explicit approval" in decision.reason
+
+
+def test_reddit_writes_pass_with_explicit_approval() -> None:
+    comment = require_browser_workflow_permission(
+        "reddit.comment.create",
+        "comment https://reddit.com/r/x/comments/1/ | reply post this comment to reddit now",
+    )
+    assert comment.allowed is True
+    assert comment.outcome == "allowed"
+    post = require_browser_workflow_permission(
+        "reddit.post.create",
+        "post Insurance | Title | body post this to reddit now",
+    )
+    assert post.allowed is True
+    assert post.outcome == "allowed"
+
+
+# ── Social-write (Phase 1) — router_command wiring + NM1 trailing-token gate ──
+
+
+def test_linkedin_write_workflows_have_router_commands() -> None:
+    post = get_browser_workflow("linkedin.post.create")
+    connect = get_browser_workflow("linkedin.connection.request")
+    assert post is not None and post.router_command == "/linkedin_post"
+    assert connect is not None and connect.router_command == "/linkedin_connect"
+    assert post.classification == "write" and post.approval_level == "explicit"
+    assert connect.classification == "write" and connect.approval_level == "explicit"
+
+
+def test_linkedin_writes_block_without_explicit_approval() -> None:
+    for workflow_id, text in (
+        ("linkedin.post.create", "https://www.linkedin.com/feed/ | here is my body"),
+        ("linkedin.connection.request", "https://www.linkedin.com/in/x | nice to connect"),
+    ):
+        decision = require_browser_workflow_permission(workflow_id, text)
+        assert decision.allowed is False
+        assert decision.outcome == "blocked"
+        assert "requires explicit approval" in decision.reason
+
+
+def test_linkedin_writes_pass_with_trailing_approval() -> None:
+    post = require_browser_workflow_permission(
+        "linkedin.post.create",
+        "https://www.linkedin.com/feed/ | here is my body post this to linkedin now",
+    )
+    assert post.allowed is True
+    connect = require_browser_workflow_permission(
+        "linkedin.connection.request",
+        "https://www.linkedin.com/in/x | hi send this linkedin connection request now",
+    )
+    assert connect.allowed is True
+
+
+def test_approval_phrase_embedded_in_body_does_not_auto_approve() -> None:
+    """NM1: the phrase only counts as a TRAILING confirmation token — a post body
+    that contains it mid-text (with no trailing confirmation) stays BLOCKED."""
+    decision = require_browser_workflow_permission(
+        "linkedin.post.create",
+        "https://www.linkedin.com/feed/ | I love how 'post this to linkedin now' reads as copy",
+    )
+    assert decision.allowed is False
+    assert decision.outcome == "blocked"
+
+
+def test_gate_with_isolated_approved_flag_and_empty_user_text() -> None:
+    """THE FIX contract at the gate level: handlers now pass user_text="" plus an
+    `approved` flag computed from the STRUCTURALLY-ISOLATED confirmation segment.
+    The gate's own `.endswith` scan never sees the body. Both write workflows are
+    allowed only when `approved=True`."""
+    for workflow_id in ("linkedin.post.create", "reddit.comment.create", "reddit.post.create"):
+        blocked = require_browser_workflow_permission(workflow_id, "", approved=False)
+        assert blocked.allowed is False
+        assert blocked.outcome == "blocked"
+        allowed = require_browser_workflow_permission(workflow_id, "", approved=True)
+        assert allowed.allowed is True
+        assert allowed.outcome == "allowed"
+
+
+def test_gate_empty_user_text_with_body_phrase_can_never_approve_via_scan() -> None:
+    """A body that ends with the phrase can NEVER reach the gate as user_text under
+    the new handler contract — the handler passes "" and decides approval on the
+    isolated segment. Proven here: empty user_text + approved=False stays BLOCKED
+    regardless of what the (now-unseen) body contained."""
+    decision = require_browser_workflow_permission(
+        "reddit.comment.create", "", approved=False
+    )
+    assert decision.allowed is False
+    assert decision.outcome == "blocked"

@@ -16,6 +16,7 @@ from orchestration.contract import (
     DeliveryStatus,
     MergeStrategy,
     MessageType,
+    SocialWriteAction,
     SubtaskStatus,
     TeamMemberRole,
     TeamMemberStatus,
@@ -360,3 +361,20 @@ class ProgressReport:
     message: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: int = 0
+
+
+# ── Social-Write Task (Phase 1) ────────────────────────────────────────────
+# Carried via Subtask.metadata = json.dumps(asdict(task)) into BrowserExecutor.
+# A SocialWriteTask only EXISTS because the chat HANDLER already gated on the
+# operator's verbatim text and got decision.allowed — it carries NO approval
+# claim. There is deliberately NO approval_token field (default-deny invariant).
+
+
+@dataclass
+class SocialWriteTask:
+    workflow_id: str  # a registered write workflow, e.g. "linkedin.post.create"
+    target_url: str  # absolute http(s); the gate redacts it on the way out
+    payload_text: str  # final approved text (post body or connection note)
+    action: SocialWriteAction = "post"  # "post" | "connect"
+    # literal default (Rule-1 safe) — capture a screenshot after the write
+    post_action_snapshot: bool = True

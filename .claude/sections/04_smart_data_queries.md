@@ -18,6 +18,10 @@ Natural language data queries are intercepted by the router before reaching the 
 5. **Data-only** (no analysis signals): raw data returned immediately, engine never invoked
 6. **Analysis wanted** (greetings, "summary", "prioritize", etc.): pre-fetched data attached to `incoming.prefetched_context`, engine invoked with `TEXT_REASONING` (no tools, cheapest provider, max 1 turn)
 
+### Disabling Auto-Dispatch (talk-only mode)
+
+`INTENT_AUTODISPATCH_ENABLED` (default `true`, in `.claude/scripts/config.py`) gates this entire path. Set `INTENT_AUTODISPATCH_ENABLED=false` in `.claude/scripts/.env` and `detect_intents()` returns `[]` — every natural-language message (data-only, analysis, broad-query briefings, and action intents like cabinet/browserops) falls straight through to the engine instead of auto-running a command. **Explicit slash commands (`/budget`, `/email`, …) are unaffected** — they're parsed before `detect_intents()` runs. Use this when keyword matches in normal conversation keep hijacking the reply. Requires a bot restart (config reads env at import).
+
 ### Key Files
 
 | File | Role |

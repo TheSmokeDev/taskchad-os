@@ -664,6 +664,8 @@ def _audit_browser_action(
     readiness: dict[str, Any] | None = None,
     cdp_port: int | None = None,
     target_url: str | None = None,
+    subtask_id: int | None = None,
+    executor_name: str | None = None,
 ) -> None:
     from browser_audit import append_browser_audit_record
     from browser_workflows import get_browser_workflow
@@ -680,6 +682,8 @@ def _audit_browser_action(
         surface=_browser_actor_surface(adapter, incoming),
         session_id=_browser_session_id(incoming),
         target_url=target_url,
+        subtask_id=subtask_id,
+        executor_name=executor_name,
     )
 
 
@@ -1242,6 +1246,728 @@ async def handle_linkedin_profile(
         readiness=readiness,
     )
     return "Unknown LinkedIn profile command. Use: /linkedin_profile status or /linkedin_profile open"
+
+
+def _reddit_search_url(query: str) -> str:
+    """Build a Reddit URL for a research query. A leading 'r/<sub>' browses that
+    subreddit; anything else runs a site search sorted by relevance over the year."""
+    from urllib.parse import quote_plus
+
+    q = query.strip()
+    if q.lower().startswith("r/"):
+        sub = q.split()[0].strip("/")
+        return f"https://www.reddit.com/{sub}/"
+    return f"https://www.reddit.com/search/?q={quote_plus(q)}&sort=relevance&t=year"
+
+
+_REDDIT_SUBREDDIT_RE = None  # lazily compiled in _validate_reddit_subreddit
+
+
+def _validate_reddit_thread_url(thread_url: str) -> str | None:
+    """Return an error string if ``thread_url`` is not a safe reddit https URL.
+
+    Closes the comment-target injection surface: the thread URL is driven straight
+    into ``open`` with no scheme/host check. Require an absolute https URL on a
+    reddit host. Returns None when valid.
+    """
+    from urllib.parse import urlsplit
+
+    from browser_control import validate_web_url
+
+    try:
+        validate_web_url(thread_url)
+    except ValueError as exc:
+        return str(exc)
+    parsed = urlsplit(thread_url)
+    if parsed.scheme != "https":
+        return "thread URL must use https"
+    host = (parsed.hostname or "").lower()
+    if host != "reddit.com" and not host.endswith(".reddit.com"):
+        return "thread URL must be on reddit.com"
+    return None
+
+
+def _validate_reddit_subreddit(sub: str) -> str | None:
+    """Return an error string if ``sub`` is not a safe subreddit name.
+
+    Closes the r/{sub}/submit interpolation surface: a subreddit with a slash,
+    '?', '#', or '..' would smuggle a path/query into the constructed submit URL.
+    Reddit subreddit names are ``^[A-Za-z0-9_]{2,21}$``. Returns None when valid.
+    """
+    import re as _re
+
+    global _REDDIT_SUBREDDIT_RE
+    if _REDDIT_SUBREDDIT_RE is None:
+        _REDDIT_SUBREDDIT_RE = _re.compile(r"^[A-Za-z0-9_]{2,21}$")
+    if not _REDDIT_SUBREDDIT_RE.match(sub):
+        return "subreddit must match ^[A-Za-z0-9_]{2,21}$ (no slashes, query, or path)"
+    # Belt-and-suspenders: the constructed submit URL must also be a valid https URL.
+    from browser_control import validate_web_url
+
+    submit_url = f"https://www.reddit.com/r/{sub}/submit?type=TEXT"
+    try:
+        validate_web_url(submit_url)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _strip_phrase(text: str, phrase: str) -> str:
+    """Remove a trailing approval phrase (case-insensitive) from drafted content."""
+    lower = text.lower()
+    idx = lower.rfind(phrase.lower())
+    if idx == -1:
+        return text.strip()
+    return (text[:idx] + text[idx + len(phrase):]).strip()
+
+
+def _split_social_args(rest: str, approval: str, *, body_segments: int) -> tuple[list[str], bool]:
+    """Split pipe-delimited social-write args into content segments + an isolated
+    confirmation flag.
+
+    Ban-safety invariant (the FIX): the operator's approval MUST be a DISTINCT
+    trailing pipe-delimited segment that EXACTLY matches the approval phrase. The
+    body can NEVER satisfy approval, even if the body itself ends with the phrase,
+    because approval is decided ONLY on the last segment by exact equality — never
+    by scanning the whole message.
+
+    Args:
+        rest: the operator's args after the subcommand (e.g. "<url> | <body> | <phrase>").
+        approval: the EXACT approval phrase for this workflow.
+        body_segments: how many leading content segments the command carries
+            (LinkedIn post/connect = 2: url|body; reddit comment = 2: url|body;
+            reddit post = 3: sub|title|body).
+
+    Returns:
+        (segments, approved) where:
+          - segments is a list of exactly ``body_segments`` content strings
+            (stripped, padded with "" if the operator supplied fewer). The FINAL
+            content field keeps any literal pipes the body contained. The
+            confirmation segment, when present, is NEVER included here.
+          - approved is True ONLY when a trailing segment beyond the content
+            segments exists AND exactly equals the approval phrase (normalized).
+
+    Pipe-in-body safety: a body may itself contain '|'. Approval is decided by
+    peeling ONLY the final '|'-delimited segment and exact-matching it to the
+    phrase. The body keeps its pipes; only a true trailing confirmation is peeled.
+    """
+
+    raw = rest or ""
+    approved = False
+    content = raw
+    # Peel ONLY the final segment and test it for an exact confirmation match. A
+    # body that merely ENDS with the phrase (no preceding '|') never matches,
+    # because there is no trailing segment to peel.
+    if "|" in raw:
+        head, _, tail = raw.rpartition("|")
+        if _normalize_confirmation(tail) == _normalize_confirmation(approval):
+            approved = True
+            content = head  # everything before the confirmation segment
+    # Split the content into the first (body_segments - 1) fields; the FINAL
+    # field keeps any remaining pipes so a body with '|' is preserved intact.
+    if body_segments <= 1:
+        parts = [content.strip()]
+    else:
+        parts = [p.strip() for p in content.split("|", body_segments - 1)]
+    segments = [parts[i] if i < len(parts) else "" for i in range(body_segments)]
+    return segments, approved
+
+
+def _normalize_confirmation(text: str) -> str:
+    """Whitespace/case-normalize a confirmation segment for EXACT comparison."""
+    import re as _re
+
+    return _re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _reddit_drive_comment(port: int, thread_url: str, body: str) -> tuple[bool, str]:
+    """Drive the visible browser to post a comment reply on a Reddit thread.
+
+    SELECTORS: verify against the live Reddit (shreddit) UI before the first real
+    post. The composer is a contenteditable and the submit control is the "Comment"
+    button; finalize these refs interactively during the supervised first run.
+    """
+    from browser_control import redact_text_urls, run_agent_browser
+
+    for step in (["open", thread_url], ["wait", "--load", "networkidle"]):
+        result = run_agent_browser(step, port=port)
+        if not result.ok:
+            return False, f"{step[0]} failed: {redact_text_urls(result.output[:600]) or '(no output)'}"
+    fill = run_agent_browser(["find", "role", "textbox", "fill", body], port=port)
+    if not fill.ok:
+        return False, f"comment box fill failed: {redact_text_urls(fill.output[:600]) or '(no output)'}"
+    submit = run_agent_browser(["find", "role", "button", "click", "--name", "Comment"], port=port)
+    if not submit.ok:
+        return False, f"comment submit failed: {redact_text_urls(submit.output[:600]) or '(no output)'}"
+    return True, "comment submitted"
+
+
+def _reddit_drive_post(port: int, subreddit: str, title: str, body: str) -> tuple[bool, str]:
+    """Drive the visible browser to create a Reddit self-post.
+
+    SELECTORS: verify against the live Reddit (shreddit) submit UI before the first
+    real post; finalize the title/body/Post refs during the supervised first run.
+    """
+    from browser_control import redact_text_urls, run_agent_browser
+
+    sub = subreddit.strip().strip("/")
+    if sub.lower().startswith("r/"):
+        sub = sub[2:]
+    submit_url = f"https://www.reddit.com/r/{sub}/submit?type=TEXT"
+    for step in (["open", submit_url], ["wait", "--load", "networkidle"]):
+        result = run_agent_browser(step, port=port)
+        if not result.ok:
+            return False, f"{step[0]} failed: {redact_text_urls(result.output[:600]) or '(no output)'}"
+    title_step = run_agent_browser(["find", "placeholder", "Title", "fill", title], port=port)
+    if not title_step.ok:
+        return False, f"title fill failed: {redact_text_urls(title_step.output[:600]) or '(no output)'}"
+    body_step = run_agent_browser(["find", "role", "textbox", "fill", body], port=port)
+    if not body_step.ok:
+        return False, f"body fill failed: {redact_text_urls(body_step.output[:600]) or '(no output)'}"
+    submit = run_agent_browser(["find", "role", "button", "click", "--name", "Post"], port=port)
+    if not submit.ok:
+        return False, f"post submit failed: {redact_text_urls(submit.output[:600]) or '(no output)'}"
+    return True, "post submitted"
+
+
+async def handle_reddit(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
+    """Reddit operator over the visible Chrome CDP session.
+
+    research = read-only thread search. comment / post = explicit-approval browser
+    writes (the first real write-execution path). Drives whatever Reddit account is
+    logged into the visible session. Generic framework capability - the business
+    playbook (target subs, voice) lives in the consuming repo, not here.
+    """
+
+    from browser_control import (
+        browser_readiness,
+        browser_status,
+        format_browser_status,
+        redact_text_urls,
+        redact_url,
+        resolve_cdp_port,
+        run_agent_browser,
+    )
+    from browser_workflows import require_browser_workflow_permission
+
+    raw = (args or "").strip()
+    if not raw or raw.lower() in {"help", "-h", "--help"}:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/reddit help",
+            workflow_id=None,
+            outcome="succeeded",
+            reason="help displayed",
+        )
+        return (
+            "*Reddit Commands*\n"
+            "  /reddit status\n"
+            "  /reddit research <query or r/subreddit>\n"
+            "  /reddit comment <thread_url> | <body> | <approval phrase>\n"
+            "  /reddit post <subreddit> | <title> | <body> | <approval phrase>\n\n"
+            "Research is read-only. Comment and post require explicit approval as the\n"
+            "FINAL pipe-delimited segment, matching EXACTLY:\n"
+            "  comment -> \"post this comment to reddit now\"\n"
+            "  post    -> \"post this to reddit now\"\n"
+            "The body can never approve itself - the confirmation is a separate segment.\n"
+            "Drives the visible Chrome CDP session - no API, no headless fallback."
+        )
+
+    split_once = raw.split(None, 1)
+    subcommand = split_once[0].lower()
+    rest = split_once[1].strip() if len(split_once) > 1 else ""
+
+    try:
+        port = resolve_cdp_port(
+            env_names=(
+                "HOMIE_REDDIT_CDP_PORT",
+                "REDDIT_BROWSER_CDP_PORT",
+                "HOMIE_BROWSER_CDP_PORT",
+                "AGENT_BROWSER_CDP_PORT",
+            )
+        )
+    except ValueError as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/reddit {subcommand}",
+            workflow_id=None,
+            outcome="failed",
+            reason=str(exc),
+        )
+        return f"Reddit browser config error: {exc}"
+
+    readiness = browser_readiness(port=port)
+
+    if subcommand == "status":
+        workflow_id = "browser.status"
+        decision = require_browser_workflow_permission(workflow_id, raw)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/reddit status",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        output = format_browser_status(browser_status(port=port), label="Reddit Browser")
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/reddit status",
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason="status rendered",
+            readiness=readiness,
+        )
+        return output
+
+    if subcommand == "research":
+        if not rest:
+            return "Usage: /reddit research <query or r/subreddit>"
+        workflow_id = "reddit.research"
+        url = _reddit_search_url(rest)
+        decision = require_browser_workflow_permission(workflow_id, raw)
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/reddit research",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+            target_url=url,
+        )
+        if not decision.allowed:
+            return _format_browser_blocked(decision)
+        try:
+            open_res = run_agent_browser(["open", url], port=port)
+            if open_res.ok:
+                run_agent_browser(["wait", "--load", "networkidle"], port=port)
+            snap = run_agent_browser(["snapshot", "-i", "-c"], port=port)
+        except Exception as exc:
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/reddit research",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason=str(exc),
+                readiness=readiness,
+                target_url=url,
+            )
+            return f"Reddit research failed: {redact_text_urls(str(exc))}"
+        ok = open_res.ok and snap.ok
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/reddit research",
+            workflow_id=workflow_id,
+            outcome="succeeded" if ok else "failed",
+            reason=(redact_text_urls(snap.output[:1200]) or "(no output)") if not ok else "research snapshot rendered",
+            readiness=readiness,
+            target_url=url,
+        )
+        if ok:
+            return redact_text_urls(snap.output[:4000]) or "Research returned no readable threads."
+        return (
+            "Reddit research failed.\n"
+            f"  command: {redact_text_urls(snap.command_label)}\n"
+            f"  exit: {snap.returncode}\n"
+            f"  output: {redact_text_urls(snap.output[:1200]) or '(no output)'}"
+        )
+
+    if subcommand == "comment":
+        workflow_id = "reddit.comment.create"
+        approval = "post this comment to reddit now"
+        # FIX (ban-safety): approval is a DISTINCT trailing "| <phrase>" segment.
+        # The body can never satisfy approval — even if it ends with the phrase.
+        (thread_url, body), approved = _split_social_args(
+            rest, approval, body_segments=2
+        )
+        # Validate the thread URL before driving (subreddit/URL injection hardening).
+        url_error = _validate_reddit_thread_url(thread_url) if thread_url else None
+        # GATE on an EMPTY user_text + the structurally-isolated approved flag —
+        # the gate's own .endswith scan can NEVER see the body.
+        decision = require_browser_workflow_permission(
+            workflow_id, "", approved=approved, target_url=thread_url or None
+        )
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/reddit comment",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+            target_url=thread_url or None,
+        )
+        if not decision.allowed:
+            preview = ""
+            if thread_url and body:
+                preview = (
+                    f"\n\nReady to comment on {redact_url(thread_url)}:\n{body}\n\n"
+                    f"To post it, resend with \"| {approval}\" as the final segment."
+                )
+            return _format_browser_blocked(decision) + preview
+        if not thread_url or not body:
+            return (
+                "Usage: /reddit comment <thread_url> | <body> | <approval phrase>  "
+                "(final segment must be exactly \"post this comment to reddit now\")"
+            )
+        if url_error:
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/reddit comment",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason=url_error,
+                readiness=readiness,
+                target_url=thread_url or None,
+            )
+            return f"Reddit comment rejected: {url_error}"
+        if not readiness.get("enabled"):
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/reddit comment",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason="visible-chrome not ready",
+                readiness=readiness,
+                target_url=thread_url or None,
+            )
+            return "Reddit comment failed: visible-chrome not ready."
+        try:
+            ok, detail = _reddit_drive_comment(port, thread_url, body)
+        except Exception as exc:
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/reddit comment",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason=str(exc),
+                readiness=readiness,
+                target_url=thread_url,
+            )
+            return f"Reddit comment failed: {redact_text_urls(str(exc))}"
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/reddit comment",
+            workflow_id=workflow_id,
+            outcome="succeeded" if ok else "failed",
+            reason=detail,
+            readiness=readiness,
+            target_url=thread_url,
+        )
+        if ok:
+            return f"Comment posted to {redact_url(thread_url)}."
+        return f"Reddit comment failed: {detail}"
+
+    if subcommand == "post":
+        workflow_id = "reddit.post.create"
+        approval = "post this to reddit now"
+        # FIX (ban-safety): approval is a DISTINCT trailing "| <phrase>" segment.
+        (subreddit, title, body), approved = _split_social_args(
+            rest, approval, body_segments=3
+        )
+        sub_clean = subreddit.strip("/")
+        if sub_clean.lower().startswith("r/"):
+            sub_clean = sub_clean[2:]
+        # Validate subreddit + constructed submit URL before driving (injection).
+        url_error = _validate_reddit_subreddit(sub_clean) if sub_clean else None
+        decision = require_browser_workflow_permission(
+            workflow_id, "", approved=approved
+        )
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/reddit post",
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+            readiness=readiness,
+        )
+        if not decision.allowed:
+            preview = ""
+            if subreddit and title:
+                preview = (
+                    f"\n\nReady to post to r/{sub_clean}:\n{title}\n{body}\n\n"
+                    f"To post it, resend with \"| {approval}\" as the final segment."
+                )
+            return _format_browser_blocked(decision) + preview
+        if not subreddit or not title:
+            return (
+                "Usage: /reddit post <subreddit> | <title> | <body> | <approval phrase>  "
+                "(final segment must be exactly \"post this to reddit now\")"
+            )
+        if url_error:
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/reddit post",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason=url_error,
+                readiness=readiness,
+            )
+            return f"Reddit post rejected: {url_error}"
+        if not readiness.get("enabled"):
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/reddit post",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason="visible-chrome not ready",
+                readiness=readiness,
+            )
+            return "Reddit post failed: visible-chrome not ready."
+        try:
+            ok, detail = _reddit_drive_post(port, subreddit, title, body)
+        except Exception as exc:
+            _audit_browser_action(
+                adapter=adapter,
+                incoming=incoming,
+                command="/reddit post",
+                workflow_id=workflow_id,
+                outcome="failed",
+                reason=str(exc),
+                readiness=readiness,
+            )
+            return f"Reddit post failed: {redact_text_urls(str(exc))}"
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/reddit post",
+            workflow_id=workflow_id,
+            outcome="succeeded" if ok else "failed",
+            reason=detail,
+            readiness=readiness,
+        )
+        if ok:
+            return f"Post created in r/{subreddit.strip('/')}."
+        return f"Reddit post failed: {detail}"
+
+    _audit_browser_action(
+        adapter=adapter,
+        incoming=incoming,
+        command=f"/reddit {subcommand}",
+        workflow_id=None,
+        outcome="failed",
+        reason="unknown reddit command",
+        readiness=readiness,
+    )
+    return "Unknown Reddit command. Use: /reddit status, research, comment, post"
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn social-write handlers (Phase 1) — the HANDLER is the approval
+# authority. It gates on the operator's VERBATIM message text via
+# require_browser_workflow_permission and dispatches a SocialWriteTask to a
+# locally-constructed BrowserExecutor ONLY when decision.allowed. There is no
+# approval_token; the post body NEVER reaches the gate's user_text.
+# ---------------------------------------------------------------------------
+
+
+def _build_social_write_subtask(task: Any) -> Any:
+    """Serialize a SocialWriteTask into a Subtask.metadata JSON envelope."""
+
+    import json as _json
+    from dataclasses import asdict
+
+    from orchestration.models import Subtask
+
+    return Subtask(
+        title=f"social-write:{task.workflow_id}",
+        metadata=_json.dumps(asdict(task)),
+    )
+
+
+async def _handle_social_write(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    workflow_id: str,
+    command: str,
+    approval: str,
+    action: str,
+    usage: str,
+    tracker_lane: str,
+    success_label: str,
+) -> str:
+    """Shared gate->dispatch->audit->tracker path for /linkedin_post and /linkedin_connect."""
+
+    from browser_control import browser_readiness, redact_text_urls, redact_url, resolve_cdp_port
+    from browser_workflows import require_browser_workflow_permission
+    from social_write_driver import AgentBrowserSocialWriteDriver, append_tracker_row
+
+    from orchestration.browser_executor import BrowserExecutor
+    from orchestration.models import SocialWriteTask
+
+    raw = (args or "").strip()  # operator's verbatim args (NM2 — guard None)
+    if not raw or raw.lower() in {"help", "-h", "--help"}:
+        return usage
+
+    # FIX (ban-safety): the operator's approval MUST be a DISTINCT trailing
+    # "| <approval phrase>" segment that EXACTLY matches the phrase. The body can
+    # never satisfy approval, even if the body itself ends with the phrase — the
+    # confirmation is decided ONLY on the isolated final segment by exact match.
+    #   /linkedin_post <feed_url> | <body> | <approval phrase>
+    (target_url, body), approved = _split_social_args(raw, approval, body_segments=2)
+
+    try:
+        port = resolve_cdp_port(
+            env_names=(
+                "HOMIE_LINKEDIN_CDP_PORT",
+                "LINKEDIN_BROWSER_CDP_PORT",
+                "HOMIE_BROWSER_CDP_PORT",
+                "AGENT_BROWSER_CDP_PORT",
+            )
+        )
+    except ValueError as exc:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=command,
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=str(exc),
+            executor_name="browser",
+        )
+        return f"LinkedIn browser config error: {exc}"
+
+    readiness = browser_readiness(port=port)
+
+    # GATE on an EMPTY user_text + the structurally-isolated approved flag — the
+    # gate's own .endswith scan can NEVER see the body (R1-B3 / NM1 close-out).
+    driver = AgentBrowserSocialWriteDriver()
+    decision = require_browser_workflow_permission(
+        workflow_id, "", approved=approved, target_url=target_url or None
+    )
+    _audit_browser_action(
+        adapter=adapter,
+        incoming=incoming,
+        command=command,
+        workflow_id=workflow_id,
+        outcome=decision.outcome,
+        reason=decision.reason,
+        readiness=readiness,
+        target_url=target_url or None,
+        executor_name="browser",
+    )
+    if not decision.allowed:
+        preview = ""
+        if target_url and body:
+            preview = (
+                f"\n\nReady ({action}) to {redact_url(target_url)}:\n{body}\n\n"
+                f"To run it, resend with \"| {approval}\" as the final segment."
+            )
+        return _format_browser_blocked(decision) + preview
+
+    if not target_url or not body:
+        return usage
+
+    # ALLOW -> build the task (carries NO approval claim) and dispatch through a
+    # LOCAL BrowserExecutor (never the shared registry — R1-M1).
+    task = SocialWriteTask(
+        workflow_id=workflow_id,
+        target_url=target_url,
+        payload_text=body,
+        action=action,
+    )
+    subtask = _build_social_write_subtask(task)
+    executor = BrowserExecutor(driver)
+    receipt = executor.dispatch(subtask)
+
+    if receipt.status == "completed":
+        try:
+            append_tracker_row(
+                name=redact_url(target_url),
+                lane=tracker_lane,
+                action=action,
+                status="invite-sent" if action == "connect" else "posted",
+                notes=command,
+            )
+        except Exception:  # noqa: BLE001 - tracker write must never fail a landed write
+            pass
+        return f"{success_label} {redact_url(target_url)}"
+    return f"LinkedIn {action} failed: {redact_text_urls(receipt.error or 'unknown error')}"
+
+
+async def handle_linkedin_post(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
+    """Create a LinkedIn post on the visible Chrome session — operator-approved per action.
+
+    Default-deny: no write fires unless the operator's verbatim message ends with
+    the approval phrase. Slash-command-only (NL phrasing stays read-only).
+    """
+
+    return await _handle_social_write(
+        adapter,
+        incoming,
+        args,
+        workflow_id="linkedin.post.create",
+        command="/linkedin_post",
+        approval="post this to linkedin now",
+        action="post",
+        usage=(
+            "Usage: /linkedin_post <feed_url> | <body> | <approval phrase>  "
+            "(final segment must be exactly \"post this to linkedin now\")"
+        ),
+        tracker_lane="LinkedIn post",
+        success_label="Posted to LinkedIn:",
+    )
+
+
+async def handle_linkedin_connect(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
+    """Send a LinkedIn connection request — operator-approved per action.
+
+    Default-deny: no invite fires unless the operator's verbatim message ends
+    with the approval phrase. One approval, one invite — no bulk fan-out, no
+    auto-invite tooling.
+    """
+
+    return await _handle_social_write(
+        adapter,
+        incoming,
+        args,
+        workflow_id="linkedin.connection.request",
+        command="/linkedin_connect",
+        approval="send this linkedin connection request now",
+        action="connect",
+        usage=(
+            "Usage: /linkedin_connect <profile_url> | <note> | <approval phrase>  "
+            "(final segment must be exactly \"send this linkedin connection request now\")"
+        ),
+        tracker_lane="LinkedIn connect",
+        success_label="Connection request sent:",
+    )
 
 
 def _import_x_scout() -> Any:
@@ -4007,6 +4733,9 @@ CORE_HANDLERS: dict[str, Any] = {
     "browser": handle_browser,
     "browserops": handle_browserops,
     "linkedin_profile": handle_linkedin_profile,
+    "linkedin_post": handle_linkedin_post,
+    "linkedin_connect": handle_linkedin_connect,
+    "reddit": handle_reddit,
     "x": handle_x,
     "video": handle_video,
     "inbox": handle_inbox,

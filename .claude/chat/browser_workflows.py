@@ -162,7 +162,7 @@ _WORKFLOWS: dict[str, BrowserWorkflow] = {
         description="Create a LinkedIn post.",
         classification="write",
         approval_level="explicit",
-        router_command=None,
+        router_command="/linkedin_post",
         default_url="https://www.linkedin.com/feed/",
         audit_action="linkedin_post_create",
         approval_examples=("post this to linkedin now",),
@@ -172,10 +172,10 @@ _WORKFLOWS: dict[str, BrowserWorkflow] = {
         description="Send a LinkedIn connection request.",
         classification="write",
         approval_level="explicit",
-        router_command=None,
+        router_command="/linkedin_connect",
         default_url="https://www.linkedin.com/",
         audit_action="linkedin_connection_request",
-        approval_examples=("send the connection request",),
+        approval_examples=("send this linkedin connection request now",),
     ),
     "x.scout": BrowserWorkflow(
         workflow_id="x.scout",
@@ -213,6 +213,35 @@ _WORKFLOWS: dict[str, BrowserWorkflow] = {
         default_url="https://x.com/",
         audit_action="x_post_create",
         approval_examples=("post this to x now",),
+    ),
+    "reddit.research": BrowserWorkflow(
+        workflow_id="reddit.research",
+        description="Search and read Reddit threads via the visible browser (read-only).",
+        classification="read",
+        approval_level="none",
+        router_command="/reddit research",
+        default_url=None,
+        audit_action="reddit_research",
+    ),
+    "reddit.comment.create": BrowserWorkflow(
+        workflow_id="reddit.comment.create",
+        description="Post a comment reply on a Reddit thread.",
+        classification="write",
+        approval_level="explicit",
+        router_command=None,
+        default_url=None,
+        audit_action="reddit_comment_create",
+        approval_examples=("post this comment to reddit now",),
+    ),
+    "reddit.post.create": BrowserWorkflow(
+        workflow_id="reddit.post.create",
+        description="Create a Reddit self-post in a subreddit.",
+        classification="write",
+        approval_level="explicit",
+        router_command=None,
+        default_url=None,
+        audit_action="reddit_post_create",
+        approval_examples=("post this to reddit now",),
     ),
 }
 
@@ -299,10 +328,21 @@ def require_browser_workflow_permission(
 
 
 def _has_explicit_approval(workflow: BrowserWorkflow, user_text: str) -> bool:
+    """True only when the operator's message ENDS with an approval phrase.
+
+    Trailing-token check (not substring-anywhere): a post/comment BODY that
+    happens to contain the approval phrase mid-text must NOT auto-approve. The
+    operator confirms by appending the phrase at the very end of their message,
+    mirroring the reddit write path ("<body> post this to reddit now").
+    """
+
     normalized = _normalize_approval_text(user_text)
     if not normalized:
         return False
-    return any(example in normalized for example in workflow.approval_examples)
+    return any(
+        _normalize_approval_text(example) and normalized.endswith(_normalize_approval_text(example))
+        for example in workflow.approval_examples
+    )
 
 
 def _normalize_approval_text(text: str) -> str:

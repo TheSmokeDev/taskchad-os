@@ -41,16 +41,21 @@ sanitized audit rows, and exposes a read-only dashboard Browser Viewer at
   send messages, post to social, inspect raw URL lists, or export cookies/tokens.
 - Direct browser input belongs to an explicitly authorized visible CDP browser
   workflow, not the dashboard viewer.
-- Browser writes such as LinkedIn edits/posts/DMs remain default-denied until a
-  dedicated PRP defines approval UX, audit, tests, and proof.
+- LinkedIn post/connect and Reddit comment/post writes are now implemented
+  behind per-action operator-approval gates by the Social-Write Executor — each
+  fires only on the operator's verbatim trailing approval phrase, with an audit
+  row and a screenshot receipt per attempt. See
+  [social-write-executor](social-write-executor.md). LinkedIn profile edits and
+  DMs remain default-denied (`linkedin.profile.edit` stays stubbed).
 - Heartbeat may propose LinkedIn work only after a dedicated queue/proposal
   slice; it must not publish, DM, edit, or connect without later explicit
   bounded-autopilot opt-in.
 - LinkedIn/Social Homie owns strategy, voice, drafts, queue review, and approval
   prompts. Browser Homie owns visible Chrome execution, snapshot/ref loops,
   redaction, and audit evidence.
-- `/linkedin` is draft-only. Browser writes still require separate approved
-  BrowserOps/social workflows.
+- `/linkedin` is draft-only. Actual posting/connecting goes through the
+  per-action gated `/linkedin_post`, `/linkedin_connect`, and `/reddit
+  comment|post` write commands.
 
 ## How To Run It
 
@@ -121,5 +126,7 @@ was shipped through the framework path in earlier BrowserOps phases.
 ## Next Slices
 
 - Mission Control / Hub consumer for the same read-only viewer API.
-- Close the first approved LinkedIn connection-request workflow.
-- Implement the LinkedIn Operator post, queue, and proposal phases.
+- LinkedIn post/connect and Reddit comment/post writes shipped behind per-action
+  approval gates via the [Social-Write Executor](social-write-executor.md);
+  remaining LinkedIn Operator queue/proposal phases and the `linkedin.profile.edit`
+  write are still pending.

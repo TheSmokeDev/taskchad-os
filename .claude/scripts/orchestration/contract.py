@@ -166,6 +166,20 @@ BACKEND_FALLBACK_CHAIN: dict[str, list[str]] = {
     "local":     ["local"],
 }
 
+# ── Social-Write Executor (Phase 1) ────────────────────────────────────────
+# Frozen scope for the operator-approved-per-action browser-write executor.
+# contract.py stays dataclass-free by design — the SocialWriteTask dataclass
+# lives in models.py and imports SocialWriteAction from here.
+
+SocialWriteAction = Literal["post", "connect"]  # Phase 1 LinkedIn scope (no "comment" dead branch)
+
+# Allowlist of fields the executor accepts off Subtask.metadata JSON. There is
+# deliberately NO approval_token field — the chat HANDLER is the approval
+# authority and a task only exists AFTER decision.allowed (default-deny).
+SOCIAL_WRITE_FIELDS: frozenset[str] = frozenset(
+    ["workflow_id", "target_url", "payload_text", "action", "post_action_snapshot"]
+)
+
 # ── Defaults ───────────────────────────────────────────────────────────────
 
 DEFAULT_WORKSPACE_ID: int = 1

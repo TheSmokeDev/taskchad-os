@@ -251,6 +251,12 @@ EXTENSIONS_ALLOW = os.getenv("EXTENSIONS_ALLOW", "")         # comma-separated, 
 EXTENSIONS_DENY = os.getenv("EXTENSIONS_DENY", "")           # comma-separated
 EXTENSIONS_ENABLED = os.getenv("EXTENSIONS_ENABLED", "true").lower() == "true"
 
+# === Natural-language intent auto-dispatch (Smart Data Queries router path) ===
+# When false, natural-language messages never auto-run a data/action command;
+# they go straight to the engine. Explicit slash commands are unaffected.
+# See .claude/sections/04_smart_data_queries.md.
+INTENT_AUTODISPATCH_ENABLED = os.getenv("INTENT_AUTODISPATCH_ENABLED", "true").lower() == "true"
+
 # Circle
 CIRCLE_ADMIN_TOKEN = os.getenv("CIRCLE_ADMIN_TOKEN", "")
 CIRCLE_HEADLESS_TOKEN = os.getenv("CIRCLE_HEADLESS_TOKEN", "")

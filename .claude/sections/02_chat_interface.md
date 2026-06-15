@@ -81,6 +81,12 @@ BrowserOps is the visible-browser specialist surface for requests that need the 
 | `/linkedin_profile status` | Reports LinkedIn browser readiness using the visible browser safety layer. | Read-only. |
 | `/linkedin_profile open` | Opens the configured LinkedIn profile in the visible browser. | Navigation only. |
 | `/linkedin_profile edit` | Attempts a write-capable profile edit workflow. | Expected to be blocked/default-denied until a dedicated write PRP lands. |
+| `/linkedin_post <feed_url> \| <body> \| <approval phrase>` | Creates a LinkedIn post on the visible browser. | Default-deny write; fires only when the final pipe segment is exactly `post this to linkedin now`; audit row + screenshot receipt. |
+| `/linkedin_connect <profile_url> \| <note> \| <approval phrase>` | Sends a LinkedIn connection request (optional note). | Default-deny write; fires only when the final pipe segment is exactly `send this linkedin connection request now`; one approval, one invite. |
+| `/reddit comment <thread_url> \| <body> \| <approval phrase>` | Posts a comment reply on a Reddit thread. | Default-deny write; fires only when the final pipe segment is exactly `post this comment to reddit now`; thread URL validated. |
+| `/reddit post <subreddit> \| <title> \| <body> \| <approval phrase>` | Creates a Reddit self-post in a subreddit. | Default-deny write; fires only when the final pipe segment is exactly `post this to reddit now`; subreddit validated. |
+
+The four social-write commands above are the execution half of the Social/LinkedIn Homie. The body can never approve itself — the approval is a distinct trailing pipe segment, exact-matched. `/reddit research` and `/reddit status` are read-only. See `docs/manual/features/social-write-executor.md`.
 
 Natural-language browser requests can attach BrowserOps context through prefetch. That path may load readiness, registered workflows, and the current `agent-browser` guide, but it must not click, type, post, edit, DM, connect, or navigate by itself.
 

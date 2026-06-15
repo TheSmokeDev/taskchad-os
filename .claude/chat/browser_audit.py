@@ -39,9 +39,15 @@ def append_browser_audit_record(
     session_id: str | None = None,
     target_url: str | None = None,
     action: str | None = None,
+    subtask_id: int | None = None,
+    executor_name: str | None = None,
     path: Path | None = None,
 ) -> dict[str, Any]:
-    """Append one sanitized browser audit record and return the record."""
+    """Append one sanitized browser audit record and return the record.
+
+    `subtask_id` / `executor_name` are additive (default None) so the executor
+    boundary can stamp social-write attempts without breaking existing callers.
+    """
 
     log_path = path or BROWSER_AUDIT_LOG
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,6 +63,8 @@ def append_browser_audit_record(
         "surface": normalize_surface(surface),
         "session_id": session_id,
         "target_url": redact_url(target_url) if target_url else None,
+        "subtask_id": subtask_id,
+        "executor_name": executor_name,
     }
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")

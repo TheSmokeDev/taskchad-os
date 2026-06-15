@@ -39,7 +39,29 @@ open/control a browser.
 
 ## Safety Boundary
 
-If the user asks to post, publish, DM, edit the profile, connect with someone,
-or otherwise mutate LinkedIn, respond that this `/linkedin` command can prepare
-the exact draft and approval text only. Actual writes require the separate
-approved BrowserOps/social workflow.
+This `/linkedin` command is draft-only. It can prepare the exact draft and the
+approval text, but it never posts, connects, DMs, edits a profile, or controls a
+browser itself.
+
+When the user wants to actually post or connect, do this:
+
+1. Produce the final post body (or connection note) and the exact absolute
+   `target_url` (the LinkedIn feed URL for a post, or the person's profile URL
+   for a connection request).
+2. Tell the user to run ONE of these explicit, per-action gated write commands
+   (the slash command IS the approval path — there is no auto-post):
+   - `/linkedin_post <feed_url> | <body> post this to linkedin now`
+   - `/linkedin_connect <profile_url> | <note> send this linkedin connection request now`
+   The trailing approval phrase must be the user's own words at the END of the
+   message. One approval, one action — never a batch or approve-all.
+
+## Live Status (read on demand)
+
+You MAY read these vault files when the user asks who has been contacted, who to
+target next, or for the live state of the outreach loop. Read them on demand;
+do not assume their contents:
+
+- `vault/memory/docs/LINKEDIN-OUTREACH-TRACKER.md` — live touched/pending log
+  (never double-touch; golden-hour follow-up rule).
+- `vault/memory/docs/LINKEDIN-NETWORK-TARGETS.md` — the static research target
+  list per lane.

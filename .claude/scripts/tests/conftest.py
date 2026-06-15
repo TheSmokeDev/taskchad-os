@@ -20,6 +20,26 @@ sys.path.insert(0, str(SCRIPTS_DIR.parent / "chat"))
 collect_ignore_glob = ["_holders/*"]
 
 
+@pytest.fixture(autouse=True)
+def _intent_autodispatch_default(monkeypatch):
+    """Pin natural-language intent auto-dispatch to its framework code default.
+
+    ``config.py`` loads the operator's personal ``.env`` via
+    ``load_dotenv(override=True)``, so a personal ``INTENT_AUTODISPATCH_ENABLED=false``
+    override would otherwise leak into the test process and flip the framework
+    default under the tests. Force the code default (enabled) here so
+    intent-detection tests stay deterministic; tests that want the disabled path
+    override it with their own ``monkeypatch``.
+    """
+    try:
+        import config
+
+        monkeypatch.setattr(config, "INTENT_AUTODISPATCH_ENABLED", True, raising=False)
+    except Exception:
+        # Fail-safe: never let this fixture error the whole suite.
+        pass
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_path: Path) -> Path:
     """Provide a temporary state directory for PID files."""

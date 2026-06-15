@@ -70,6 +70,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Team Room | V3 shipped, live-proven | [team-room](features/team-room.md) | `/teamroom`, `/teams` |
 | Autonomous Team Scheduler | Shipped, Telegram-proven | [autonomous-team-scheduler](features/autonomous-team-scheduler.md) | `/teamtick`, `/teams` |
 | BrowserOps + Browser Viewer | Shipped, live-proven | [browserops-browser-viewer](features/browserops-browser-viewer.md) | `/browserops`, `/browser` |
+| Social-Write Executor | Shipped, default-denied, operator-gated per action | [social-write-executor](features/social-write-executor.md) | `/linkedin_post`, `/linkedin_connect`, `/reddit comment\|post` |
 | Video Generation | Shipped, native command, model-agnostic | [video-generation](features/video-generation.md) | `/video`, `video_pipeline.py`, `video_styles.py` |
 | Document Uploads And Ingest | Shipped, all 3 phases (truthfulness, full reads, /vault-ingest) | [document-uploads-and-ingest](features/document-uploads-and-ingest.md) | `attachment_context.py`, `router.py` `/vault-ingest` caption, Telegram + Discord |
 | Telegram Command Menu | Curated native menu | [telegram-command-menu](features/telegram-command-menu.md) | `/commands`, Telegram slash menu |
@@ -89,6 +90,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 |---|---|
 | [The Living Self Manual](../the-living-self-manual.md) | The cognitive system end to end — sense, form beliefs, hold against conflict, think before speaking, earn convictions. Operator runbook + architecture + knobs + verification. Ties together Heartbeat Runtime, Episodes, and Session Opening Brief. |
 | [BrowserOps Agent Browser Manual](../browserops-agent-browser-manual.md) | Deep BrowserOps operating contract, safety policy, validation, and failure modes. |
+| [Social-Write Executor Manual](../social-write-executor-manual.md) | Deep operating contract for operator-approved LinkedIn and Reddit writes: the isolated-approval gate, the executor/driver split, audit policy, platform notes, and validation. |
 | [Cabinet Room Manual](../cabinet-room-manual.md) | Deep Cabinet room-state, dashboard, and participant-control context. |
 
 Private proof handoffs, tracker entries, and migration notes stay out of the

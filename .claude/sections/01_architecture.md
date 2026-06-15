@@ -87,9 +87,14 @@ Existing implementations (greppable examples of the invariant):
    goes through registered workflow gates with audit rows; browser write
    actions (post/edit/DM/connect) are default-denied. See
    `docs/manual/features/browserops-browser-viewer.md`.
-4. **LinkedIn write-gates** — `/linkedin_profile edit` is expected-blocked until
-   a dedicated write PRP lands; the nudge job DRAFTS and QUEUES only, never
-   posts or connects. See `docs/linkedin-automation-playbook.md`.
+4. **Social-write gates** — `/linkedin_post`, `/linkedin_connect`, and
+   `/reddit comment|post` writes shipped behind per-action operator-approval
+   gates (commit `63f28827`): each fires only on the operator's verbatim
+   trailing approval phrase, with an audit row + screenshot receipt per attempt.
+   `/linkedin_profile edit` is still expected-blocked until a dedicated
+   profile-write PRP lands; the nudge job DRAFTS and QUEUES only. See
+   `docs/manual/features/social-write-executor.md` and
+   `docs/linkedin-automation-playbook.md`.
 5. **Cabinet participant turns** — room personas default-deny tools and answer
    directly. See `docs/manual/features/cabinet-rooms.md`.
 

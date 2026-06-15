@@ -496,7 +496,16 @@ class ExtensionManager:
         """Detect data-intent commands matching a natural language message.
 
         Returns list of command names. For broad queries, returns all brief intents.
+
+        When INTENT_AUTODISPATCH_ENABLED is false, returns [] so natural-language
+        messages fall through to the engine instead of auto-running a command.
+        Explicit slash commands bypass this path entirely.
         """
+        from config import INTENT_AUTODISPATCH_ENABLED
+
+        if not INTENT_AUTODISPATCH_ENABLED:
+            return []
+
         text_lower = text.lower()
 
         if self.is_discussion_only(text):

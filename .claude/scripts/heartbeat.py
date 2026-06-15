@@ -71,9 +71,10 @@ from config import (  # noqa: E402
     now_local,
 )
 from notifications import send_console_notification, send_toast_notification
-from runtime.base import RuntimeRequest
+from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE, RuntimeRequest
 from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
 from runtime.lane_router import run_with_runtime_lanes
+from runtime.selection import resolve_runtime_selection
 from shared import (
     append_to_daily_log,
     load_state,
@@ -2143,10 +2144,20 @@ async def run_heartbeat(test_mode: bool = False) -> str | None:
     active_drafts_ctx = gather_active_drafts_context()
 
     heartbeat_codex_model = _heartbeat_codex_model()
-    if heartbeat_codex_model:
+    # Be honest about the lane. The codex model is ONLY consulted on a generic
+    # lane; on the claude_native lane it never enters the resolved profile chain
+    # (it's inert). Printing "Codex model override" unconditionally made it look
+    # like the heartbeat ran on Codex even when it ran on Claude/haiku.
+    _hb_fast_model = get_background_models()["fast"]
+    if resolve_runtime_selection().lane == RUNTIME_LANE_CLAUDE_NATIVE:
         print(
             f"[{now_local()}] Running heartbeat runtime reasoning "
-            f"(Codex model override: {heartbeat_codex_model})"
+            f"(Claude lane, model={_hb_fast_model})"
+        )
+    elif heartbeat_codex_model:
+        print(
+            f"[{now_local()}] Running heartbeat runtime reasoning "
+            f"(generic lane, Codex model override: {heartbeat_codex_model})"
         )
     else:
         print(f"[{now_local()}] Running heartbeat runtime reasoning")
