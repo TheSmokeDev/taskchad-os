@@ -72,7 +72,7 @@ def _display_filename(name: Any) -> str:
     return text or "attachment"
 
 
-DEFAULT_ENGINE_TIMEOUT_SECONDS = 180.0
+DEFAULT_ENGINE_TIMEOUT_SECONDS = 900.0
 # Test/legacy override. Normal runtime reads config.CHAT_ENGINE_TIMEOUT_SECONDS
 # at call time so /reload can update the guard without restarting the process.
 ENGINE_TIMEOUT_SECONDS: float | None = None

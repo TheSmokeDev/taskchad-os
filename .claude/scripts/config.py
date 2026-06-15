@@ -206,7 +206,7 @@ DASHBOARD_DB_PATH = Path(
 DASHBOARD_BOT_GRACE_SECONDS = int(os.getenv("DASHBOARD_BOT_GRACE_SECONDS", "5"))
 CHAT_MAX_TURNS = int(os.getenv("CHAT_MAX_TURNS", "25"))
 CHAT_MAX_BUDGET_USD = float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0"))
-CHAT_ENGINE_TIMEOUT_SECONDS = float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "180"))
+CHAT_ENGINE_TIMEOUT_SECONDS = float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "900"))
 # doc-upload-truthful-reads Phase 2 — attachment full-read caps + attachment-turn
 # timeout. Consumers resolve these at CALL TIME via None-sentinel params
 # (Rule 1) so /reload takes effect without a restart.
@@ -1115,7 +1115,7 @@ def reload_config() -> dict[str, tuple[str, str]]:
         "VOICE_TTS_VOICE_OPENAI": os.getenv("VOICE_TTS_VOICE_OPENAI", "alloy"),
         "CHAT_MAX_TURNS": int(os.getenv("CHAT_MAX_TURNS", "25")),
         "CHAT_MAX_BUDGET_USD": float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0")),
-        "CHAT_ENGINE_TIMEOUT_SECONDS": float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "180")),
+        "CHAT_ENGINE_TIMEOUT_SECONDS": float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "900")),
         "CHAT_ATTACHMENT_MAX_BYTES": int(
             os.getenv("CHAT_ATTACHMENT_MAX_BYTES", str(8 * 1024 * 1024))
         ),
