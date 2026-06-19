@@ -582,6 +582,29 @@ If there is no real cross-domain signal this week, write: `No cross-domain signa
         except Exception as exc:
             print(f"[{now_local()}] Hermes Scout post-weekly failed (non-blocking): {exc}")
 
+    # --- Business signal engine post-step (weekly quality-tier run) ---
+    if not test_mode:
+        try:
+            import os
+            from business_signal.signal_engine import run_signal_engine
+
+            _prev_tier = os.environ.get("SIGNAL_MODEL_TIER")
+            os.environ["SIGNAL_MODEL_TIER"] = "quality"
+            try:
+                signal_result = await run_signal_engine(test_mode=False)
+            finally:
+                if _prev_tier is None:
+                    os.environ.pop("SIGNAL_MODEL_TIER", None)
+                else:
+                    os.environ["SIGNAL_MODEL_TIER"] = _prev_tier
+            if signal_result and signal_result != "SIGNAL_SILENT":
+                print(f"[{now_local()}] Business Signal Engine (quality tier) completed post-weekly: {signal_result}")
+                append_to_daily_log("Signal Engine (quality tier) ran as weekly post-step", "Weekly Synthesis")
+            elif signal_result == "SIGNAL_SILENT":
+                print(f"[{now_local()}] Signal Engine post-weekly: no relevant signal (SILENT)")
+        except Exception as exc:
+            print(f"[{now_local()}] Signal Engine post-weekly failed (non-blocking): {exc}")
+
     # --- Vault log append (chronological wiki timeline) ---
     if not test_mode and "WEEKLY_OK" not in response_text:
         try:

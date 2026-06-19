@@ -723,6 +723,19 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
         except Exception as exc:
             print(f"[{now_local()}] Hermes Scout post-reflection failed (non-blocking): {exc}")
 
+    # --- Signal engine post-step (daily business intelligence) ---
+    if not test_mode:
+        try:
+            from business_signal.signal_engine import run_signal_engine
+
+            signal_result = await run_signal_engine(test_mode=False)
+            if signal_result and signal_result != "SIGNAL_SILENT":
+                print(f"[{now_local()}] Signal engine completed post-reflection: {signal_result}")
+            elif signal_result == "SIGNAL_SILENT":
+                print(f"[{now_local()}] Signal engine: no relevant signal (SILENT)")
+        except Exception as exc:
+            print(f"[{now_local()}] Signal engine post-reflection failed (non-blocking): {exc}")
+
     # --- Vault log append (chronological wiki timeline) ---
     if not test_mode and "REFLECTION_OK" not in response_text:
         try:

@@ -390,45 +390,19 @@ async def gather_heartbeat_context() -> tuple[
         print(f"[{now_local()}] Finance check error (non-fatal): {e}")
         blocker_candidates.append(("finance", str(e)))
 
-    # HARO monitoring
+    # HARO monitoring — scan delegated to business_signal.fetchers.haro_fetcher
     try:
-        from integrations.outlook import get_email_body, list_emails
+        from business_signal.fetchers.haro_fetcher import scan_haro_emails
 
-        haro_emails = list_emails(max_results=5, hours_ago=4, unread_only=True)
-        haro_emails = [e for e in haro_emails if "haro@helpareporter.com" in e.sender_email.lower()]
-
-        if haro_emails:
-            INSURANCE_KEYWORDS = [
-                "insurance", "auto", "car", "vehicle", "driver", "coverage",
-                "policy", "premium", "deductible", "liability", "sr-22",
-                "finance", "loan", "mortgage", "credit", "debt", "savings",
-                "accident", "claim", "personal finance", "budget",
-            ]
-            AI_TECH_KEYWORDS = [
-                "artificial intelligence", "machine learning", "automation",
-                "startup", "entrepreneur", "founder", "small business", "insurtech",
-                "fintech", "saas", "technology", "software",
-            ]
-
+        haro_items = scan_haro_emails(max_results=5, hours_ago=4)
+        if haro_items:
             haro_section = "## HARO Opportunities\n\n"
             haro_section += "<!-- BEGIN UNTRUSTED EXTERNAL DATA -->\n"
 
-            # matched_queries: list of (query_text, angle)
-            matched_queries: list[tuple[str, str]] = []
-            for haro_email in haro_emails:
-                body = get_email_body(haro_email.id)
-                chunks = [q.strip() for q in body.split("\n\n") if q.strip() and len(q.strip()) > 40]
-                for q_text in chunks:
-                    q_lower = q_text.lower()
-                    non_ascii = sum(1 for c in q_text if ord(c) > 127)
-                    if non_ascii / max(len(q_text), 1) > 0.15:
-                        continue
-                    if q_text.count("&") > 3:
-                        continue
-                    if any(kw in q_lower for kw in AI_TECH_KEYWORDS):
-                        matched_queries.append((q_text[:500], "ai"))
-                    elif any(kw in q_lower for kw in INSURANCE_KEYWORDS):
-                        matched_queries.append((q_text[:500], "insurance"))
+            matched_queries: list[tuple[str, str]] = [
+                (item.summary, item.tags[0] if item.tags else "ai")
+                for item in haro_items
+            ]
 
             # Auto-draft AI-written pitches for each matched query
             drafts_created: list[str] = []
@@ -561,22 +535,18 @@ async def gather_heartbeat_context() -> tuple[
                 if drafts_created:
                     haro_section += "**Drafts:**\n" + "".join(f"- `{d}`\n" for d in drafts_created)
                     haro_section += "\n_Review pitch, then send to the journalist email in each query._\n"
-            else:
-                haro_section += f"{len(haro_emails)} HARO email(s) found — no relevant queries this cycle.\n"
-
             haro_section += "<!-- END UNTRUSTED EXTERNAL DATA -->\n"
             sections.append(haro_section)
-            source_ids.extend(f"email:{e.id}" for e in haro_emails)
-            # Counts only — never query text (untrusted external data).
+            source_ids.extend(f"haro:{item.url}" for item in haro_items)
             sense_facts.setdefault("community", {}).update(
                 {
                     "haro_matched_count": len(matched_queries),
                     "haro_drafts_created": len(drafts_created),
                 }
             )
-            print(f"[{now_local()}] HARO: {len(haro_emails)} email(s), {len(matched_queries)} relevant queries, {len(drafts_created)} AI drafts created")
+            print(f"[{now_local()}] HARO: {len(haro_items)} relevant queries, {len(drafts_created)} AI drafts created")
         else:
-            print(f"[{now_local()}] HARO: no new emails this cycle")
+            print(f"[{now_local()}] HARO: no relevant queries this cycle")
     except Exception as e:
         print(f"[{now_local()}] HARO check error (non-fatal): {e}")
         blocker_candidates.append(("haro", str(e)))

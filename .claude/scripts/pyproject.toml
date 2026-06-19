@@ -70,6 +70,8 @@ dependencies = [
     # contract explicit so personas.services.load_persona_config can rely
     # on it without depending on the transitive resolution staying stable.
     "pyyaml>=6.0",
+    # Signal engine — RSS/Atom feed parsing
+    "feedparser>=6.0.0",
     # PRD-8 Phase 3 / WS2 — explicit Pillow dep (R6 NB2, 2026-05-07).
     # Required for avatar magic-byte+anti-spoof validation in
     # dashboard_api.py PUT /api/agents/{id}/avatar (per criterion

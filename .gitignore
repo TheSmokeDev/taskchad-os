@@ -64,6 +64,12 @@ NUL
 .claude/scripts/.codex-*/
 PRPs/planning/.clutch-tmp/
 
+# Archon writes per-run research/scratch here (brain-dump-* dirs, etc.). A
+# committed scratch file caused a cross-PR merge collision (2026-06-18).
+# Ignoring the dir stops NEW scratch from being tracked; already-committed
+# reference docs stay tracked. Sanitizer sources from git ls-files.
+.claude/research/
+
 # Locally synced vault skills; canonical copies live outside this checkout
 .claude/skills/vault/
 .claude/skills/vault-*/

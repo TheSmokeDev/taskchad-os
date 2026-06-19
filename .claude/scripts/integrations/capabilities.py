@@ -254,6 +254,54 @@ _ACTIONS: tuple[IntegrationAction, ...] = (
         exposures=("operator_confirmed",),
         config_hints=("GRAPH_CLIENT_ID", "GRAPH_TENANT_ID", "GRAPH_USER_EMAIL"),
     ),
+    # Social media posting — default-deny, operator-confirmed.
+    _action(
+        "social",
+        "draft_content",
+        "write",
+        exposures=("operator_confirmed", "internal"),
+        description="Generate a social media draft (cadence scheduler + manual).",
+    ),
+    _action(
+        "social",
+        "post_linkedin",
+        "external_post",
+        exposures=("operator_confirmed",),
+        config_hints=("LINKEDIN_EMAIL", "LINKEDIN_PASSWORD"),
+        description="Post to LinkedIn via browser executor.",
+    ),
+    _action(
+        "social",
+        "post_facebook",
+        "external_post",
+        exposures=("operator_confirmed",),
+        config_hints=("FACEBOOK_PAGE_ACCESS_TOKEN", "FACEBOOK_PAGE_ID"),
+        description="Post to Facebook Page via Graph API.",
+    ),
+    _action(
+        "social",
+        "post_x",
+        "external_post",
+        exposures=("operator_confirmed",),
+        default_enabled=False,
+        config_hints=("X_API_KEY", "X_API_SECRET"),
+        description="Post to X. DISABLED — X is draft-only per operator policy.",
+    ),
+    _action(
+        "social",
+        "post_reddit",
+        "external_post",
+        exposures=("operator_confirmed",),
+        description="Post or comment on Reddit via browser executor.",
+    ),
+    _action(
+        "social",
+        "post_instagram",
+        "external_post",
+        exposures=("operator_confirmed",),
+        config_hints=("INSTAGRAM_BUSINESS_ACCOUNT_ID", "FACEBOOK_PAGE_ACCESS_TOKEN"),
+        description="Post to Instagram via Meta Graph API (requires image URL).",
+    ),
 )
 
 _ACTION_INDEX: dict[tuple[str, str], IntegrationAction] = {

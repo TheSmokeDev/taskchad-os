@@ -83,6 +83,12 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Memory, Knowledge Graph, And Dashboard Chat | Active baseline, dashboard chat reliability proven | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
 | Scheduled Jobs, Settings, And Audit | Active baseline | [scheduled-settings-audit](features/scheduled-settings-audit.md) | `/scheduled`, `/settings`, `/audit` |
 | Native Design (`/design`) | Phase 1 + B1 shipped, live-proven | [design-capability](features/design-capability.md) | `/design`, `/design system <slug>` |
+| Business Signal Engine | Shipped (#79), merged | [business-signal-engine](features/business-signal-engine.md) | `/signal`, `/signal refresh`, daily/weekly cadence |
+| Social Post Pipeline | Shipped (#80), default-denied, operator-gated | [social-post-pipeline](features/social-post-pipeline.md) | `/social` (draft/approve/post/schedule/cadence) |
+| Intent-PRD and Clutch Review | Shipped (#78), merged | [intent-prd-and-clutch](features/intent-prd-and-clutch.md) | `create-prd`, `archon workflow run archon-clutch` |
+| Context-Economy DX | Shipped (#66), merged | [context-economy-dx](features/context-economy-dx.md) | `/prime-*`, `brownfield-day-1`, `vertical-slice-audit` |
+| Repositories System | Shipped (#63), merged | [repositories-system](features/repositories-system.md) | `thehomie repositories status\|validate` |
+| Archon Workflows | Active baseline, autonomous pipeline live-proven | [archon-workflows](features/archon-workflows.md) | `archon workflow list\|run\|status` |
 
 ### Existing Deep Public Manuals
 

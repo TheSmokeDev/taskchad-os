@@ -2268,6 +2268,41 @@ async def handle_analytics(adapter: Any, incoming: Any, args: str, *, collect_on
         return f"Error fetching Analytics data: {e}"
 
 
+async def handle_signal(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Business signal digest — status or refresh."""
+    subcmd = args.strip().lower() if args.strip() else ""
+
+    if subcmd == "refresh":
+        try:
+            import sys
+            from pathlib import Path
+
+            _scripts = Path(__file__).resolve().parent.parent / "scripts"
+            if str(_scripts) not in sys.path:
+                sys.path.insert(0, str(_scripts))
+
+            from business_signal.signal_engine import run_signal_engine
+
+            result = await run_signal_engine(test_mode=False)
+            return f"Signal engine run complete: {result}"
+        except Exception as e:
+            return f"Signal engine error: {e}"
+
+    try:
+        import sys
+        from pathlib import Path
+
+        _scripts = Path(__file__).resolve().parent.parent / "scripts"
+        if str(_scripts) not in sys.path:
+            sys.path.insert(0, str(_scripts))
+
+        from business_signal.signal_engine import get_latest_status
+
+        return get_latest_status()
+    except Exception as e:
+        return f"Signal status error: {e}"
+
+
 async def handle_budget(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Personal finance / budget commands — requires finance integration modules."""
     return "Finance module not configured. See docs for Teller/Plaid setup."
@@ -4706,6 +4741,214 @@ async def try_consume_video_message(adapter: Any, incoming: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Social Post Queue (Issue #77)
+# ---------------------------------------------------------------------------
+
+
+async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Social post queue — status, queue, draft, approve, reject, post, cadence."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+    parts = args.strip().split(None, 1) if args.strip() else []
+    subcmd = parts[0].lower() if parts else "status"
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if subcmd == "status":
+        try:
+            from social.service import SocialPostService
+            from social.channels import list_channels
+
+            svc = SocialPostService()
+            counts = svc.count_by_status()
+            channels = list_channels()
+
+            lines = ["*Social Post Queue*\n"]
+            total = sum(counts.values())
+            lines.append(f"Total posts: {total}")
+            for status in ("draft", "approved", "posted", "failed", "rejected"):
+                c = counts.get(status, 0)
+                if c:
+                    lines.append(f"  {status}: {c}")
+            lines.append(f"\n*Channels ({len(channels)}):*")
+            for ch in channels:
+                cadence = "ON" if ch.cadence_enabled else "off"
+                lines.append(f"  {ch.display_name} [{ch.execution_method}] cadence={cadence}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+    elif subcmd == "queue":
+        try:
+            from social.service import SocialPostService
+            svc = SocialPostService()
+            posts = svc.list_queue(limit=20)
+            if not posts:
+                return "No posts in queue."
+            lines = ["*Social Post Queue*\n"]
+            for p in posts:
+                badge = p.status.upper()
+                title = p.title[:50] if p.title else "(no title)"
+                lines.append(f"  [{badge}] #{p.id} {p.channel} — {title}")
+                lines.append(f"    Created: {p.created_at}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+    elif subcmd == "draft":
+        draft_parts = rest.strip().split(None, 1)
+        if len(draft_parts) < 2:
+            return "Usage: `/social draft <channel> <idea>`\nExample: `/social draft linkedin Our new AI receptionist handles 100 calls a day`"
+        channel_id, topic = draft_parts[0].lower(), draft_parts[1]
+        try:
+            from social.draft_generator import generate_draft
+            pid = generate_draft(channel_id, topic, topic_source="manual")
+            if pid:
+                from social.service import SocialPostService
+                svc = SocialPostService()
+                post = svc.get_post(pid)
+                preview = post.body[:200] if post else ""
+                return f"Draft created: #{pid} ({channel_id})\n\n{preview}{'...' if post and len(post.body) > 200 else ''}\n\nApprove: `/social approve {pid}`"
+            return "Draft generation failed. Check logs."
+        except Exception as e:
+            return f"Error creating draft: {e}"
+
+    elif subcmd == "approve":
+        try:
+            post_id = int(rest.strip())
+        except (ValueError, TypeError):
+            return "Usage: `/social approve <id>`"
+        try:
+            from social.service import SocialPostService
+            from social.audit import append_social_audit_record
+            svc = SocialPostService()
+            post = svc.approve_post(post_id)
+            append_social_audit_record(
+                channel=post.channel, action="approve", post_id=post_id,
+                outcome="approved", operator="operator",
+            )
+            return f"Post #{post_id} approved ({post.channel}). Dispatch: `/social post {post_id}`"
+        except ValueError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    elif subcmd == "reject":
+        reject_parts = rest.strip().split(None, 1)
+        try:
+            post_id = int(reject_parts[0]) if reject_parts else 0
+        except (ValueError, TypeError):
+            return "Usage: `/social reject <id> [reason]`"
+        reason = reject_parts[1] if len(reject_parts) > 1 else ""
+        try:
+            from social.service import SocialPostService
+            from social.audit import append_social_audit_record
+            svc = SocialPostService()
+            post = svc.reject_post(post_id, reason=reason)
+            append_social_audit_record(
+                channel=post.channel, action="reject", post_id=post_id,
+                outcome="rejected", operator="operator",
+            )
+            return f"Post #{post_id} rejected."
+        except ValueError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    elif subcmd == "post":
+        try:
+            post_id = int(rest.strip())
+        except (ValueError, TypeError):
+            return "Usage: `/social post <id>` (post must be approved first)"
+        try:
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(post_id)
+            if ok:
+                from social.service import SocialPostService
+                svc = SocialPostService()
+                post = svc.get_post(post_id)
+                url = post.post_url if post and post.post_url else "n/a"
+                return f"Post #{post_id} dispatched successfully. URL: {url}"
+            else:
+                from social.service import SocialPostService
+                svc = SocialPostService()
+                post = svc.get_post(post_id)
+                err = post.error if post else "Unknown"
+                return f"Post #{post_id} dispatch failed: {err}"
+        except ValueError as e:
+            return f"Error: {e}"
+        except PermissionError as e:
+            return f"Post #{post_id} blocked by default-deny gate: {e}"
+        except Exception as e:
+            return f"Error dispatching post: {e}"
+
+    elif subcmd == "schedule":
+        schedule_parts = rest.strip().split(None, 1) if rest.strip() else []
+        if len(schedule_parts) < 2:
+            return "Usage: `/social schedule <id> <ISO datetime>` (e.g. `/social schedule 5 2026-06-19T10:00:00+00:00`)"
+        try:
+            post_id = int(schedule_parts[0])
+            scheduled_for = schedule_parts[1].strip()
+        except (ValueError, TypeError):
+            return "Usage: `/social schedule <id> <ISO datetime>`"
+        try:
+            from social.service import SocialPostService
+            svc = SocialPostService()
+            post = svc.schedule_post(post_id, scheduled_for)
+            return f"Post #{post_id} scheduled for {post.scheduled_for}."
+        except ValueError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            return f"Error scheduling post: {e}"
+
+    elif subcmd in ("dispatch-due", "dispatchdue"):
+        try:
+            from social.post_executor import dispatch_due_posts
+            result = dispatch_due_posts()
+            lines = ["*Dispatch Due Posts*\n"]
+            lines.append(f"Dispatched: {result['dispatched']}")
+            lines.append(f"Failed: {result['failed']}")
+            lines.append(f"Blocked: {result['blocked']}")
+            if result["errors"]:
+                lines.append("\nErrors:")
+                for err in result["errors"]:
+                    lines.append(f"  {err}")
+            if result["dispatched"] == 0 and result["failed"] == 0:
+                lines.append("\nNo posts due for dispatch.")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+    elif subcmd == "cadence":
+        try:
+            from social.channels import list_channels
+            channels = list_channels()
+            lines = ["*Social Cadence Config*\n"]
+            for ch in channels:
+                status = "ACTIVE" if ch.cadence_enabled else "off"
+                lines.append(f"  *{ch.display_name}*: {status}, every {ch.cadence_interval_hours}h, dispatch={ch.execution_method}")
+                if ch.topic_pool:
+                    lines.append(f"    Topics: {', '.join(ch.topic_pool[:5])}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+    else:
+        return (
+            "*Social Post Queue Commands*\n\n"
+            "`/social status` — overview\n"
+            "`/social queue` — pending posts\n"
+            "`/social draft <channel> <idea>` — create draft\n"
+            "`/social approve <id>` — approve for posting\n"
+            "`/social reject <id> [reason]` — reject draft\n"
+            "`/social post <id>` — dispatch approved post\n"
+            "`/social schedule <id> <datetime>` — set dispatch time\n"
+            "`/social dispatch-due` — dispatch all scheduled posts due now\n"
+            "`/social cadence` — cadence settings"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Handler lookup — maps command name to handler function
 # ---------------------------------------------------------------------------
 
@@ -4741,6 +4984,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "inbox": handle_inbox,
     "cleanup": handle_cleanup,
     "analytics": handle_analytics,
+    "signal": handle_signal,
     "budget": handle_budget,
     # Cabinet (Phase 5b) — keys are slashless, matching all other entries
     # (Phase 5 R1 B3 + Codex M2 fix).
@@ -4755,4 +4999,6 @@ CORE_HANDLERS: dict[str, Any] = {
     "extensions": handle_extensions,
     # Native design — Open Design power, no daemon (brief -> artifact -> critique).
     "design": handle_design,
+    # Social post queue (Issue #77)
+    "social": handle_social,
 }

@@ -1,0 +1,73 @@
+channels:
+  linkedin:
+    display_name: LinkedIn
+    execution_method: browser
+    cadence_enabled: true
+    cadence_interval_hours: 24
+    voice_profile: ""
+    topic_pool:
+      - industry insights
+      - product updates
+      - team wins
+      - thought leadership
+      - customer stories
+    browser_workflow_id: linkedin.post.create
+
+  facebook:
+    display_name: Facebook
+    execution_method: api
+    cadence_enabled: false
+    cadence_interval_hours: 24
+    voice_profile: ""
+    topic_pool:
+      - community updates
+      - product news
+      - tips and tricks
+      - behind the scenes
+    browser_workflow_id: null
+
+  x:
+    display_name: X (Twitter)
+    execution_method: manual
+    cadence_enabled: false
+    cadence_interval_hours: 12
+    voice_profile: ""
+    topic_pool:
+      - hot takes
+      - industry commentary
+      - product launches
+      - community engagement
+    browser_workflow_id: x.post.create
+
+  reddit:
+    display_name: Reddit
+    execution_method: browser
+    cadence_enabled: false
+    cadence_interval_hours: 48
+    voice_profile: ""
+    topic_pool:
+      - value-add comments
+      - community help
+      - relevant discussions
+    browser_workflow_id: reddit.post.create
+
+  instagram:
+    display_name: Instagram
+    execution_method: api
+    cadence_enabled: false
+    cadence_interval_hours: 24
+    voice_profile: ""
+    topic_pool:
+      - visual content
+      - stories
+      - reels ideas
+    browser_workflow_id: null
+
+  discord:
+    display_name: Discord
+    execution_method: manual
+    cadence_enabled: false
+    cadence_interval_hours: 24
+    voice_profile: ""
+    topic_pool: []
+    browser_workflow_id: null

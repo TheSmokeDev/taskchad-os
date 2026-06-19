@@ -79,8 +79,10 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     # -- Analytics & Monitoring --
     ("gsc", "Check Google Search Console — queries, pages, CTR", "router", "operator"),
     ("analytics", "Check Google Analytics — sessions, traffic, pages", "router", "operator"),
+    ("signal", "Business signal digest — latest status or /signal refresh to run now", "router", "admin"),
     # -- Personal Finance --
     ("budget", "Personal finances — status, bills, loans, transactions, spending, accounts", "router", "admin"),
+    ("social", "Social post queue — status, queue, draft, approve, reject, post, cadence", "router", "admin"),
     # -- Cabinet (Phase 5b) — chat-routed cabinet meetings via localhost:4322 --
     ("cabinet", "Multi-persona meeting — create|list|send <id> <text>|end <id>", "router", "admin"),
     ("standup", "Send a standup question to the cabinet — /standup [question]", "router", "admin"),
@@ -136,8 +138,9 @@ CATEGORIES: list[tuple[str, list[str]]] = [
          "browser", "browserops", "linkedin_profile", "linkedin_post", "linkedin_connect",
          "x", "reddit", "slack", "sheets", "docs", "drive", "circle"],
     ),
-    ("Analytics & Monitoring", ["gsc", "analytics"]),
+    ("Analytics & Monitoring", ["gsc", "analytics", "signal"]),
     ("Personal Finance", ["budget"]),
+    ("Social Media", ["social"]),
     # Cabinet (Phase 5b) — chat-routed cabinet operator surface.
     ("Cabinet", ["cabinet", "standup", "discuss", "teamtick", "teamroom"]),
     ("Communication", ["send", "brief"]),
@@ -189,6 +192,8 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "tweet",
     "instagram",
     "design",
+    "signal",
+    "social",
 )
 
 # Core data intents: (keywords, command, included_in_brief)
