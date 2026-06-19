@@ -232,6 +232,38 @@ def write_skill(spec: SkillSpec, skills_dir: Path) -> Path:
     return skill_path
 
 
+def validate_skill(skill_path: Path) -> list[str]:
+    """Validate a SKILL.md file for discoverability.
+
+    Returns a list of error strings (empty = valid).
+    """
+    errors: list[str] = []
+    if not skill_path.exists():
+        errors.append(f"File not found: {skill_path}")
+        return errors
+    try:
+        content = skill_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"Cannot read file: {exc}")
+        return errors
+    size_kb = len(content.encode("utf-8")) / 1024
+    if size_kb > 25:
+        errors.append(f"File too large: {size_kb:.1f}KB (max 25KB)")
+    fm = _parse_skill_frontmatter(content)
+    if not fm:
+        errors.append("No YAML frontmatter found (expected --- markers)")
+    else:
+        if not fm.get("name"):
+            errors.append("Missing or empty 'name' in frontmatter")
+        if not fm.get("description"):
+            errors.append("Missing or empty 'description' in frontmatter")
+    fm_match = re.match(r"^---\s*\n.*?\n---\s*\n?", content, re.DOTALL)
+    body = content[fm_match.end():].strip() if fm_match else content.strip()
+    if not body:
+        errors.append("Body is empty (no content after frontmatter)")
+    return errors
+
+
 def patch_skill(skill_path: Path, updates: dict[str, str]) -> bool:
     """Update an existing generated skill's frontmatter fields.
 
@@ -258,3 +290,25 @@ def patch_skill(skill_path: Path, updates: dict[str, str]) -> bool:
 
     skill_path.write_text(content, encoding="utf-8")
     return True
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "--validate-skill":
+        target = Path(sys.argv[2])
+        errs = validate_skill(target)
+        if errs:
+            print(f"FAIL: {target}")
+            for e in errs:
+                print(f"  - {e}")
+            sys.exit(1)
+        else:
+            fm = _parse_skill_frontmatter(target.read_text(encoding="utf-8"))
+            print(f"OK: {target}")
+            print(f"  name: {fm.get('name', '?')}")
+            print(f"  description: {fm.get('description', '?')}")
+            sys.exit(0)
+    else:
+        print("Usage: python skills.py --validate-skill <path/to/SKILL.md>")
+        sys.exit(2)

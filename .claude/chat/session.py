@@ -310,9 +310,37 @@ class SQLiteSessionStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    def _open(self) -> sqlite3.Connection:
+        """Raw connection with no schema check.
+
+        Used by ``_init_db`` (which would otherwise recurse through
+        ``_connect``) and by ``_connect`` after the schema is ensured.
+        """
+        return sqlite3.connect(self.db_path, check_same_thread=False)
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open a per-op connection, re-initialising the schema if the DB file
+        was wiped mid-run.
+
+        The store opens a fresh connection per operation and ``_init_db`` only
+        runs at construction. If the gitignored DB file is deleted/truncated
+        while the bot is running (e.g. ``git clean -x``), SQLite silently
+        recreates it empty on the next connect and every query then fails with
+        ``no such table``. Re-initialise when the file is missing or
+        zero-length before handing back the connection. Cheap on the happy
+        path (one ``stat``); idempotent (``CREATE TABLE IF NOT EXISTS``).
+        """
+        try:
+            wiped = (not self.db_path.exists()) or self.db_path.stat().st_size == 0
+        except OSError:
+            wiped = True
+        if wiped:
+            self._init_db()
+        return self._open()
+
     def _init_db(self) -> None:
         """Create the chat/session tables if they don't exist."""
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._open() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS chat_sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -507,7 +535,7 @@ class SQLiteSessionStore:
     def get(self, platform: str, channel_id: str, thread_id: str) -> Session | None:
         """Look up a session by platform, channel, and thread."""
         session_id = build_session_key(platform, channel_id, thread_id)
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM chat_sessions WHERE session_id = ?",
@@ -524,7 +552,7 @@ class SQLiteSessionStore:
         bypass the four-value enum (PRP-7d R1 M4). Set-once invariant: ``update``
         deliberately does NOT touch ``source``.
         """
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO chat_sessions
                    (session_id, agent_session_id, runtime_session_id, runtime_lane, runtime_provider,
@@ -558,7 +586,7 @@ class SQLiteSessionStore:
 
     def update(self, session: Session) -> None:
         """Update an existing session's mutable fields."""
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """UPDATE chat_sessions
                    SET agent_session_id = ?, runtime_session_id = ?, runtime_lane = ?, runtime_provider = ?,
@@ -586,7 +614,7 @@ class SQLiteSessionStore:
     def delete(self, platform: str, channel_id: str, thread_id: str) -> bool:
         """Delete a session by platform, channel, and thread. Returns True if a row was deleted."""
         session_id = build_session_key(platform, channel_id, thread_id)
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "DELETE FROM chat_messages WHERE session_id = ?",
                 (session_id,),
@@ -626,7 +654,7 @@ class SQLiteSessionStore:
             + " AND ".join(where_clauses)
             + " ORDER BY updated_at DESC"
         )
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, tuple(params)).fetchall()
             return [self._row_to_session(row) for row in rows]
@@ -688,7 +716,7 @@ class SQLiteSessionStore:
             + " ORDER BY updated_at DESC LIMIT ?"
         )
         params.append(limit)
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, tuple(params)).fetchall()
             summaries: list[SessionSummary] = []
@@ -721,7 +749,7 @@ class SQLiteSessionStore:
         from quiet-JSON output.
         """
 
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM chat_sessions "
@@ -744,7 +772,7 @@ class SQLiteSessionStore:
         """Persist one chat message for transcript replay/search."""
 
         timestamp = (created_at or datetime.now()).isoformat()
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """INSERT INTO chat_messages (session_id, role, content, created_at, tool_calls_json)
                    VALUES (?, ?, ?, ?, ?)""",
@@ -754,7 +782,7 @@ class SQLiteSessionStore:
     def list_messages(self, session_id: str, limit: int = 200) -> list[ChatMessage]:
         """List chat messages for a session in chronological order."""
 
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """SELECT id, session_id, role, content, created_at, tool_calls_json
@@ -778,7 +806,7 @@ class SQLiteSessionStore:
         if not fts_query:
             return []
 
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             if session_id:
                 rows = conn.execute(
@@ -808,7 +836,7 @@ class SQLiteSessionStore:
 
     def get_by_user(self, user_id: str) -> list[Session]:
         """Look up all sessions for a user across all platforms."""
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC",
@@ -818,7 +846,7 @@ class SQLiteSessionStore:
 
     def save_heartbeat_thread(self, thread: HeartbeatThread) -> None:
         """Record a heartbeat notification so thread replies can be linked."""
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO heartbeat_threads
                    (channel_id, thread_ts, alert_text, created_at)
@@ -833,7 +861,7 @@ class SQLiteSessionStore:
 
     def get_heartbeat_thread(self, channel_id: str, thread_ts: str) -> HeartbeatThread | None:
         """Look up a heartbeat thread by channel and ts."""
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM heartbeat_threads WHERE channel_id = ? AND thread_ts = ?",

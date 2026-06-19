@@ -15,6 +15,23 @@ This page documents the public-safe pattern only. It does not enable automatic
 runtime dispatch, automatic issue triage, automatic merges, or unattended
 workflow execution.
 
+## Coding Dispatch Rule
+
+The short form of the pattern, suitable as a turn-1 operating rule:
+
+- Use Archon for substantive coding work in a tracked repository. Resolve the
+  repository slug from your repository index, read the matching per-repo page
+  for context, then dispatch the appropriate Archon workflow (with an isolated
+  worktree).
+- Skip Archon and work in-session for trivial edits, read-only explanations,
+  planning conversations, or urgent hotfixes the operator requests as direct
+  work.
+- Decide the dispatch path before starting the work, not after.
+
+The repository index and per-repo pages are operator-owned (kept in your own
+memory/vault or profile config). They are not part of the public export — see
+the Safety Boundaries below.
+
 ## Operator Entry Points
 
 - CLI profile setup: `thehomie profile init-archon <profile-name>`

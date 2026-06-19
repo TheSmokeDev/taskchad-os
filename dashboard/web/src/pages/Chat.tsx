@@ -104,6 +104,8 @@ function actorLabel(type: ChatEvent['type']): string {
   return 'homie';
 }
 
+const QUICK_COMMANDS = ['/video'];
+
 function streamPersonaMatches(streamPersonaId: unknown, browserPersonaId: string): boolean {
   if (!streamPersonaId) return true;
   return outboundPersonaId(String(streamPersonaId)) === browserPersonaId;
@@ -210,6 +212,11 @@ export function Chat() {
     }
   }
 
+  function insertQuickCommand(command: string) {
+    if (readOnly) return;
+    setDraft(command);
+  }
+
   return (
     <div class="flex h-full flex-col">
       <TopBar
@@ -271,7 +278,22 @@ export function Chat() {
           submitMessage();
         }}
       >
-        <div class="mx-auto flex max-w-4xl items-end gap-2">
+        <div class="mx-auto flex max-w-4xl flex-col gap-2">
+          {!readOnly && (
+            <div class="flex flex-wrap gap-2">
+              {QUICK_COMMANDS.map((command) => (
+                <button
+                  key={command}
+                  type="button"
+                  onClick={() => insertQuickCommand(command)}
+                  class="inline-flex h-7 items-center rounded-md border border-[var(--color-border)] bg-[var(--color-card)] px-2.5 font-mono text-[12px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-text)]"
+                >
+                  {command}
+                </button>
+              ))}
+            </div>
+          )}
+          <div class="flex items-end gap-2">
           <textarea
             value={draft}
             disabled={readOnly}
@@ -294,6 +316,7 @@ export function Chat() {
           >
             {sending ? <Loader2 size={16} class="animate-spin" /> : <Send size={16} />}
           </button>
+          </div>
         </div>
       </form>
     </div>

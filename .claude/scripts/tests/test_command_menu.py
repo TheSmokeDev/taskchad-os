@@ -12,6 +12,7 @@ sys.path.insert(0, str(_SCRIPTS.parent / "chat"))
 
 import commands  # type: ignore[import-not-found]  # noqa: E402
 import core_handlers  # type: ignore[import-not-found]  # noqa: E402
+from adapters.discord import get_discord_native_command_menu  # type: ignore[import-not-found]  # noqa: E402
 from extension_manager import ExtensionManager, set_manager  # type: ignore[import-not-found]  # noqa: E402
 
 
@@ -38,9 +39,10 @@ def test_telegram_native_menu_is_curated_static_registry() -> None:
     names = [name for name, _desc in menu]
 
     assert names == list(commands.TELEGRAM_NATIVE_COMMANDS)
-    assert len(names) == 31
+    assert len(names) == 36
     assert "design" in names
     assert "linkedin" in names
+    assert "video" in names
     assert "commands" in names
     assert "publish" not in names
     assert "blogstatus" not in names
@@ -64,6 +66,15 @@ def test_telegram_command_constraints_hold() -> None:
         assert name == name.lower()
         assert name.replace("_", "").isalnum()
         assert 1 <= len(desc) <= 256
+
+
+def test_discord_native_menu_reuses_curated_slash_registry() -> None:
+    menu = get_discord_native_command_menu()
+    names = [name for name, _desc in menu]
+
+    assert names == list(commands.TELEGRAM_NATIVE_COMMANDS)
+    assert "video" in names
+    assert all(1 <= len(desc) <= 100 for _name, desc in menu)
 
 
 def test_diagnostics_and_commands_are_categorized() -> None:

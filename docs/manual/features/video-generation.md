@@ -12,6 +12,9 @@ generated voiceover driving the scene timing and karaoke captions burned in.
 It is a native router command, so it works identically from Telegram,
 Discord, Slack, WhatsApp, the web dashboard chat, and the CLI. The finished
 video is delivered back into the same conversation as a file attachment.
+Telegram exposes it in the native command menu, Discord registers it as a
+native slash command with an optional `args` field, and the dashboard chat
+shows `/video` as a quick command.
 
 V3 makes the engine a creative director. A bare `/video` opens a guided
 wizard (kind, raw material, style, voice), optionally researches a URL you

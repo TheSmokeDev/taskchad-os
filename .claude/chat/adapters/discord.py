@@ -45,6 +45,24 @@ _DISCORD_AUDIO_MIMES: tuple[str, ...] = (
 )
 
 
+def get_discord_native_command_menu() -> list[tuple[str, str]]:
+    """Return Discord-native slash commands from the curated chat menu."""
+
+    from commands import get_telegram_command_menu
+
+    menu, _hidden_count = get_telegram_command_menu()
+    return [(name, _discord_description(desc)) for name, desc in menu]
+
+
+def _discord_description(description: str) -> str:
+    """Discord application command descriptions are capped at 100 chars."""
+
+    clean = " ".join(str(description or "").split())
+    if len(clean) <= 100:
+        return clean
+    return clean[:97].rstrip() + "..."
+
+
 class DiscordAdapter:
     """Discord platform adapter using discord.py gateway.
 
@@ -70,6 +88,8 @@ class DiscordAdapter:
         self.allowed_users = allowed_users
         self._queue: asyncio.Queue[IncomingMessage] = asyncio.Queue()
         self._client = discord.Client(intents=intents)
+        self._tree = discord.app_commands.CommandTree(self._client)
+        self._slash_commands_synced = False
         self._bot_user_id: int | None = None
         # Channels where bot listens without @mention
         # Reads from DISCORD_WATCHED_CHANNELS env var (comma-separated IDs)
@@ -83,6 +103,7 @@ class DiscordAdapter:
         async def on_ready() -> None:
             self._bot_user_id = self._client.user.id
             print(f"[{datetime.now()}] Discord adapter connected ({self._client.user})")
+            await self._sync_native_slash_commands(discord)
 
         @self._client.event
         async def on_message(msg: Any) -> None:
@@ -112,6 +133,8 @@ class DiscordAdapter:
             attachments = [*img_attachments, *doc_attachments]
             incoming = self._normalize_message(msg, is_dm, context_text, attachments)
             await self._queue.put(incoming)
+
+        self._register_native_slash_commands(discord)
 
         @self._client.event
         async def on_interaction(interaction: discord.Interaction) -> None:
@@ -192,6 +215,105 @@ class DiscordAdapter:
         await self._client.close()
         if hasattr(self, "_task") and not self._task.done():
             self._task.cancel()
+
+    def _register_native_slash_commands(self, discord: Any) -> None:
+        """Expose the curated Homie command menu as Discord slash commands."""
+
+        for command_name, description in get_discord_native_command_menu():
+
+            def make_callback(name: str) -> Any:
+                async def callback(interaction: Any, args: str = "") -> None:
+                    await self._queue_native_slash_command(interaction, name, args)
+
+                callback.__name__ = f"slash_{name}"
+                return discord.app_commands.describe(
+                    args="Arguments after the slash command"
+                )(callback)
+
+            self._tree.add_command(
+                discord.app_commands.Command(
+                    name=command_name,
+                    description=description,
+                    callback=make_callback(command_name),
+                )
+            )
+
+    async def _sync_native_slash_commands(self, discord: Any) -> None:
+        """Sync once per process. Guild syncs update immediately; global can lag."""
+
+        if self._slash_commands_synced:
+            return
+        try:
+            if self.allowed_guilds:
+                total = 0
+                for guild_id in self.allowed_guilds:
+                    guild = discord.Object(id=int(guild_id))
+                    self._tree.copy_global_to(guild=guild)
+                    synced = await self._tree.sync(guild=guild)
+                    total += len(synced)
+                print(f"[{datetime.now()}] Registered {total} Discord slash commands")
+            else:
+                synced = await self._tree.sync()
+                print(f"[{datetime.now()}] Registered {len(synced)} Discord slash commands")
+            self._slash_commands_synced = True
+        except Exception as e:
+            print(f"[{datetime.now()}] Discord slash command sync failed: {e}", flush=True)
+
+    async def _queue_native_slash_command(
+        self,
+        interaction: Any,
+        command_name: str,
+        args: str = "",
+    ) -> None:
+        """Convert a native Discord slash invocation into the shared router path."""
+
+        if self.allowed_users and str(interaction.user.id) not in self.allowed_users:
+            try:
+                await interaction.response.send_message(
+                    "You don't have permission.", ephemeral=True
+                )
+            except Exception:
+                pass
+            return
+        if self.allowed_guilds and interaction.guild_id is not None:
+            if str(interaction.guild_id) not in self.allowed_guilds:
+                try:
+                    await interaction.response.send_message(
+                        "This server is not allowed.", ephemeral=True
+                    )
+                except Exception:
+                    pass
+                return
+
+        try:
+            await interaction.response.defer(thinking=True)
+        except Exception:
+            pass
+
+        ch_id = str(interaction.channel_id)
+        text = f"/{command_name}"
+        args = str(args or "").strip()
+        if args:
+            text = f"{text} {args}"
+        incoming = IncomingMessage(
+            text=text,
+            user=User(
+                Platform.DISCORD,
+                str(interaction.user.id),
+                interaction.user.display_name,
+            ),
+            channel=Channel(Platform.DISCORD, ch_id, is_dm=interaction.guild_id is None),
+            platform=Platform.DISCORD,
+            thread=Thread(thread_id=ch_id),
+            raw_event={
+                "interaction_id": str(interaction.id),
+                "interaction_type": "slash_command",
+                "command": command_name,
+                "guild": str(interaction.guild_id or ""),
+                "display_text": text,
+            },
+        )
+        await self._queue.put(incoming)
 
     async def listen(self) -> Any:
         """Yield incoming messages from the queue."""

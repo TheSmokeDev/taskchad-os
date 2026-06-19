@@ -1,4 +1,4 @@
-"""Tests for cognition.skills — skill index, writing, patching."""
+"""Tests for cognition.skills — skill index, writing, patching, validation."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from cognition.skills import (
     _has_conflict,
     build_skill_index,
     patch_skill,
+    validate_skill,
     write_skill,
 )
 
@@ -313,3 +314,59 @@ def test_propose_skill_logs_conflict_skipped(tmp_path, monkeypatch):
     assert len(logged) == 1
     assert logged[0].action == "conflict_skipped"
     assert logged[0].skill_name == "turborater"
+
+
+# === validate_skill tests ===
+
+
+def test_validate_skill_valid(tmp_path):
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: test\ndescription: A test skill\n---\n\n# Body\nContent here.\n",
+        encoding="utf-8",
+    )
+    assert validate_skill(skill_md) == []
+
+
+def test_validate_skill_missing_file(tmp_path):
+    errs = validate_skill(tmp_path / "nope.md")
+    assert len(errs) == 1
+    assert "not found" in errs[0].lower()
+
+
+def test_validate_skill_no_frontmatter(tmp_path):
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text("# Just a heading\nNo frontmatter.\n", encoding="utf-8")
+    errs = validate_skill(skill_md)
+    assert any("frontmatter" in e.lower() for e in errs)
+
+
+def test_validate_skill_missing_name(tmp_path):
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text("---\ndescription: Has desc\n---\n\nBody.\n", encoding="utf-8")
+    errs = validate_skill(skill_md)
+    assert any("name" in e.lower() for e in errs)
+
+
+def test_validate_skill_missing_description(tmp_path):
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text("---\nname: test\n---\n\nBody.\n", encoding="utf-8")
+    errs = validate_skill(skill_md)
+    assert any("description" in e.lower() for e in errs)
+
+
+def test_validate_skill_empty_body(tmp_path):
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text("---\nname: test\ndescription: d\n---\n", encoding="utf-8")
+    errs = validate_skill(skill_md)
+    assert any("body" in e.lower() for e in errs)
+
+
+def test_validate_skill_oversized(tmp_path):
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: big\ndescription: huge\n---\n\n" + "x" * 30000,
+        encoding="utf-8",
+    )
+    errs = validate_skill(skill_md)
+    assert any("large" in e.lower() for e in errs)

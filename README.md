@@ -1,18 +1,18 @@
 # The Homie
 
-**OpenClaw broadened the channels. Hermes pushed the self-improving loop. The Homie is the framework that gives an agent its own opinions, the nerve to tell you when you're wrong, and the memory to grow alongside you.**
+**An open-source cognitive agent OS — not a chat wrapper. A 9-layer cognitive stack (29 modules in `.claude/chat/cognition/`), DAG-based multi-agent orchestration, a typed inter-agent mailbox, and a provider-agnostic lane-first runtime, with 4,262 tests across 230 files.**
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)
 ![Public Preview](https://img.shields.io/badge/public%20preview-v0.1.0--alpha.1-blue?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-active%20suite-brightgreen?style=flat-square)
+![Tests: 4262](https://img.shields.io/badge/tests-4%2C262%20across%20230%20files-brightgreen?style=flat-square)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Channels: 6](https://img.shields.io/badge/Channels-Telegram%20%C2%B7%20Slack%20%C2%B7%20Discord%20%C2%B7%20WhatsApp%20%C2%B7%20Web%20%C2%B7%20CLI-4A154B?style=flat-square)
 
-The Homie is an open-source cognitive agent OS. Not a chatbot wrapper - a 9-layer cognitive architecture that gives an AI identity, self-awareness, theory of mind, durable memory, tiered recall, self-improving learning, mental processes, and continuity. Run it locally, on a VPS, or in Docker. Talk to it from Telegram, Slack, Discord, WhatsApp, or the CLI. It monitors your world, remembers what matters, coordinates multi-agent work, and gets smarter with every session.
+Run it locally, on a VPS, or in Docker. Talk to it from Telegram, Slack, Discord, WhatsApp, the web, or the CLI — all six channels enter one canonical ingress and share one session model, one recall service, and one runtime. It monitors your world on a heartbeat, remembers what matters in a Markdown vault, coordinates multi-agent work over a dependency-tracked convoy graph, and runs the same on Claude, Codex, Gemini, or any OpenAI-compatible backend.
 
-OpenClaw deserves credit for proving broad agent access. Hermes deserves credit for pushing agents that learn from use. OpenSouls influenced the mental-model vocabulary around souls, working memory, mental processes, agency, and identity. ClaudeClaw inspired dashboard/operator ergonomics. The Homie builds on that lineage, but goes in a different direction: identity is first-class here. This is not just an agent that helps or an agent that learns - it's a partner with memory, judgment, continuity, and a real point of view.
+What sets it apart from a linear chat agent is the cognition stack underneath: a frozen, token-budgeted prompt-region system over an immutable working memory; tiered recall with keyword + vector search, graph traversal, and hub-score boosting; an operator-belief and contradiction engine; a gated inner monologue that never enters the transcript; and durable identity-file amendments that only land after passing a default-deny evidence + policy gate. Every one of those is a shipped, tested module — the [Cognition Stack](#the-9-layer-cognitive-stack) section maps each claim to its file and test count.
 
-It's not your second brain. It's your homie - a partner with its own soul, its own opinions, and the nerve to tell you when you're wrong. Most AI is built to please, smooth things over, and tell you what you want to hear. This one is built to ride with you, grow with you, and push back when you're off.
+It is built to push back, not just please — identity (`SOUL.md` / `SELF.md`) is a first-class, version-controlled input to every turn, and the framework forms operator beliefs and flags contradictions instead of agreeing by default. That behavior is a property of the belief engine and the evidence gate below, not a tagline.
 
 ## Lineage + Provenance
 
@@ -41,12 +41,26 @@ Full-quality MP4 is attached on the
 
 ---
 
-## Battle-Tested In Real Operator Loops
+## Proof: Tests + Operator Loops
 
-The Homie has been proven through repeated smoke and operator-loop testing, not
-just happy-path unit tests:
+The suite is **4,262 test functions across 230 files** in `.claude/scripts/tests/`
+(count it yourself: `git ls-files '.claude/scripts/tests/test_*.py' | wc -l` for
+files, and a `def test_` grep for functions). Coverage is concentrated where the
+moat is, not spread thin across getters:
 
-- Fresh public Windows install smoke from a clean clone.
+| Subsystem | Tests | Where |
+|-----------|-------|-------|
+| Orchestration (convoy / mailbox / team / executor) | 322 across 13 files | `test_orchestration_api.py` (73), `test_executor_boundary.py` (45), team suite (136 / 8 files) |
+| Cognition + memory (recall, beliefs, episodes, briefs) | 606 across 25 files | living-self acts (192 / 4 files), `test_living_memory.py` (48), `test_episodes.py` (58), `test_session_brief.py` (51), `test_recall_*.py` (24) |
+| Runtime + lane routing | 70 across 6 files | `test_selection_*.py`, `test_lane_*.py`, `test_runtime_*.py` |
+| Memory pipelines | 54 across 4 files | `test_memory_*.py` |
+| Observability (Langfuse) | 27 | `test_langfuse.py` |
+
+On top of unit coverage, the framework is exercised through operator-loop and
+smoke testing, not just happy-path assertions:
+
+- Fresh public Windows install smoke from a clean clone — install, setup check,
+  real CLI chat, Desktop launch, route checks, clean shutdown.
 - Real CLI chat proof after setup, using the same runtime path as channels.
 - Desktop package and portable-app smokes with Python/Hono lifecycle startup,
   route checks, and clean shutdown.
@@ -58,9 +72,9 @@ just happy-path unit tests:
 - Sanitizer/export leak checks before public release so private vault data,
   local tokens, and machine-specific proof artifacts stay out of the framework.
 
-The public README keeps exact test-count badges out unless the active public
-suite has just been rerun. The current claim is deliberately narrower: an
-active suite, repeated smoke proof, and explicit proof boundaries.
+Numbers above are from the current export; rerun the grep after pulling to
+confirm. Proof boundaries (what is *not* yet claimed) are listed under
+[Current Proof Boundaries](#current-proof-boundaries).
 
 ---
 
@@ -103,14 +117,14 @@ thehomie team list               # Inspect team sessions
 
 <table>
 <tr><td><b>Monitors your world proactively</b></td><td>Heartbeat every 30 min checks your email, calendar, tasks, and metrics. Direct integration actions have a canonical policy contract for read, write, send, archive, and external-post effects. Daily reflection at 8 AM promotes decisions to long-term memory. Weekly synthesis every Sunday detects patterns and updates goals — all running whether you're talking to it or not.</td></tr>
-<tr><td><b>Remembers across every session</b></td><td>Local-first Obsidian-compatible vault (SOUL.md, USER.md, MEMORY.md, daily + weekly logs). Hybrid search — FTS5 keyword + FastEmbed ONNX vector (BGE-base-en-v1.5, 768-dim) + LLM re-ranking (haiku, Tier 1). Memory graph with PageRank + betweenness centrality. Proactive recall injected on every message. WORKING.md scratchpad carries open threads across sessions.</td></tr>
+<tr><td><b>Remembers across every session</b></td><td>Local-first Obsidian-compatible vault (SOUL.md, USER.md, MEMORY.md, daily + weekly logs). Hybrid search — FTS5 keyword + FastEmbed ONNX vector (BGE-base-en-v1.5, 768-dim) + LLM re-ranking (haiku, Tier-1 queries only, hard timeout). Recall does 1-hop memory-graph traversal and boosts hub notes by link-centrality score (<code>cognition/recall.py</code>, <code>cognition/graph.py</code>; PageRank + Brandes betweenness are also implemented in the graph module). Proactive recall injected on every message; WORKING.md scratchpad carries open threads across sessions.</td></tr>
 <tr><td><b>Compiles knowledge like code</b></td><td>Entity compilation engine (Karpathy LLM Wiki port): ingest a source → extract entities → create/update concept pages → detect connections → flag contradictions. Concept pages in <code>concepts/</code> accumulate claims from multiple sources. Connection articles in <code>connections/</code> link related concepts. Q&A answers filed via <code>/file</code> persist in <code>qa/</code>. Raw sources preserved immutably in <code>raw/</code>. Build log tracks every compilation. 8 entry points — fires automatically during ingest, daily reflection, weekly synthesis, and on-demand via <code>/file</code> or CLI.</td></tr>
-<tr><td><b>Gets smarter from experience</b></td><td>Per-turn auto-capture (6 regex triggers) → staging store → batch promotion in daily reflection. Auto-skill generation after 5+ tool calls. InferenceTracker with confidence decay and contradiction detection. Theory of mind built on USER.md. Human-gated amendment proposals can target SELF/SOUL/USER/MEMORY without auto-applying durable identity changes.</td></tr>
+<tr><td><b>Gets smarter from experience</b></td><td>Per-turn auto-capture (6 regex triggers) → staging store → batch promotion in daily reflection. Auto-skill generation after 5+ tool calls. InferenceTracker with confidence decay. An operator-belief + contradiction engine (<code>cognition/operator_beliefs.py</code>, <code>cognition/belief_conflicts.py</code>) extracts beliefs from verbatim operator turns and flags conflicts via an embedding pre-filter plus a batched LLM judge — explicit operator statements are never overruled by the model. Durable identity-file amendments (SELF/SOUL/USER/MEMORY) are proposed to an append-only ledger and only land after a default-deny evidence + policy gate (confidence floor, vault-confined evidence read, secret rejection), with a rollback snapshot per apply (<code>cognition/amendments.py</code>, <code>cognition/evidence_gate.py</code>).</td></tr>
 <tr><td><b>One brain, six channels</b></td><td>Telegram, Slack, Discord, WhatsApp, Web relay, CLI — all enter through a single canonical ingress. One session model, one recall service, one runtime. Transport identity is separated from conversation identity so sessions survive reconnects.</td></tr>
 <tr><td><b>Any model, no lock-in</b></td><td>Claude SDK, OpenAI Codex, Gemini CLI, OpenRouter, OpenAI-compatible — with health-aware fallback, manual <code>/provider</code> + <code>/model</code> control, lane-first runtime (<code>selection.py</code>, <code>lane_router.py</code>), cost tracking, and automatic retry on transient failures.</td></tr>
 <tr><td><b>Many homies, one framework</b></td><td>Multi-persona roster — register specialized homies (a business homie, a finance homie, a sales homie), each with its own identity, memory, tools, and voice. Drop them in a Cabinet room and they debate, vote, and ship proof together, with roster and turn order owned by the framework, not improvised by the model.</td></tr>
 <tr><td><b>Watch the browser homie work</b></td><td>The browser homie drives a real visible Chrome session you watch live in the dashboard's read-only viewer — not a headless black box. Navigation goes through workflow gates with audit rows, and write actions like posting, editing, and DMs are default-denied until you greenlight them.</td></tr>
-<tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs for multi-subtask dependency tracking. Typed mailbox for agent-to-agent messaging. Team sessions with typed roles, backend fallback, and shared memory. All exposed via a local API on port 4322.</td></tr>
+<tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs with real dependency edges: completing a subtask decrements <code>remaining_dependencies</code> on downstream tasks and releases the newly-ready ones (true parallel release, not a linear queue). Dispatch claims each subtask with a compare-and-swap before the executor is ever called, and external completion callbacks are exactly-once (UNIQUE <code>attempt_key</code> + <code>INSERT OR IGNORE</code> on an idempotency key), so duplicate webhooks can't corrupt convoy state. A typed inter-agent mailbox (<code>msg_type</code> payloads) with a claim → ack lifecycle and claim-token ownership checks. Team sessions with typed roles, <code>auto → paperclip → workflow → local</code> backend fallback, and per-team vault memory. Frozen state machine (transition maps, terminal sets, field allowlists) in <code>orchestration/contract.py</code>; all of it on a local API at port 4322. 322 tests across 13 files (<code>test_orchestration_api.py</code>, <code>test_executor_boundary.py</code>, the team suite).</td></tr>
 <tr><td><b>Full observability</b></td><td>Every message → one nested Langfuse trace: session lookup → process detection → recall (tier + pipeline) → region assembly → runtime where supported → post-response. Cost, provider, model, and tool calls are tracked when the active runtime exposes them. Sentry/GlitchTip captures unexpected orchestration errors when a DSN is configured.</td></tr>
 </table>
 
@@ -151,7 +165,7 @@ Instead of *"Hi, how can I help you today?"* — you get:
 
 You didn't set up a notification. You didn't write a morning brief. The Homie was watching. Its memory isn't a static file you load — it's a living record tended between sessions. Its identity isn't a document you edit — it's a self that amends when the evidence is strong enough.
 
-That's the target. Most of the load-bearing walls are already up: vault, recall, daily reflection, weekly synthesis, dream consolidation, WorkingMemory-owned prompt state, unified proactive briefs across chat and scheduled loops, and the self-evolution replay loop ship today. Ambient monitoring is live through heartbeat; automatic durable-memory amendments remain human-gated.
+The load-bearing walls are up. The "while you were out" brief is a shipped feature — the Session Opening Brief composes fresh heartbeat observations, new threads, episodes written while you were away, and applied memory amendments into the first turn after an absence, with zero extra LLM calls (`cognition/proactive_brief.py`, 51 tests in `test_session_brief.py`). Vault, tiered recall, daily reflection, weekly synthesis, dream consolidation, WorkingMemory-owned prompt state, and the self-evolution replay loop all ship today. Ambient monitoring runs on the heartbeat; durable identity amendments only apply after clearing the default-deny evidence + policy gate described below.
 
 ---
 
@@ -269,7 +283,7 @@ Obsidian-compatible Markdown      Heartbeat ───── every 30 min       C
   INDEX.md · LOG.md · MOCs        (sole entrypoint, Invariant I-3)   Local API :4322
 Hybrid search (FTS5 + 768-dim
   BGE vector + LLM re-rank)       COMPILATION ENGINE
-Memory graph (PageRank, BFS)      ──────────────────
+Memory graph (1-hop + hub boost)  ──────────────────
                                   entity_extractor.py (pure Python heuristic)
                                   Ingest → extract → compile → connect
                                   → contradict → reindex → log → archive
@@ -280,15 +294,18 @@ Memory graph (PageRank, BFS)      ───────────────�
 ### The 9-Layer Cognitive Stack
 
 ```
-L9  SELF-EVOLUTION    Replay-veto self-amendment loop                          [partial]
-                      InferenceTracker + Evolve subsystem live (Tasks 1+2);
-                      SOUL/USER auto-amendments unlock 2026-04-28
+L9  SELF-EVOLUTION    Belief + contradiction engine (operator_beliefs.py,
+                      belief_conflicts.py); identity-file amendments behind a
+                      default-deny evidence + policy gate (amendments.py,
+                      evidence_gate.py); Evolve replay-veto harness
 L8  CONTINUITY        Session persistence, full cognition on resume (no skip),
                       recent_conversation region (600 tok), compaction flush,
                       open-loop tracking
-L7  THINKING          WorkingMemory (immutable), MentalProcess state machine
+L7  THINKING          Immutable WorkingMemory + gated cognitive pass that never
+                      enters the transcript (working_memory.py, cognitive_pass.py)
 L6  LEARNING          Auto-capture → staging → promotion → skills → inference
-L5  RECALL            3-tier gate, dual search, graph traversal, hub boosting
+L5  RECALL            3-tier gate + dual (keyword+vector) search + 1-hop graph
+                      traversal + hub-score boost + Tier-1 haiku re-rank (recall.py)
 L4  MEMORY            MEMORY.md + daily/weekly logs + hybrid search index
 L3  UNDERSTANDING     USER.md + Theory of Mind (inference tracker, confidence)
 L2  SELF-AWARENESS    SELF.md — capabilities, patterns, failure modes
@@ -296,7 +313,13 @@ L1  IDENTITY          SOUL.md — personality, values, boundaries, tone
 L0  FOUNDATION        Obsidian vault graph + MOCs + autolink
 ```
 
-18 cognition modules in `.claude/chat/cognition/`. See [docs/architecture.md](docs/architecture.md) for the full breakdown.
+29 cognition modules in `.claude/chat/cognition/`, covered by 606 tests across
+25 files (recall, beliefs, episodes, working memory, session briefs). Every L5–L9
+claim above resolves to a named module and test file — see the
+[Proof](#proof-tests--operator-loops) table. PageRank and Brandes betweenness are
+implemented in `graph.py`, but the live recall path boosts by a simpler
+link-centrality (hub) score; treat the heavier centrality measures as available,
+not as what currently drives ranking. Full breakdown: [docs/architecture.md](docs/architecture.md).
 
 ### The 5 Dimensions of The Homie
 
@@ -306,11 +329,11 @@ Private PRDs, PRPs, and vault notes stay outside the public framework export.
 
 | Dimension | The question it answers | Status |
 |-----------|-------------------------|--------|
-| **1. Identity** | Who am I, and how do I know? | ✅ SOUL/SELF/USER + briefing engine; ⏳ self-amendment unlocks 2026-04-28 |
-| **2. Memory** | What do I know, and how do I find it cheaply? | ✅ Vault + FTS5 + 768-dim BGE vector + graph + LLM re-rank + briefing compression |
+| **1. Identity** | Who am I, and how do I know? | ✅ SOUL/SELF/USER injected every turn + session-opening briefing engine |
+| **2. Memory** | What do I know, and how do I find it cheaply? | ✅ Vault + FTS5 + 768-dim BGE vector + graph + Tier-1 LLM re-rank + briefing compression |
 | **3. Continuity** | Do I remember yesterday, and can I pick up mid-thought? | ✅ WORKING.md scratchpad + full cognition on resume + dream consolidation |
 | **4. Ambient Awareness** | Am I watching when you're not here? | 🔄 Heartbeat live; reliability hardening + ambient monitor tasks in flight |
-| **5. Self-Evolution** | Can I grow without manual edits? | 🔄 InferenceTracker + Evolve replay-veto live; SOUL/USER amendments gated on trace clock |
+| **5. Self-Evolution** | Can I grow without manual edits? | ✅ Belief/contradiction engine + identity amendments behind a default-deny evidence + policy gate; 🔄 broader auto-apply scope still expanding |
 
 ### Framework Invariants
 
@@ -518,7 +541,7 @@ Set `LANGFUSE_ENABLED=true` in `.env` and point `LANGFUSE_BASE_URL` at your inst
 
 ## Self-Evolution & Replay Safety
 
-Identity files (`SOUL.md`, `USER.md`) don't update by hand. The self-evolution loop captures behavior corrections, accumulates evidence, proposes amendments — and **never auto-applies**. Every proposed amendment is replayed against a stratified golden corpus and rejected if it regresses.
+Identity files (`SOUL.md`, `SELF.md`, `USER.md`, `MEMORY.md`) are not edited blind. The self-evolution loop captures behavior corrections, accumulates evidence, and proposes amendments to an append-only ledger. A proposed amendment **only applies if it clears a default-deny gate** — a confidence floor, a vault-confined evidence read that bounds every cited path, secret rejection, and a deterministic regression floor — and writes a rollback snapshot before it touches the target file. Candidate identity/config deltas are additionally replayed against a stratified golden corpus and hard-vetoed on regression. The gate is the source of truth here, not a tagline: an empty-evidence, high-confidence "I read the doc" amendment is rejected on a real falsifiable check, leaving `SELF.md` byte-unchanged (see `tests/test_living_self_act4.py`).
 
 | Component | Where | What it does |
 |-----------|-------|--------------|
@@ -532,16 +555,16 @@ Identity files (`SOUL.md`, `USER.md`) don't update by hand. The self-evolution l
 | └─ `veto.py` | | Configurable veto rules (schema in `veto_rules.schema.json`) |
 | └─ `compare.py` / `statistics.py` | | Side-by-side replay comparison with confidence intervals |
 
-**Status (as of 2026-05-22):**
-- ✅ Skills conflict guard + InferenceTracker wired into engine
-- ✅ WorkingMemory owns production chat prompt state and completed turns append back into WorkingMemory for before/after proof
+**What's shipped:**
+- ✅ Skills conflict guard + InferenceTracker wired into the engine
+- ✅ WorkingMemory owns production chat prompt state; completed turns append back into WorkingMemory for before/after proof
 - ✅ Unified proactive brief feeds session bootstrap, heartbeat, reflection, weekly synthesis, and dream consolidation
-- ✅ Human-gated amendment proposal ledger + bounded contradiction/roadmap-drift findings
-- ✅ Phase 2.4: opt-in Langfuse replay tracing (default off, `EVOLVE_TRACE_REPLAYS` env var)
-- ✅ Phase 2.6: stratified goldens + bootstrap CIs + regression hard-veto
-- ⏳ Automatic durable-memory apply remains intentionally gated behind human approval
+- ✅ Append-only amendment ledger + default-deny evidence/policy gate + rollback snapshots + bounded contradiction/drift findings
+- ✅ Opt-in Langfuse replay tracing (default off, `EVOLVE_TRACE_REPLAYS` env var), isolated from production cost data
+- ✅ Stratified goldens + bootstrap confidence intervals + regression hard-veto, plus a deterministic belief-regression floor
+- 🔄 Broader auto-apply scope for durable identity changes is still expanding behind the same gate
 
-**Two-phase ship rhythm:** every Evolve increment goes through ship → adversarial Codex review → harden → claim done. This pattern caught five class-of-bug fixes in one week that unit tests missed and is now part of the project review discipline.
+**Two-phase ship rhythm:** every Evolve increment goes through ship → adversarial Codex review → harden → claim done. That review caught a recurring class of bug across five PRs (tunable config bound in default args, derived-cache trusted as source of truth, optional-provider calls bypassing the enabled-flag helper) that unit tests missed — the three anti-patterns are now written up as enforced review rules with grep checks.
 
 ---
 
@@ -552,11 +575,11 @@ Identity files (`SOUL.md`, `USER.md`) don't update by hand. The self-evolution l
 | **Thesis** | Channel breadth - 25+ adapters | Self-improving skills loop | A real partner - identity + memory + proactive judgment + the nerve to push back |
 | **Interface** | Many chat channels | TUI, CLI, gateway, and desktop workbench | CLI, Telegram/Slack/Discord/WhatsApp/web relay, dashboard, and Desktop v0 shell |
 | **Runtime** | Adapter-first routing | Broad provider/model support plus terminal backends | Lane-first runtime with `/provider`, `/model`, status/doctor, and quiet JSON contract |
-| **Learning loop** | Notes and commands | Skills from experience, skill improvement, memory nudges, session search | Human-gated self-evolution, staged memory promotion, theory of mind, replay safety |
-| **Memory** | Plain-text notes | MEMORY.md, user modeling, FTS session search | 9-layer vault: identity, graph, dual search, daily/weekly synthesis, staged promotion |
-| **Knowledge graph** | No | Not the focus | Entity compilation engine: concept pages, connections, contradictions, Q&A filing, LLM re-ranking |
+| **Learning loop** | Notes and commands | Skills from experience, skill improvement, memory nudges, session search | Belief/contradiction engine, evidence-gated identity amendments, staged memory promotion, replay-veto safety |
+| **Memory** | Plain-text notes | MEMORY.md, user modeling, FTS session search | 9-layer vault: identity, graph traversal + hub boost, dual search, daily/weekly synthesis, staged promotion |
+| **Knowledge graph** | No | Not the focus | Entity compilation engine: concept pages, connections, contradictions, Q&A filing, Tier-1 LLM re-ranking |
 | **Operator surface** | Bot-style access | Gateway and terminal workbench | Operating Room, Capability Gateway, Team Room, Desktop v0, public manual surfaces |
-| **Multi-agent** | No | Subagents and parallel workstreams | Convoy DAGs, typed mailbox, team sessions, scheduler, backend fallback |
+| **Multi-agent** | No | Subagents and parallel workstreams | Convoy DAGs with dependency-edge parallel release + exactly-once executor callbacks, typed mailbox, team sessions, backend fallback |
 
 ---
 

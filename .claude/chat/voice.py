@@ -1180,17 +1180,26 @@ class _MacOsSayProvider:
 class EdgeTtsProvider:
     """EXISTING — preserved for back-compat AND now in cascade."""
 
-    voice: str = "en-US-GuyNeural"
+    voice: str = "en-US-AndrewMultilingualNeural|+14%"
 
     async def synthesize(self, text: str) -> bytes:
         import edge_tts  # lazy (Rule 3)
 
-        communicate = edge_tts.Communicate(text, self.voice)
+        voice, rate = _parse_edge_voice_spec(self.voice)
+        communicate = edge_tts.Communicate(text, voice, rate=rate)
         buf = BytesIO()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 buf.write(chunk["data"])
         return buf.getvalue()
+
+
+def _parse_edge_voice_spec(spec: str) -> tuple[str, str]:
+    """Parse ``ShortName|rate`` while preserving plain edge-tts voice names."""
+    voice, sep, rate = spec.partition("|")
+    voice = voice.strip() or "en-US-AndrewMultilingualNeural"
+    rate = rate.strip() if sep else "+0%"
+    return voice, rate or "+0%"
 
 
 @dataclass(slots=True)
@@ -1313,7 +1322,7 @@ async def synthesize(
             voice_overrides.get("edge")
             or os.environ.get("VOICE_TTS_VOICE_EDGE")
             or os.environ.get("EDGE_TTS_VOICE")
-            or "en-US-GuyNeural"
+            or "en-US-AndrewMultilingualNeural|+14%"
         )
         return await _try_provider(
             "edge",

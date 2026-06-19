@@ -84,6 +84,22 @@ describe('dashboard chat', () => {
     });
   });
 
+  test('video quick command sends /video through dashboard chat', async () => {
+    render(<Chat />);
+
+    fireEvent.click(await screen.findByText('/video'));
+    fireEvent.click(screen.getByTitle('Send'));
+
+    await waitFor(() => {
+      const calls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+      const sendCall = calls.find(([url]) => String(url).includes('/api/conversation/main/send'));
+      expect(sendCall).toBeTruthy();
+      const body = JSON.parse((sendCall?.[1] as RequestInit).body as string);
+      expect(body.text).toBe('/video');
+      expect(body.conversation_id).toBe('dashboard-main');
+    });
+  });
+
   test('router action buttons post button_custom_id back through chat send', async () => {
     render(<Chat />);
 

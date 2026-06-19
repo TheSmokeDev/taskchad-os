@@ -231,7 +231,7 @@ VOICE_STT_MODEL = os.getenv("VOICE_STT_MODEL", "whisper-1")
 VOICE_STT_PROVIDERS = os.getenv("VOICE_STT_PROVIDERS", "")
 VOICE_STT_ENABLE_OPENAI = os.getenv("VOICE_STT_ENABLE_OPENAI", "")
 VOICE_TTS_ENGINE = os.getenv("VOICE_TTS_ENGINE", "edge")  # "edge" or "openai"
-VOICE_TTS_VOICE_EDGE = os.getenv("VOICE_TTS_VOICE_EDGE", "en-US-GuyNeural")
+VOICE_TTS_VOICE_EDGE = os.getenv("VOICE_TTS_VOICE_EDGE", "en-US-AndrewMultilingualNeural|+14%")
 VOICE_TTS_VOICE_OPENAI = os.getenv("VOICE_TTS_VOICE_OPENAI", "alloy")
 
 # Calendar
@@ -1117,7 +1117,7 @@ def reload_config() -> dict[str, tuple[str, str]]:
         "VOICE_STT_PROVIDERS": os.getenv("VOICE_STT_PROVIDERS", ""),
         "VOICE_STT_ENABLE_OPENAI": os.getenv("VOICE_STT_ENABLE_OPENAI", ""),
         "VOICE_TTS_ENGINE": os.getenv("VOICE_TTS_ENGINE", "edge"),
-        "VOICE_TTS_VOICE_EDGE": os.getenv("VOICE_TTS_VOICE_EDGE", "en-US-GuyNeural"),
+        "VOICE_TTS_VOICE_EDGE": os.getenv("VOICE_TTS_VOICE_EDGE", "en-US-AndrewMultilingualNeural|+14%"),
         "VOICE_TTS_VOICE_OPENAI": os.getenv("VOICE_TTS_VOICE_OPENAI", "alloy"),
         "CHAT_MAX_TURNS": int(os.getenv("CHAT_MAX_TURNS", "25")),
         "CHAT_MAX_BUDGET_USD": float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0")),
