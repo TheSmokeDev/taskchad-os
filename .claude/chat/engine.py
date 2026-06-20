@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from attachment_context import build_attachment_context
-from models import IncomingMessage, OutgoingMessage
+from models import IncomingMessage, OutgoingMessage, Platform
 from session import HeartbeatThread, PostgresSessionStore, Session, SQLiteSessionStore
 from session_keys import build_session_key, resolve_thread_id
 from speaker_context import (
@@ -138,6 +138,8 @@ def _should_use_text_only_fast_path(message: IncomingMessage) -> bool:
     """Return True for short low-intent chat turns that do not need tools."""
 
     prompt = message.text.strip().lower()
+    if message.platform == Platform.TELEGRAM:
+        return False
     if message.is_piv or message.prefetched_context or message.attachments:
         return False
     if any(marker in prompt for marker in _TEXT_ONLY_FAST_MARKERS):
@@ -1271,7 +1273,7 @@ class ConversationEngine:
         # Pre-fetched data from router — lightweight TEXT_REASONING pass.
         # Context itself is owned by WorkingMemory above; this block only
         # constrains runtime behavior for already-loaded data.
-        if message.prefetched_context:
+        if message.prefetched_context and message.platform != Platform.TELEGRAM:
             allowed_tools = []  # Force no tools — data is pre-loaded
             piv_max_turns = 1   # Single response, no back-and-forth
             piv_max_budget = 0.5  # Cheap ceiling
@@ -1325,7 +1327,7 @@ class ConversationEngine:
             max_turns=piv_max_turns,
             max_budget_usd=piv_max_budget,
             allowed_tools=allowed_tools,
-            permission_mode="plan" if mode == "plan" else "acceptEdits",
+            permission_mode="plan" if mode == "plan" else "bypassPermissions",
             setting_sources=[],
             system_prompt=system_prompt,
             thinking={"type": "adaptive"},

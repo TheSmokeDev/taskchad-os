@@ -14,6 +14,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Load .env (via config's import-time load_dotenv) BEFORE any os.getenv check —
+# otherwise SOCIAL_CADENCE_ENABLED is invisible when cadence.py runs as a
+# standalone scheduled job and run_cadence_tick() silently no-ops "cadence disabled".
+import config  # noqa: E402,F401
+
 logger = logging.getLogger(__name__)
 
 

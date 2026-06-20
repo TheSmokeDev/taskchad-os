@@ -317,7 +317,39 @@ async def test_engine_does_not_reuse_stale_claude_session_after_generic_turn(
 
 
 @pytest.mark.asyncio
-async def test_short_casual_telegram_message_uses_text_reasoning(
+async def test_short_casual_telegram_message_keeps_tools_and_bypass_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["capability"] = request.capability
+        captured["allowed_tools"] = list(request.allowed_tools)
+        captured["permission_mode"] = request.permission_mode
+        return RuntimeResult(
+            text="yo",
+            runtime_lane="generic_runtime",
+            provider="gemini-cli",
+            model="gemini-3-flash-preview",
+            profile_key="primary-gemini-cli",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [out async for out in convo.handle_message(_make_message("yo"))]
+
+    assert outputs[-1].text == "yo"
+    assert captured["capability"] == "tool_reasoning"
+    assert "Bash" in captured["allowed_tools"]
+    assert captured["permission_mode"] == "bypassPermissions"
+
+
+@pytest.mark.asyncio
+async def test_short_casual_discord_message_can_use_text_reasoning(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -339,11 +371,45 @@ async def test_short_casual_telegram_message_uses_text_reasoning(
 
     monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
 
-    outputs = [out async for out in convo.handle_message(_make_message("yo"))]
+    outputs = [out async for out in convo.handle_message(_make_discord_message("yo"))]
 
     assert outputs[-1].text == "yo"
     assert captured["capability"] == "text_reasoning"
     assert captured["allowed_tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_prefetched_context_keeps_tools_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["capability"] = request.capability
+        captured["allowed_tools"] = list(request.allowed_tools)
+        captured["max_turns"] = request.max_turns
+        return RuntimeResult(
+            text="working",
+            runtime_lane="generic_runtime",
+            provider="gemini-cli",
+            model="gemini-3-flash-preview",
+            profile_key="primary-gemini-cli",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    message = _make_message("open up your browser and go to LinkedIn")
+    message.prefetched_context = "## /browserops\nBrowserOps context loaded"
+    outputs = [out async for out in convo.handle_message(message)]
+
+    assert outputs[-1].text == "working"
+    assert captured["capability"] == "tool_reasoning"
+    assert "Bash" in captured["allowed_tools"]
+    assert captured["max_turns"] > 1
 
 
 @pytest.mark.asyncio

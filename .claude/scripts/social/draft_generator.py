@@ -81,6 +81,47 @@ def _read_voice_context(voice_profile: str = "") -> str:
     return ""
 
 
+def _invoke_runtime(prompt: str) -> str:
+    """Run one background-model completion and return the text.
+
+    Bridges the async runtime from this sync function: a plain ``asyncio.run``
+    when no event loop is running (the cadence job / CLI), or a worker thread
+    when one is (the async ``/social`` chat handler). The LLM kill-switch is
+    enforced inside ``run_with_runtime_lanes``.
+    """
+    import asyncio
+
+    import config
+    from runtime.base import RuntimeRequest
+    from runtime.capabilities import TEXT_REASONING
+    from runtime.lane_router import run_with_runtime_lanes
+
+    model = config.get_background_models().get("fast", "haiku")
+    request = RuntimeRequest(
+        prompt=prompt,
+        cwd=config.PROJECT_ROOT,
+        task_name="social_draft_generator",
+        capability=TEXT_REASONING,
+        model=model,
+        max_turns=1,
+        allowed_tools=[],
+    )
+
+    async def _go() -> str:
+        result = await run_with_runtime_lanes(request)
+        return (getattr(result, "text", "") or "").strip()
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_go())  # no loop: cadence / CLI
+    # A loop is already running (async chat handler) — run in a worker thread.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(_go())).result()
+
+
 def generate_draft(
     channel_id: str,
     topic: str,
@@ -104,19 +145,12 @@ def generate_draft(
     prompt = _build_draft_prompt(channel_id, topic, voice_ctx, constraints)
 
     try:
-        from runtime.registry import run_with_fallback
-        import config
+        body = _invoke_runtime(prompt)
 
-        models = config.get_background_models()
-        fast_model = models.get("fast", "haiku")
-
-        result = run_with_fallback(prompt, model=fast_model, max_turns=1)
-
-        if not result or not result.strip():
+        if not body:
             logger.error("Empty draft from runtime for %s", channel_id)
             return None
 
-        body = result.strip()
         if len(body) > constraints["max_chars"]:
             body = body[: constraints["max_chars"]]
 
