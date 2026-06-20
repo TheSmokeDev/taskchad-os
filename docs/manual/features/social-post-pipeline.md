@@ -69,11 +69,11 @@ shipped set:
 
 | Channel | Method | Cadence | Notes |
 |---|---|---|---|
-| `linkedin` | browser | enabled (24h) | The one cadence-on channel; drives the existing visible-Chrome `BrowserExecutor`. |
-| `facebook` | api | off | Graph API (`FACEBOOK_PAGE_ACCESS_TOKEN` + `FACEBOOK_PAGE_ID`). |
-| `x` | manual | off | **Draft-only by policy** — `manual` method + the `post_x` capability is hard-disabled. Drafts are delivered, never auto-posted. |
+| `linkedin` | browser | enabled (24h) | Drives the existing visible-Chrome `BrowserExecutor`. |
+| `facebook` | api | enabled (24h) | Drafts a caption; posting via Graph API (`FACEBOOK_PAGE_ACCESS_TOKEN` + `FACEBOOK_PAGE_ID`). |
+| `x` | manual | enabled (12h) | **Draft-only by policy** — `manual` method + the `post_x` capability is hard-disabled. Drafts are delivered, never auto-posted. |
 | `reddit` | browser | off | Visible-Chrome `BrowserExecutor`. |
-| `instagram` | api | off | Meta Graph API (requires a business account id + image URL). |
+| `instagram` | api | enabled (24h) | Drafts a caption **plus a best-effort generated scene image** (codex CLI image tool; saved under `<project>/.claude/data/social_images/`, caption-only fallback). Posting via Meta Graph API also needs a business account id + the image at a public URL. |
 | `discord` | manual | off | Placeholder; `manual` never auto-posts. |
 
 ## Default-Deny Safety
@@ -110,12 +110,19 @@ load-bearing invariant. Verified in code:
 ## Cadence
 
 `run_cadence_tick()` (`social/cadence.py`): if `SOCIAL_CADENCE_ENABLED` is off it
-returns immediately. Otherwise, for each channel whose interval is due it picks a
-topic from the channel's `topic_pool` and generates a **draft** (never an
-approval), records `last_draft_at`, then calls `dispatch_due_posts()` to send any
-already-approved, already-scheduled posts. State lives in
-`STATE_DIR/social-cadence-state.json`. It is currently invoked manually / via the
-CLI; wiring it to the system scheduler is a stated next slice.
+returns immediately. Otherwise, for each cadence-enabled channel whose interval is
+due it picks a topic from the channel's `topic_pool` and generates a **draft**
+(never an approval), records `last_draft_at`, then calls `dispatch_due_posts()` to
+send any already-approved, already-scheduled posts. State lives in
+`STATE_DIR/social-cadence-state.json`.
+
+**Scheduling is wired.** A daily Windows Task Scheduler job (07:00) runs the tick
+via `run_social_cadence.bat` → `social/cadence.py`. The loop stays **off by
+default** (master switch `SOCIAL_CADENCE_ENABLED`, default `false`). To turn it on:
+set `SOCIAL_CADENCE_ENABLED=true`, then register the job once with
+`setup_social_cadence_scheduler.ps1` (it prints the task name plus the
+disable/remove commands). To stop it: set the flag `false`, or disable/unregister
+the task. A channel that fails to draft is skipped, never fatal.
 
 ## Audit Trail
 
@@ -154,6 +161,13 @@ Env-var names only; values live in `.claude/scripts/.env`.
 | `X_API_KEY`, `X_API_SECRET` | — | Present but unused — `post_x` is disabled by policy. |
 
 Channel cadence, method, and topic pools live in `social/channels.yaml`, not env.
+The shipped cadence-enabled set is LinkedIn (24h), X (12h), Facebook (24h), and
+Instagram (24h); Reddit and Discord stay off.
+
+Instagram drafts get a best-effort scene image via the codex CLI image tool
+(`video_imagegen`) — no env knob; it degrades to caption-only when codex image
+generation is unavailable. Images are saved under
+`<project>/.claude/data/social_images/` and the path is referenced in the draft.
 
 ## How To Run It
 
@@ -185,12 +199,14 @@ JSONL shape.
 
 ## Latest Live Proof
 
-- Date: 2026-06-19
-- Surface: merged PR #80 (squash commit `1ab4386e`); re-reviewed and merged.
-- Result: 92/92 social tests green on the merged tree; the prior two Codex review
-  rounds closed the default-deny bypass and the dispatch-wire finding; `/social`
-  registered and live on the running bot.
-- Proof: the merged PR review thread (round-3 re-review verdict APPROVE).
+- Date: 2026-06-20
+- Surface: scheduled cadence live + merged PR #80 (squash commit `1ab4386e`).
+- Result: 92/92 social tests green; the daily cadence is wired and proven to draft
+  LinkedIn / X / Facebook / Instagram (Instagram with a codex-generated image),
+  all draft-only with nothing posted. Two runtime bugs fixed (cadence `.env` load
+  + `draft_generator` runtime call) in commits `60dd6784` / `7351d697`.
+- Proof: a cadence run produced one draft per enabled channel plus a saved image;
+  the merged PR review thread (round-3 re-review verdict APPROVE).
 
 ## File Ownership Map
 
@@ -200,9 +216,11 @@ JSONL shape.
 | `social/db.py` | `social_post_queue` schema, CRUD, the `list_due()` gate query. |
 | `social/service.py` | Business logic: create/approve/reject/mark, transition validation. |
 | `social/channels.py` / `channels.yaml` | Config-driven channel registry. |
-| `social/draft_generator.py` | Voice-matched AI draft copy. |
+| `social/draft_generator.py` | Voice-matched AI draft copy; `_generate_social_image()` attaches a best-effort codex-generated image to Instagram drafts. |
 | `social/post_executor.py` | Gated dispatch: `require_integration_action` + pre-send audit + API/browser/manual routing. |
 | `social/cadence.py` | Opt-in autonomous draft loop (never approves). |
+| `run_social_cadence.bat` | Scheduled-job runner — the daily Task Scheduler job invokes this to run one cadence tick. |
+| `setup_social_cadence_scheduler.ps1` | One-time Windows Task Scheduler registration for the daily 07:00 cadence. |
 | `social/audit.py` | Append-only sanitized JSONL audit. |
 | `.claude/scripts/integrations/capabilities.py` | The `social` action declarations (default-deny). |
 | `.claude/scripts/integrations/social_media.py` | Platform API wrappers (`post_to_platform`). |
@@ -217,7 +235,6 @@ list. Export goes only through `scripts/sanitize.py`; never copy files by hand.
 
 ## Next Slices
 
-- Wire `run_cadence_tick()` into the system scheduler (currently manual/CLI).
 - A dashboard surface for the queue.
 - Prove the token-backed direct-API legs (Facebook/Instagram) against live creds.
 - Migrate the Reddit write onto the shared `BrowserExecutor` (shared with the
