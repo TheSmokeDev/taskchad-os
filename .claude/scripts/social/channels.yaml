@@ -16,7 +16,7 @@ channels:
   facebook:
     display_name: Facebook
     execution_method: api
-    cadence_enabled: false
+    cadence_enabled: true
     cadence_interval_hours: 24
     voice_profile: ""
     topic_pool:
@@ -29,7 +29,7 @@ channels:
   x:
     display_name: X (Twitter)
     execution_method: manual
-    cadence_enabled: false
+    cadence_enabled: true
     cadence_interval_hours: 12
     voice_profile: ""
     topic_pool:
@@ -54,7 +54,7 @@ channels:
   instagram:
     display_name: Instagram
     execution_method: api
-    cadence_enabled: false
+    cadence_enabled: true
     cadence_interval_hours: 24
     voice_profile: ""
     topic_pool:

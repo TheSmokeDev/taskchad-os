@@ -122,6 +122,41 @@ def _invoke_runtime(prompt: str) -> str:
         return pool.submit(lambda: asyncio.run(_go())).result()
 
 
+def _generate_social_image(channel_id: str, topic: str) -> str | None:
+    """Best-effort scene image for image-first channels (Instagram), generated
+    through the codex CLI image generator. Returns the saved absolute path, or
+    None on any failure (codex absent, image_generation not enabled, quota,
+    timeout). Never raises — a caption-only draft is the graceful fallback.
+    """
+    if channel_id != "instagram":
+        return None
+    try:
+        from datetime import datetime
+
+        import config
+        import video_imagegen
+
+        images_dir = config.DATA_DIR / "social_images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        name = f"{channel_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        prompt = (
+            f"A clean, modern social-media scene about: {topic}. Editorial and "
+            "brand-friendly, single strong focal point, generous negative space."
+        )
+        rel = video_imagegen.generate_image(
+            prompt=prompt,
+            design={},
+            aspect="1:1",
+            assets_dir=str(images_dir),
+            name=name,
+        )
+        if not rel:
+            return None
+        return str(images_dir / Path(rel).name)
+    except Exception:
+        return None
+
+
 def generate_draft(
     channel_id: str,
     topic: str,
@@ -167,6 +202,12 @@ def generate_draft(
         )
         svc.mark_failed(svc.approve_post(pid).id, error=str(exc))
         return None
+
+    # Image-first channels (Instagram): attach a best-effort generated scene
+    # image. Caption-only is the graceful fallback when image gen is unavailable.
+    image_path = _generate_social_image(channel_id, topic)
+    if image_path:
+        body = f"{body}\n\n[generated image: {image_path}]"
 
     title = body[:60].replace("\n", " ")
     if len(body) > 60:
