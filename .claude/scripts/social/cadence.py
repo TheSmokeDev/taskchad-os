@@ -113,6 +113,18 @@ def run_cadence_tick(
         if pid:
             summary["drafts_created"] += 1
             state[last_key] = now_iso
+            # Deliver the draft to the operator's Telegram with approve/reject
+            # buttons. Fail-open: a delivery miss never blocks the cadence or
+            # un-counts the draft (it is already persisted in the queue DB).
+            try:
+                from social.notify import deliver_draft_to_telegram
+                from social.service import SocialPostService
+
+                post = SocialPostService(db_path=db_path).get_post(pid)
+                if post is not None:
+                    deliver_draft_to_telegram(post)
+            except Exception as exc:
+                logger.warning("Draft %s delivery failed: %s", pid, exc)
 
     _save_state(state, state_path)
 

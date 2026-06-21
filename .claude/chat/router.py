@@ -9,6 +9,7 @@ import asyncio
 import re
 import shlex
 import time
+from pathlib import Path
 from datetime import datetime
 from typing import Any
 
@@ -298,9 +299,16 @@ class ChatRouter:
             "__button:turn_steer:"
         )
 
+    @staticmethod
+    def _is_immediate_button(incoming: Any) -> bool:
+        text = (getattr(incoming, "text", "") or "").strip()
+        return ChatRouter._is_turn_followup_button(incoming) or text.startswith(
+            "__button:social:"
+        )
+
     def _queue_incoming(self, adapter: Any, incoming: Any) -> None:
         """Buffer quick conversational bursts, then handle in thread order."""
-        if self._is_turn_followup_button(incoming):
+        if self._is_immediate_button(incoming):
             asyncio.create_task(self._handle(adapter, incoming))
             return
 
@@ -1406,9 +1414,119 @@ class ChatRouter:
             import core_handlers as _video_handlers
 
             await _video_handlers.handle_video_button(adapter, incoming, custom_id)
+        elif custom_id.startswith("social:"):
+            await self._handle_social_button(adapter, incoming, custom_id)
         else:
             # Unknown button — log and ignore
             print(f"[{datetime.now()}] Unknown button: {custom_id}")
+
+    async def _handle_social_button(
+        self, adapter: Any, incoming: Any, custom_id: str
+    ) -> None:
+        """Route a social-draft button tap (``social:<action>:<id>``) to the
+        existing ``/social`` handler.
+
+        Approve runs approve+dispatch in one go (the auth-gated button tap IS
+        the operator approval under the default-deny write doctrine). Reject
+        kills the draft. Edit returns the full body for manual copy/tweak.
+        """
+        # Default-deny: an external write (LinkedIn/Reddit post) may fire ONLY
+        # from a genuine, auth-checked button tap. The Telegram adapter verifies
+        # allowed_user_ids and stamps raw_event.interaction_type="button" before
+        # emitting this. A raw "__button:social:..." typed through any other
+        # ingress (CLI / web relay) lacks that marker and is refused — typed text
+        # can never synthesize an approval.
+        raw_event = getattr(incoming, "raw_event", None) or {}
+        if raw_event.get("interaction_type") != "button":
+            await adapter.send(
+                OutgoingMessage(
+                    text="Social actions only run from the draft buttons. Use `/social` to manage the queue.",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        parts = custom_id.split(":")
+        if len(parts) != 3 or not parts[2].isdigit():
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Malformed social action: {custom_id}",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        _, action, pid = parts
+        import core_handlers
+
+        try:
+            if action == "approve":
+                approved = await core_handlers.handle_social(
+                    adapter, incoming, f"approve {pid}"
+                )
+                # Dispatch only if the post actually reached 'approved' state —
+                # verified against the DB, not by sniffing the reply string.
+                if self._social_post_is_approved(pid):
+                    reply = await core_handlers.handle_social(
+                        adapter, incoming, f"post {pid}"
+                    )
+                else:
+                    reply = approved
+            elif action == "reject":
+                reply = await core_handlers.handle_social(
+                    adapter, incoming, f"reject {pid}"
+                )
+            elif action == "edit":
+                reply = await self._social_edit_reply(pid)
+            else:
+                reply = f"Unknown social action: {action}"
+        except Exception as e:  # noqa: BLE001 — never leave the tap on read
+            reply = f"Social action failed: {type(e).__name__}: {e}"
+
+        await adapter.send(
+            OutgoingMessage(
+                text=reply,
+                channel=incoming.channel,
+                thread=incoming.thread,
+            )
+        )
+
+    def _social_post_is_approved(self, pid: str) -> bool:
+        """True only when post #pid is genuinely in 'approved' state in the DB.
+        Robust gate for the approve→dispatch sequence (no reply-string sniffing)."""
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        try:
+            from social.service import SocialPostService
+
+            post = SocialPostService().get_post(int(pid))
+            return post is not None and post.status == "approved"
+        except Exception:  # noqa: BLE001 — fail closed: no approval, no post
+            return False
+
+    async def _social_edit_reply(self, pid: str) -> str:
+        """Return the full draft body so the operator can copy, edit, and post
+        it manually, then clear the queue row."""
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        try:
+            from social.service import SocialPostService
+
+            post = SocialPostService().get_post(int(pid))
+            if post is None:
+                return f"Draft #{pid} not found."
+            return (
+                f"Edit draft #{pid} — copy, tweak, and post manually, then "
+                f"`/social reject {pid}` to clear it from the queue:\n\n{post.body}"
+            )
+        except Exception as e:  # noqa: BLE001
+            return f"Error loading draft #{pid}: {type(e).__name__}: {e}"
 
     def _persist_router_turn(self, incoming: Any, reply: str) -> None:
         """Persist direct router-path turns into the transcript store."""
@@ -1469,11 +1587,16 @@ class ChatRouter:
         """Keep router-command quiet metadata aligned with current selection."""
 
         parsed = self._parse_command((getattr(incoming, "text", "") or "").strip())
-        if not parsed or parsed[0] not in {"model", "provider", "teamroom"}:
+        if not parsed or parsed[0] not in {"model", "provider", "teamroom", "team"}:
             return
         command, args = parsed
         requested_runtime_lane: str | None = None
-        if command == "teamroom":
+        if command in {"teamroom", "team"}:
+            if command == "team":
+                team_tokens = args.split(maxsplit=1)
+                if not team_tokens or team_tokens[0].lower() != "room":
+                    return
+                args = team_tokens[1] if len(team_tokens) > 1 else ""
             runtime_requested, requested_runtime_lane = self._router_runtime_request(args)
             if not runtime_requested:
                 return
@@ -1519,6 +1642,10 @@ class ChatRouter:
         while i < len(tokens):
             token = tokens[i]
             if token == "--runtime":
+                runtime_requested = True
+                i += 1
+                continue
+            if token.strip(".,:;!?()[]{}").lower() in {"call", "calling", "live", "runtime"}:
                 runtime_requested = True
                 i += 1
                 continue

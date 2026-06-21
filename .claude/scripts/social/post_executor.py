@@ -238,7 +238,24 @@ def _dispatch_browser(
             }),
         )
 
-        from chat.social_write_driver import make_social_write_driver  # type: ignore[import-not-found]
+        # The driver lives in the chat slice. Import it as a package when
+        # .claude/ is on sys.path; otherwise fall back to the flat-slice
+        # convention (chat/ on sys.path) used everywhere else (#53).
+        try:
+            from chat.social_write_driver import make_social_write_driver  # type: ignore[import-not-found]
+        except ModuleNotFoundError as exc:
+            # Only fall back for the EXPECTED package-resolution miss (the chat
+            # slice not importable as `chat.*`). A real broken dependency inside
+            # social_write_driver (e.g. browser_control) must surface, not be
+            # silently retried and masked behind a confusing second error.
+            if exc.name not in ("chat", "chat.social_write_driver"):
+                raise
+            import sys
+
+            chat_dir = Path(__file__).resolve().parents[2] / "chat"
+            if str(chat_dir) not in sys.path:
+                sys.path.insert(0, str(chat_dir))
+            from social_write_driver import make_social_write_driver  # type: ignore[no-redef]
 
         driver = make_social_write_driver()
         executor = BrowserExecutor(driver)

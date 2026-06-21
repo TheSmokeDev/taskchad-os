@@ -18,7 +18,7 @@ Within that framework, behavior is organized as vertical slices. Group behavior 
 | `.claude/scripts/orchestration/` | Convoy/mailbox service layer, executor adapters, local API (port 4322), contract |
 | `.claude/scripts/integrations/` | Direct platform API integrations |
 | `.claude/scripts/integrations/finance_*` | Personal finance: bank sync, budget queries, Teller/Plaid clients |
-| `.claude/scripts/dashboard_*.py` + `dashboard/server/` + `dashboard/web/` | Dashboard slice — Python framework HTTP API (port 4322), Hono thin proxy (port 3141), Vite+Preact web bundle. Deep context: `dashboard/README.md` (canonical dashboard doc — components, ports, auth, routes) |
+| `.claude/scripts/dashboard_*.py` + `dashboard/server/` + `dashboard/web/` | Dashboard slice — Python framework HTTP API (port 4322), Hono thin proxy (port 3141), Vite+Preact web bundle. Deep context: `dashboard/README.md` (canonical dashboard doc — components, ports, auth, routes). Mobile consumer surface — a Capacitor app (iOS/Android) wraps this dashboard over a mesh VPN: `docs/manual/features/homie-mobile-app.md` |
 | `.claude/scripts/security/` | Cross-cutting security primitives — `patterns.py` (SECRET_PREFIXES single-source-of-truth, ≥27 vendor key prefixes, length-desc sorted), `kill_switches.py` (operator-toggleable refusal counters, KillSwitchDisabled exception, /api/health rich snapshot), `redact.py` (Hermes verbatim port — log-message secret scrubbing at all log call sites; default ON via `_REDACT_ENABLED` import-time snapshot; lazy `__getattr__` re-export so non-redact consumers don't snapshot config-dependent state). Module-only re-exports enforce Rule 3 across consumers (sanitize.py, runtime/subprocess_env.py, lane_router/registry/recall_service, heartbeat HARO, engine/memory_*, voice cascade, persona lifecycle/dashboard_api). PRD-8 Phase 7a introduced kill_switches/patterns; Phase 7b commit-1 added redact.py + voice + persona_mutation/persona_operations switches; Phase 7b commit-2 added cabinet kill-switches at chat-process chokepoints (handle_cabinet/standup/discuss in core_handlers.py) for symmetric refusal counting alongside Phase 5a's API-process gate. |
 | `vault/memory/` | Canonical memory substrate |
 | `mission-control/src/app/api/` | Hub / Mission Control control-plane APIs |
@@ -97,6 +97,13 @@ Existing implementations (greppable examples of the invariant):
    `docs/linkedin-automation-playbook.md`.
 5. **Cabinet participant turns** — room personas default-deny tools and answer
    directly. See `docs/manual/features/cabinet-rooms.md`.
+6. **Skill promotion** — auto-drafted skills land inert in
+   `.claude/skills/generated/` and never reach the `procedural_memory` prompt or
+   the generic-lane framework tool map; promoting one to a live skill requires the
+   operator's `/skills promote` (security-scan-passed, kill-switchable via
+   `HOMIE_KILLSWITCH_SKILL_PROMOTION`), with an audit row per
+   scan/promote/reject/archive. See
+   `docs/manual/features/skill-from-experience-loop.md`.
 
 Same family: the live-lane opt-in gate (dry-run is the default), operator
 kill-switches (`.claude/scripts/security/kill_switches.py`), and the skill

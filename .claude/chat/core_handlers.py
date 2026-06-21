@@ -2777,7 +2777,88 @@ def _parse_teamroom_args(args: str) -> dict[str, Any] | str:
         opts["goal"] = f"{opts['goal']} {extra_goal}".strip() if opts["goal"] else extra_goal
     if not opts["goal"]:
         return usage
+    _apply_teamroom_natural_language_shortcuts(opts)
     return opts
+
+
+def _apply_teamroom_natural_language_shortcuts(opts: dict[str, Any]) -> None:
+    """Infer common Team Room options from conversational slash-command text."""
+
+    goal = str(opts.get("goal") or "").strip()
+    if not goal:
+        return
+
+    lowered = goal.lower()
+    words = {word.strip(".,:;!?()[]{}") for word in lowered.split()}
+
+    live_words = {
+        "agent",
+        "agents",
+        "call",
+        "calling",
+        "live",
+        "run",
+        "runtime",
+    }
+    if not opts.get("allow_live_agent_run") and words & live_words:
+        opts["allow_live_agent_run"] = True
+
+    runtime_words = {"call", "calling", "live", "runtime"}
+    if not opts.get("use_runtime") and words & runtime_words:
+        opts["use_runtime"] = True
+
+    facilitated_words = {
+        "boardroom",
+        "facilitated",
+        "meeting",
+        "v2",
+        "v3",
+    }
+    if not opts.get("meeting_mode") and words & facilitated_words:
+        opts["meeting_mode"] = "facilitated_boardroom"
+
+    removable_prefixes = (
+        "call the team about ",
+        "call the team on ",
+        "call the team for ",
+        "call team about ",
+        "call team on ",
+        "call team for ",
+        "calling the team about ",
+        "calling the team on ",
+        "calling the team for ",
+        "run a team room about ",
+        "run a team room on ",
+        "run a team room for ",
+        "run a facilitated boardroom about ",
+        "run a facilitated boardroom on ",
+        "run a facilitated boardroom for ",
+        "run facilitated boardroom about ",
+        "run facilitated boardroom on ",
+        "run facilitated boardroom for ",
+        "run team room about ",
+        "run team room on ",
+        "run team room for ",
+        "run the team room about ",
+        "run the team room on ",
+        "run the team room for ",
+    )
+    for prefix in removable_prefixes:
+        if lowered.startswith(prefix):
+            opts["goal"] = goal[len(prefix):].strip() or goal
+            return
+
+
+async def handle_team(
+    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
+) -> str:
+    """Slash alias for conversational `/team room ...` usage."""
+
+    tokens = (args or "").strip().split(maxsplit=1)
+    if tokens and tokens[0].lower() == "room":
+        room_args = tokens[1] if len(tokens) > 1 else ""
+        return await handle_teamroom(adapter, incoming, room_args, collect_only=collect_only)
+    return "Usage: /team room <goal>"
 
 
 def _clip_team_room_text(text: str, *, max_chars: int = 1800) -> str:
@@ -5108,6 +5189,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "discuss": handle_discuss,
     "teamtick": handle_teamtick,
     "teamroom": handle_teamroom,
+    "team": handle_team,
     "send": handle_send,
     "brief": handle_brief,
     "working": handle_working,

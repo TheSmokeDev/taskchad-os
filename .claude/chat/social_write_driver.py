@@ -193,6 +193,19 @@ class AgentBrowserSocialWriteDriver:
         append_browser_audit_record(**kwargs)
 
 
+def make_social_write_driver(
+    *, screenshot_dir: Path | None = None
+) -> AgentBrowserSocialWriteDriver:
+    """Factory for the visible-Chrome social-write driver.
+
+    Consumed by the unified social ``post_executor`` browser-dispatch path;
+    mirrors the in-handler ``AgentBrowserSocialWriteDriver()`` construction the
+    proven ``/linkedin_post`` path uses. Rule-1 safe: ``screenshot_dir`` is a
+    None sentinel resolved inside the driver at call time.
+    """
+    return AgentBrowserSocialWriteDriver(screenshot_dir=screenshot_dir)
+
+
 # ── Tracker-append helper (HANDLER calls this on success) ──────────────────
 
 
