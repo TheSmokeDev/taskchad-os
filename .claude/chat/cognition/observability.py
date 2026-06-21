@@ -134,9 +134,12 @@ class ProcessLog:
 
 @dataclass
 class SkillLog:
-    """Skill generation or reuse event."""
+    """Skill generation, reuse, or promotion-lifecycle event."""
 
-    action: str = ""  # proposed | generated | reused | patched
+    # Skill-from-experience loop (WS4) extends the action vocabulary:
+    #   proposed | generated | reused | patched | conflict_skipped |
+    #   nudge_opportunity | promotion_eligible | promoted | scan_blocked
+    action: str = ""
     skill_name: str = ""
     category: str = ""
     tool_count: int = 0

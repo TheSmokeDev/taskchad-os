@@ -270,6 +270,10 @@ class ConversationEngine:
         # session-opening brief. A process restart inside the gap can at
         # worst produce one extra brief — accepted and documented.
         self._session_brief_fired_at: datetime | None = None
+        # Skill-from-experience loop (WS4): draft names already announced as
+        # promotion-eligible this process lifetime, so the post-response hook
+        # emits the `promotion_eligible` event once per draft (not every turn).
+        self._skill_eligible_logged: set[str] = set()
 
     def _build_active_inference_region(self) -> str:
         """Render active user inferences as a WorkingMemory system region."""
@@ -1545,6 +1549,26 @@ class ConversationEngine:
                             tool_count=result.tool_call_count,
                             skill_path=str(skill_path),
                         ))
+
+                # A recurrence inside propose_skill (a generated draft re-appeared)
+                # may have flipped a draft to `eligible`. Surface that ONCE per
+                # draft per process lifetime so the operator's `/skills review`
+                # has a heads-up signal. Reads the physical sidecar (Rule 2);
+                # fire-and-forget inside the same try/except.
+                from cognition import skill_usage
+                from cognition.observability import SkillLog, log_skill_event
+
+                for usage in skill_usage.list_eligible():
+                    if usage.name in self._skill_eligible_logged:
+                        continue
+                    self._skill_eligible_logged.add(usage.name)
+                    log_skill_event(SkillLog(
+                        action="promotion_eligible",
+                        skill_name=usage.name,
+                        category="",
+                        tool_count=usage.recurrence_count,
+                        skill_path=usage.path,
+                    ))
             except Exception as e:
                 print(f"[{datetime.now()}] [Skills] Generation failed (non-blocking): {e}")
 

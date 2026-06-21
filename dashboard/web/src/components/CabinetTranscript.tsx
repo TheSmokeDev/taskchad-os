@@ -162,7 +162,7 @@ function EventRow({ event }: { event: CabinetEventLike }) {
 
 export function CabinetTranscript({ baselineRows, liveEvents }: Props) {
   return (
-    <div class="flex-1 overflow-y-auto px-4 py-2">
+    <div class="flex-1 min-h-0 overflow-y-auto px-4 py-2">
       {baselineRows.map((row) => (
         <div key={`row-${row.id}`} class="my-2 px-3 py-2 bg-[var(--color-card)] rounded-md">
           <div class="text-xs text-[var(--color-text-muted)] mb-1">

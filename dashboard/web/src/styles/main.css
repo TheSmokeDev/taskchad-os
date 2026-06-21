@@ -2,6 +2,57 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Mobile / Android-15 edge-to-edge safe-area utilities.
+ * env(safe-area-inset-*) only resolves non-zero when index.html has
+ * viewport-fit=cover. On desktop browsers the insets are 0, so these
+ * utilities are no-ops there. */
+@layer utilities {
+  .h-app {
+    height: 100vh;
+    height: 100dvh;
+  }
+  .topbar-safe {
+    padding-top: calc(1rem + var(--safe-top));
+    padding-right: calc(1.5rem + var(--safe-right));
+    padding-bottom: 1rem;
+    padding-left: calc(1.5rem + var(--safe-left));
+  }
+  .composer-safe {
+    padding-top: 0.75rem;
+    padding-right: calc(0.75rem + var(--safe-right));
+    padding-bottom: calc(0.75rem + var(--safe-bottom));
+    padding-left: calc(0.75rem + var(--safe-left));
+  }
+  @media (min-width: 768px) {
+    .composer-safe {
+      padding-top: 1rem;
+      padding-right: calc(1rem + var(--safe-right));
+      padding-bottom: calc(1rem + var(--safe-bottom));
+      padding-left: calc(1rem + var(--safe-left));
+    }
+  }
+  .fixed-safe-tl {
+    top: calc(0.75rem + var(--safe-top));
+    left: calc(0.75rem + var(--safe-left));
+  }
+  .main-pad-safe {
+    padding-left: calc(3rem + var(--safe-left));
+  }
+  @media (min-width: 768px) {
+    .main-pad-safe {
+      padding-left: 0;
+    }
+  }
+  .toast-safe {
+    top: calc(1rem + var(--safe-top));
+    right: calc(1rem + var(--safe-right));
+  }
+  .scroll-safe-bottom {
+    padding-bottom: calc(1rem + var(--safe-bottom));
+    padding-right: var(--safe-right);
+  }
+}
+
 @layer base {
   :root {
     --color-bg: #0d0e12;
@@ -22,6 +73,12 @@
     --color-status-done: #4ade80;
     --color-status-warn: #facc15;
     --color-status-failed: #f87171;
+
+    /* System safe-area insets (Android nav/status bars, iOS notch). */
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
   }
 
   html[data-theme='midnight'] {

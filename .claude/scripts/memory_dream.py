@@ -852,6 +852,26 @@ async def _run_dream_inner(
         # Dream cycle continues even if archiving fails.
         print(f"[{now_local()}]   WARNING: working memory archive failed: {_wm_exc}")
 
+    # === PHASE 2.5b: Archive stale self-authored skill drafts (always) ===
+    # Skill-From-Experience loop (WS3): staged drafts that never recurred past
+    # SKILL_STALE_DAYS are flipped to archived (+ one audit row each). This is
+    # the production rail for skill_promotion.archive_stale() — same dream-prune
+    # seam as working-memory archival. Lazy import via the chat-slice cognition
+    # path (already on sys.path above). Fire-and-forget: a failure here NEVER
+    # breaks the dream run.
+    try:
+        from cognition import skill_promotion  # noqa: WPS433
+
+        _archived_skills = skill_promotion.archive_stale()
+        if _archived_skills:
+            print(
+                f"[{now_local()}]   Archived {len(_archived_skills)} stale skill "
+                f"draft(s): {', '.join(_archived_skills)}"
+            )
+    except Exception as _skill_exc:  # noqa: BLE001
+        # Dream cycle continues even if skill archival fails.
+        print(f"[{now_local()}]   WARNING: skill draft archive failed: {_skill_exc}")
+
     if not signal.found:
         print(f"[{now_local()}] No signal found — {DREAM_SILENT}")
         # Crash-safe: advance state even on silent

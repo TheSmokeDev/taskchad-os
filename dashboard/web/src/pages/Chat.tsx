@@ -218,7 +218,7 @@ export function Chat() {
   }
 
   return (
-    <div class="flex h-full flex-col">
+    <div class="flex h-full min-h-0 flex-col">
       <TopBar
         title="Chat"
         subtitle={readOnly ? 'linked stream · read-only' : (chatStreamConnected.value ? 'dashboard chat · live' : 'dashboard chat · reconnecting')}
@@ -272,7 +272,7 @@ export function Chat() {
       </div>
 
       <form
-        class="border-t border-[var(--color-border)] bg-[var(--color-bg)] p-3 md:p-4"
+        class="border-t border-[var(--color-border)] bg-[var(--color-bg)] composer-safe"
         onSubmit={(event) => {
           event.preventDefault();
           submitMessage();

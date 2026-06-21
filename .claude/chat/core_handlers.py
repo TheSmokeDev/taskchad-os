@@ -3060,6 +3060,121 @@ async def handle_working(adapter: Any, incoming: Any, args: str, *, collect_only
     return "\n".join(lines)
 
 
+# Skill-from-experience loop (WS4): operator surface for the promotion gate.
+# Default-deny — a self-authored skill draft can only be promoted into the
+# prompt through THIS explicit operator command (operator_approved=True), after
+# it has recurred enough to be eligible AND passed the security scan. Reject is
+# its own verb (B6), never `promote(operator_approved=True)`.
+_SKILLS_USAGE = (
+    "*Skills* — self-authored skill drafts\n"
+    "  `/skills review` — list promotion-eligible drafts (with scan preview)\n"
+    "  `/skills promote <name>` — promote an eligible, scan-passed draft\n"
+    "  `/skills promote <name> --override-caution` — promote despite a `caution` scan\n"
+    "  `/skills reject <name> [| reason]` — archive a draft so it stops being surfaced"
+)
+
+_SKILL_PROMOTE_STATUS_TEXT = {
+    "promoted": "promoted — it is now live in the prompt",
+    "already_promoted": "already promoted (no change)",
+    "killswitch_disabled": "refused — the skill_promotion kill-switch is disabled",
+    "not_eligible": "refused — not eligible yet (needs more recurrences, or already handled)",
+    "not_found": "refused — could not locate the generated draft on disk",
+    "promote_target_invalid": "refused — a promoted/<name> dir already exists but is empty or invalid (partial prior run); remove it and retry",
+    "scan_dangerous": "refused — the security scan flagged it DANGEROUS",
+    "scan_caution": "refused — the scan returned CAUTION (re-run with --override-caution to force)",
+    "not_approved": "refused — operator approval missing",
+    "move_failed": "refused — the file move out of generated/ failed",
+}
+
+
+async def handle_skills(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Review / promote / reject self-authored skill drafts (WS4 operator gate).
+
+    Subcommands:
+      /skills review                       — list eligible drafts + scan preview
+      /skills promote <name> [--override-caution]   (name may contain spaces)
+      /skills reject <name> [| reason]              (name may contain spaces)
+    """
+    try:
+        from cognition import skill_promotion
+    except Exception as exc:  # noqa: BLE001 - module optional outside scripts env
+        return f"Skills promotion is unavailable: {exc}"
+
+    sub = (args or "").strip()
+    if not sub:
+        return _SKILLS_USAGE
+
+    # F1: a generated skill's DISPLAY name can contain spaces (write_skill keeps
+    # the display name in frontmatter; recurrence + the usage sidecar are keyed
+    # on that exact name). So the NAME is the full remainder of the line after
+    # the verb — NOT just the first whitespace token. Split ONCE on whitespace.
+    verb_split = sub.split(None, 1)
+    verb = verb_split[0].lower()
+    remainder = verb_split[1].strip() if len(verb_split) > 1 else ""
+
+    # --- review: list promotion-eligible drafts with a fresh scan preview ---
+    if verb == "review":
+        try:
+            promotable = skill_promotion.list_promotable()
+        except Exception as exc:  # noqa: BLE001 - never break the turn
+            return f"Could not list promotable skills: {exc}"
+        if not promotable:
+            return "*Skills* — no promotion-eligible drafts right now."
+        lines = ["*Promotion-eligible skill drafts*"]
+        for item in promotable:
+            name = item.get("name", "?")
+            verdict = item.get("verdict", "unknown")
+            count = item.get("recurrence_count", 0)
+            lines.append(f"  • *{name}* — scan: {verdict}, recurrences: {count}")
+        lines.append(
+            "\nPromote with `/skills promote <name>` "
+            "or reject with `/skills reject <name>`."
+        )
+        return "\n".join(lines)
+
+    # --- promote: explicit operator approval (default-deny gate) ---
+    if verb == "promote":
+        # F1: handle the flag FIRST, then the rest of the remainder (joined,
+        # stripped) is the full multi-word name. `/skills promote Daily Spend`
+        # → name "Daily Spend"; `--override-caution` may appear anywhere.
+        tokens = remainder.split()
+        override = "--override-caution" in tokens
+        name = " ".join(t for t in tokens if not t.startswith("--")).strip()
+        if not name:
+            return "Usage: `/skills promote <name> [--override-caution]`"
+        try:
+            result = skill_promotion.promote(
+                name, operator_approved=True, override_caution=override,
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the turn
+            return f"Promotion failed for `{name}`: {exc}"
+        status = result.get("status", "unknown")
+        detail = _SKILL_PROMOTE_STATUS_TEXT.get(status, status)
+        line = f"*/skills promote {name}* — {detail}"
+        if status in ("promoted", "already_promoted") and result.get("path"):
+            line += f"\n  path: `{result['path']}`"
+        return line
+
+    # --- reject: distinct verb (B6) — archive the draft + audit ---
+    if verb == "reject":
+        # F1: the name is multi-word, so an optional reason is delimited by a
+        # single `|`: `/skills reject Daily Spend | too risky`. With no `|`, the
+        # whole remainder is the name and the reason defaults.
+        name_part, sep, reason_part = remainder.partition("|")
+        name = name_part.strip()
+        if not name:
+            return "Usage: `/skills reject <name> [| reason]`"
+        reason = reason_part.strip() if sep else ""
+        reason = reason or "operator_rejected"
+        try:
+            result = skill_promotion.reject_skill(name, reason)
+        except Exception as exc:  # noqa: BLE001 - never break the turn
+            return f"Reject failed for `{name}`: {exc}"
+        return f"*/skills reject {name}* — {result.get('status', 'rejected')} (reason: {reason})"
+
+    return _SKILLS_USAGE
+
+
 async def handle_extensions(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Show extension diagnostics or manage extensions."""
     from extension_manager import get_manager
@@ -4996,6 +5111,10 @@ CORE_HANDLERS: dict[str, Any] = {
     "send": handle_send,
     "brief": handle_brief,
     "working": handle_working,
+    # Skill-from-experience loop (WS4) — operator-gated promotion surface.
+    # Router-dispatched via the manager (no router.py edit needed); key is
+    # slashless to match every other entry.
+    "skills": handle_skills,
     "extensions": handle_extensions,
     # Native design — Open Design power, no daemon (brief -> artifact -> critique).
     "design": handle_design,

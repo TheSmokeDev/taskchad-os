@@ -102,6 +102,13 @@ def discover_skills(project_root: Path | str) -> list[SkillEntry]:
 
     entries: list[SkillEntry] = []
     for skill_file in sorted(skills_root.rglob("SKILL.md")):
+        # Default-deny: exclude auto-drafted skills under generated/ — unvetted
+        # (no scan, no operator gate) skills must not enter the generic-lane tool map.
+        try:
+            if "generated" in skill_file.relative_to(skills_root).parts:
+                continue
+        except ValueError:
+            pass
         try:
             content = skill_file.read_text(encoding="utf-8")
         except OSError:

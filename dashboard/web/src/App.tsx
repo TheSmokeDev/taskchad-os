@@ -32,13 +32,13 @@ import { DEFAULT_ROUTE } from '@/lib/routes';
 export function App() {
   const open = sidebarOpen.value;
   return (
-    <div class="flex h-screen bg-[var(--color-bg)] text-[var(--color-text)]">
+    <div class="flex h-app bg-[var(--color-bg)] text-[var(--color-text)]">
       {/* Mobile-only hamburger. Hidden on >=md where the sidebar is
        *  always inline. */}
       <button
         type="button"
         onClick={() => { sidebarOpen.value = true; }}
-        class="md:hidden fixed top-3 left-3 z-50 p-2 rounded-md bg-[var(--color-card)] border border-[var(--color-border)] text-[var(--color-text)] shadow-md"
+        class="md:hidden fixed fixed-safe-tl z-50 p-2 rounded-md bg-[var(--color-card)] border border-[var(--color-border)] text-[var(--color-text)] shadow-md"
         aria-label="Open menu"
       >
         <Menu size={18} />
@@ -52,7 +52,7 @@ export function App() {
       )}
 
       <Sidebar />
-      <main class="flex-1 min-w-0 overflow-hidden flex flex-col pl-12 md:pl-0">
+      <main class="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col main-pad-safe">
         <KillSwitchBanner />
         <DesktopControls />
         <Switch>

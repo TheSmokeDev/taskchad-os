@@ -11,7 +11,6 @@ import pytest
 from entity_extractor import (
     CONFIDENCE_THRESHOLD,
     CompilationReport,
-    Contradiction,
     DetectedConnection,
     ExtractedEntity,
     VaultFrontmatterError,
@@ -19,14 +18,12 @@ from entity_extractor import (
     _rotate_build_log_if_needed,
     archive_concept,
     backfill_vault,
-    check_contradictions,
     compile_entities,
     create_concept_page,
     create_connection_article,
     extract_entities_heuristic,
     find_existing_concept,
     generate_index,
-    insert_contradiction_callouts,
     load_schema,
     sweep_uncompiled,
     update_concept_page,
@@ -296,109 +293,9 @@ class TestUpdateConceptPage:
 
 
 # ---------------------------------------------------------------------------
-# Contradiction detection
+# Contradiction detection — moved to tests/test_entity_contradictions.py
+# (WS2, issue #83).
 # ---------------------------------------------------------------------------
-
-
-class TestContradictions:
-    def test_detects_negation_contradiction(self, tmp_path):
-        page = tmp_path / "TEST.md"
-        page.write_text(textwrap.dedent("""\
-        ---
-        aliases: []
-        ---
-
-        # Test Concept
-
-        ## From [[Source-A]] (2026-01-01)
-
-        - The system always uses SQLite as the default database
-        - Caching is enabled by default
-
-        ## From [[Source-B]] (2026-02-01)
-
-        - The system does not use SQLite as the default database
-        - Caching is disabled for performance reasons
-        """))
-
-        contras = check_contradictions(page)
-        assert len(contras) >= 1
-        assert any(c.severity == "direct" for c in contras)
-
-    def test_detects_opposite_pairs(self, tmp_path):
-        page = tmp_path / "TEST.md"
-        page.write_text(textwrap.dedent("""\
-        ---
-        aliases: []
-        ---
-
-        # Config Pattern
-
-        ## From [[Source-A]] (2026-01-01)
-
-        - Feature flags are enabled by default in production
-
-        ## From [[Source-B]] (2026-02-01)
-
-        - Feature flags are disabled by default in production
-        """))
-
-        contras = check_contradictions(page)
-        assert len(contras) >= 1
-
-    def test_no_contradictions_single_source(self, tmp_path):
-        page = tmp_path / "TEST.md"
-        page.write_text(textwrap.dedent("""\
-        ---
-        aliases: []
-        ---
-
-        # Test
-
-        ## From [[Only-Source]] (2026-01-01)
-
-        - Claim one
-        - Claim two
-        """))
-
-        contras = check_contradictions(page)
-        assert contras == []
-
-    def test_inserts_callouts(self, tmp_path):
-        page = tmp_path / "TEST.md"
-        page.write_text("# Test\n\nSome content.\n")
-
-        contra = Contradiction(
-            concept_page="TEST",
-            claim_a="uses SQLite",
-            source_a="Source-A",
-            claim_b="does not use SQLite",
-            source_b="Source-B",
-            severity="direct",
-        )
-        insert_contradiction_callouts(page, [contra])
-
-        content = page.read_text()
-        assert "[!warning] Contradiction" in content
-        assert "Source-A" in content
-        assert "Source-B" in content
-
-    def test_no_duplicate_callouts(self, tmp_path):
-        page = tmp_path / "TEST.md"
-        page.write_text("# Test\n\nContent.\n")
-
-        contra = Contradiction(
-            concept_page="TEST",
-            claim_a="X",
-            source_a="A",
-            claim_b="Y",
-            source_b="B",
-        )
-        insert_contradiction_callouts(page, [contra])
-        insert_contradiction_callouts(page, [contra])
-
-        content = page.read_text()
-        assert content.count("[!warning]") == 1
 
 
 # ---------------------------------------------------------------------------

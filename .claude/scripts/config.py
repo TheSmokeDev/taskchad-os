@@ -1188,4 +1188,16 @@ def __getattr__(name: str) -> Any:
     if name == "WHATSAPP_WEBHOOK_PORT":
         from personas.services import get_whatsapp_webhook_port
         return get_whatsapp_webhook_port()
+    # Skill-from-experience loop knobs (WS4). Resolved on every attribute
+    # access (Rule 1) so an env override / ``monkeypatch.setenv`` takes effect
+    # on the NEXT ``from config import SKILL_*`` read with no module reload —
+    # deliberately NOT bound as module-level ints the way the older
+    # ``SKILL_TRIGGER_TOOL_CALLS`` (line ~378) is. The upstream consumers
+    # (cognition.skill_usage, cognition.skill_promotion) read these via PEP 562.
+    if name == "SKILL_PROMOTE_REUSE_THRESHOLD":
+        return int(os.getenv("SKILL_PROMOTE_REUSE_THRESHOLD", "3"))
+    if name == "SKILL_STALE_DAYS":
+        return int(os.getenv("SKILL_STALE_DAYS", "30"))
+    if name == "SKILL_SCAN_BLOCK_VERDICT":
+        return os.getenv("SKILL_SCAN_BLOCK_VERDICT", "dangerous").strip() or "dangerous"
     raise AttributeError(f"module 'config' has no attribute {name!r}")

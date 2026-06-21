@@ -5,15 +5,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from cognition.skills import (
+    ConflictMatch,
     SkillSpec,
+    _find_conflict,
     _has_conflict,
     build_skill_index,
     patch_skill,
     validate_skill,
     write_skill,
 )
-
 
 # === SkillSpec dataclass tests ===
 
@@ -102,16 +104,28 @@ def test_build_skill_index_malformed_skip(tmp_path):
     assert result.count("- **") == 1
 
 
-def test_build_skill_index_scans_generated(tmp_path):
-    """Index scans both top-level and generated/ subdirectory."""
+def test_build_skill_index_excludes_generated(tmp_path):
+    """Default-deny: auto-drafted skills under generated/ are NOT surfaced.
+
+    They are unscanned + ungated, so build_skill_index must keep them out of the
+    procedural_memory region until the skill rails promote them out of generated/.
+    A hand-authored skill alongside them must still be surfaced.
+    """
     gen_dir = tmp_path / "generated" / "test-cat" / "auto-skill"
     gen_dir.mkdir(parents=True)
     (gen_dir / "SKILL.md").write_text(
         "---\nname: auto-skill\ndescription: Auto-generated\ngenerated: true\n---\n",
         encoding="utf-8",
     )
+    hand = tmp_path / "hand-skill"
+    hand.mkdir()
+    (hand / "SKILL.md").write_text(
+        "---\nname: hand-skill\ndescription: Hand authored\n---\n",
+        encoding="utf-8",
+    )
     result = build_skill_index(tmp_path)
-    assert "auto-skill" in result
+    assert "auto-skill" not in result
+    assert "hand-skill" in result
 
 
 # === write_skill tests ===
@@ -370,3 +384,272 @@ def test_validate_skill_oversized(tmp_path):
     )
     errs = validate_skill(skill_md)
     assert any("large" in e.lower() for e in errs)
+
+
+# === _find_conflict tests (WS4 / B2) ===
+
+
+def _write_generated_skill(skills_dir: Path, category: str, name: str) -> Path:
+    """Plant a generated draft at skills_dir/generated/<category>/<name>/SKILL.md."""
+    d = skills_dir / "generated" / category / name
+    d.mkdir(parents=True, exist_ok=True)
+    md = d / "SKILL.md"
+    md.write_text(
+        f"---\nname: {name}\ndescription: auto\ngenerated: true\n---\n\n# {name}\n",
+        encoding="utf-8",
+    )
+    return md
+
+
+def test_find_conflict_returns_none_when_no_match(tmp_path):
+    _write_manual_skill(tmp_path, "email-check", "Check inbox")
+    spec = SkillSpec(name="calendar-sync", description="d", category="c")
+    assert _find_conflict(spec, tmp_path) is None
+
+
+def test_find_conflict_returns_match_with_name_and_path(tmp_path):
+    """A hand-authored collision returns name + path + is_generated=False."""
+    _write_manual_skill(tmp_path, "turborater-quote", "ITC quotes")
+    spec = SkillSpec(name="quote", description="auto", category="ops")
+    match = _find_conflict(spec, tmp_path)
+    assert isinstance(match, ConflictMatch)
+    assert match.name == "turborater-quote"  # MATCHED skill's name (B2), not spec.name
+    assert match.path.name == "SKILL.md"
+    assert match.path.parent.name == "turborater-quote"
+    assert match.is_generated is False
+
+
+def test_find_conflict_flags_generated_match(tmp_path):
+    """A collision against a generated draft sets is_generated=True (path segment)."""
+    _write_generated_skill(tmp_path, "data-queries", "daily-spend-query")
+    spec = SkillSpec(name="daily-spend-query", description="auto", category="x")
+    match = _find_conflict(spec, tmp_path)
+    assert match is not None
+    assert match.name == "daily-spend-query"
+    assert match.is_generated is True
+    # path segment is the source of truth — it lives under generated/
+    assert "generated" in match.path.parts
+
+
+def test_find_conflict_empty_name_returns_none(tmp_path):
+    _write_manual_skill(tmp_path, "any-skill", "x")
+    spec = SkillSpec(name="", description="d", category="c")
+    assert _find_conflict(spec, tmp_path) is None
+
+
+def test_has_conflict_is_thin_wrapper(tmp_path):
+    """_has_conflict must agree with (_find_conflict is not None) — back-compat."""
+    _write_manual_skill(tmp_path, "turborater-quote", "ITC quotes")
+    spec_hit = SkillSpec(name="quote", description="d", category="c")
+    spec_miss = SkillSpec(name="calendar-sync", description="d", category="c")
+    assert _has_conflict(spec_hit, tmp_path) == (_find_conflict(spec_hit, tmp_path) is not None)
+    assert _has_conflict(spec_miss, tmp_path) == (_find_conflict(spec_miss, tmp_path) is not None)
+
+
+# === propose_skill recurrence (WS4 / B2) ===
+
+
+@pytest.fixture
+def _sidecar_data_dir(tmp_path, monkeypatch):
+    """Point the call-time DATA_DIR resolver at a tmp dir (mirrors WS2 fixture)."""
+    import config
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", data_dir, raising=False)
+    return data_dir
+
+
+def _patch_reasoning(monkeypatch, parsed: dict) -> None:
+    from cognition import steps
+
+    class _FakeResult:
+        pass
+
+    fake = _FakeResult()
+    fake.parsed = parsed
+
+    async def _fake_reasoning_step(**_kwargs):
+        return fake
+
+    monkeypatch.setattr(steps, "reasoning_step", _fake_reasoning_step)
+
+
+def test_propose_skill_records_recurrence_on_generated_match(
+    tmp_path, monkeypatch, _sidecar_data_dir,
+):
+    """A proposal colliding with a GENERATED draft records recurrence (keyed on
+    the matched draft's name) and returns None — recurrence, not a new draft."""
+    import asyncio
+
+    from cognition import observability, skill_usage, skills
+    from cognition.skills import propose_skill
+
+    skills_dir = tmp_path / "skills"
+    _write_generated_skill(skills_dir, "data-queries", "daily-spend-query")
+
+    # Proposal whose token set matches the generated draft.
+    _patch_reasoning(monkeypatch, {
+        "name": "daily-spend-query",
+        "description": "auto gen",
+        "category": "data-queries",
+    })
+
+    logged: list[observability.SkillLog] = []
+    monkeypatch.setattr(observability, "log_skill_event", lambda e: logged.append(e))
+    _ = skills  # silence linters
+
+    result = asyncio.run(propose_skill(
+        tool_calls=["Read", "Grep", "Bash", "Edit", "Write"],
+        session_summary="spend check",
+        skills_dir=skills_dir,
+        cwd=tmp_path,
+    ))
+
+    assert result is None  # recurrence, not a new draft
+    # recurrence recorded against the MATCHED draft name in the physical sidecar
+    usage = skill_usage.get_usage("daily-spend-query")
+    assert usage is not None
+    assert usage.recurrence_count == 1
+    # a `reused` event was logged, keyed on the matched draft name (B2)
+    assert any(e.action == "reused" and e.skill_name == "daily-spend-query" for e in logged)
+
+
+def test_propose_skill_skips_recurrence_on_manual_match(tmp_path, monkeypatch, _sidecar_data_dir):
+    """A proposal colliding with a HAND-authored skill keeps conflict_skipped —
+    no recurrence row is written (a hand-authored skill is not a draft)."""
+    import asyncio
+
+    from cognition import observability, skill_usage, skills
+    from cognition.skills import propose_skill
+
+    skills_dir = tmp_path / "skills"
+    _write_manual_skill(skills_dir, "turborater-quote", "ITC quotes")
+
+    _patch_reasoning(monkeypatch, {
+        "name": "quote",
+        "description": "auto gen",
+        "category": "ops",
+    })
+
+    logged: list[observability.SkillLog] = []
+    monkeypatch.setattr(observability, "log_skill_event", lambda e: logged.append(e))
+    _ = skills
+
+    result = asyncio.run(propose_skill(
+        tool_calls=["Read", "Grep", "Bash", "Edit", "Write"],
+        session_summary="quote",
+        skills_dir=skills_dir,
+        cwd=tmp_path,
+    ))
+
+    assert result is None
+    # NO recurrence row for the matched hand-authored skill
+    assert skill_usage.get_usage("turborater-quote") is None
+    # the event is conflict_skipped (keyed on the PROPOSAL name, existing behavior)
+    assert any(e.action == "conflict_skipped" for e in logged)
+    assert not any(e.action == "reused" for e in logged)
+
+
+# === write_skill B4 path-traversal enforcement (WS4) ===
+
+
+def test_write_skill_rejects_dotdot_category(tmp_path):
+    """category='../escaped' must raise — never write outside generated/."""
+    spec = SkillSpec(name="x", description="y", category="../escaped")
+    with pytest.raises(ValueError):
+        write_skill(spec, tmp_path)
+    # nothing escaped: no SKILL.md outside generated/
+    escaped = list(tmp_path.glob("escaped/**/SKILL.md"))
+    assert escaped == []
+
+
+def test_write_skill_rejects_forward_slash_name(tmp_path):
+    spec = SkillSpec(name="a/b", description="y", category="ops")
+    with pytest.raises(ValueError):
+        write_skill(spec, tmp_path)
+
+
+def test_write_skill_rejects_backslash_category(tmp_path):
+    spec = SkillSpec(name="x", description="y", category="a\\b")
+    with pytest.raises(ValueError):
+        write_skill(spec, tmp_path)
+
+
+def test_write_skill_rejects_absolute_name(tmp_path):
+    spec = SkillSpec(name="/etc/passwd", description="y", category="ops")
+    with pytest.raises(ValueError):
+        write_skill(spec, tmp_path)
+
+
+def test_write_skill_happy_path_stays_under_generated(tmp_path):
+    """A clean spec writes under generated/ and the resolved path is contained."""
+    spec = SkillSpec(name="clean-name", description="d", category="ops")
+    path = write_skill(spec, tmp_path)
+    generated_root = (tmp_path / "generated").resolve()
+    assert path.resolve().is_relative_to(generated_root)
+    assert path.parent.parent.parent.name == "generated"
+
+
+def test_write_skill_slugs_spaces_in_components(tmp_path):
+    """Spaces/uppercase in model-authored components are slugged for the PATH."""
+    spec = SkillSpec(name="Daily Spend", description="d", category="Data Queries")
+    path = write_skill(spec, tmp_path)
+    assert path.parent.name == "daily-spend"
+    assert path.parent.parent.name == "data-queries"
+    # frontmatter keeps the original display name (only the path is sanitized)
+    content = path.read_text(encoding="utf-8")
+    assert "name: Daily Spend" in content
+
+
+# === write_skill F2 YAML field-injection enforcement ===
+
+
+def test_write_skill_rejects_newline_in_description(tmp_path):
+    """F2: a description carrying a newline that forges a frontmatter key must
+    raise — never write the injected YAML."""
+    spec = SkillSpec(
+        name="x", description="line1\nmalicious: true", category="ops",
+    )
+    with pytest.raises(ValueError):
+        write_skill(spec, tmp_path)
+    # nothing written: no SKILL.md anywhere under tmp_path
+    assert list(tmp_path.rglob("SKILL.md")) == []
+
+
+def test_write_skill_rejects_newline_in_name(tmp_path):
+    """F2: a name with a newline (would forge frontmatter) must raise."""
+    spec = SkillSpec(name="x\ngenerated: false", description="d", category="ops")
+    with pytest.raises(ValueError):
+        write_skill(spec, tmp_path)
+    assert list(tmp_path.rglob("SKILL.md")) == []
+
+
+def test_write_skill_rejects_carriage_return_in_category(tmp_path):
+    """F2: a category with a carriage return must raise."""
+    spec = SkillSpec(name="x", description="d", category="ops\rinjected: 1")
+    with pytest.raises(ValueError):
+        write_skill(spec, tmp_path)
+    assert list(tmp_path.rglob("SKILL.md")) == []
+
+
+def test_write_skill_rejects_control_char_in_description(tmp_path):
+    """F2: a non-newline C0 control character is also rejected."""
+    spec = SkillSpec(name="x", description="bad\x00value", category="ops")
+    with pytest.raises(ValueError):
+        write_skill(spec, tmp_path)
+    assert list(tmp_path.rglob("SKILL.md")) == []
+
+
+def test_write_skill_allows_clean_multiword_values(tmp_path):
+    """F2 is not over-broad: clean spaced values (no control chars) still write,
+    and the forged key never appears as a real frontmatter line."""
+    spec = SkillSpec(
+        name="Daily Spend",
+        description="Summarize the day's spend by category.",
+        category="Data Queries",
+    )
+    path = write_skill(spec, tmp_path)
+    content = path.read_text(encoding="utf-8")
+    assert "name: Daily Spend" in content
+    assert "description: Summarize the day's spend by category." in content

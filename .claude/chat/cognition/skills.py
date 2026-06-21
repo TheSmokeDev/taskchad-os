@@ -51,6 +51,26 @@ def _tokenize(name: str) -> frozenset[str]:
     return frozenset(t for t in name.lower().replace("-", " ").split() if t)
 
 
+def _log_skill(*, action: str, skill_name: str, category: str, tool_count: int) -> None:
+    """Fire-and-forget skill-event log (never raises into the turn)."""
+    try:
+        from cognition.observability import SkillLog, log_skill_event
+    except ImportError:
+        return
+    try:
+        log_skill_event(SkillLog(
+            action=action,
+            skill_name=skill_name,
+            category=category,
+            tool_count=tool_count,
+        ))
+    except (TypeError, ValueError) as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "SkillLog shape drift on %s: %s", action, exc,
+        )
+
+
 def _iter_existing_skills(skills_dir: Path) -> Iterator[str]:
     """Yield names of every existing SKILL.md under skills_dir.
 
@@ -71,8 +91,36 @@ def _iter_existing_skills(skills_dir: Path) -> Iterator[str]:
             yield name
 
 
-def _has_conflict(spec: SkillSpec, skills_dir: Path) -> bool:
-    """True when a proposed skill's token set overlaps an existing skill.
+@dataclass
+class ConflictMatch:
+    """The existing skill a proposal collides with (B2).
+
+    ``name`` is the MATCHED skill's name — recurrence telemetry is keyed on
+    THIS, not the new proposal's name. ``is_generated`` is True iff the match
+    lives under a ``generated/`` ancestor (path segment is source of truth,
+    Rule 2 — NOT the frontmatter ``generated:`` flag).
+    """
+
+    name: str
+    path: Path
+    is_generated: bool
+
+
+def _path_has_generated_segment(skill_md: Path, skills_dir: Path) -> bool:
+    """True iff the SKILL.md path has a ``generated`` segment under skills_dir.
+
+    Mirrors ``build_skill_index`` / ``discover_skills`` (path-segment filter,
+    Rule 2). Falls back to scanning the absolute path's parts when the file is
+    not relative to ``skills_dir`` (defensive — should not happen in practice).
+    """
+    try:
+        return "generated" in skill_md.relative_to(skills_dir).parts
+    except ValueError:
+        return "generated" in skill_md.parts
+
+
+def _find_conflict(spec: SkillSpec, skills_dir: Path) -> ConflictMatch | None:
+    """Return the existing skill a proposal collides with, or None (B2).
 
     Uses token-set subset matching: `{quote}` is a subset of
     `{turborater, quote}` → conflict (proposed would shadow existing).
@@ -81,11 +129,21 @@ def _has_conflict(spec: SkillSpec, skills_dir: Path) -> bool:
     skills_dir — no rendered-index cap that could hide skill #51.
     Prevents the ITC-style collision where an auto-generated skill
     shadows or duplicates a hand-authored one.
+
+    Returns the FIRST match (name + path + whether it is a generated draft) so
+    the caller can record recurrence against the matched draft (B2).
     """
     proposed = _tokenize(spec.name)
     if not proposed:
-        return False
-    for existing_name in _iter_existing_skills(skills_dir):
+        return None
+    if not skills_dir.exists():
+        return None
+    for skill_md in skills_dir.rglob("SKILL.md"):
+        try:
+            fm = _parse_skill_frontmatter(skill_md.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        existing_name = fm.get("name") or skill_md.parent.name
         existing = _tokenize(existing_name)
         if not existing:
             continue
@@ -94,14 +152,31 @@ def _has_conflict(spec: SkillSpec, skills_dir: Path) -> bool:
             or proposed.issubset(existing)
             or existing.issubset(proposed)
         ):
-            return True
-    return False
+            return ConflictMatch(
+                name=existing_name,
+                path=skill_md,
+                is_generated=_path_has_generated_segment(skill_md, skills_dir),
+            )
+    return None
+
+
+def _has_conflict(spec: SkillSpec, skills_dir: Path) -> bool:
+    """True when a proposed skill's token set overlaps an existing skill.
+
+    Thin back-compat wrapper over ``_find_conflict`` (B2) — the existing 32
+    skills tests call this. New code should call ``_find_conflict`` to get the
+    matched skill's name/path/is_generated.
+    """
+    return _find_conflict(spec, skills_dir) is not None
 
 
 def build_skill_index(skills_dir: Path, max_entries: int = 20) -> str:
-    """Scan skills/ + skills/generated/ for SKILL.md files.
+    """Scan skills/ for hand-authored SKILL.md files (procedural_memory region).
 
-    Return names + descriptions as formatted text for procedural_memory region.
+    Default-deny: auto-drafted skills under ``generated/`` are EXCLUDED. They are
+    unvetted (no security scan, no operator gate) and must not influence behavior
+    until the skill-from-experience rails promote them out of ``generated/``.
+    Return names + descriptions as formatted text for the procedural_memory region.
     CRITICAL: Names and one-line descriptions ONLY — no full body.
     """
     entries: list[tuple[str, str]] = []
@@ -110,6 +185,14 @@ def build_skill_index(skills_dir: Path, max_entries: int = 20) -> str:
         return ""
 
     for skill_md in skills_dir.rglob("SKILL.md"):
+        # Default-deny: skip auto-drafted skills under generated/ — they are
+        # unscanned and ungated, so they must not enter the procedural_memory
+        # prompt until promoted out of generated/ by the skill rails.
+        try:
+            if "generated" in skill_md.relative_to(skills_dir).parts:
+                continue
+        except ValueError:
+            pass
         try:
             content = skill_md.read_text(encoding="utf-8")
             fm = _parse_skill_frontmatter(content)
@@ -173,35 +256,114 @@ async def propose_skill(
             spec.tools_used = tool_calls
             spec.source_session = session_summary[:100]
             spec.created_at = datetime.now(UTC).isoformat()
-            if _has_conflict(spec, skills_dir):
-                try:
-                    from cognition.observability import SkillLog, log_skill_event
-                except ImportError:
-                    pass
-                else:
+            match = _find_conflict(spec, skills_dir)
+            if match is not None:
+                if match.is_generated:
+                    # B2: the proposal re-appeared against an existing GENERATED
+                    # draft — count it as a recurrence (the "reuse" signal),
+                    # keyed on the MATCHED draft's name, NOT spec.name. Generated
+                    # drafts are inert pre-promotion, so this is recurrence, not
+                    # invocation. Fire-and-forget — telemetry never breaks a turn.
                     try:
-                        log_skill_event(SkillLog(
-                            action="conflict_skipped",
-                            skill_name=spec.name,
-                            category=spec.category,
-                            tool_count=len(tool_calls),
-                        ))
-                    except (TypeError, ValueError) as exc:
+                        from cognition import skill_usage
+
+                        skill_usage.record_recurrence(
+                            match.name,
+                            source_session=spec.source_session,
+                            path=str(match.path),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - telemetry best-effort
                         import logging
                         logging.getLogger(__name__).warning(
-                            "SkillLog shape drift on conflict_skipped: %s", exc,
+                            "skill recurrence record failed for %s: %s",
+                            match.name, exc,
                         )
+                    _log_skill(
+                        action="reused",
+                        skill_name=match.name,
+                        category=spec.category,
+                        tool_count=len(tool_calls),
+                    )
+                else:
+                    # Hand-authored collision — keep the existing skip (no
+                    # recurrence: a hand-authored skill is not a draft to graduate).
+                    _log_skill(
+                        action="conflict_skipped",
+                        skill_name=spec.name,
+                        category=spec.category,
+                        tool_count=len(tool_calls),
+                    )
                 return None
             return spec
     return None
 
 
+def _reject_frontmatter_value(value: str, field_name: str) -> None:
+    """Hard-reject newline/control chars in a model-authored frontmatter VALUE.
+
+    F2 (SECURITY — YAML field injection): ``sanitize_skill_path_component`` only
+    guards the PATH. The frontmatter VALUES (``name``/``category``/``description``)
+    are interpolated straight into the SKILL.md YAML. A newline or other control
+    character in one of these could forge extra frontmatter keys (e.g. a
+    ``description`` of ``"foo\\ngenerated: false"`` would flip a scan/gate field)
+    or otherwise produce malformed/misleading frontmatter BEFORE any scan gate.
+
+    These three fields are all single-line by contract, so the safe, explicit fix
+    is to refuse anything carrying ``\\n`` / ``\\r`` or other C0 control chars
+    (``\\x00``-``\\x1f``) — NOT to silently strip, which could still smuggle a
+    misleading value. NOT fail-open: this raises ``ValueError`` (the engine's
+    post-response try/except swallows it for the turn; nothing is written).
+    """
+    if any(ch in value for ch in "\n\r"):
+        raise ValueError(
+            f"refusing to write skill: {field_name} contains a newline "
+            "(YAML field injection guard)"
+        )
+    if any(ord(ch) < 0x20 for ch in value):
+        raise ValueError(
+            f"refusing to write skill: {field_name} contains a control character "
+            "(YAML field injection guard)"
+        )
+
+
 def write_skill(spec: SkillSpec, skills_dir: Path) -> Path:
     """Write SkillSpec to skills/generated/{category}/{name}/SKILL.md.
 
+    B4 (SECURITY — path traversal): ``spec.category`` and ``spec.name`` are
+    MODEL-authored. They are sanitized via ``sanitize_skill_path_component``
+    (HARD-rejects ``..`` / path separators / absolute paths / dotfiles) BEFORE
+    they touch the filesystem, and the resolved write dir is asserted to stay
+    under ``skills_dir/"generated"``. This is NOT fail-open — a traversal attempt
+    raises ``ValueError`` (the engine's post-response try/except swallows it for
+    the turn, but the file is never written outside ``generated/``). The
+    frontmatter still records the original (display) ``spec.name``/``category``;
+    only the PATH components are sanitized.
+
+    F2 (SECURITY — YAML field injection): the model-authored frontmatter VALUES
+    (``spec.name``/``spec.category``/``spec.description``) are hard-rejected via
+    ``_reject_frontmatter_value`` if they carry a newline or control character,
+    so a crafted value cannot forge extra frontmatter keys before the scan gate.
+
     Returns path to written file.
     """
-    skill_dir = skills_dir / "generated" / spec.category / spec.name
+    from cognition.skill_guard import sanitize_skill_path_component
+
+    # F2: validate the frontmatter VALUES before any path work — these are
+    # single-line by contract and must not smuggle YAML structure.
+    _reject_frontmatter_value(spec.name, "name")
+    _reject_frontmatter_value(spec.category, "category")
+    _reject_frontmatter_value(spec.description, "description")
+
+    safe_category = sanitize_skill_path_component(spec.category)
+    safe_name = sanitize_skill_path_component(spec.name)
+    generated_root = (skills_dir / "generated").resolve()
+    skill_dir = generated_root / safe_category / safe_name
+    # Defense in depth: even with both components slugged, assert the resolved
+    # final dir cannot escape generated/ (Rule 2 — path is the gating source).
+    if not skill_dir.resolve().is_relative_to(generated_root):
+        raise ValueError(
+            f"refusing to write skill outside generated/: {skill_dir!r}"
+        )
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_path = skill_dir / "SKILL.md"
 

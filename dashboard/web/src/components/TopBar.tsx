@@ -8,7 +8,7 @@ interface TopBarProps {
 
 export function TopBar({ title, subtitle, actions }: TopBarProps) {
   return (
-    <div class="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)] bg-[var(--color-bg)]">
+    <div class="flex items-center justify-between topbar-safe border-b border-[var(--color-border)] bg-[var(--color-bg)]">
       <div class="min-w-0">
         <div class="text-[15px] font-semibold text-[var(--color-text)] truncate">{title}</div>
         {subtitle && (

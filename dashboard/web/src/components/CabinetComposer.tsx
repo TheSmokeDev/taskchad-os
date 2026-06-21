@@ -92,9 +92,9 @@ export function CabinetComposer({ meetingId, roster, chatId, disabled }: Props) 
   const filteredRoster = roster.filter((a) => a.id.toLowerCase().startsWith(filterText)).slice(0, 6);
 
   return (
-    <div class="border-t border-[var(--color-border)] p-3 relative">
+    <div class="border-t border-[var(--color-border)] composer-safe relative">
       {showPicker && filteredRoster.length > 0 && (
-        <div class="absolute bottom-full left-3 mb-2 bg-[var(--color-card)] border border-[var(--color-border)] rounded-md shadow-lg max-w-md">
+        <div class="absolute bottom-full left-3 right-3 z-20 mb-2 max-h-[40dvh] overflow-y-auto bg-[var(--color-card)] border border-[var(--color-border)] rounded-md shadow-lg md:right-auto md:max-w-md">
           {filteredRoster.map((a) => (
             <button
               key={a.id}

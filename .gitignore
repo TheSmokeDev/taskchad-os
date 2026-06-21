@@ -27,6 +27,7 @@ __pycache__/
 .claude/chat/*.log
 .claude/dashboard/*.log
 .claude/skills/generated/
+.claude/skills/promoted/
 .context/
 
 # Memory search data (Phase 3)

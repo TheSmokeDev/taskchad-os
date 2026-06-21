@@ -23,12 +23,20 @@ def _write_skill(path: Path, *, name: str, description: str) -> None:
     )
 
 
-def test_discovers_top_level_and_nested_skills(tmp_path: Path) -> None:
+def test_discovers_skills_and_excludes_generated(tmp_path: Path) -> None:
     _write_skill(
         tmp_path / ".claude" / "skills" / "direct-integrations" / "SKILL.md",
         name="direct-integrations",
         description="Query direct APIs without browser fallback.",
     )
+    # Nested, hand-authored (non-generated) skill is still discovered.
+    _write_skill(
+        tmp_path / ".claude" / "skills" / "mcp-client" / "nested" / "SKILL.md",
+        name="mcp-nested",
+        description="A nested hand-authored skill.",
+    )
+    # Default-deny: auto-drafted skills under generated/ are unscanned + ungated,
+    # so they must NOT appear in the generic-lane framework tool map.
     _write_skill(
         tmp_path / ".claude" / "skills" / "generated" / "seo" / "geo" / "SKILL.md",
         name="geo-audit",
@@ -37,9 +45,11 @@ def test_discovers_top_level_and_nested_skills(tmp_path: Path) -> None:
 
     skills = discover_skills(tmp_path)
 
-    assert [skill.name for skill in skills] == ["direct-integrations", "geo-audit"]
-    assert skills[0].path == ".claude/skills/direct-integrations/SKILL.md"
-    assert skills[1].path == ".claude/skills/generated/seo/geo/SKILL.md"
+    names = [skill.name for skill in skills]
+    assert "direct-integrations" in names
+    assert "mcp-nested" in names
+    assert "geo-audit" not in names  # generated/ excluded by default-deny
+    assert ".claude/skills/generated/seo/geo/SKILL.md" not in [s.path for s in skills]
 
 
 def test_discovers_mcp_servers_and_redacts_secret_values(tmp_path: Path) -> None:

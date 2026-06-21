@@ -82,6 +82,16 @@ try:
 except ImportError:
     pass  # Optional — Move 3 modules
 
+# Skill-from-experience loop (WS1/WS2/WS3) — export the modules so chat-slice
+# consumers can ``from cognition import skill_guard`` etc. ``skill_guard`` and
+# ``skill_usage`` are self-contained; ``skill_promotion`` pulls in the runtime
+# (security.kill_switches), so the whole block is guarded fail-open like the
+# Move 2/3 blocks above.
+try:
+    from cognition import skill_guard, skill_promotion, skill_usage
+except ImportError:
+    pass  # Optional — skill-from-experience rails
+
 __all__ = [
     # Move 1
     "RecallTier",
@@ -142,4 +152,8 @@ __all__ = [
     # Move 3 — self-model
     "InferenceRecord",
     "InferenceTracker",
+    # Skill-from-experience loop (WS1/WS2/WS3) — module exports
+    "skill_guard",
+    "skill_usage",
+    "skill_promotion",
 ]

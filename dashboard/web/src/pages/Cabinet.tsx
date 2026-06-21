@@ -269,8 +269,8 @@ export function Cabinet() {
   }
 
   return (
-    <div class="flex flex-1 min-h-0">
-      <div class="w-72 border-r border-[var(--color-border)] flex flex-col">
+    <div class="flex min-h-0 flex-1 flex-col pt-[var(--safe-top)] md:flex-row md:pt-0">
+      <div class="flex w-full shrink-0 flex-col max-h-[38dvh] border-b border-[var(--color-border)] md:max-h-none md:w-72 md:border-b-0 md:border-r">
         <div class="p-3 border-b border-[var(--color-border)] flex gap-2">
           <button
             type="button"
@@ -317,7 +317,7 @@ export function Cabinet() {
         </div>
       </div>
 
-      <div class="flex-1 flex flex-col min-w-0">
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col">
         <div class="border-b border-[var(--color-border)] px-4 py-2">
           <div class="flex items-center justify-between gap-3">
             <div>

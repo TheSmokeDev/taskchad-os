@@ -21,7 +21,7 @@ export function Sidebar() {
   }
 
   const asideClass = [
-    'flex flex-col h-screen w-[280px] bg-[var(--color-sidebar)] border-r border-[var(--color-border)]',
+    'flex flex-col h-app w-[280px] bg-[var(--color-sidebar)] border-r border-[var(--color-border)]',
     'fixed inset-y-0 left-0 z-50 transform transition-transform duration-200',
     open ? 'translate-x-0' : '-translate-x-full',
     'md:static md:translate-x-0 md:w-[260px] md:shrink-0',
@@ -29,15 +29,15 @@ export function Sidebar() {
 
   return (
     <aside class={asideClass}>
-      <div class="px-4 py-4 border-b border-[var(--color-border)]">
-        <div class="text-[14px] font-semibold text-[var(--color-text)]">The Homie</div>
+      <div class="px-4 pb-4 pt-[calc(1rem_+_var(--safe-top))] border-b border-[var(--color-border)]">
+        <div class="text-[14px] font-semibold text-[var(--color-text)]">YourProduct OS</div>
         <div class="text-[11px] text-[var(--color-text-muted)] mt-0.5">Dashboard</div>
       </div>
 
       <button
         type="button"
         onClick={closeSidebar}
-        class="md:hidden absolute top-3 right-3 p-1.5 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-elevated)] transition-colors"
+        class="md:hidden absolute right-3 top-[calc(0.75rem_+_var(--safe-top))] p-1.5 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-elevated)] transition-colors"
         aria-label="Close menu"
       >
         <X size={16} />
@@ -53,7 +53,7 @@ export function Sidebar() {
         <span class="ml-auto text-[10.5px] text-[var(--color-text-faint)]">⌘K</span>
       </button>
 
-      <nav class="flex-1 overflow-y-auto px-2 pb-3">
+      <nav class="flex-1 overflow-y-auto px-2 pb-[calc(0.75rem_+_var(--safe-bottom))]">
         {SECTIONS.map((section) => {
           const items = ROUTES.filter((r) => r.section === section);
           if (items.length === 0) return null;
