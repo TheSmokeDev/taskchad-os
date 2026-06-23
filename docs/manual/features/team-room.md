@@ -2,7 +2,7 @@
 
 Status: V3 shipped, dashboard-artifacted, public-exported, and live-proven
 Owner: Python orchestration
-Last updated: 2026-05-31
+Last updated: 2026-06-20
 
 ## What It Does
 
@@ -14,6 +14,7 @@ memory between meetings, and clearer synthesis of agreements/disagreements.
 ## Operator Entry Points
 
 - Chat/Telegram: `/teamroom [--v2] [--runtime] [--lane <lane>] <goal>`
+  or conversational alias `/team room <natural language goal>`
 - Dashboard: `/teams` Team Room run controls, result panel, and persisted V3
   artifact panels
 - API: `POST /api/team/room/run`
@@ -53,6 +54,17 @@ Deterministic chat path:
 cd <repo>\.claude\scripts
 uv run thehomie chat -q "/teamroom --v2 How should the team prioritize the next release?" -Q
 ```
+
+Conversational chat shortcut:
+
+```powershell
+cd <repo>\.claude\scripts
+uv run thehomie chat -q "/team room run a facilitated boardroom on pricing" -Q
+```
+
+Phrases such as `call the team`, `live`, or `runtime` opt the slash command
+into live/runtime Team Room execution without memorizing `--allow-live-agent-run`
+and `--runtime`.
 
 Dashboard path:
 

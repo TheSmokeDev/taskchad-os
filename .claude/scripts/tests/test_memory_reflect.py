@@ -211,3 +211,105 @@ class TestPromptParityWithShim:
         assert legacy == new
         assert "entry one" in new
         assert "pattern A" in new
+
+
+# =============================================================================
+# WS3 #84 — write-time-contradiction operator-visible count (M3) print path
+# =============================================================================
+#
+# These drive the REAL _run_reflection_inner so the production print line at
+# memory_reflect.py:529-539 executes. The line is conditional on the SECOND
+# tuple element returned by apply_operator_beliefs (write_time_applied):
+#
+#     belief_count, write_time_applied = await apply_operator_beliefs(...)
+#     if write_time_applied:
+#         print(f"... write-time contradictions applied: {write_time_applied}")
+#
+# A regression that drops the unpack, makes the print unconditional, or stops
+# threading the count would flip one of these two tests. All heavy collaborators
+# are patched to no-ops and every state/dir constant is redirected to tmp_path
+# (the suite NEVER touches real vault/memory/ or live state files).
+
+
+def _drive_reflection_for_print(monkeypatch, tmp_path, apply_return):
+    """Run the REAL _run_reflection_inner with collaborators stubbed + state
+    redirected to tmp; return captured stdout. ``apply_return`` is the
+    ``(written, write_time_applied)`` tuple the patched apply_operator_beliefs
+    yields — the ONLY input that should drive the write-time print."""
+    import asyncio
+    from types import SimpleNamespace
+
+    # Hermetic: no Langfuse export attempt (the local server is intentionally
+    # dead; tracing fails open but emits a noisy connection traceback otherwise).
+    monkeypatch.setenv("LANGFUSE_ENABLED", "false")
+
+    import memory_reflect as mr
+    from cognition import belief_conflicts as bc_mod
+    from cognition import operator_beliefs as ob_mod
+
+    # Redirect every dir/state constant the function touches to tmp_path.
+    mem_dir = tmp_path / "TheHomie" / "Memory"
+    daily_dir = mem_dir / "daily"
+    state_dir = tmp_path / "state"
+    daily_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    inf_state = state_dir / "self-model-inferences.json"
+    refl_state = state_dir / "reflection-state.json"
+    monkeypatch.setattr(mr, "MEMORY_DIR", mem_dir, raising=False)
+    monkeypatch.setattr(mr, "DAILY_DIR", daily_dir, raising=False)
+    monkeypatch.setattr(mr, "REFLECTION_STATE_FILE", refl_state, raising=False)
+    monkeypatch.setattr("config.INFERENCE_STATE_FILE", inf_state, raising=False)
+
+    # One log so the function does NOT early-return at the "no logs" guard.
+    monkeypatch.setattr(
+        mr, "get_recent_logs", lambda days=1: [("2026-06-21", "did stuff")]
+    )
+
+    # The reflection LLM call -> REFLECTION_OK (skips amendment/promotion writes).
+    async def _fake_lanes(_req):
+        return SimpleNamespace(
+            text="REFLECTION_OK", provider="test", model="m", cost_usd=0.0
+        )
+
+    monkeypatch.setattr(mr, "run_with_runtime_lanes", _fake_lanes)
+
+    # Act-1 extraction collaborators (lazy-imported from their source modules).
+    async def _fake_extract(*_a, **_k):
+        return [{"claim": "operator prefers concise answers", "kind": "reflection"}]
+
+    async def _fake_apply(*_a, **_k):
+        return apply_return  # (written, write_time_applied) — the print's input
+
+    monkeypatch.setattr(ob_mod, "extract_operator_beliefs", _fake_extract)
+    monkeypatch.setattr(ob_mod, "apply_operator_beliefs", _fake_apply)
+    monkeypatch.setattr(
+        "session.read_operator_user_turns", lambda *_a, **_k: ["turn"], raising=False
+    )
+
+    # Neutralize the live Act-2 nightly judge (no provider call in a unit test).
+    async def _no_judge(*_a, **_k):
+        return []
+
+    monkeypatch.setattr(bc_mod, "judge_contradictions", _no_judge)
+
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        asyncio.run(mr._run_reflection_inner(test_mode=False, days=1))
+    return buf.getvalue()
+
+
+def test_reflect_logs_write_time_count_when_nonzero(monkeypatch, tmp_path):
+    """M3: a nonzero write_time_applied -> the operator-visible line fires with
+    the exact count (proves the production print is wired to the real return)."""
+    out = _drive_reflection_for_print(monkeypatch, tmp_path, apply_return=(4, 3))
+    assert "write-time contradictions applied: 3" in out
+
+
+def test_reflect_omits_write_time_line_when_zero(monkeypatch, tmp_path):
+    """Discrimination companion: write_time_applied == 0 -> NO line (the print is
+    truly conditional, not unconditional). Guards against an `if True:` regression."""
+    out = _drive_reflection_for_print(monkeypatch, tmp_path, apply_return=(4, 0))
+    assert "write-time contradictions applied" not in out

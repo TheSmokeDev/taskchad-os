@@ -839,6 +839,154 @@ def mailbox_ack(delivery_id, agent_id, claim_token):
         sys.exit(1)
 
 
+# ── Tenant token commands (Tenant Isolation v0, Phase A) ───────────────────
+#
+# Mints/lists/revokes per-tenant API tokens for the orchestration app. Tokens
+# are stored HASHED (orchestration.tenant_auth.hash_token); the raw token is
+# printed ONCE at create time and never persisted in plaintext.
+#
+# ADMIN BOOTSTRAP (R2 NM1): multi-tenant mode engages on the FIRST non-admin
+# token (`is_multi_tenant_mode`). Once it engages, the legacy
+# ORCHESTRATION_API_TOKEN only authenticates if it matches an is_admin=1 row.
+# So the operator MUST seed an admin row for the existing global token BEFORE
+# (or together with) the first tenant row, or the global token will 401 on
+# admin routes. See the runbook in the PRP.
+#
+# PHASE-A WARNING: multi-tenant mode is NOT a complete isolation boundary until
+# Phase B (route-policy registry / deny-by-default / dashboard scoping). Do NOT
+# create non-admin tenant rows in a production deployment until Phase B ships.
+
+
+@main.group()
+def tenant():
+    """Tenant API tokens — mint, list, revoke (Tenant Isolation v0)."""
+    pass
+
+
+@tenant.command("create")
+@click.option("--workspace", "workspace_id", type=int, required=True,
+              help="Workspace id this token is bound to")
+@click.option("--persona-scope", "persona_scope", default=None,
+              help='Allowed persona ids: JSON array \'["a","b"]\' or comma list a,b')
+@click.option("--admin", "is_admin", is_flag=True,
+              help="Mint an ADMIN/global token (seed for the existing ORCHESTRATION_API_TOKEN)")
+@click.option("--label", default=None, help="Human label (never the token)")
+@click.option("--token", "raw_token", default=None,
+              help="Use THIS raw token (e.g. the existing global token for admin "
+                   "bootstrap); default generates a fresh secrets.token_urlsafe()")
+def tenant_create(workspace_id, persona_scope, is_admin, label, raw_token):
+    """Mint a tenant (or admin) token. Prints the RAW token ONCE."""
+    import json as _json
+    import secrets
+
+    from orchestration.tenant_auth import hash_token, parse_persona_scope
+
+    db, _, _ = _get_orchestration_services()
+
+    # Normalize the persona scope to a JSON-array string (or None). Accepts a
+    # JSON array OR a comma list; validated through the strict parser so a
+    # malformed scope is rejected at mint time rather than silently failing
+    # closed at request time.
+    scope_json: str | None = None
+    if persona_scope is not None and persona_scope.strip():
+        raw = persona_scope.strip()
+        if raw.startswith("["):
+            ids = parse_persona_scope(raw)
+        else:
+            ids = frozenset(s.strip() for s in raw.split(",") if s.strip())
+        if not ids:
+            click.echo(
+                "Error: --persona-scope did not parse to any persona ids "
+                "(use a JSON array or a comma list of non-empty ids).",
+                err=True,
+            )
+            sys.exit(1)
+        scope_json = _json.dumps(sorted(ids))
+
+    token_value = raw_token if raw_token else secrets.token_urlsafe(32)
+    try:
+        token_id = db.insert_tenant_token(
+            hash_token(token_value), workspace_id, scope_json, is_admin, label,
+        )
+    except Exception as e:  # sqlite3.IntegrityError on duplicate hash
+        click.echo(f"Error: could not create token: {e}", err=True)
+        sys.exit(1)
+
+    kind = "admin" if is_admin else "tenant"
+    click.echo(f"Created {kind} token #{token_id} (workspace {workspace_id}).")
+    if scope_json:
+        click.echo(f"  persona_scope: {scope_json}")
+    click.echo("")
+    click.echo("  RAW TOKEN (shown ONCE — store it now, it is NOT recoverable):")
+    click.echo(f"    {token_value}")
+    if not is_admin:
+        click.echo("")
+        click.echo(
+            "  NOTE: this token is INERT until HOMIE_TENANT_ENFORCEMENT is enabled.",
+            err=True,
+        )
+        click.echo(
+            "  Do NOT set HOMIE_TENANT_ENFORCEMENT in production until Phase B ships "
+            "all-route deny-by-default — until then, unthreaded routes still default "
+            "to workspace 1 (a cross-tenant leak). Phase A is foundation only.",
+            err=True,
+        )
+
+
+@tenant.command("list")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+@click.option("--active-only", is_flag=True, help="Hide revoked tokens")
+def tenant_list(json_mode, active_only):
+    """List tenant tokens. NEVER prints the raw token or its hash."""
+    db, _, _ = _get_orchestration_services()
+    rows = db.list_tenant_tokens(include_revoked=not active_only)
+    # Project a SAFE view: id/workspace/label/is_admin/revoked — explicitly NO
+    # token_sha256, NO raw token.
+    safe = [
+        {
+            "id": r["id"],
+            "workspace_id": r["workspace_id"],
+            "label": r["label"],
+            "persona_scope": r["persona_scope"],
+            "is_admin": bool(r["is_admin"]),
+            "revoked": r["revoked_at"] is not None,
+        }
+        for r in rows
+    ]
+    if json_mode:
+        print(json_mod.dumps(safe, indent=2))
+        return
+    if not safe:
+        click.echo("No tenant tokens.")
+        return
+    for s in safe:
+        flags = []
+        if s["is_admin"]:
+            flags.append("admin")
+        if s["revoked"]:
+            flags.append("revoked")
+        flag_str = f"  [{', '.join(flags)}]" if flags else ""
+        scope_str = f"  scope={s['persona_scope']}" if s["persona_scope"] else ""
+        click.echo(
+            f"  #{s['id']}  ws={s['workspace_id']}  "
+            f"{s['label'] or '(no label)'}{scope_str}{flag_str}"
+        )
+
+
+@tenant.command("revoke")
+@click.option("--id", "token_id", type=int, required=True, help="Token id to revoke")
+def tenant_revoke(token_id):
+    """Revoke a tenant token (physical state; effective next request)."""
+    db, _, _ = _get_orchestration_services()
+    if db.revoke_token(token_id):
+        click.echo(f"Revoked token #{token_id}.")
+    else:
+        click.echo(
+            f"Token #{token_id} not found or already revoked.", err=True
+        )
+        sys.exit(1)
+
+
 # ── Team commands ──────────────────────────────────────────────────────────
 
 

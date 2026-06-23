@@ -28,6 +28,7 @@ from orchestration.team_room import (  # noqa: E402
     TeamRoomWorkflowService,
     team_room_workflow_result_to_dict,
 )
+from router import ChatRouter  # noqa: E402
 from runtime.base import RuntimeResult  # noqa: E402
 
 
@@ -346,11 +347,14 @@ def test_teamroom_chat_command_is_registered_and_runs(monkeypatch, tmp_path) -> 
     assert role == "admin"
     assert "Growth Boardroom" in desc
     assert core_handlers.CORE_HANDLERS["teamroom"] is core_handlers.handle_teamroom
+    assert command_rows["team"][1] == "router"
+    assert core_handlers.CORE_HANDLERS["team"] is core_handlers.handle_team
 
     manager = ExtensionManager()
     manager.register_core_commands(commands.COMMANDS, commands.CATEGORIES, core_handlers.CORE_HANDLERS)
     help_text = manager.get_help_text(user_role="admin")
     assert "/teamroom" in help_text
+    assert manager.command_regex.match("/team room call the team about launch plan")
 
     reply = asyncio.run(
         core_handlers.handle_teamroom(
@@ -366,6 +370,22 @@ def test_teamroom_chat_command_is_registered_and_runs(monkeypatch, tmp_path) -> 
     assert "4 proposals, 4 cross-talk, 1 adversarial critique, 4 revisions, 1 final synthesis" in reply
     assert "Runtime turns: `off`" in reply
     assert "Final Team Room brief" in reply
+
+
+def test_teamroom_natural_language_shortcuts() -> None:
+    parsed = core_handlers._parse_teamroom_args("call the team about the launch plan")
+
+    assert isinstance(parsed, dict)
+    assert parsed["goal"] == "the launch plan"
+    assert parsed["allow_live_agent_run"] is True
+    assert parsed["use_runtime"] is True
+
+    parsed = core_handlers._parse_teamroom_args("run a facilitated boardroom on pricing")
+
+    assert isinstance(parsed, dict)
+    assert parsed["goal"] == "pricing"
+    assert parsed["allow_live_agent_run"] is True
+    assert parsed["meeting_mode"] == "facilitated_boardroom"
 
 
 def test_teamroom_chat_v2_command_runs_facilitated_meeting(monkeypatch, tmp_path) -> None:
@@ -448,6 +468,15 @@ def test_teamroom_chat_runtime_command_uses_lane(monkeypatch, tmp_path) -> None:
     assert "models `gpt-test`" in reply
     assert "tools `0`" in reply
     assert "Runtime command turn 14" in reply
+
+
+def test_router_teamroom_runtime_metadata_accepts_natural_language_alias() -> None:
+    assert ChatRouter._router_runtime_request("call the team about launch") == (True, None)
+    assert ChatRouter._router_runtime_request("room live launch") == (True, None)
+    assert ChatRouter._router_runtime_request("--lane generic_runtime launch") == (
+        True,
+        "generic_runtime",
+    )
 
 
 def test_team_room_cli_run_json(monkeypatch, tmp_path) -> None:

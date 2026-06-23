@@ -1854,3 +1854,745 @@ def test_phase7a_audit_log_endpoint_503_even_when_orch_token_set(
     )
     assert r.status_code == 503
     db.close()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Tenant Isolation v0 — Phase B WS3 (dashboard persona + workspace scoping)
+#
+# These tests engage MULTI-TENANT mode (HOMIE_TENANT_ENFORCEMENT=true + ≥1
+# active non-admin tenant_tokens row). They prove, PER ROUTE:
+#   * tenant_persona routes 403 a cross-tenant persona_id (B token -> A persona)
+#     and 200 the caller's own persona.
+#   * GET /api/agents enumeration is FILTERED to scope.
+#   * NB4 aggregate routes (memory/graph, brain/graph, memories, hive-mind/recent)
+#     do NOT return aggregate to a non-admin tenant (403); admin still aggregates.
+#   * NB3 empty-scope token 403s EVERY persona_id; admin/None allows all.
+#   * M4 destructive routes: B cannot delete/patch A's persona/avatar (403); a
+#     deleted profile under the caller's own scope -> 404.
+#   * tenant_workspace work/tasks: a tenant sees/touches only its workspace rows.
+#   * Parity: enforcement OFF / zero tenant rows -> responses byte-unchanged.
+#
+# WS2 contract consumed verbatim (orchestration.tenant_auth.resolve_tenant_binding):
+#   persona_scope=None -> admin allow-all; frozenset() -> non-admin deny-all;
+#   a non-admin token NEVER carries None.
+# ════════════════════════════════════════════════════════════════════════════
+
+_MT_ADMIN_TOKEN = "ws3-admin-raw-token"
+_MT_TOKEN_A = "ws3-tenant-a-raw-token"
+_MT_TOKEN_B = "ws3-tenant-b-raw-token"
+_MT_TOKEN_EMPTY = "ws3-tenant-empty-raw-token"  # non-admin, empty persona scope
+_MT_WS_A = 2
+_MT_WS_B = 3
+_MT_WS_EMPTY = 4
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _make_named_profile(homie_root: Path, name: str) -> None:
+    """Materialize a NAMED profile root with the 4 expected children.
+
+    ``_profile_disk_state`` reads ``resolve_profile_root(name)`` -> in tests
+    that resolves to ``<homie_root>/profiles/<name>`` (HOMIE_HOME outside the
+    real ``~/.homie``). Creating ``memory/``, ``data/``, ``state/`` +
+    ``config.yaml`` makes the state 'intact' so the M4 gate passes for an
+    in-scope persona.
+    """
+    root = homie_root / "profiles" / name
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    (root / "config.yaml").write_text(
+        "persona:\n  name: " + name + "\nmodel:\n  preferred: claude-opus-4-7\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def mt_app(tmp_path, monkeypatch):
+    """Multi-tenant dashboard app: admin + tenant-A + tenant-B + empty-scope token.
+
+    Tenant A is scoped to ['persona-a'], tenant B to ['persona-b'], the empty
+    token to []. Physical named profiles for persona-a / persona-b are created
+    so the M4 physical gate sees them as 'intact'. Yields the TestClient.
+    """
+    from orchestration.tenant_auth import hash_token
+
+    dash_db = tmp_path / "dashboard.db"
+    chat_db = tmp_path / "chat.db"
+    memory_db = tmp_path / "memory.db"
+    orch_db = tmp_path / "orchestration.db"
+    homie_root = tmp_path / ".homie"
+    _make_chat_db(chat_db)
+    _make_memory_db(memory_db)
+    _make_named_profile(homie_root, "persona-a")
+    _make_named_profile(homie_root, "persona-b")
+
+    import config
+    monkeypatch.setattr(config, "DASHBOARD_DB_PATH", dash_db)
+    monkeypatch.setattr(config, "CHAT_DB_PATH", chat_db)
+    monkeypatch.setattr(config, "DATABASE_PATH", memory_db)
+    monkeypatch.setattr(config, "ORCHESTRATION_DB_PATH", orch_db)
+    monkeypatch.setenv("HOMIE_HOME", str(homie_root))
+    monkeypatch.setenv("ORCHESTRATION_API_TOKEN", _MT_ADMIN_TOKEN)
+    monkeypatch.setenv("HOMIE_TENANT_ENFORCEMENT", "true")
+
+    import orchestration.api as oa
+    importlib.reload(oa)
+    db, cs, ms, reg, ts = oa._get_services()
+    oa._db = db
+    oa._convoy_svc = cs
+    oa._mailbox_svc = ms
+    oa._executor_registry = reg
+    oa._team_svc = ts
+
+    # Admin bootstrap FIRST so the global token survives MT mode (NM1).
+    db.insert_tenant_token(hash_token(_MT_ADMIN_TOKEN), _MT_WS_A, None, True, "admin")
+    db.insert_tenant_token(hash_token(_MT_TOKEN_A), _MT_WS_A, '["persona-a"]', False, "tenant-a")
+    db.insert_tenant_token(hash_token(_MT_TOKEN_B), _MT_WS_B, '["persona-b"]', False, "tenant-b")
+    db.insert_tenant_token(hash_token(_MT_TOKEN_EMPTY), _MT_WS_EMPTY, "[]", False, "tenant-empty")
+
+    yield TestClient(oa.app)
+    db.close()
+
+
+# ── tenant_persona per-route 403/200 matrix (B token -> A's persona -> 403) ──
+#
+# Every tenant_persona dashboard route with a persona_id in the PATH. Each row:
+#   (method, path_template, json_body_or_None). The matrix asserts, PER ROUTE:
+#     * tenant-B hitting persona-a (out of B's scope) -> 403
+#     * tenant-A hitting persona-a (in scope)        -> NOT 403 (allowed through;
+#       may be 200/404/422 depending on data, but never the scope 403).
+
+# The SSE stream route is in the CROSS-TENANT matrix only: its 403 fires BEFORE
+# the StreamingResponse, so a cross-tenant call returns immediately. The
+# same-tenant matrix excludes it because TestClient.get() on a same-tenant call
+# would block on the infinite keepalive generator.
+# BLOCKER #3 (B6-deferred): /api/agents/{pid}/conversation, /api/agents/{pid}/tokens,
+# and /api/hive-mind/recent read the SHARED chat.db by runtime_profile_key=persona
+# with NO workspace column. Two tenants assigned the same (globally-named) persona
+# could read each other's chat rows. Robust scoping needs the B6 per-row workspace
+# column (deferred), so WS2 reclassified these 3 from tenant_persona -> admin in
+# route_policy.py. The middleware now 403s ANY bound tenant token on them (admin
+# still 200s). Their per-handler persona-scope gates are now moot-but-harmless
+# (middleware denies first). They are EXCLUDED from the tenant_persona reachability
+# matrix below and asserted in _RECLASSIFIED_ADMIN_ROUTES instead.
+_PERSONA_PATH_ROUTES_READONLY = [
+    ("GET", "/api/agents/{pid}"),
+    ("GET", "/api/agents/{pid}/files"),
+    ("GET", "/api/agents/{pid}/files/history"),
+    ("GET", "/api/agents/{pid}/tasks"),
+    ("GET", "/api/conversation/{pid}/history"),
+    ("GET", "/api/conversation/{pid}/stream"),
+]
+
+_PERSONA_PATH_ROUTES_READONLY_SAME_TENANT = [
+    r for r in _PERSONA_PATH_ROUTES_READONLY if not r[1].endswith("/stream")
+]
+
+# BLOCKER #3 — the 3 routes reclassified tenant_persona -> admin (B6-deferred:
+# chat_sessions lacks a workspace column, so per-row tenant scoping is impossible
+# in v0). Under enforcement-on, a bound tenant token gets 403 (admin-only) and an
+# admin token still 200s. (path_template, query_params)
+_RECLASSIFIED_ADMIN_ROUTES = [
+    ("/api/agents/persona-a/conversation", {}),
+    ("/api/agents/persona-a/tokens", {}),
+    ("/api/hive-mind/recent", {"persona_id": "persona-a"}),
+    ("/api/hive-mind/recent", {}),
+]
+
+_PERSONA_PATH_ROUTES_MUTATE = [
+    ("POST", "/api/agents/{pid}/activate", None),
+    ("POST", "/api/agents/{pid}/deactivate", None),
+    ("POST", "/api/agents/{pid}/restart", None),
+    ("PATCH", "/api/agents/{pid}/model", {"model": "claude-haiku-4-5"}),
+    ("PATCH", "/api/agents/{pid}/files/SOUL.md", {"content": "hi"}),
+    ("DELETE", "/api/agents/{pid}", None),
+    ("DELETE", "/api/agents/{pid}/full", {"confirm": True}),
+    ("DELETE", "/api/agents/{pid}/avatar", None),
+    ("POST", "/api/conversation/{pid}/send", {"text": "hi"}),
+]
+
+
+def _call(client, method, path, body=None, *, token):
+    headers = _bearer(token)
+    if method == "GET":
+        return client.get(path, headers=headers)
+    if method == "POST":
+        return client.post(path, headers=headers, json=body)
+    if method == "PATCH":
+        return client.patch(path, headers=headers, json=body)
+    if method == "DELETE":
+        # DELETE with a JSON body (hard-delete confirm) when provided.
+        if body is not None:
+            return client.request("DELETE", path, headers=headers, json=body)
+        return client.delete(path, headers=headers)
+    raise AssertionError(method)
+
+
+@pytest.mark.parametrize("method,template", _PERSONA_PATH_ROUTES_READONLY)
+def test_ws3_persona_readonly_cross_tenant_403(mt_app, method, template):
+    """tenant-B -> persona-a (out of scope) -> 403 on every read route."""
+    path = template.format(pid="persona-a")
+    r = _call(mt_app, method, path, token=_MT_TOKEN_B)
+    assert r.status_code == 403, f"{method} {path} should 403 cross-tenant, got {r.status_code}"
+
+
+@pytest.mark.parametrize("method,template", _PERSONA_PATH_ROUTES_READONLY_SAME_TENANT)
+def test_ws3_persona_readonly_same_tenant_not_403(mt_app, method, template):
+    """tenant-A -> persona-a (in scope) -> NOT the scope 403 (allowed through)."""
+    path = template.format(pid="persona-a")
+    r = _call(mt_app, method, path, token=_MT_TOKEN_A)
+    assert r.status_code != 403, f"{method} {path} should allow in-scope, got 403"
+
+
+@pytest.mark.parametrize("method,template,body", _PERSONA_PATH_ROUTES_MUTATE)
+def test_ws3_persona_mutate_cross_tenant_403(mt_app, method, template, body):
+    """tenant-B -> persona-a (out of scope) -> 403 on every mutate route."""
+    path = template.format(pid="persona-a")
+    r = _call(mt_app, method, path, body, token=_MT_TOKEN_B)
+    assert r.status_code == 403, f"{method} {path} should 403 cross-tenant, got {r.status_code}"
+
+
+def test_ws3_validate_id_cross_tenant_403(mt_app):
+    """POST /api/agents/validate-id with an out-of-scope candidate id -> 403."""
+    r = mt_app.post(
+        "/api/agents/validate-id",
+        headers=_bearer(_MT_TOKEN_B),
+        json={"persona_id": "persona-a"},
+    )
+    assert r.status_code == 403
+
+
+def test_ws3_validate_id_in_scope_allowed(mt_app):
+    """tenant-A validating its own id -> not the scope 403."""
+    r = mt_app.post(
+        "/api/agents/validate-id",
+        headers=_bearer(_MT_TOKEN_A),
+        json={"persona_id": "persona-a"},
+    )
+    assert r.status_code == 200
+
+
+# ── GET /api/agents enumeration filtered to scope ────────────────────────────
+
+
+def test_ws3_agents_enumeration_filtered_to_scope(mt_app):
+    """tenant-B sees ONLY persona-b in the list; admin sees both."""
+    rb = mt_app.get("/api/agents", headers=_bearer(_MT_TOKEN_B))
+    assert rb.status_code == 200
+    ids_b = {a["id"] for a in rb.json()["agents"]}
+    assert ids_b <= {"persona-b"}, f"tenant-B leaked personas: {ids_b}"
+    assert "persona-a" not in ids_b
+
+    ra = mt_app.get("/api/agents", headers=_bearer(_MT_TOKEN_A))
+    ids_a = {a["id"] for a in ra.json()["agents"]}
+    assert "persona-b" not in ids_a
+
+    radmin = mt_app.get("/api/agents", headers=_bearer(_MT_ADMIN_TOKEN))
+    ids_admin = {a["id"] for a in radmin.json()["agents"]}
+    assert {"persona-a", "persona-b"} <= ids_admin, f"admin missing personas: {ids_admin}"
+
+
+# ── NB3 — empty-scope token 403s every persona_id; admin/None allows all ─────
+
+
+@pytest.mark.parametrize("pid", ["persona-a", "persona-b", "anything-else"])
+def test_ws3_nb3_empty_scope_403s_every_persona(mt_app, pid):
+    """A non-admin token with an EMPTY persona scope is denied EVERY persona_id."""
+    r = mt_app.get(f"/api/agents/{pid}", headers=_bearer(_MT_TOKEN_EMPTY))
+    assert r.status_code == 403, f"empty-scope must 403 {pid}, got {r.status_code}"
+
+
+def test_ws3_nb3_empty_scope_enumeration_is_empty(mt_app):
+    """Empty-scope token sees an EMPTY /api/agents list (deny-all enumeration)."""
+    r = mt_app.get("/api/agents", headers=_bearer(_MT_TOKEN_EMPTY))
+    assert r.status_code == 200
+    assert r.json()["agents"] == []
+
+
+@pytest.mark.parametrize("pid", ["persona-a", "persona-b"])
+def test_ws3_nb3_admin_none_allows_all_personas(mt_app, pid):
+    """Admin (persona_scope=None) reaches EVERY persona (allow-all)."""
+    r = mt_app.get(f"/api/agents/{pid}", headers=_bearer(_MT_ADMIN_TOKEN))
+    assert r.status_code != 403
+
+
+# ── NB4 — aggregate read routes do NOT leak aggregate to a tenant token ──────
+
+
+_NB4_AGGREGATE_REQUESTS = [
+    ("/api/memory/graph", {}),                 # defaults scope=all (aggregate)
+    ("/api/memory/graph", {"scope": "all"}),
+    ("/api/memory/graph", {"scope": "global"}),
+    ("/api/memory/graph", {"scope": "persona"}),  # persona but NO scope_id
+    # BLOCKER #2 same-class audit: scope=room surfaces cabinet_meetings metadata
+    # (title/chat_id/pinned_persona via _add_cabinet_session_nodes) and scope=team
+    # is a cross-tenant aggregate. Both map to _nb4_persona=None → a non-admin
+    # tenant must 403 (cabinet stays admin-only per the B6 v0 decision).
+    ("/api/memory/graph", {"scope": "room"}),
+    ("/api/memory/graph", {"scope": "room", "scope_id": "cabinet-1"}),
+    ("/api/memory/graph", {"scope": "team"}),
+    ("/api/brain/graph", {}),
+    ("/api/brain/graph", {"scope": "all"}),
+    ("/api/brain/graph", {"scope": "persona"}),   # persona but NO scope_id
+    ("/api/brain/graph", {"scope": "room", "scope_id": "cabinet-1"}),
+    ("/api/memories", {}),                     # persona_id=None (aggregate)
+    # NOTE: /api/hive-mind/recent moved to _RECLASSIFIED_ADMIN_ROUTES — BLOCKER #3
+    # reclassified it tenant_persona -> admin (B6-deferred, no workspace column).
+]
+
+
+@pytest.mark.parametrize("path,params", _NB4_AGGREGATE_REQUESTS)
+def test_ws3_nb4_tenant_aggregate_denied(mt_app, path, params):
+    """A NON-admin tenant requesting the no-filter/scope=all form -> 403."""
+    r = mt_app.get(path, headers=_bearer(_MT_TOKEN_A), params=params)
+    assert r.status_code == 403, (
+        f"{path}?{params} must NOT return aggregate to a tenant, got {r.status_code}"
+    )
+
+
+@pytest.mark.parametrize("path,params", _NB4_AGGREGATE_REQUESTS)
+def test_ws3_nb4_admin_aggregate_allowed(mt_app, path, params):
+    """An ADMIN token requesting the same aggregate form -> 200 (allow-all)."""
+    r = mt_app.get(path, headers=_bearer(_MT_ADMIN_TOKEN), params=params)
+    assert r.status_code == 200, f"{path}?{params} admin aggregate denied: {r.text}"
+
+
+def test_ws3_nb4_memory_graph_in_scope_persona_allowed(mt_app):
+    """tenant-A with its own persona scope_id -> 200 (scoped read allowed)."""
+    r = mt_app.get(
+        "/api/memory/graph",
+        headers=_bearer(_MT_TOKEN_A),
+        params={"scope": "persona", "scope_id": "persona-a"},
+    )
+    assert r.status_code == 200
+
+
+def test_ws3_nb4_memory_graph_cross_tenant_persona_403(mt_app):
+    """tenant-B requesting persona-a's scope_id -> 403 (out of scope)."""
+    r = mt_app.get(
+        "/api/memory/graph",
+        headers=_bearer(_MT_TOKEN_B),
+        params={"scope": "persona", "scope_id": "persona-a"},
+    )
+    assert r.status_code == 403
+
+
+def test_ws3_nb4_memories_in_scope_allowed(mt_app):
+    """tenant-A scoping /api/memories to its own persona_id -> 200."""
+    r = mt_app.get(
+        "/api/memories", headers=_bearer(_MT_TOKEN_A), params={"persona_id": "persona-a"}
+    )
+    assert r.status_code == 200
+
+
+# ── BLOCKER #3 — un-scopable persona chat reads reclassified tenant_persona ──
+# -> admin (B6-deferred: chat_sessions has no workspace column, so per-row tenant
+# scoping is impossible in v0). The shared chat.db is read by
+# runtime_profile_key=persona; two tenants assigned the same globally-named persona
+# could read each other's chat. Until the B6 workspace column lands these 3 are
+# admin-only deny-by-default: ANY bound tenant token 403s, admin still 200s.
+
+
+@pytest.mark.parametrize("path,params", _RECLASSIFIED_ADMIN_ROUTES)
+def test_ws3_blocker3_reclassified_route_tenant_403(mt_app, path, params):
+    """Reclassified admin route: an in-scope tenant token (A→persona-a, A owns it)
+    is now 403 — the route is admin-only, not tenant_persona, regardless of scope."""
+    r = mt_app.get(path, headers=_bearer(_MT_TOKEN_A), params=params)
+    assert r.status_code == 403, (
+        f"{path}?{params} is admin-only (B6-deferred); a tenant token must 403, "
+        f"got {r.status_code}"
+    )
+
+
+@pytest.mark.parametrize("path,params", _RECLASSIFIED_ADMIN_ROUTES)
+def test_ws3_blocker3_reclassified_route_cross_tenant_403(mt_app, path, params):
+    """A cross-tenant token (B→persona-a) is also 403 on the reclassified routes."""
+    r = mt_app.get(path, headers=_bearer(_MT_TOKEN_B), params=params)
+    assert r.status_code == 403, (
+        f"{path}?{params} cross-tenant must 403, got {r.status_code}"
+    )
+
+
+@pytest.mark.parametrize("path,params", _RECLASSIFIED_ADMIN_ROUTES)
+def test_ws3_blocker3_reclassified_route_admin_200(mt_app, path, params):
+    """The admin/global token still reaches the reclassified routes (200)."""
+    r = mt_app.get(path, headers=_bearer(_MT_ADMIN_TOKEN), params=params)
+    assert r.status_code == 200, (
+        f"{path}?{params} admin must still 200, got {r.status_code}: {r.text}"
+    )
+
+
+# ── M4 — destructive routes: scope 403 cross-tenant + 404 on deleted target ──
+
+
+def test_ws3_m4_cross_tenant_soft_delete_403(mt_app):
+    """tenant-B cannot soft-delete persona-a (403 before any state read)."""
+    r = mt_app.delete("/api/agents/persona-a", headers=_bearer(_MT_TOKEN_B))
+    assert r.status_code == 403
+
+
+def test_ws3_m4_cross_tenant_patch_file_403(mt_app):
+    """tenant-B cannot PATCH persona-a's files (403)."""
+    r = mt_app.patch(
+        "/api/agents/persona-a/files/SOUL.md",
+        headers=_bearer(_MT_TOKEN_B),
+        json={"content": "x"},
+    )
+    assert r.status_code == 403
+
+
+def test_ws3_m4_cross_tenant_avatar_delete_403(mt_app):
+    """tenant-B cannot delete persona-a's avatar (403)."""
+    r = mt_app.delete("/api/agents/persona-a/avatar", headers=_bearer(_MT_TOKEN_B))
+    assert r.status_code == 403
+
+
+def test_ws3_m4_deleted_profile_in_scope_404(mt_app, tmp_path):
+    """A tenant whose scoped profile root was removed -> destructive route 404.
+
+    persona-a is in tenant-A's scope, but its on-disk root is gone (deleted) ->
+    the M4 physical gate (read disk, not meta — Rule 2) refuses with 404. Scope
+    passes (in scope), physical fails (deleted).
+    """
+    import shutil
+
+    # Remove persona-a's profile root from disk while tenant-A still has it in
+    # scope. resolve_profile_root("persona-a") -> <HOMIE_HOME>/profiles/persona-a.
+    from personas.lifecycle import resolve_profile_root
+
+    root = resolve_profile_root("persona-a")
+    shutil.rmtree(root, ignore_errors=True)
+
+    r = mt_app.delete("/api/agents/persona-a/avatar", headers=_bearer(_MT_TOKEN_A))
+    assert r.status_code == 404, f"deleted in-scope profile must 404, got {r.status_code}"
+
+
+def test_ws3_m4_in_scope_destructive_passes_scope_and_physical(mt_app):
+    """tenant-A deleting its OWN avatar (in scope + intact) -> NOT 403/404."""
+    r = mt_app.delete("/api/agents/persona-a/avatar", headers=_bearer(_MT_TOKEN_A))
+    # 200 (idempotent ok) — scope passed, physical 'intact', kill-switch on.
+    assert r.status_code == 200
+
+
+# ── tenant_workspace — work/tasks scoped to the caller's workspace ───────────
+
+
+def test_ws3_work_tasks_cross_workspace_isolated(mt_app):
+    """tenant-A creates a task; tenant-B's list does NOT see it, and B's PATCH
+    of A's task_id -> 404 (cross-workspace task is invisible)."""
+    created = mt_app.post(
+        "/api/work/tasks",
+        headers=_bearer(_MT_TOKEN_A),
+        json={"title": "tenant-a-only-task"},
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["task"]["id"]
+
+    # tenant-B lists work — must NOT see tenant-A's task.
+    listing_b = mt_app.get("/api/work/tasks", headers=_bearer(_MT_TOKEN_B))
+    assert listing_b.status_code == 200
+    b_task_ids = {t["id"] for t in listing_b.json()["tasks"]}
+    assert task_id not in b_task_ids, "tenant-B saw tenant-A's task (cross-ws leak)"
+
+    # tenant-A DOES see its own task.
+    listing_a = mt_app.get("/api/work/tasks", headers=_bearer(_MT_TOKEN_A))
+    a_task_ids = {t["id"] for t in listing_a.json()["tasks"]}
+    assert task_id in a_task_ids
+
+    # tenant-B PATCHing tenant-A's task_id -> 404 (cross-workspace).
+    patch_b = mt_app.patch(
+        f"/api/work/tasks/{task_id}",
+        headers=_bearer(_MT_TOKEN_B),
+        json={"assigned_agent_id": "hijack"},
+    )
+    assert patch_b.status_code == 404
+
+    # tenant-B dispatching tenant-A's task_id -> 404.
+    dispatch_b = mt_app.post(
+        f"/api/work/tasks/{task_id}/dispatch", headers=_bearer(_MT_TOKEN_B)
+    )
+    assert dispatch_b.status_code == 404
+
+
+# ── Parity — enforcement OFF / zero tenant rows -> byte-unchanged ────────────
+
+
+def test_ws3_parity_enforcement_off_persona_route_unchanged(tmp_path, monkeypatch):
+    """With tenant rows present but enforcement OFF, a dashboard persona route
+    behaves EXACTLY as single-tenant: the legacy global-token gate runs, a
+    tenant token is just a non-global bearer -> 401 (no scope 403 path)."""
+    from orchestration.tenant_auth import hash_token
+
+    dash_db = tmp_path / "dashboard.db"
+    orch_db = tmp_path / "orchestration.db"
+    homie_root = tmp_path / ".homie"
+    _make_named_profile(homie_root, "persona-a")
+
+    import config
+    monkeypatch.setattr(config, "DASHBOARD_DB_PATH", dash_db)
+    monkeypatch.setattr(config, "ORCHESTRATION_DB_PATH", orch_db)
+    monkeypatch.setenv("HOMIE_HOME", str(homie_root))
+    monkeypatch.setenv("ORCHESTRATION_API_TOKEN", _MT_ADMIN_TOKEN)
+    monkeypatch.delenv("HOMIE_TENANT_ENFORCEMENT", raising=False)  # OFF (default)
+
+    import orchestration.api as oa
+    importlib.reload(oa)
+    db, cs, ms, reg, ts = oa._get_services()
+    oa._db = db
+    oa._convoy_svc = cs
+    oa._mailbox_svc = ms
+    oa._executor_registry = reg
+    oa._team_svc = ts
+    db.insert_tenant_token(hash_token(_MT_TOKEN_A), _MT_WS_A, '["persona-a"]', False, "tenant-a")
+
+    client = TestClient(oa.app)
+    # Global/admin token still works (back-compat).
+    admin_r = client.get("/api/agents/persona-a", headers=_bearer(_MT_ADMIN_TOKEN))
+    assert admin_r.status_code in (200, 404)
+    # A tenant token is NOT resolved (enforcement off) -> 401 like legacy, NOT 403.
+    tenant_r = client.get("/api/agents/persona-a", headers=_bearer(_MT_TOKEN_A))
+    assert tenant_r.status_code == 401
+    db.close()
+
+
+def test_ws3_parity_zero_rows_aggregate_unchanged(isolated_app):
+    """Zero tenant rows (the isolated_app default): the NB4 aggregate routes
+    return their full aggregate exactly as before (scope is None -> allow-all)."""
+    assert isolated_app.get("/api/memory/graph").status_code == 200
+    assert isolated_app.get("/api/memories").status_code == 200
+    assert isolated_app.get("/api/hive-mind/recent").status_code == 200
+    assert isolated_app.get("/api/brain/graph").status_code == 200
+    assert isolated_app.get("/api/agents").status_code == 200
+
+
+def test_ws3_blocker3_reclassified_routes_single_tenant_parity(isolated_app):
+    """PARITY: with zero tenant rows / enforcement OFF (ws defaults to 1), the 3
+    routes reclassified to admin in MT mode still serve 200 EXACTLY as before.
+
+    The route_policy admin classification only 403s a BOUND TENANT TOKEN in
+    multi-tenant mode (is_multi_tenant_mode + enforcement on). In single-tenant
+    mode the middleware never resolves a tenant binding, so the routes behave
+    byte-identically to pre-reclassification. (The default profile route uses
+    'default'; the persona detail uses the bootstrap default.)"""
+    assert isolated_app.get("/api/agents/default/conversation").status_code == 200
+    assert isolated_app.get("/api/agents/default/tokens").status_code == 200
+    assert isolated_app.get("/api/hive-mind/recent").status_code == 200
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# BLOCKER #2 — dashboard conversation cross-tenant leak via shared conversation_id
+#
+# The conversation routes (/api/conversation/{persona_id}/history|send|stream)
+# are persona-scope gated, but stored/read by conversation_id ONLY. The default
+# id is the SHARED constant 'dashboard-main', and session_id =
+# web:{conversation_id}:{conversation_id}. Two tenants both defaulting to
+# 'dashboard-main' resolved to the SAME chat session / SSE buffer → tenant B
+# read tenant A's conversation. Fix: _scoped_conversation_id binds the id to
+# request.state.workspace_id (true tenant boundary), with byte-identical
+# single-tenant parity (ws == DEFAULT_WORKSPACE_ID → id unchanged).
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class _FakeState:
+    def __init__(self, workspace_id):
+        self.workspace_id = workspace_id
+
+
+class _FakeRequest:
+    """Minimal Request stand-in carrying only request.state.workspace_id."""
+
+    def __init__(self, workspace_id):
+        self.state = _FakeState(workspace_id)
+
+
+def test_blocker2_scoped_conversation_id_parity_default_workspace():
+    """ws == DEFAULT_WORKSPACE_ID (1) → conversation_id returned UNCHANGED.
+
+    This is the single-tenant parity guarantee: existing chat sessions, SSE
+    buffers, and session_ids are byte-identical to the pre-fix behavior.
+    """
+    import dashboard_api
+
+    req = _FakeRequest(1)  # DEFAULT_WORKSPACE_ID
+    assert dashboard_api._scoped_conversation_id(req, "dashboard-main") == "dashboard-main"
+    assert dashboard_api._scoped_conversation_id(req, "default") == "default"
+
+
+def test_blocker2_scoped_conversation_id_isolates_workspaces():
+    """Two different non-default workspaces yield DISJOINT keys for the SAME id.
+
+    This is the leak fix at the unit level: without scoping, both tenants
+    sharing 'dashboard-main' collide; with scoping they cannot.
+    """
+    import dashboard_api
+
+    a = dashboard_api._scoped_conversation_id(_FakeRequest(2), "dashboard-main")
+    b = dashboard_api._scoped_conversation_id(_FakeRequest(3), "dashboard-main")
+    assert a != b, "two workspaces must NOT share a conversation key (cross-tenant leak)"
+    assert a == "ws2.dashboard-main"
+    assert b == "ws3.dashboard-main"
+    # The scoped key must stay a valid dashboard chat id.
+    assert dashboard_api._DASHBOARD_CHAT_ID_RE.fullmatch(a)
+    assert dashboard_api._DASHBOARD_CHAT_ID_RE.fullmatch(b)
+
+
+def _make_chat_db_with_tool_calls(path, *, seed_session_id):
+    """Seed a chat.db (with tool_calls_json) carrying ONE message under
+    *seed_session_id* — used to simulate tenant A's persisted conversation."""
+    now = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE chat_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL UNIQUE,
+            runtime_profile_key TEXT DEFAULT 'default',
+            runtime_provider TEXT DEFAULT 'claude',
+            runtime_model TEXT DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '2026-05-07T00:00:00',
+            message_count INTEGER DEFAULT 0,
+            total_cost_usd REAL DEFAULT 0.0
+        );
+        CREATE TABLE chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            tool_calls_json TEXT DEFAULT '[]'
+        );
+    """)
+    conn.execute(
+        "INSERT INTO chat_sessions (session_id) VALUES (?)", (seed_session_id,)
+    )
+    conn.execute(
+        "INSERT INTO chat_messages (session_id, role, content, created_at, tool_calls_json) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            seed_session_id,
+            "user",
+            "TENANT-A SECRET MESSAGE",
+            now.isoformat(timespec="seconds"),
+            "[]",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def mt_app_with_tenant_a_conversation(tmp_path, monkeypatch):
+    """MT app where tenant A (ws 2) already has a 'dashboard-main' conversation
+    persisted at its WORKSPACE-SCOPED session_id (web:ws2.dashboard-main:...).
+
+    The fix means tenant B (ws 3) reading 'dashboard-main' resolves to
+    web:ws3.dashboard-main:... → it must NOT see A's row. Without the fix both
+    resolve to web:dashboard-main:dashboard-main → B reads A's secret.
+    """
+    from orchestration.tenant_auth import hash_token
+
+    dash_db = tmp_path / "dashboard.db"
+    chat_db = tmp_path / "chat.db"
+    orch_db = tmp_path / "orchestration.db"
+    homie_root = tmp_path / ".homie"
+    _make_named_profile(homie_root, "persona-a")
+    _make_named_profile(homie_root, "persona-b")
+
+    # Seed A's conversation at the session_id A's SEND actually produces — derived
+    # from the production helper itself so the test tracks the FIX STATE:
+    #   * post-fix: _scoped_conversation_id(ws=2,...) → 'ws2.dashboard-main' →
+    #     web:ws2.dashboard-main:... ; B reads web:ws3.dashboard-main:... → empty.
+    #   * pre-fix:  the helper returns the BARE id for BOTH → A seeds AND B reads
+    #     web:dashboard-main:dashboard-main → B SEES A's secret → test RED.
+    # This is the fail-without-fix guarantee.
+    import dashboard_api
+    a_scoped = dashboard_api._scoped_conversation_id(_FakeRequest(_MT_WS_A), "dashboard-main")
+    a_session_id = f"web:{a_scoped}:{a_scoped}"
+    _make_chat_db_with_tool_calls(chat_db, seed_session_id=a_session_id)
+
+    import config
+    monkeypatch.setattr(config, "DASHBOARD_DB_PATH", dash_db)
+    monkeypatch.setattr(config, "CHAT_DB_PATH", chat_db)
+    monkeypatch.setattr(config, "ORCHESTRATION_DB_PATH", orch_db)
+    monkeypatch.setenv("HOMIE_HOME", str(homie_root))
+    monkeypatch.setenv("ORCHESTRATION_API_TOKEN", _MT_ADMIN_TOKEN)
+    monkeypatch.setenv("HOMIE_TENANT_ENFORCEMENT", "true")
+
+    import orchestration.api as oa
+    importlib.reload(oa)
+    db, cs, ms, reg, ts = oa._get_services()
+    oa._db = db
+    oa._convoy_svc = cs
+    oa._mailbox_svc = ms
+    oa._executor_registry = reg
+    oa._team_svc = ts
+    db.insert_tenant_token(hash_token(_MT_ADMIN_TOKEN), _MT_WS_A, None, True, "admin")
+    db.insert_tenant_token(hash_token(_MT_TOKEN_A), _MT_WS_A, '["persona-a"]', False, "tenant-a")
+    db.insert_tenant_token(hash_token(_MT_TOKEN_B), _MT_WS_B, '["persona-b"]', False, "tenant-b")
+
+    yield TestClient(oa.app)
+    db.close()
+
+
+def test_blocker2_history_cross_tenant_isolated(mt_app_with_tenant_a_conversation):
+    """Tenant B reading the DEFAULT 'dashboard-main' conversation must NOT see
+    tenant A's message (different workspace → different scoped session_id).
+
+    FAIL-WITHOUT-FIX: pre-fix, both A and B resolve 'dashboard-main' to the same
+    session_id web:dashboard-main:dashboard-main, so B's history would return
+    A's 'TENANT-A SECRET MESSAGE'. The workspace scoping makes B's read hit
+    web:ws3.dashboard-main:... which has no rows.
+    """
+    client = mt_app_with_tenant_a_conversation
+
+    # Tenant A (ws 2) DOES see its own conversation under the default id.
+    ra = client.get(
+        "/api/conversation/persona-a/history",
+        headers=_bearer(_MT_TOKEN_A),
+        params={"conversation_id": "dashboard-main"},
+    )
+    assert ra.status_code == 200
+    a_contents = [t["content"] for t in ra.json()["turns"]]
+    assert "TENANT-A SECRET MESSAGE" in a_contents, "tenant A must see its OWN conversation"
+
+    # Tenant B (ws 3) reading the SAME default id must see NOTHING of A's.
+    rb = client.get(
+        "/api/conversation/persona-b/history",
+        headers=_bearer(_MT_TOKEN_B),
+        params={"conversation_id": "dashboard-main"},
+    )
+    assert rb.status_code == 200
+    b_contents = [t["content"] for t in rb.json()["turns"]]
+    assert "TENANT-A SECRET MESSAGE" not in b_contents, (
+        "CROSS-TENANT LEAK: tenant B read tenant A's conversation via the shared "
+        "default conversation_id"
+    )
+    assert b_contents == [], "tenant B's default conversation must be empty"
+
+
+def test_blocker2_single_tenant_conversation_history_parity(isolated_app, tmp_path, monkeypatch):
+    """Parity: single-tenant (zero tenant rows, ws defaults to 1) → the default
+    'dashboard-main' conversation resolves to the UNSCOPED session_id exactly as
+    before. A row seeded at web:dashboard-main:dashboard-main is returned."""
+    import config
+
+    # Re-seed the isolated_app's chat.db with a tool_calls_json column + a row at
+    # the UNSCOPED default session id.
+    chat_db = Path(config.CHAT_DB_PATH)
+    if chat_db.exists():
+        chat_db.unlink()
+    _make_chat_db_with_tool_calls(
+        chat_db, seed_session_id="web:dashboard-main:dashboard-main"
+    )
+
+    r = isolated_app.get(
+        "/api/conversation/default/history",
+        params={"conversation_id": "dashboard-main"},
+    )
+    assert r.status_code == 200
+    contents = [t["content"] for t in r.json()["turns"]]
+    assert "TENANT-A SECRET MESSAGE" in contents, (
+        "single-tenant parity broken: the unscoped default session must still resolve"
+    )

@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from orchestration.capability_gateway import collect_capability_gateway_status
+from orchestration.contract import DEFAULT_WORKSPACE_ID
 from orchestration.convoy_service import ConvoyService
 from orchestration.db import OrchestrationDB
 from orchestration.executor import ExecutorRegistry, create_default_registry
@@ -35,6 +36,11 @@ from orchestration.models import (
 )
 from orchestration.observability import orchestration_span, update_observation
 from orchestration.operating_room import OperatingRoomService, operating_room_result_to_dict
+from orchestration.route_policy import (
+    enforce_policy,
+    resolve_policy,
+    resolve_route_template,
+)
 from orchestration.team_executor import TeamExecutorService, executor_result_to_dict
 from orchestration.team_loop import (
     TeamLoopService,
@@ -44,6 +50,7 @@ from orchestration.team_loop import (
 )
 from orchestration.team_room import TeamRoomWorkflowService, team_room_workflow_result_to_dict
 from orchestration.team_service import TeamService
+from orchestration.tenant_auth import is_multi_tenant_mode, resolve_tenant_binding
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +97,27 @@ if API_HOST not in _LOOPBACK_ADDRS and ORCHESTRATION_API_TOKEN is None:
     )
 
 
+def _tenant_enforcement_enabled() -> bool:
+    """Phase-A multi-tenant enforcement gate — resolved at CALL TIME (Rule 1), default OFF.
+
+    Multi-tenant request-path enforcement engages ONLY when
+    ``HOMIE_TENANT_ENFORCEMENT`` is truthy AND ≥1 active tenant row exists. The
+    default-OFF posture is load-bearing security: creating ``tenant_tokens`` rows
+    does NOTHING to the request path until an operator EXPLICITLY opts in. That
+    makes the Phase-A "half-locked" state (Phase B's all-route deny-by-default not
+    yet shipped — unthreaded routes like ``/api/executor/callback`` and the team
+    mutators still default to workspace 1) UNREACHABLE in a default deployment,
+    and keeps zero-/any-row back-compat byte-identical. Phase B flips this ON only
+    after every route is workspace-scoped. Do NOT enable in production until then.
+    """
+    return os.getenv("HOMIE_TENANT_ENFORCEMENT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def __getattr__(name: str) -> Any:
     """PRP-7c Phase 3: lazy ``API_PORT`` resolver.
 
@@ -128,8 +156,11 @@ def _get_services() -> tuple[
 _db, _convoy_svc, _mailbox_svc, _executor_registry, _team_svc = _get_services()
 
 
-def _require_subtask_in_convoy(convoy_id: int, subtask_id: int):
-    subtask = _convoy_svc.get_subtask(subtask_id)
+def _require_subtask_in_convoy(convoy_id: int, subtask_id: int, workspace_id: int):
+    # Tenant Isolation v0 (B4): resolve the subtask through the WORKSPACE-scoped
+    # read so a cross-tenant subtask_id surfaces as 404 (not found in caller's
+    # workspace), not as a leaked row from another tenant's convoy.
+    subtask = _convoy_svc.get_subtask(subtask_id, workspace_id=workspace_id)
     if not subtask or subtask.convoy_id != convoy_id:
         raise HTTPException(
             status_code=404,
@@ -332,52 +363,122 @@ app = FastAPI(title="Orchestration Control API", version="0.1.0")
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Bearer token enforcement. Active only when ORCHESTRATION_API_TOKEN is set.
+    """Bearer enforcement + tenant auth TRUTH TABLE + route-policy deny-by-default.
 
-    PRD-8 Phase 3 / WS2 (R1 B3 + owner Decision 3) — ``/api/health`` is
-    explicitly EXEMPT from bearer auth in BOTH token-set and token-unset
-    deployment modes. The path check happens BEFORE the bearer check so
-    health probes work without leaking auth requirements. The endpoint
-    response is intentionally minimal (NO PII, NO secrets, NO internal
-    paths).
+    Two modes, selected by physical state (Rule 2 — the presence of an active
+    non-admin ``tenant_tokens`` row), NOT by config:
+
+    SINGLE-TENANT (zero active non-admin tenant rows — the DEFAULT):
+        Behavior is BYTE-UNCHANGED from before Phase A. ``ORCHESTRATION_API_TOKEN``
+        bearer-equality is the only gate (when set); every request binds to
+        ``DEFAULT_WORKSPACE_ID`` / ``persona_scope=None`` / ``is_admin=True``.
+        The ``/api/cabinet/voice/*`` blanket query-token exemption is preserved
+        byte-unchanged in this mode (no policy layer — there are no tenants to
+        deny).
+
+    MULTI-TENANT (≥1 active non-admin tenant row AND enforcement opted in):
+        The bearer is resolved by HASHED row lookup (``resolve_tenant_binding``),
+        NOT by equality to the global token. The resolved
+        ``workspace_id`` / ``persona_scope`` / ``is_admin`` are set on
+        ``request.state``. AFTER binding, ``route_policy.enforce_policy`` runs
+        REAL deny-by-default (B2): a valid bound tenant token hitting a route
+        with NO declared policy fails CLOSED (403), and a tenant token on an
+        ``admin`` / ``voice_query`` route is 403'd. The threaded convoy/mailbox/
+        team handlers + the WS3 dashboard handlers do the row-level id gate.
+
+    NB2 (R2) — voice routes are NOT a blanket exemption in MT mode. The route
+        template is resolved (``resolve_route_template``) and classified:
+        static JS is ``public``; UI/session/control routes are ``voice_query``
+        (a tenant HEADER token 403s; the admin query-token path still works);
+        the per-persona ``avatars/{persona_id}.png`` route reads persona config
+        so it is ``admin`` (a tenant token 403s — it does NOT bypass the policy
+        layer via the prefix).
+
+    ``/api/health`` and ``/api/info`` are ``public``; ``/api/audit-log`` enforces
+    its own ``DASHBOARD_ADMIN_TOKEN`` internally and is ``admin`` here. In MT
+    mode these all route through ``enforce_policy`` like everything else.
+
+    M2 (PRP) — ``request.state`` defaults are set at the TOP, BEFORE any
+    exemption returns, so an exempt voice/cabinet handler that reads
+    ``request.state.workspace_id`` can never ``AttributeError``/500.
     """
+    # M2 — request.state defaults FIRST, before any exemption returns.
+    request.state.workspace_id = DEFAULT_WORKSPACE_ID
+    request.state.persona_scope = None
+    request.state.is_admin = True
+
+    # Resolve the auth truth table against the CURRENT module-level DB (the test
+    # fixtures swap ``_db``, so reference the module attr, not a closure bind).
+    db = _db
     path = request.url.path
-    if path == "/api/health":
-        return await call_next(request)
-    # PRD-8 Phase 7a R3 NB1 — /api/audit-log is exempt from the outer
-    # ORCHESTRATION_API_TOKEN bearer middleware. The endpoint enforces its
-    # own DASHBOARD_ADMIN_TOKEN bearer internally (in dashboard_api.py).
-    # Without this exemption, the single Authorization header would have to
-    # equal BOTH tokens — fail-closed forever in token-set deployments
-    # unless the two tokens happened to be equal (defeats the "separate
-    # admin token" security boundary). Mirrors the /api/health exemption
-    # above.
-    if path == "/api/audit-log":
-        return await call_next(request)
-    # PRD-8 Phase 6 v2 fix-pass 2026-05-10 (B1 fix) — /api/cabinet/voice/*
-    # is exempt from header-bearer auth and instead validates a query-param
-    # token. Browsers cannot send Authorization headers reliably on initial
-    # GETs (especially across iframe / new-tab boundaries). Mirrors the
-    # ClaudeClaw upstream pattern at src/dashboard.ts:453-565 where the
-    # operator pastes the URL with ?token=... and the server consumes it.
-    #
-    # Token-unset mode: voice UI is loopback-only via API_HOST guard; no
-    # token required (mirrors orchestration loopback no-token mode).
-    # Token-set mode: query-param token must equal ORCHESTRATION_API_TOKEN.
-    if path.startswith("/api/cabinet/voice/"):
-        if ORCHESTRATION_API_TOKEN is None:
+
+    # Phase-A/B gate (Rule 1, call-time, default OFF): MT enforcement engages
+    # ONLY on explicit opt-in AND when an active non-admin tenant row exists.
+    # OFF (default) → tenant rows are IGNORED, the legacy single-tenant path runs
+    # byte-identically, and there is NO half-locked leak surface. Phase B ships
+    # all-route deny-by-default; an operator flips the flag once that lands.
+    multi_tenant = _tenant_enforcement_enabled() and is_multi_tenant_mode(db)
+
+    if not multi_tenant:
+        # ── SINGLE-TENANT (or enforcement OFF) — preserve TODAY exactly. ─────
+        # These three exemptions are byte-unchanged from the pre-Phase-B path.
+        if path == "/api/health":
             return await call_next(request)
-        query_token = request.query_params.get("token", "")
-        if query_token == ORCHESTRATION_API_TOKEN:
+        if path == "/api/audit-log":
+            return await call_next(request)
+        if path.startswith("/api/cabinet/voice/"):
+            if ORCHESTRATION_API_TOKEN is None:
+                return await call_next(request)
+            query_token = request.query_params.get("token", "")
+            if query_token == ORCHESTRATION_API_TOKEN:
+                return await call_next(request)
+            return JSONResponse(
+                {"detail": "Invalid or missing query-param token for cabinet voice"},
+                status_code=401,
+            )
+        if ORCHESTRATION_API_TOKEN is not None:
+            auth = request.headers.get("Authorization", "")
+            if not auth.startswith("Bearer ") or auth[7:] != ORCHESTRATION_API_TOKEN:
+                return JSONResponse(
+                    {"detail": "Invalid or missing bearer token"}, status_code=401
+                )
+        return await call_next(request)
+
+    # ── MULTI-TENANT — resolve binding, then enforce the route policy. ──────
+    # Resolve the LITERAL route template (NB1: scope["route"] is unset in HTTP
+    # middleware; this replays Starlette matching across the live route table).
+    resolved = resolve_route_template(request)
+    route_tpl = resolved[1] if resolved is not None else None
+    policy = resolve_policy(request.method, route_tpl)
+
+    # voice_query routes admit the admin/global query-param token path (browsers
+    # cannot send the Authorization header reliably on cross-iframe GETs). A
+    # valid query token is an ADMIN reach — NOT a tenant token (NB2). A tenant
+    # HEADER token on a voice_query route falls through to enforce_policy → 403.
+    if policy == "voice_query" and ORCHESTRATION_API_TOKEN is not None:
+        if request.query_params.get("token", "") == ORCHESTRATION_API_TOKEN:
+            request.state.is_admin = True
+            return await call_next(request)
+
+    auth = request.headers.get("Authorization", "")
+    bearer = auth[7:] if auth.startswith("Bearer ") else ""
+    binding = resolve_tenant_binding(db, bearer)
+    if binding is None:
+        # public routes (health/info/static/templates/openapi) need no token.
+        if policy == "public":
             return await call_next(request)
         return JSONResponse(
-            {"detail": "Invalid or missing query-param token for cabinet voice"},
-            status_code=401,
+            {"detail": "Invalid or missing bearer token"}, status_code=401
         )
-    if ORCHESTRATION_API_TOKEN is not None:
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != ORCHESTRATION_API_TOKEN:
-            return JSONResponse({"detail": "Invalid or missing bearer token"}, status_code=401)
+    request.state.workspace_id = binding.workspace_id
+    request.state.persona_scope = binding.persona_scope
+    request.state.is_admin = binding.is_admin
+
+    # B2 — REAL deny-by-default: unregistered route → 403; tenant token on
+    # admin/voice_query → 403; admin binding reaches everything.
+    deny = enforce_policy(request.method, route_tpl, binding)
+    if deny is not None:
+        return deny
     return await call_next(request)
 
 
@@ -385,7 +486,8 @@ async def auth_middleware(request: Request, call_next):
 
 
 @app.post("/api/convoy")
-def create_convoy(body: CreateConvoyBody):
+def create_convoy(request: Request, body: CreateConvoyBody):
+    ws = request.state.workspace_id
     subtask_inputs = [
         CreateSubtaskInput(
             title=s.title,
@@ -408,46 +510,54 @@ def create_convoy(body: CreateConvoyBody):
         subtasks=subtask_inputs,
     )
     try:
-        result = _convoy_svc.create_convoy(inp)
+        result = _convoy_svc.create_convoy(inp, workspace_id=ws)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return dataclasses.asdict(result)
 
 
 @app.get("/api/convoy")
-def list_convoys(status: str | None = None):
-    convoys = _convoy_svc.list_convoys(status=status)
+def list_convoys(request: Request, status: str | None = None):
+    ws = request.state.workspace_id
+    convoys = _convoy_svc.list_convoys(workspace_id=ws, status=status)
     return [dataclasses.asdict(c) for c in convoys]
 
 
 @app.get("/api/convoy/{convoy_id}")
-def get_convoy(convoy_id: int):
-    result = _convoy_svc.get_convoy(convoy_id)
+def get_convoy(convoy_id: int, request: Request):
+    ws = request.state.workspace_id
+    result = _convoy_svc.get_convoy(convoy_id, workspace_id=ws)
     if not result:
         raise HTTPException(status_code=404, detail=f"Convoy {convoy_id} not found")
     return dataclasses.asdict(result)
 
 
 @app.delete("/api/convoy/{convoy_id}")
-def delete_convoy(convoy_id: int):
+def delete_convoy(convoy_id: int, request: Request):
+    ws = request.state.workspace_id
     try:
-        _convoy_svc.delete_convoy(convoy_id)
+        _convoy_svc.delete_convoy(convoy_id, workspace_id=ws)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"ok": True}
 
 
 @app.post("/api/convoy/{convoy_id}/status")
-def update_convoy_status(convoy_id: int, body: UpdateStatusBody):
+def update_convoy_status(convoy_id: int, body: UpdateStatusBody, request: Request):
+    ws = request.state.workspace_id
     try:
-        result = _convoy_svc.update_convoy_status(convoy_id, body.status)
+        result = _convoy_svc.update_convoy_status(convoy_id, body.status, workspace_id=ws)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # "not found" (cross-tenant / stale id) -> 404; an invalid transition on
+        # an OWNED convoy stays 400. Same discrimination as add_subtasks.
+        status = 404 if "not found" in str(e).lower() else 400
+        raise HTTPException(status_code=status, detail=str(e))
     return dataclasses.asdict(result)
 
 
 @app.post("/api/convoy/{convoy_id}/subtasks")
-def add_subtasks(convoy_id: int, body: AddSubtasksBody):
+def add_subtasks(convoy_id: int, body: AddSubtasksBody, request: Request):
+    ws = request.state.workspace_id
     inputs = [
         AddSubtaskInput(
             title=s.title,
@@ -460,7 +570,7 @@ def add_subtasks(convoy_id: int, body: AddSubtasksBody):
         for s in body.subtasks
     ]
     try:
-        result = _convoy_svc.add_subtasks(convoy_id, inputs)
+        result = _convoy_svc.add_subtasks(convoy_id, inputs, workspace_id=ws)
     except ValueError as e:
         status = 404 if "not found" in str(e).lower() else 400
         raise HTTPException(status_code=status, detail=str(e))
@@ -468,8 +578,11 @@ def add_subtasks(convoy_id: int, body: AddSubtasksBody):
 
 
 @app.get("/api/convoy/{convoy_id}/ready")
-def get_ready_subtasks(convoy_id: int):
-    if not _convoy_svc.get_convoy(convoy_id):
+def get_ready_subtasks(convoy_id: int, request: Request):
+    ws = request.state.workspace_id
+    # B4: the ONLY no-workspace service method. Gate on a ws-scoped parent read
+    # so a cross-tenant convoy_id is 404, THEN call the (convoy-id-only) reader.
+    if not _convoy_svc.get_convoy(convoy_id, workspace_id=ws):
         raise HTTPException(status_code=404, detail=f"Convoy {convoy_id} not found")
     subtasks = _convoy_svc.get_ready_subtasks(convoy_id)
     return [dataclasses.asdict(s) for s in subtasks]
@@ -496,18 +609,19 @@ def dispatch_subtask(
         trace_metadata={"surface": surface, "feature_phase": 6},
         expected_exceptions=(HTTPException,),
     ):
+        ws = request.state.workspace_id
         _require_live_agent_action(
             "convoy subtask dispatch",
             body.allow_live_agent_run if body else False,
         )
-        _require_subtask_in_convoy(convoy_id, subtask_id)
+        _require_subtask_in_convoy(convoy_id, subtask_id, ws)
         executor_name = body.executor_name if body else None
         team_id = body.team_id if body else None
 
         if team_id is not None:
             try:
                 receipt, actual_backend = _team_svc.dispatch_to_executor(
-                    team_id, subtask_id,
+                    team_id, subtask_id, workspace_id=ws,
                 )
             except ValueError as e:
                 update_observation(
@@ -518,12 +632,17 @@ def dispatch_subtask(
                 raise HTTPException(status_code=404, detail=str(e))
             result = dataclasses.asdict(receipt)
             result["actual_backend"] = actual_backend
+            _team_for_obs = _team_svc.get_team_session(team_id, workspace_id=ws)
             update_observation(
                 metadata={
                     "team_id": team_id,
                     "requested_backend": "team_backend",
                     "actual_backend": actual_backend,
-                    "fallback_used": actual_backend != _team_svc.get_team_session(team_id).session.backend_type if _team_svc.get_team_session(team_id) else False,
+                    "fallback_used": (
+                        actual_backend != _team_for_obs.session.backend_type
+                        if _team_for_obs
+                        else False
+                    ),
                 },
                 output={"status": receipt.status},
             )
@@ -535,6 +654,7 @@ def dispatch_subtask(
         try:
             receipt = _convoy_svc.dispatch_subtask(
                 subtask_id,
+                workspace_id=ws,
                 paperclip_issue_id=body.paperclip_issue_id if body else None,
                 executor=executor,
             )
@@ -557,10 +677,13 @@ def dispatch_subtask(
 
 
 @app.post("/api/convoy/{convoy_id}/subtask/{subtask_id}/complete")
-def complete_subtask(convoy_id: int, subtask_id: int):
-    _require_subtask_in_convoy(convoy_id, subtask_id)
+def complete_subtask(convoy_id: int, subtask_id: int, request: Request):
+    ws = request.state.workspace_id
+    _require_subtask_in_convoy(convoy_id, subtask_id, ws)
     try:
-        newly_ready, convoy_completed = _convoy_svc.handle_subtask_completion(subtask_id)
+        newly_ready, convoy_completed = _convoy_svc.handle_subtask_completion(
+            subtask_id, workspace_id=ws
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {
@@ -570,11 +693,15 @@ def complete_subtask(convoy_id: int, subtask_id: int):
 
 
 @app.post("/api/convoy/{convoy_id}/subtask/{subtask_id}/fail")
-def fail_subtask(convoy_id: int, subtask_id: int, body: FailBody | None = None):
-    _require_subtask_in_convoy(convoy_id, subtask_id)
+def fail_subtask(
+    convoy_id: int, subtask_id: int, request: Request, body: FailBody | None = None
+):
+    ws = request.state.workspace_id
+    _require_subtask_in_convoy(convoy_id, subtask_id, ws)
     try:
         convoy_failed = _convoy_svc.handle_subtask_failure(
             subtask_id,
+            workspace_id=ws,
             error_message=body.error_message if body else None,
         )
     except ValueError as e:
@@ -583,8 +710,9 @@ def fail_subtask(convoy_id: int, subtask_id: int, body: FailBody | None = None):
 
 
 @app.post("/api/convoy/{convoy_id}/subtask/{subtask_id}/progress")
-def report_progress(convoy_id: int, subtask_id: int, body: ProgressBody):
-    _require_subtask_in_convoy(convoy_id, subtask_id)
+def report_progress(convoy_id: int, subtask_id: int, body: ProgressBody, request: Request):
+    ws = request.state.workspace_id
+    _require_subtask_in_convoy(convoy_id, subtask_id, ws)
     import time
 
     progress = ProgressReport(
@@ -596,7 +724,7 @@ def report_progress(convoy_id: int, subtask_id: int, body: ProgressBody):
         timestamp=int(time.time()),
     )
     try:
-        _convoy_svc.report_progress(subtask_id, progress)
+        _convoy_svc.report_progress(subtask_id, progress, workspace_id=ws)
     except ValueError as e:
         status = 404 if "not found" in str(e).lower() else 400
         raise HTTPException(status_code=status, detail=str(e))
@@ -604,21 +732,27 @@ def report_progress(convoy_id: int, subtask_id: int, body: ProgressBody):
 
 
 @app.post("/api/convoy/{convoy_id}/subtask/{subtask_id}/transition")
-def transition_subtask(convoy_id: int, subtask_id: int, body: TransitionBody):
-    _require_subtask_in_convoy(convoy_id, subtask_id)
+def transition_subtask(
+    convoy_id: int, subtask_id: int, body: TransitionBody, request: Request
+):
+    ws = request.state.workspace_id
+    _require_subtask_in_convoy(convoy_id, subtask_id, ws)
     try:
-        result = _convoy_svc.transition_subtask(subtask_id, body.status)
+        result = _convoy_svc.transition_subtask(subtask_id, body.status, workspace_id=ws)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return dataclasses.asdict(result)
 
 
 @app.patch("/api/convoy/{convoy_id}/subtask/{subtask_id}")
-def update_subtask_fields(convoy_id: int, subtask_id: int, body: UpdateFieldsBody):
-    _require_subtask_in_convoy(convoy_id, subtask_id)
+def update_subtask_fields(
+    convoy_id: int, subtask_id: int, body: UpdateFieldsBody, request: Request
+):
+    ws = request.state.workspace_id
+    _require_subtask_in_convoy(convoy_id, subtask_id, ws)
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
-        result = _convoy_svc.update_subtask_fields(subtask_id, fields)
+        result = _convoy_svc.update_subtask_fields(subtask_id, fields, workspace_id=ws)
     except ValueError as e:
         status = 404 if "not found" in str(e).lower() else 400
         raise HTTPException(status_code=status, detail=str(e))
@@ -657,7 +791,8 @@ def executor_callback(body: ExecutorCallbackBody):
 
 
 @app.post("/api/mailbox/send")
-def send_message(body: SendMessageBody):
+def send_message(body: SendMessageBody, request: Request):
+    ws = request.state.workspace_id
     inp = SendMessageInput(
         from_agent=body.from_agent,
         recipients=body.recipients,
@@ -674,7 +809,7 @@ def send_message(body: SendMessageBody):
         msg_type=body.msg_type,
     )
     try:
-        result = _mailbox_svc.send_message(inp)
+        result = _mailbox_svc.send_message(inp, workspace_id=ws)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return dataclasses.asdict(result)
@@ -683,28 +818,37 @@ def send_message(body: SendMessageBody):
 @app.get("/api/mailbox/inbox/{agent_id}")
 def get_inbox(
     agent_id: str,
+    request: Request,
     convoy_id: int | None = None,
     msg_type: str | None = None,
 ):
+    ws = request.state.workspace_id
     messages = _mailbox_svc.get_inbox(
-        agent_id, convoy_id=convoy_id, msg_type=msg_type,
+        agent_id, workspace_id=ws, convoy_id=convoy_id, msg_type=msg_type,
     )
     return [dataclasses.asdict(m) for m in messages]
 
 
 @app.post("/api/mailbox/claim/{agent_id}")
-def claim_deliveries(agent_id: str, convoy_id: int | None = None, limit: int = 10):
-    claimed = _mailbox_svc.claim_deliveries(agent_id, convoy_id=convoy_id, limit=limit)
+def claim_deliveries(
+    agent_id: str, request: Request, convoy_id: int | None = None, limit: int = 10
+):
+    ws = request.state.workspace_id
+    claimed = _mailbox_svc.claim_deliveries(
+        agent_id, workspace_id=ws, convoy_id=convoy_id, limit=limit
+    )
     return [dataclasses.asdict(m) for m in claimed]
 
 
 @app.post("/api/mailbox/ack/{delivery_id}")
-def ack_delivery(delivery_id: int, body: AckBody):
+def ack_delivery(delivery_id: int, body: AckBody, request: Request):
+    ws = request.state.workspace_id
     try:
         _mailbox_svc.ack_delivery(
             delivery_id,
             recipient_agent=body.recipient_agent,
             claim_token=body.claim_token,
+            workspace_id=ws,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -712,8 +856,9 @@ def ack_delivery(delivery_id: int, body: AckBody):
 
 
 @app.get("/api/mailbox/convoy/{convoy_id}")
-def get_convoy_messages(convoy_id: int):
-    messages = _mailbox_svc.get_convoy_messages(convoy_id)
+def get_convoy_messages(convoy_id: int, request: Request):
+    ws = request.state.workspace_id
+    messages = _mailbox_svc.get_convoy_messages(convoy_id, workspace_id=ws)
     return [dataclasses.asdict(m) for m in messages]
 
 
@@ -744,7 +889,9 @@ def create_team(request: Request, body: CreateTeamBody):
             metadata=body.metadata,
         )
         try:
-            result = _team_svc.create_team_session(inp)
+            result = _team_svc.create_team_session(
+                inp, workspace_id=request.state.workspace_id
+            )
         except ValueError as e:
             update_observation(
                 metadata={"error_type": "team_validation"},
@@ -771,7 +918,9 @@ def list_teams(request: Request, status: str | None = None):
         metadata={"surface": surface, "status_filter": status},
         trace_metadata={"surface": surface, "feature_phase": 5},
     ):
-        teams = _team_svc.list_team_sessions(status=status)
+        teams = _team_svc.list_team_sessions(
+            status=status, workspace_id=request.state.workspace_id
+        )
         update_observation(metadata={"team_count": len(teams)})
         return [dataclasses.asdict(t) for t in teams]
 
@@ -808,6 +957,9 @@ def run_team_room(request: Request, body: TeamRoomRunBody):
                     if body.v2 and not body.meeting_mode
                     else body.meeting_mode
                 ),
+                # B4: the boardroom CREATES a team + convoy — they must land in
+                # the caller's workspace, not the default ws 1 (self-isolation).
+                workspace_id=request.state.workspace_id,
             )
         except ValueError as e:
             update_observation(
@@ -866,6 +1018,9 @@ def run_operating_room(request: Request, body: OperatingRoomRunBody):
                 tick_executor_command=body.tick_executor_command,
                 tick_executor_cwd=body.tick_executor_cwd,
                 tick_complete_on_executor_success=body.tick_complete_on_executor_success,
+                # B4: the operating room CREATES a team + convoy and ticks it —
+                # all of it must be scoped to the caller's workspace.
+                workspace_id=request.state.workspace_id,
             )
         except ValueError as e:
             update_observation(
@@ -919,7 +1074,9 @@ def get_team(team_id: int, request: Request):
         trace_metadata={"surface": surface, "feature_phase": 5, "team_id": team_id},
         expected_exceptions=(HTTPException,),
     ):
-        result = _team_svc.get_team_session(team_id)
+        result = _team_svc.get_team_session(
+            team_id, workspace_id=request.state.workspace_id
+        )
         if not result:
             raise HTTPException(status_code=404, detail=f"Team session {team_id} not found")
         update_observation(
@@ -944,7 +1101,12 @@ def close_team(team_id: int, request: Request):
         expected_exceptions=(HTTPException,),
     ):
         try:
-            result = _team_svc.close_team_session(team_id)
+            # B4: scope the mutation to the caller's workspace — a cross-tenant
+            # team_id raises ValueError("...not found") → 404 (the team is not in
+            # B's workspace), never a silent close of A's team in workspace 1.
+            result = _team_svc.close_team_session(
+                team_id, workspace_id=request.state.workspace_id
+            )
         except ValueError as e:
             update_observation(level="WARNING", status_message=str(e), metadata={"error_type": "team_validation"})
             raise HTTPException(status_code=404, detail=str(e))
@@ -974,7 +1136,9 @@ def add_team_member(team_id: int, request: Request, body: AddTeamMemberBody):
             subtask_id=body.subtask_id,
         )
         try:
-            result = _team_svc.add_member(team_id, inp)
+            result = _team_svc.add_member(
+                team_id, inp, workspace_id=request.state.workspace_id
+            )
         except ValueError as e:
             status = 404 if "not found" in str(e).lower() else 400
             update_observation(level="WARNING", status_message=str(e), metadata={"error_type": "team_validation"})
@@ -993,7 +1157,9 @@ def request_team_shutdown(team_id: int, request: Request):
         expected_exceptions=(HTTPException,),
     ):
         try:
-            result = _team_svc.request_shutdown(team_id)
+            result = _team_svc.request_shutdown(
+                team_id, workspace_id=request.state.workspace_id
+            )
         except ValueError as e:
             update_observation(level="WARNING", status_message=str(e), metadata={"error_type": "team_validation"})
             raise HTTPException(status_code=404, detail=str(e))
@@ -1012,7 +1178,9 @@ def ping_team(team_id: int, request: Request, body: TeamPingBody | None = None):
         expected_exceptions=(HTTPException,),
     ):
         try:
-            _team_svc.ping_activity(team_id, agent_id=agent_id)
+            _team_svc.ping_activity(
+                team_id, agent_id=agent_id, workspace_id=request.state.workspace_id
+            )
         except ValueError as e:
             update_observation(level="WARNING", status_message=str(e), metadata={"error_type": "team_validation"})
             raise HTTPException(status_code=404, detail=str(e))
@@ -1047,6 +1215,7 @@ def run_team_loop_step(team_id: int, request: Request, body: TeamLoopStepBody):
                 use_runtime=body.use_runtime,
                 runtime_lane=body.runtime_lane,
                 complete=body.complete,
+                workspace_id=request.state.workspace_id,  # B4: cross-tenant team_id → 404
             )
         except ValueError as e:
             update_observation(
@@ -1104,6 +1273,7 @@ def run_team_tick(team_id: int, request: Request, body: TeamTickBody | None = No
                 executor_command=payload_body.executor_command,
                 executor_cwd=payload_body.executor_cwd,
                 complete_on_executor_success=payload_body.complete_on_executor_success,
+                workspace_id=request.state.workspace_id,  # B4: cross-tenant team_id → 404
             )
         except ValueError as e:
             update_observation(
@@ -1153,6 +1323,7 @@ def run_team_executor_step(team_id: int, request: Request, body: TeamExecutorSte
                 cwd=body.cwd,
                 timeout_seconds=body.timeout_seconds,
                 complete_on_success=body.complete_on_success,
+                workspace_id=request.state.workspace_id,  # B4: cross-tenant team_id → 404
             )
         except ValueError as e:
             update_observation(
@@ -1183,19 +1354,24 @@ class WriteMemoryBody(BaseModel):
     overwrite: bool = False
 
 
-def _require_team(team_id: int):
-    """Return the TeamSessionWithMembers or raise 404."""
-    session = _team_svc.get_team_session(team_id)
+def _require_team(team_id: int, workspace_id: int):
+    """Return the TeamSessionWithMembers or raise 404.
+
+    Tenant Isolation v0 (B4): the WORKSPACE-scoped read is the parent gate for
+    the entire team-memory CRUD family — a cross-tenant team_id surfaces as 404
+    BEFORE any memory file is read, written, or deleted.
+    """
+    session = _team_svc.get_team_session(team_id, workspace_id=workspace_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Team session {team_id} not found")
     return session
 
 
 @app.get("/api/team/{team_id}/memory")
-def list_team_memory_endpoint(team_id: int):
+def list_team_memory_endpoint(team_id: int, request: Request):
     from orchestration.team_memory import list_team_memory
 
-    _require_team(team_id)
+    _require_team(team_id, request.state.workspace_id)
     with orchestration_span(
         "orchestration.api.team_memory_list",
         metadata={"team_id": team_id, "memory_scope": "team"},
@@ -1207,10 +1383,10 @@ def list_team_memory_endpoint(team_id: int):
 
 
 @app.get("/api/team/{team_id}/memory/{filename}")
-def read_team_memory_endpoint(team_id: int, filename: str):
+def read_team_memory_endpoint(team_id: int, filename: str, request: Request):
     from orchestration.team_memory import read_team_memory
 
-    _require_team(team_id)
+    _require_team(team_id, request.state.workspace_id)
     with orchestration_span(
         "orchestration.api.team_memory_read",
         metadata={"team_id": team_id, "memory_scope": "team", "memory_filename": filename},
@@ -1230,10 +1406,12 @@ def read_team_memory_endpoint(team_id: int, filename: str):
 
 
 @app.post("/api/team/{team_id}/memory/{filename}")
-def write_team_memory_endpoint(team_id: int, filename: str, body: WriteMemoryBody):
+def write_team_memory_endpoint(
+    team_id: int, filename: str, body: WriteMemoryBody, request: Request
+):
     from orchestration.team_memory import write_team_memory
 
-    _require_team(team_id)
+    _require_team(team_id, request.state.workspace_id)
     with orchestration_span(
         "orchestration.api.team_memory_write",
         metadata={
@@ -1269,10 +1447,10 @@ def write_team_memory_endpoint(team_id: int, filename: str, body: WriteMemoryBod
 
 
 @app.delete("/api/team/{team_id}/memory/{filename}")
-def delete_team_memory_endpoint(team_id: int, filename: str):
+def delete_team_memory_endpoint(team_id: int, filename: str, request: Request):
     from orchestration.team_memory import delete_team_memory
 
-    _require_team(team_id)
+    _require_team(team_id, request.state.workspace_id)
     with orchestration_span(
         "orchestration.api.team_memory_delete",
         metadata={"team_id": team_id, "memory_scope": "team", "memory_filename": filename},

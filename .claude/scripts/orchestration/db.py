@@ -199,6 +199,25 @@ CREATE TABLE IF NOT EXISTS team_members (
 );
 CREATE INDEX IF NOT EXISTS idx_team_members_session ON team_members(team_session_id);
 CREATE INDEX IF NOT EXISTS idx_team_members_agent ON team_members(agent_id);
+
+-- Tenant Isolation v0 (Phase A) -- per-tenant API token store.
+-- Stores the SHA-256 HASH of each token, never the raw secret. Multi-tenant
+-- mode engages iff at least one non-revoked is_admin=0 row exists. Admin rows
+-- (is_admin=1) carry the global/operator token so MT mode does not strand it.
+-- persona_scope is a JSON ARRAY of allowed persona ids (NULL = unscoped,
+-- reserved for admin rows -- Phase B owns non-admin persona scoping).
+-- Revocation is physical state (revoked_at non-NULL), read per request (Rule 2).
+CREATE TABLE IF NOT EXISTS tenant_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_sha256 TEXT NOT NULL UNIQUE,
+    workspace_id INTEGER NOT NULL,
+    persona_scope TEXT,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    label TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_tokens_hash ON tenant_tokens(token_sha256);
 """
 
 
@@ -242,6 +261,95 @@ class OrchestrationDB:
 
     def close(self) -> None:
         self.conn.close()
+
+    # ── Tenant token store (Tenant Isolation v0, Phase A) ───────────────────
+    # All reads/writes operate on HASHES. The raw token never touches this
+    # layer — the caller hashes it (orchestration.tenant_auth) before lookup.
+
+    def insert_tenant_token(
+        self,
+        token_sha256: str,
+        workspace_id: int,
+        persona_scope: str | None,
+        is_admin: bool,
+        label: str | None,
+    ) -> int:
+        """Insert a tenant-token row; return its id. *token_sha256* is the HASH.
+
+        ``persona_scope`` is a JSON-array string (or NULL). Raises
+        ``sqlite3.IntegrityError`` on a duplicate hash (UNIQUE constraint).
+        """
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO tenant_tokens "
+                "(token_sha256, workspace_id, persona_scope, is_admin, label) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    token_sha256,
+                    workspace_id,
+                    persona_scope,
+                    1 if is_admin else 0,
+                    label,
+                ),
+            )
+        return int(cur.lastrowid)
+
+    def get_binding_by_hash(self, token_sha256: str) -> sqlite3.Row | None:
+        """Return the ACTIVE (non-revoked) row for *token_sha256*, or None.
+
+        Rule 2 — revocation is physical state: the ``revoked_at IS NULL`` filter
+        lives in the read, so a revoked token stops resolving on the very next
+        request with no cache to invalidate.
+        """
+        return self.conn.execute(
+            "SELECT * FROM tenant_tokens "
+            "WHERE token_sha256 = ? AND revoked_at IS NULL",
+            (token_sha256,),
+        ).fetchone()
+
+    def has_active_tenant_token(self) -> bool:
+        """True iff at least one ACTIVE non-admin tenant row exists.
+
+        This is the multi-tenant mode flag (Rule 2 — read physical rows, never a
+        module cache). Admin rows (``is_admin=1``) do NOT engage MT mode: they
+        carry the global/operator token so it survives the first tenant onboard.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM tenant_tokens "
+            "WHERE revoked_at IS NULL AND is_admin = 0 LIMIT 1"
+        ).fetchone()
+        return row is not None
+
+    def revoke_token(self, token_id: int) -> bool:
+        """Revoke the row with *token_id* (set ``revoked_at``). Idempotent.
+
+        Returns True if a still-active row was revoked, False if the id was
+        unknown or already revoked.
+        """
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE tenant_tokens "
+                "SET revoked_at = strftime('%s','now') "
+                "WHERE id = ? AND revoked_at IS NULL",
+                (token_id,),
+            )
+        return cur.rowcount > 0
+
+    def list_tenant_tokens(self, include_revoked: bool = True) -> list[sqlite3.Row]:
+        """List token rows for the operator CLI. NEVER exposes the raw token.
+
+        The ``token_sha256`` column is present on each row but the CLI must not
+        print it; the CLI prints id / workspace / label / is_admin / revoked.
+        """
+        if include_revoked:
+            rows = self.conn.execute(
+                "SELECT * FROM tenant_tokens ORDER BY id"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM tenant_tokens WHERE revoked_at IS NULL ORDER BY id"
+            ).fetchall()
+        return list(rows)
 
     # ── Row mappers ────────────────────────────────────────────────────────
 

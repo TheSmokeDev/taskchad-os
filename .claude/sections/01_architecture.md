@@ -104,6 +104,16 @@ Existing implementations (greppable examples of the invariant):
    `HOMIE_KILLSWITCH_SKILL_PROMOTION`), with an audit row per
    scan/promote/reject/archive. See
    `docs/manual/features/skill-from-experience-loop.md`.
+7. **Multi-tenant request enforcement** — the shared orchestration + dashboard
+   API ships **deny-by-default** per route: every route declares one of five
+   policies in `.claude/scripts/orchestration/route_policy.py`, and a bound
+   tenant token hitting a route with no policy → 403 (a CI invariant proves
+   every route is classified, so a new route can't default open). Enforcement is
+   gated by `HOMIE_TENANT_ENFORCEMENT` + multi-tenant mode; the default (no flag
+   / no tenant rows) is byte-identical single-tenant. Tenant binding
+   (`workspace_id` + `persona_scope`) is a request auth dimension threaded
+   through the one `api.py` middleware — workspace on mutations, persona scope on
+   reads. See `docs/manual/features/tenant-isolation-v0.md`.
 
 Same family: the live-lane opt-in gate (dry-run is the default), operator
 kill-switches (`.claude/scripts/security/kill_switches.py`), and the skill

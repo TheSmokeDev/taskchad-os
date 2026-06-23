@@ -425,6 +425,162 @@ def _reject_main_translation(persona_id: str) -> None:
         )
 
 
+# ── Tenant isolation v0 Phase B / WS3 — persona-scope + workspace gates ───
+#
+# We CONSUME the WS2 middleware contract; we never edit it. The shared
+# orchestration middleware (orchestration/api.py:auth_middleware) sets, on
+# EVERY request (single-tenant, multi-tenant, and exempt):
+#
+#   request.state.workspace_id : int
+#   request.state.persona_scope: frozenset[str] | None
+#   request.state.is_admin     : bool
+#
+# NB3 semantics (already enforced in orchestration.tenant_auth.resolve_tenant_binding):
+#   * persona_scope is None      -> ADMIN / single-tenant -> allow-all personas.
+#   * persona_scope is frozenset()-> NON-admin with zero personas -> deny-all.
+#     A non-admin token NEVER carries None (WS2 coerces it).
+# So the gate is exactly: None -> allow; persona_id not in scope -> 403. The
+# empty frozenset naturally 403s every persona_id. No ambiguity to handle.
+
+
+def _persona_scope(request: Request) -> frozenset[str] | None:
+    """Read the caller's persona scope off request.state (WS2 contract).
+
+    Defaults to ``None`` (admin allow-all / single-tenant) when the attribute
+    is absent — e.g. a unit test that constructs a Request without the
+    middleware. The middleware sets it on every real request.
+    """
+    return getattr(request.state, "persona_scope", None)
+
+
+def _workspace_id(request: Request) -> int:
+    """Read the caller's workspace_id off request.state (WS2 contract).
+
+    Falls back to the canonical ``DEFAULT_WORKSPACE_ID`` (orchestration
+    contract) when absent — the same default the middleware itself sets in
+    single-tenant mode. Lazy import keeps orchestration out of module init.
+    """
+    try:
+        from orchestration.contract import DEFAULT_WORKSPACE_ID  # noqa: PLC0415
+    except Exception:
+        DEFAULT_WORKSPACE_ID = 1  # contract default; mirrored for fail-open
+    return int(getattr(request.state, "workspace_id", DEFAULT_WORKSPACE_ID))
+
+
+def _scoped_conversation_id(request: Request, conversation_id: str) -> str:
+    """Bind a dashboard conversation id to the caller's workspace (BLOCKER #2).
+
+    The dashboard conversation routes store/read by ``conversation_id`` only —
+    the default id is the SHARED constant ``'dashboard-main'`` and the chat
+    session_id is ``web:{conversation_id}:{conversation_id}`` (no workspace /
+    persona dimension). Two tenants both defaulting to ``dashboard-main`` would
+    read/write the SAME chat session, SSE replay buffer, and
+    ``_conversation_personas`` entry — tenant B reads tenant A's thread.
+
+    This helper makes ``workspace_id`` the true tenant boundary: every key the
+    conversation routes derive (session_id, Channel.platform_id, Thread.thread_id,
+    the in-memory ``_conversation_personas`` map, and the SSE replay buffer) is
+    built from the RETURNED value, so different workspaces never collide.
+
+    PARITY (load-bearing): for ``workspace_id == DEFAULT_WORKSPACE_ID`` (1 — the
+    single-tenant default the middleware sets when enforcement is OFF / zero
+    tenant rows) the id is returned UNCHANGED, so existing single-tenant chat
+    sessions, SSE buffers, and tests are byte-identical. Only a non-default
+    workspace gets the ``ws{N}.`` prefix. The prefix chars (``ws``, digits, ``.``)
+    are all inside ``_DASHBOARD_CHAT_ID_RE``; the workspace id is a small int so
+    the result stays within the 128-char id limit.
+    """
+    try:
+        from orchestration.contract import DEFAULT_WORKSPACE_ID  # noqa: PLC0415
+    except Exception:
+        DEFAULT_WORKSPACE_ID = 1
+    ws = _workspace_id(request)
+    if ws == DEFAULT_WORKSPACE_ID:
+        return conversation_id  # single-tenant parity — byte-identical old key.
+    return f"ws{ws}.{conversation_id}"
+
+
+def _require_persona_in_scope(request: Request, persona_id: str) -> None:
+    """403 when *persona_id* is outside the caller's tenant persona scope (NB3).
+
+    ``None`` scope (admin / single-tenant) allows all personas. A non-admin
+    tenant token carries a concrete frozenset (possibly empty); a persona_id
+    outside it — including EVERY persona_id when the set is empty — is denied.
+    """
+    scope = _persona_scope(request)
+    if scope is None:
+        return
+    if persona_id not in scope:
+        raise HTTPException(status_code=403, detail="persona not in tenant scope")
+
+
+def _require_scoped_persona_filter(
+    request: Request,
+    *,
+    persona_id: str | None,
+) -> None:
+    """NB4 — a non-admin tenant must NOT receive aggregate/all data.
+
+    The aggregate read routes (``/api/memory/graph``, ``/api/brain/graph``,
+    ``/api/memories``, ``/api/hive-mind/recent``) default to a NO-FILTER /
+    ``scope=all`` form that returns cross-persona data. For an admin /
+    single-tenant caller (``scope is None``) that aggregate is allowed. For a
+    NON-admin tenant token it is the exact leak B5/NB4 closes:
+
+      * no persona filter supplied (``persona_id is None``) -> 403 admin-only.
+        A tenant must name a persona it owns; it may not omit the filter and
+        receive everything.
+      * a persona filter that is OUTSIDE the caller's scope                -> 403
+        (delegated to ``_require_persona_in_scope``).
+
+    ``get_brain_graph`` calls ``get_memory_graph`` / ``get_hive_mind_recent``
+    internally and threads its OWN ``request`` through, so the inner calls re-run
+    this gate idempotently (the same request that passed at the brain boundary
+    passes again). FastAPI cannot inject a ``Request | None`` field, so the route
+    signatures keep a bare required ``request: Request`` and the brain handler
+    forwards it.
+    """
+    scope = _persona_scope(request)
+    if scope is None:
+        return  # admin / single-tenant — aggregate allowed.
+    if persona_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="aggregate view is admin-only; tenant tokens must scope to an owned persona",
+        )
+    _require_persona_in_scope(request, persona_id)
+
+
+def _require_target_persona_physical(request: Request, persona_id: str) -> None:
+    """M4 destructive-route physical-state gate — read disk, not a cache (Rule 2).
+
+    Runs AFTER the persona-scope check on destructive persona routes
+    (soft/hard delete, avatar PUT/DELETE, file PATCH). For a NON-admin tenant
+    caller, resolves the target profile's PHYSICAL state via
+    ``_profile_disk_state`` (which reads ``resolve_profile_root(...).exists()``)
+    and refuses to mutate a profile whose root is gone:
+
+      * 'deleted' (root missing) -> 404 (already gone / never existed)
+
+    PARITY GUARD: this gate is TENANT-ONLY. For an admin / single-tenant caller
+    (``persona_scope is None``) it is a NO-OP, so the existing single-tenant
+    avatar/file behavior — input validation (415/413/422) firing BEFORE any
+    physical check, and idempotent deletes on a not-yet-materialized profile —
+    is byte-unchanged. A non-admin tenant token never carries ``None``, so the
+    physical check engages exactly when a real tenant boundary exists.
+
+    Why M4 reads PHYSICAL state, not a meta row (Rule 2): a tenant must not be
+    able to act on a stale id whose backing profile was removed/copied/restored
+    out from under a cache. The scope frozenset says "you MAY name this persona";
+    the disk says "and it still exists". Expected-id mismatch (409) stays inline
+    in the hard-delete handler's ``expected_persona_id`` contract.
+    """
+    if _persona_scope(request) is None:
+        return  # admin / single-tenant — preserve existing behavior byte-for-byte.
+    if _profile_disk_state(persona_id) == "deleted":
+        raise HTTPException(status_code=404, detail="persona profile not found")
+
+
 def _redact_bot_token(text: str) -> str:
     """Redact resolved bot-token values from a config-yaml-shaped string.
 
@@ -988,8 +1144,18 @@ def get_info() -> dict:
 
 
 @router.get("/api/agents")
-def list_agents() -> dict:
-    return {"agents": _list_personas()}
+def list_agents(request: Request) -> dict:
+    """List personas, FILTERED to the caller's tenant scope (NB3 enumeration leak).
+
+    Admin / single-tenant (scope is None) sees every persona. A non-admin
+    tenant token sees ONLY the personas in its scope — an empty scope sees an
+    empty list. The id key shipped by ``_list_personas`` is ``"id"``.
+    """
+    agents = _list_personas()
+    scope = _persona_scope(request)
+    if scope is not None:
+        agents = [a for a in agents if a.get("id") in scope]
+    return {"agents": agents}
 
 
 @router.post("/api/agents")
@@ -1033,11 +1199,17 @@ def create_agent(body: CreatePersonaBody) -> dict:
 
 
 @router.delete("/api/agents/{persona_id}")
-def soft_delete_agent(persona_id: str) -> dict:
+def soft_delete_agent(persona_id: str, request: Request) -> dict:
     """Soft-delete (canonical DELETE) — calls personas.lifecycle.delete_profile."""
     _reject_main_translation(persona_id)
+    # WS3 — tenant persona scope gate FIRST (403 before any state read), then
+    # M4 physical-state gate (404 on a stale/partial profile under the caller's
+    # root). Scope precedes physical so a cross-tenant probe can't distinguish
+    # "exists" from "not in scope".
+    _require_persona_in_scope(request, persona_id)
     if persona_id == "default":
         raise HTTPException(status_code=400, detail="cannot delete default persona")
+    _require_target_persona_physical(request, persona_id)
 
     # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
     from security import kill_switches  # noqa: PLC0415
@@ -1184,6 +1356,11 @@ async def hard_delete_agent(
 ) -> JSONResponse:
     """Enterprise-grade hard-delete. 6 requirements per PRP §1014-1022."""
     _reject_main_translation(persona_id)
+    # WS3 — tenant persona scope gate FIRST: a cross-tenant hard-delete is 403'd
+    # before any audit-before write or state read. The existing
+    # expected_persona_id (409) + disk-state (404/207/500) gates below complete
+    # the M4 contract.
+    _require_persona_in_scope(request, persona_id)
 
     # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
     # Hard-delete is the most destructive persona mutation; refuse BEFORE any
@@ -1452,10 +1629,15 @@ async def get_audit_log(
 @router.put("/api/agents/{persona_id}/avatar")
 async def put_avatar(
     persona_id: str,
+    request: Request,
     image: UploadFile = File(...),
 ) -> JSONResponse:
     """7 requirements per PRP §1023-1041 — magic-byte verify + atomic write."""
     _reject_main_translation(persona_id)
+    # WS3 — tenant persona scope gate (403), then M4 physical-state gate (404 on
+    # a deleted target, tenant-only) BEFORE reading the upload body.
+    _require_persona_in_scope(request, persona_id)
+    _require_target_persona_physical(request, persona_id)
     if persona_id == "default":
         # Allow default avatar upload? PRP doesn't ban it — proceed.
         pass
@@ -1605,9 +1787,13 @@ async def put_avatar(
 
 
 @router.delete("/api/agents/{persona_id}/avatar")
-def delete_avatar(persona_id: str) -> dict:
+def delete_avatar(persona_id: str, request: Request) -> dict:
     """Idempotent — removes any avatar.{png,jpg,webp} present."""
     _reject_main_translation(persona_id)
+    # WS3 — tenant persona scope gate (403), then M4 physical-state gate (404 on
+    # a deleted target, tenant-only).
+    _require_persona_in_scope(request, persona_id)
+    _require_target_persona_physical(request, persona_id)
 
     # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
     from security import kill_switches  # noqa: PLC0415
@@ -1638,8 +1824,9 @@ def delete_avatar(persona_id: str) -> dict:
 
 
 @router.post("/api/agents/{persona_id}/activate")
-def activate_agent(persona_id: str) -> dict:
+def activate_agent(persona_id: str, request: Request) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
 
     # PRD-8 Phase 7b WS4.3 — persona_operations kill-switch (Rule 3 module-attr).
     # SECOND switch — runtime lifecycle ONLY (activate/deactivate/restart).
@@ -1672,8 +1859,9 @@ def activate_agent(persona_id: str) -> dict:
 
 
 @router.post("/api/agents/{persona_id}/deactivate")
-def deactivate_agent(persona_id: str) -> dict:
+def deactivate_agent(persona_id: str, request: Request) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
 
     # PRD-8 Phase 7b WS4.3 — persona_operations kill-switch (Rule 3 module-attr).
     from security import kill_switches  # noqa: PLC0415
@@ -1699,8 +1887,9 @@ def deactivate_agent(persona_id: str) -> dict:
 
 
 @router.post("/api/agents/{persona_id}/restart")
-def restart_agent(persona_id: str) -> dict:
+def restart_agent(persona_id: str, request: Request) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
 
     # PRD-8 Phase 7b WS4.3 — persona_operations kill-switch (Rule 3 module-attr).
     from security import kill_switches  # noqa: PLC0415
@@ -1729,8 +1918,13 @@ def restart_agent(persona_id: str) -> dict:
 
 
 @router.post("/api/agents/validate-id")
-def validate_id(body: ValidateIdBody) -> dict:
+def validate_id(body: ValidateIdBody, request: Request) -> dict:
     pid = body.persona_id
+    # WS3 — tenant persona scope gate on the candidate id. validate-id checks
+    # `already_exists` against ALL profiles, which would leak the existence of
+    # out-of-scope personas to a tenant token; gating the body id closes that
+    # probe (admin / single-tenant scope=None still validates any id).
+    _require_persona_in_scope(request, pid)
     if pid in _RESERVED_PERSONA_NAMES:
         return {"valid": False, "reason": "reserved"}
     try:
@@ -1913,8 +2107,9 @@ def patch_global_model(body: PatchModelBody) -> dict:
 
 
 @router.get("/api/agents/{persona_id}")
-def get_agent(persona_id: str) -> dict:
+def get_agent(persona_id: str, request: Request) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
     try:
         cfg = personas.load_persona_config(persona_id)
     except FileNotFoundError:
@@ -1979,7 +2174,7 @@ def _patch_persona_config_model(persona_id: str, model: str, *, scope: str) -> N
 
 
 @router.patch("/api/agents/{persona_id}/model")
-def patch_per_agent_model(persona_id: str, body: PatchModelBody) -> dict:
+def patch_per_agent_model(persona_id: str, body: PatchModelBody, request: Request) -> dict:
     """Per-agent model swap — updates persona config.yaml.model.preferred.
 
     Returns ``{ok, restartRequired}`` matching donor Agents.tsx:237.
@@ -1987,6 +2182,7 @@ def patch_per_agent_model(persona_id: str, body: PatchModelBody) -> dict:
     /api/agents/{id}/restart).
     """
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
 
     # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
     # NM1 boundary: per-agent model PATCH writes ``config.yaml``.
@@ -2031,8 +2227,9 @@ def _resolve_file_path(persona_id: str, filename: str) -> Path:
 
 
 @router.get("/api/agents/{persona_id}/files")
-def get_files(persona_id: str) -> dict:
+def get_files(persona_id: str, request: Request) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
     out: dict[str, str] = {}
     for filename in _FILE_ALLOWLIST:
         path = _resolve_file_path(persona_id, filename)
@@ -2048,8 +2245,12 @@ def get_files(persona_id: str) -> dict:
 
 
 @router.patch("/api/agents/{persona_id}/files/{filename}")
-def patch_file(persona_id: str, filename: str, body: PatchFileBody) -> dict:
+def patch_file(persona_id: str, filename: str, body: PatchFileBody, request: Request) -> dict:
     _reject_main_translation(persona_id)
+    # WS3 — tenant persona scope gate (403), then M4 physical-state gate (404 on
+    # a deleted target, tenant-only) before writing/snapshotting persona files.
+    _require_persona_in_scope(request, persona_id)
+    _require_target_persona_physical(request, persona_id)
 
     # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
     # NM1 boundary: file PATCH writes arbitrary persona files (CLAUDE.md,
@@ -2135,8 +2336,9 @@ def _snapshot_to_history(persona_id: str, filename: str, content: str) -> None:
 
 
 @router.get("/api/agents/{persona_id}/files/history")
-def get_file_history(persona_id: str) -> dict:
+def get_file_history(persona_id: str, request: Request) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
     conn = get_connection()
     try:
         rows = conn.execute(
@@ -2159,10 +2361,12 @@ def get_file_history(persona_id: str) -> dict:
 @router.get("/api/agents/{persona_id}/conversation")
 def get_conversation(
     persona_id: str,
+    request: Request,
     limit: int = Query(default=50, ge=1, le=500),
     before_id: int | None = Query(default=None),
 ) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
     chat_db_path = Path(config.CHAT_DB_PATH)
     if not chat_db_path.is_file():
         return {"turns": [], "next_before_id": None}
@@ -2210,9 +2414,11 @@ def get_conversation(
 @router.get("/api/agents/{persona_id}/tokens")
 def get_agent_tokens(
     persona_id: str,
+    request: Request,
     range: str = Query(default="30d"),
 ) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
     return _aggregate_lane_aware_tokens(persona_id=persona_id, range_str=range)
 
 
@@ -2220,8 +2426,9 @@ def get_agent_tokens(
 
 
 @router.get("/api/agents/{persona_id}/tasks")
-def get_agent_tasks(persona_id: str) -> dict:
+def get_agent_tasks(persona_id: str, request: Request) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
     # Lazy import — avoid pulling orchestration into module init.
     from orchestration.convoy_service import ConvoyService
     from orchestration.db import OrchestrationDB
@@ -2230,10 +2437,13 @@ def get_agent_tasks(persona_id: str) -> dict:
     if not db_path.is_file():
         return {"tasks": []}
 
+    # WS3 — this route is tenant_persona + tenant_workspace: thread the caller's
+    # workspace_id so a tenant only sees subtasks in its own workspace.
+    ws = _workspace_id(request)
     db = OrchestrationDB(str(db_path))
     try:
         svc = ConvoyService(db)
-        rows = svc.list_subtasks_by_agent(persona_id)
+        rows = svc.list_subtasks_by_agent(persona_id, workspace_id=ws)
         tasks = [
             {
                 "convoy_id": r.convoy_id,
@@ -2370,8 +2580,8 @@ def _work_summary(tasks: list[dict[str, Any]]) -> dict[str, int]:
     return summary
 
 
-def _work_get_subtask_payload(svc: Any, subtask: Any) -> dict[str, Any]:
-    convoy = svc.get_convoy(subtask.convoy_id)
+def _work_get_subtask_payload(svc: Any, subtask: Any, *, workspace_id: int = 1) -> dict[str, Any]:
+    convoy = svc.get_convoy(subtask.convoy_id, workspace_id=workspace_id)
     return _work_task_payload(subtask, convoy.convoy if convoy else None)
 
 
@@ -2380,19 +2590,23 @@ def _work_apply_status(
     subtask: Any,
     status: str,
     error_message: str | None,
+    *,
+    workspace_id: int = 1,
 ) -> Any:
     if status not in _WORK_STATUS_IDS:
         raise HTTPException(status_code=422, detail=f"invalid work status: {status}")
     if status == subtask.status:
         return subtask
     if status == "completed":
-        svc.handle_subtask_completion(subtask.id)
-        updated = svc.get_subtask(subtask.id)
+        svc.handle_subtask_completion(subtask.id, workspace_id=workspace_id)
+        updated = svc.get_subtask(subtask.id, workspace_id=workspace_id)
     elif status == "failed":
-        svc.handle_subtask_failure(subtask.id, error_message=error_message)
-        updated = svc.get_subtask(subtask.id)
+        svc.handle_subtask_failure(
+            subtask.id, workspace_id=workspace_id, error_message=error_message
+        )
+        updated = svc.get_subtask(subtask.id, workspace_id=workspace_id)
     elif status in {"running", "stalled", "cancelled"}:
-        updated = svc.transition_subtask(subtask.id, status)
+        updated = svc.transition_subtask(subtask.id, status, workspace_id=workspace_id)
     elif status == "dispatched":
         raise HTTPException(
             status_code=409,
@@ -2410,6 +2624,7 @@ def _work_apply_status(
 
 @router.get("/api/work/tasks")
 def list_work_tasks(
+    request: Request,
     status: str | None = Query(default=None),
     assigned_agent_id: str | None = Query(default=None),
 ) -> dict:
@@ -2425,14 +2640,17 @@ def list_work_tasks(
             "summary": _work_summary([]),
         }
 
+    # WS3 — tenant_workspace: scope every convoy/subtask read to the caller's
+    # workspace so a tenant only sees its own work rows.
+    ws = _workspace_id(request)
     from orchestration.convoy_service import ConvoyService
 
     try:
         svc = ConvoyService(db)
         tasks: list[dict[str, Any]] = []
         convoys: list[dict[str, Any]] = []
-        for convoy_row in svc.list_convoys():
-            convoy_full = svc.get_convoy(convoy_row.id)
+        for convoy_row in svc.list_convoys(workspace_id=ws):
+            convoy_full = svc.get_convoy(convoy_row.id, workspace_id=ws)
             if not convoy_full:
                 continue
             convoys.append(_work_convoy_payload(convoy_full.convoy))
@@ -2454,10 +2672,15 @@ def list_work_tasks(
 
 
 @router.post("/api/work/tasks")
-def create_work_task(body: CreateWorkTaskBody) -> dict:
+def create_work_task(body: CreateWorkTaskBody, request: Request) -> dict:
     from orchestration.convoy_service import ConvoyService
     from orchestration.models import AddSubtaskInput, CreateConvoyInput, CreateSubtaskInput
 
+    # WS3 — tenant_workspace: every created convoy/subtask lands under the
+    # caller's workspace, and an add-to-existing-convoy is scoped so a tenant
+    # cannot append to another workspace's convoy (cross-ws add -> ValueError ->
+    # 400 from the existing handler).
+    ws = _workspace_id(request)
     db = _open_work_orchestration_db(create=True)
     try:
         svc = ConvoyService(db)
@@ -2474,9 +2697,10 @@ def create_work_task(body: CreateWorkTaskBody) -> dict:
                         metadata=metadata,
                     )
                 ],
+                workspace_id=ws,
             )
             subtask = subtasks[0]
-            convoy = svc.get_convoy(body.convoy_id)
+            convoy = svc.get_convoy(body.convoy_id, workspace_id=ws)
         else:
             created = svc.create_convoy(
                 CreateConvoyInput(
@@ -2492,12 +2716,13 @@ def create_work_task(body: CreateWorkTaskBody) -> dict:
                             metadata=metadata,
                         )
                     ],
-                )
+                ),
+                workspace_id=ws,
             )
             subtask = created.subtasks[0]
             convoy = created
         return {
-            "task": _work_get_subtask_payload(svc, subtask),
+            "task": _work_get_subtask_payload(svc, subtask, workspace_id=ws),
             "convoy": _work_convoy_payload(convoy.convoy if convoy else None),
         }
     except ValueError as exc:
@@ -2507,16 +2732,19 @@ def create_work_task(body: CreateWorkTaskBody) -> dict:
 
 
 @router.patch("/api/work/tasks/{task_id}")
-def patch_work_task(task_id: int, body: PatchWorkTaskBody) -> dict:
+def patch_work_task(task_id: int, body: PatchWorkTaskBody, request: Request) -> dict:
     from orchestration.convoy_service import ConvoyService
 
     db = _open_work_orchestration_db(create=False)
     if db is None:
         raise HTTPException(status_code=404, detail=f"task {task_id} not found")
 
+    # WS3 — tenant_workspace: a cross-workspace task_id resolves to None ->
+    # 404 (the tenant cannot even tell another workspace's task exists).
+    ws = _workspace_id(request)
     try:
         svc = ConvoyService(db)
-        subtask = svc.get_subtask(task_id)
+        subtask = svc.get_subtask(task_id, workspace_id=ws)
         if subtask is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
 
@@ -2526,7 +2754,7 @@ def patch_work_task(task_id: int, body: PatchWorkTaskBody) -> dict:
             if key in patch:
                 fields[key] = patch[key]
         if fields:
-            subtask = svc.update_subtask_fields(task_id, fields)
+            subtask = svc.update_subtask_fields(task_id, fields, workspace_id=ws)
 
         requested_status = patch.get("status")
         if requested_status is not None:
@@ -2535,8 +2763,9 @@ def patch_work_task(task_id: int, body: PatchWorkTaskBody) -> dict:
                 subtask,
                 str(requested_status),
                 body.error_message,
+                workspace_id=ws,
             )
-        return {"task": _work_get_subtask_payload(svc, subtask)}
+        return {"task": _work_get_subtask_payload(svc, subtask, workspace_id=ws)}
     except HTTPException:
         raise
     except ValueError as exc:
@@ -2546,27 +2775,35 @@ def patch_work_task(task_id: int, body: PatchWorkTaskBody) -> dict:
 
 
 @router.post("/api/work/tasks/{task_id}/dispatch")
-def dispatch_work_task(task_id: int, body: DispatchWorkTaskBody | None = None) -> dict:
+def dispatch_work_task(
+    task_id: int,
+    request: Request,
+    body: DispatchWorkTaskBody | None = None,
+) -> dict:
     from orchestration.convoy_service import ConvoyService
 
     db = _open_work_orchestration_db(create=False)
     if db is None:
         raise HTTPException(status_code=404, detail=f"task {task_id} not found")
 
+    # WS3 — tenant_workspace: cross-workspace task -> None -> 404; dispatch is
+    # also workspace-scoped so a tenant can't dispatch another ws's subtask.
+    ws = _workspace_id(request)
     try:
         svc = ConvoyService(db)
-        subtask = svc.get_subtask(task_id)
+        subtask = svc.get_subtask(task_id, workspace_id=ws)
         if subtask is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
         receipt = svc.dispatch_subtask(
             task_id,
+            workspace_id=ws,
             paperclip_issue_id=body.paperclip_issue_id if body else None,
         )
-        updated = svc.get_subtask(task_id)
+        updated = svc.get_subtask(task_id, workspace_id=ws)
         if updated is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
         return {
-            "task": _work_get_subtask_payload(svc, updated),
+            "task": _work_get_subtask_payload(svc, updated, workspace_id=ws),
             "receipt": {
                 "status": receipt.status,
                 "external_ref": receipt.external_ref,
@@ -3200,17 +3437,28 @@ def _add_cabinet_session_nodes(
 
 @router.get("/api/memory/graph")
 def get_memory_graph(
+    request: Request,
     scope: str = Query(default="all"),
     scope_id: str | None = Query(default=None),
     limit: int = Query(default=120, ge=1, le=300),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
-    """Read-only vault/memory graph. Does NOT call recall_service."""
+    """Read-only vault/memory graph. Does NOT call recall_service.
+
+    ``get_brain_graph`` forwards its OWN ``request`` here (internal call), so the
+    NB4 gate runs idempotently. FastAPI cannot inject ``Request | None``, so the
+    param is a bare required ``Request``.
+    """
     allowed_scopes = {"all", "global", "persona", "agent", "team", "room"}
     if scope not in allowed_scopes:
         raise HTTPException(status_code=422, detail=f"invalid scope: {scope}")
     if scope == "persona" and scope_id is not None:
         _reject_main_translation(scope_id)
+    # NB4 — a non-admin tenant may only read a persona/agent scope it owns; the
+    # aggregate ("all"/"global"/"team"/"room", or persona/agent with no
+    # scope_id) is admin-only. The persona filter for this route is ``scope_id``.
+    _nb4_persona = scope_id if scope in ("persona", "agent") else None
+    _require_scoped_persona_filter(request, persona_id=_nb4_persona)
 
     db_path = Path(config.DATABASE_PATH) if hasattr(config, "DATABASE_PATH") else None
     vault_root = Path(config.MEMORY_DIR).resolve(strict=False)
@@ -3368,6 +3616,7 @@ def _brain_activity_persona_filter(scope: str, scope_id: str | None) -> str | No
 
 @router.get("/api/brain/graph")
 def get_brain_graph(
+    request: Request,
     scope: str = Query(default="all"),
     scope_id: str | None = Query(default=None),
     activity_window_minutes: int = Query(default=60, ge=1),
@@ -3380,11 +3629,19 @@ def get_brain_graph(
         raise HTTPException(status_code=422, detail=f"invalid scope: {scope}")
     if scope == "persona" and scope_id is not None:
         _reject_main_translation(scope_id)
+    # NB4 — gate at THIS boundary, then forward THIS request into the memory/hive
+    # helpers so they re-run the same (already-passed) gate idempotently. The
+    # persona filter for the brain graph is ``scope_id``.
+    _nb4_persona = scope_id if scope in ("persona", "agent") else None
+    _require_scoped_persona_filter(request, persona_id=_nb4_persona)
 
-    memory = get_memory_graph(scope=scope, scope_id=scope_id, limit=limit, offset=offset)
+    memory = get_memory_graph(
+        request, scope=scope, scope_id=scope_id, limit=limit, offset=offset
+    )
     activity_persona_id = _brain_activity_persona_filter(scope, scope_id)
     activity_limit = min(limit, 200)
     hive = get_hive_mind_recent(
+        request,
         limit=activity_limit,
         persona_id=activity_persona_id,
         window_minutes=activity_window_minutes,
@@ -3434,6 +3691,7 @@ def get_brain_graph(
 
 @router.get("/api/memories")
 def get_memories(
+    request: Request,
     persona_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     before_id: int | None = Query(default=None),
@@ -3441,6 +3699,9 @@ def get_memories(
     """Paginated memory listing. Does NOT call recall_service (read-only)."""
     if persona_id is not None:
         _reject_main_translation(persona_id)
+    # NB4 — non-admin tenant must scope to an owned persona; persona_id=None
+    # (no-filter aggregate) is admin-only.
+    _require_scoped_persona_filter(request, persona_id=persona_id)
     db_path = Path(config.DATABASE_PATH) if hasattr(config, "DATABASE_PATH") else None
     if db_path is None or not db_path.is_file():
         return {"memories": [], "stats": {}, "next_before_id": None}
@@ -3562,12 +3823,17 @@ def get_tokens(
 
 @router.get("/api/hive-mind/recent")
 def get_hive_mind_recent(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     persona_id: str | None = Query(default=None),
     window_minutes: int = Query(default=60, ge=1),
 ) -> dict:
     if persona_id is not None:
         _reject_main_translation(persona_id)
+    # NB4 — non-admin tenant must scope to an owned persona; persona_id=None
+    # (no-filter aggregate) is admin-only. get_brain_graph forwards its OWN
+    # request here, so the same already-passed gate re-runs idempotently.
+    _require_scoped_persona_filter(request, persona_id=persona_id)
     chat_db_path = Path(config.CHAT_DB_PATH)
     if not chat_db_path.is_file():
         return {"entries": []}
@@ -4065,14 +4331,19 @@ def _get_dashboard_chat_runtime() -> dict[str, Any]:
 @router.get("/api/conversation/{persona_id}/history")
 def conversation_history(
     persona_id: str,
+    request: Request,
     conversation_id: str = Query(default=_DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID),
     limit: int = Query(default=80, ge=1, le=300),
 ) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
     conversation_id = _normalize_dashboard_chat_id(
         conversation_id,
         fallback=_DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID,
     )
+    # BLOCKER #2 — bind the conversation to the caller's workspace so two
+    # tenants sharing the default 'dashboard-main' id read DIFFERENT sessions.
+    conversation_id = _scoped_conversation_id(request, conversation_id)
     chat_db_path = Path(config.CHAT_DB_PATH)
     if not chat_db_path.is_file():
         return {"turns": [], "next_before_id": None}
@@ -4121,12 +4392,19 @@ def conversation_history(
 
 
 @router.post("/api/conversation/{persona_id}/send")
-async def conversation_send(persona_id: str, body: DashboardChatSendBody) -> dict:
+async def conversation_send(persona_id: str, body: DashboardChatSendBody, request: Request) -> dict:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
     conversation_id = _normalize_dashboard_chat_id(
         body.conversation_id,
         fallback=_DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID,
     )
+    # BLOCKER #2 — workspace-scope the conversation id BEFORE it flows into the
+    # Channel/Thread (→ chat session_id), the _conversation_personas map, and the
+    # SSE replay buffer, so a tenant's send never lands in another tenant's
+    # default-id session. The response echoes the raw client id (below).
+    raw_conversation_id = conversation_id
+    conversation_id = _scoped_conversation_id(request, conversation_id)
     user_id = _normalize_dashboard_chat_id(body.user_id, fallback="dashboard-user")
     display_name = (body.display_name or "Dashboard").strip()[:128] or "Dashboard"
     raw_text = (body.text or "").strip()
@@ -4182,7 +4460,10 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody) -> dic
         "ok": True,
         "queued": True,
         "persona_id": persona_id,
-        "conversation_id": conversation_id,
+        # Echo the RAW client id — the frontend re-sends it to history/stream,
+        # which re-scope it server-side. The internal ws-prefixed key never
+        # leaves the server.
+        "conversation_id": raw_conversation_id,
         "request_id": request_id,
     }
 
@@ -4194,6 +4475,11 @@ async def conversation_stream(
     conversation_id: str = Query(default="default"),
 ) -> StreamingResponse:
     _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
+    # BLOCKER #2 — scope the SSE replay-buffer key by workspace so two tenants
+    # streaming the same default conversation id read DISJOINT buffers. Every
+    # _sse_buffer_for/_sse_buffer_append below uses this scoped value.
+    conversation_id = _scoped_conversation_id(request, conversation_id)
 
     last_event_id_header = request.headers.get("Last-Event-ID")
     last_event_id: int | None = None

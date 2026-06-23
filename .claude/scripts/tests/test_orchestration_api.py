@@ -1505,3 +1505,192 @@ def test_phase7a_audit_log_path_exempt_from_outer_bearer(tmp_path, monkeypatch):
         f"Got {r.status_code}: {r.text}"
     )
     db.close()
+
+
+# ── Tenant Isolation v0 Phase B — per-route enforcement matrix (M1) ──────────
+#
+# NOT "route families": every ORCHESTRATION route in ROUTE_POLICY gets driven in
+# multi-tenant mode with a tenant token, asserting the POLICY-CLASS contract:
+#   admin        -> tenant token 403
+#   voice_query  -> tenant HEADER token 403
+#   public       -> tenant token NOT 401/403 (no tenant data, but reachable)
+#   tenant_*     -> a cross-tenant resource id is 404 (workspace) — covered by the
+#                   data-seeded cross-tenant block below + test_tenant_isolation_phase_a.
+#
+# The admin/voice/public rows are parameterized straight from ROUTE_POLICY so a
+# newly-added orchestration route of those classes is automatically asserted.
+
+import importlib as _importlib  # noqa: E402
+from unittest.mock import patch as _patch  # noqa: E402
+
+from orchestration.route_policy import ROUTE_POLICY as _ROUTE_POLICY  # noqa: E402
+from orchestration.tenant_auth import hash_token as _hash_token  # noqa: E402
+
+_MX_ADMIN = "mx-admin-token"
+_MX_TOKEN_A = "mx-tenant-a-token"
+_MX_TOKEN_B = "mx-tenant-b-token"
+
+
+def _mx_auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+# Orchestration routes only (the 37). Dashboard routes are WS3's matrix.
+_ORCH_PREFIXES = (
+    "/api/convoy",
+    "/api/executor",
+    "/api/mailbox",
+    "/api/team",
+    "/api/capabilities",
+)
+
+
+def _is_orch(template: str) -> bool:
+    return any(template == p or template.startswith(p + "/") or template.startswith(p)
+               for p in _ORCH_PREFIXES) and template.startswith("/api/")
+
+
+def _orch_routes_for_policy(policy: str) -> list[tuple[str, str]]:
+    return sorted(
+        (m, t)
+        for (m, t), p in _ROUTE_POLICY.items()
+        if p == policy and _is_orch(t)
+    )
+
+
+def _concrete_url(template: str) -> str:
+    """Realize a template to a concrete (non-existent) id URL for a 403 probe.
+
+    The probe asserts the POLICY layer (403 BEFORE the handler), so the ids never
+    need to exist — a 403 fires in the middleware regardless of the id.
+    """
+    return (
+        template.replace("{convoy_id}", "999999")
+        .replace("{subtask_id}", "999999")
+        .replace("{team_id}", "999999")
+        .replace("{agent_id}", "ghost")
+        .replace("{delivery_id}", "999999")
+        .replace("{filename}", "ghost.md")
+    )
+
+
+@pytest.fixture
+def mx_mt_api(tmp_path, monkeypatch):
+    """Multi-tenant orchestration app: admin + two tenant tokens (ws 1 / ws 2)."""
+    db_path = tmp_path / "mx.db"
+    monkeypatch.setenv("ORCHESTRATION_API_TOKEN", _MX_ADMIN)
+    monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
+    monkeypatch.setenv("HOMIE_TENANT_ENFORCEMENT", "true")
+    with _patch("config.ORCHESTRATION_DB_PATH", db_path):
+        import orchestration.api as api_mod
+
+        _importlib.reload(api_mod)
+        db, cs, ms, reg, ts = api_mod._get_services()
+        api_mod._db = db
+        api_mod._convoy_svc = cs
+        api_mod._mailbox_svc = ms
+        api_mod._executor_registry = reg
+        api_mod._team_svc = ts
+        db.insert_tenant_token(_hash_token(_MX_ADMIN), 1, None, True, "admin")
+        db.insert_tenant_token(_hash_token(_MX_TOKEN_A), 1, '["persona-a"]', False, "tenant-a")
+        db.insert_tenant_token(_hash_token(_MX_TOKEN_B), 2, '["persona-b"]', False, "tenant-b")
+        try:
+            yield api_mod
+        finally:
+            db.close()
+
+
+@pytest.mark.parametrize("method,template", _orch_routes_for_policy("admin"))
+def test_matrix_admin_route_403s_tenant_allows_admin(mx_mt_api, method, template):
+    """Every ADMIN orchestration route: tenant token 403; admin token NOT 403."""
+    client = TestClient(mx_mt_api.app)
+    url = _concrete_url(template)
+    rt = client.request(method, url, headers=_mx_auth(_MX_TOKEN_B))
+    assert rt.status_code == 403, f"{method} {url} should 403 a tenant token"
+    assert rt.json()["detail"] == "admin-only"
+    # The admin token passes the policy layer (may then 404/400/200 in the
+    # handler, but must NOT be the policy 403 "admin-only").
+    ra = client.request(method, url, headers=_mx_auth(_MX_ADMIN))
+    assert not (ra.status_code == 403 and ra.json().get("detail") == "admin-only")
+
+
+@pytest.mark.parametrize("method,template", _orch_routes_for_policy("voice_query"))
+def test_matrix_voice_query_route_403s_tenant_header(mx_mt_api, method, template):
+    """Every voice_query orchestration route 403s a tenant HEADER token (NB2).
+
+    (There are no voice routes under the orchestration prefixes today; this
+    parameterization auto-covers any future one.)"""
+    client = TestClient(mx_mt_api.app)
+    url = _concrete_url(template)
+    rt = client.request(method, url, headers=_mx_auth(_MX_TOKEN_B))
+    assert rt.status_code == 403
+
+
+@pytest.mark.parametrize("method,template", _orch_routes_for_policy("tenant_workspace"))
+def test_matrix_tenant_workspace_route_authenticates_both_tenants(mx_mt_api, method, template):
+    """Every tenant_workspace orchestration route is REACHABLE by a bound tenant
+    token (not a policy 403/401) — proving the policy layer admits it so the
+    handler's ws-scoped id gate (404 on cross-tenant) is what enforces isolation.
+
+    A concrete non-existent id yields a handler 404/400/422 — NEVER a policy 403
+    'admin-only' and NEVER a 401. That distinguishes 'policy admitted, handler
+    gated' from 'policy denied'."""
+    client = TestClient(mx_mt_api.app)
+    url = _concrete_url(template)
+    r = client.request(method, url, headers=_mx_auth(_MX_TOKEN_B), json={})
+    assert r.status_code != 401, f"{method} {url} 401'd a valid bound tenant token"
+    if r.status_code == 403:
+        assert r.json().get("detail") != "admin-only", (
+            f"{method} {url} wrongly classified admin-only for a tenant_workspace route"
+        )
+
+
+def test_matrix_every_orch_route_has_a_policy(mx_mt_api):
+    """Sanity: the orchestration prefixes are fully covered by ROUTE_POLICY (no
+    orchestration route falls through to deny-by-default by accident)."""
+    from orchestration.route_policy import all_registered_routes
+
+    real = all_registered_routes(mx_mt_api.app)
+    orch_real = {(m, t) for (m, t) in real if _is_orch(t)}
+    declared = {(m, t) for (m, t) in _ROUTE_POLICY if _is_orch(t)}
+    assert orch_real == declared, (
+        f"orchestration route/policy mismatch — missing: {orch_real - declared}, "
+        f"stale: {declared - orch_real}"
+    )
+
+
+def test_matrix_cross_tenant_workspace_resources_are_404(mx_mt_api):
+    """Data-seeded cross-tenant 404 across the convoy/team/mailbox families: A
+    creates real resources, B is 404'd on every one (the row-level gate)."""
+    client = TestClient(mx_mt_api.app)
+
+    # A creates a convoy with a subtask + a team.
+    rc = client.post(
+        "/api/convoy",
+        json={"title": "A", "created_by": "sb", "subtasks": [{"title": "T"}]},
+        headers=_mx_auth(_MX_TOKEN_A),
+    )
+    assert rc.status_code == 200, rc.text
+    cid = rc.json()["convoy"]["id"]
+    sid = rc.json()["subtasks"][0]["id"]
+    rt = client.post(
+        "/api/team", json={"team_name": "A", "lead_agent_id": "lead"},
+        headers=_mx_auth(_MX_TOKEN_A),
+    )
+    assert rt.status_code == 200, rt.text
+    tid = rt.json()["session"]["id"]
+
+    # B is 404'd on A's convoy, subtask, team, and team-memory.
+    assert client.get(f"/api/convoy/{cid}", headers=_mx_auth(_MX_TOKEN_B)).status_code == 404
+    assert client.get(f"/api/convoy/{cid}/ready", headers=_mx_auth(_MX_TOKEN_B)).status_code == 404
+    assert client.post(
+        f"/api/convoy/{cid}/subtask/{sid}/complete", headers=_mx_auth(_MX_TOKEN_B)
+    ).status_code == 404
+    assert client.get(f"/api/team/{tid}", headers=_mx_auth(_MX_TOKEN_B)).status_code == 404
+    assert client.get(
+        f"/api/team/{tid}/memory", headers=_mx_auth(_MX_TOKEN_B)
+    ).status_code == 404
+
+    # A still owns all of them (200).
+    assert client.get(f"/api/convoy/{cid}", headers=_mx_auth(_MX_TOKEN_A)).status_code == 200
+    assert client.get(f"/api/team/{tid}", headers=_mx_auth(_MX_TOKEN_A)).status_code == 200
