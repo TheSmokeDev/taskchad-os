@@ -359,3 +359,117 @@ def apply_contradictions(
             seen_losers.add(loser.id)
             applied += 1
     return applied
+
+
+async def resolve_write_time_contradiction(
+    new_record: Any,
+    state_file: Path,
+    cwd: Path,
+    *,
+    write_time_enabled: bool | None = None,
+    settings: Any | None = None,
+    embed_batch: Any | None = None,
+    reasoning: Any | None = None,
+) -> int:
+    """Resolve a newly-WRITTEN belief against the existing corpus at write (WS3 #84).
+
+    Backports the nightly contradiction engine to the belief WRITE path as an
+    opt-in, default-OFF, fail-open step. REUSES ``judge_contradictions`` +
+    ``apply_contradictions`` VERBATIM (no new judge/policy/audit) over the SINGLE
+    new record vs. the bounded band-neighbor set (1xN). The caller invokes this
+    ONLY on a physical MISS (a freshly-appended record), so a dedup HIT never
+    reaches it.
+
+    DEFAULT-OFF IS THE HELPER'S CONTRACT (R1 B2 — Rule 1 None sentinel): when
+    ``write_time_enabled`` is None it resolves
+    ``get_inference_extraction_settings().write_time_contradiction`` IN THE BODY
+    and early-returns ``0`` when unset, BEFORE any corpus load / embed / judge. A
+    direct call with the env unset is inert; the caller's flag check is only a
+    cheap fast-path. ``CONTRADICTION_ENABLED=false`` is a SECOND kill switch —
+    the shared ``get_contradiction_settings().enabled`` gate short-circuits before
+    the embed.
+
+    COST CAP (R1 B4 — mirror ``find_candidate_pairs``:80-91): the eligible set
+    (non-decayed, ``source in {reflection, explicit}`` so ``auto_capture`` is
+    excluded — M4) is recency/confidence-sorted and TRUNCATED to
+    ``settings.max_eligible`` BEFORE ``embed_batch``, so embed cost is exactly
+    ``1 + len(eligible) <= 1 + max_eligible`` texts — never the full corpus. The
+    judge fires only when a neighbor lands in
+    ``[pair_min_cosine, pair_max_cosine)`` (the band BELOW the dedup threshold —
+    at/above it the belief already merged, so no two-record conflict exists).
+
+    FAIL-OPEN (hot-path safe): ``add_inference`` already SAVED the new record
+    before this runs, so even a raising judge/embed loses nothing — the fallback
+    is literally "do nothing else." The whole body (after the two early gates) is
+    wrapped; on ANY exception a visible non-fatal print fires and it returns ``0``.
+
+    ``embed_batch`` / ``reasoning`` are injectable test seams (deterministic
+    offline runs); production callers pass nothing.
+
+    Returns the count of records moved by ``apply_contradictions`` this call (the
+    operator-visible applied-count threaded back to ``apply_operator_beliefs`` —
+    M3).
+    """
+    # R1 B2 — DEFAULT-OFF IS THE HELPER'S CONTRACT (Rule 1, None sentinel in body).
+    if write_time_enabled is None:
+        from config import get_inference_extraction_settings
+
+        write_time_enabled = get_inference_extraction_settings().write_time_contradiction
+    if not write_time_enabled:
+        return 0
+    # Rule 1: shared contradiction settings (judge + apply read the SAME object so
+    # the band/flags stay consistent). CONTRADICTION_ENABLED is the 2nd kill switch.
+    if settings is None:
+        from config import get_contradiction_settings
+
+        settings = get_contradiction_settings()
+    if not settings.enabled:
+        return 0
+    try:
+        from cognition.self_model import InferenceTracker
+
+        records = InferenceTracker(state_file).load()  # Rule 2: FRESH physical state
+        # R1 B4 — mirror find_candidate_pairs:80-91: filter -> sort -> TRUNCATE
+        # before embed_batch. auto_capture excluded by the source filter (M4).
+        eligible = [
+            r
+            for r in records
+            if r.status != "decayed"
+            and r.source in ("reflection", "explicit")
+            and r.id != new_record.id
+        ]
+        eligible.sort(
+            key=lambda r: (r.last_updated or "", r.confidence), reverse=True
+        )
+        eligible = eligible[: settings.max_eligible]  # COST CAP — bound BEFORE embed
+        if not eligible:
+            return 0  # no embed, no judge
+        # NEIGHBOR SCAN — mirror _find_similar_active embed_batch shape; keep the
+        # band BELOW the dedup threshold. Cost = 1 + len(eligible) texts.
+        if embed_batch is None:
+            from embeddings import embed_batch  # lazy; injectable in tests
+        vecs = embed_batch(
+            [new_record.inference] + [r.inference for r in eligible]
+        )
+        v0 = vecs[0]
+        band = []
+        for r, v in zip(eligible, vecs[1:], strict=False):
+            cos = float(v0 @ v)
+            if settings.pair_min_cosine <= cos < settings.pair_max_cosine:
+                band.append((cos, r))
+        if not band:
+            return 0  # NO judge call -> zero cost
+        band.sort(key=lambda p: p[0], reverse=True)  # strongest topical first
+        pairs = [(new_record, r) for _c, r in band[: settings.max_pairs]]
+        conflicts = await judge_contradictions(
+            pairs, cwd, settings=settings, reasoning=reasoning
+        )
+        return apply_contradictions(conflicts, state_file, settings=settings)
+    except Exception as exc:
+        # FAIL-OPEN: the write already succeeded in add_inference; do nothing else.
+        print(
+            f"[belief_conflicts] write-time contradiction skipped "
+            f"(non-fatal): {exc!r}",
+            flush=True,
+        )
+        return 0

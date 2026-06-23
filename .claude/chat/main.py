@@ -45,6 +45,7 @@ from config import (  # noqa: E402
     DISCORD_ALLOWED_GUILDS,
     DISCORD_ALLOWED_USERS,
     DISCORD_BOT_TOKEN,
+    DISCORD_WATCH_ALL_GUILD_CHANNELS,
     EXTENSIONS_ALLOW,
     EXTENSIONS_BUNDLED_PATH,
     EXTENSIONS_DENY,
@@ -503,7 +504,12 @@ def main() -> None:
 
         if has_discord and (start_all or args.discord):
             from adapters.discord import DiscordAdapter
-            disc = DiscordAdapter(DISCORD_BOT_TOKEN, DISCORD_ALLOWED_GUILDS, DISCORD_ALLOWED_USERS)
+            disc = DiscordAdapter(
+                DISCORD_BOT_TOKEN,
+                DISCORD_ALLOWED_GUILDS,
+                DISCORD_ALLOWED_USERS,
+                watch_all_guild_channels=DISCORD_WATCH_ALL_GUILD_CHANNELS,
+            )
             router.register(disc)
             print("  Discord adapter OK")
 
@@ -542,7 +548,12 @@ def main() -> None:
 
     if has_discord and (start_all or args.discord):
         from adapters.discord import DiscordAdapter
-        disc = DiscordAdapter(DISCORD_BOT_TOKEN, DISCORD_ALLOWED_GUILDS, DISCORD_ALLOWED_USERS)
+        disc = DiscordAdapter(
+            DISCORD_BOT_TOKEN,
+            DISCORD_ALLOWED_GUILDS,
+            DISCORD_ALLOWED_USERS,
+            watch_all_guild_channels=DISCORD_WATCH_ALL_GUILD_CHANNELS,
+        )
         router.register(disc)
 
     if has_whatsapp and (start_all or args.whatsapp):

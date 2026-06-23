@@ -76,6 +76,7 @@ class DiscordAdapter:
         allowed_guilds: list[str],
         allowed_users: list[str],
         watched_channels: list[str] | None = None,
+        watch_all_guild_channels: bool = False,
     ) -> None:
         import discord
 
@@ -86,6 +87,9 @@ class DiscordAdapter:
         self.bot_token = bot_token
         self.allowed_guilds = allowed_guilds
         self.allowed_users = allowed_users
+        # When true, auto-listen to every channel in the allowed guild(s)
+        # without an @mention (scoped by allowed_guilds).
+        self._watch_all_guild_channels = watch_all_guild_channels
         self._queue: asyncio.Queue[IncomingMessage] = asyncio.Queue()
         self._client = discord.Client(intents=intents)
         self._tree = discord.app_commands.CommandTree(self._client)
@@ -116,7 +120,12 @@ class DiscordAdapter:
             # Only process DMs, @mentions, or watched channels
             is_dm = isinstance(msg.channel, discord.DMChannel)
             is_watched = str(msg.channel.id) in self._watched_channels
-            if not is_dm and not is_watched and self._client.user not in msg.mentions:
+            if (
+                not is_dm
+                and not is_watched
+                and not self._watches_guild(msg)
+                and self._client.user not in msg.mentions
+            ):
                 return
 
             # Phase 4: voice ingress — transcribe audio attachments first.
@@ -461,6 +470,22 @@ class DiscordAdapter:
         if not isinstance(msg.channel, discord.DMChannel):
             if self.allowed_guilds and str(msg.guild.id) not in self.allowed_guilds:
                 return False
+        return True
+
+    def _watches_guild(self, msg: Any) -> bool:
+        """True if the whole guild is auto-listened (no @mention needed).
+
+        Only fires when DISCORD_WATCH_ALL_GUILD_CHANNELS is on, the message
+        comes from a guild, and that guild is in allowed_guilds (empty = any).
+        DMs return False (they are always handled via the is_dm path).
+        """
+        if not self._watch_all_guild_channels:
+            return False
+        guild = getattr(msg, "guild", None)
+        if guild is None:
+            return False
+        if self.allowed_guilds and str(guild.id) not in self.allowed_guilds:
+            return False
         return True
 
     def _normalize_message(

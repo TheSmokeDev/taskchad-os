@@ -531,3 +531,66 @@ def test_dashboard_bot_lifecycle_rule_2_no_module_level_state() -> None:
         f"Rule 2 violation in dashboard_bot_lifecycle.py — module-level "
         f"cache: {cache_offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# WS3 #84 — write-time-contradiction slice (Living Self Act 2 backport).
+#
+# The 3 production files this feature touches are NOT in the Phase 2
+# AUDITED_FILES set above (that set asserts an EXACT file list — adding cognition
+# files there would drift the canonical identity-reconciliation surface). They
+# get a dedicated slice-local bucket here, mirroring the dashboard pattern:
+#   - Rule 1: the write-time flag (INFERENCE_WRITE_TIME_CONTRADICTION) is resolved
+#     at call time via get_inference_extraction_settings, NEVER bound as a default
+#     arg (the canonical "binds tunable config at def time" trap).
+#   - Rule 3: the helper introduces NO new optional-provider import — it reuses
+#     judge_contradictions' module-attribute langfuse lookup. No call site may use
+#     `from runtime.langfuse_setup import is_langfuse_enabled` or
+#     `from langfuse import get_client`.
+# ---------------------------------------------------------------------------
+
+_WRITE_TIME_SLICE_FILES: list[Path] = [
+    _CHAT_DIR / "cognition" / "belief_conflicts.py",
+    _CHAT_DIR / "cognition" / "operator_beliefs.py",
+    _SCRIPTS_DIR / "config.py",
+]
+
+
+def test_write_time_slice_rule_1_no_config_bound_defaults() -> None:
+    """Rule 1 across the WS3 #84 touched files — no def-time config bind.
+
+    The canonical trap for this slice would be
+    ``def resolve_write_time_contradiction(..., write_time=config.X)`` or a bare
+    uppercase constant default. The correct shape (shipped) is a ``None`` sentinel
+    resolved in the body via ``get_inference_extraction_settings()`` (Rule 1).
+    """
+    for path in _WRITE_TIME_SLICE_FILES:
+        assert path.is_file(), f"{path.name} missing at {path} — WS3 #84 incomplete"
+        offenders = _scan_default_arg_violations(path)
+        assert not offenders, (
+            f"Rule 1 violation in {path.name} — default arg binds tunable "
+            f"config: {offenders}"
+        )
+
+
+def test_write_time_slice_rule_3_no_direct_langfuse_import() -> None:
+    """Rule 3 across the WS3 #84 touched files — no direct optional-provider import.
+
+    All observability must route through the module-attribute lookup
+    (``langfuse_setup.get_observation_client``) the reused judge already uses, so
+    replay isolation's monkeypatch of ``runtime.langfuse_setup`` propagates. A
+    top-level ``from runtime.langfuse_setup import is_langfuse_enabled`` or
+    ``from langfuse import get_client`` caches the symbol and leaks isolation.
+    """
+    forbidden = (
+        "from runtime.langfuse_setup import is_langfuse_enabled",
+        "from langfuse import get_client",
+    )
+    for path in _WRITE_TIME_SLICE_FILES:
+        assert path.is_file(), f"{path.name} missing at {path} — WS3 #84 incomplete"
+        text = path.read_text(encoding="utf-8")
+        hits = [pat for pat in forbidden if pat in text]
+        assert not hits, (
+            f"Rule 3 violation in {path.name} — direct optional-provider "
+            f"import (use the module-attribute lookup instead): {hits}"
+        )

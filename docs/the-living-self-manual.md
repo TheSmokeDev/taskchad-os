@@ -149,6 +149,19 @@ recorded in an audit field on the record. Two protections are load-bearing:
 A contradicted-but-surviving belief is rendered as "held under tension" so the
 operator can see beliefs in conflict rather than having them quietly resolved.
 
+**Resolving at write (opt-in, default off).** By default a conflict is only
+caught by the nightly pass, so a belief written at the start of a reflection that
+contradicts an existing one sits mis-stated until the next run. An optional
+write-time step closes that gap: when a newly-written belief lands topically near
+an existing one, it is resolved immediately at write — reusing the exact same
+judge and protections (explicit-sacrosanct, count-once). It is gated by
+`INFERENCE_WRITE_TIME_CONTRADICTION` and ships **off**; with the knob off the
+written belief set is identical to before and the judge is never called. The
+nightly pass remains the backstop either way, and `CONTRADICTION_ENABLED=false`
+is a second kill switch that disables the write-time step too. When the step does
+resolve a conflict, the morning reflection reports a `write-time contradictions
+applied: N` line so the operator can see it happened.
+
 ## 5. Thinking Before Speaking (the gated cognitive pass)
 
 On a substantive turn the assistant runs an internal monologue before it
@@ -259,6 +272,7 @@ change). Defaults below are the shipped values.
 | `INFERENCE_DEDUP_THRESHOLD` | `0.72` | Cosine floor for merging paraphrased beliefs into one record. |
 | `INFERENCE_EXTRACTION_MAX_CLAIMS` | `8` | Cap on claims emitted per reflection run. |
 | `INFERENCE_EXTRACTION_MIN_CHARS` | `12` | Floor on a single claim's text length. |
+| `INFERENCE_WRITE_TIME_CONTRADICTION` | `false` | Opt-in. When on, a newly-written belief is resolved against an existing conflicting one immediately at write (reusing the nightly judge and protections) instead of waiting for the next pass. Off keeps the written belief set identical and never calls the judge. `CONTRADICTION_ENABLED=false` also disables it. |
 
 ### Contradiction pass
 

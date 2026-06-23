@@ -41,6 +41,25 @@ natural-language chat should not auto-fetch Gmail/Outlook context.
 - Slack, Discord, WhatsApp, web relay, and CLI adapters when configured
 - Health/status: `http://127.0.0.1:8787/health` and `thehomie status --json`
 
+## Discord Configuration
+
+The Discord adapter connects over the gateway and starts automatically whenever
+`DISCORD_BOT_TOKEN` is set. The bot's `MESSAGE CONTENT INTENT` must be enabled in
+the Discord Developer Portal — the adapter sets `intents.message_content = True`
+in code, and without the matching portal toggle every message arrives blank.
+
+| Env var | Effect |
+|---|---|
+| `DISCORD_BOT_TOKEN` | Bot token. Empty = adapter disabled. |
+| `DISCORD_ALLOWED_USERS` | Comma-separated user IDs allowed to drive the bot. Empty = anyone. |
+| `DISCORD_ALLOWED_GUILDS` | Comma-separated guild (server) IDs the bot operates in. Empty = all. |
+| `DISCORD_WATCHED_CHANNELS` | Comma-separated channel IDs the bot auto-listens in without an `@mention`. |
+| `DISCORD_WATCH_ALL_GUILD_CHANNELS` | `true` to auto-listen to every channel in the allowed guild(s) with no `@mention`. Scoped by `DISCORD_ALLOWED_GUILDS`; pair with `DISCORD_ALLOWED_USERS` to lock who can drive it. |
+
+In a guild, a message is handled when the bot is `@mention`ed, the channel is in
+`DISCORD_WATCHED_CHANNELS`, or `DISCORD_WATCH_ALL_GUILD_CHANNELS` is on for that
+guild. DMs are always handled. The user allowlist applies before any of these.
+
 ## Source Of Truth Files
 
 | Layer | Files |

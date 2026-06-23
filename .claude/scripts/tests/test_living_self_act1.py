@@ -146,6 +146,7 @@ def test_settings_resolver_locked_defaults(monkeypatch):
         "INFERENCE_EXTRACTION_ENABLED",
         "INFERENCE_EXTRACTION_MAX_CLAIMS",
         "INFERENCE_EXTRACTION_MIN_CHARS",
+        "INFERENCE_WRITE_TIME_CONTRADICTION",
     ):
         monkeypatch.delenv(var, raising=False)
     s = config.get_inference_extraction_settings()
@@ -153,6 +154,7 @@ def test_settings_resolver_locked_defaults(monkeypatch):
     assert s.extraction_enabled is True
     assert s.max_claims == 8
     assert s.min_chars == 12
+    assert s.write_time_contradiction is False  # WS3 #84 — opt-in, default OFF
 
 
 def test_settings_resolver_env_flips_on_next_call(monkeypatch):
@@ -169,9 +171,14 @@ def test_settings_resolver_env_flips_on_next_call(monkeypatch):
 
 def test_settings_resolver_explicit_args_passthrough():
     s = config.get_inference_extraction_settings(
-        dedup_threshold=0.5, extraction_enabled=False, max_claims=1, min_chars=2
+        dedup_threshold=0.5,
+        extraction_enabled=False,
+        max_claims=1,
+        min_chars=2,
+        write_time_contradiction=True,
     )
-    assert s == (0.5, False, 1, 2)
+    # WS3 #84 — the 5th positional field (write_time_contradiction) is appended last.
+    assert s == (0.5, False, 1, 2, True)
 
 
 # ===========================================================================
@@ -482,7 +489,7 @@ def test_apply_operator_beliefs_writes_reflection_and_explicit(tmp_path, monkeyp
         {"claim": "operator prefers concise", "confidence": 0.8, "kind": "inferred"},
         {"claim": "operator always tests before shipping", "confidence": 0.9, "kind": "explicit"},
     ]
-    n = ob.apply_operator_beliefs(claims, path)
+    n, _ = asyncio.run(ob.apply_operator_beliefs(claims, path))  # WS3 #84 — async + tuple
     assert n == 2
     records = InferenceTracker(path).load()
     sources = {r.source for r in records}
@@ -515,7 +522,7 @@ def test_end_to_end_read_extract_apply_seam(tmp_path, monkeypatch):
         return [{"claim": "operator tests before shipping", "confidence": 0.9, "kind": "explicit"}]
 
     claims = asyncio.run(fake_extract(turns, cwd=tmp_path))
-    written = ob.apply_operator_beliefs(claims, path)
+    written, _ = asyncio.run(ob.apply_operator_beliefs(claims, path))  # WS3 #84 — async
     assert written == 1
     records = InferenceTracker(path).load()
     assert records[0].source == "explicit"

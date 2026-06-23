@@ -1050,5 +1050,619 @@ def test_render_decayed_and_auto_capture_never_show(monkeypatch, tmp_path):
     assert "auto text" not in out
 
 
+# ===========================================================================
+# 9. Write-time contradiction (WS3 #84 — opt-in, default-OFF, fail-open).
+#
+# The helper resolve_write_time_contradiction reuses judge_contradictions +
+# apply_contradictions VERBATIM. apply_operator_beliefs goes async + gates the
+# helper on a physical MISS + the flag. Every case is tmp_path-scoped with
+# injected embed_batch (angle-controlled) + reasoning (judge stub) so the REAL
+# branches run offline — no FastEmbed, no provider.
+#
+# embed_batch is monkeypatched at embeddings.embed_batch (NOT just injected) so
+# BOTH the add_inference dedup path (HIT detection, threshold 0.72) AND the
+# helper's neighbor scan see the same controlled angles. The helper's band is
+# [0.45, 0.72) — strictly BELOW the dedup threshold.
+# ===========================================================================
+
+from cognition import operator_beliefs as ob  # noqa: E402
+
+
+def _patch_embed_angles(monkeypatch, angles):
+    """Monkeypatch embeddings.embed_batch with an angle-controlled fake.
+
+    Covers BOTH add_inference's dedup scan and the write-time helper's neighbor
+    scan, so a single map controls dedup-HIT vs band placement deterministically.
+    """
+    monkeypatch.setattr("embeddings.embed_batch", _angle_embed(angles))
+
+
+def _raise_if_awaited(label="judge"):
+    """A reasoning stub that FAILS the test if the judge is ever awaited."""
+
+    async def reasoning(*_a, **_k):
+        raise AssertionError(f"{label} must NOT be awaited in this path")
+
+    return reasoning
+
+
+def _conflict_reasoning(a_id, b_id, reason="opposed"):
+    """A reasoning stub returning ONE conflict naming the two ids."""
+    return _fake_reasoning([{"a_id": a_id, "b_id": b_id, "reason": reason}])
+
+
+def _band_conflict_reasoning(reason="opposed"):
+    """A reasoning stub for write-time tests where the NEW record's id is freshly
+    minted (so it can't be hardcoded). Parses the ``A[id=...]`` / ``B[id=...]``
+    markers the judge builds into the context and returns ONE conflict per pair,
+    naming the EXACT ids it was handed. The helper id-filters, so this is faithful.
+    """
+    import re as _re
+
+    async def reasoning(context, *_a, **_k):
+        conflicts = []
+        for m in _re.finditer(r"A\[id=([^\]]+)\].*?B\[id=([^\]]+)\]", context):
+            conflicts.append({"a_id": m.group(1), "b_id": m.group(2), "reason": reason})
+        return SimpleNamespace(parsed=conflicts, model="x")
+
+    return reasoning
+
+
+def _spy_embed(angles=None):
+    """An ``embed_batch`` spy that RECORDS every call into ``.calls`` and returns
+    real angle-controlled vectors.
+
+    Unlike ``_raise_if_awaited`` (whose AssertionError the production fail-open
+    judge SWALLOWS — line :184-199 catches ``Exception`` and returns ``[]``), a
+    spy proves a NEGATIVE by an explicit ``assert spy.calls == []`` AFTER the
+    call: the alarm cannot be muted by the code under test. ``calls`` holds the
+    ``list(texts)`` of each invocation (so a test can also assert the cost-cap
+    count, not just that it ran).
+    """
+    inner = _angle_embed(angles or {})
+
+    def _embed(texts, **kw):
+        _embed.calls.append(list(texts))
+        return inner(texts, **kw)
+
+    _embed.calls = []
+    return _embed
+
+
+def _spy_reasoning(parsed=None):
+    """A ``reasoning`` (judge) spy that RECORDS every await into ``.calls`` and
+    returns ``parsed`` (default ``[]`` — no conflict).
+
+    The discriminating replacement for ``_raise_if_awaited`` on "judge must NOT
+    fire" paths: assert ``spy.calls == []`` after the call. Because it returns a
+    value instead of raising, the production ``except Exception`` in
+    ``judge_contradictions`` can NOT swallow the proof — if a regression awaits
+    the judge, ``.calls`` is non-empty and the test FAILS.
+    """
+
+    async def reasoning(*a, **k):
+        reasoning.calls.append((a, k))
+        return SimpleNamespace(parsed=parsed if parsed is not None else [], model="x")
+
+    reasoning.calls = []
+    return reasoning
+
+
+def _patch_resolve_counter(monkeypatch):
+    """Wrap ``cognition.belief_conflicts.resolve_write_time_contradiction`` with a
+    delegating counter and return the counter handle (``.count``).
+
+    ``apply_operator_beliefs`` imports the helper lazily by module attribute
+    (``from cognition.belief_conflicts import resolve_write_time_contradiction``
+    inside the loop), so patching the module attribute is seen at call time. The
+    wrapper counts then delegates to the REAL helper — behavior is unchanged; the
+    test asserts ``.count == 0`` to prove the CALLER skipped the helper (a dedup
+    HIT), not merely that a swallowed judge produced zero conflicts.
+    """
+    real = bc.resolve_write_time_contradiction
+    handle = SimpleNamespace(count=0)
+
+    async def _counting(*a, **k):
+        handle.count += 1
+        return await real(*a, **k)
+
+    monkeypatch.setattr(
+        "cognition.belief_conflicts.resolve_write_time_contradiction", _counting
+    )
+    return handle
+
+
+def _run_apply(claims, path, **kw):
+    """asyncio.run the async apply_operator_beliefs -> (written, write_time_applied)."""
+    return asyncio.run(ob.apply_operator_beliefs(claims, path, **kw))
+
+
+def test_write_time_off_is_state_parity(tmp_path, monkeypatch):
+    """PARITY GATE: flag UNSET -> corpus identical to plain-add + NO judge call.
+
+    Two new beliefs are written with the flag OFF; the reasoning stub raises if
+    awaited (asserts the judge never fires), and the resulting corpus matches a
+    plain-add baseline byte-for-byte (minus the volatile timestamps). The returned
+    write_time_applied is 0.
+    """
+    monkeypatch.delenv("INFERENCE_WRITE_TIME_CONTRADICTION", raising=False)
+    # Two distinct beliefs far apart so neither dedups into the other.
+    angles = {"ship lean and fast": 0.0, "build a heavy enterprise process": 2.0}
+    _patch_embed_angles(monkeypatch, angles)
+    claims = [
+        {"claim": "ship lean and fast", "kind": "reflection"},
+        {"claim": "build a heavy enterprise process", "kind": "reflection"},
+    ]
+
+    # JUDGE SPY (not _raise_if_awaited — the production fail-open judge swallows
+    # AssertionError). assert spy.calls == [] proves NO judge fired on the OFF path.
+    judge_spy = _spy_reasoning()
+    flag_path = tmp_path / "flag_off.json"
+    written, applied = _run_apply(claims, flag_path, reasoning=judge_spy)
+    assert written == 2
+    assert applied == 0  # OFF -> no write-time resolution
+    assert judge_spy.calls == []  # ...and NO judge call
+
+    # NORMALIZED PLAIN-ADD BASELINE — the SAME two claims through a direct
+    # add_inference-only path (no flag, no helper). The OFF-path corpus must be
+    # field-for-field identical to this baseline (minus volatile id + timestamps).
+    base_path = tmp_path / "baseline.json"
+    base_tracker = InferenceTracker(base_path)
+    for c in claims:
+        base_tracker.add_inference(
+            inference=c["claim"],
+            observation=c["claim"],
+            confidence=0.5,  # apply_operator_beliefs' default when "confidence" absent
+            source="reflection",
+        )
+
+    def _normalized(records):
+        from dataclasses import asdict
+
+        out = []
+        for r in sorted(records, key=lambda x: x.inference):
+            d = asdict(r)
+            # id is a fresh uuid4; first_seen/last_updated are wall-clock — drop them.
+            for volatile in ("id", "first_seen", "last_updated"):
+                d.pop(volatile, None)
+            out.append(d)
+        return out
+
+    off_recs = InferenceTracker(flag_path).load()
+    base_recs = base_tracker.load()
+    assert _normalized(off_recs) == _normalized(base_recs)
+    # And explicitly: no contradiction audit was written on either record.
+    assert all(r.contradicted_by == [] for r in off_recs)
+    assert all(r.contradiction_count == 0 for r in off_recs)
+
+
+def test_write_time_helper_self_gates_when_flag_unset(tmp_path, monkeypatch):
+    """R1 B2: a DIRECT helper call with the env unset returns 0, judge never awaited.
+
+    Even with an in-band neighbor seeded, the helper early-returns on its OWN gate
+    (get_inference_extraction_settings().write_time_contradiction) before any embed
+    or judge — proving default-OFF is the helper's contract, not just the caller's.
+    """
+    monkeypatch.delenv("INFERENCE_WRITE_TIME_CONTRADICTION", raising=False)
+    path = tmp_path / "inf.json"
+    existing = _rec("ex", "ship lean and fast", source="explicit", confidence=0.8)
+    new = _rec("new", "build a heavy enterprise process", source="reflection")
+    _seed(path, [existing, new])
+    angles = {
+        "ship lean and fast": 0.0,
+        "build a heavy enterprise process": _cosine_to_angle(0.6),  # in-band
+    }
+    # SPIES (not _raise_if_awaited — that AssertionError is swallowed by the
+    # production fail-open judge). The self-gate must return BEFORE either fires.
+    embed_spy = _spy_embed(angles)
+    judge_spy = _spy_reasoning()
+    applied = _run(
+        bc.resolve_write_time_contradiction(
+            new,
+            path,
+            Path("."),
+            settings=_settings(),
+            embed_batch=embed_spy,
+            reasoning=judge_spy,
+        )
+    )
+    assert applied == 0
+    # The self-gate short-circuited before corpus load / embed / judge.
+    assert embed_spy.calls == []
+    assert judge_spy.calls == []
+
+
+def test_write_time_on_resolves_reflection_conflict(tmp_path, monkeypatch):
+    """Flag ON + a new reflection belief in-band with an existing explicit ->
+    the reflection LOSES at write via the real apply_contradictions; count == 1."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    # Seed one explicit belief already in the corpus.
+    _seed(path, [_rec("expl", "ship lean and fast", source="explicit", confidence=0.8)])
+    # The NEW reflection belief lands in-band (cosine 0.6) with the explicit one.
+    angles = {
+        "ship lean and fast": 0.0,
+        "build a heavy enterprise process": _cosine_to_angle(0.6),
+    }
+    _patch_embed_angles(monkeypatch, angles)
+
+    written, applied = _run_apply(
+        # confidence 0.8 so the post-drop value is deterministic (0.8 - 0.15).
+        [{"claim": "build a heavy enterprise process", "kind": "reflection", "confidence": 0.8}],
+        path,
+        write_time_enabled=True,
+        settings=_settings(),
+        # The new record's id is freshly minted; resolve it by text, not id:
+        reasoning=_band_conflict_reasoning(),
+    )
+    assert written == 1
+    assert applied == 1
+    by_text = {r.inference: r for r in InferenceTracker(path).load()}
+    refl = by_text["build a heavy enterprise process"]
+    # The reflection dropped; the explicit is sacrosanct (untouched).
+    assert refl.contradiction_count == 1
+    assert refl.contradicted_by  # an audit entry naming the explicit winner
+    assert abs(refl.confidence - 0.65) < 1e-9
+    expl = by_text["ship lean and fast"]
+    assert abs(expl.confidence - 0.8) < 1e-9
+    assert expl.contradiction_count == 0
+
+
+def test_write_time_on_explicit_vs_explicit_holds_both(tmp_path, monkeypatch):
+    """B1: flag ON, new EXPLICIT in-band with existing EXPLICIT -> HELD on both,
+    neither confidence drops (default allow_explicit_vs_explicit=false)."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    _seed(path, [_rec("e1", "ship lean and fast", source="explicit", confidence=0.8)])
+    angles = {
+        "ship lean and fast": 0.0,
+        "build a heavy enterprise process": _cosine_to_angle(0.6),
+    }
+    _patch_embed_angles(monkeypatch, angles)
+
+    written, applied = _run_apply(
+        # confidence 0.8 so the held assertion (no drop) is checked against 0.8.
+        [{"claim": "build a heavy enterprise process", "kind": "explicit", "confidence": 0.8}],
+        path,
+        write_time_enabled=True,
+        settings=_settings(),
+        reasoning=_band_conflict_reasoning(),
+    )
+    assert written == 1
+    assert applied == 2  # both HELD (B1 records tension on both, no drop)
+    by_text = {r.inference: r for r in InferenceTracker(path).load()}
+    assert abs(by_text["ship lean and fast"].confidence - 0.8) < 1e-9
+    assert abs(by_text["build a heavy enterprise process"].confidence - 0.8) < 1e-9
+
+
+def test_write_time_fail_open_on_raising_judge(tmp_path, monkeypatch, capsys):
+    """Flag ON, the judge RAISES -> the write survives unchanged, visible print,
+    count 0, no exception escapes."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    _seed(path, [_rec("expl", "ship lean and fast", source="explicit", confidence=0.8)])
+    angles = {
+        "ship lean and fast": 0.0,
+        "build a heavy enterprise process": _cosine_to_angle(0.6),
+    }
+    _patch_embed_angles(monkeypatch, angles)
+
+    async def raising(*_a, **_k):
+        raise RuntimeError("provider boom")
+
+    written, applied = _run_apply(
+        [{"claim": "build a heavy enterprise process", "kind": "reflection"}],
+        path,
+        write_time_enabled=True,
+        settings=_settings(),
+        reasoning=raising,
+    )
+    assert written == 1
+    assert applied == 0
+    # The write survived: the new reflection record is present and unmodified.
+    by_text = {r.inference: r for r in InferenceTracker(path).load()}
+    refl = by_text["build a heavy enterprise process"]
+    assert refl.contradiction_count == 0
+    assert refl.contradicted_by == []
+    # judge_contradictions prints its OWN "judge failed" line on a raising reasoning.
+    out = capsys.readouterr().out
+    assert "judge failed" in out or "write-time contradiction skipped" in out
+
+
+def test_write_time_no_band_neighbor_skips_judge(tmp_path, monkeypatch):
+    """COST BOUND: flag ON, the new belief is orthogonal to all actives ->
+    no band hit -> the judge is NEVER awaited; returns 0."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    _seed(path, [_rec("expl", "ship lean and fast", source="explicit", confidence=0.8)])
+    # New belief far from the existing one (cosine ~0 -> below the 0.45 floor).
+    angles = {
+        "ship lean and fast": 0.0,
+        "a totally unrelated belief about lunch": 1.5,  # ~0.07 cosine, below band
+    }
+    # add_inference's OWN dedup scan uses embeddings.embed_batch (monkeypatched);
+    # the helper's band scan uses the INJECTED embed spy. The judge spy proves the
+    # judge is never awaited via an explicit empty-calls assert (a swallowed
+    # AssertionError would not).
+    _patch_embed_angles(monkeypatch, angles)
+    embed_spy = _spy_embed(angles)
+    judge_spy = _spy_reasoning()
+
+    written, applied = _run_apply(
+        [{"claim": "a totally unrelated belief about lunch", "kind": "reflection"}],
+        path,
+        write_time_enabled=True,
+        settings=_settings(),
+        embed_batch=embed_spy,
+        reasoning=judge_spy,
+    )
+    assert written == 1
+    assert applied == 0
+    # The helper RAN the band scan (embed fired) but found no in-band neighbor, so
+    # the judge was never awaited — proven by the recorded call list, not a muted
+    # raise.
+    assert embed_spy.calls != []  # the band scan ran
+    assert judge_spy.calls == []  # ...and stopped before the judge
+
+
+def test_write_time_eligible_capped_at_max_eligible(tmp_path, monkeypatch):
+    """R1 B4 COST CAP: seed MORE than max_eligible actives; the injected embed_batch
+    receives exactly 1 + max_eligible texts (the incoming + the truncated band),
+    NOT len(corpus)+1."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    # Seed 5 existing reflection beliefs; cap eligible at 2.
+    seeded = [
+        _rec(f"r{i}", f"existing belief number {i}", source="reflection")
+        for i in range(5)
+    ]
+    _seed(path, seeded)
+
+    captured = {"texts": None}
+
+    def capturing_embed(texts, **_kw):
+        captured["texts"] = list(texts)
+        import numpy as np
+
+        # Place everything orthogonal so no judge fires (we only assert the count).
+        return [np.array([1.0, 0.0], dtype=np.float32) for _ in texts]
+
+    new = _rec("new", "a fresh incoming belief", source="reflection")
+    _run(
+        bc.resolve_write_time_contradiction(
+            new,
+            path,
+            Path("."),
+            write_time_enabled=True,
+            settings=_settings(max_eligible=2),
+            embed_batch=capturing_embed,
+            reasoning=_raise_if_awaited(),
+        )
+    )
+    # 1 incoming + 2 (the max_eligible cap), NOT 1 + 5.
+    assert captured["texts"] is not None
+    assert len(captured["texts"]) == 1 + 2
+
+
+def test_write_time_dedup_hit_skips_judge(tmp_path, monkeypatch):
+    """Flag ON, a paraphrase of an existing belief -> add_inference HIT (id already
+    in before_ids) -> the helper is never invoked / returns 0."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    _seed(path, [_rec("orig", "ship lean and fast", source="reflection", confidence=0.7)])
+    # The incoming text is a paraphrase that lands ABOVE the 0.72 dedup threshold.
+    angles = {
+        "ship lean and fast": 0.0,
+        "ship lean and move fast": _cosine_to_angle(0.95),  # HIT (>= 0.72)
+    }
+    _patch_embed_angles(monkeypatch, angles)
+    # COUNTER on the helper itself (not a swallowed judge AssertionError): on a
+    # dedup HIT the caller's before_ids gate must SKIP the helper entirely. The
+    # wrapper increments then delegates so behavior is unchanged.
+    helper_calls = _patch_resolve_counter(monkeypatch)
+
+    written, applied = _run_apply(
+        [{"claim": "ship lean and move fast", "kind": "reflection"}],
+        path,
+        write_time_enabled=True,
+        settings=_settings(),
+    )
+    assert written == 1
+    assert applied == 0
+    # The helper was NEVER invoked — proven by the call counter, not by a swallowed
+    # judge raise (which would pass even if the helper ran and the judge was hit).
+    assert helper_calls.count == 0
+    # The original record was strengthened in place (still ONE record).
+    recs = InferenceTracker(path).load()
+    assert len(recs) == 1
+    assert recs[0].id == "orig"
+    assert recs[0].evidence_count == 2
+
+
+def test_write_time_legacy_zero_evidence_hit_skips_judge(tmp_path, monkeypatch):
+    """R1 B5: an existing record at evidence_count=0 that the incoming belief
+    paraphrases still HITs and skips the judge — the before_ids membership gate
+    (NOT evidence_count) decides MISS-vs-HIT."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    # A legacy/imported record reading evidence_count=0.
+    legacy = _rec("legacy", "ship lean and fast", source="reflection", confidence=0.7)
+    legacy.evidence_count = 0
+    _seed(path, [legacy])
+    angles = {
+        "ship lean and fast": 0.0,
+        "ship lean and move fast": _cosine_to_angle(0.95),  # HIT
+    }
+    _patch_embed_angles(monkeypatch, angles)
+    # COUNTER on the helper: the before_ids membership gate (NOT evidence_count)
+    # must SKIP the helper because the returned id is already in the corpus.
+    helper_calls = _patch_resolve_counter(monkeypatch)
+
+    written, applied = _run_apply(
+        [{"claim": "ship lean and move fast", "kind": "reflection"}],
+        path,
+        write_time_enabled=True,
+        settings=_settings(),
+    )
+    assert written == 1
+    assert applied == 0
+    # The physical-id gate skipped the helper even though evidence_count reads 0 —
+    # proven by the call counter, not a muted judge raise.
+    assert helper_calls.count == 0
+    recs = InferenceTracker(path).load()
+    assert len(recs) == 1  # strengthened in place, no new record
+    assert recs[0].id == "legacy"
+
+
+def test_write_time_auto_capture_neighbor_is_ignored(tmp_path, monkeypatch):
+    """R1 M4: an in-band auto_capture active is NEVER sent to the judge (the source
+    filter excludes it); no judge call, no mutation."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    # Only an auto_capture neighbor exists in-band; it must be filtered out.
+    _seed(
+        path,
+        [_rec("ac", "ship lean and fast", source="auto_capture", confidence=0.9)],
+    )
+    angles = {
+        "ship lean and fast": 0.0,
+        "build a heavy enterprise process": _cosine_to_angle(0.6),  # in-band
+    }
+    _patch_embed_angles(monkeypatch, angles)
+    embed_spy = _spy_embed(angles)
+    judge_spy = _spy_reasoning()
+
+    written, applied = _run_apply(
+        [{"claim": "build a heavy enterprise process", "kind": "reflection"}],
+        path,
+        write_time_enabled=True,
+        settings=_settings(),
+        embed_batch=embed_spy,
+        reasoning=judge_spy,
+    )
+    assert written == 1
+    assert applied == 0
+    # The source filter empties the eligible set BEFORE the band scan, so neither
+    # the helper's embed nor the judge runs (proven by recorded call lists; a
+    # raise-if-awaited would be swallowed by the fail-open judge).
+    assert embed_spy.calls == []
+    assert judge_spy.calls == []
+
+
+def test_write_time_offline_embed_fail_open(tmp_path, monkeypatch, capsys):
+    """Flag ON, embed_batch RAISES (offline) -> visible print, plain add, count 0."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    _seed(path, [_rec("expl", "ship lean and fast", source="explicit", confidence=0.8)])
+
+    def boom_embed(_texts, **_kw):
+        raise RuntimeError("FastEmbed offline")
+
+    new = _rec("new", "build a heavy enterprise process", source="reflection")
+    # Seed the new record physically so the helper has a fresh-MISS target to load.
+    recs = InferenceTracker(path).load()
+    recs.append(new)
+    InferenceTracker(path).save(recs)
+
+    applied = _run(
+        bc.resolve_write_time_contradiction(
+            new,
+            path,
+            Path("."),
+            write_time_enabled=True,
+            settings=_settings(),
+            embed_batch=boom_embed,
+            reasoning=_raise_if_awaited(),
+        )
+    )
+    assert applied == 0
+    out = capsys.readouterr().out
+    assert "write-time contradiction skipped" in out
+
+
+def test_write_time_contradiction_enabled_false_kill_switch(tmp_path, monkeypatch):
+    """CONTRADICTION_ENABLED=false is a SECOND kill switch — even flag ON, the
+    helper returns 0 before any embed/judge."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    path = tmp_path / "inf.json"
+    existing = _rec("ex", "ship lean and fast", source="explicit", confidence=0.8)
+    new = _rec("new", "build a heavy enterprise process", source="reflection")
+    _seed(path, [existing, new])
+    angles = {
+        "ship lean and fast": 0.0,
+        "build a heavy enterprise process": _cosine_to_angle(0.6),
+    }
+    embed_spy = _spy_embed(angles)
+    judge_spy = _spy_reasoning()
+    applied = _run(
+        bc.resolve_write_time_contradiction(
+            new,
+            path,
+            Path("."),
+            write_time_enabled=True,
+            settings=_settings(enabled=False),  # CONTRADICTION_ENABLED off
+            embed_batch=embed_spy,
+            reasoning=judge_spy,
+        )
+    )
+    assert applied == 0
+    # The CONTRADICTION_ENABLED gate returns before corpus load / embed / judge.
+    assert embed_spy.calls == []
+    assert judge_spy.calls == []
+
+
+def test_apply_operator_beliefs_is_async_returns_tuple(tmp_path, monkeypatch):
+    """The signature change: apply_operator_beliefs is async + returns
+    (written, write_time_applied)."""
+    monkeypatch.delenv("INFERENCE_WRITE_TIME_CONTRADICTION", raising=False)
+    _patch_embed_angles(monkeypatch, {"operator prefers concise answers": 0.0})
+    path = tmp_path / "inf.json"
+    result = _run_apply(
+        [{"claim": "operator prefers concise answers", "kind": "reflection"}], path
+    )
+    assert isinstance(result, tuple)
+    assert result == (1, 0)
+
+
+def test_write_time_integration_over_tmp_state(tmp_path, monkeypatch):
+    """R1 M1 REAL integration: flag ON, tmp INFERENCE_STATE_FILE; await
+    apply_operator_beliefs with a claim contradicting a pre-seeded in-band belief,
+    injecting embed_batch (band placement) + reasoning (the conflict). Assert
+    contradicted_by CHANGED on the loser via a FRESH InferenceTracker load.
+
+    Exercises the REAL async write-time branch end-to-end (memory_reflect --test
+    SKIPS apply_operator_beliefs, so the old smoke proved nothing)."""
+    monkeypatch.setenv("INFERENCE_WRITE_TIME_CONTRADICTION", "true")
+    state_file = tmp_path / "self-model-inferences.json"
+    # Pre-seed an explicit belief the new reflection will contradict.
+    _seed(
+        state_file,
+        [_rec("expl", "ship lean and fast", source="explicit", confidence=0.8)],
+    )
+    angles = {
+        "ship lean and fast": 0.0,
+        "build a heavy enterprise process": _cosine_to_angle(0.6),  # in-band
+    }
+    _patch_embed_angles(monkeypatch, angles)
+
+    written, applied = asyncio.run(
+        ob.apply_operator_beliefs(
+            [{"claim": "build a heavy enterprise process", "kind": "reflection"}],
+            state_file,
+            cwd=tmp_path,
+            write_time_enabled=True,
+            settings=_settings(),
+            reasoning=_band_conflict_reasoning(),
+        )
+    )
+    assert written == 1
+    assert applied == 1
+    # FRESH load — the loser's contradicted_by physically changed on disk.
+    by_text = {r.inference: r for r in InferenceTracker(state_file).load()}
+    refl = by_text["build a heavy enterprise process"]
+    assert refl.contradicted_by  # audit entry present
+    assert refl.contradiction_count == 1
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

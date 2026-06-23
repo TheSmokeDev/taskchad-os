@@ -74,6 +74,19 @@ def _run_extract(turns, reasoning, **kw):
     )
 
 
+def _run_apply(*a, **k):
+    """Run the now-async ``apply_operator_beliefs`` and return the WRITTEN count.
+
+    WS3 #84 made ``apply_operator_beliefs`` async returning
+    ``(written, write_time_applied)``. These tests assert the written count with
+    the write-time flag UNSET (so ``write_time_applied`` is always 0), so this
+    helper unpacks and returns just ``written`` — keeping the ``assert n == X``
+    assertions intact.
+    """
+    written, _ = asyncio.run(ob.apply_operator_beliefs(*a, **k))
+    return written
+
+
 # ===========================================================================
 # extract_operator_beliefs — claim filtering + capping over a stubbed LLM
 # ===========================================================================
@@ -149,7 +162,7 @@ def test_apply_kind_inferred_maps_to_reflection(tmp_path, monkeypatch):
         {"claim": "operator likes dark mode", "kind": "something_else"},
         {"claim": "operator reviews PRs daily"},  # no kind at all
     ]
-    n = ob.apply_operator_beliefs(claims, path)
+    n = _run_apply(claims, path)
     assert n == 3
     records = InferenceTracker(path).load()
     assert {r.source for r in records} == {"reflection"}
@@ -158,7 +171,7 @@ def test_apply_kind_inferred_maps_to_reflection(tmp_path, monkeypatch):
 def test_apply_kind_explicit_maps_to_explicit(tmp_path, monkeypatch):
     _patch_fake_embed_batch(monkeypatch)
     path = tmp_path / "inf.json"
-    n = ob.apply_operator_beliefs(
+    n = _run_apply(
         [{"claim": "operator always tests before shipping", "kind": "explicit"}], path
     )
     assert n == 1
@@ -173,7 +186,7 @@ def test_apply_bad_confidence_falls_back_to_half(tmp_path, monkeypatch):
         {"claim": "operator prefers concise answers", "confidence": "not a number"},
         {"claim": "operator likes dark mode in editors"},  # missing confidence
     ]
-    n = ob.apply_operator_beliefs(claims, path)
+    n = _run_apply(claims, path)
     assert n == 2
     records = InferenceTracker(path).load()
     assert all(abs(r.confidence - 0.5) < 1e-9 for r in records)
@@ -195,7 +208,7 @@ def test_apply_skips_malformed_without_aborting_batch(tmp_path, monkeypatch):
         {"claim": ""},                       # empty -> skipped
         {"claim": "operator prefers concise answers", "kind": "inferred"},  # kept
     ]
-    n = ob.apply_operator_beliefs(claims, path)
+    n = _run_apply(claims, path)
     assert n == 1
     records = InferenceTracker(path).load()
     assert len(records) == 1
@@ -211,7 +224,7 @@ def test_apply_none_claim_value_is_written_as_literal(tmp_path, monkeypatch):
     """
     _patch_fake_embed_batch(monkeypatch)
     path = tmp_path / "inf.json"
-    n = ob.apply_operator_beliefs([{"claim": None}], path)
+    n = _run_apply([{"claim": None}], path)
     # str(None).strip() == "None" (non-empty) -> written, NOT skipped.
     assert n == 1
     assert InferenceTracker(path).load()[0].inference == "None"
@@ -219,7 +232,7 @@ def test_apply_none_claim_value_is_written_as_literal(tmp_path, monkeypatch):
 
 def test_apply_empty_list_writes_nothing(tmp_path):
     path = tmp_path / "inf.json"
-    assert ob.apply_operator_beliefs([], path) == 0
+    assert _run_apply([], path) == 0
     assert not path.exists() or InferenceTracker(path).load() == []
 
 

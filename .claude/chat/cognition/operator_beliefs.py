@@ -157,19 +157,58 @@ async def extract_operator_beliefs(
     return claims[: settings.max_claims]
 
 
-def apply_operator_beliefs(claims: list[dict], state_file: Path) -> int:
+async def apply_operator_beliefs(
+    claims: list[dict],
+    state_file: Path,
+    *,
+    cwd: Path | None = None,
+    write_time_enabled: bool | None = None,
+    settings: Any | None = None,
+    embed_batch: Any | None = None,
+    reasoning: Any | None = None,
+) -> tuple[int, int]:
     """Write extracted claims as inference records (source explicit|reflection).
 
     ``kind == "explicit"`` -> ``source="explicit"`` (strong, direct operator
     statement); anything else -> ``source="reflection"`` (synthesized from a
     pattern). The dedup is now embedding-based (paraphrases converge), so
     repeated reflections climb ``evidence_count`` toward the ``>=2`` promotion
-    gate. Returns the count written. Each malformed claim is skipped, not fatal.
+    gate. Each malformed claim is skipped, not fatal.
+
+    Returns ``(written, write_time_applied)`` — ``written`` is the count of
+    claims persisted; ``write_time_applied`` is the count of existing beliefs
+    moved by the OPT-IN write-time contradiction step (WS3 #84). The caller uses
+    both (M3); ``write_time_applied`` is always ``0`` when the flag is OFF (the
+    default) because the helper self-gates and the caller's fast-path is unset.
+
+    WRITE-TIME CONTRADICTION (opt-in, default OFF): when
+    ``INFERENCE_WRITE_TIME_CONTRADICTION`` is ON and a newly-written belief is a
+    physical MISS (a fresh append — detected by ``before_ids`` membership, R1 B5,
+    NEVER ``evidence_count``), the freshly-written record is resolved against the
+    existing corpus by ``resolve_write_time_contradiction`` (which reuses the
+    nightly judge/policy). On a dedup HIT (the returned record's id was already in
+    the corpus) the helper is skipped — there is no two-record conflict.
+
+    ``cwd`` defaults to ``Path(".")`` (passed through to the judge). The
+    ``write_time_enabled`` / ``settings`` / ``embed_batch`` / ``reasoning`` args
+    are injectable test seams forwarded VERBATIM to the helper; production callers
+    pass nothing (all default None -> resolved in the helper body, Rule 1), so the
+    production call path and ``add_inference`` behavior are unchanged.
     """
     from cognition.self_model import InferenceTracker
 
+    from config import get_inference_extraction_settings
+
     tracker = InferenceTracker(state_file)
     written = 0
+    write_time_applied = 0
+    # Cheap fast-path: skip the per-claim MISS snapshot + helper import entirely
+    # when the flag is OFF. The helper ALSO self-gates (B2) — belt and suspenders.
+    flag_on = (
+        write_time_enabled
+        if write_time_enabled is not None
+        else get_inference_extraction_settings().write_time_contradiction
+    )
     for c in claims:
         try:
             claim_text = str(c["claim"]).strip()
@@ -183,11 +222,28 @@ def apply_operator_beliefs(claims: list[dict], state_file: Path) -> int:
             confidence = float(c.get("confidence", 0.5))
         except (TypeError, ValueError):
             confidence = 0.5
-        tracker.add_inference(
+        # R1 B5 — Rule 2 physical MISS snapshot, captured ONLY when the flag is on
+        # (default-OFF parity: when off, the corpus path is byte-identical).
+        before_ids = {r.id for r in tracker.load()} if flag_on else None
+        rec = tracker.add_inference(
             inference=claim_text,
             observation=claim_text,
             confidence=confidence,
             source=source,
         )
         written += 1
-    return written
+        # MISS = the returned record's id is NEW. NEVER gate on rec.evidence_count —
+        # a legacy evidence_count=0 record would HIT while reading 1 (R1 B5).
+        if flag_on and before_ids is not None and rec.id not in before_ids:
+            from cognition.belief_conflicts import resolve_write_time_contradiction
+
+            write_time_applied += await resolve_write_time_contradiction(
+                rec,
+                state_file,
+                cwd or Path("."),
+                write_time_enabled=write_time_enabled,
+                settings=settings,
+                embed_batch=embed_batch,
+                reasoning=reasoning,
+            )
+    return written, write_time_applied

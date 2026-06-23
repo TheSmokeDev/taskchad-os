@@ -525,8 +525,18 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
         user_turns = read_operator_user_turns(window_start)
         claims = await extract_operator_beliefs(user_turns, cwd=PROJECT_ROOT)
         belief_count = 0
+        write_time_applied = 0
         if not test_mode:
-            belief_count = apply_operator_beliefs(claims, INFERENCE_STATE_FILE)
+            belief_count, write_time_applied = await apply_operator_beliefs(
+                claims, INFERENCE_STATE_FILE, cwd=PROJECT_ROOT
+            )
+            if write_time_applied:
+                # WS3 #84 — operator-visible write-time resolution count (M3).
+                print(
+                    f"[{now_local()}] write-time contradictions applied: "
+                    f"{write_time_applied}",
+                    flush=True,
+                )
         print(
             f"[{now_local()}] Operator-belief extraction: "
             f"{len(user_turns)} turns -> {len(claims)} claims -> {belief_count} written"

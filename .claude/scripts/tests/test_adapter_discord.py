@@ -19,12 +19,14 @@ from models import Attachment, Platform
 def _make_adapter(
     allowed_guilds: list[str] | None = None,
     allowed_users: list[str] | None = None,
+    watch_all_guild_channels: bool = False,
 ) -> DiscordAdapter:
     """Create a DiscordAdapter without connecting to Discord."""
     adapter = DiscordAdapter(
         bot_token="fake-token",
         allowed_guilds=allowed_guilds or [],
         allowed_users=allowed_users or [],
+        watch_all_guild_channels=watch_all_guild_channels,
     )
     adapter._bot_user_id = 999999
     return adapter
@@ -173,6 +175,39 @@ def test_is_allowed_dm_bypasses_guild_check():
     adapter = _make_adapter(allowed_guilds=["99999"])
     msg = _mock_message(is_dm=True, author_id=12345)
     assert adapter._is_allowed(msg) is True
+
+
+# ── Whole-server auto-listen (DISCORD_WATCH_ALL_GUILD_CHANNELS) ─────
+
+
+def test_watches_guild_flag_off():
+    adapter = _make_adapter(allowed_guilds=["11111"], watch_all_guild_channels=False)
+    msg = _mock_message(guild_id=11111)
+    assert adapter._watches_guild(msg) is False
+
+
+def test_watches_guild_flag_on_guild_allowed():
+    adapter = _make_adapter(allowed_guilds=["11111"], watch_all_guild_channels=True)
+    msg = _mock_message(guild_id=11111)
+    assert adapter._watches_guild(msg) is True
+
+
+def test_watches_guild_flag_on_guild_not_allowed():
+    adapter = _make_adapter(allowed_guilds=["99999"], watch_all_guild_channels=True)
+    msg = _mock_message(guild_id=11111)
+    assert adapter._watches_guild(msg) is False
+
+
+def test_watches_guild_flag_on_empty_allowlist_any_guild():
+    adapter = _make_adapter(allowed_guilds=[], watch_all_guild_channels=True)
+    msg = _mock_message(guild_id=11111)
+    assert adapter._watches_guild(msg) is True
+
+
+def test_watches_guild_dm_returns_false():
+    adapter = _make_adapter(allowed_guilds=[], watch_all_guild_channels=True)
+    msg = _mock_message(is_dm=True, author_id=12345)
+    assert adapter._watches_guild(msg) is False
 
 
 # ── Message splitting ──────────────────────────────────────

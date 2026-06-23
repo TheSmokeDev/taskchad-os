@@ -390,6 +390,12 @@ _discord_users_raw = os.getenv("DISCORD_ALLOWED_USERS", "")
 DISCORD_ALLOWED_USERS: list[str] = [
     u.strip() for u in _discord_users_raw.split(",") if u.strip()
 ]
+# When true, the bot auto-listens to EVERY channel in its allowed guild(s)
+# without needing an @mention. Scope it with DISCORD_ALLOWED_GUILDS.
+DISCORD_WATCH_ALL_GUILD_CHANNELS: bool = (
+    os.getenv("DISCORD_WATCH_ALL_GUILD_CHANNELS", "").strip().lower()
+    in ("1", "true", "yes", "on")
+)
 
 # WhatsApp (Meta Cloud API)
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
@@ -645,6 +651,7 @@ class InferenceExtractionSettings(NamedTuple):
     extraction_enabled: bool
     max_claims: int
     min_chars: int
+    write_time_contradiction: bool  # WS3 #84 — opt-in write-time contradiction step (default OFF)
 
 
 def get_inference_extraction_settings(
@@ -652,6 +659,7 @@ def get_inference_extraction_settings(
     extraction_enabled: bool | None = None,
     max_claims: int | None = None,
     min_chars: int | None = None,
+    write_time_contradiction: bool | None = None,
 ) -> InferenceExtractionSettings:
     """Resolve operator-belief extraction knobs at CALL TIME (Rule 1) — Living Self Act 1.
 
@@ -685,6 +693,18 @@ def get_inference_extraction_settings(
         INFERENCE_EXTRACTION_MAX_CLAIMS (8) — cap on claims emitted per
             reflection run.
         INFERENCE_EXTRACTION_MIN_CHARS (12) — floor on a single claim's length.
+        INFERENCE_WRITE_TIME_CONTRADICTION ("false") — WS3 #84 opt-in. When ON,
+            a newly-WRITTEN operator belief that lands topically-near an existing
+            ACTIVE belief (cosine in the conflict band) is resolved against it
+            IMMEDIATELY at write — reusing the EXACT nightly judge/policy
+            (``belief_conflicts.judge_contradictions`` + ``apply_contradictions``)
+            — instead of waiting for the 8 AM pass. DEFAULT OFF keeps the written
+            corpus byte-identical and fires zero judge calls; the nightly
+            ``belief_conflicts`` pass remains the backstop. NOTE: this is a
+            write-time-only opt-in stacked ON TOP of ``CONTRADICTION_ENABLED`` —
+            ``CONTRADICTION_ENABLED=false`` is a SECOND kill switch that also
+            disables the write-time step (the shared ``get_contradiction_settings``
+            ``.enabled`` gate short-circuits the reused primitives).
     """
     if dedup_threshold is None:
         dedup_threshold = float(os.getenv("INFERENCE_DEDUP_THRESHOLD", "0.72"))
@@ -696,11 +716,16 @@ def get_inference_extraction_settings(
         max_claims = int(os.getenv("INFERENCE_EXTRACTION_MAX_CLAIMS", "8"))
     if min_chars is None:
         min_chars = int(os.getenv("INFERENCE_EXTRACTION_MIN_CHARS", "12"))
+    if write_time_contradiction is None:
+        write_time_contradiction = (
+            os.getenv("INFERENCE_WRITE_TIME_CONTRADICTION", "false").lower() == "true"
+        )
     return InferenceExtractionSettings(
         dedup_threshold=dedup_threshold,
         extraction_enabled=extraction_enabled,
         max_claims=max_claims,
         min_chars=min_chars,
+        write_time_contradiction=write_time_contradiction,
     )
 
 
