@@ -49,6 +49,12 @@ class RuntimeRequest:
     mcp_servers: list[str] | None = None
     metadata: dict[str, Any] | None = None
     auth_profile: str | None = None
+    # User-facing conversational turn (cabinet personas, chat replies). When True,
+    # the CLI prompt builder uses an in-character preamble instead of the backstage
+    # "safe text-only reasoning task" framing, so the homie never narrates the
+    # runtime/lanes/tools to the user. Provider-agnostic (Codex + Gemini share the
+    # builder); ignored on the claude_native lane, which has no such preamble.
+    conversational: bool = False
 
 
 @dataclass(slots=True)

@@ -37,6 +37,7 @@ from cabinet.text_orchestrator import (
 )
 from dashboard_db import get_connection
 from runtime.base import RuntimeResult
+from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
 from security.kill_switches import KillSwitchDisabled
 
 
@@ -59,6 +60,14 @@ def _reset_channels() -> None:
     channels_mod._reset_channels()
     yield
     channels_mod._reset_channels()
+
+
+@pytest.fixture(autouse=True)
+def _default_deny_cabinet_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate tests from an operator .env that sets CABINET_PERSONA_FULL_TOOLS=true
+    (config.load_dotenv(override=True) would otherwise leak it into every test).
+    Default to the secure OFF state; the full-tools test opts in explicitly."""
+    monkeypatch.delenv("CABINET_PERSONA_FULL_TOOLS", raising=False)
 
 
 def _make_meeting(chat_id: str = "test-chat") -> int:
@@ -298,6 +307,99 @@ async def test_handle_text_turn_threads_tool_policy(tmp_dashboard_db: Path) -> N
     assert ops_request.disallowed_tools is not None
     assert "Write" in ops_request.disallowed_tools
     assert ops_request.mcp_servers == ["gmail"]
+
+
+@pytest.mark.asyncio
+async def test_full_tools_off_keeps_default_deny(tmp_dashboard_db: Path, monkeypatch) -> None:
+    """Default (no opt-in): cabinet persona stays text-only on the M1 default-deny
+    floor — capability TEXT_REASONING, disallowed-tools intact, full_tools=False."""
+    monkeypatch.delenv("CABINET_PERSONA_FULL_TOOLS", raising=False)
+    meeting_id = _make_meeting()
+    captured: list = []
+
+    async def fake_run(req):
+        captured.append(req)
+        return RuntimeResult(text="ok", runtime_lane="generic_runtime", provider="codex", model="m")
+
+    roster = [
+        RosterAgent(id="default", name="Main", description="host"),
+        RosterAgent(id="ops", name="Ops", description="schedules", tools=["Bash"], mcp_servers={"gmail": {}, "asana": {}}),
+    ]
+    opts = HandleTurnOptions(roster=roster)
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_router.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        await handle_text_turn(meeting_id, "@ops schedule it", "ft_off", opts=opts)
+
+    ops_req = next(r for r in captured if r.metadata and r.metadata.get("persona_id") == "ops")
+    assert ops_req.capability == TEXT_REASONING
+    assert ops_req.disallowed_tools is not None  # default-deny floor intact
+    assert ops_req.metadata["tool_policy"]["full_tools"] is False
+
+
+@pytest.mark.asyncio
+async def test_full_tools_on_gives_main_homie_parity(tmp_dashboard_db: Path, monkeypatch) -> None:
+    """CABINET_PERSONA_FULL_TOOLS=true arms a cabinet persona exactly like the
+    main 1:1 homie: TOOL_REASONING + full toolset + bypass + unfiltered MCP."""
+    monkeypatch.setenv("CABINET_PERSONA_FULL_TOOLS", "true")
+    monkeypatch.setenv("CABINET_PERSONA_MAX_TOOL_TURNS", "8")
+    meeting_id = _make_meeting()
+    captured: list = []
+
+    async def fake_run(req):
+        captured.append(req)
+        return RuntimeResult(text="ok", runtime_lane="generic_runtime", provider="codex", model="m")
+
+    roster = [
+        RosterAgent(id="default", name="Main", description="host"),
+        RosterAgent(id="ops", name="Ops", description="schedules", tools=["Bash"], mcp_servers={"gmail": {}, "asana": {}}),
+    ]
+    opts = HandleTurnOptions(roster=roster)
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_router.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        await handle_text_turn(meeting_id, "@ops schedule it", "ft_on", opts=opts)
+
+    ops_req = next(r for r in captured if r.metadata and r.metadata.get("persona_id") == "ops")
+    assert ops_req.capability == TOOL_REASONING
+    assert "WebSearch" in ops_req.allowed_tools
+    assert "Bash" in ops_req.allowed_tools
+    assert "Read" in ops_req.allowed_tools
+    assert ops_req.disallowed_tools is None        # no default-deny when armed
+    assert ops_req.max_turns == 8
+    assert ops_req.permission_mode == "bypassPermissions"
+    # MCP is unfiltered under full parity (both servers, not just policy-allowed gmail).
+    assert "gmail" in ops_req.mcp_servers and "asana" in ops_req.mcp_servers
+    assert ops_req.metadata["tool_policy"]["full_tools"] is True
+
+
+@pytest.mark.asyncio
+async def test_full_tools_off_true_m1_default_deny(tmp_dashboard_db: Path, monkeypatch) -> None:
+    """Default-off with a persona that has NO tools configured → the GENUINE M1
+    floor: allowed=[], disallowed=["*"], mcp=[], TEXT_REASONING. (The other off-test
+    uses an opt-in tool, so this one proves the true empty-config default-deny.)"""
+    monkeypatch.delenv("CABINET_PERSONA_FULL_TOOLS", raising=False)
+    meeting_id = _make_meeting()
+    captured: list = []
+
+    async def fake_run(req):
+        captured.append(req)
+        return RuntimeResult(text="ok", runtime_lane="generic_runtime", provider="codex", model="m")
+
+    # 'seo' has no tools= and no mcp_servers= → genuine default-deny.
+    roster = [
+        RosterAgent(id="default", name="Main", description="host"),
+        RosterAgent(id="seo", name="SEO", description="content + SERP"),
+    ]
+    opts = HandleTurnOptions(roster=roster)
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_router.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        await handle_text_turn(meeting_id, "@seo what's the plan?", "ft_floor", opts=opts)
+
+    seo_req = next(r for r in captured if r.metadata and r.metadata.get("persona_id") == "seo")
+    assert seo_req.capability == TEXT_REASONING
+    assert seo_req.allowed_tools == []
+    assert seo_req.disallowed_tools == ["*"]
+    assert seo_req.mcp_servers == []
+    assert seo_req.metadata["tool_policy"]["full_tools"] is False
 
 
 @pytest.mark.asyncio

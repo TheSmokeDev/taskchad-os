@@ -913,20 +913,8 @@ class ConversationEngine:
             "- no external writes such as posts, DMs, connection requests, purchases, or profile edits unless explicitly requested\n"
             "LinkedIn profile browser checks use /linkedin_profile status, which is a wrapper over the same helper.\n"
         )
-        allowed_tools = [
-            "Read", "Write", "Edit", "Bash", "Glob", "Grep",
-            "WebSearch", "WebFetch", "NotebookEdit", "Skill",
-            # MCP tools
-            "mcp__exa__web_search_exa",
-            "mcp__exa__get_code_context_exa",
-            "mcp__crawl4ai__crawl",
-            "mcp__crawl4ai__md",
-            "mcp__crawl4ai__ask",
-            "mcp__crawl4ai__html",
-            "mcp__crawl4ai__pdf",
-            "mcp__crawl4ai__screenshot",
-            "mcp__crawl4ai__execute_js",
-        ]
+        from config import DEFAULT_AGENT_TOOLSET  # canonical homie toolset (shared w/ cabinet parity)
+        allowed_tools = list(DEFAULT_AGENT_TOOLSET)
 
         requested_model = os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6")
         piv_max_turns = self.max_turns
@@ -1327,6 +1315,10 @@ class ConversationEngine:
             cwd=self.project_root,
             task_name="chat_turn",
             capability=TOOL_REASONING if allowed_tools else TEXT_REASONING,
+            # User-facing chat reply — on no-tool (TEXT_REASONING) turns, use the
+            # in-character preamble so the homie never narrates its sandbox. Ignored
+            # on the TOOL_REASONING path (which uses the tool preamble).
+            conversational=True,
             model=requested_model,
             max_turns=piv_max_turns,
             max_budget_usd=piv_max_budget,

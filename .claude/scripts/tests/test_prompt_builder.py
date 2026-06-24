@@ -149,3 +149,111 @@ def test_text_preamble_grounds_against_fabricated_action_claims() -> None:
     req = RuntimeRequest(prompt="yo", cwd=".", task_name="t", capability=TEXT_REASONING)
     result = render_cli_prompt(req)
     assert "never claim to have read files" in result
+
+
+# ---------------------------------------------------------------------------
+# conversational flag — in-character preamble for user-facing turns (cabinet
+# personas + chat replies). Provider-agnostic: both CLI lanes share this builder.
+# ---------------------------------------------------------------------------
+
+
+def test_conversational_text_turn_swaps_backstage_preamble() -> None:
+    req = RuntimeRequest(
+        prompt="what's our priority?", cwd=".", task_name="t",
+        capability=TEXT_REASONING, conversational=True,
+    )
+    result = render_cli_prompt(req)
+    # The exact backstage script the homie embarrassingly recited is GONE.
+    assert "safe text-only" not in result
+    assert "no tools in this mode" not in result
+    assert "reasoning task for The Homie runtime layer" not in result
+    # ...replaced by an in-character frame.
+    assert "speaking as yourself in a live conversation" in result
+    assert "Stay fully in character" in result
+
+
+def test_conversational_keeps_anti_fabrication_and_forbids_plumbing() -> None:
+    req = RuntimeRequest(
+        prompt="yo", cwd=".", task_name="t",
+        capability=TEXT_REASONING, conversational=True,
+    )
+    result = render_cli_prompt(req)
+    assert "taken an action you haven't" in result
+    assert "backstage plumbing the user must never hear about" in result
+
+
+def test_conversational_flag_ignored_on_tool_path() -> None:
+    req = RuntimeRequest(
+        prompt="go", cwd=".", task_name="t",
+        capability=TOOL_REASONING, conversational=True,
+    )
+    result = render_cli_prompt(req, framework_tool_map="")
+    # Tool turns keep the tool preamble; the conversational frame is not used.
+    assert "full access to read and write files" in result
+    assert "Stay fully in character" not in result
+
+
+def test_conversational_preserves_persona_system_prompt() -> None:
+    req = RuntimeRequest(
+        prompt="status?", cwd=".", task_name="t",
+        capability=TEXT_REASONING, conversational=True,
+        system_prompt="You are the Sales homie.",
+    )
+    result = render_cli_prompt(req)
+    assert "System context:\nYou are the Sales homie." in result
+
+
+def test_text_turn_without_conversational_keeps_backstage_preamble() -> None:
+    # Backstage reasoning jobs (reflection, dream, formatter) are unchanged.
+    req = RuntimeRequest(
+        prompt="reflect", cwd=".", task_name="t",
+        capability=TEXT_REASONING, conversational=False,
+    )
+    result = render_cli_prompt(req)
+    assert "safe text-only" in result
+    assert "Stay fully in character" not in result
+
+
+def test_conversational_skips_gemini_guidance() -> None:
+    """Gemini's tool/runtime-discipline guidance must NOT leak into a conversational
+    turn — it would re-introduce the "verify first: read files / execute" framing the
+    in-character preamble is meant to suppress."""
+    req = RuntimeRequest(
+        prompt="yo", cwd=".", task_name="t",
+        capability=TEXT_REASONING, conversational=True,
+    )
+    result = render_cli_prompt(req, model_guidance=GEMINI_GUIDANCE)
+    assert "Gemini operational directives" not in result
+    assert "verify first" not in result.lower()
+    assert "Stay fully in character" in result
+
+
+def test_non_conversational_text_still_gets_model_guidance() -> None:
+    """Backstage text turns are unchanged — guidance still appended."""
+    req = RuntimeRequest(
+        prompt="yo", cwd=".", task_name="t",
+        capability=TEXT_REASONING, conversational=False,
+    )
+    result = render_cli_prompt(req, model_guidance=GEMINI_GUIDANCE)
+    assert "Gemini operational directives" in result
+
+
+def test_user_facing_requests_set_conversational_flag() -> None:
+    """The two user-facing RuntimeRequest sites carry conversational=True so a homie
+    never narrates its sandbox. Source guard (non-comment lines) against accidental
+    removal — the cabinet wiring also has a behavioral test in
+    test_cabinet_text_orchestrator.py."""
+    from pathlib import Path
+
+    scripts = Path(__file__).resolve().parent.parent
+    cabinet_src = (scripts / "cabinet" / "text_orchestrator.py").read_text(encoding="utf-8")
+    engine_src = (scripts.parent / "chat" / "engine.py").read_text(encoding="utf-8")
+
+    def _has_real_flag(src: str) -> bool:
+        return any(
+            "conversational=True" in line and not line.lstrip().startswith("#")
+            for line in src.splitlines()
+        )
+
+    assert _has_real_flag(cabinet_src), "cabinet persona turn must set conversational=True"
+    assert _has_real_flag(engine_src), "engine chat turn must set conversational=True"

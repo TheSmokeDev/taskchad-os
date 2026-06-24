@@ -1,0 +1,7 @@
+interface:
+  display_name: "Founder Video Digester"
+  short_description: "Turn founder videos into concrete action"
+  default_prompt: "Use $founder-video-digester to extract founder patterns, compare them to our current systems, and turn the gaps into concrete changes."
+
+policy:
+  allow_implicit_invocation: true

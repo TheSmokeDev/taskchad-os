@@ -140,10 +140,33 @@ def _dispatch_api(
             body_preview=post.body,
         )
 
+        # Instagram requires a publicly-fetchable image — generate a branded
+        # quote card and host it before posting. A failure here MUST fail the
+        # post (no text-only IG attempt — the Graph API rejects it anyway).
+        image_url = ""
+        if post.channel.lower() in ("instagram", "ig"):
+            try:
+                from social.image_host import upload_public
+                from social.quote_card import render_quote_card
+
+                card_path = render_quote_card(post.body, title=post.title)
+                image_url = upload_public(card_path)
+            except Exception as exc:
+                error = f"Quote-card generation/upload failed: {exc}"
+                svc.mark_failed(post.id, error=error)
+                append_social_audit_record(
+                    channel=post.channel,
+                    action="post",
+                    post_id=post.id,
+                    outcome="failed",
+                    error=error,
+                )
+                return False
+
         # Now attempt the external post
         from integrations.social_media import post_to_platform
 
-        result = post_to_platform(post.channel, post.body)
+        result = post_to_platform(post.channel, post.body, image_url=image_url)
         if result.success:
             svc.mark_posted(post.id, post_url=result.post_url)
             # Update audit record with success

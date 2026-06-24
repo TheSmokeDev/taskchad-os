@@ -91,3 +91,47 @@ dashboard/desktop/node_modules/
 dashboard/desktop/out/
 dashboard/web/dist/
 dashboard/web/node_modules/
+
+# Per-script run logs (the existing list named specific files; these were missed)
+.claude/scripts/*_runs.log
+.claude/scripts/output/
+
+# Browser-automation screenshots dumped at repo root / scripts root
+/*.png
+.claude/scripts/*.png
+
+# Stray artifacts — script bugs wrote DBs/docs to literal paths. Content (if any)
+# stays on disk; we just stop tracking these locations.
+/data/
+/undefined/
+/coding-vault/
+.claude/scripts/None
+.claude/scheduled_tasks.lock
+
+# Local agent scratch (not previously covered)
+.archon/logs/
+.claude/tmp/
+.codex/artifacts/
+.codex-remote-attachments/
+
+# Installed HyperFrames skill bundle — these are symlinks into the gitignored
+# .agents/skills/ install dir; tracking them would commit dangling symlinks.
+.claude/skills/animejs
+.claude/skills/contribute-catalog
+.claude/skills/css-animations
+.claude/skills/gsap
+.claude/skills/hyperframes
+.claude/skills/hyperframes-cli
+.claude/skills/hyperframes-media
+.claude/skills/hyperframes-registry
+.claude/skills/lottie
+.claude/skills/remotion-to-hyperframes
+.claude/skills/tailwind
+.claude/skills/three
+.claude/skills/typegpu
+.claude/skills/waapi
+.claude/skills/website-to-hyperframes
+skills-lock.json
+
+# Video render output — hundreds of MB of HTML/audio/video/image binaries; stays local
+.claude/video/

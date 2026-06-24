@@ -101,6 +101,13 @@ class DiscordAdapter:
             env_val = os.getenv("DISCORD_WATCHED_CHANNELS", "")
             watched_channels = [c.strip() for c in env_val.split(",") if c.strip()] if env_val else []
         self._watched_channels: set[str] = set(watched_channels)
+        # Channels EXCLUDED from whole-guild watch — still reachable via
+        # @mention or DM. Lets one guild stay whole-watched while a single
+        # channel (e.g. a dedicated bot's channel) remains @mention-only.
+        _excl = os.getenv("DISCORD_WATCH_EXCLUDE_CHANNELS", "")
+        self._watch_exclude_channels: set[str] = {
+            c.strip() for c in _excl.split(",") if c.strip()
+        }
 
         # Register event handlers
         @self._client.event
@@ -478,6 +485,8 @@ class DiscordAdapter:
         Only fires when DISCORD_WATCH_ALL_GUILD_CHANNELS is on, the message
         comes from a guild, and that guild is in allowed_guilds (empty = any).
         DMs return False (they are always handled via the is_dm path).
+        Channels in DISCORD_WATCH_EXCLUDE_CHANNELS are skipped here so they
+        stay @mention-only even when the rest of the guild is whole-watched.
         """
         if not self._watch_all_guild_channels:
             return False
@@ -485,6 +494,8 @@ class DiscordAdapter:
         if guild is None:
             return False
         if self.allowed_guilds and str(guild.id) not in self.allowed_guilds:
+            return False
+        if str(msg.channel.id) in self._watch_exclude_channels:
             return False
         return True
 

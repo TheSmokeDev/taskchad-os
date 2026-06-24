@@ -44,11 +44,12 @@ import personas
 # explicitly so the roster works regardless of import order. Rule 3 module-
 # attribute lookup pattern.
 from personas import lifecycle as _persona_lifecycle
+import config
 from dashboard_db import get_connection
 from runtime import lane_router
 from runtime.base import RuntimeRequest
 from runtime.bootstrap import build_session_start_context
-from runtime.capabilities import TEXT_REASONING
+from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
 from runtime import subprocess_env as _subprocess_env
 from security import kill_switches
 
@@ -762,6 +763,26 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
     mcp_filtered = filter_mcp_servers(args.persona.mcp_servers, policy)
     mcp_names = list(mcp_filtered.keys())
 
+    # Full-parity opt-in (CABINET_PERSONA_FULL_TOOLS): arm cabinet personas with
+    # the SAME toolset + tool-capability as the main 1:1 homie. Default OFF keeps
+    # the M1 default-deny floor for the shipped framework. Voice turns stay
+    # text-only/brief regardless. NOTE: this is a trusted-operator escape hatch —
+    # bypassPermissions + Bash/Write/Edit + unfiltered MCP can act OUTSIDE the
+    # named integration mutation gates (see config.cabinet_persona_full_tools_enabled).
+    _full_tools = config.cabinet_persona_full_tools_enabled() and not args.is_voice
+    if _full_tools:
+        turn_capability = TOOL_REASONING
+        turn_allowed_tools = list(config.DEFAULT_AGENT_TOOLSET)
+        turn_disallowed_tools: list[str] | None = None
+        turn_mcp_names = list(args.persona.mcp_servers.keys())
+        turn_max_turns = config.cabinet_persona_max_tool_turns()
+    else:
+        turn_capability = TEXT_REASONING
+        turn_allowed_tools = list(policy.allowed_tools)
+        turn_disallowed_tools = list(policy.disallowed_tools)
+        turn_mcp_names = mcp_names
+        turn_max_turns = 1 if args.is_voice else 3
+
     # Emit agent_typing so the UI can show the typing indicator.
     channel.emit({
         "type": "agent_typing",
@@ -807,12 +828,15 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
         prompt=runtime_prompt,
         cwd=Path.cwd(),
         task_name="cabinet_persona_turn",
-        capability=TEXT_REASONING,
+        capability=turn_capability,
+        # User-facing room reply — stay in character, never narrate the runtime
+        # sandbox (the homie is a persona in a meeting, not a backstage task).
+        conversational=True,
         # No model override — let lane_router resolve per persona/profile.
-        max_turns=1 if args.is_voice else 3,
-        allowed_tools=list(policy.allowed_tools),
-        disallowed_tools=list(policy.disallowed_tools),
-        mcp_servers=mcp_names,
+        max_turns=turn_max_turns,
+        allowed_tools=turn_allowed_tools,
+        disallowed_tools=turn_disallowed_tools,
+        mcp_servers=turn_mcp_names,
         permission_mode="bypassPermissions",
         allow_fallback=True,
         metadata={
@@ -821,9 +845,10 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
             "persona_id": args.persona_id,
             "caller": "cabinet_orchestrator",
             "tool_policy": {
-                "allowed_count": len(policy.allowed_tools),
-                "disallowed_count": len(policy.disallowed_tools),
-                "mcp_count": len(mcp_names),
+                "allowed_count": len(turn_allowed_tools),
+                "disallowed_count": len(turn_disallowed_tools or []),
+                "mcp_count": len(turn_mcp_names),
+                "full_tools": _full_tools,
             },
             "system_prompt_source": "+".join(system_prompt_sources),
         },

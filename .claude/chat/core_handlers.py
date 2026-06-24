@@ -2320,6 +2320,7 @@ async def handle_cabinet(
     """
     from integrations import cabinet_api  # lazy: avoid HTTP/httpx cost on every import
     from security import kill_switches  # Phase 7b WS3 — Rule 3 module-attribute lookup
+    from cabinet_relay import ensure_relay  # lazy: relay persona turns to chat
 
     args = (args or "").strip()
     if not args or args.lower() in {"help", "?"}:
@@ -2339,6 +2340,12 @@ async def handle_cabinet(
 
         if args.lower() == "create":
             ref = await cabinet_api.create_meeting(chat_id=chat_id_str)
+            if ensure_relay(ref.id, adapter, incoming):
+                return (
+                    f"Cabinet meeting #{ref.id} started — the homies will answer "
+                    f"right here.\n"
+                    f"Add a turn: /cabinet send {ref.id} <message>"
+                )
             return (
                 f"Cabinet meeting #{ref.id} started.\n"
                 f"Watch live: http://localhost:3141/cabinet?id={ref.id}\n"
@@ -2361,6 +2368,8 @@ async def handle_cabinet(
             await cabinet_api.send_message(
                 meeting_id, text.strip(), chat_id=chat_id_str,
             )
+            if ensure_relay(meeting_id, adapter, incoming):
+                return f"Sent to meeting #{meeting_id} — answers will come through here."
             return (
                 f"Sent to meeting #{meeting_id}. "
                 f"Watch http://localhost:3141/cabinet?id={meeting_id} for persona turns "
@@ -2491,6 +2500,12 @@ async def handle_standup(
         await cabinet_api.send_message(
             ref.id, standup_q, chat_id=chat_id_str,
         )
+        from cabinet_relay import ensure_relay  # lazy: relay persona turns to chat
+        if ensure_relay(ref.id, adapter, incoming):
+            return (
+                f"Standup #{ref.id} started — the homies will answer right here "
+                f"(or a Main-only reply if no cabinet-eligible personas are registered)."
+            )
         return (
             f"Standup #{ref.id} started.\n"
             f"Watch http://localhost:3141/cabinet?id={ref.id} for persona answers "
@@ -2532,6 +2547,12 @@ async def handle_discuss(
 
         ref = await cabinet_api.create_meeting(chat_id=chat_id_str)
         await cabinet_api.send_message(ref.id, args, chat_id=chat_id_str)
+        from cabinet_relay import ensure_relay  # lazy: relay persona turns to chat
+        if ensure_relay(ref.id, adapter, incoming):
+            return (
+                f"Discussion #{ref.id} started — topic: {args}\n"
+                f"The homies will answer right here."
+            )
         return (
             f"Discussion #{ref.id} started — topic: {args}\n"
             f"Watch: http://localhost:3141/cabinet?id={ref.id}"

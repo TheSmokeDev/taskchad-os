@@ -52,6 +52,25 @@ _TEXT_PREAMBLE = (
     "Return only the final response text for the requested task."
 )
 
+# User-facing conversational turns (cabinet personas, chat replies). Same no-tool
+# reality as _TEXT_PREAMBLE, but framed for a HOMIE talking to the user — never the
+# backstage "you are a safe text-only reasoning task for The Homie runtime layer"
+# script. Keeps the anti-fabrication guard (don't claim actions you didn't take)
+# while forbidding any mention of runtime/lanes/tools so the homie stays in
+# character on every provider (this is the model-agnostic parity fix).
+_CONVERSATIONAL_PREAMBLE = (
+    "You are speaking as yourself in a live conversation. Stay fully in character "
+    "and answer naturally and directly, the way this persona would.\n\n"
+    "Speak from what you know and the context provided. Don't claim to have looked "
+    "something up, read a file, or taken an action you haven't — if you're missing a "
+    "detail, just say so in your own voice and keep going. Never describe yourself as "
+    "being in a limited, sandboxed, or \"text-only\" mode, and never mention the "
+    "runtime, lanes, providers, tools, or adapters — that is backstage plumbing the "
+    "user must never hear about.\n\n"
+    "Match the length to the message: keep it tight and conversational; don't pad or "
+    "restate the question."
+)
+
 
 # Gemini-specific operational guidance, ported from Hermes'
 # GOOGLE_MODEL_OPERATIONAL_GUIDANCE (hermes-agent/agent/prompt_builder.py),
@@ -109,8 +128,17 @@ def render_cli_prompt(
         if tool_map:
             parts.append(tool_map)
     else:
-        parts = [text_preamble]
-        if model_guidance and model_guidance.strip():
+        # User-facing conversational turns get the in-character preamble so the
+        # homie never narrates its own sandbox; backstage reasoning tasks keep the
+        # honest text preamble. Provider-agnostic — both CLI lanes hit this path.
+        is_conversational = getattr(request, "conversational", False)
+        preamble = _CONVERSATIONAL_PREAMBLE if is_conversational else text_preamble
+        parts = [preamble]
+        # Skip model_guidance on conversational turns — GEMINI_GUIDANCE carries
+        # tool/runtime-discipline language ("verify first: read files", "absolute
+        # paths", "execute, do not just plan") that contradicts staying in character
+        # (its brevity directive is already covered by _CONVERSATIONAL_PREAMBLE).
+        if not is_conversational and model_guidance and model_guidance.strip():
             parts.append(model_guidance.strip())
 
     if isinstance(request.system_prompt, str) and request.system_prompt.strip():

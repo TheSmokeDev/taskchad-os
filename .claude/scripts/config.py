@@ -1100,6 +1100,96 @@ def get_session_brief_settings(
     )
 
 
+class CabinetRelaySettings(NamedTuple):
+    """Effective cabinet→chat relay knobs (call-time resolved)."""
+
+    enabled: bool
+    max_turns: int
+
+
+def get_cabinet_relay_settings(
+    enabled: bool | None = None,
+    max_turns: int | None = None,
+) -> CabinetRelaySettings:
+    """Resolve cabinet→chat relay knobs at CALL TIME (Rule 1).
+
+    The relay (``.claude/chat/cabinet_relay.py``) posts each completed cabinet
+    persona turn back into the originating chat channel (Discord/Telegram/…)
+    instead of leaving the conversation dashboard-only. Knobs:
+
+        CABINET_CHAT_RELAY_ENABLED ("true") — master switch. When false, the
+            cabinet slash commands behave exactly as before (dashboard-only;
+            the chat reply points at the browser URL).
+        CABINET_CHAT_RELAY_MAX_TURNS ("0") — per-meeting cap on relayed persona
+            turns (0 == unlimited). Guards against a ``/standup`` firehose when
+            the full roster answers; prefer @mention audiences for tight turns.
+
+    None-sentinel pattern: explicit values pass through; ``None`` resolves the
+    matching env var inside the body so ``monkeypatch.setenv`` takes effect on
+    the next call with no module reload.
+    """
+    if enabled is None:
+        enabled = os.getenv("CABINET_CHAT_RELAY_ENABLED", "true").lower() == "true"
+    if max_turns is None:
+        max_turns = int(os.getenv("CABINET_CHAT_RELAY_MAX_TURNS", "0"))
+    return CabinetRelaySettings(enabled=enabled, max_turns=max_turns)
+
+
+# Canonical interactive-homie toolset — the full set the main chat engine grants
+# its 1:1 homie (chat/engine.py). Single source of truth so the cabinet
+# full-parity path and the engine never drift apart.
+DEFAULT_AGENT_TOOLSET: tuple[str, ...] = (
+    "Read", "Write", "Edit", "Bash", "Glob", "Grep",
+    "WebSearch", "WebFetch", "NotebookEdit", "Skill",
+    # MCP tools
+    "mcp__exa__web_search_exa",
+    "mcp__exa__get_code_context_exa",
+    "mcp__crawl4ai__crawl",
+    "mcp__crawl4ai__md",
+    "mcp__crawl4ai__ask",
+    "mcp__crawl4ai__html",
+    "mcp__crawl4ai__pdf",
+    "mcp__crawl4ai__screenshot",
+    "mcp__crawl4ai__execute_js",
+)
+
+
+def cabinet_persona_full_tools_enabled(enabled: bool | None = None) -> bool:
+    """Opt-in: give cabinet personas the SAME toolset + capability as the main
+    1:1 homie (full parity) instead of the M1 default-deny no-tools floor.
+
+    Resolved at CALL TIME (Rule 1). Default **false** keeps the shipped framework
+    secure-by-default (cabinet rooms stay tool-less unless an operator opts in);
+    set ``CABINET_PERSONA_FULL_TOOLS=true`` in .env to arm them.
+
+    SECURITY: this is a TRUSTED-OPERATOR escape hatch, not "the same gates plus
+    more tools". With ``bypassPermissions`` + Bash/Write/Edit + unfiltered MCP, a
+    cabinet persona can take filesystem/shell/MCP actions that do NOT pass through
+    the named direct-integration mutation gates (those only protect the wrapped
+    integration entrypoints — social posts, sends, etc.). Leave OFF unless every
+    cabinet persona is trusted at the operator's own level.
+    """
+    if enabled is None:
+        enabled = os.getenv("CABINET_PERSONA_FULL_TOOLS", "false").lower() == "true"
+    return enabled
+
+
+def cabinet_persona_max_tool_turns(max_turns: int | None = None) -> int:
+    """Per-persona turn budget when full tools are armed (Rule 1, call-time).
+
+    Bounds a tool-using cabinet turn so a full-roster standup doesn't run 13 long
+    agentic loops. ``CABINET_PERSONA_MAX_TOOL_TURNS`` (default 8), clamped to
+    [1, 50] so a bad/empty/negative/huge value can't disable execution, spin an
+    unbounded loop, or crash request construction.
+    """
+    if max_turns is None:
+        try:
+            max_turns = int(os.getenv("CABINET_PERSONA_MAX_TOOL_TURNS", "8"))
+        except (TypeError, ValueError):
+            max_turns = 8
+    return max(1, min(int(max_turns), 50))
+
+
 def ensure_directories() -> None:
     """Ensure all required directories exist."""
     for directory in [MEMORY_DIR, DAILY_DIR, WEEKLY_DIR, STATE_DIR, DATA_DIR,
