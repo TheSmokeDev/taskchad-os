@@ -255,7 +255,9 @@ def run_agent_browser(
     runner: Any = subprocess.run,
 ) -> CommandResult:
     argv, resolution = build_agent_browser_argv(args, port=port, environ=environ)
-    result = runner(argv, capture_output=True, text=True, timeout=timeout)
+    result = runner(
+        argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
+    )
     return CommandResult(
         ok=result.returncode == 0,
         returncode=result.returncode,
@@ -275,7 +277,9 @@ def run_agent_browser_global(
     """Run an agent-browser command that should not receive ``--cdp``."""
 
     argv, resolution = build_agent_browser_global_argv(args, environ=environ)
-    result = runner(argv, capture_output=True, text=True, timeout=timeout)
+    result = runner(
+        argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
+    )
     return CommandResult(
         ok=result.returncode == 0,
         returncode=result.returncode,

@@ -126,24 +126,116 @@ class AgentBrowserSocialWriteDriver:
         return False, f"unsupported social-write action: {action}"
 
     def _drive_post(self, task: Any, *, port: int) -> tuple[bool, str]:
+        """Publish a feed post via the shadow-DOM composer (playbook §4.6).
+
+        The composer editor is a Quill ``.ql-editor`` rendered inside a SHADOW
+        ROOT — ``find role textbox`` / ``fill`` miss it and a plain
+        ``querySelector`` returns nothing. The modal also opens as an empty
+        shell and hydrates the editor a few seconds later. So: wait for
+        hydration, shadow-pierce to the editor, synthetic-PASTE the body
+        (base64'd so subprocess/shell quoting can't corrupt apostrophes,
+        quotes, ``$``, ``#`` or newlines), then deep-find + ``.click()`` the
+        enabled "Post" button (a CDP click is eaten). Confirm via the toast.
+        """
+
         body = getattr(task, "payload_text", "") or ""
+        if not body.strip():
+            return False, "post body is empty"
         feed_url = getattr(task, "target_url", "") or "https://www.linkedin.com/feed/"
-        for step in (["open", feed_url], ["wait", "--load", "networkidle"]):
-            result = run_agent_browser(step, port=port)
+
+        # A REUSED tab can carry an injected overlay (e.g. the Gemini side
+        # panel) that silently blocks the composer from opening. Always post
+        # from a FRESH tab — proven the only reliable way to get the modal up.
+        run_agent_browser(["tab", "new"], port=port, timeout=20)
+        for step in (["open", feed_url], ["wait", "--load", "networkidle"], ["wait", "3000"]):
+            result = run_agent_browser(step, port=port, timeout=45)
             if not result.ok:
                 return _step_fail(f"{step[0]} failed", result)
-        start = run_agent_browser(
-            ["find", "role", "button", "click", "--name", "Start a post"], port=port
+
+        # Open the composer with retries. The trigger may not be rendered yet,
+        # and the modal opens as an empty shell whose editor hydrates a few
+        # seconds later — poll the shadow DOM for the Quill editor rather than
+        # trust the click result (a "Done" click can still leave it closed).
+        editor_probe = (
+            "(()=>{function deep(r){let a=[...r.querySelectorAll('*')];"
+            "r.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)a=a.concat(deep(e.shadowRoot));});return a;}"
+            "return deep(document).find(e=>e.classList&&e.classList.contains('ql-editor')"
+            "&&e.getAttribute('role')==='textbox')?'ED_OK':'NO_EDITOR';})()"
         )
-        if not start.ok:
-            return _step_fail("open composer failed", start)
-        fill = run_agent_browser(["find", "role", "textbox", "fill", body], port=port)
-        if not fill.ok:
-            return _step_fail("post body fill failed", fill)
-        submit = run_agent_browser(["find", "role", "button", "click", "--name", "Post"], port=port)
+        opened = False
+        for _ in range(5):
+            # Open via snapshot REF + `click @ref` (a CDP click) — proven
+            # reliable. `find role button click --name` is flaky (it reports
+            # done without opening). The utf-8 decode fix lets us parse the
+            # snapshot safely; refs reach across the composer's frame boundary.
+            snap = run_agent_browser(["snapshot", "-i"], port=port, timeout=30)
+            match = re.search(r'button "Start a post" \[ref=(e\d+)\]', snap.stdout or "")
+            if match:
+                run_agent_browser(["click", match.group(1)], port=port, timeout=20)
+                for _ in range(5):  # poll ~10s for the editor to hydrate
+                    run_agent_browser(["wait", "2000"], port=port, timeout=8)
+                    probe = run_agent_browser(["eval", editor_probe], port=port, timeout=20)
+                    if probe.ok and "ED_OK" in (probe.output or ""):
+                        opened = True
+                        break
+            if opened:
+                break
+            run_agent_browser(["wait", "2000"], port=port, timeout=8)  # feed still rendering
+        if not opened:
+            return False, "could not open the LinkedIn composer (trigger or editor not found)"
+
+        # Focus the editor by its REF (a CDP click reaches across the
+        # composer's frame boundary), then type the body LINE BY LINE.
+        # `keyboard inserttext` truncates at newlines through the shell, and the
+        # synthetic ClipboardEvent paste is ignored by Quill (untrusted) — so
+        # real Enter key-presses make the paragraph breaks.
+        snap = run_agent_browser(["snapshot", "-i"], port=port, timeout=30)
+        editor_match = re.search(
+            r'textbox "Text editor for creating content" \[ref=(e\d+)\]', snap.stdout or ""
+        )
+        if not editor_match:
+            return False, "composer editor ref not found after open"
+        editor_ref = editor_match.group(1)
+        run_agent_browser(["click", editor_ref], port=port, timeout=20)
+        lines = body.split("\n")
+        for idx, line in enumerate(lines):
+            if line:
+                run_agent_browser(["keyboard", "inserttext", line], port=port, timeout=20)
+            if idx < len(lines) - 1:
+                run_agent_browser(["press", "Enter"], port=port, timeout=15)
+        readback = run_agent_browser(["get", "text", editor_ref], port=port, timeout=20)
+        rb_len = len((readback.stdout or "").strip())
+        if rb_len < len(body) * 0.8:
+            return False, f"editor text incomplete after typing ({rb_len}/{len(body)} chars)"
+
+        # Give LinkedIn a beat to enable the Post button after the input lands.
+        run_agent_browser(["wait", "2000"], port=port, timeout=8)
+
+        # CDP click on "Post" is eaten by overlays — deep-find the enabled
+        # BUTTON whose text is exactly "Post" and fire its real onClick.
+        click_js = (
+            "(()=>{function deep(r){let a=[...r.querySelectorAll('*')];"
+            "r.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)a=a.concat(deep(e.shadowRoot));});return a;}"
+            "const b=deep(document).find(e=>e.tagName==='BUTTON'&&!e.disabled"
+            "&&(e.innerText||'').trim()==='Post');"
+            "if(!b)return 'NO_POST_BTN';b.click();return 'CLICKED';})()"
+        )
+        submit = run_agent_browser(["eval", click_js], port=port, timeout=40)
         if not submit.ok:
             return _step_fail("post submit failed", submit)
-        return True, "post submitted"
+        if "CLICKED" not in (submit.output or ""):
+            return False, f"post button not found: {redact_text_urls((submit.output or '')[:200])}"
+
+        # Confirm via the "Post successful / View post" toast (Rule 7).
+        run_agent_browser(["wait", "3000"], port=port, timeout=10)
+        verify = run_agent_browser(
+            ["eval", "(()=>/Post successful|View post/i.test(document.body.innerText||'')?'POSTED':'UNCONFIRMED')()"],
+            port=port,
+            timeout=15,
+        )
+        if verify.ok and "POSTED" in (verify.output or ""):
+            return True, "post submitted and confirmed"
+        return True, "post submitted (confirmation toast not detected — verify manually)"
 
     def _drive_connect(self, task: Any, *, port: int) -> tuple[bool, str]:
         note = getattr(task, "payload_text", "") or ""

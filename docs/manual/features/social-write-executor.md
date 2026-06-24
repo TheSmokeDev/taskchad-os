@@ -173,11 +173,20 @@ approval and audit shape but drives directly in the handler):
    envelope. If not ready, it audits `failed` and returns a failed receipt
    without driving.
 6. The executor calls the injected driver's `drive(task, port=port)`, which runs
-   the sequential `agent-browser --cdp` steps on the visible browser (for a post:
-   open the feed, "Start a post", fill the composer textbox, click "Post"; for a
-   connect: open the profile, "Connect", optional "Add a note" plus note fill,
-   "Send"). A drive exception is caught, audited `failed`, and returned as a
-   failed receipt — it never crashes dispatch.
+   the sequential `agent-browser --cdp` steps on the visible browser. The LinkedIn
+   feed-post composer resists naive automation — the editor sits behind a
+   frame/shadow boundary, ignores synthetic paste events, and hydrates a few
+   seconds after an empty shell opens — so the proven post drive is: open the feed
+   in a FRESH tab (a reused tab can carry an injected overlay that blocks the
+   composer), locate "Start a post" from a `snapshot` and click it BY REF, poll
+   until the editor hydrates, focus the editor by ref and type the body LINE BY
+   LINE (`keyboard inserttext` per line plus a top-level `press Enter` between
+   lines — a single multi-line insert truncates at the first newline through the
+   shell), then deep-element-find the enabled "Post" button and click it,
+   confirming via the success toast. The connect drive opens the profile,
+   "Connect", optional "Add a note" plus note fill, "Send". A drive exception is
+   caught, audited `failed`, and returned as a failed receipt — it never crashes
+   dispatch.
 7. On success, if `post_action_snapshot` is set the driver persists a screenshot
    to the git-ignored path and returns it. The executor audits the
    `succeeded`/`failed` outcome (stamped with `subtask_id` and `executor_name`)
@@ -235,9 +244,12 @@ injection rejections, and the readiness refusals.
   and the fix (isolated trailing-segment exact match) is now the load-bearing
   invariant.
 - 51 new tests green.
-- The agent-browser drive selectors (the composer textbox and submit button
-  references for LinkedIn and Reddit) are documented in the drive docstrings and
-  deferred to verification during a supervised first real write.
+- The LinkedIn post drive was verified live during a supervised first run
+  (2026-06-23): the rewritten `_drive_post` published real feed posts end to end
+  (open the composer, type the body with line breaks, click Post, confirm the
+  toast). The visible-Chrome composer method in How It Works step 6 is the
+  load-bearing technique. The Reddit submit selectors remain deferred to a
+  supervised Reddit run.
 
 ## Common Failure Modes
 
@@ -265,11 +277,17 @@ Reddit URL or subreddit rejected:
 - The thread URL was not an absolute `https://reddit.com` URL, or the subreddit
   did not match `^[A-Za-z0-9_]{2,21}$`. Fix the target and resend.
 
-Stale drive selectors:
+LinkedIn post lands empty / composer never opens:
 
-- The agent-browser composer or submit selectors were not verified against the
-  live UI. The drive step fails, is audited `failed`, and returns a failed
-  receipt. Finalize the selectors during a supervised first run.
+- The composer editor is behind a frame/shadow boundary, ignores the synthetic
+  ClipboardEvent paste, and hydrates a few seconds after an empty shell. The
+  proven drive (How It Works step 6) opens from a FRESH tab, locates elements by
+  `snapshot` ref, focuses the editor by ref, types LINE BY LINE via
+  `keyboard inserttext` plus a top-level `press Enter`, and clicks Post via a deep
+  element-find. Two infra prerequisites: pre-warm the agent-browser daemon from a
+  separate process (a daemon spawned by the posting subprocess inherits its stdout
+  pipe and hangs the caller), and decode agent-browser CLI output as utf-8 (a
+  default Windows codec can crash on snapshot output).
 
 ## File Ownership Map
 
@@ -311,7 +329,11 @@ Non-blocking follow-ups (from the commit and review artifacts):
   approval split is the single owner.
 - Migrate the Reddit comment/post writes onto the shared `BrowserExecutor` so
   both platforms run one execution path.
-- Supervised first-run verification of the agent-browser drive selectors.
+- Reddit submit-selector verification (LinkedIn post selectors verified live 2026-06-23).
+- A visible-Chrome session keeper: an idempotent, health-gated supervisor that
+  relaunches the logged-in CDP browser ONLY when the debug port is dead (so it
+  never stacks instances) and re-warms the agent-browser daemon, so scheduled or
+  approved writes always have a live session to attach to.
 
 Phase 2 candidates: outreach-tracker-memory injection into drafting, an
 autonomous scheduler, and Telegram delivery of receipts.
