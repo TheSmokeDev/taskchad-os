@@ -31,6 +31,9 @@ class SkillSpec:
     workflow_steps: list[str] = field(default_factory=list)
     source_session: str = ""
     created_at: str = ""
+    # Optional pre-authored markdown body (e.g. /learn distillation). When set,
+    # write_skill renders it verbatim instead of the auto-capture stub.
+    body: str = ""
 
 
 def _parse_skill_frontmatter(text: str) -> dict[str, str]:
@@ -370,7 +373,7 @@ def write_skill(spec: SkillSpec, skills_dir: Path) -> Path:
     steps_text = "\n".join(f"{i + 1}. {step}" for i, step in enumerate(spec.workflow_steps))
     tools_text = "\n".join(f"- {tool}" for tool in spec.tools_used)
 
-    content = (
+    frontmatter = (
         f"---\n"
         f"name: {spec.name}\n"
         f"description: {spec.description}\n"
@@ -382,13 +385,24 @@ def write_skill(spec: SkillSpec, skills_dir: Path) -> Path:
         f"source_session: {spec.source_session}\n"
         f"created_at: {spec.created_at}\n"
         f"---\n\n"
-        f"# {spec.name}\n\n"
-        f"{spec.description}\n\n"
-        f"## Workflow Steps\n\n"
-        f"{steps_text}\n\n"
-        f"## Tools Required\n\n"
-        f"{tools_text}\n"
     )
+
+    # A pre-authored body (e.g. /learn distillation) is rendered verbatim so the
+    # SKILL.md follows house section order. Otherwise fall back to the
+    # auto-capture stub (Workflow Steps / Tools Required).
+    if spec.body.strip():
+        body_md = spec.body.strip() + "\n"
+    else:
+        body_md = (
+            f"# {spec.name}\n\n"
+            f"{spec.description}\n\n"
+            f"## Workflow Steps\n\n"
+            f"{steps_text}\n\n"
+            f"## Tools Required\n\n"
+            f"{tools_text}\n"
+        )
+
+    content = frontmatter + body_md
 
     skill_path.write_text(content, encoding="utf-8")
     return skill_path

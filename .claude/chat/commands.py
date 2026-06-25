@@ -97,6 +97,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("file", "File the last answer as a vault note with entity compilation", "engine", "admin"),
     ("working", "Show cross-session scratchpad — open threads, hypotheses, questions", "router", "admin"),
     ("skills", "Review/promote/reject self-authored skill drafts", "router", "operator"),
+    ("learn", "Author a reusable skill from a URL, local dir, this conversation, or pasted notes (staged for /skills)", "router", "operator"),
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
     ("quote", "Generate an insurance quote via TurboRater using the turborater-quote skill", "engine", "admin"),
@@ -146,7 +147,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     # Cabinet (Phase 5b) — chat-routed cabinet operator surface.
     ("Cabinet", ["cabinet", "standup", "discuss", "teamtick", "teamroom", "team"]),
     ("Communication", ["send", "brief"]),
-    ("Memory", ["search", "file", "working", "skills"]),
+    ("Memory", ["search", "file", "working", "skills", "learn"]),
     ("Content Creation", ["blog", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts", "video"]),
     ("Design", ["design"]),
     (

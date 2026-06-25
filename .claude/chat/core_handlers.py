@@ -3277,6 +3277,72 @@ async def handle_skills(adapter: Any, incoming: Any, args: str, *, collect_only:
     return _SKILLS_USAGE
 
 
+async def handle_learn(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Author a reusable skill draft from a source (Hermes /learn port).
+
+    Sources: a URL, a local dir/file, this conversation, or pasted notes.
+    Optionally end with ``--focus <hint>`` / ``focus on <hint>``.
+
+      /learn https://docs.example.com/api/quickstart
+      /learn ~/projects/acme-sdk focus on auth + pagination
+      /learn what we just did
+      /learn filing an expense: open portal, New > Expense, attach receipt, submit
+
+    The draft is written inert under ``skills/generated/`` and security-scanned;
+    graduation stays manual via ``/skills review`` -> ``promote``.
+    """
+    if not (args or "").strip():
+        return (
+            "*Learn* — turn a source into a reusable skill draft.\n"
+            "Usage: `/learn <url | path | \"this conversation\" | notes>` "
+            "`[--focus <hint>]`\n"
+            "Drafts stage in `skills/generated/`; promote with `/skills`."
+        )
+
+    try:
+        from cognition import skill_learn
+    except Exception as exc:  # noqa: BLE001 - optional outside the scripts env
+        return f"Learn is unavailable: {exc}"
+
+    # Best-effort: pull recent conversation history for the "this conversation"
+    # source. Fail-soft — an unavailable store just means an empty transcript.
+    transcript = ""
+    session_id = ""
+    try:
+        from session import build_session_key, get_session_store
+
+        store = get_session_store()
+        session_id = build_session_key(
+            getattr(incoming, "platform", ""),
+            getattr(incoming, "channel", ""),
+            getattr(incoming, "thread", ""),
+        )
+        msgs = store.list_messages(session_id, limit=40)
+        transcript = "\n".join(f"{m.role}: {m.content}" for m in msgs)
+    except Exception:  # noqa: BLE001 - transcript is optional
+        transcript = ""
+
+    try:
+        from commands import get_all_command_names
+
+        known_commands = list(get_all_command_names())
+    except Exception:  # noqa: BLE001
+        known_commands = None
+
+    try:
+        result = await skill_learn.learn_skill(
+            args,
+            transcript=transcript,
+            cwd=Path.cwd(),
+            known_commands=known_commands,
+            source_session=session_id if transcript else "",
+        )
+    except Exception as exc:  # noqa: BLE001 - never break the turn
+        return f"Learn failed: {exc}"
+
+    return result.message
+
+
 async def handle_extensions(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Show extension diagnostics or manage extensions."""
     from extension_manager import get_manager
@@ -5218,6 +5284,9 @@ CORE_HANDLERS: dict[str, Any] = {
     # Router-dispatched via the manager (no router.py edit needed); key is
     # slashless to match every other entry.
     "skills": handle_skills,
+    # Source-driven skill authoring (Hermes /learn port) — writes an inert
+    # draft that graduates through the /skills gate above.
+    "learn": handle_learn,
     "extensions": handle_extensions,
     # Native design — Open Design power, no daemon (brief -> artifact -> critique).
     "design": handle_design,
