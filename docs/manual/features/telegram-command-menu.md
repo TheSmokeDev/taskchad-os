@@ -1,14 +1,18 @@
 # Telegram Command Menu
 
-Status: shipped, live Telegram menu and delivery gate verified
+Status: shipped, shared native command registry with Telegram menu
 Owner: `.claude/chat/` command registry and Telegram adapter
-Last updated: 2026-06-02
+Last updated: 2026-06-27
 
 ## What It Does
 
 Telegram shows a native slash-command dropdown. Homie keeps the full command
-registry dispatchable, but exposes only a curated top-level menu in Telegram so
-the visible command list stays useful.
+registry dispatchable, but exposes only a curated top-level menu so the visible
+command list stays useful.
+
+The curated list is also the shared baseline for native chat commands. Discord
+uses the same baseline for flat commands and adds richer typed wrappers where
+the platform supports them, such as the `/vault` group.
 
 ## Operator Entry Points
 
@@ -16,6 +20,7 @@ the visible command list stays useful.
 - Chat command audit: `/commands native`, `/commands all`
 - Full help: `/help`
 - LinkedIn/Social Homie: `/linkedin [draft|ideas|revise] <topic-or-text>`
+- Shared vault surface: `/vault ...`
 
 ## Source Of Truth Files
 
@@ -24,8 +29,9 @@ the visible command list stays useful.
 | Command registry | `.claude/chat/commands.py` |
 | Router handlers | `.claude/chat/core_handlers.py`, `.claude/chat/router.py` |
 | Telegram adapter | `.claude/chat/adapters/telegram.py` |
+| Discord native wrappers | `.claude/chat/adapters/discord.py` |
 | LinkedIn prompt | `.claude/commands/linkedin.md` |
-| Tests | `.claude/scripts/tests/test_command_menu.py`, `.claude/scripts/tests/test_chat_router_timeout.py`, `.claude/scripts/tests/test_adapter_telegram.py` |
+| Tests | `.claude/scripts/tests/test_command_menu.py`, `.claude/scripts/tests/test_chat_router_timeout.py`, `.claude/scripts/tests/test_adapter_telegram.py`, `.claude/scripts/tests/test_adapter_discord.py` |
 
 ## Safety Boundaries
 
@@ -38,6 +44,12 @@ the visible command list stays useful.
   `/linkedin_profile` policy gates.
 - Telegram's menu refreshes when the Telegram adapter reconnects and registers
   commands again.
+- Native command names must be valid across shared surfaces. Hyphenated text
+  aliases can stay registered, but should not be placed in the shared native
+  menu.
+- Slash commands are explicit-only. Pasted paths, URLs, and copied chat logs
+  must not trigger commands unless the message starts with the exact slash
+  command token.
 - Follow-up nudges, including `/file` save prompts, are gated behind successful
   final-answer delivery. A nudge must not become the only visible reply for a
   turn.
@@ -55,6 +67,8 @@ Telegram examples:
 
 ```text
 /commands native
+/vault db thehomie
+/vault search YourProduct --vault thehomie
 /linkedin ideas AI operator systems
 /linkedin draft What I learned building multi-persona agents
 /linkedin revise <paste draft>
@@ -64,9 +78,20 @@ Telegram examples:
 
 ```powershell
 cd .claude/scripts
-uv run pytest tests/test_command_menu.py tests/test_skill_intent_gates.py -q
+uv run pytest tests/test_command_menu.py tests/test_adapter_discord.py tests/test_skill_intent_gates.py -q
 uv run pytest tests/test_chat_router_timeout.py tests/test_adapter_telegram.py -q
 ```
+
+## Current Local Proof
+
+- Date: 2026-06-27
+- Result: shared native command menu tests passed with `/vault` included for
+  Telegram, Discord flat commands reusing the same curated list, and Discord
+  registering one typed `/vault` group instead of a duplicate flat `/vault`.
+- Live adapter proof: after restart, the bot log showed Telegram and Discord
+  registering native slash commands from the shared command surface.
+- Scope: local test proof plus live adapter sync proof. Platform clients may
+  still cache native command menus until their UI refreshes.
 
 ## Latest Live Proof
 

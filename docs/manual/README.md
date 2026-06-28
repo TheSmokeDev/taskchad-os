@@ -76,12 +76,15 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Video Generation | Shipped, native command, model-agnostic | [video-generation](features/video-generation.md) | `/video`, `video_pipeline.py`, `video_styles.py` |
 | Document Uploads And Ingest | Shipped, all 3 phases (truthfulness, full reads, /vault-ingest) | [document-uploads-and-ingest](features/document-uploads-and-ingest.md) | `attachment_context.py`, `router.py` `/vault-ingest` caption, Telegram + Discord |
 | Telegram Command Menu | Curated native menu | [telegram-command-menu](features/telegram-command-menu.md) | `/commands`, Telegram slash menu |
-| Multi-Channel Adapters | Active baseline, Telegram docs + turn controls proven | [multi-channel-adapters](features/multi-channel-adapters.md) | Telegram, Slack, Discord, WhatsApp, web, CLI |
+| Native Vault Commands | Shared Telegram + Discord native command baseline | [native-vault-commands](features/native-vault-commands.md) | `/vault`, Discord `/vault` group, recall-backed vault search/context |
+| Slash Commands Reference | Active baseline | [commands-reference](features/commands-reference.md) | `/commands all`, `/commands native`, `/help` |
+| Multi-Channel Adapters | Active baseline, long-lived chat continuity + timeout handoff status locally proven | [multi-channel-adapters](features/multi-channel-adapters.md) | Telegram, Slack, Discord, WhatsApp, web, CLI |
 | Cabinet Rooms | Shipped baseline, manual exists | [cabinet-rooms](features/cabinet-rooms.md) | `/cabinet`, `/standup`, `/discuss`, `/cabinet` dashboard |
 | Cabinet Voice | Single-session lifecycle controls shipped | [cabinet-voice](features/cabinet-voice.md) | `/cabinet voice`, `/voices`, `/api/cabinet/voice/*` |
 | Cognitive Loop | Shipped/live-runtime proven; dashboard route hidden from public nav | [jarvis-cognitive-loop](features/jarvis-cognitive-loop.md) | status/doctor, scheduled loops |
 | Heartbeat Runtime | Active baseline, runtime contract corrected | [heartbeat-runtime](features/heartbeat-runtime.md) | `heartbeat.py`, `HEARTBEAT.md`, scheduled loop |
 | Direct Integration Capability Contract | Shipped, policy-enforced | [direct-integration-capability-contract](features/direct-integration-capability-contract.md) | direct integration wrapper, `/send`, status/doctor |
+| Memory And Recall System | Active baseline | [memory-and-recall-system](features/memory-and-recall-system.md) | `thehomie recall`, `/search`, `/file`, `/working`, `/vault-ops` |
 | Memory, Knowledge Graph, And Dashboard Chat | Active baseline, dashboard chat reliability proven | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
 | Scheduled Jobs, Settings, And Audit | Active baseline | [scheduled-settings-audit](features/scheduled-settings-audit.md) | `/scheduled`, `/settings`, `/audit` |
 | Native Design (`/design`) | Phase 1 + B1 shipped, live-proven | [design-capability](features/design-capability.md) | `/design`, `/design system <slug>` |

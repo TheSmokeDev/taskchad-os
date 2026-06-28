@@ -23,7 +23,7 @@ import re
 import shutil
 import sys
 from dataclasses import asdict, dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -613,7 +613,7 @@ def find_existing_concept(name: str, vault_dir: Path) -> Path | None:
 
 
 def _today() -> str:
-    return date.today().isoformat()
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 # ---------------------------------------------------------------------------

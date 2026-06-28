@@ -94,6 +94,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("brief", "Quick briefing — /brief all for full dashboard", "router", "operator"),
     # -- Memory & Search --
     ("search", "Search memory — keyword or semantic over notes", "engine", "admin"),
+    ("vault", "Vault operations — status, db, search, context, contacts, ingest, ops", "router", "admin"),
     ("file", "File the last answer as a vault note with entity compilation", "engine", "admin"),
     ("working", "Show cross-session scratchpad — open threads, hypotheses, questions", "router", "admin"),
     ("skills", "Review/promote/reject self-authored skill drafts", "router", "operator"),
@@ -146,7 +147,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     # Cabinet (Phase 5b) — chat-routed cabinet operator surface.
     ("Cabinet", ["cabinet", "standup", "discuss", "teamtick", "teamroom", "team"]),
     ("Communication", ["send", "brief"]),
-    ("Memory", ["search", "file", "working", "skills"]),
+    ("Memory", ["search", "vault", "file", "working", "skills"]),
     ("Content Creation", ["blog", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts", "video"]),
     ("Design", ["design"]),
     (
@@ -189,6 +190,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "discuss",
     "teamroom",
     "search",
+    "vault",
     "file",
     "skills",
     "blog",

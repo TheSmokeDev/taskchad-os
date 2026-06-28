@@ -77,6 +77,63 @@ DATA_DIR = _paths["data"]
 DATABASE_PATH = DATA_DIR / "memory.db"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
+# === Multi-vault recall registry (DB-per-vault) ===
+# The recall index (memory.db) historically covered ONLY the thehomie Homie
+# vault. These env-resolved paths let recall + indexing address coding-vault and
+# unified-vault too, each with its own SQLite DB under DATA_DIR. Framework code
+# must NOT hardcode personal vault paths — they come from env (scrubbed on the
+# public export). Unset env => None => that vault is simply unavailable.
+HOMIE_CODING_VAULT_DIR = (
+    Path(os.getenv("HOMIE_CODING_VAULT_DIR")) if os.getenv("HOMIE_CODING_VAULT_DIR") else None
+)
+HOMIE_UNIFIED_VAULT_DIR = (
+    Path(os.getenv("HOMIE_UNIFIED_VAULT_DIR")) if os.getenv("HOMIE_UNIFIED_VAULT_DIR") else None
+)
+
+# thehomie keeps memory.db (back-compat); the others get suffixed DBs.
+_VAULT_MEMORY_DIRS: dict[str, "Path | None"] = {
+    "thehomie": MEMORY_DIR,
+    "coding-vault": HOMIE_CODING_VAULT_DIR,
+    "unified-vault": HOMIE_UNIFIED_VAULT_DIR,
+}
+_VAULT_DB_PATHS: dict[str, Path] = {
+    "thehomie": DATABASE_PATH,
+    "coding-vault": DATA_DIR / "memory.coding-vault.db",
+    "unified-vault": DATA_DIR / "memory.unified-vault.db",
+}
+VAULT_NAMES = tuple(_VAULT_MEMORY_DIRS.keys())
+
+
+def resolve_vault(name: str) -> "tuple[Path | None, Path]":
+    """Vault name -> (memory_dir, db_path).
+
+    ``memory_dir`` is None when the vault's env path is unset (vault not
+    configured on this machine). ``db_path`` is always defined.
+    """
+    return _VAULT_MEMORY_DIRS.get(name), _VAULT_DB_PATHS.get(name, DATABASE_PATH)
+
+
+def resolve_db_path(memory_dir: "Path | str | None" = None) -> Path:
+    """Map a memory_dir to its per-vault SQLite DB (Rule 1: None sentinel resolved
+    at call time).
+
+    Defaults to the thehomie DB (``DATABASE_PATH``) when memory_dir is None or
+    matches the thehomie vault — keeping the legacy single-vault path
+    byte-identical. A known non-default vault dir maps to its suffixed DB; an
+    unknown dir gets its own derived DB so an unindexed override never silently
+    reads the wrong vault's data.
+    """
+    if memory_dir is None:
+        return DATABASE_PATH
+    md = Path(memory_dir).resolve()
+    for _name, vdir in _VAULT_MEMORY_DIRS.items():
+        if vdir and Path(vdir).resolve() == md:
+            return _VAULT_DB_PATHS[_name]
+    import re as _re
+
+    slug = _re.sub(r"[^A-Za-z0-9._-]+", "-", md.name) or "vault"
+    return DATA_DIR / f"memory.{slug}.db"
+
 # State files — per-machine operational data, NOT synced via Obsidian
 STATE_DIR = _paths["state"]
 HEARTBEAT_STATE_FILE = STATE_DIR / "heartbeat-state.json"
@@ -310,10 +367,13 @@ REGION_BUDGETS = {
     # runaway monologue; assemble_regions truncates per the budget. Without this
     # row the cap would fall back to DEFAULT_REGION_BUDGETS.get == 1000.
     "internal": int(os.getenv("REGION_BUDGET_INTERNAL_MONOLOGUE", "500")),
-    "recent_conversation": int(os.getenv("REGION_BUDGET_RECENT_CONVERSATION", "600")),
+    "recent_conversation": int(os.getenv("REGION_BUDGET_RECENT_CONVERSATION", "24000")),
 }
 
-RECENT_CONVERSATION_COUNT = int(os.getenv("RECENT_CONVERSATION_COUNT", "6"))
+RECENT_CONVERSATION_COUNT = int(os.getenv("RECENT_CONVERSATION_COUNT", "80"))
+RECENT_CONVERSATION_MESSAGE_MAX_CHARS = int(
+    os.getenv("RECENT_CONVERSATION_MESSAGE_MAX_CHARS", "2000")
+)
 
 # Staging store
 STAGING_STORE_PATH = STATE_DIR / "memory-candidates.jsonl"
@@ -356,7 +416,7 @@ PROMOTION_STATE_FILE = STATE_DIR / "promotion-state.json"
 CONTINUITY_DIR = STATE_DIR / "continuity"
 CONTINUITY_MAX_OPEN_LOOPS = int(os.getenv("CONTINUITY_MAX_LOOPS", "5"))
 CONTINUITY_MAX_DECISIONS = int(os.getenv("CONTINUITY_MAX_DECISIONS", "5"))
-SESSION_TURN_THRESHOLD = int(os.getenv("SESSION_TURN_THRESHOLD", "30"))
+SESSION_TURN_THRESHOLD = int(os.getenv("SESSION_TURN_THRESHOLD", "0"))
 
 # Compaction
 COMPACTION_RECOVERY_DIR = STATE_DIR / "compaction-recovery"
@@ -1210,6 +1270,9 @@ def reload_config() -> dict[str, tuple[str, str]]:
         "VOICE_STT_ENABLE_OPENAI", "VOICE_TTS_ENGINE", "VOICE_TTS_VOICE_EDGE",
         "VOICE_TTS_VOICE_OPENAI",
         "CHAT_MAX_TURNS", "CHAT_MAX_BUDGET_USD", "CHAT_ENGINE_TIMEOUT_SECONDS",
+        "SESSION_TURN_THRESHOLD", "RECENT_CONVERSATION_COUNT",
+        "RECENT_CONVERSATION_MESSAGE_MAX_CHARS",
+        "REGION_BUDGET_RECENT_CONVERSATION",
         "CHAT_ATTACHMENT_MAX_BYTES", "CHAT_ATTACHMENT_MAX_CHARS",
         "CHAT_ATTACHMENT_TOTAL_MAX_CHARS", "CHAT_ENGINE_ATTACHMENT_TIMEOUT_SECONDS",
         "GOOGLE_CALENDAR_ID", "HEARTBEAT_INTERVAL_MINUTES",
@@ -1237,6 +1300,14 @@ def reload_config() -> dict[str, tuple[str, str]]:
         "CHAT_MAX_TURNS": int(os.getenv("CHAT_MAX_TURNS", "25")),
         "CHAT_MAX_BUDGET_USD": float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0")),
         "CHAT_ENGINE_TIMEOUT_SECONDS": float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "900")),
+        "SESSION_TURN_THRESHOLD": int(os.getenv("SESSION_TURN_THRESHOLD", "0")),
+        "RECENT_CONVERSATION_COUNT": int(os.getenv("RECENT_CONVERSATION_COUNT", "80")),
+        "RECENT_CONVERSATION_MESSAGE_MAX_CHARS": int(
+            os.getenv("RECENT_CONVERSATION_MESSAGE_MAX_CHARS", "2000")
+        ),
+        "REGION_BUDGET_RECENT_CONVERSATION": int(
+            os.getenv("REGION_BUDGET_RECENT_CONVERSATION", "24000")
+        ),
         "CHAT_ATTACHMENT_MAX_BYTES": int(
             os.getenv("CHAT_ATTACHMENT_MAX_BYTES", str(8 * 1024 * 1024))
         ),
@@ -1254,9 +1325,15 @@ def reload_config() -> dict[str, tuple[str, str]]:
     }
 
     for key, new_val in new_map.items():
-        old_val = old_values.get(key)
+        if key == "REGION_BUDGET_RECENT_CONVERSATION":
+            old_val = REGION_BUDGETS.get("recent_conversation")
+        else:
+            old_val = old_values.get(key)
         if old_val != new_val:
-            setattr(module, key, new_val)
+            if key == "REGION_BUDGET_RECENT_CONVERSATION":
+                module.REGION_BUDGETS["recent_conversation"] = int(new_val)
+            else:
+                setattr(module, key, new_val)
             # Mask sensitive values in the change report
             if "KEY" in key or "TOKEN" in key:
                 changes[key] = ("***", "***" if new_val else "(empty)")

@@ -2,7 +2,7 @@
 
 Status: Active baseline (live-proven)
 Owner: runtime-chat
-Last updated: 2026-06-14
+Last updated: 2026-06-27
 
 ## What It Does
 
@@ -70,6 +70,12 @@ opens its channel poller, so there is no double-poll conflict.
 python .claude/chat/relaunch.py
 ```
 
+If the relauncher spawns but does not bring adapters fully online, recover by
+starting `..\chat\main.py` from `.claude/scripts` with the repo venv Python and
+redirecting stdout/stderr to `.claude/data/bot.log` and
+`.claude/data/bot.err.log`. That is a recovery path, not a replacement for the
+normal `/restart` command.
+
 ## How To Test It
 
 ```powershell
@@ -82,7 +88,25 @@ directly) and confirm the log shows the old bot stopping and a fresh bot
 reaching "all adapters connected" within a few seconds, with a new process id
 and no nested-session error.
 
+A valid restart proof must include more than an HTTP 200:
+
+- The profile PID file points at a live process.
+- The configured health port is owned by the live bot process.
+- `/health` returns `status=ok` with the expected adapters true.
+- The bot log shows platform connection and native command registration lines,
+  for example Telegram connected, Telegram commands registered, all adapters
+  connected, Discord connected, and Discord commands registered.
+
 ## Latest Live Proof
+
+- Date: 2026-06-27
+- Surface: direct recovery launch after relauncher stall investigation
+- Result: fresh bot process reached health `status=ok`; Telegram, Discord, and
+  web adapters were true; the log showed Telegram connected, Telegram native
+  command registration, all adapters connected, Discord connected, and Discord
+  native command registration.
+
+## Previous Live Proof
 
 - Date: 2026-06-14
 - Surface: chat `/restart` + direct relauncher

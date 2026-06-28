@@ -5,14 +5,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 # Add chat dir to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "chat"))
 
-from adapters.discord import DiscordAdapter
+from adapters.discord import DiscordAdapter, get_discord_native_command_menu
 from models import Attachment, Platform
 
 
@@ -76,6 +76,78 @@ def _mock_message(
 def test_discord_platform():
     adapter = _make_adapter()
     assert adapter.platform == Platform.DISCORD
+
+
+def test_discord_registers_native_vault_group_without_flat_duplicate():
+    adapter = _make_adapter()
+    commands = adapter._tree.get_commands()
+    vault_commands = [cmd for cmd in commands if cmd.name == "vault"]
+
+    assert len(vault_commands) == 1
+    assert type(vault_commands[0]).__name__ == "Group"
+    assert [cmd.name for cmd in vault_commands[0].commands] == [
+        "status",
+        "db",
+        "search",
+        "context",
+        "contacts",
+        "ingest",
+        "ops",
+    ]
+    assert "vault" not in [name for name, _desc in get_discord_native_command_menu()]
+
+
+def test_discord_native_vault_text_builds_shared_router_command():
+    text = DiscordAdapter._build_native_vault_text(
+        "search",
+        query="YourProduct demo URLs",
+        vault="thehomie",
+        mode="hybrid",
+        limit=4,
+    )
+
+    assert text == (
+        "/vault search YourProduct demo URLs --vault thehomie "
+        "--mode hybrid --limit 4"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discord_native_vault_ingest_attachment_queues_internal_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _make_adapter()
+    downloaded = Attachment(
+        filename="notes.txt",
+        mimetype="text/plain",
+        url="C:\\tmp\\notes.txt",
+        size_bytes=12,
+    )
+    download = AsyncMock(return_value=downloaded)
+    monkeypatch.setattr(adapter, "_download_interaction_attachment", download)
+
+    interaction = SimpleNamespace(
+        id=111,
+        channel_id=222,
+        guild_id=333,
+        user=SimpleNamespace(id=444, display_name="Tester"),
+        response=SimpleNamespace(defer=AsyncMock()),
+    )
+    raw_attachment = SimpleNamespace(filename="notes.txt")
+
+    await adapter._queue_native_slash_command(
+        interaction,
+        "vault",
+        "ingest --vault thehomie",
+        interaction_attachment=raw_attachment,
+    )
+
+    queued = await adapter._queue.get()
+    assert queued.text == "/vault ingest --vault thehomie"
+    assert queued.attachments == [downloaded]
+    assert queued.raw_event["interaction_type"] == "slash_command"
+    download.assert_awaited_once_with(interaction, raw_attachment)
+    interaction.response.defer.assert_awaited_once_with(thinking=True)
 
 
 # ── Message normalization ──────────────────────────────────

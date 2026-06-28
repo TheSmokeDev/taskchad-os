@@ -3162,6 +3162,26 @@ async def handle_working(adapter: Any, incoming: Any, args: str, *, collect_only
     return "\n".join(lines)
 
 
+async def handle_vault(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Registry guard for /vault.
+
+    ChatRouter intercepts the production /vault route because ingest needs
+    router-owned attachment and persistence behavior. This keeps the central
+    command registry internally consistent for audits and fallback dispatch.
+    """
+
+    return (
+        "*Vault Commands*\n"
+        "`/vault status [vault]`\n"
+        "`/vault db [vault]`\n"
+        "`/vault search <query> [--vault name]`\n"
+        "`/vault context <topic> [--vault name]`\n"
+        "`/vault contacts [query] [--vault name]`\n"
+        "`/vault ingest <url> [--vault name]`\n"
+        "`/vault ops <routine> [args] [--vault name]`"
+    )
+
+
 # Skill-from-experience loop (WS4): operator surface for the promotion gate.
 # Default-deny — a self-authored skill draft can only be promoted into the
 # prompt through THIS explicit operator command (operator_approved=True), after
@@ -5214,6 +5234,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "send": handle_send,
     "brief": handle_brief,
     "working": handle_working,
+    "vault": handle_vault,
     # Skill-from-experience loop (WS4) — operator-gated promotion surface.
     # Router-dispatched via the manager (no router.py edit needed); key is
     # slashless to match every other entry.

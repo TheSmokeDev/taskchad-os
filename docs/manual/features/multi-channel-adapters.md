@@ -1,8 +1,8 @@
 # Multi-Channel Adapters
 
-Status: active baseline, Telegram document ingress and turn controls live-proven; Discord document parsing locally proven
+Status: active baseline, continuity locally proven, adapter startup live-proven
 Owner: `.claude/chat/adapters/`
-Last updated: 2026-06-11
+Last updated: 2026-06-27
 
 ## What It Does
 
@@ -32,6 +32,44 @@ follow-up and shows operator controls:
 - `Steer Current`: apply the follow-up as a revision/steer after the current
   response finishes, instead of treating it as an unrelated task.
 
+Slash commands are explicit-only. The router only dispatches a command when the
+trimmed message starts with an exact `/command` token followed by whitespace or
+end-of-message. Pasted docs paths, URLs, and copied logs such as
+`docs/foo/DESIGN.md`, `/opt/app/docs/index.html`, or `phone/email/locations`
+must fall through to normal chat, not trigger `/design` or `/email`.
+
+Native command surfaces share one baseline registry from
+`.claude/chat/commands.py`. Telegram exposes that curated list directly.
+Discord exposes the same flat list except where a platform-native typed wrapper
+is better; `/vault` is a Discord command group with typed subcommands, but it
+queues the same `/vault ...` router text used by Telegram and CLI. Hidden text
+aliases like `/vaults` and `/vault-ops` only dispatch when they begin the
+message as explicit slash commands.
+
+Adapter startup is isolated per platform. Router startup connects configured
+adapters concurrently with a bounded timeout so a stuck Telegram, Discord,
+Slack, or relay connect cannot keep the other channels offline. Discord native
+slash-command sync also runs asynchronously with its own timeout so gateway
+connect and command registration do not block the rest of startup.
+
+Long-running chat work uses a timeout handoff instead of pretending the turn
+completed. When the engine hits `CHAT_ENGINE_TIMEOUT_SECONDS` (or the
+attachment-specific timeout), the router posts an honest timeout response,
+keeps the in-process engine task running, and writes a background-task record
+with session, channel, thread, message id, request preview, status, and
+timestamps. Completion, failure, and delivery failure update the same record.
+Short follow-ups such as "still cooking?" or "how we looking?" answer from that
+task status instead of generic recall. This is not yet a separate external job
+worker, but it prevents the bot from claiming "nothing finished" while a
+timeout handoff is still registered.
+
+Chat continuity is local-first for generic runtimes. Do not assume Codex,
+Gemini, or other generic lanes preserve server-side conversation state.
+`SESSION_TURN_THRESHOLD=0` is the default and means "never reset by turn
+count"; positive values are emergency caps only. The engine injects the latest
+persisted transcript tail into working memory and the turn prompt so newest
+Discord/Telegram turns survive long sessions and Windows system-append caps.
+
 Sensitive email/inbox data pulls remain explicit slash-command actions;
 natural-language chat should not auto-fetch Gmail/Outlook context.
 
@@ -39,7 +77,8 @@ natural-language chat should not auto-fetch Gmail/Outlook context.
 
 - Telegram bot channel
 - Slack, Discord, WhatsApp, web relay, and CLI adapters when configured
-- Health/status: `http://127.0.0.1:8787/health` and `thehomie status --json`
+- Health/status: the configured profile health port
+  (`http://127.0.0.1:<health-port>/health`) and `thehomie status --json`
 
 ## Discord Configuration
 
@@ -56,6 +95,15 @@ in code, and without the matching portal toggle every message arrives blank.
 | `DISCORD_WATCHED_CHANNELS` | Comma-separated channel IDs the bot auto-listens in without an `@mention`. |
 | `DISCORD_WATCH_ALL_GUILD_CHANNELS` | `true` to auto-listen to every channel in the allowed guild(s) with no `@mention`. Scoped by `DISCORD_ALLOWED_GUILDS`; pair with `DISCORD_ALLOWED_USERS` to lock who can drive it. |
 
+## Continuity Configuration
+
+| Env var | Default | Effect |
+|---|---:|---|
+| `SESSION_TURN_THRESHOLD` | `0` | `0` disables turn-count resets; positive values force a new runtime session after that many persisted turns. |
+| `RECENT_CONVERSATION_COUNT` | `80` | Latest persisted messages injected for local continuity. |
+| `RECENT_CONVERSATION_MESSAGE_MAX_CHARS` | `2000` | Per-message clip for recent conversation context. |
+| `REGION_BUDGET_RECENT_CONVERSATION` | `24000` | Recent-conversation prompt-region budget in tokens. |
+
 In a guild, a message is handled when the bot is `@mention`ed, the channel is in
 `DISCORD_WATCHED_CHANNELS`, or `DISCORD_WATCH_ALL_GUILD_CHANNELS` is on for that
 guild. DMs are always handled. The user allowlist applies before any of these.
@@ -69,9 +117,12 @@ guild. DMs are always handled. The user allowlist applies before any of these.
 | Telegram adapter | `.claude/chat/adapters/telegram.py` |
 | Discord adapter | `.claude/chat/adapters/discord.py` |
 | Attachment parser | `.claude/chat/attachment_context.py` |
-| Router and engine | `.claude/chat/router.py`, `.claude/chat/engine.py` |
+| Command registry | `.claude/chat/commands.py` |
+| Router, engine, task status | `.claude/chat/router.py`, `.claude/chat/engine.py`, `.claude/chat/background_tasks.py` |
+| Transcript persistence | `.claude/chat/session.py` |
+| Continuity state | `.claude/chat/cognition/continuity.py` |
 | Windows launcher | `.claude/chat/run_chat.bat` |
-| Tests | `.claude/scripts/tests/test_adapter_telegram.py`, `.claude/scripts/tests/test_adapter_discord.py`, `.claude/scripts/tests/test_attachment_context.py` |
+| Tests | `.claude/scripts/tests/test_adapter_telegram.py`, `.claude/scripts/tests/test_adapter_discord.py`, `.claude/scripts/tests/test_attachment_context.py`, `.claude/scripts/tests/test_chat_runtime_engine.py`, `.claude/scripts/tests/test_chat_router_timeout.py`, `.claude/scripts/tests/test_cognition_continuity.py` |
 | Public reference | `docs/adapters.md` |
 
 ## Safety Boundaries
@@ -108,11 +159,18 @@ cd .claude\chat
 .\run_chat.bat
 ```
 
-Check live health:
+Check live health through the configured profile port:
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/health
+cd .claude/scripts
+$port = uv run thehomie status --json | ConvertFrom-Json | ForEach-Object { $_.profile_lifecycle.health_check_port }
+Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$port/health"
 ```
+
+For restart verification, do not stop at HTTP 200. Confirm the bot PID file
+points at a live process, the configured health port is owned by that process,
+the health payload reports `status=ok` with expected adapters true, and the bot
+log contains platform connection plus native command registration lines.
 
 ## How To Test It
 
@@ -120,22 +178,27 @@ Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/health
 cd .claude/scripts
 uv run python -m py_compile ..\chat\adapters\telegram.py
 uv run python -m py_compile ..\chat\attachment_context.py ..\chat\adapters\discord.py ..\chat\engine.py
-uv run pytest tests/test_adapter_telegram.py tests/test_adapter_discord.py tests/test_attachment_context.py -q
+uv run pytest tests/test_adapter_telegram.py tests/test_adapter_discord.py tests/test_command_menu.py tests/test_attachment_context.py -q
 uv run pytest tests/test_extension_manager.py tests/test_skill_intent_gates.py -q
+uv run pytest tests/test_chat_runtime_engine.py tests/test_cognition_continuity.py tests/test_router_transcript_persistence.py tests/test_chat_router_timeout.py tests/test_config_reload.py -q
 ```
 
 ## Current Regression Proof
 
-- Date: 2026-06-08
+- Date: 2026-06-27
 - Local proof: `py_compile` passed for the shared attachment parser, Discord
-  adapter, chat engine, and prompt-region modules.
-- Focused tests: `tests/test_attachment_context.py`,
-  `tests/test_adapter_discord.py`, `tests/test_adapter_voice_discord.py`,
-  `tests/test_adapter_telegram.py`, and `tests/test_chat_runtime_engine.py`
-  passed.
-- Targeted runtime/router/cognition lane passed.
-- Scope: local code and fixture proof only; no Discord restart or live Discord
-  propagation proof was run.
+  adapter, chat engine, router, command registry, core handlers, and prompt-region
+  modules.
+- Combined requested regression lane passed: `261 passed, 28 warnings`.
+- Coverage included chat runtime continuity, cognition continuity, transcript
+  persistence, timeout handoff status, config reload, extension manager,
+  command menu, Discord adapter, URL ingest, document ingest, and recall CLI.
+- Live restart proof: a restarted Homie process reached `status=ok`; Telegram,
+  Discord, and web adapters were true in `/health`; the bot log showed Telegram
+  connected, Telegram native command registration, all adapters connected,
+  Discord connected, and Discord native command registration.
+- Scope: local code, fixture proof, and live adapter startup proof. Platform
+  menu display can still depend on each client refreshing its native command UI.
 
 ## Previous Live Proof
 

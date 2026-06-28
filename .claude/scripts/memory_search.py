@@ -50,6 +50,7 @@ def search_keyword(
     query: str,
     limit: int | None = None,
     path_prefix: str = "",
+    memory_dir: "Path | str | None" = None,
 ) -> list[SearchResult]:
     """Keyword search (FTS5 for SQLite, tsvector for Postgres)."""
     import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
@@ -58,7 +59,7 @@ def search_keyword(
     if not query.strip():
         return []
 
-    db = get_memory_db()
+    db = get_memory_db(db_path=_cfg.resolve_db_path(memory_dir))
     db.init_schema()
     rows = db.keyword_search(query, limit, path_prefix=path_prefix)
     db.close()
@@ -82,6 +83,7 @@ def search_semantic(
     limit: int | None = None,
     min_score: float | None = None,
     path_prefix: str = "",
+    memory_dir: "Path | str | None" = None,
 ) -> list[SearchResult]:
     """Semantic search using vector similarity."""
     import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
@@ -96,7 +98,7 @@ def search_semantic(
 
     query_embedding = embed_text(query)
 
-    db = get_memory_db()
+    db = get_memory_db(db_path=_cfg.resolve_db_path(memory_dir))
     db.init_schema()
     rows = db.vector_search(query_embedding, limit, path_prefix=path_prefix)
     db.close()
@@ -124,6 +126,7 @@ def search_hybrid(
     keyword_weight: float | None = None,
     path_prefix: str = "",
     graph_scores: dict[str, float] | None = None,
+    memory_dir: "Path | str | None" = None,
 ) -> list[SearchResult]:
     """Hybrid search combining keyword and semantic with weighted scoring."""
     import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
@@ -142,7 +145,7 @@ def search_hybrid(
 
     query_embedding = embed_text(query)
 
-    db = get_memory_db()
+    db = get_memory_db(db_path=_cfg.resolve_db_path(memory_dir))
     db.init_schema()
     keyword_rows = db.keyword_search(query, limit * 2, path_prefix=path_prefix)
     semantic_rows = db.vector_search(query_embedding, limit * 2, path_prefix=path_prefix)

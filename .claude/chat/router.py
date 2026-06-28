@@ -6,6 +6,7 @@ Uses ExtensionManager for command dispatch instead of hardcoded elif chains.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shlex
 import time
@@ -13,6 +14,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any
 
+import background_tasks
 from commands import get_command_min_role, get_engine_command_description, get_piv_instruction
 from engine import ConversationEngine
 from extension_manager import ExtensionManager
@@ -27,6 +29,9 @@ from session_keys import build_session_key, resolve_thread_id
 _VAULT_INGEST_URL_RE = re.compile(
     r"^/vault-ingest\s+(https?://\S+)\s*$", re.IGNORECASE
 )
+_VAULT_COMMAND_ALIAS_RE = re.compile(
+    r"^/(vaults|vault-ops)(?=\s|$)\s*(.*)$", re.IGNORECASE | re.DOTALL
+)
 
 # Phase 3 document ingest — matched against IncomingMessage.caption (NOT the
 # rendered turn text). Default-deny: only a caption that is EXACTLY the
@@ -34,6 +39,13 @@ _VAULT_INGEST_URL_RE = re.compile(
 # mentioning vault-ingest, bare command text sent AFTER an upload, and
 # caption-less uploads all fall through to the engine unchanged.
 _VAULT_INGEST_DOC_RE = re.compile(r"^/vault-ingest\s*$", re.IGNORECASE)
+
+
+def _adapter_connect_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("CHAT_ADAPTER_CONNECT_TIMEOUT_SECONDS", "20")))
+    except (TypeError, ValueError):
+        return 20.0
 
 
 class _DocumentCompileError(RuntimeError):
@@ -78,6 +90,32 @@ DEFAULT_ENGINE_TIMEOUT_SECONDS = 900.0
 # at call time so /reload can update the guard without restarting the process.
 ENGINE_TIMEOUT_SECONDS: float | None = None
 PREFETCH_ONLY_INTENTS = {"browserops"}
+VAULT_COMMAND_NAMES = {"vault", "vaults", "vault-ops"}
+VAULT_NAME_ALIASES = {
+    "second": "thehomie",
+    "thehomie": "thehomie",
+    "thehomie": "thehomie",
+    "coding": "coding-vault",
+    "coding-vault": "coding-vault",
+    "unified": "unified-vault",
+    "unified-vault": "unified-vault",
+}
+VAULT_RECALL_MODES = {"auto", "hybrid", "keyword"}
+VAULT_OPS_ROUTINES = {
+    "orient": "Medium (~1-2 min)",
+    "morning": "Medium (~1-2 min)",
+    "debrief": "Medium (~2-3 min)",
+    "evening": "Medium (~2-3 min)",
+    "weekly": "Heavy (~5-10 min)",
+    "capture": "Light (~5 sec)",
+    "ingest": "Medium (~1-2 min)",
+    "compile": "Light-Heavy",
+    "research": "Very heavy (~10-30 min)",
+    "maintain": "Heavy (~3-5 min)",
+    "context": "Medium (~1-2 min)",
+    "status": "Light (~30 sec)",
+    "think": "Heavy (~5-10 min)",
+}
 
 _LINKEDIN_PROFILE_MARKERS = (
     "linkedin profile",
@@ -143,16 +181,14 @@ def _engine_timeout_message(timeout_seconds: float, attachments: list[Any] | Non
         plural = len(names) > 1
         return (
             f"I hit the chat runtime timeout after {formatted}s. "
-            f"Your uploaded {'files were' if plural else 'file was'} NOT read, "
-            f"ingested, or saved: {shown}. Nothing from "
-            f"{'them' if plural else 'it'} was processed. The bot is still online — "
-            "send the file again, or ask about a specific section, to retry."
+            f"I have not confirmed the uploaded {'files were' if plural else 'file was'} "
+            f"processed yet: {shown}. I kept the turn running in the background "
+            "and will post the result here if it finishes."
         )
     return (
         f"I hit the chat runtime timeout after {formatted}s before the model "
-        "returned. I did not finish that turn or make changes from it. "
-        "The bot is still online; send the concrete next action again, or use "
-        "Codex/Mission Control for longer code-editing work."
+        "returned. I kept that turn running in the background and will post "
+        "the result here if it finishes. You can keep chatting."
     )
 
 
@@ -195,6 +231,7 @@ class ChatRouter:
         self._burst_delay_seconds = 1.2
         self._pending_followup_choices: dict[str, tuple[Any, Any, str]] = {}
         self._turn_choice_counter = 0
+        self._background_engine_tasks: set[asyncio.Task[Any]] = set()
 
     def register(self, adapter: Any) -> None:
         """Register a platform adapter."""
@@ -214,12 +251,34 @@ class ChatRouter:
         except ImportError:
             pass  # core_handlers not available — handlers will degrade gracefully
 
-        # Connect adapters individually — one failing shouldn't block the rest
-        for platform, adapter in list(self.adapters.items()):
+        async def _connect_adapter(platform: Platform, adapter: Any) -> tuple[Platform, str | None]:
+            timeout_s = _adapter_connect_timeout_seconds()
             try:
-                await adapter.connect()
+                await asyncio.wait_for(adapter.connect(), timeout=timeout_s)
+                return platform, None
+            except asyncio.TimeoutError:
+                try:
+                    await adapter.disconnect()
+                except Exception:
+                    pass
+                return platform, f"timed out after {timeout_s:g}s"
             except Exception as e:
-                print(f"[{datetime.now()}] FATAL: {platform.value} adapter failed to connect: {e}", flush=True)
+                return platform, str(e)
+
+        # Connect adapters concurrently. A slow or stuck platform must not keep
+        # other configured channels, especially Discord, offline.
+        connect_results = await asyncio.gather(
+            *(
+                _connect_adapter(platform, adapter)
+                for platform, adapter in list(self.adapters.items())
+            )
+        )
+        for platform, error in connect_results:
+            if error:
+                print(
+                    f"[{datetime.now()}] FATAL: {platform.value} adapter failed to connect: {error}",
+                    flush=True,
+                )
                 del self.adapters[platform]
 
         if not self.adapters:
@@ -478,7 +537,21 @@ class ChatRouter:
 
     def _parse_command(self, text: str) -> tuple[str, str] | None:
         """Return (command, args) if text is a known bot command, else None."""
-        m = self.manager.command_regex.match(text.strip())
+        stripped = text.strip()
+        if not stripped.startswith("/"):
+            return None
+
+        alias_match = _VAULT_COMMAND_ALIAS_RE.match(stripped)
+        if alias_match:
+            return alias_match.group(1).lower(), alias_match.group(2).strip()
+
+        names = "|".join(
+            re.escape(name)
+            for name in sorted(self.manager.get_all_command_names(), key=len, reverse=True)
+        )
+        if not names:
+            return None
+        m = re.match(rf"^/({names})(?=\s|$)\s*(.*)$", stripped, re.IGNORECASE | re.DOTALL)
         if m:
             return m.group(1).lower(), m.group(2).strip()
         return None
@@ -488,18 +561,33 @@ class ChatRouter:
 
         Returns list of (command, args) tuples, or None if <2 commands found.
         """
-        all_names = self.manager.get_all_command_names()
-        pattern = re.compile(r"/(" + "|".join(all_names) + r")\b", re.IGNORECASE)
-        matches = list(pattern.finditer(text.strip()))
-        if len(matches) < 2:
+        stripped = text.strip()
+        if not stripped.startswith("/"):
             return None
-        result = []
-        for i, m in enumerate(matches):
-            cmd = m.group(1).lower()
-            arg_start = m.end()
-            arg_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            args = text[arg_start:arg_end].strip()
-            result.append((cmd, args))
+
+        command_names = {name.lower() for name in self.manager.get_all_command_names()}
+        tokens = stripped.split()
+        if len(tokens) < 2:
+            return None
+
+        commands: list[str] = []
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if not token.startswith("/") or token.count("/") != 1:
+                break
+            cmd = token[1:].lower()
+            if cmd not in command_names:
+                break
+            commands.append(cmd)
+            index += 1
+
+        if len(commands) < 2:
+            return None
+
+        trailing_args = " ".join(tokens[index:]).strip()
+        result = [(cmd, "") for cmd in commands[:-1]]
+        result.append((commands[-1], trailing_args))
         return result
 
     async def _handle(self, adapter: Any, incoming: Any) -> None:
@@ -528,6 +616,16 @@ class ChatRouter:
     async def _handle_inner(self, adapter: Any, incoming: Any) -> None:
         """Core message handling logic."""
         text = incoming.text or ""
+        skip_intent_detection = False
+        platform_str = (
+            incoming.platform.value
+            if isinstance(getattr(incoming, "platform", None), Platform)
+            else str(getattr(incoming, "platform", ""))
+        )
+        channel_id = getattr(getattr(incoming, "channel", None), "platform_id", "")
+        thread_value = getattr(getattr(incoming, "thread", None), "thread_id", None)
+        thread_id = resolve_thread_id(channel_id, thread_value)
+        session_key = build_session_key(platform_str, channel_id, thread_id)
 
         # --- Button clicks: __button:{custom_id} ---
         if text.startswith("__button:"):
@@ -556,6 +654,20 @@ class ChatRouter:
             url = m.group(1)
             await self._handle_vault_ingest_url(adapter, incoming, url)
             return
+
+        if background_tasks.is_status_probe(text):
+            latest_task = background_tasks.latest_for_session(session_key)
+            if latest_task:
+                reply = background_tasks.render_status_reply(latest_task)
+                await adapter.send(
+                    OutgoingMessage(
+                        text=reply,
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                    )
+                )
+                self._persist_router_turn(incoming, reply)
+                return
 
         # --- Phase 3 document ingest: an upload captioned EXACTLY
         # /vault-ingest short-circuits to the deterministic router-side
@@ -626,7 +738,26 @@ class ChatRouter:
         # --- Single command: /email -> handle directly ---
         if parsed:
             command, args = parsed
-            if command in router_commands:
+            if command in VAULT_COMMAND_NAMES:
+                user_role = getattr(incoming, "user_role", "admin")
+                min_role = get_command_min_role("vault")
+                role_level = {"viewer": 0, "operator": 1, "admin": 2}
+                if role_level.get(user_role, 0) < role_level.get(min_role, 0):
+                    await adapter.send(
+                        OutgoingMessage(
+                            text=f"Permission denied: /vault requires {min_role} role.",
+                            channel=incoming.channel,
+                            thread=incoming.thread,
+                        )
+                    )
+                    return
+                handled = await self._handle_vault_command(adapter, incoming, command, args)
+                if handled:
+                    return
+                parsed = None
+                skip_intent_detection = True
+
+            if not skip_intent_detection and command in router_commands:
                 reply = await self.manager.dispatch(command, adapter, incoming, args)
                 if reply is not None:
                     await adapter.send(
@@ -640,59 +771,60 @@ class ChatRouter:
                         self._persist_router_turn(incoming, reply)
                 return
 
-            # Role check for engine commands
-            user_role = getattr(incoming, "user_role", "admin")
-            min_role = get_command_min_role(command)
-            role_level = {"viewer": 0, "operator": 1, "admin": 2}
-            if role_level.get(user_role, 0) < role_level.get(min_role, 0):
-                await adapter.send(
-                    OutgoingMessage(
-                        text=f"Permission denied: /{command} requires {min_role} role.",
-                        channel=incoming.channel,
-                        thread=incoming.thread,
+            if not skip_intent_detection:
+                # Role check for engine commands
+                user_role = getattr(incoming, "user_role", "admin")
+                min_role = get_command_min_role(command)
+                role_level = {"viewer": 0, "operator": 1, "admin": 2}
+                if role_level.get(user_role, 0) < role_level.get(min_role, 0):
+                    await adapter.send(
+                        OutgoingMessage(
+                            text=f"Permission denied: /{command} requires {min_role} role.",
+                            channel=incoming.channel,
+                            thread=incoming.thread,
+                        )
                     )
-                )
-                return
+                    return
 
-            # Engine command — convert to natural language for the SDK
-            piv_content = get_piv_instruction(command, args)
-            if piv_content:
-                if isinstance(getattr(incoming, "raw_event", None), dict):
-                    incoming.raw_event.setdefault("display_text", text)
-                incoming.text = piv_content
-                incoming.is_piv = True
-                incoming.piv_command = command
-            elif command == "clutch":
-                if isinstance(getattr(incoming, "raw_event", None), dict):
-                    incoming.raw_event.setdefault("display_text", text)
-                clutch_prompt = (
-                    f"Use the Skill tool to invoke the 'clutch' skill with arguments: {args}"
-                    if args
-                    else "Use the Skill tool to invoke the 'clutch' skill"
-                )
-                incoming.text = clutch_prompt
-            elif command == "quote":
-                if isinstance(getattr(incoming, "raw_event", None), dict):
-                    incoming.raw_event.setdefault("display_text", text)
-                quote_prompt = (
-                    f"Use the Skill tool to invoke the 'turborater-quote' skill with arguments: {args}"
-                    if args
-                    else "Use the Skill tool to invoke the 'turborater-quote' skill. Ask the user for: full name, vehicle (year make model), zip code, and coverage type (liability or full coverage)."
-                )
-                incoming.text = quote_prompt
-                incoming.is_piv = True
-                incoming.piv_command = "clutch"
-            else:
-                if isinstance(getattr(incoming, "raw_event", None), dict):
-                    incoming.raw_event.setdefault("display_text", text)
-                desc = get_engine_command_description(command)
-                if args:
-                    incoming.text = f"{desc}: {args}"
+                # Engine command — convert to natural language for the SDK
+                piv_content = get_piv_instruction(command, args)
+                if piv_content:
+                    if isinstance(getattr(incoming, "raw_event", None), dict):
+                        incoming.raw_event.setdefault("display_text", text)
+                    incoming.text = piv_content
+                    incoming.is_piv = True
+                    incoming.piv_command = command
+                elif command == "clutch":
+                    if isinstance(getattr(incoming, "raw_event", None), dict):
+                        incoming.raw_event.setdefault("display_text", text)
+                    clutch_prompt = (
+                        f"Use the Skill tool to invoke the 'clutch' skill with arguments: {args}"
+                        if args
+                        else "Use the Skill tool to invoke the 'clutch' skill"
+                    )
+                    incoming.text = clutch_prompt
+                elif command == "quote":
+                    if isinstance(getattr(incoming, "raw_event", None), dict):
+                        incoming.raw_event.setdefault("display_text", text)
+                    quote_prompt = (
+                        f"Use the Skill tool to invoke the 'turborater-quote' skill with arguments: {args}"
+                        if args
+                        else "Use the Skill tool to invoke the 'turborater-quote' skill. Ask the user for: full name, vehicle (year make model), zip code, and coverage type (liability or full coverage)."
+                    )
+                    incoming.text = quote_prompt
+                    incoming.is_piv = True
+                    incoming.piv_command = "clutch"
                 else:
-                    incoming.text = desc or command
+                    if isinstance(getattr(incoming, "raw_event", None), dict):
+                        incoming.raw_event.setdefault("display_text", text)
+                    desc = get_engine_command_description(command)
+                    if args:
+                        incoming.text = f"{desc}: {args}"
+                    else:
+                        incoming.text = desc or command
 
         # --- Smart intent detection: natural language -> router commands ---
-        if not parsed:
+        if not parsed and not skip_intent_detection:
             requires_confirmation = getattr(
                 self.manager, "requires_external_action_confirmation", None
             )
@@ -855,14 +987,20 @@ class ChatRouter:
         final_footer: str | None = None
         final_components: list[Any] = []
         followup_messages: list[OutgoingMessage] = []
+        engine_result_started = False
+        foreground_text: str | None = None
+        foreground_is_error = False
+        background_task_id: str | None = None
 
         async def _run_engine() -> None:
             nonlocal final_text, final_is_error, final_footer, final_components
+            nonlocal engine_result_started
             async for outgoing in self.engine.handle_message(incoming, progress=progress):
-                if final_text:
+                if engine_result_started:
                     followup_messages.append(outgoing)
                     continue
                 final_text = outgoing.text
+                engine_result_started = True
                 final_is_error = getattr(outgoing, "is_error", False)
                 # gap-6: capture engine-side footer + components (concept draft).
                 # Persistence (_persist_router_turn) keeps using final_text only —
@@ -872,19 +1010,98 @@ class ChatRouter:
                 if yielded_components:
                     final_components = list(yielded_components)
 
+        async def _deliver_background_engine_result(task: asyncio.Task[Any]) -> None:
+            nonlocal final_text, final_is_error, final_footer, final_components
+            try:
+                await task
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                print(f"[{datetime.now()}] Background engine error: {e}", flush=True)
+                final_text = f"Background task failed after timeout: {e}"
+                final_is_error = True
+                final_footer = None
+                final_components = []
+
+            if not final_text.strip():
+                final_text = "Background task finished, but it had no text response."
+
+            text = final_text
+            if not final_is_error:
+                text = f"Background task finished:\n\n{final_text}"
+
+            components = self._extract_result_buttons(final_text)
+            if final_components:
+                components = list(components) + list(final_components)
+
+            try:
+                background_message_id = await adapter.send(
+                    OutgoingMessage(
+                        text=text,
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                        is_error=final_is_error,
+                        components=components,
+                        footer=final_footer,
+                    )
+                )
+                background_tasks.update_task(
+                    background_task_id,
+                    status="failed" if final_is_error else "completed",
+                    final_message_id=background_message_id,
+                    final_text=final_text,
+                    error=final_text if final_is_error else None,
+                )
+                for followup in followup_messages:
+                    await adapter.send(followup)
+            except Exception as e:
+                background_tasks.update_task(
+                    background_task_id,
+                    status="delivery_failed",
+                    final_text=text,
+                    error=str(e),
+                )
+                print(
+                    f"[{datetime.now()}] Failed to deliver background engine result: {e}",
+                    flush=True,
+                )
+
+        def _track_background_engine_result(task: asyncio.Task[Any]) -> None:
+            self._background_engine_tasks.add(task)
+
+            def _on_engine_done(done_task: asyncio.Task[Any]) -> None:
+                self._background_engine_tasks.discard(done_task)
+                delivery_task = asyncio.create_task(
+                    _deliver_background_engine_result(done_task)
+                )
+                self._background_engine_tasks.add(delivery_task)
+                delivery_task.add_done_callback(self._background_engine_tasks.discard)
+
+            task.add_done_callback(_on_engine_done)
+
         timeout_seconds = _engine_timeout_seconds(
             bool(getattr(incoming, "attachments", None))
         )
 
+        engine_task = asyncio.create_task(_run_engine())
         try:
-            await asyncio.wait_for(_run_engine(), timeout=timeout_seconds)
+            await asyncio.wait_for(asyncio.shield(engine_task), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             formatted_timeout = _format_seconds(timeout_seconds)
             print(f"[{datetime.now()}] Engine timed out after {formatted_timeout}s")
-            final_text = _engine_timeout_message(
+            foreground_text = _engine_timeout_message(
                 timeout_seconds, getattr(incoming, "attachments", None)
             )
-            final_is_error = True
+            foreground_is_error = True
+            background_task_id = background_tasks.start_task(
+                session_key=session_key,
+                platform=platform_str,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                message_id=getattr(incoming, "platform_message_id", None),
+                user_request=text,
+            )
+            _track_background_engine_result(engine_task)
         except Exception as e:
             print(f"[{datetime.now()}] Engine error: {e}")
             final_text = f"Sorry, something went wrong: {e}"
@@ -894,14 +1111,16 @@ class ChatRouter:
                 progress_task.cancel()
 
         # Update the placeholder with the final response
-        if not final_text.strip():
-            final_text = "I processed your request but had no text response."
+        delivered_text = foreground_text if foreground_text is not None else final_text
+        delivered_is_error = foreground_is_error if foreground_text is not None else final_is_error
+        if not delivered_text.strip():
+            delivered_text = "I processed your request but had no text response."
 
         # Parse <<BLOG_RESULTS>> marker — attach Publish/Skip buttons
-        components = self._extract_result_buttons(final_text)
+        components = self._extract_result_buttons(delivered_text)
         # If the engine attached components (e.g. concept draft Accept/Diff),
         # carry them into the outgoing message alongside any blog buttons.
-        if final_components:
+        if final_components and foreground_text is None:
             components = list(components) + list(final_components)
 
         final_delivery_ok = False
@@ -910,24 +1129,24 @@ class ChatRouter:
             if placeholder_id:
                 final_delivery_id = await adapter.update(
                     OutgoingMessage(
-                        text=final_text,
+                        text=delivered_text,
                         channel=incoming.channel,
                         thread=incoming.thread,
                         is_update=True,
                         update_message_id=placeholder_id,
-                        is_error=final_is_error,
-                        footer=final_footer,
+                        is_error=delivered_is_error,
+                        footer=final_footer if foreground_text is None else None,
                     )
                 )
             else:
                 final_delivery_id = await adapter.send(
                     OutgoingMessage(
-                        text=final_text,
+                        text=delivered_text,
                         channel=incoming.channel,
                         thread=incoming.thread,
-                        is_error=final_is_error,
+                        is_error=delivered_is_error,
                         components=components,
-                        footer=final_footer,
+                        footer=final_footer if foreground_text is None else None,
                     )
                 )
             final_delivery_ok = True
@@ -958,7 +1177,7 @@ class ChatRouter:
                     flush=True,
                 )
 
-        if final_delivery_ok:
+        if final_delivery_ok and foreground_text is None:
             try:
                 # Buttons can't be added to edits — send as follow-up
                 if components:
@@ -976,8 +1195,389 @@ class ChatRouter:
             except Exception as e:
                 print(f"[{datetime.now()}] Failed to send follow-up response: {e}", flush=True)
 
-        if final_is_error:
-            self._persist_router_turn(incoming, final_text)
+        if delivered_is_error:
+            self._persist_router_turn(incoming, delivered_text)
+
+    async def _handle_vault_command(
+        self,
+        adapter: Any,
+        incoming: Any,
+        command: str,
+        args: str,
+    ) -> bool:
+        """Handle the shared /vault command family.
+
+        Returns True when the router fully handled the turn. Returns False for
+        /vault ops, after rewriting the incoming message into a vault-ops skill
+        prompt so the normal engine path can run it.
+        """
+
+        original_text = f"/{command} {args}".strip()
+        if isinstance(getattr(incoming, "raw_event", None), dict):
+            incoming.raw_event.setdefault("display_text", original_text)
+
+        parsed = self._parse_vault_args(command, args)
+        if isinstance(parsed, str):
+            await self._send_vault_reply(adapter, incoming, parsed)
+            return True
+
+        subcommand, positionals, options = parsed
+        vault_name = options["vault"]
+
+        if subcommand in {"help", ""}:
+            await self._send_vault_reply(adapter, incoming, self._vault_help_text())
+            return True
+
+        if subcommand == "status":
+            reply = self._vault_status_reply(vault_name)
+            await self._send_vault_reply(adapter, incoming, reply)
+            return True
+
+        if subcommand == "db":
+            reply = self._vault_db_reply(vault_name)
+            await self._send_vault_reply(adapter, incoming, reply)
+            return True
+
+        if subcommand in {"search", "context", "contacts"}:
+            query = " ".join(positionals).strip()
+            if subcommand == "search" and not query:
+                await self._send_vault_reply(
+                    adapter,
+                    incoming,
+                    "Usage: `/vault search <query> [--vault thehomie|coding-vault|unified-vault] [--mode auto|hybrid|keyword] [--limit N]`",
+                    is_error=True,
+                )
+                return True
+            if subcommand == "context" and not query:
+                await self._send_vault_reply(
+                    adapter,
+                    incoming,
+                    "Usage: `/vault context <topic> [--vault thehomie|coding-vault|unified-vault]`",
+                    is_error=True,
+                )
+                return True
+            if subcommand == "contacts":
+                query = (
+                    f"contacts people clients prospects owners phone email {query}".strip()
+                    if query
+                    else "contacts people clients prospects owners phone email"
+                )
+            elif subcommand == "context":
+                query = f"context briefing decisions open items source notes {query}"
+            reply = await self._vault_recall_reply(
+                subcommand=subcommand,
+                vault_name=vault_name,
+                query=query,
+                mode=options["mode"],
+                limit=options["limit"],
+            )
+            await self._send_vault_reply(adapter, incoming, reply)
+            return True
+
+        if subcommand == "ingest":
+            url = options.get("url") or next(
+                (token for token in positionals if token.startswith(("http://", "https://"))),
+                "",
+            )
+            memory_dir, _db_path, error = self._resolve_vault(vault_name)
+            if error:
+                await self._send_vault_reply(adapter, incoming, error, is_error=True)
+                return True
+            if url:
+                await self._handle_vault_ingest_url(
+                    adapter,
+                    incoming,
+                    url,
+                    vault_name=vault_name,
+                    memory_dir=memory_dir,
+                )
+                return True
+            if getattr(incoming, "attachments", None):
+                await self._handle_vault_ingest_document(
+                    adapter,
+                    incoming,
+                    vault_name=vault_name,
+                    memory_dir=memory_dir,
+                )
+                return True
+            await self._send_vault_reply(
+                adapter,
+                incoming,
+                "Usage: `/vault ingest <url> [--vault name]` or use Discord `/vault ingest` with an attachment.",
+                is_error=True,
+            )
+            return True
+
+        if subcommand == "ops":
+            if not positionals:
+                await self._send_vault_reply(
+                    adapter,
+                    incoming,
+                    "Usage: `/vault ops <orient|debrief|weekly|capture|ingest|compile|research|maintain|context|status|think> [args] [--vault name]`",
+                    is_error=True,
+                )
+                return True
+            routine = positionals[0].lower()
+            routine_args = " ".join(positionals[1:]).strip()
+            if routine not in VAULT_OPS_ROUTINES:
+                await self._send_vault_reply(
+                    adapter,
+                    incoming,
+                    f"Unknown vault-ops routine `{routine}`. Supported: {', '.join(sorted(VAULT_OPS_ROUTINES))}.",
+                    is_error=True,
+                )
+                return True
+            incoming.text = self._build_vault_ops_prompt(vault_name, routine, routine_args)
+            incoming.is_piv = True
+            incoming.piv_command = "vault-ops"
+            return False
+
+        await self._send_vault_reply(
+            adapter,
+            incoming,
+            f"Unknown /vault subcommand `{subcommand}`.\n\n{self._vault_help_text()}",
+            is_error=True,
+        )
+        return True
+
+    async def _send_vault_reply(
+        self,
+        adapter: Any,
+        incoming: Any,
+        text: str,
+        *,
+        is_error: bool = False,
+    ) -> None:
+        await adapter.send(
+            OutgoingMessage(
+                text=text,
+                channel=incoming.channel,
+                thread=incoming.thread,
+                is_error=is_error,
+            )
+        )
+        self._persist_router_turn(incoming, text)
+
+    def _parse_vault_args(
+        self,
+        command: str,
+        args: str,
+    ) -> tuple[str, list[str], dict[str, Any]] | str:
+        if command == "vault-ops":
+            args = f"ops {args}".strip()
+
+        if not args.strip():
+            return "help", [], {"vault": "thehomie", "mode": "hybrid", "limit": 5, "url": ""}
+
+        try:
+            tokens = shlex.split(args)
+        except ValueError as e:
+            return f"Could not parse /vault arguments: {e}"
+
+        if not tokens:
+            return "help", [], {"vault": "thehomie", "mode": "hybrid", "limit": 5, "url": ""}
+
+        subcommand = tokens[0].lower()
+        rest = tokens[1:]
+        options: dict[str, Any] = {
+            "vault": "thehomie",
+            "mode": "hybrid",
+            "limit": 5,
+            "url": "",
+        }
+        positionals: list[str] = []
+        index = 0
+        while index < len(rest):
+            token = rest[index]
+            if token in {"--vault", "--mode", "--limit", "-n", "--url"}:
+                if index + 1 >= len(rest):
+                    return f"Missing value for `{token}`."
+                value = rest[index + 1]
+                if token == "--vault":
+                    options["vault"] = value
+                elif token == "--mode":
+                    options["mode"] = value.lower()
+                elif token in {"--limit", "-n"}:
+                    options["limit"] = value
+                elif token == "--url":
+                    options["url"] = value
+                index += 2
+                continue
+            if token.startswith("--vault="):
+                options["vault"] = token.split("=", 1)[1]
+            elif token.startswith("--mode="):
+                options["mode"] = token.split("=", 1)[1].lower()
+            elif token.startswith("--limit="):
+                options["limit"] = token.split("=", 1)[1]
+            elif token.startswith("--url="):
+                options["url"] = token.split("=", 1)[1]
+            else:
+                positionals.append(token)
+            index += 1
+
+        if options["vault"] == "thehomie" and positionals:
+            if subcommand in {"status", "db"}:
+                maybe_vault = self._normalize_vault_name(positionals[0])
+                if maybe_vault:
+                    options["vault"] = maybe_vault
+                    positionals = positionals[1:]
+            elif subcommand in {"search", "context", "contacts", "ingest", "ops"}:
+                maybe_vault = self._normalize_vault_name(positionals[-1])
+                if maybe_vault and len(positionals) > 1:
+                    options["vault"] = maybe_vault
+                    positionals = positionals[:-1]
+
+        normalized = self._normalize_vault_name(options["vault"])
+        if not normalized:
+            return (
+                f"Unknown vault `{options['vault']}`. "
+                "Use `thehomie`, `coding-vault`, or `unified-vault`."
+            )
+        options["vault"] = normalized
+
+        if options["mode"] not in VAULT_RECALL_MODES:
+            return "Unknown recall mode. Use `auto`, `hybrid`, or `keyword`."
+        try:
+            options["limit"] = max(1, min(10, int(options["limit"])))
+        except (TypeError, ValueError):
+            return "Limit must be a number from 1 to 10."
+
+        return subcommand, positionals, options
+
+    @staticmethod
+    def _normalize_vault_name(raw: str) -> str | None:
+        key = str(raw or "").strip().lower().replace("_", "-")
+        return VAULT_NAME_ALIASES.get(key)
+
+    def _resolve_vault(self, vault_name: str) -> tuple[Path | None, Path, str | None]:
+        from config import VAULT_NAMES, resolve_vault
+
+        if vault_name not in VAULT_NAMES:
+            return None, Path(""), f"Unknown vault `{vault_name}`."
+        memory_dir, db_path = resolve_vault(vault_name)
+        if memory_dir is None:
+            return (
+                None,
+                db_path,
+                f"Vault `{vault_name}` is not configured on this machine.",
+            )
+        return Path(memory_dir), db_path, None
+
+    def _vault_status_reply(self, vault_name: str) -> str:
+        memory_dir, db_path, error = self._resolve_vault(vault_name)
+        configured = memory_dir is not None and error is None
+        vault_exists = bool(memory_dir and memory_dir.exists())
+        db_exists = db_path.exists()
+        db_size = db_path.stat().st_size if db_exists else 0
+        return (
+            "*Vault Status*\n"
+            f"  Vault: `{vault_name}`\n"
+            f"  Configured: {'yes' if configured else 'no'}\n"
+            f"  Memory dir exists: {'yes' if vault_exists else 'no'}\n"
+            f"  Recall DB exists: {'yes' if db_exists else 'no'}\n"
+            f"  Recall DB size: {db_size} bytes"
+        )
+
+    def _vault_db_reply(self, vault_name: str) -> str:
+        memory_dir, db_path, error = self._resolve_vault(vault_name)
+        memory_display = str(memory_dir) if memory_dir else "not configured"
+        return (
+            "*Vault DB*\n"
+            f"  Vault: `{vault_name}`\n"
+            f"  Memory dir: `{memory_display}`\n"
+            f"  DB path: `{db_path}`\n"
+            f"  DB exists: {'yes' if db_path.exists() else 'no'}"
+            + (f"\n  Note: {error}" if error else "")
+        )
+
+    async def _vault_recall_reply(
+        self,
+        *,
+        subcommand: str,
+        vault_name: str,
+        query: str,
+        mode: str,
+        limit: int,
+    ) -> str:
+        memory_dir, _db_path, error = self._resolve_vault(vault_name)
+        if error:
+            return error
+        try:
+            from recall_service import SearchMode, recall as recall_memory
+
+            mode_map = {
+                "auto": SearchMode.AUTO,
+                "hybrid": SearchMode.HYBRID,
+                "keyword": SearchMode.KEYWORD,
+            }
+            response = await recall_memory(
+                query=query,
+                memory_dir=memory_dir,
+                search_mode=mode_map[mode],
+                caller=f"vault-command:{subcommand}",
+                max_results=limit,
+                is_slash_command=False,
+            )
+        except Exception as e:
+            return f"Vault recall failed for `{vault_name}`: {type(e).__name__}: {e}"
+
+        results = list(getattr(response, "results", []) or [])
+        title = {
+            "search": "Vault Search",
+            "context": "Vault Context",
+            "contacts": "Vault Contacts",
+        }.get(subcommand, "Vault Recall")
+        if not results:
+            return f"*{title}*\n  Vault: `{vault_name}`\n  Query: `{query}`\n\nNo matches."
+
+        lines = [
+            f"*{title}*",
+            f"  Vault: `{vault_name}`",
+            f"  Mode: `{mode}`",
+            f"  Query: `{query}`",
+            "",
+        ]
+        for result in results[:limit]:
+            path = getattr(result, "path", "")
+            start = getattr(result, "start_line", 0)
+            end = getattr(result, "end_line", 0)
+            section = getattr(result, "section_title", "") or "match"
+            text = " ".join(str(getattr(result, "text", "") or "").split())
+            if len(text) > 260:
+                text = text[:257].rstrip() + "..."
+            loc = f"{path}:{start}-{end}" if start and end else path
+            lines.append(f"- `{loc}` — {section}\n  {text}")
+        return "\n".join(lines)
+
+    def _build_vault_ops_prompt(self, vault_name: str, routine: str, args: str) -> str:
+        effort = VAULT_OPS_ROUTINES.get(routine, "Medium")
+        arg_text = args or "(no additional arguments)"
+        return (
+            "Use the Skill tool to invoke the 'vault-ops' skill.\n"
+            f"Command: {routine}\n"
+            f"Arguments: {arg_text}\n"
+            f"Selected vault: {vault_name}\n"
+            f"Approximate effort: {effort}\n\n"
+            "Follow the vault-ops routing rules. Prefer the real recall stack "
+            "when retrieving context, preserve provenance, and distinguish "
+            "indexed recall results from raw markdown reads. If the routine "
+            "writes to a vault, only proceed because this explicit /vault ops "
+            "command is the user's authorization for that vault routine."
+        )
+
+    @staticmethod
+    def _vault_help_text() -> str:
+        return (
+            "*Vault Commands*\n"
+            "`/vault status [vault]`\n"
+            "`/vault db [vault]`\n"
+            "`/vault search <query> [--vault name] [--mode auto|hybrid|keyword] [--limit N]`\n"
+            "`/vault context <topic> [--vault name]`\n"
+            "`/vault contacts [query] [--vault name]`\n"
+            "`/vault ingest <url> [--vault name]`\n"
+            "`/vault ops <routine> [args] [--vault name]`\n\n"
+            "Vaults: `thehomie`, `coding-vault`, `unified-vault`."
+        )
 
     async def _handle_file_subcommand(self, sub: str, auto_id: str) -> str:
         """Dispatch /file accept|diff <id> to the concept_drafter module.
@@ -1038,7 +1638,13 @@ class ChatRouter:
         return f"Draft preview (`{auto_id}`):\n\n{preview}"
 
     async def _handle_vault_ingest_url(
-        self, adapter: Any, incoming: Any, url: str
+        self,
+        adapter: Any,
+        incoming: Any,
+        url: str,
+        *,
+        vault_name: str = "thehomie",
+        memory_dir: Path | None = None,
     ) -> None:
         """Router-side URL ingest (gap-4).
 
@@ -1046,10 +1652,15 @@ class ChatRouter:
         compilation cascade. Reply with concept/connection/contradiction counts.
         Never reaches the engine — fully deterministic.
         """
+        show_vault = memory_dir is not None or vault_name != "thehomie"
         try:
             await adapter.send(
                 OutgoingMessage(
-                    text=f"Fetching {url}...",
+                    text=(
+                        f"Fetching {url} into `{vault_name}`..."
+                        if show_vault
+                        else f"Fetching {url}..."
+                    ),
                     channel=incoming.channel,
                     thread=incoming.thread,
                 )
@@ -1060,7 +1671,7 @@ class ChatRouter:
 
         try:
             html_path, md_path, content, report = await asyncio.to_thread(
-                self._url_ingest_pipeline, url
+                self._url_ingest_pipeline, url, memory_dir
             )
         except Exception as e:
             await adapter.send(
@@ -1084,7 +1695,11 @@ class ChatRouter:
             f"Ingested '{title}'. "
             f"{n_concepts} concepts, {n_connections} connections, "
             f"{n_contradictions} contradictions. "
-            f"Raw: `{html_path.name}`, `{md_path.name}`."
+            + (
+                f"Vault: `{vault_name}`. Raw: `{html_path.name}`, `{md_path.name}`."
+                if show_vault
+                else f"Raw: `{html_path.name}`, `{md_path.name}`."
+            )
         )
         await adapter.send(
             OutgoingMessage(
@@ -1096,7 +1711,7 @@ class ChatRouter:
         self._persist_router_turn(incoming, reply)
 
     @staticmethod
-    def _url_ingest_pipeline(url: str):
+    def _url_ingest_pipeline(url: str, memory_dir: Path | None = None):
         """Synchronous fetch + archive + compile pipeline.
 
         Runs off the event loop (called via ``asyncio.to_thread`` from the
@@ -1106,14 +1721,21 @@ class ChatRouter:
         from entity_extractor import compile_entities, extract_entities_heuristic
         from config import MEMORY_DIR
 
-        vault_dir = MEMORY_DIR
+        vault_dir = Path(memory_dir) if memory_dir is not None else MEMORY_DIR
         html_path, md_path, content = fetch_and_archive(url, vault_dir)
         md_text = md_path.read_text(encoding="utf-8")
         ents = extract_entities_heuristic(md_text, str(md_path))
-        report = compile_entities(ents, str(md_path), vault_dir, MEMORY_DIR)
+        report = compile_entities(ents, str(md_path), vault_dir, vault_dir)
         return html_path, md_path, content, report
 
-    async def _handle_vault_ingest_document(self, adapter: Any, incoming: Any) -> None:
+    async def _handle_vault_ingest_document(
+        self,
+        adapter: Any,
+        incoming: Any,
+        *,
+        vault_name: str = "thehomie",
+        memory_dir: Path | None = None,
+    ) -> None:
         """Router-side document ingest (Phase 3, doc-upload-truthful-reads).
 
         An upload captioned exactly ``/vault-ingest`` runs the deterministic
@@ -1130,6 +1752,7 @@ class ChatRouter:
             is_supported_document_attachment(att.filename or "", att.mimetype)
             for att in attachments
         ]
+        show_vault = memory_dir is not None or vault_name != "thehomie"
 
         if any(flags):
             names = ", ".join(
@@ -1140,7 +1763,11 @@ class ChatRouter:
             try:
                 await adapter.send(
                     OutgoingMessage(
-                        text=f"Ingesting {names}...",
+                        text=(
+                            f"Ingesting {names} into `{vault_name}`..."
+                            if show_vault
+                            else f"Ingesting {names}..."
+                        ),
                         channel=incoming.channel,
                         thread=incoming.thread,
                     )
@@ -1168,11 +1795,12 @@ class ChatRouter:
                 had_error = True
                 continue
             try:
+                pipeline_args: tuple[Any, ...] = (att.url, filename, att.mimetype)
+                if memory_dir is not None:
+                    pipeline_args = (*pipeline_args, memory_dir)
                 raw_path, report = await asyncio.to_thread(
                     self._document_ingest_pipeline,
-                    att.url,
-                    filename,
-                    att.mimetype,
+                    *pipeline_args,
                 )
             except _DocumentCompileError as e:
                 # Partial-state honesty: the raw archive landed; only the
@@ -1201,7 +1829,11 @@ class ChatRouter:
                     f"Ingested '{display_name}'. "
                     f"{n_concepts} concepts, {n_connections} connections, "
                     f"{n_contradictions} contradictions. "
-                    f"Raw: {_display_filename(raw_path.name)}."
+                    + (
+                        f"Vault: `{vault_name}`. Raw: {_display_filename(raw_path.name)}."
+                        if show_vault
+                        else f"Raw: {_display_filename(raw_path.name)}."
+                    )
                 )
 
         reply = "\n".join(lines)
@@ -1217,7 +1849,10 @@ class ChatRouter:
 
     @staticmethod
     def _document_ingest_pipeline(
-        file_path: str, filename: str, mimetype: str | None
+        file_path: str,
+        filename: str,
+        mimetype: str | None,
+        memory_dir: Path | None = None,
     ) -> tuple[Any, Any]:
         """Synchronous preserve_raw → companion → extract → compile pipeline.
 
@@ -1245,7 +1880,7 @@ class ChatRouter:
             preserve_raw,
         )
 
-        vault_dir = MEMORY_DIR
+        vault_dir = Path(memory_dir) if memory_dir is not None else MEMORY_DIR
         # preserve_raw sanitizes dest_name centrally and already falls back to
         # a date-prefixed destination on collision — no caller-side retry. A
         # FileExistsError that still escapes means nothing new was saved.
@@ -1281,7 +1916,7 @@ class ChatRouter:
                     pass
                 raise
             ents = extract_entities_heuristic(text, str(compile_path))
-            report = compile_entities(ents, str(compile_path), vault_dir, MEMORY_DIR)
+            report = compile_entities(ents, str(compile_path), vault_dir, vault_dir)
         except Exception as exc:
             # Raw landed; the compile stage failed — surface as the
             # partial-state honesty shape, never "nothing was saved".

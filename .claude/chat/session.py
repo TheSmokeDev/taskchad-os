@@ -794,6 +794,23 @@ class SQLiteSessionStore:
             ).fetchall()
             return [self._row_to_chat_message(row) for row in rows]
 
+    def list_recent_messages(self, session_id: str, limit: int = 80) -> list[ChatMessage]:
+        """List the latest chat messages for a session in chronological order."""
+
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT id, session_id, role, content, created_at, tool_calls_json
+                   FROM chat_messages
+                   WHERE session_id = ?
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT ?""",
+                (session_id, limit),
+            ).fetchall()
+            messages = [self._row_to_chat_message(row) for row in rows]
+            messages.reverse()
+            return messages
+
     def search_messages(
         self,
         query: str,
@@ -1348,6 +1365,35 @@ class PostgresSessionStore:
             )
             for row in rows
         ]
+
+    def list_recent_messages(self, session_id: str, limit: int = 80) -> list[ChatMessage]:
+        """List the latest chat messages for a session in chronological order."""
+
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT id, session_id, role, content, created_at, tool_calls_json
+            FROM chat_messages
+            WHERE session_id = %s
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s
+            """,
+            (session_id, limit),
+        )
+        rows = cur.fetchall()
+        messages = [
+            ChatMessage(
+                id=row[0],
+                session_id=row[1],
+                role=row[2],
+                content=row[3],
+                created_at=(row[4] if isinstance(row[4], datetime) else datetime.fromisoformat(str(row[4]))),
+                tool_calls=_parse_tool_calls(row[5] if len(row) > 5 else None),
+            )
+            for row in rows
+        ]
+        messages.reverse()
+        return messages
 
     def search_messages(
         self,

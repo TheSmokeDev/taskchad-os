@@ -222,6 +222,44 @@ class TestReloadConfigFunction:
 
             rc()
 
+    def test_detects_conversation_continuity_knob_changes(self) -> None:
+        """reload_config reloads long-lived chat continuity knobs."""
+        import config
+
+        originals = {
+            "SESSION_TURN_THRESHOLD": config.SESSION_TURN_THRESHOLD,
+            "RECENT_CONVERSATION_COUNT": config.RECENT_CONVERSATION_COUNT,
+            "RECENT_CONVERSATION_MESSAGE_MAX_CHARS": (
+                config.RECENT_CONVERSATION_MESSAGE_MAX_CHARS
+            ),
+            "REGION_BUDGET_RECENT_CONVERSATION": (
+                config.REGION_BUDGETS["recent_conversation"]
+            ),
+        }
+
+        try:
+            os.environ["SESSION_TURN_THRESHOLD"] = "7"
+            os.environ["RECENT_CONVERSATION_COUNT"] = "33"
+            os.environ["RECENT_CONVERSATION_MESSAGE_MAX_CHARS"] = "1200"
+            os.environ["REGION_BUDGET_RECENT_CONVERSATION"] = "9000"
+            from config import reload_config
+
+            changes = reload_config()
+            assert "SESSION_TURN_THRESHOLD" in changes
+            assert "RECENT_CONVERSATION_COUNT" in changes
+            assert "RECENT_CONVERSATION_MESSAGE_MAX_CHARS" in changes
+            assert "REGION_BUDGET_RECENT_CONVERSATION" in changes
+            assert config.SESSION_TURN_THRESHOLD == 7
+            assert config.RECENT_CONVERSATION_COUNT == 33
+            assert config.RECENT_CONVERSATION_MESSAGE_MAX_CHARS == 1200
+            assert config.REGION_BUDGETS["recent_conversation"] == 9000
+        finally:
+            for key, original in originals.items():
+                os.environ[key] = str(original)
+            from config import reload_config as rc
+
+            rc()
+
     def test_sensitive_values_masked(self) -> None:
         """API keys should be masked in the change report."""
         import config

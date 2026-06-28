@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+import background_tasks
 import router as router_module
 from models import Attachment, Channel, IncomingMessage, OutgoingMessage, Platform, User
 from router import ChatRouter
@@ -18,6 +19,18 @@ class _SlowEngine:
 
     async def handle_message(self, incoming: IncomingMessage, progress: dict[str, Any]):
         await asyncio.sleep(60)
+        yield OutgoingMessage(text="late", channel=incoming.channel, thread=incoming.thread)
+
+
+class _CompletableEngine:
+    def __init__(self, session_store=None) -> None:
+        self.session_store = session_store
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def handle_message(self, incoming: IncomingMessage, progress: dict[str, Any]):
+        self.started.set()
+        await self.release.wait()
         yield OutgoingMessage(text="late", channel=incoming.channel, thread=incoming.thread)
 
 
@@ -72,6 +85,23 @@ class _FailingFinalUpdateAdapter(_CaptureAdapter):
         raise RuntimeError("final delivery failed")
 
 
+async def _wait_for_event_text(adapter: _CaptureAdapter, text: str) -> None:
+    for _ in range(20):
+        if any(text in event_text for _, event_text in adapter.events):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"event text not found: {text!r}")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_background_task_state(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        background_tasks,
+        "BACKGROUND_TASK_STATE_FILE",
+        tmp_path / "background-engine-tasks.json",
+    )
+
+
 @pytest.mark.asyncio
 async def test_engine_timeout_updates_placeholder_and_persists_turn(
     monkeypatch: pytest.MonkeyPatch,
@@ -88,7 +118,8 @@ async def test_engine_timeout_updates_placeholder_and_persists_turn(
         platform=Platform.CLI,
     )
     adapter = _CaptureAdapter()
-    router = ChatRouter(_SlowEngine(store), _NoopManager())  # type: ignore[arg-type]
+    engine = _CompletableEngine(store)
+    router = ChatRouter(engine, _NoopManager())  # type: ignore[arg-type]
 
     await router._handle_inner(adapter, incoming)
 
@@ -96,12 +127,59 @@ async def test_engine_timeout_updates_placeholder_and_persists_turn(
     assert adapter.updates
     assert adapter.updates[-1].is_error is True
     assert "chat runtime timeout" in adapter.updates[-1].text
-    assert "I did not finish that turn" in adapter.updates[-1].text
+    assert "kept that turn running in the background" in adapter.updates[-1].text
 
     messages = store.list_messages("cli:test-channel:test-channel")
     assert [msg.role for msg in messages] == ["user", "assistant"]
     assert messages[0].content == "please do a slow thing"
     assert "chat runtime timeout" in messages[1].content
+
+    engine.release.set()
+    await _wait_for_event_text(adapter, "Background task finished")
+    assert adapter.sent[-1].text == "Background task finished:\n\nlate"
+    record = background_tasks.latest_for_session("cli:test-channel:test-channel")
+    assert record is not None
+    assert record["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_status_probe_answers_from_running_background_task(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setattr(router_module, "ENGINE_TIMEOUT_SECONDS", 0.01)
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    adapter = _CaptureAdapter()
+    engine = _CompletableEngine(store)
+    router = ChatRouter(engine, _NoopManager())  # type: ignore[arg-type]
+
+    first = IncomingMessage(
+        text="create individual clickable YourProduct prospect demo URLs",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    await router._handle_inner(adapter, first)
+
+    record = background_tasks.latest_for_session("cli:test-channel:test-channel")
+    assert record is not None
+    assert record["status"] == "running"
+
+    status_ping = IncomingMessage(
+        text="How we looking still cooking?",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    await router._handle_inner(adapter, status_ping)
+
+    assert "Still cooking" in adapter.sent[-1].text
+    assert "individual clickable YourProduct prospect demo URLs" in adapter.sent[-1].text
+
+    engine.release.set()
+    await _wait_for_event_text(adapter, "Background task finished")
 
 
 @pytest.mark.asyncio
@@ -124,7 +202,8 @@ async def test_engine_timeout_with_attachment_names_file_and_states_not_processe
         attachments=[Attachment(filename="transcript.txt")],
     )
     adapter = _CaptureAdapter()
-    router = ChatRouter(_SlowEngine(store), _NoopManager())  # type: ignore[arg-type]
+    engine = _CompletableEngine(store)
+    router = ChatRouter(engine, _NoopManager())  # type: ignore[arg-type]
 
     await router._handle_inner(adapter, incoming)
 
@@ -133,12 +212,17 @@ async def test_engine_timeout_with_attachment_names_file_and_states_not_processe
     final_update = adapter.updates[-1]
     assert final_update.is_error is True
     assert "transcript.txt" in final_update.text
-    assert "NOT read, ingested, or saved" in final_update.text
+    assert "not confirmed" in final_update.text
+    assert "kept the turn running in the background" in final_update.text
 
     messages = store.list_messages("cli:test-channel:test-channel")
     assert [msg.role for msg in messages] == ["user", "assistant"]
     assert "transcript.txt" in messages[1].content
-    assert "NOT read, ingested, or saved" in messages[1].content
+    assert "not confirmed" in messages[1].content
+
+    engine.release.set()
+    await _wait_for_event_text(adapter, "Background task finished")
+    assert adapter.sent[-1].text == "Background task finished:\n\nlate"
 
 
 def test_engine_timeout_uses_attachment_timeout_when_attachments_present(
@@ -165,7 +249,7 @@ def test_engine_timeout_uses_attachment_timeout_when_attachments_present(
 
 def test_engine_timeout_message_caps_filename_list():
     """Supplementary unit test: filename list caps at 3 names + overflow count,
-    and the NOT-fact lands within the 400-char recent-conversation clip."""
+    and the not-confirmed fact lands within the 400-char recent-conversation clip."""
     attachments = [
         Attachment(filename="a.txt"),
         Attachment(filename="b.txt"),
@@ -178,7 +262,7 @@ def test_engine_timeout_message_caps_filename_list():
     assert "a.txt, b.txt, c.txt" in message
     assert "(+1 more)" in message
     assert "d.txt" not in message
-    not_fact_pos = message.find("NOT read, ingested, or saved")
+    not_fact_pos = message.find("not confirmed")
     assert 0 <= not_fact_pos < 400
 
 

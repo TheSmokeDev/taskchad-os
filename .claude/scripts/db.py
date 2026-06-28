@@ -706,13 +706,19 @@ class PostgresMemoryDB:
 # Factory
 # ---------------------------------------------------------------------------
 
-def get_memory_db(database_url: str = "") -> SQLiteMemoryDB | PostgresMemoryDB:
+def get_memory_db(
+    database_url: str = "", db_path: "str | Path | None" = None
+) -> SQLiteMemoryDB | PostgresMemoryDB:
     """Return the appropriate backend based on DATABASE_URL.
 
     If database_url is provided, use it. Otherwise fall back to
     the DATABASE_URL from config (env var). If neither is set, use SQLite.
+
+    ``db_path`` selects a specific SQLite file (per-vault recall); None keeps the
+    default DATABASE_PATH (byte-identical legacy behavior). Ignored for Postgres,
+    which is single-instance.
     """
     url = database_url or DATABASE_URL
     if url:
         return PostgresMemoryDB(url)
-    return SQLiteMemoryDB()
+    return SQLiteMemoryDB(db_path=str(db_path) if db_path else None)

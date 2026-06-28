@@ -224,15 +224,19 @@ async def expand_queries(
 def _search_with_fallback(
     query: str,
     limit: int = 5,
+    memory_dir: "Path | None" = None,
 ) -> list[RecallResult]:
-    """Run keyword + hybrid search with graceful fallback."""
+    """Run keyword + hybrid search with graceful fallback.
+
+    ``memory_dir`` selects the per-vault DB (None => thehomie, unchanged).
+    """
     results: list[RecallResult] = []
 
     try:
         from memory_search import search_hybrid, search_keyword
 
         # Keyword search (fast, no embeddings)
-        keyword_results = search_keyword(query, limit=limit)
+        keyword_results = search_keyword(query, limit=limit, memory_dir=memory_dir)
         for r in keyword_results:
             results.append(
                 RecallResult(
@@ -249,7 +253,7 @@ def _search_with_fallback(
 
         # Hybrid search (needs embeddings — may fail on first run)
         try:
-            hybrid_results = search_hybrid(query, limit=limit)
+            hybrid_results = search_hybrid(query, limit=limit, memory_dir=memory_dir)
             for r in hybrid_results:
                 results.append(
                     RecallResult(
@@ -448,7 +452,7 @@ async def run_recall_pipeline(
 
     loop = asyncio.get_event_loop()
     search_tasks = [
-        loop.run_in_executor(None, _search_with_fallback, q, 5)
+        loop.run_in_executor(None, _search_with_fallback, q, 5, memory_dir)
         for q in queries
     ]
     search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
@@ -466,7 +470,7 @@ async def run_recall_pipeline(
 
     # Search neighbor content too
     for rel_path in neighbor_paths:
-        neighbor_results = _search_with_fallback(message_text, limit=2)
+        neighbor_results = _search_with_fallback(message_text, limit=2, memory_dir=memory_dir)
         for r in neighbor_results:
             if Path(r.path).stem.lower() in {Path(p).stem.lower() for p in neighbor_paths}:
                 r.graph_hops = 1

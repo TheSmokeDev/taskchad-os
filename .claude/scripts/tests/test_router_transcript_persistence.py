@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -29,13 +32,39 @@ class _RecordingAdapter:
 class _RouterOnlyManager:
     command_regex = re.compile(r"^/(\w+)\b(.*)$")
 
+    def __init__(self):
+        self.dispatched = []
+
     def get_router_commands(self):
-        return {"status", "clear", "model", "provider", "teamroom"}
+        return {
+            "status",
+            "clear",
+            "model",
+            "provider",
+            "teamroom",
+            "email",
+            "gsc",
+            "analytics",
+            "design",
+            "vault",
+        }
 
     def get_all_command_names(self):
-        return ["status", "clear", "model", "provider", "teamroom"]
+        return [
+            "status",
+            "clear",
+            "model",
+            "provider",
+            "teamroom",
+            "email",
+            "gsc",
+            "analytics",
+            "design",
+            "vault",
+        ]
 
     async def dispatch(self, command, adapter, incoming, args, collect_only=False):
+        self.dispatched.append((command, args, collect_only))
         if command == "clear":
             return "Session cleared. Next message starts fresh."
         if command == "status":
@@ -46,6 +75,14 @@ class _RouterOnlyManager:
             return "Runtime Provider Status"
         if command == "teamroom":
             return "Team Room Workflow"
+        if command == "email":
+            return f"Email Search: {args}".strip()
+        if command == "gsc":
+            return f"GSC Stats: {args}".strip()
+        if command == "analytics":
+            return f"Analytics Stats: {args}".strip()
+        if command == "design":
+            return f"Design Command: {args}".strip()
         return None
 
     def detect_intents(self, text):
@@ -58,8 +95,10 @@ class _RouterOnlyManager:
 class _FakeEngine:
     def __init__(self, store):
         self.session_store = store
+        self.messages = []
 
     async def handle_message(self, message, progress=None):
+        self.messages.append(message)
         if False:
             yield None
 
@@ -199,6 +238,263 @@ async def test_teamroom_runtime_command_persists_requested_runtime_lane(
     assert session.runtime_provider == "auto"
     assert session.runtime_model == ""
     assert session.runtime_session_id == ""
+
+
+@pytest.mark.asyncio
+async def test_pasted_example-project_handoff_does_not_dispatch_embedded_slash_commands(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    engine = _FakeEngine(store)
+    manager = _RouterOnlyManager()
+    router = ChatRouter(engine, manager)
+    adapter = _RecordingAdapter()
+    text = """SSH into my server and pull both.
+
+We built a Pay Low mock here:
+/opt/YourBusiness-homie/docs/example-project-enterprise-redesign/index.html
+
+Related docs:
+docs/example-project-enterprise-redesign/DESIGN.md
+docs/research/2026-06-23-example-project-YourProduct-plan-of-attack.md
+
+Generic agency copy used placeholder phone/email/locations and no Pay Low leftovers.
+"""
+
+    await router._handle(adapter, _cli_incoming(text))
+
+    assert manager.dispatched == []
+    assert engine.messages
+    assert engine.messages[0].text == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "docs/example-project-enterprise-redesign/DESIGN.md",
+        "phone/email/locations",
+        "https://site.com/email",
+        "docs/foo/vault.md",
+        "https://site.com/vault",
+        "/opt/YourBusiness-homie/docs/example-project-enterprise-redesign/index.html",
+        "/design.md",
+        "/email/locations",
+        "/vault.md",
+        "/vault/path",
+    ],
+)
+async def test_command_like_paths_and_urls_fall_through_to_engine(tmp_path, text: str):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    engine = _FakeEngine(store)
+    manager = _RouterOnlyManager()
+    router = ChatRouter(engine, manager)
+    adapter = _RecordingAdapter()
+
+    await router._handle(adapter, _cli_incoming(text))
+
+    assert manager.dispatched == []
+    assert engine.messages
+    assert engine.messages[0].text == text
+
+
+@pytest.mark.asyncio
+async def test_explicit_multi_command_chain_still_dispatches(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    engine = _FakeEngine(store)
+    manager = _RouterOnlyManager()
+    router = ChatRouter(engine, manager)
+    adapter = _RecordingAdapter()
+
+    await router._handle(adapter, _cli_incoming("/email /gsc /analytics"))
+
+    assert [cmd for cmd, _args, _collect in manager.dispatched] == [
+        "email",
+        "gsc",
+        "analytics",
+    ]
+    assert all(collect for _cmd, _args, collect in manager.dispatched)
+    assert engine.messages == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_design_command_still_dispatches(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    engine = _FakeEngine(store)
+    manager = _RouterOnlyManager()
+    router = ChatRouter(engine, manager)
+    adapter = _RecordingAdapter()
+
+    await router._handle(adapter, _cli_incoming("/design html build a page"))
+
+    assert manager.dispatched == [("design", "html build a page", False)]
+    assert engine.messages == []
+
+
+@pytest.mark.asyncio
+async def test_vault_search_calls_recall_with_selected_vault(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import config
+    import recall_service
+    from recall_service import SearchMode
+
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+    db_path = tmp_path / "memory.db"
+    monkeypatch.setattr(
+        config,
+        "resolve_vault",
+        lambda name: (vault_dir, db_path),
+    )
+    fake_result = SimpleNamespace(
+        path="MEMORY.md",
+        start_line=7,
+        end_line=9,
+        section_title="YourProduct",
+        text="YourProduct prospect demo URLs",
+    )
+    fake_recall = AsyncMock(
+        return_value=SimpleNamespace(results=[fake_result], log=SimpleNamespace())
+    )
+    monkeypatch.setattr(recall_service, "recall", fake_recall)
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    router = ChatRouter(_FakeEngine(store), _RouterOnlyManager())
+    adapter = _RecordingAdapter()
+
+    await router._handle(adapter, _cli_incoming("/vault search YourProduct --vault thehomie"))
+
+    fake_recall.assert_awaited_once()
+    kwargs = fake_recall.await_args.kwargs
+    assert kwargs["memory_dir"] == vault_dir
+    assert kwargs["search_mode"] is SearchMode.HYBRID
+    assert kwargs["caller"] == "vault-command:search"
+    assert kwargs["is_slash_command"] is False
+    assert "YourProduct prospect demo URLs" in adapter.sent[-1].text
+
+
+@pytest.mark.asyncio
+async def test_vault_db_resolves_selected_vault(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import config
+
+    vault_dir = tmp_path / "coding"
+    vault_dir.mkdir()
+    db_path = tmp_path / "memory.coding-vault.db"
+    db_path.write_text("sqlite-ish", encoding="utf-8")
+    monkeypatch.setattr(config, "resolve_vault", lambda name: (vault_dir, db_path))
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    router = ChatRouter(_FakeEngine(store), _RouterOnlyManager())
+    adapter = _RecordingAdapter()
+
+    await router._handle(adapter, _cli_incoming("/vault db coding-vault"))
+
+    reply = adapter.sent[-1].text
+    assert "*Vault DB*" in reply
+    assert "coding-vault" in reply
+    assert str(vault_dir) in reply
+    assert str(db_path) in reply
+
+
+@pytest.mark.asyncio
+async def test_vault_contacts_uses_contact_scoped_recall(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import config
+    import recall_service
+
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+    monkeypatch.setattr(config, "resolve_vault", lambda name: (vault_dir, tmp_path / "db.sqlite"))
+    fake_recall = AsyncMock(return_value=SimpleNamespace(results=[], log=SimpleNamespace()))
+    monkeypatch.setattr(recall_service, "recall", fake_recall)
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    router = ChatRouter(_FakeEngine(store), _RouterOnlyManager())
+    adapter = _RecordingAdapter()
+
+    await router._handle(adapter, _cli_incoming("/vault contacts Haris"))
+
+    query = fake_recall.await_args.kwargs["query"]
+    assert "contacts people clients prospects owners phone email Haris" == query
+
+
+@pytest.mark.asyncio
+async def test_vault_ops_becomes_vault_ops_skill_prompt(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    engine = _FakeEngine(store)
+    router = ChatRouter(engine, _RouterOnlyManager())
+    adapter = _RecordingAdapter()
+
+    await router._handle(adapter, _cli_incoming("/vault ops context YourProduct"))
+
+    assert engine.messages
+    prompt = engine.messages[0].text
+    assert "Use the Skill tool to invoke the 'vault-ops' skill" in prompt
+    assert "Command: context" in prompt
+    assert "Arguments: YourProduct" in prompt
+    assert "Selected vault: thehomie" in prompt
+
+
+@pytest.mark.asyncio
+async def test_router_connects_other_adapters_when_one_connect_hangs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHAT_ADAPTER_CONNECT_TIMEOUT_SECONDS", "0.01")
+
+    class HangingAdapter:
+        platform = Platform.TELEGRAM
+        disconnected = False
+
+        async def connect(self):
+            await asyncio.Event().wait()
+
+        async def disconnect(self):
+            self.disconnected = True
+
+        async def listen(self):
+            if False:
+                yield None
+
+    class ConnectedAdapter:
+        platform = Platform.DISCORD
+
+        def __init__(self):
+            self.connected = asyncio.Event()
+
+        async def connect(self):
+            self.connected.set()
+
+        async def disconnect(self):
+            return None
+
+        async def listen(self):
+            await asyncio.Event().wait()
+            if False:
+                yield None
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    router = ChatRouter(_FakeEngine(store), _RouterOnlyManager())
+    hanging = HangingAdapter()
+    connected = ConnectedAdapter()
+    router.register(hanging)
+    router.register(connected)
+
+    task = asyncio.create_task(router.run())
+    await asyncio.wait_for(connected.connected.wait(), timeout=2)
+    await asyncio.sleep(1.1)
+
+    assert Platform.TELEGRAM not in router.adapters
+    assert Platform.DISCORD in router.adapters
+    assert hanging.disconnected is True
+
+    task.cancel()
+    await task
 
 
 # =============================================================================

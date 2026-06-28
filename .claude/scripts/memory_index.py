@@ -222,14 +222,23 @@ def sync_index(
     memory_dir: Path = MEMORY_DIR,
     generate_embeddings: bool = True,
     force_rebuild: bool = False,
+    db_path: "Path | None" = None,
 ) -> dict[str, int]:
     """
     Main entry point: sync all memory files into the search index.
 
+    ``db_path`` selects the per-vault SQLite DB; None resolves it from
+    ``memory_dir`` (Rule 1: None sentinel at call time), so the default
+    thehomie call writes the legacy ``memory.db`` unchanged.
+
     Returns dict with counts: files_total, files_indexed, files_skipped,
     files_removed, chunks_total.
     """
-    db = get_memory_db()
+    if db_path is None:
+        from config import resolve_db_path
+
+        db_path = resolve_db_path(memory_dir)
+    db = get_memory_db(db_path=db_path)
 
     # Check physical schema BEFORE init_schema -- init_schema would create
     # tables at current config and mask any existing drift. Schema introspection
@@ -322,27 +331,44 @@ def main() -> None:
     parser.add_argument("--rebuild", action="store_true", help="Force full reindex")
     parser.add_argument("--stats", action="store_true", help="Show index statistics")
     parser.add_argument("--test", action="store_true", help="Dry run (list files only)")
+    parser.add_argument(
+        "--vault",
+        default="thehomie",
+        help="Which vault to index: thehomie | coding-vault | unified-vault",
+    )
     args = parser.parse_args()
 
     ensure_directories()
+
+    from config import resolve_vault
+
+    memory_dir, db_path = resolve_vault(args.vault)
+    if memory_dir is None:
+        print(
+            f"Vault '{args.vault}' is not configured — set its HOMIE_CODING_VAULT_DIR / "
+            "HOMIE_UNIFIED_VAULT_DIR env var (thehomie is always available)."
+        )
+        raise SystemExit(1)
 
     if args.stats:
         print_stats()
         return
 
     if args.test:
-        files = list_memory_files(MEMORY_DIR)
-        print(f"Found {len(files)} memory files:")
+        files = list_memory_files(memory_dir)
+        print(f"Found {len(files)} memory files in '{args.vault}':")
         for f in files:
-            rel = f.relative_to(MEMORY_DIR).as_posix()
+            rel = f.relative_to(memory_dir).as_posix()
             size = f.stat().st_size
             print(f"  {rel} ({size} bytes)")
         return
 
-    print("Syncing memory index...")
+    print(f"Syncing memory index for '{args.vault}' ({memory_dir}) -> {db_path.name}...")
     results = sync_index(
+        memory_dir=memory_dir,
         generate_embeddings=not args.no_embeddings,
         force_rebuild=args.rebuild,
+        db_path=db_path,
     )
 
     print("\nDone!")

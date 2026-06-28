@@ -612,6 +612,7 @@ async def test_large_document_reaches_prompt_fully_and_never_persists(
     store = SQLiteSessionStore(tmp_path / "chat.db")
     project_root = _make_project_root(tmp_path)
     convo = ConversationEngine(store, project_root)
+    monkeypatch.setattr(convo, "_maybe_session_brief", lambda *args, **kwargs: "")
     document_path = tmp_path / "transcript.txt"
     body = ("lorem ipsum " * 7_082).strip() + "\nTAIL-SENTINEL-END"  # ~85K chars
     document_path.write_text(body, encoding="utf-8")
@@ -800,6 +801,7 @@ def _install_fake_runtime(
     text: str = "resumed response",
 ) -> None:
     async def fake_run(request):
+        captured["prompt"] = request.prompt
         captured["system_prompt"] = request.system_prompt
         captured["capability"] = request.capability
         captured["resume"] = request.resume
@@ -931,6 +933,107 @@ async def test_resumed_session_injects_recent_conversation(
     assert "Sometimes I dream about vector spaces" in append_text
     assert "what about AI consciousness?" in append_text
     assert "Consciousness in AI is an unresolved philosophical question" in append_text
+
+
+@pytest.mark.asyncio
+async def test_long_discord_session_injects_true_latest_recent_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression: sessions over 200 rows must inject newest turns, not oldest rows."""
+    import config as config_module
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    session = Session(
+        session_id="discord:discord-chan:discord-thread",
+        agent_session_id="",
+        platform="discord",
+        channel_id="discord-chan",
+        thread_id="discord-thread",
+        user_id="111",
+        created_at=engine_module.datetime.now(),
+        updated_at=engine_module.datetime.now(),
+        message_count=220,
+        runtime_lane=RUNTIME_LANE_GENERIC,
+        runtime_provider="openai-codex",
+    )
+    store.create(session)
+
+    target = "individual clickable YourProduct prospect demo URLs"
+    for i in range(220):
+        body = f"historical discord turn {i:03d}"
+        if i == 219:
+            body = f"We need {target} under YourProduct.com today."
+        store.add_message("discord:discord-chan:discord-thread", "user", body)
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        captured["prompt"] = request.prompt
+        captured["system_prompt"] = request.system_prompt
+        captured["resume"] = request.resume
+        return RuntimeResult(
+            text="still on it",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    captured: dict = {}
+    monkeypatch.setattr(config_module, "RECENT_CONVERSATION_COUNT", 80)
+    monkeypatch.setattr(config_module, "SESSION_TURN_THRESHOLD", 0)
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [
+        out
+        async for out in convo.handle_message(
+            _make_discord_message("How we looking still cooking?")
+        )
+    ]
+
+    assert outputs[-1].text == "still on it"
+    assert captured["resume"] is None
+    prompt_text = str(captured["prompt"])
+    assert "# Recent Conversation Context" in prompt_text
+    assert target in prompt_text
+    assert "historical discord turn 001" not in prompt_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_count", [30, 35, 200])
+async def test_zero_session_turn_threshold_never_resets_by_turn_count(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    message_count: int,
+) -> None:
+    """SESSION_TURN_THRESHOLD=0 keeps long local chat sessions resumable."""
+    import config as config_module
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    session = _seed_resumed_session(store, runtime_session_id="runtime-session-existing")
+    session.message_count = message_count
+    store.update(session)
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    captured: dict = {}
+    _install_fake_runtime(monkeypatch, captured)
+    monkeypatch.setattr(config_module, "SESSION_TURN_THRESHOLD", 0)
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+
+    outputs = [out async for out in convo.handle_message(_make_message("Continue"))]
+
+    assert outputs[-1].text == "resumed response"
+    assert captured["resume"] == "runtime-session-existing"
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -203,12 +204,18 @@ class TestFetchAndArchive:
         assert md_path.parent == vault / "raw" / "clipped"
         assert html_path.suffix == ".html"
         assert md_path.suffix == ".md"
-        # Date-prefixed slugified base
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        assert html_path.name.startswith(today)
-        assert md_path.name.startswith(today)
-
         md_text = md_path.read_text(encoding="utf-8")
+        # Date-prefixed slugified base. Use the persisted frontmatter date
+        # instead of recomputing after the call; this test can cross UTC
+        # midnight between archive creation and assertion.
+        archive_date = next(
+            line.split(":", 1)[1].strip()
+            for line in md_text.splitlines()
+            if line.startswith("date:")
+        )
+        assert html_path.name.startswith(archive_date)
+        assert md_path.name.startswith(archive_date)
+
         assert md_text.startswith("---\n")
         assert 'source_url: "https://example.com/demo"' in md_text
         assert 'fetched_at:' in md_text
@@ -472,6 +479,49 @@ class TestRouterURLBranch:
             pass
 
         assert called["hit"] is False
+
+    @pytest.mark.asyncio
+    async def test_selected_vault_url_ingest_threads_memory_dir(self, monkeypatch, tmp_path):
+        router = _build_test_router()
+        selected_vault = tmp_path / "coding-vault"
+        selected_vault.mkdir()
+        html_path = selected_vault / "raw" / "clipped" / "demo.html"
+        md_path = selected_vault / "raw" / "clipped" / "demo.md"
+        html_path.parent.mkdir(parents=True)
+        html_path.write_text("<html></html>", encoding="utf-8")
+        md_path.write_text("# Demo", encoding="utf-8")
+        report = SimpleNamespace(
+            pages_created=["c1"],
+            pages_updated=[],
+            connections_created=[],
+            contradictions_found=[],
+        )
+        content = SimpleNamespace(title="Demo")
+        calls = []
+
+        def fake_pipeline(url, memory_dir=None):
+            calls.append((url, memory_dir))
+            return html_path, md_path, content, report
+
+        monkeypatch.setattr(router, "_url_ingest_pipeline", fake_pipeline)
+        monkeypatch.setattr(router, "_persist_router_turn", lambda *args, **kwargs: None)
+
+        adapter = MagicMock()
+        adapter.send = AsyncMock()
+        incoming = _build_test_incoming("/vault ingest https://example.com --vault coding-vault")
+
+        await router._handle_vault_ingest_url(
+            adapter,
+            incoming,
+            "https://example.com",
+            vault_name="coding-vault",
+            memory_dir=selected_vault,
+        )
+
+        assert calls == [("https://example.com", selected_vault)]
+        sent_texts = [call.args[0].text for call in adapter.send.await_args_list]
+        assert sent_texts[0] == "Fetching https://example.com into `coding-vault`..."
+        assert "Vault: `coding-vault`. Raw: `demo.html`, `demo.md`." in sent_texts[-1]
 
 
 # ---------------------------------------------------------------------------

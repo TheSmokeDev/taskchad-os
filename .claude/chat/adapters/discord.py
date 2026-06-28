@@ -45,13 +45,24 @@ _DISCORD_AUDIO_MIMES: tuple[str, ...] = (
 )
 
 
+def _discord_sync_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("DISCORD_SLASH_SYNC_TIMEOUT_SECONDS", "20")))
+    except (TypeError, ValueError):
+        return 20.0
+
+
 def get_discord_native_command_menu() -> list[tuple[str, str]]:
     """Return Discord-native slash commands from the curated chat menu."""
 
     from commands import get_telegram_command_menu
 
     menu, _hidden_count = get_telegram_command_menu()
-    return [(name, _discord_description(desc)) for name, desc in menu]
+    return [
+        (name, _discord_description(desc))
+        for name, desc in menu
+        if name != "vault"
+    ]
 
 
 def _discord_description(description: str) -> str:
@@ -114,7 +125,7 @@ class DiscordAdapter:
         async def on_ready() -> None:
             self._bot_user_id = self._client.user.id
             print(f"[{datetime.now()}] Discord adapter connected ({self._client.user})")
-            await self._sync_native_slash_commands(discord)
+            asyncio.create_task(self._sync_native_slash_commands(discord))
 
         @self._client.event
         async def on_message(msg: Any) -> None:
@@ -253,6 +264,199 @@ class DiscordAdapter:
                     callback=make_callback(command_name),
                 )
             )
+        self._register_native_vault_group(discord)
+
+    def _register_native_vault_group(self, discord: Any) -> None:
+        """Expose /vault as a typed Discord command group.
+
+        Telegram and text surfaces use the same /vault command name with
+        freeform args. Discord gets typed options but every callback converts
+        back into the shared router text path.
+        """
+
+        app_commands = discord.app_commands
+        vault_choices = [
+            app_commands.Choice(name="thehomie", value="thehomie"),
+            app_commands.Choice(name="coding-vault", value="coding-vault"),
+            app_commands.Choice(name="unified-vault", value="unified-vault"),
+        ]
+        mode_choices = [
+            app_commands.Choice(name="hybrid", value="hybrid"),
+            app_commands.Choice(name="keyword", value="keyword"),
+            app_commands.Choice(name="auto", value="auto"),
+        ]
+        routine_choices = [
+            app_commands.Choice(name=name, value=name)
+            for name in (
+                "orient",
+                "debrief",
+                "weekly",
+                "capture",
+                "ingest",
+                "compile",
+                "research",
+                "maintain",
+                "context",
+                "status",
+                "think",
+            )
+        ]
+
+        group = app_commands.Group(
+            name="vault",
+            description="Vault operations across thehomie, coding, and unified vaults",
+        )
+
+        async def status(interaction: Any, vault: str = "thehomie") -> None:
+            text = self._build_native_vault_text("status", vault=vault)
+            await self._queue_native_slash_command(interaction, "vault", text[7:])
+
+        async def db(interaction: Any, vault: str = "thehomie") -> None:
+            text = self._build_native_vault_text("db", vault=vault)
+            await self._queue_native_slash_command(interaction, "vault", text[7:])
+
+        async def search(
+            interaction: Any,
+            query: str,
+            vault: str = "thehomie",
+            mode: str = "hybrid",
+            limit: int = 5,
+        ) -> None:
+            text = self._build_native_vault_text(
+                "search",
+                query=query,
+                vault=vault,
+                mode=mode,
+                limit=limit,
+            )
+            await self._queue_native_slash_command(interaction, "vault", text[7:])
+
+        async def context(
+            interaction: Any,
+            topic: str,
+            vault: str = "thehomie",
+        ) -> None:
+            text = self._build_native_vault_text("context", query=topic, vault=vault)
+            await self._queue_native_slash_command(interaction, "vault", text[7:])
+
+        async def contacts(
+            interaction: Any,
+            query: str = "",
+            vault: str = "thehomie",
+        ) -> None:
+            text = self._build_native_vault_text("contacts", query=query, vault=vault)
+            await self._queue_native_slash_command(interaction, "vault", text[7:])
+
+        async def ingest(
+            interaction: Any,
+            url: str = "",
+            attachment: Any = None,
+            vault: str = "thehomie",
+        ) -> None:
+            text = self._build_native_vault_text("ingest", url=url, vault=vault)
+            await self._queue_native_slash_command(
+                interaction,
+                "vault",
+                text[7:],
+                interaction_attachment=attachment,
+            )
+
+        async def ops(
+            interaction: Any,
+            routine: str,
+            args: str = "",
+            vault: str = "thehomie",
+        ) -> None:
+            text = self._build_native_vault_text(
+                "ops",
+                routine=routine,
+                args=args,
+                vault=vault,
+            )
+            await self._queue_native_slash_command(interaction, "vault", text[7:])
+
+        status.__name__ = "slash_vault_status"
+        db.__name__ = "slash_vault_db"
+        search.__name__ = "slash_vault_search"
+        context.__name__ = "slash_vault_context"
+        contacts.__name__ = "slash_vault_contacts"
+        ingest.__name__ = "slash_vault_ingest"
+        ops.__name__ = "slash_vault_ops"
+        ingest.__annotations__["attachment"] = discord.Attachment | None
+
+        group.add_command(
+            app_commands.Command(
+                name="status",
+                description="Show vault configuration and recall index status",
+                callback=app_commands.describe(vault="Vault to inspect")(
+                    app_commands.choices(vault=vault_choices)(status)
+                ),
+            )
+        )
+        group.add_command(
+            app_commands.Command(
+                name="db",
+                description="Show the selected vault memory and recall DB paths",
+                callback=app_commands.describe(vault="Vault to inspect")(
+                    app_commands.choices(vault=vault_choices)(db)
+                ),
+            )
+        )
+        group.add_command(
+            app_commands.Command(
+                name="search",
+                description="Search a vault with Homie recall",
+                callback=app_commands.describe(
+                    query="Search query",
+                    vault="Vault to search",
+                    mode="Recall mode",
+                    limit="Maximum matches, 1-10",
+                )(app_commands.choices(vault=vault_choices, mode=mode_choices)(search)),
+            )
+        )
+        group.add_command(
+            app_commands.Command(
+                name="context",
+                description="Pull context briefing for a topic",
+                callback=app_commands.describe(
+                    topic="Topic to brief",
+                    vault="Vault to search",
+                )(app_commands.choices(vault=vault_choices)(context)),
+            )
+        )
+        group.add_command(
+            app_commands.Command(
+                name="contacts",
+                description="Search contact-related vault knowledge",
+                callback=app_commands.describe(
+                    query="Optional person or company query",
+                    vault="Vault to search",
+                )(app_commands.choices(vault=vault_choices)(contacts)),
+            )
+        )
+        group.add_command(
+            app_commands.Command(
+                name="ingest",
+                description="Ingest a URL or attached document into a vault",
+                callback=app_commands.describe(
+                    url="URL to ingest",
+                    attachment="Document attachment to ingest",
+                    vault="Vault to write into",
+                )(app_commands.choices(vault=vault_choices)(ingest)),
+            )
+        )
+        group.add_command(
+            app_commands.Command(
+                name="ops",
+                description="Run a vault-ops routine",
+                callback=app_commands.describe(
+                    routine="Vault-ops routine",
+                    args="Arguments for the routine",
+                    vault="Vault context",
+                )(app_commands.choices(vault=vault_choices, routine=routine_choices)(ops)),
+            )
+        )
+        self._tree.add_command(group)
 
     async def _sync_native_slash_commands(self, discord: Any) -> None:
         """Sync once per process. Guild syncs update immediately; global can lag."""
@@ -260,18 +464,30 @@ class DiscordAdapter:
         if self._slash_commands_synced:
             return
         try:
+            timeout_s = _discord_sync_timeout_seconds()
             if self.allowed_guilds:
                 total = 0
                 for guild_id in self.allowed_guilds:
                     guild = discord.Object(id=int(guild_id))
                     self._tree.copy_global_to(guild=guild)
-                    synced = await self._tree.sync(guild=guild)
+                    synced = await asyncio.wait_for(
+                        self._tree.sync(guild=guild),
+                        timeout=timeout_s,
+                    )
                     total += len(synced)
                 print(f"[{datetime.now()}] Registered {total} Discord slash commands")
             else:
-                synced = await self._tree.sync()
+                synced = await asyncio.wait_for(
+                    self._tree.sync(),
+                    timeout=timeout_s,
+                )
                 print(f"[{datetime.now()}] Registered {len(synced)} Discord slash commands")
             self._slash_commands_synced = True
+        except asyncio.TimeoutError:
+            print(
+                f"[{datetime.now()}] Discord slash command sync timed out after {timeout_s:g}s",
+                flush=True,
+            )
         except Exception as e:
             print(f"[{datetime.now()}] Discord slash command sync failed: {e}", flush=True)
 
@@ -280,6 +496,9 @@ class DiscordAdapter:
         interaction: Any,
         command_name: str,
         args: str = "",
+        *,
+        attachments: list[Attachment] | None = None,
+        interaction_attachment: Any = None,
     ) -> None:
         """Convert a native Discord slash invocation into the shared router path."""
 
@@ -306,6 +525,16 @@ class DiscordAdapter:
         except Exception:
             pass
 
+        queued_attachments = list(attachments or [])
+        if interaction_attachment is not None:
+            downloaded = await self._download_interaction_attachment(
+                interaction,
+                interaction_attachment,
+            )
+            if downloaded is None:
+                return
+            queued_attachments.append(downloaded)
+
         ch_id = str(interaction.channel_id)
         text = f"/{command_name}"
         args = str(args or "").strip()
@@ -321,6 +550,7 @@ class DiscordAdapter:
             channel=Channel(Platform.DISCORD, ch_id, is_dm=interaction.guild_id is None),
             platform=Platform.DISCORD,
             thread=Thread(thread_id=ch_id),
+            attachments=queued_attachments,
             raw_event={
                 "interaction_id": str(interaction.id),
                 "interaction_type": "slash_command",
@@ -330,6 +560,88 @@ class DiscordAdapter:
             },
         )
         await self._queue.put(incoming)
+
+    @staticmethod
+    def _build_native_vault_text(
+        subcommand: str,
+        *,
+        query: str = "",
+        url: str = "",
+        routine: str = "",
+        args: str = "",
+        vault: str = "thehomie",
+        mode: str = "hybrid",
+        limit: int = 5,
+    ) -> str:
+        parts = ["/vault", subcommand]
+        if subcommand in {"search", "context", "contacts"} and query.strip():
+            parts.append(query.strip())
+        elif subcommand == "ingest" and url.strip():
+            parts.append(url.strip())
+        elif subcommand == "ops":
+            parts.append(routine.strip())
+            if args.strip():
+                parts.append(args.strip())
+        parts.extend(["--vault", vault])
+        if subcommand == "search":
+            parts.extend(["--mode", mode, "--limit", str(limit)])
+        return " ".join(part for part in parts if part)
+
+    async def _download_interaction_attachment(
+        self,
+        interaction: Any,
+        attachment: Any,
+    ) -> Attachment | None:
+        """Download a Discord slash-command attachment to the internal model."""
+
+        import tempfile
+        import httpx
+
+        filename = self._safe_attachment_filename(getattr(attachment, "filename", "attachment"))
+        content_type = getattr(attachment, "content_type", None) or ""
+        size = getattr(attachment, "size", None)
+        if size and size > 8 * 1024 * 1024:
+            try:
+                await interaction.followup.send(
+                    f"Skipped document {filename}: exceeds 8MB parser limit.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+            return None
+
+        tmp_dir = Path(tempfile.gettempdir()) / "thehomie_discord_documents"
+        tmp_dir.mkdir(exist_ok=True)
+        ext = Path(filename).suffix or ".bin"
+        attachment_id = getattr(attachment, "id", "interaction")
+        local_path = tmp_dir / f"{interaction.id}_{attachment_id}{ext}"
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(str(getattr(attachment, "url", "")))
+                resp.raise_for_status()
+                local_path.write_bytes(resp.content)
+        except Exception as e:
+            print(f"[{datetime.now()}] Discord slash attachment download failed ({filename}): {e}")
+            try:
+                await interaction.followup.send(
+                    f"Failed to download document {filename}: {type(e).__name__}.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+            return None
+
+        print(
+            f"[{datetime.now()}] Discord slash document saved: "
+            f"{local_path} ({size or 0} bytes)"
+        )
+        return Attachment(
+            filename=filename,
+            mimetype=content_type,
+            url=str(local_path),
+            size_bytes=size,
+        )
 
     async def listen(self) -> Any:
         """Yield incoming messages from the queue."""

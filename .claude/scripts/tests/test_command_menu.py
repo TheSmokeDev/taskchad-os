@@ -39,10 +39,11 @@ def test_telegram_native_menu_is_curated_static_registry() -> None:
     names = [name for name, _desc in menu]
 
     assert names == list(commands.TELEGRAM_NATIVE_COMMANDS)
-    assert len(names) == 39
+    assert len(names) == 40
     assert "design" in names
     assert "linkedin" in names
     assert "video" in names
+    assert "vault" in names
     assert "skills" in names
     assert "commands" in names
     assert "publish" not in names
@@ -73,8 +74,9 @@ def test_discord_native_menu_reuses_curated_slash_registry() -> None:
     menu = get_discord_native_command_menu()
     names = [name for name, _desc in menu]
 
-    assert names == list(commands.TELEGRAM_NATIVE_COMMANDS)
+    assert names == [name for name in commands.TELEGRAM_NATIVE_COMMANDS if name != "vault"]
     assert "video" in names
+    assert "vault" not in names
     assert all(1 <= len(desc) <= 100 for _name, desc in menu)
 
 
@@ -97,6 +99,7 @@ async def test_commands_native_handler_shows_menu_and_hidden_count() -> None:
 
     assert "*Native Telegram Commands*" in reply
     assert "/linkedin - LinkedIn/Social Homie" in reply
+    assert "/vault - Vault operations" in reply
     assert "Hidden registered commands:" in reply
     assert "/prime" not in reply
 

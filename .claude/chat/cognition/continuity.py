@@ -19,6 +19,38 @@ from pathlib import Path
 # Defaults — overridden by config.py when available
 _MAX_OPEN_LOOPS = 5
 _MAX_DECISIONS = 5
+_LOW_SIGNAL_PHRASES = {
+    "yes",
+    "yeah",
+    "yep",
+    "yup",
+    "ok",
+    "okay",
+    "cool",
+    "got it",
+    "sounds good",
+    "sound good",
+    "right",
+    "right right",
+    "yoo",
+    "yo",
+    "still cooking",
+    "how we looking",
+    "how we looking still cooking",
+    "we good",
+    "any update",
+    "do that",
+    "lets do that",
+    "let s do that",
+}
+_DIRECTIVE_RE = re.compile(
+    r"\b("
+    r"please|need|we need|i need|i want|go ahead|pull|deploy|set up|setup|"
+    r"create|fix|run|show|implement|wire|push|restart|download|build|"
+    r"make|update|ship"
+    r")\b",
+    re.I,
+)
 
 
 def _get_limits() -> tuple[int, int]:
@@ -31,10 +63,55 @@ def _get_limits() -> tuple[int, int]:
         return _MAX_OPEN_LOOPS, _MAX_DECISIONS
 
 
+def _normalize_signal(text: str) -> str:
+    """Normalize a short utterance for low-signal/follow-up detection."""
+
+    normalized = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+    return " ".join(normalized.split())
+
+
+def _is_low_signal(text: str) -> bool:
+    """Return True for acknowledgements/status pings that should not replace focus."""
+
+    normalized = _normalize_signal(text)
+    if not normalized:
+        return True
+    if normalized in _LOW_SIGNAL_PHRASES:
+        return True
+    if normalized.startswith("yes exactly") and len(normalized) <= 32:
+        return True
+    if normalized.startswith("right right") and len(normalized) <= 32:
+        return True
+    return False
+
+
+def _first_substantive_sentence(text: str) -> str:
+    """Pick the first non-acknowledgement sentence from a user message."""
+
+    for match in re.finditer(r"[^.!?\n]+", text):
+        sentence = match.group(0).strip()
+        if not sentence or _is_low_signal(sentence):
+            continue
+        return sentence[:240].strip()
+    stripped = text.strip()
+    if stripped and not _is_low_signal(stripped):
+        return stripped[:240].strip()
+    return ""
+
+
+def _looks_like_directive(text: str) -> bool:
+    """Detect messages that should update the durable active task/goal."""
+
+    if not text:
+        return False
+    return bool(_DIRECTIVE_RE.search(text))
+
+
 @dataclass
 class ContinuityState:
     """Tracks active context across session boundaries."""
 
+    active_goal: str = ""
     current_focus: str = ""
     open_loops: list[str] = field(default_factory=list)
     pending_commitments: list[str] = field(default_factory=list)
@@ -46,6 +123,8 @@ class ContinuityState:
     def to_region_text(self) -> str:
         """Format for injection into continuity prompt region."""
         parts: list[str] = []
+        if self.active_goal:
+            parts.append(f"**Active Goal**: {self.active_goal}")
         if self.current_focus:
             parts.append(f"**Current Focus**: {self.current_focus}")
         if self.open_loops:
@@ -101,10 +180,13 @@ def update_continuity_from_turn(
     state.turn_count += 1
     state.updated_at = datetime.now(UTC).isoformat()
 
-    # Update current focus: last substantive user topic (>30 chars)
-    if len(user_message) > 30:
-        first_sentence = user_message.split(".")[0][:100]
-        state.current_focus = first_sentence.strip()
+    # Update focus/task from the first substantive sentence, skipping short
+    # acknowledgements and status pings that would otherwise erase the real work.
+    substantive = _first_substantive_sentence(user_message)
+    if substantive:
+        state.current_focus = substantive[:180].strip()
+        if _looks_like_directive(substantive):
+            state.active_goal = substantive[:240].strip()
 
     # Detect open loops: questions in user message
     questions = re.findall(r"[^.!]*\?", user_message)

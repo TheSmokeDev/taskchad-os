@@ -76,6 +76,178 @@ def main(ctx):
 main.add_command(session_group)
 
 
+def _resolve_vault_memory_dir(vault: str) -> Path:
+    """Resolve a vault name → its memory dir via the config registry.
+
+    recall() threads this memory_dir down to the search layer, which maps it to
+    the per-vault DB (``config.resolve_db_path``). A vault whose env path is unset
+    raises a friendly error so the shelling skill's ``|| true`` fails open.
+    """
+    from config import resolve_vault
+
+    memory_dir, _db_path = resolve_vault(vault)
+    if memory_dir is None:
+        raise click.ClickException(
+            f"vault '{vault}' is not configured — set HOMIE_CODING_VAULT_DIR / "
+            "HOMIE_UNIFIED_VAULT_DIR in .env (thehomie is always available)"
+        )
+    return Path(memory_dir)
+
+
+@main.command()
+@click.argument("query", required=False, default="")
+@click.option(
+    "--vault",
+    type=click.Choice(["thehomie", "coding-vault", "unified-vault"]),
+    default="thehomie",
+    help="Which vault to recall over (each has its own BGE index; coding/unified need their HOMIE_*_VAULT_DIR env set).",
+)
+@click.option(
+    "--memory-dir",
+    "memory_dir_opt",
+    default=None,
+    help="Override the vault memory dir (advanced; bypasses --vault).",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["auto", "hybrid", "keyword"]),
+    default="hybrid",
+    help="auto=tier-classified; hybrid=force Tier-1 (reaches the haiku rerank); keyword=FTS5 only.",
+)
+@click.option("-n", "--max-results", "max_results", type=int, default=5, help="Max results")
+@click.option("--brief", is_flag=True, help="Prepend the proactive brief (build_proactive_brief_section).")
+@click.option("--caller", default="vault-ops", help="Observability caller tag.")
+@click.option("--json", "json_out", is_flag=True, help="Machine-readable JSON output.")
+def recall(query, vault, memory_dir_opt, mode, max_results, brief, caller, json_out):
+    """Run the full recall pipeline over a vault and print ranked, compressed context.
+
+    Mirrors the runtime recall the chat engine/heartbeat/reflection use:
+    tier -> query expansion -> FTS5 + 768-dim BGE dual search -> graph hub-boost
+    -> Tier-1 haiku rerank -> dedup/cap. Intended to be shelled out by skills
+    (e.g. /vault-ops) as an ADDITIVE augmentation; exits 0 on empty/disabled so
+    a `|| true` caller fails open to its own behavior.
+
+    --mode hybrid (default) forces tier=TIER_1 directly (recall_service skips
+    classify_tier), so the haiku rerank gate (tier==TIER_1 and len>3) is
+    reachable from a one-shot invocation. is_slash_command is deliberately left
+    False -- do NOT set it True, or classify_tier would SKIP and return empty.
+    """
+    ensure_directories()
+    from recall_service import recall as recall_fn, SearchMode
+
+    if memory_dir_opt:
+        memory_dir = Path(memory_dir_opt)
+    else:
+        memory_dir = _resolve_vault_memory_dir(vault)
+
+    mode_map = {
+        "auto": SearchMode.AUTO,
+        "hybrid": SearchMode.HYBRID,
+        "keyword": SearchMode.KEYWORD,
+    }
+    search_mode = mode_map[mode]
+
+    async def _run():
+        return await recall_fn(
+            query=query,
+            memory_dir=memory_dir,
+            search_mode=search_mode,
+            caller=caller,
+            max_results=max_results,
+            is_slash_command=False,  # keep AUTO/HYBRID reachable to TIER_1 -- do NOT flip
+        )
+
+    # Swallow framework stdout (e.g. the "[Recall] tier=..." event-log line that
+    # log_recall_event prints) during the run so --json stays a clean machine
+    # contract and human mode stays tidy. Mirrors the chat -Q real_stdout swap.
+    import io as _io
+
+    _real_stdout = sys.stdout
+    brief_text = ""
+    resp = None
+    err = None
+    try:
+        sys.stdout = _io.StringIO()
+        if brief:
+            try:
+                from cognition.proactive_brief import build_proactive_brief_section
+
+                brief_text = build_proactive_brief_section(memory_dir)
+            except Exception:
+                brief_text = ""
+        resp = asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001 — fail-open below
+        err = exc
+    finally:
+        sys.stdout = _real_stdout
+
+    if err is not None:
+        # Fail-open: a shelling skill uses `|| true`, so empty + exit 0 = "no augmentation".
+        exc = err
+        if json_out:
+            print(
+                json_mod.dumps(
+                    {
+                        "query": query,
+                        "vault": vault,
+                        "memory_dir": str(memory_dir),
+                        "mode": mode,
+                        "brief": brief_text,
+                        "formatted_text": "",
+                        "results": [],
+                        "log": {"tier": "error", "reranked": False, "results_returned": 0, "latency_ms": 0.0},
+                        "error": str(exc),
+                    }
+                )
+            )
+        else:
+            click.echo(f"Error: {exc}", err=True)
+        return
+
+    log = resp.log
+    if json_out:
+        payload = {
+            "query": query,
+            "vault": vault,
+            "memory_dir": str(memory_dir),
+            "mode": mode,
+            "brief": brief_text,
+            "formatted_text": resp.formatted_text,
+            "results": [
+                {
+                    "path": getattr(r, "path", ""),
+                    "start_line": getattr(r, "start_line", 0),
+                    "end_line": getattr(r, "end_line", 0),
+                    "score": getattr(r, "score", 0.0),
+                    "match_type": getattr(r, "match_type", ""),
+                    "section_title": getattr(r, "section_title", ""),
+                    "text": getattr(r, "text", ""),
+                }
+                for r in resp.results
+            ],
+            "log": {
+                "tier": str(getattr(log, "tier", "")),
+                "reranked": bool(getattr(log, "reranked", False)),
+                "results_returned": int(getattr(log, "results_returned", len(resp.results))),
+                "latency_ms": float(getattr(log, "latency_ms", 0.0)),
+            },
+        }
+        print(json_mod.dumps(payload, ensure_ascii=False))
+        return
+
+    out_parts = []
+    if brief_text:
+        out_parts.append(brief_text)
+    if resp.formatted_text:
+        out_parts.append(resp.formatted_text)
+    output = "\n\n".join(out_parts).strip()
+    if output:
+        try:
+            click.echo(output)
+        except UnicodeEncodeError:
+            click.echo(output.encode("ascii", errors="replace").decode("ascii"))
+
+
 @main.command()
 @click.option("-q", "--query", default=None, help="Single query (non-interactive)")
 @click.option("-Q", "--quiet", is_flag=True, help="Quiet/JSON output (for Paperclip)")

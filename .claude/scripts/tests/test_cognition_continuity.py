@@ -35,6 +35,39 @@ def test_short_message_no_focus():
     assert state.current_focus == "previous focus"
 
 
+def test_low_signal_followup_preserves_active_goal():
+    state = ContinuityState(
+        active_goal="individual clickable YourProduct prospect demo URLs",
+        current_focus="YourProduct demo deployment",
+    )
+    state = update_continuity_from_turn(state, "Sounds good", "OK")
+    state = update_continuity_from_turn(state, "How we looking still cooking?", "Still running")
+    assert state.active_goal == "individual clickable YourProduct prospect demo URLs"
+    assert state.current_focus == "YourProduct demo deployment"
+
+
+def test_ack_prefix_does_not_replace_goal_with_yes_exactly():
+    state = ContinuityState(active_goal="previous task", current_focus="previous focus")
+    state = update_continuity_from_turn(
+        state,
+        "Yes, exactly. Let's set up individual clickable YourProduct prospect demo URLs.",
+        "I'll deploy those URLs.",
+    )
+    assert state.current_focus != "Yes, exactly"
+    assert "YourProduct prospect demo URLs" in state.current_focus
+    assert "YourProduct prospect demo URLs" in state.active_goal
+
+
+def test_active_goal_tracks_substantive_directive():
+    state = ContinuityState()
+    state = update_continuity_from_turn(
+        state,
+        "We need to fix Homie conversation continuity for Discord.",
+        "I'll inspect the runtime.",
+    )
+    assert "Homie conversation continuity" in state.active_goal
+
+
 def test_question_detection():
     state = ContinuityState()
     state = update_continuity_from_turn(
@@ -89,12 +122,14 @@ def test_load_corrupted_file(tmp_path: Path):
 
 def test_region_text_formatting():
     state = ContinuityState(
+        active_goal="Ship the demo links",
         current_focus="Building finance dashboard",
         open_loops=["What about the loan tracker?"],
         pending_commitments=["check the Teller API status"],
         recent_decisions=["using Recharts for charts"],
     )
     text = state.to_region_text()
+    assert "Ship the demo links" in text
     assert "Building finance dashboard" in text
     assert "loan tracker" in text
     assert "Teller API" in text

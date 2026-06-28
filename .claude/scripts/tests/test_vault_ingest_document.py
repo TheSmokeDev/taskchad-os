@@ -186,6 +186,48 @@ class TestDefaultDenyTrigger:
         assert "Ingested 'notes.txt'" in messages[1].content
 
     @pytest.mark.asyncio
+    async def test_selected_vault_document_ingest_threads_memory_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        router, _engine, _store = _router_with_store(tmp_path)
+        adapter = _CaptureAdapter()
+        selected_vault = tmp_path / "coding-vault"
+        selected_vault.mkdir()
+
+        calls: list[tuple[Any, ...]] = []
+        report = CompilationReport(pages_created=["c1"])
+
+        def fake_pipeline(file_path, filename, mimetype, memory_dir):
+            calls.append((file_path, filename, mimetype, memory_dir))
+            return selected_vault / "raw" / "uploads" / "notes.txt", report
+
+        monkeypatch.setattr(router, "_document_ingest_pipeline", fake_pipeline)
+
+        incoming = _incoming(
+            caption="",
+            attachments=[
+                Attachment(
+                    filename="notes.txt",
+                    mimetype="text/plain",
+                    url=str(tmp_path / "src.txt"),
+                )
+            ],
+        )
+
+        await router._handle_vault_ingest_document(
+            adapter,
+            incoming,
+            vault_name="coding-vault",
+            memory_dir=selected_vault,
+        )
+
+        assert calls == [
+            (str(tmp_path / "src.txt"), "notes.txt", "text/plain", selected_vault)
+        ]
+        assert adapter.sent[0].text == "Ingesting notes.txt into `coding-vault`..."
+        assert "Vault: `coding-vault`. Raw: notes.txt." in adapter.sent[-1].text
+
+    @pytest.mark.asyncio
     async def test_prose_caption_falls_through_to_engine(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
