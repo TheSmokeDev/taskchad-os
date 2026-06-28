@@ -63,6 +63,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Bot Self-Restart | Active baseline, live-proven | [bot-self-restart](features/bot-self-restart.md) | `/restart` |
 | Live Lane Safety Contract | Active baseline | [live-lane-safety](features/live-lane-safety.md) | `live-safety proof`, status/doctor, orchestration live APIs |
 | Persona Lifecycle And Files | Active baseline | [persona-lifecycle-files](features/persona-lifecycle-files.md) | `/agents`, `/agents/:id/files` |
+| Persona Capability Matrix | Active baseline | [persona-capability-matrix](features/persona-capability-matrix.md) | `thehomie profile env-sync`, Discord persona channels, Cabinet personas |
 | Convoy, Work Queue, And Mailbox | Active baseline | [convoy-work-mailbox](features/convoy-work-mailbox.md) | `/convoy`, `/work`, mailbox APIs |
 | Team Operations And Executor | Active baseline | [team-operations-executor](features/team-operations-executor.md) | `/teams`, team APIs |
 | Tenant Isolation v0 | Phase A+B shipped, enforcement default-OFF | [tenant-isolation-v0](features/tenant-isolation-v0.md) | `thehomie tenant`, `HOMIE_TENANT_ENFORCEMENT`, orchestration/dashboard API |

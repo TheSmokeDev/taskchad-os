@@ -128,6 +128,47 @@ def test_build_skill_index_excludes_generated(tmp_path):
     assert "hand-skill" in result
 
 
+def test_build_skill_index_allowlist_filters_central_skills(tmp_path):
+    for name in ("sales-skill", "social-skill"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} desc\n---\n",
+            encoding="utf-8",
+        )
+
+    result = build_skill_index(tmp_path, allowlist={"sales-skill"})
+
+    assert "sales-skill" in result
+    assert "social-skill" not in result
+
+
+def test_build_skill_index_includes_profile_local_extra_skills(tmp_path):
+    central = tmp_path / "central"
+    profile = tmp_path / "profile"
+    central.mkdir()
+    profile.mkdir()
+    (central / "central-skill").mkdir()
+    (central / "central-skill" / "SKILL.md").write_text(
+        "---\nname: central-skill\ndescription: Central desc\n---\n",
+        encoding="utf-8",
+    )
+    (profile / "local-skill").mkdir()
+    (profile / "local-skill" / "SKILL.md").write_text(
+        "---\nname: local-skill\ndescription: Local desc\n---\n",
+        encoding="utf-8",
+    )
+
+    result = build_skill_index(
+        central,
+        allowlist={"missing-central-skill"},
+        extra_skill_dirs=[profile],
+    )
+
+    assert "central-skill" not in result
+    assert "local-skill" in result
+
+
 # === write_skill tests ===
 
 

@@ -27,19 +27,19 @@ def _build_manager() -> ExtensionManager:
     return manager
 
 
-def _incoming(text: str) -> IncomingMessage:
+def _incoming(text: str, platform: Platform = Platform.CLI) -> IncomingMessage:
+    platform_id = platform.value
     return IncomingMessage(
         text=text,
-        user=User(Platform.CLI, "cli-user", "Tester"),
-        channel=Channel(Platform.CLI, "cli-test", is_dm=True),
-        platform=Platform.CLI,
+        user=User(platform, f"{platform_id}-user", "Tester"),
+        channel=Channel(platform, f"{platform_id}-test", is_dm=True),
+        platform=platform,
     )
 
 
 class _RecordingAdapter:
-    platform = Platform.CLI
-
-    def __init__(self) -> None:
+    def __init__(self, platform: Platform = Platform.CLI) -> None:
+        self.platform = platform
         self.sent: list[OutgoingMessage] = []
         self.updates: list[OutgoingMessage] = []
 
@@ -139,6 +139,42 @@ async def test_potential_external_action_requires_confirmation_before_engine():
     assert len(adapter.sent) == 1
     assert "contact a real person" in adapter.sent[0].text
     assert adapter.updates == []
+
+
+@pytest.mark.parametrize(
+    "platform",
+    [
+        Platform.CLI,
+        Platform.DISCORD,
+        Platform.TELEGRAM,
+        Platform.SLACK,
+        Platform.WEB,
+        Platform.WHATSAPP,
+    ],
+)
+@pytest.mark.asyncio
+async def test_pasted_website_research_reaches_engine_without_confirmation_across_platforms(
+    platform: Platform,
+):
+    engine = _RecordingEngine()
+    router = ChatRouter(engine, _build_manager())
+    adapter = _RecordingAdapter(platform)
+    text = """
+https://www.shinedivisiondetailing.com/contact#ContactForm
+Pro-Grade Detailing Oceanside, CA | Shine Division Detailing
+Start your detailing journey with Shine Division Detailing by getting
+information from our highly trained team. Call us directly at (760) 500-7297 today.
+Image
+https://goldeaglemobiledetail.as.me/schedule/7c1843d5
+Google Maps
+Find local businesses, view maps and get driving directions in Google Maps.
+"""
+
+    await router._handle_inner(adapter, _incoming(text, platform))
+
+    assert engine.messages == [text]
+    assert adapter.sent[0].text == "Thinking..."
+    assert adapter.updates[-1].text == "engine handled"
 
 
 @pytest.mark.asyncio

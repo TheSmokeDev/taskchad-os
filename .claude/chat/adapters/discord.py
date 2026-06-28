@@ -109,8 +109,13 @@ class DiscordAdapter:
         # Channels where bot listens without @mention
         # Reads from DISCORD_WATCHED_CHANNELS env var (comma-separated IDs)
         if watched_channels is None:
-            env_val = os.getenv("DISCORD_WATCHED_CHANNELS", "")
-            watched_channels = [c.strip() for c in env_val.split(",") if c.strip()] if env_val else []
+            try:
+                from discord_channel_bindings import watched_channel_ids
+
+                watched_channels = watched_channel_ids()
+            except Exception:
+                env_val = os.getenv("DISCORD_WATCHED_CHANNELS", "")
+                watched_channels = [c.strip() for c in env_val.split(",") if c.strip()] if env_val else []
         self._watched_channels: set[str] = set(watched_channels)
         # Channels EXCLUDED from whole-guild watch — still reachable via
         # @mention or DM. Lets one guild stay whole-watched while a single

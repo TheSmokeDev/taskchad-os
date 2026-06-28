@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import personas
+from personas.capabilities import build_capability_scoped_env, resolve_skill_allowlist
 # Codex roster review 2026-05-11 (HIGH): personas/__init__.py does NOT
 # auto-import the lifecycle submodule, so `personas.lifecycle.list_profiles()`
 # at line ~96 silently fails (`AttributeError: module 'personas' has no
@@ -50,7 +51,6 @@ from runtime import lane_router
 from runtime.base import RuntimeRequest
 from runtime.bootstrap import build_session_start_context
 from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
-from runtime import subprocess_env as _subprocess_env
 from security import kill_switches
 
 from . import meeting_channel as _channels_mod
@@ -188,7 +188,7 @@ def _profile_execution_context(persona_id: str) -> _ProfileExecutionContext:
     )
 
     try:
-        env = _subprocess_env.get_scrubbed_sdk_env(profile_root=info.path)
+        env = build_capability_scoped_env(canonical_id, profile_root=info.path)
     except Exception as exc:  # noqa: BLE001
         return _ProfileExecutionContext(error=_redact(str(exc)))
 
@@ -207,14 +207,35 @@ def _profile_execution_context(persona_id: str) -> _ProfileExecutionContext:
         )
         profile_context = ""
 
+    try:
+        from cognition.skills import build_skill_index
+
+        skill_index = build_skill_index(
+            config.PROJECT_ROOT / ".claude" / "skills",
+            allowlist=resolve_skill_allowlist(canonical_id),
+            extra_skill_dirs=[paths["skills"]],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "cabinet skill index load failed for %s: %s",
+            _redact(canonical_id),
+            _redact(str(exc)),
+        )
+        skill_index = ""
+
     system_prompt = ""
+    prompt_blocks: list[str] = []
     if profile_context:
+        prompt_blocks.append(profile_context)
+    if skill_index:
+        prompt_blocks.append("## Persona Skill Index\n" + skill_index)
+    if prompt_blocks:
         system_prompt = (
             "## Cabinet Participant Profile Context\n"
             "Use this profile's memory, tools, and operating context for this "
             "turn. If this context conflicts with the Cabinet Room Identity "
             "Contract above, the Identity Contract wins.\n\n"
-            f"{profile_context}"
+            + "\n\n".join(prompt_blocks)
         )
 
     return _ProfileExecutionContext(

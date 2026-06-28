@@ -16,6 +16,8 @@ from typing import Any
 
 import background_tasks
 from commands import get_command_min_role, get_engine_command_description, get_piv_instruction
+from discord_channel_bindings import resolve_discord_channel_binding
+from discord_persona_runtime import run_discord_persona_channel_turn
 from engine import ConversationEngine
 from extension_manager import ExtensionManager
 from models import OutgoingMessage, Platform
@@ -929,6 +931,12 @@ class ChatRouter:
                         self._persist_router_turn(incoming, reply)
                         return
 
+        discord_persona_binding = (
+            resolve_discord_channel_binding(incoming)
+            if parsed is None and not skip_intent_detection
+            else None
+        )
+
         try:
             print(
                 f"[{datetime.now()}] Message from {incoming.user.platform_id} "
@@ -995,6 +1003,23 @@ class ChatRouter:
         async def _run_engine() -> None:
             nonlocal final_text, final_is_error, final_footer, final_components
             nonlocal engine_result_started
+            if discord_persona_binding is not None:
+                outgoing = await run_discord_persona_channel_turn(
+                    incoming=incoming,
+                    binding=discord_persona_binding,
+                    session_store=getattr(self.engine, "session_store", None),
+                    project_root=getattr(self.engine, "project_root", Path.cwd()),
+                    progress=progress,
+                )
+                final_text = outgoing.text
+                engine_result_started = True
+                final_is_error = getattr(outgoing, "is_error", False)
+                final_footer = getattr(outgoing, "footer", None)
+                yielded_components = getattr(outgoing, "components", None) or []
+                if yielded_components:
+                    final_components = list(yielded_components)
+                return
+
             async for outgoing in self.engine.handle_message(incoming, progress=progress):
                 if engine_result_started:
                     followup_messages.append(outgoing)

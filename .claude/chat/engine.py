@@ -350,6 +350,34 @@ class ConversationEngine:
             inference_lines.append(f"- [{status_tag}] {inf.inference}")
         return "## Active Beliefs About User\n" + "\n".join(inference_lines)
 
+    def _build_profile_skill_index(self) -> str:
+        """Build a persona-aware skill index for the active profile."""
+
+        if not _PROCESSES_AVAILABLE:
+            return ""
+
+        central_skills = self.project_root / ".claude" / "skills"
+        try:
+            import personas
+            from personas.capabilities import resolve_skill_allowlist
+
+            profile_name = personas.get_active_profile_name()
+            allowlist = resolve_skill_allowlist(profile_name)
+            paths = personas.get_persona_paths(profile_name)
+            extra_dirs = []
+            if profile_name != "default":
+                extra_dirs.append(paths["skills"])
+            return build_skill_index(
+                central_skills,
+                allowlist=allowlist,
+                extra_skill_dirs=extra_dirs,
+            )
+        except Exception:
+            try:
+                return build_skill_index(central_skills)
+            except Exception:
+                return ""
+
     def _build_base_working_memory(
         self,
         *,
@@ -374,12 +402,7 @@ class ConversationEngine:
 
         skill_text = ""
         if _PROCESSES_AVAILABLE:
-            try:
-                skill_text = build_skill_index(
-                    self.project_root / ".claude" / "skills",
-                )
-            except Exception:
-                skill_text = ""
+            skill_text = self._build_profile_skill_index()
 
         return build_initial_working_memory(
             soul_name="the_homie",

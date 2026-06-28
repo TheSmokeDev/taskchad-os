@@ -3183,6 +3183,88 @@ def profile_migrate_default(dry_run):
         sys.exit(1)
 
 
+@profile.command("env-sync")
+@click.argument("name", required=False)
+@click.option("--all", "all_profiles", is_flag=True, default=False, help="Sync every named profile.")
+@click.option("--write", is_flag=True, default=False, help="Write derived profile .env files. Default is dry-run.")
+@click.option("--matrix", "matrix_path", type=click.Path(dir_okay=False), default=None, help="Capability matrix path.")
+@click.option("--master-env", "master_env_path", type=click.Path(dir_okay=False), default=None, help="Master env path.")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output with key names only.")
+def profile_env_sync(name, all_profiles, write, matrix_path, master_env_path, json_mode):
+    """Derive profile .env files from the persona capability matrix."""
+    if name and all_profiles:
+        raise click.UsageError("Pass either NAME or --all, not both.")
+
+    try:
+        from personas.activity import get_active_profile_name
+        from personas.capabilities import (
+            CapabilityMatrixError,
+            build_env_sync_plan,
+            safe_env_sync_summary,
+            write_profile_env,
+        )
+        from personas.lifecycle import LifecycleError, list_profiles, show_profile
+
+        if all_profiles:
+            targets = [info.name for info in list_profiles() if not info.is_default]
+        elif name:
+            targets = [name]
+        else:
+            active = get_active_profile_name()
+            if active == "default":
+                raise click.UsageError("Pass NAME or --all; default uses the master env.")
+            targets = [active]
+
+        summaries = []
+        for target in targets:
+            if target != "default":
+                show_profile(target)
+            plan = build_env_sync_plan(
+                target,
+                matrix_path=matrix_path,
+                master_env_path=master_env_path,
+            )
+            summary = safe_env_sync_summary(plan)
+            summary["mode"] = "write" if write else "dry-run"
+            if write:
+                summary["written_path"] = str(write_profile_env(plan))
+            summaries.append(summary)
+
+        if json_mode:
+            print(json_mod.dumps(summaries, indent=2))
+            return
+
+        mode = "WRITE" if write else "DRY RUN"
+        click.echo(f"Persona env sync ({mode})")
+        for summary in summaries:
+            click.echo(f"\nProfile: {summary['profile']}")
+            click.echo(f"  Env file: {summary['env_file']}")
+            click.echo(
+                "  Keys: "
+                f"{summary['present_count']} present, "
+                f"{summary['missing_count']} missing from master"
+            )
+            if summary["present_keys"]:
+                click.echo("  Present key names:")
+                for key in summary["present_keys"]:
+                    click.echo(f"    - {key}")
+            if summary["missing_keys"]:
+                click.echo("  Missing key names:")
+                for key in summary["missing_keys"]:
+                    click.echo(f"    - {key}")
+            if write:
+                click.echo(f"  Wrote: {summary['written_path']}")
+    except (
+        CapabilityMatrixError,
+        LifecycleError,
+        ValueError,
+        FileExistsError,
+        FileNotFoundError,
+    ) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
 # ── Archon runner subgroup (PRP-7e Phase 5 — R4 ARCHON_HOME pivot) ───────────
 #
 # `thehomie archon list/run/status` is the operator surface for invoking

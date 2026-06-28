@@ -2,7 +2,7 @@
 
 Status: active baseline, continuity locally proven, adapter startup live-proven
 Owner: `.claude/chat/adapters/`
-Last updated: 2026-06-27
+Last updated: 2026-06-28
 
 ## What It Does
 
@@ -73,6 +73,16 @@ Discord/Telegram turns survive long sessions and Windows system-append caps.
 Sensitive email/inbox data pulls remain explicit slash-command actions;
 natural-language chat should not auto-fetch Gmail/Outlook context.
 
+The shared router also owns the natural-language external-action confirmation
+gate across CLI, Telegram, Discord, Slack, WhatsApp, web, and downstream
+persona channels. Pasted research, prospect lists, website snippets, Google
+Maps results, contact-page URLs, scheduling links, phone-number CTAs, and
+screenshotted/link-dump context are reference material and should reach the
+engine or active persona as normal chat. The gate should only interrupt when
+the operator is plausibly asking Homie to mutate a live surface or contact a
+real person, such as sending a message, contacting a lead, booking an
+appointment, posting/publishing, or deploying.
+
 ## Operator Entry Points
 
 - Telegram bot channel
@@ -118,6 +128,7 @@ guild. DMs are always handled. The user allowlist applies before any of these.
 | Discord adapter | `.claude/chat/adapters/discord.py` |
 | Attachment parser | `.claude/chat/attachment_context.py` |
 | Command registry | `.claude/chat/commands.py` |
+| Command and safety gate registry | `.claude/chat/extension_manager.py` |
 | Router, engine, task status | `.claude/chat/router.py`, `.claude/chat/engine.py`, `.claude/chat/background_tasks.py` |
 | Transcript persistence | `.claude/chat/session.py` |
 | Continuity state | `.claude/chat/cognition/continuity.py` |
@@ -147,6 +158,12 @@ guild. DMs are always handled. The user allowlist applies before any of these.
 - Gmail/Outlook and inbox triage are sensitive data surfaces. Use explicit
   `/email`, `/pemail`, `/inbox`, `/cleanup`, or `/brief` commands; conversational
   mentions of email/inbox do not auto-fetch mail.
+- The external-action confirmation gate is shared by every adapter and runs
+  before persona routing. It must not treat copied website/listing language
+  such as "contact", "call", "schedule", or embedded contact-form links as
+  operator intent by itself. Direct requests to send, contact, book, post,
+  publish, deploy, or otherwise mutate live state still require the existing
+  explicit authorization path.
 - Photos, voice, and documents stay adapter-owned. Runtime/provider behavior
   remains behind the engine and runtime layers.
 - Do not print bot tokens, raw Telegram update payload secrets, cookies, or
@@ -184,6 +201,20 @@ uv run pytest tests/test_chat_runtime_engine.py tests/test_cognition_continuity.
 ```
 
 ## Current Regression Proof
+
+- Date: 2026-06-28
+- Local proof: `py_compile` passed for the shared router, extension manager,
+  main chat entrypoint, Discord adapter, and Telegram adapter.
+- Focused cross-channel proof: `124 passed, 1 warning` across extension
+  manager gates, router intent gates, Discord persona channels, persona
+  capabilities, Discord adapter, and Telegram adapter.
+- Coverage included pasted website/listing research reaching the engine across
+  CLI, Discord, Telegram, Slack, web, and WhatsApp while direct external-action
+  requests with reference links still require confirmation.
+- Scope: local code and fixture proof for shared router behavior. Live adapter
+  availability still depends on which configured runtimes are running.
+
+## Previous Regression Proof
 
 - Date: 2026-06-27
 - Local proof: `py_compile` passed for the shared attachment parser, Discord

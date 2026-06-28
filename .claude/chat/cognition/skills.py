@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -170,19 +170,28 @@ def _has_conflict(spec: SkillSpec, skills_dir: Path) -> bool:
     return _find_conflict(spec, skills_dir) is not None
 
 
-def build_skill_index(skills_dir: Path, max_entries: int = 20) -> str:
-    """Scan skills/ for hand-authored SKILL.md files (procedural_memory region).
+def _normalize_skill_allowlist(allowlist: Iterable[str] | None) -> frozenset[str] | None:
+    if allowlist is None:
+        return None
+    normalized = frozenset(
+        item.strip()
+        for item in allowlist
+        if isinstance(item, str) and item.strip()
+    )
+    if "*" in normalized:
+        return None
+    return normalized
 
-    Default-deny: auto-drafted skills under ``generated/`` are EXCLUDED. They are
-    unvetted (no security scan, no operator gate) and must not influence behavior
-    until the skill-from-experience rails promote them out of ``generated/``.
-    Return names + descriptions as formatted text for the procedural_memory region.
-    CRITICAL: Names and one-line descriptions ONLY — no full body.
-    """
+
+def _collect_index_entries(
+    skills_dir: Path,
+    *,
+    allowlist: frozenset[str] | None = None,
+) -> list[tuple[str, str]]:
     entries: list[tuple[str, str]] = []
 
     if not skills_dir.exists():
-        return ""
+        return entries
 
     for skill_md in skills_dir.rglob("SKILL.md"):
         # Default-deny: skip auto-drafted skills under generated/ — they are
@@ -198,17 +207,51 @@ def build_skill_index(skills_dir: Path, max_entries: int = 20) -> str:
             fm = _parse_skill_frontmatter(content)
             name = fm.get("name", skill_md.parent.name)
             description = fm.get("description", "")
+            if allowlist is not None and name not in allowlist:
+                continue
             if name and description:
                 entries.append((name, description))
         except Exception:
             continue  # Skip malformed files
 
-    # Sort by name, cap at max_entries
-    entries.sort(key=lambda e: e[0])
-    entries = entries[:max_entries]
+    return entries
+
+
+def build_skill_index(
+    skills_dir: Path,
+    max_entries: int = 20,
+    *,
+    allowlist: Iterable[str] | None = None,
+    extra_skill_dirs: Iterable[Path] | None = None,
+) -> str:
+    """Scan skills/ for hand-authored SKILL.md files (procedural_memory region).
+
+    Default-deny: auto-drafted skills under ``generated/`` are EXCLUDED. They are
+    unvetted (no security scan, no operator gate) and must not influence behavior
+    until the skill-from-experience rails promote them out of ``generated/``.
+    Return names + descriptions as formatted text for the procedural_memory region.
+    CRITICAL: Names and one-line descriptions ONLY — no full body.
+    """
+    allowed = _normalize_skill_allowlist(allowlist)
+    entries = _collect_index_entries(skills_dir, allowlist=allowed)
+    for extra_dir in extra_skill_dirs or []:
+        # Profile-local skills are explicitly installed into that persona's
+        # brain, so they are surfaced without requiring central allowlist edits.
+        entries.extend(_collect_index_entries(extra_dir, allowlist=None))
 
     if not entries:
         return ""
+
+    # De-duplicate by name, preferring the last entry so profile-local skills
+    # can override a central skill description with the same name.
+    deduped: dict[str, str] = {}
+    for name, description in entries:
+        deduped[name] = description
+    entries = list(deduped.items())
+
+    # Sort by name, cap at max_entries.
+    entries.sort(key=lambda e: e[0])
+    entries = entries[:max_entries]
 
     return "\n".join(f"- **{name}**: {desc}" for name, desc in entries)
 

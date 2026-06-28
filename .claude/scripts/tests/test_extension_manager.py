@@ -274,6 +274,34 @@ class TestIntentDetection:
             "should we use the email skill before contacting leads?"
         )
 
+    def test_pasted_website_research_does_not_need_external_action_confirmation(
+        self, populated_manager: ExtensionManager,
+    ):
+        text = """
+        https://www.shinedivisiondetailing.com/contact#ContactForm
+        Pro-Grade Detailing Oceanside, CA | Shine Division Detailing
+        Start your detailing journey with Shine Division Detailing by getting
+        information from our highly trained team. Call us directly at
+        (760) 500-7297 today.
+        Image
+        https://goldeaglemobiledetail.as.me/schedule/7c1843d5
+        Google Maps
+        Find local businesses, view maps and get driving directions.
+        """
+
+        assert not populated_manager.requires_external_action_confirmation(text)
+
+    def test_direct_action_with_reference_links_still_needs_confirmation(
+        self, populated_manager: ExtensionManager,
+    ):
+        text = """
+        https://www.shinedivisiondetailing.com/contact#ContactForm
+        Google Maps
+        contact this lead about a new website
+        """
+
+        assert populated_manager.requires_external_action_confirmation(text)
+
     def test_wants_analysis_true(self, populated_manager: ExtensionManager):
         assert populated_manager.wants_analysis("good morning, how are we looking?")
         assert populated_manager.wants_analysis("summarize everything")

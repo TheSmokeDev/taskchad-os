@@ -37,6 +37,11 @@ def _reset_channels() -> None:
     channels_mod._reset_channels()
 
 
+@pytest.fixture(autouse=True)
+def _default_deny_cabinet_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CABINET_PERSONA_FULL_TOOLS", raising=False)
+
+
 def _make_profile(
     homie_root: Path,
     persona_id: str,

@@ -538,6 +538,64 @@ class ExtensionManager:
     def _normalize_for_gate(self, text: str) -> str:
         return " ".join(text.lower().split())
 
+    def _looks_like_pasted_reference_material(self, text: str) -> bool:
+        """Return True for copied research/listing dumps, not operator intent."""
+        text_lower = text.lower()
+        if not text_lower.strip():
+            return False
+
+        url_count = len(re.findall(r"https?://\S+", text_lower))
+        lines = [line.strip() for line in text_lower.splitlines() if line.strip()]
+        reference_markers = (
+            "google maps",
+            "maps.app.goo.gl",
+            "google.com/maps",
+            "find local businesses",
+            "#contactform",
+            "/contact",
+            "as.me/schedule",
+            "schedule/",
+            "no site",
+            "image",
+        )
+
+        if url_count >= 2 and any(marker in text_lower for marker in reference_markers):
+            return True
+        return url_count >= 1 and len(lines) >= 5 and any(
+            marker in text_lower for marker in reference_markers
+        )
+
+    def _has_direct_external_action_instruction(self, text: str) -> bool:
+        """Detect user intent to actually perform the external action."""
+        text_lower = self._normalize_for_gate(text)
+        if not text_lower or text_lower.startswith("/"):
+            return False
+
+        action = (
+            r"(?:send|email|text|sms|dm|message|slack|contact|outreach|"
+            r"reach\s+out\s+to|book|schedule|deploy|ship|publish|release|"
+            r"submit|post|push)"
+        )
+        direct_patterns = [
+            rf"^(?:please\s+)?{action}\b",
+            rf"\b(?:please|can you|could you|would you|i need you to|"
+            rf"go ahead and|let's|we should|we need to)\s+{action}\b",
+            (
+                r"\b(?:send|email|text|sms|dm|message|slack)\s+"
+                r"(?:this|the|them|him|her|lead|customer|client|prospect|team|everyone)\b"
+            ),
+            (
+                r"\b(?:contact|outreach|reach\s+out\s+to)\s+"
+                r"(?:this|the|them|him|her|lead|leads|customer|client|prospect)\b"
+            ),
+            (
+                r"\b(?:book|schedule)\s+(?:this|the|an?)?\s*"
+                r"(?:appointment|reservation|call|meeting)\b.{0,40}"
+                r"\b(?:for\s+me|now|today|asap)\b"
+            ),
+        ]
+        return any(re.search(pattern, text_lower) for pattern in direct_patterns)
+
     def is_discussion_only(self, text: str) -> bool:
         """Return True when a command/skill mention is meta-discussion only."""
         text_lower = self._normalize_for_gate(text)
@@ -567,6 +625,11 @@ class ExtensionManager:
         if self.is_discussion_only(text):
             return False
         if not self.has_external_action_signal(text):
+            return False
+        if (
+            self._looks_like_pasted_reference_material(text)
+            and not self._has_direct_external_action_instruction(text)
+        ):
             return False
         return not self.is_clearly_authorized_external_action(text)
 
