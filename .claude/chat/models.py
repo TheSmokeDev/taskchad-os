@@ -95,6 +95,11 @@ class IncomingMessage:
     user_role: str = "admin"          # "admin", "operator", or "viewer"
     raw_event: dict[str, Any] = field(default_factory=dict)
     source: str = "interactive"       # PRD-7 §7.10 / Phase 4 (PRP-7d): "interactive"|"tool"|"cron"|"hook"
+    # True when this turn originated as a transcribed voice message. The router
+    # skips the "Thinking..." text placeholder for these turns so the adapter's
+    # one-shot voice-reply flag is consumed by the FINAL send() (the real
+    # answer), not by the placeholder.
+    voice_origin: bool = False
 
 
 @dataclass

@@ -226,6 +226,163 @@ def _assemble_reflect_amendment_section(
 # =============================================================================
 
 
+async def _run_self_model_pass(days: int, test_mode: bool) -> None:
+    """Run the log-independent self-model blocks: Act-1 belief extraction,
+    Act-2 contradiction pass, and inference decay.
+
+    These read the chat.db corpus and the belief store — never the daily
+    logs — so they must also run on a persona's no-logs first pass (a
+    brand-new persona has attributed turns but no daily logs yet). Called
+    from `_run_reflection_inner` in both the normal flow and the no-logs
+    persona branch; each block keeps its own non-blocking try/except.
+    """
+    # --- Living Self Act 1 (B2): operator-belief extraction from VERBATIM
+    # chat.db user turns ---
+    # The real LLM claim-extractor over the operator's OWN words (NOT the
+    # daily-log paraphrase in log_context, NOT staging). Amortized once per
+    # reflection, provider-agnostic via reasoning_step. Whole-block try/except
+    # mirrors the promotion/decay non-blocking style; the count may legitimately
+    # be 0 on a quiet day or when no interactive user turns fall in the window.
+    #
+    # Persona-corpus semantics (US-007): under a named profile, reads THIS
+    # persona's attributed turns from the install DB, gates them through
+    # is_injection_attempt rejection, and forces source='reflection' on every
+    # claim (no persona-sourced claim can ever mint a sacrosanct 'explicit').
+    try:
+        from cognition.operator_beliefs import (
+            apply_operator_beliefs,
+            extract_operator_beliefs,
+        )
+        from session import get_session_store, read_operator_user_turns
+
+        from config import INFERENCE_STATE_FILE
+        from personas import activity as _personas_activity
+        from personas.core import get_default_paths
+
+        active_profile = _personas_activity.get_active_profile_name()
+        is_persona_run = active_profile not in ("default", "custom")
+        corpus_persona_id = active_profile if is_persona_run else None
+
+        window_start = now_local() - timedelta(days=days)
+        if is_persona_run:
+            # Persona corpora ALWAYS live in the install DB (the R1 keystone):
+            # a named profile reads its own attributed turns from there.
+            install_store = get_session_store(
+                chat_db_path=get_default_paths()["data"] / "chat.db"
+            )
+        else:
+            # Main/custom-profile runs must read their OWN store via active-
+            # profile resolution (a custom profile reads the store it writes to).
+            install_store = get_session_store()
+        user_turns = read_operator_user_turns(
+            window_start, store=install_store, persona_id=corpus_persona_id
+        )
+
+        if is_persona_run and user_turns:
+            from cognition.injection import is_injection_attempt
+
+            pre_filter = len(user_turns)
+            user_turns = [t for t in user_turns if not is_injection_attempt(t)]
+            dropped = pre_filter - len(user_turns)
+            if dropped:
+                print(
+                    f"[{now_local()}] Persona injection filter: "
+                    f"dropped {dropped}/{pre_filter} turns",
+                    flush=True,
+                )
+
+        claims = await extract_operator_beliefs(user_turns, cwd=PROJECT_ROOT)
+
+        if is_persona_run:
+            for c in claims:
+                c["kind"] = "inferred"
+
+        belief_count = 0
+        write_time_applied = 0
+        if not test_mode:
+            belief_count, write_time_applied = await apply_operator_beliefs(
+                claims, INFERENCE_STATE_FILE, cwd=PROJECT_ROOT
+            )
+            if write_time_applied:
+                # WS3 #84 — operator-visible write-time resolution count (M3).
+                print(
+                    f"[{now_local()}] write-time contradictions applied: "
+                    f"{write_time_applied}",
+                    flush=True,
+                )
+        label = f"Persona '{active_profile}'" if is_persona_run else "Operator"
+        print(
+            f"[{now_local()}] {label}-belief extraction: "
+            f"{len(user_turns)} turns -> {len(claims)} claims -> {belief_count} written"
+        )
+        append_to_daily_log(
+            f"{label}-belief extraction: {len(claims)} claims from "
+            f"{len(user_turns)} verbatim turns, {belief_count} written to self-model",
+            "Self-Model",
+        )
+    except ImportError:
+        pass  # Cognition/session module not available — skip extraction
+    except Exception as e:
+        print(f"[{now_local()}] Operator-belief extraction error (non-blocking): {e}")
+
+    # --- Living Self Act 2 (the keystone): belief-contradiction pass ---
+    # Wires the disconfirmation primitive contradict() into a real caller. Runs
+    # AFTER the Act-1 extraction (so a belief written THIS cycle is judged against
+    # the corpus) and BEFORE decay (so decay sees post-contradiction confidences).
+    # Embedding PRE-FILTER -> LLM JUDGE (provider-agnostic) -> EXPLICIT-protective
+    # resolution policy -> audited contradict(). Whole-block try/except mirrors the
+    # extraction/decay non-blocking style; K may legitimately be 0 (no candidates,
+    # or the judge found no real conflict) — success is "completes + logs a count,"
+    # not ">=1 contradiction." test_mode runs the judge but skips the live apply.
+    try:
+        from cognition import belief_conflicts
+        from cognition.self_model import InferenceTracker
+
+        from config import INFERENCE_STATE_FILE
+
+        records = InferenceTracker(INFERENCE_STATE_FILE).load()
+        pairs = belief_conflicts.find_candidate_pairs(records)
+        conflicts = await belief_conflicts.judge_contradictions(
+            pairs, cwd=PROJECT_ROOT
+        )
+        applied = 0
+        if not test_mode:
+            applied = belief_conflicts.apply_contradictions(
+                conflicts, INFERENCE_STATE_FILE
+            )
+        print(
+            f"[{now_local()}] Contradiction pass: {len(pairs)} pairs -> "
+            f"{len(conflicts)} conflicts -> {applied} applied"
+        )
+        append_to_daily_log(
+            f"Contradiction pass: {len(pairs)} candidate pairs, "
+            f"{len(conflicts)} judged conflicts, {applied} applied",
+            "Self-Model",
+        )
+    except ImportError:
+        pass  # Cognition module not available — skip contradiction pass
+    except Exception as e:
+        print(f"[{now_local()}] Contradiction pass error (non-blocking): {e}")
+
+    # --- Move 5a: Inference decay + state sync ---
+    try:
+        from cognition.self_model import InferenceTracker
+
+        from config import INFERENCE_STATE_FILE
+
+        tracker = InferenceTracker(INFERENCE_STATE_FILE)
+        decayed = tracker.decay_old_inferences()
+        if decayed > 0:
+            print(f"[{now_local()}] Decayed {decayed} old inferences")
+            append_to_daily_log(
+                f"Decayed {decayed} old inferences (confidence lowered)", "Self-Model"
+            )
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[{now_local()}] Inference decay error (non-blocking): {e}")
+
+
 async def run_reflection(test_mode: bool = False, days: int = 1) -> str | None:
     """Run daily reflection with concurrency guard.
 
@@ -258,6 +415,25 @@ async def _run_reflection_inner(test_mode: bool = False, days: int = 1) -> str |
     # Load recent logs
     logs = get_recent_logs(days=days)
     if not logs:
+        # Persona runs read their belief corpus from chat.db, not daily logs —
+        # a brand-new persona has attributed turns but no daily logs yet, so
+        # the self-model pass must still run (first beliefs). Fail-open: if
+        # profile detection errors, fall through to the main-run skip.
+        try:
+            from personas import activity as _personas_activity
+
+            _active_profile = _personas_activity.get_active_profile_name()
+        except Exception:
+            _active_profile = "default"
+        if _active_profile not in ("default", "custom"):
+            msg = (
+                f"No daily logs found for the last {days} day(s) — "
+                "running persona corpus pass only"
+            )
+            print(f"[{now_local()}] {msg}")
+            append_to_daily_log(f"REFLECTION_LOGS_EMPTY - {msg}", "Reflection")
+            await _run_self_model_pass(days, test_mode)
+            return None
         msg = f"No daily logs found for the last {days} day(s), skipping reflection"
         print(f"[{now_local()}] {msg}")
         append_to_daily_log(f"REFLECTION_SKIPPED - {msg}", "Reflection")
@@ -505,152 +681,12 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
         print(f"[{now_local()}] Promotion pipeline error (non-blocking): {e}")
         append_to_daily_log(f"**WARNING**: Promotion pipeline failed - {e}", "Promotion")
 
-    # --- Living Self Act 1 (B2): operator-belief extraction from VERBATIM
-    # chat.db user turns ---
-    # The real LLM claim-extractor over the operator's OWN words (NOT the
-    # daily-log paraphrase in log_context, NOT staging). Amortized once per
-    # reflection, provider-agnostic via reasoning_step. Whole-block try/except
-    # mirrors the promotion/decay non-blocking style; the count may legitimately
-    # be 0 on a quiet day or when no interactive user turns fall in the window.
-    #
-    # Persona-corpus semantics (US-007): under a named profile, reads THIS
-    # persona's attributed turns from the install DB, gates them through
-    # is_injection_attempt rejection, and forces source='reflection' on every
-    # claim (no persona-sourced claim can ever mint a sacrosanct 'explicit').
-    try:
-        from cognition.operator_beliefs import (
-            apply_operator_beliefs,
-            extract_operator_beliefs,
-        )
-        from session import get_session_store, read_operator_user_turns
+    # --- Self-model pass: Act-1 belief extraction, Act-2 contradiction pass,
+    # inference decay --- (extracted to _run_self_model_pass so the no-logs
+    # persona branch above can run it too; behavior here is unchanged)
+    await _run_self_model_pass(days, test_mode)
 
-        from config import INFERENCE_STATE_FILE
-        from personas import activity as _personas_activity
-        from personas.core import get_default_paths
-
-        active_profile = _personas_activity.get_active_profile_name()
-        is_persona_run = active_profile not in ("default", "custom")
-        corpus_persona_id = active_profile if is_persona_run else None
-
-        window_start = now_local() - timedelta(days=days)
-        if is_persona_run:
-            # Persona corpora ALWAYS live in the install DB (the R1 keystone):
-            # a named profile reads its own attributed turns from there.
-            install_store = get_session_store(
-                chat_db_path=get_default_paths()["data"] / "chat.db"
-            )
-        else:
-            # Main/custom-profile runs must read their OWN store via active-
-            # profile resolution (a custom profile reads the store it writes to).
-            install_store = get_session_store()
-        user_turns = read_operator_user_turns(
-            window_start, store=install_store, persona_id=corpus_persona_id
-        )
-
-        if is_persona_run and user_turns:
-            from cognition.injection import is_injection_attempt
-
-            pre_filter = len(user_turns)
-            user_turns = [t for t in user_turns if not is_injection_attempt(t)]
-            dropped = pre_filter - len(user_turns)
-            if dropped:
-                print(
-                    f"[{now_local()}] Persona injection filter: "
-                    f"dropped {dropped}/{pre_filter} turns",
-                    flush=True,
-                )
-
-        claims = await extract_operator_beliefs(user_turns, cwd=PROJECT_ROOT)
-
-        if is_persona_run:
-            for c in claims:
-                c["kind"] = "inferred"
-
-        belief_count = 0
-        write_time_applied = 0
-        if not test_mode:
-            belief_count, write_time_applied = await apply_operator_beliefs(
-                claims, INFERENCE_STATE_FILE, cwd=PROJECT_ROOT
-            )
-            if write_time_applied:
-                # WS3 #84 — operator-visible write-time resolution count (M3).
-                print(
-                    f"[{now_local()}] write-time contradictions applied: "
-                    f"{write_time_applied}",
-                    flush=True,
-                )
-        label = f"Persona '{active_profile}'" if is_persona_run else "Operator"
-        print(
-            f"[{now_local()}] {label}-belief extraction: "
-            f"{len(user_turns)} turns -> {len(claims)} claims -> {belief_count} written"
-        )
-        append_to_daily_log(
-            f"{label}-belief extraction: {len(claims)} claims from "
-            f"{len(user_turns)} verbatim turns, {belief_count} written to self-model",
-            "Self-Model",
-        )
-    except ImportError:
-        pass  # Cognition/session module not available — skip extraction
-    except Exception as e:
-        print(f"[{now_local()}] Operator-belief extraction error (non-blocking): {e}")
-
-    # --- Living Self Act 2 (the keystone): belief-contradiction pass ---
-    # Wires the disconfirmation primitive contradict() into a real caller. Runs
-    # AFTER the Act-1 extraction (so a belief written THIS cycle is judged against
-    # the corpus) and BEFORE decay (so decay sees post-contradiction confidences).
-    # Embedding PRE-FILTER -> LLM JUDGE (provider-agnostic) -> EXPLICIT-protective
-    # resolution policy -> audited contradict(). Whole-block try/except mirrors the
-    # extraction/decay non-blocking style; K may legitimately be 0 (no candidates,
-    # or the judge found no real conflict) — success is "completes + logs a count,"
-    # not ">=1 contradiction." test_mode runs the judge but skips the live apply.
-    try:
-        from cognition import belief_conflicts
-        from cognition.self_model import InferenceTracker
-
-        from config import INFERENCE_STATE_FILE
-
-        records = InferenceTracker(INFERENCE_STATE_FILE).load()
-        pairs = belief_conflicts.find_candidate_pairs(records)
-        conflicts = await belief_conflicts.judge_contradictions(
-            pairs, cwd=PROJECT_ROOT
-        )
-        applied = 0
-        if not test_mode:
-            applied = belief_conflicts.apply_contradictions(
-                conflicts, INFERENCE_STATE_FILE
-            )
-        print(
-            f"[{now_local()}] Contradiction pass: {len(pairs)} pairs -> "
-            f"{len(conflicts)} conflicts -> {applied} applied"
-        )
-        append_to_daily_log(
-            f"Contradiction pass: {len(pairs)} candidate pairs, "
-            f"{len(conflicts)} judged conflicts, {applied} applied",
-            "Self-Model",
-        )
-    except ImportError:
-        pass  # Cognition module not available — skip contradiction pass
-    except Exception as e:
-        print(f"[{now_local()}] Contradiction pass error (non-blocking): {e}")
-
-    # --- Move 5a: Inference decay + state sync ---
-    try:
-        from cognition.self_model import InferenceTracker
-
-        from config import INFERENCE_STATE_FILE
-
-        tracker = InferenceTracker(INFERENCE_STATE_FILE)
-        decayed = tracker.decay_old_inferences()
-        if decayed > 0:
-            print(f"[{now_local()}] Decayed {decayed} old inferences")
-            append_to_daily_log(
-                f"Decayed {decayed} old inferences (confidence lowered)", "Self-Model"
-            )
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"[{now_local()}] Inference decay error (non-blocking): {e}")
-
+    # --- Move 5a (state sync half): sync state files to vault ---
     try:
         from state_sync import sync_state_to_vault
 

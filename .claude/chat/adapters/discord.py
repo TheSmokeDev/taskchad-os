@@ -106,6 +106,10 @@ class DiscordAdapter:
         self._tree = discord.app_commands.CommandTree(self._client)
         self._slash_commands_synced = False
         self._bot_user_id: int | None = None
+        self._voice_reply_channels: set[str] = set()
+        # Strong refs for fire-and-forget tasks (CPython only weak-refs
+        # running tasks — unreferenced ones can be GC'd mid-await).
+        self._bg_tasks: set[Any] = set()
         # Channels where bot listens without @mention
         # Reads from DISCORD_WATCHED_CHANNELS env var (comma-separated IDs)
         if watched_channels is None:
@@ -130,7 +134,9 @@ class DiscordAdapter:
         async def on_ready() -> None:
             self._bot_user_id = self._client.user.id
             print(f"[{datetime.now()}] Discord adapter connected ({self._client.user})")
-            asyncio.create_task(self._sync_native_slash_commands(discord))
+            _sync_task = asyncio.create_task(self._sync_native_slash_commands(discord))
+            self._bg_tasks.add(_sync_task)
+            _sync_task.add_done_callback(self._bg_tasks.discard)
 
         @self._client.event
         async def on_message(msg: Any) -> None:
@@ -154,7 +160,9 @@ class DiscordAdapter:
             # Phase 4: voice ingress — transcribe audio attachments first.
             voice_text = await self._on_voice_message(msg)
             if voice_text:
+                self._voice_reply_channels.add(str(msg.channel.id))
                 incoming = self._normalize_message(msg, is_dm, voice_text, [])
+                incoming.voice_origin = True
                 await self._queue.put(incoming)
                 return
 
@@ -678,6 +686,21 @@ class DiscordAdapter:
         if not text:
             # All-marker reply — nothing left to send as text.
             return None
+
+        wants_voice_reply = (
+            not message.is_update
+            and not message.is_error
+            and message.channel.platform_id in self._voice_reply_channels
+        )
+        if wants_voice_reply:
+            self._voice_reply_channels.discard(message.channel.platform_id)
+            tier = self._classify_voice_tier(text)
+            if tier == "voice_only":
+                await self._send_voice_response(channel, text)
+                return None
+            if tier == "voice_and_text":
+                await self._send_voice_response(channel, text)
+
         sent = None
         chunks = self._split_message(text, max_length=1900)
         for i, chunk in enumerate(chunks):
@@ -900,6 +923,24 @@ class DiscordAdapter:
                 except OSError:
                     pass
         return ""
+
+    _VOICE_ONLY_MAX = 300
+    _VOICE_AND_TEXT_MAX = 1500
+
+    @staticmethod
+    def _classify_voice_tier(raw_text: str) -> str:
+        """Classify whether a reply should be voice-only, voice+text, or text-only."""
+        text = raw_text.strip()
+        if not text:
+            return "text_only"
+        if "```" in text or "|" in text:
+            return "text_only"
+        length = len(text)
+        if length <= DiscordAdapter._VOICE_ONLY_MAX:
+            return "voice_only"
+        if length <= DiscordAdapter._VOICE_AND_TEXT_MAX:
+            return "voice_and_text"
+        return "text_only"
 
     async def _send_voice_response(self, channel: Any, text: str) -> None:
         """Phase 4: synthesize text via voice cascade, send as audio attachment."""

@@ -26,7 +26,7 @@ from speaker_context import (
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE, RuntimeRequest
+from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE, RUNTIME_LANE_GENERIC, RuntimeRequest
 from runtime.bootstrap import build_second_brain_identity_context
 from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
 from runtime.errors import RuntimeExecutionError
@@ -95,6 +95,12 @@ GROUNDING_RULES = (
     "plainly. Never say you read, ingested, saved, or sent something unless the "
     "conversation shows it succeeded. If you cannot verify, say you cannot verify.\n\n"
 )
+
+# Hard cap on an inlined SKILL.md prompt block. The win32 argv cap
+# (_truncate_win32_append) is a head-keep over the WHOLE append — an unbounded
+# skill body spliced in early could push the assembled regions past the cap
+# and silently tail-truncate them.
+SKILL_PROMPT_BLOCK_MAX_CHARS = 12_000
 
 
 _TEXT_ONLY_FAST_MARKERS = (
@@ -953,6 +959,8 @@ class ConversationEngine:
         requested_model = os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6")
         piv_max_turns = self.max_turns
         piv_max_budget = self.max_budget_usd
+        active_skill_name = ""
+        active_skill_prompt_block = ""
         if tiny_fast_text_path:
             allowed_tools = []
 
@@ -960,13 +968,32 @@ class ConversationEngine:
         if message.is_piv:
             piv_max_turns = 50
             piv_max_budget = 5.0
-            requested_model = "claude-opus-4-6"
+            requested_model = "claude-opus-4-8"
             # CLUTCH needs team orchestration tools
             if message.piv_command == "clutch":
                 allowed_tools += [
                     "TaskCreate", "TaskUpdate", "TaskList",
                     "TeamCreate", "TeamDelete", "SendMessage",
                 ]
+            if message.piv_command == "imagegen":
+                active_skill_name = "imagegen"
+                skill_md_path = self.project_root / ".claude" / "skills" / "imagegen" / "SKILL.md"
+                try:
+                    skill_body = skill_md_path.read_text(encoding="utf-8")
+                    skill_rel_path = skill_md_path.relative_to(self.project_root).as_posix()
+                    active_skill_prompt_block = (
+                        f"\n\n# Active Skill: {active_skill_name}\n"
+                        "Use the inlined skill instructions below for this slash-command run. "
+                        "Do not spend a turn re-reading the skill file unless you need a referenced "
+                        "resource that is not included here.\n\n"
+                        f"## Skill Body ({skill_rel_path})\n\n"
+                        f"{skill_body}"
+                    )
+                except Exception as exc:
+                    print(
+                        f"[{datetime.now()}] [imagegen] failed to load {skill_md_path}: {exc}",
+                        flush=True,
+                    )
 
         system_prompt = {
             "type": "preset",
@@ -1279,6 +1306,24 @@ class ConversationEngine:
         # Non-cognition attachment fallback removed — attachment content moved
         # to RuntimeRequest.prompt (Phase 2, doc-upload-truthful-reads).
 
+        if active_skill_prompt_block:
+            # GROUNDING_RULES must stay the true PREFIX of the append (the
+            # win32 cap keeps the head — see the GROUNDING_RULES comment).
+            # Splice the capped skill body in right AFTER it, never before.
+            skill_block = active_skill_prompt_block
+            if len(skill_block) > SKILL_PROMPT_BLOCK_MAX_CHARS:
+                skill_block = (
+                    skill_block[:SKILL_PROMPT_BLOCK_MAX_CHARS]
+                    + "\n\n[skill body truncated at cap]\n\n"
+                )
+            base = system_prompt["append"]
+            if base.startswith(GROUNDING_RULES):
+                system_prompt["append"] = (
+                    GROUNDING_RULES + skill_block + base[len(GROUNDING_RULES):]
+                )
+            else:
+                system_prompt["append"] = base + skill_block
+
         if _trace_decisions is not None:
             _trace_decisions["recent_conversation"] = recent_region_meta
             _trace_decisions["region_assembly"] = {
@@ -1355,10 +1400,12 @@ class ConversationEngine:
         if session_brief_text:
             prompt_text = prompt_text + "\n\n" + session_brief_text
 
+        imagegen_turn = active_skill_name == "imagegen"
+
         runtime_request = RuntimeRequest(
             prompt=prompt_text,
             cwd=self.project_root,
-            task_name="chat_turn",
+            task_name="image_generation" if imagegen_turn else "chat_turn",
             capability=TOOL_REASONING if allowed_tools else TEXT_REASONING,
             # User-facing chat reply — on no-tool (TEXT_REASONING) turns, use the
             # in-character preamble so the homie never narrates its sandbox. Ignored
@@ -1374,6 +1421,8 @@ class ConversationEngine:
             thinking={"type": "adaptive"},
             env={"CLAUDECODE": ""},
             stderr=lambda line: print(f"[CLI-STDERR] {line}", flush=True),
+            allow_fallback=not imagegen_turn,
+            runtime_lane=RUNTIME_LANE_GENERIC if imagegen_turn else None,
             resume=resume_session_id or None,
             metadata={"speaker_context": speaker_context_metadata(current_speaker)},
         )

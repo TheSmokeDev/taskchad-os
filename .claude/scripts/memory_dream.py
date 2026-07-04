@@ -215,11 +215,13 @@ def _assemble_dream_amendment_section(
 
 
 def _assemble_dream_drift_section(
-    project_root: Path = PROJECT_ROOT,
+    project_root: Path | None = None,
     cognitive_loop_status: dict | None = None,
 ) -> str:
     """Assemble deterministic contradiction/roadmap-drift findings."""
 
+    if project_root is None:
+        project_root = PROJECT_ROOT
     status = cognitive_loop_status or collect_cognitive_loop_status()
     return build_drift_detection_section(project_root, status)
 

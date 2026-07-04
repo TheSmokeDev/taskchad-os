@@ -20,6 +20,7 @@ from discord_channel_bindings import resolve_discord_channel_binding
 from discord_persona_runtime import run_discord_persona_channel_turn
 from engine import ConversationEngine
 from extension_manager import ExtensionManager
+from imagegen_workflow import build_imagegen_skill_prompt, build_persona_imagegen_skill_prompt
 from models import OutgoingMessage, Platform
 from session import Session
 from session_keys import build_session_key, resolve_thread_id
@@ -367,14 +368,25 @@ class ChatRouter:
             "__button:social:"
         )
 
+    def _retain_task(self, task: "asyncio.Task[Any]") -> None:
+        """Keep a strong reference to a fire-and-forget task.
+
+        CPython holds only weak refs to running tasks — an unreferenced task
+        can be garbage-collected mid-await and silently never complete.
+        """
+        self._background_engine_tasks.add(task)
+        task.add_done_callback(self._background_engine_tasks.discard)
+
     def _queue_incoming(self, adapter: Any, incoming: Any) -> None:
         """Buffer quick conversational bursts, then handle in thread order."""
         if self._is_immediate_button(incoming):
-            asyncio.create_task(self._handle(adapter, incoming))
+            self._retain_task(asyncio.create_task(self._handle(adapter, incoming)))
             return
 
         if not self._can_coalesce(incoming):
-            asyncio.create_task(self._handle_serialized(adapter, incoming))
+            self._retain_task(
+                asyncio.create_task(self._handle_serialized(adapter, incoming))
+            )
             return
 
         key = self._conversation_key(incoming)
@@ -450,6 +462,11 @@ class ChatRouter:
             first.caption = ""
         if message_ids:
             first.platform_message_id = ",".join(message_ids)
+        # A burst containing a voice turn stays voice-origin so the router
+        # still skips the placeholder and the adapter voices the final reply.
+        first.voice_origin = any(
+            bool(getattr(incoming, "voice_origin", False)) for incoming in batch
+        )
         first.raw_event = {"coalesced": True, "events": raw_events}
         return first
 
@@ -528,7 +545,9 @@ class ChatRouter:
         else:
             reply = "Queued. I’ll run it as the next turn after the current response."
 
-        asyncio.create_task(self._handle_serialized(pending_adapter, followup))
+        self._retain_task(
+            asyncio.create_task(self._handle_serialized(pending_adapter, followup))
+        )
         await adapter.send(
             OutgoingMessage(
                 text=reply,
@@ -816,6 +835,24 @@ class ChatRouter:
                     incoming.text = quote_prompt
                     incoming.is_piv = True
                     incoming.piv_command = "clutch"
+                elif command in {"image", "generate-image", "owner-image"}:
+                    if isinstance(getattr(incoming, "raw_event", None), dict):
+                        incoming.raw_event.setdefault("display_text", text)
+                    if command == "owner-image":
+                        incoming.text = build_persona_imagegen_skill_prompt(
+                            command,
+                            args,
+                            "owner-YourBusiness-rep",
+                            incoming.attachments,
+                        )
+                    else:
+                        incoming.text = build_imagegen_skill_prompt(
+                            command,
+                            args,
+                            incoming.attachments,
+                        )
+                    incoming.is_piv = True
+                    incoming.piv_command = "imagegen"
                 else:
                     if isinstance(getattr(incoming, "raw_event", None), dict):
                         incoming.raw_event.setdefault("display_text", text)
@@ -949,18 +986,23 @@ class ChatRouter:
                 f"in {incoming.channel.platform_id}: {safe_text}..."
             )
 
-        # Post "Thinking..." placeholder
+        # Post "Thinking..." placeholder.
+        # Voice-origin turns skip it: the placeholder send() would consume the
+        # adapter's one-shot voice-reply flag and speak "Thinking..." instead
+        # of the real answer. With no placeholder, the final delivery below
+        # goes through adapter.send(), which carries the voice-reply branch.
         placeholder_id: str | None = None
-        try:
-            placeholder_id = await adapter.send(
-                OutgoingMessage(
-                    text="Thinking...",
-                    channel=incoming.channel,
-                    thread=incoming.thread,
+        if not getattr(incoming, "voice_origin", False):
+            try:
+                placeholder_id = await adapter.send(
+                    OutgoingMessage(
+                        text="Thinking...",
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                    )
                 )
-            )
-        except Exception as e:
-            print(f"[{datetime.now()}] Failed to send placeholder: {e}")
+            except Exception as e:
+                print(f"[{datetime.now()}] Failed to send placeholder: {e}")
 
         # Run engine with a progress ticker
         progress: dict[str, Any] = {"tool_calls": 0, "started": time.time()}

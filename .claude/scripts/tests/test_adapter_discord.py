@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "chat"))
 
 from adapters.discord import DiscordAdapter, get_discord_native_command_menu
-from models import Attachment, Platform
+from models import Attachment, Channel, OutgoingMessage, Platform
 
 
 def _make_adapter(
@@ -76,6 +76,52 @@ def _mock_message(
 def test_discord_platform():
     adapter = _make_adapter()
     assert adapter.platform == Platform.DISCORD
+
+
+@pytest.mark.asyncio
+async def test_discord_voice_input_gets_voice_only_reply() -> None:
+    adapter = _make_adapter()
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    adapter._client.get_channel = MagicMock(return_value=channel)
+    adapter._send_voice_response = AsyncMock()
+    adapter._voice_reply_channels.add("67890")
+
+    result = await adapter.send(
+        OutgoingMessage(
+            text="Yep, I can hear you.",
+            channel=Channel(Platform.DISCORD, "67890"),
+        )
+    )
+
+    assert result is None
+    adapter._send_voice_response.assert_awaited_once_with(channel, "Yep, I can hear you.")
+    channel.send.assert_not_awaited()
+    assert "67890" not in adapter._voice_reply_channels
+
+
+@pytest.mark.asyncio
+async def test_discord_medium_voice_reply_keeps_text_copy() -> None:
+    adapter = _make_adapter()
+    channel = MagicMock()
+    sent = MagicMock()
+    sent.id = 123
+    channel.send = AsyncMock(return_value=sent)
+    adapter._client.get_channel = MagicMock(return_value=channel)
+    adapter._send_voice_response = AsyncMock()
+    adapter._voice_reply_channels.add("67890")
+    reply = "Got it. " + ("Here is the detail. " * 25)
+
+    result = await adapter.send(
+        OutgoingMessage(
+            text=reply,
+            channel=Channel(Platform.DISCORD, "67890"),
+        )
+    )
+
+    assert result == "123"
+    adapter._send_voice_response.assert_awaited_once_with(channel, reply.strip())
+    channel.send.assert_awaited()
 
 
 def test_discord_registers_native_vault_group_without_flat_duplicate():

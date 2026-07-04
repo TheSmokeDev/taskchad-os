@@ -343,10 +343,11 @@ def _keyword_only_recall(query: str, caller: str, max_results: int) -> RecallRes
 
 def reindex_file(file_path: Path, memory_dir: Path, generate_embeddings: bool = True) -> int:
     """Reindex a single memory file. Returns chunk count."""
+    import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
     from db import get_memory_db
     from memory_index import index_file as _index_file
 
-    db = get_memory_db()
+    db = get_memory_db(db_path=_cfg.resolve_db_path(memory_dir))
     db.init_schema()
     chunks = _index_file(db, file_path, memory_dir, generate_embeddings=generate_embeddings)
     db.close()

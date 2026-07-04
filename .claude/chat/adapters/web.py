@@ -35,6 +35,9 @@ class WebAdapter:
     def __init__(self, ws_client: RelayWSClient) -> None:
         self.ws_client = ws_client
         self._queue: asyncio.Queue[IncomingMessage] = asyncio.Queue()
+        # Strong refs for fire-and-forget tasks (CPython only weak-refs
+        # running tasks — unreferenced ones can be GC'd mid-await).
+        self._bg_tasks: set[asyncio.Task] = set()
 
     @property
     def platform(self) -> Platform:
@@ -263,7 +266,9 @@ class WebAdapter:
                 except Exception as e:
                     print(f"[{datetime.now()}] Web binary ingress failed: {e}")
 
-            asyncio.create_task(_transcribe_and_enqueue())
+            _task = asyncio.create_task(_transcribe_and_enqueue())
+            self._bg_tasks.add(_task)
+            _task.add_done_callback(self._bg_tasks.discard)
             return
 
         if text is not None:

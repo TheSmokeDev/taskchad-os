@@ -292,6 +292,70 @@ async def test_multi_yield_engine_preserves_first_output_as_placeholder_update(t
 
 
 @pytest.mark.asyncio
+async def test_voice_origin_turn_skips_placeholder_and_delivers_final_via_send(tmp_path):
+    """Voice turns must NOT get a "Thinking..." placeholder send.
+
+    The placeholder would consume the adapter's one-shot voice-reply flag and
+    speak "Thinking..." instead of the real answer (the Discord voice-reply
+    integration bug). With voice_origin set, the first and only non-followup
+    send() must be the final answer.
+    """
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="transcribed voice question",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+        voice_origin=True,
+    )
+    adapter = _CaptureAdapter()
+    router = ChatRouter(_MultiYieldEngine(store), _NoopManager())  # type: ignore[arg-type]
+
+    await router._handle_inner(adapter, incoming)
+
+    assert all("Thinking..." not in text for _, text in adapter.events)
+    assert adapter.updates == []  # no placeholder -> nothing to update
+    assert adapter.events == [
+        ("send", "real answer"),
+        ("send", "follow-up nudge"),
+    ]
+
+
+def test_merge_incoming_batch_preserves_voice_origin():
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    user = User(platform=Platform.CLI, platform_id="user-1")
+    text_turn = IncomingMessage(
+        text="first text message",
+        user=user,
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    voice_turn = IncomingMessage(
+        text="transcribed voice message",
+        user=user,
+        channel=channel,
+        platform=Platform.CLI,
+        voice_origin=True,
+    )
+
+    merged = ChatRouter._merge_incoming_batch([text_turn, voice_turn])
+    assert merged.voice_origin is True
+
+    merged_text_only = ChatRouter._merge_incoming_batch(
+        [
+            IncomingMessage(
+                text="a", user=user, channel=channel, platform=Platform.CLI
+            ),
+            IncomingMessage(
+                text="b", user=user, channel=channel, platform=Platform.CLI
+            ),
+        ]
+    )
+    assert merged_text_only.voice_origin is False
+
+
+@pytest.mark.asyncio
 async def test_multi_yield_engine_suppresses_followup_when_final_update_fails(tmp_path):
     store = SQLiteSessionStore(tmp_path / "chat.db")
     channel = Channel(platform=Platform.CLI, platform_id="test-channel")

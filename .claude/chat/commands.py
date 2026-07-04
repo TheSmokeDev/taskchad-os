@@ -29,6 +29,9 @@ PIV_INSTRUCTIONS: dict[str, str] = {
     "execreport": "validation/execution-report.md",
     "clutch": "SKILL",                    # uses Skill tool, not a raw file
     "blog": "blog.md",                    # blog pipeline via Skill("blog-pipeline")
+    "image": "SKILL",                     # image generation via Codex/imagegen
+    "generate-image": "SKILL",            # descriptive alias for /image
+    "owner-image": "SKILL",               # saved owner / YourBusiness rep image persona
     "quote": "SKILL",                     # TurboRater quote via Skill("turborater-quote")
     "linkedin": "linkedin.md",            # deterministic LinkedIn/Social Homie prompt
 }
@@ -100,6 +103,9 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("skills", "Review/promote/reject self-authored skill drafts", "router", "operator"),
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
+    ("image", "Generate or edit an image through Codex imagegen", "engine", "admin"),
+    ("generate-image", "Generate or edit an image through Codex imagegen", "engine", "admin"),
+    ("owner-image", "Generate a saved owner / YourBusiness rep persona image", "engine", "admin"),
     ("quote", "Generate an insurance quote via TurboRater using the turborater-quote skill", "engine", "admin"),
     ("linkedin", "LinkedIn/Social Homie - draft posts, ideas, and revisions only", "engine", "admin"),
     ("tweet", "Draft an X (Twitter) post or thread", "engine", "admin"),
@@ -148,7 +154,10 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ("Cabinet", ["cabinet", "standup", "discuss", "teamtick", "teamroom", "team"]),
     ("Communication", ["send", "brief"]),
     ("Memory", ["search", "vault", "file", "working", "skills"]),
-    ("Content Creation", ["blog", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts", "video"]),
+    (
+        "Content Creation",
+        ["blog", "image", "generate-image", "owner-image", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts", "video"],
+    ),
     ("Design", ["design"]),
     (
         "PIV Workflow",
@@ -194,6 +203,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "file",
     "skills",
     "blog",
+    "image",
     "tweet",
     "instagram",
     "design",

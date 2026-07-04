@@ -3773,6 +3773,10 @@ def _design_slug(brief_text: str) -> str:
 
 _VIDEO_RENDER_STATE: dict[str, Any] = {"running": False, "started": "", "brief": ""}
 
+# Strong refs for fire-and-forget tasks (CPython only weak-refs running tasks;
+# an unreferenced task can be GC'd mid-await and silently never complete).
+_BACKGROUND_TASKS: set["asyncio.Task[Any]"] = set()
+
 
 def _import_video_pipeline() -> Any:
     """Import the scripts-dir video_pipeline module from the chat slice.
@@ -4140,7 +4144,11 @@ async def _kickoff_video_render(
             )
         return f"Video render failed: {result.get('error', 'unknown error')}"
 
-    asyncio.create_task(_run_video_render(adapter, incoming, pipeline, brief, opts))
+    _render_task = asyncio.create_task(
+        _run_video_render(adapter, incoming, pipeline, brief, opts)
+    )
+    _BACKGROUND_TASKS.add(_render_task)
+    _render_task.add_done_callback(_BACKGROUND_TASKS.discard)
     style_note = opts.get("style") or "auto (use /video styles to pick)"
     aspect_note = opts.get("aspect") or "from brief"
     duration_note = f"~{opts.get('duration')}s" if opts.get("duration") else "from brief"

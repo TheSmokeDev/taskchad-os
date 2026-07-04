@@ -1643,6 +1643,105 @@ def test_session_brief_gate_skips_piv_and_non_interactive(
         assert trace["session_brief"]["suppressed"] == "non_interactive", source
 
 
+@pytest.mark.asyncio
+async def test_imagegen_piv_turn_forces_generic_runtime_and_inlines_skill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    skill_path = project_root / ".claude" / "skills" / "imagegen" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        "---\nname: imagegen\ndescription: test image skill\n---\n# Imagegen Skill\n",
+        encoding="utf-8",
+    )
+    convo = ConversationEngine(store, project_root)
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="image ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    message = _make_message("Run the imagegen skill with a owner packet")
+    message.is_piv = True
+    message.piv_command = "imagegen"
+    outputs = [out async for out in convo.handle_message(message)]
+
+    request = captured["request"]
+    assert outputs[-1].text == "image ok"
+    assert request.task_name == "image_generation"
+    assert request.runtime_lane == RUNTIME_LANE_GENERIC
+    assert request.allow_fallback is False
+    append = request.system_prompt["append"]
+    assert "# Active Skill: imagegen" in append
+    assert "# Imagegen Skill" in append
+    # Protected-prefix invariant: the skill block must NEVER displace
+    # GROUNDING_RULES from the head of the append (the win32 argv cap is a
+    # head-keep — anything ahead of the grounding rules pushes safety/identity
+    # content toward silent tail truncation).
+    assert append.startswith(engine_module.GROUNDING_RULES)
+    assert append.index("# Active Skill: imagegen") > 0
+
+
+@pytest.mark.asyncio
+async def test_imagegen_oversized_skill_body_is_capped_and_grounding_stays_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A realistic large SKILL.md (the real imagegen body is ~11.5KB) must not
+    blow the win32 head-keep cap: the inlined block is capped and the
+    grounding rules stay the literal prefix of the append."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    skill_path = project_root / ".claude" / "skills" / "imagegen" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    oversized_body = "# Imagegen Skill\n" + ("instruction line\n" * 2000)  # ~34KB
+    skill_path.write_text(
+        "---\nname: imagegen\ndescription: test image skill\n---\n" + oversized_body,
+        encoding="utf-8",
+    )
+    convo = ConversationEngine(store, project_root)
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="image ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    message = _make_message("Run the imagegen skill with a owner packet")
+    message.is_piv = True
+    message.piv_command = "imagegen"
+    outputs = [out async for out in convo.handle_message(message)]
+
+    request = captured["request"]
+    assert outputs[-1].text == "image ok"
+    append = request.system_prompt["append"]
+    assert append.startswith(engine_module.GROUNDING_RULES)
+    assert "[skill body truncated at cap]" in append
+    # The capped block bounds how much skill body can land in the append.
+    skill_start = append.index("# Active Skill: imagegen")
+    grounding_end = len(engine_module.GROUNDING_RULES)
+    capped_len = append.index("[skill body truncated at cap]") - skill_start
+    assert capped_len <= engine_module.SKILL_PROMPT_BLOCK_MAX_CHARS
+    assert skill_start >= grounding_end
+
+
 def test_session_brief_negative_decisions_reach_trace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

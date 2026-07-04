@@ -281,6 +281,41 @@ class TestRecallServiceReindex:
         assert result["files_indexed"] == 2
         assert result["files_total"] == 10
 
+    def test_reindex_file_routes_to_vault_db(self, tmp_path):
+        """Regression: reindex_file must resolve the per-vault DB from memory_dir.
+
+        Before the fix it called get_memory_db() with no db_path, so a
+        coding-vault/unified-vault reindex wrote its relative paths into
+        thehomie's memory.db (cross-vault index pollution). Exercises the
+        REAL config.resolve_db_path routing — only the DB handle is mocked.
+        """
+        import config as _cfg
+
+        mock_db = MagicMock()
+        with patch("db.get_memory_db", return_value=mock_db) as mock_get, \
+             patch("memory_index.index_file", return_value=3):
+            result = reindex_file(tmp_path / "note.md", tmp_path, generate_embeddings=False)
+
+        assert result == 3
+        db_path = mock_get.call_args.kwargs["db_path"]
+        assert db_path == _cfg.resolve_db_path(tmp_path)
+        # A non-default vault must NOT land in thehomie's memory.db
+        assert Path(db_path).resolve() != Path(_cfg.DATABASE_PATH).resolve()
+
+    def test_reindex_file_default_vault_keeps_legacy_db(self):
+        """reindex_file with the thehomie MEMORY_DIR resolves to the legacy memory.db."""
+        import config as _cfg
+
+        mock_db = MagicMock()
+        with patch("db.get_memory_db", return_value=mock_db) as mock_get, \
+             patch("memory_index.index_file", return_value=1):
+            reindex_file(
+                Path(_cfg.MEMORY_DIR) / "note.md", Path(_cfg.MEMORY_DIR), generate_embeddings=False
+            )
+
+        db_path = mock_get.call_args.kwargs["db_path"]
+        assert Path(db_path).resolve() == Path(_cfg.DATABASE_PATH).resolve()
+
 
 # ---------------------------------------------------------------------------
 # TestRecallResponseDataclass

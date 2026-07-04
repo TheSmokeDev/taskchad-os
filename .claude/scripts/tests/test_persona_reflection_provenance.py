@@ -392,7 +392,9 @@ class TestPersonaReflectionEndToEnd:
 # ============================================================================
 
 
-def _drive_persona_reflection_real_apply(monkeypatch, tmp_path, *, extract_claims):
+def _drive_persona_reflection_real_apply(
+    monkeypatch, tmp_path, *, extract_claims, recent_logs=None
+):
     """Drive the REAL _run_reflection_inner under a 'sales' persona run against a
     REAL SQLite install chat.db, with the REAL apply_operator_beliefs.
 
@@ -401,6 +403,10 @@ def _drive_persona_reflection_real_apply(monkeypatch, tmp_path, *, extract_claim
     store=), which exercises the keystone branch at memory_reflect.py:536-538.
     The belief write goes to a real tmp INFERENCE_STATE_FILE. Returns
     (sales_state_path, captured_stdout).
+
+    recent_logs: what get_recent_logs returns. None (default) seeds one log so
+    the run takes the normal with-logs flow; pass [] to exercise the no-logs
+    first-run branch (fresh persona: chat corpus present, zero daily logs).
     """
     import asyncio
     import io
@@ -466,10 +472,11 @@ def _drive_persona_reflection_real_apply(monkeypatch, tmp_path, *, extract_claim
         ),
     )
 
-    # One log so the function does NOT early-return at the no-logs guard.
-    monkeypatch.setattr(
-        mr, "get_recent_logs", lambda days=1: [("2026-07-02", "did stuff")]
-    )
+    # Default: one log so the function does NOT early-return at the no-logs
+    # guard. recent_logs=[] exercises the no-logs persona branch instead.
+    if recent_logs is None:
+        recent_logs = [("2026-07-02", "did stuff")]
+    monkeypatch.setattr(mr, "get_recent_logs", lambda days=1: list(recent_logs))
 
     async def _fake_lanes(_req):
         return SimpleNamespace(
@@ -537,3 +544,48 @@ def test_persona_reflection_forces_reflection_source_real_pipeline(monkeypatch, 
     assert (
         hashlib.sha256(sibling_state.read_bytes()).hexdigest() == sibling_hash
     ), "persona run mutated a SIBLING persona inference state file"
+
+
+def test_persona_first_run_no_daily_logs_still_forms_beliefs(monkeypatch, tmp_path):
+    """FAIL-WITHOUT-FIX lock: a brand-new persona (attributed chat turns, ZERO
+    daily logs) must still run the corpus pass. The no-logs early return used
+    to fire BEFORE the Act-1 extraction, so a fresh persona could never form
+    its first belief (the tick reported SUCCESS on a clean skip). Asserts the
+    no-logs persona branch runs the extraction, the belief persists with
+    source='reflection', and main/sibling state stay byte-identical."""
+    from cognition.self_model import InferenceTracker
+
+    main_state = tmp_path / "main-self-model-inferences.json"
+    sibling_state = tmp_path / "seo-self-model-inferences.json"
+    main_state.write_text("[]", encoding="utf-8")
+    sibling_state.write_text("[]", encoding="utf-8")
+    main_hash = hashlib.sha256(main_state.read_bytes()).hexdigest()
+    sibling_hash = hashlib.sha256(sibling_state.read_bytes()).hexdigest()
+
+    sales_state, out = _drive_persona_reflection_real_apply(
+        monkeypatch,
+        tmp_path,
+        extract_claims=[
+            {"claim": "prospects respond to missed-call pain", "kind": "explicit"}
+        ],
+        recent_logs=[],  # fresh persona: zero daily logs
+    )
+
+    # The no-logs persona branch ran the corpus pass instead of skipping.
+    assert "running persona corpus pass only" in out
+    assert "Persona 'sales'-belief extraction:" in out
+
+    records = InferenceTracker(sales_state).load()
+    assert records, (
+        "no belief written — the no-logs early return still skips the persona "
+        "corpus pass (fresh personas can never form their first belief)"
+    )
+    assert all(r.source == "reflection" for r in records)
+
+    # Isolation holds on the no-logs path too.
+    assert (
+        hashlib.sha256(main_state.read_bytes()).hexdigest() == main_hash
+    ), "no-logs persona run mutated the MAIN inference state file"
+    assert (
+        hashlib.sha256(sibling_state.read_bytes()).hexdigest() == sibling_hash
+    ), "no-logs persona run mutated a SIBLING persona inference state file"
