@@ -3265,6 +3265,66 @@ def profile_env_sync(name, all_profiles, write, matrix_path, master_env_path, js
         sys.exit(1)
 
 
+# ── Persona learning toggle (PRP persona-learning-loop / US-005) ─────────────
+
+
+@profile.group("learning")
+def profile_learning():
+    """Toggle persona learning (reflection pipeline opt-in)."""
+    pass
+
+
+@profile_learning.command("enable")
+@click.argument("name")
+def profile_learning_enable(name):
+    """Enable learning for persona <name>."""
+    try:
+        from personas.services import set_persona_learning
+        set_persona_learning(name, True)
+        _write_persona_learning_audit(name, enabled=True)
+        click.echo(f"Learning enabled for persona '{name}'.")
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@profile_learning.command("disable")
+@click.argument("name")
+def profile_learning_disable(name):
+    """Disable learning for persona <name>."""
+    try:
+        from personas.services import set_persona_learning
+        set_persona_learning(name, False)
+        _write_persona_learning_audit(name, enabled=False)
+        click.echo(f"Learning disabled for persona '{name}'.")
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+def _write_persona_learning_audit(persona_id: str, *, enabled: bool) -> None:
+    """Append audit row for a learning toggle."""
+    import json as json_mod
+    from datetime import datetime, timezone
+    try:
+        import config as _config
+        audit_path = _config.DATA_DIR / "persona_learning_audit.jsonl"
+    except Exception:
+        return
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "persona_id": persona_id,
+        "action": "enable" if enabled else "disable",
+        "enabled": enabled,
+    }
+    try:
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json_mod.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
 # ── Archon runner subgroup (PRP-7e Phase 5 — R4 ARCHON_HOME pivot) ───────────
 #
 # `thehomie archon list/run/status` is the operator surface for invoking

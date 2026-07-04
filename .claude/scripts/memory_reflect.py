@@ -512,18 +512,60 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
     # reflection, provider-agnostic via reasoning_step. Whole-block try/except
     # mirrors the promotion/decay non-blocking style; the count may legitimately
     # be 0 on a quiet day or when no interactive user turns fall in the window.
+    #
+    # Persona-corpus semantics (US-007): under a named profile, reads THIS
+    # persona's attributed turns from the install DB, gates them through
+    # is_injection_attempt rejection, and forces source='reflection' on every
+    # claim (no persona-sourced claim can ever mint a sacrosanct 'explicit').
     try:
         from cognition.operator_beliefs import (
             apply_operator_beliefs,
             extract_operator_beliefs,
         )
-        from session import read_operator_user_turns
+        from session import get_session_store, read_operator_user_turns
 
         from config import INFERENCE_STATE_FILE
+        from personas import activity as _personas_activity
+        from personas.core import get_default_paths
+
+        active_profile = _personas_activity.get_active_profile_name()
+        is_persona_run = active_profile not in ("default", "custom")
+        corpus_persona_id = active_profile if is_persona_run else None
 
         window_start = now_local() - timedelta(days=days)
-        user_turns = read_operator_user_turns(window_start)
+        if is_persona_run:
+            # Persona corpora ALWAYS live in the install DB (the R1 keystone):
+            # a named profile reads its own attributed turns from there.
+            install_store = get_session_store(
+                chat_db_path=get_default_paths()["data"] / "chat.db"
+            )
+        else:
+            # Main/custom-profile runs must read their OWN store via active-
+            # profile resolution (a custom profile reads the store it writes to).
+            install_store = get_session_store()
+        user_turns = read_operator_user_turns(
+            window_start, store=install_store, persona_id=corpus_persona_id
+        )
+
+        if is_persona_run and user_turns:
+            from cognition.injection import is_injection_attempt
+
+            pre_filter = len(user_turns)
+            user_turns = [t for t in user_turns if not is_injection_attempt(t)]
+            dropped = pre_filter - len(user_turns)
+            if dropped:
+                print(
+                    f"[{now_local()}] Persona injection filter: "
+                    f"dropped {dropped}/{pre_filter} turns",
+                    flush=True,
+                )
+
         claims = await extract_operator_beliefs(user_turns, cwd=PROJECT_ROOT)
+
+        if is_persona_run:
+            for c in claims:
+                c["kind"] = "inferred"
+
         belief_count = 0
         write_time_applied = 0
         if not test_mode:
@@ -537,12 +579,13 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
                     f"{write_time_applied}",
                     flush=True,
                 )
+        label = f"Persona '{active_profile}'" if is_persona_run else "Operator"
         print(
-            f"[{now_local()}] Operator-belief extraction: "
+            f"[{now_local()}] {label}-belief extraction: "
             f"{len(user_turns)} turns -> {len(claims)} claims -> {belief_count} written"
         )
         append_to_daily_log(
-            f"Operator-belief extraction: {len(claims)} claims from "
+            f"{label}-belief extraction: {len(claims)} claims from "
             f"{len(user_turns)} verbatim turns, {belief_count} written to self-model",
             "Self-Model",
         )

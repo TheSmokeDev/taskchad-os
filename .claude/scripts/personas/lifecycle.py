@@ -148,6 +148,7 @@ _REQUIRED_MEMORY_DIRS: tuple[str, ...] = (
     "concepts",
     "connections",
     "daily",
+    "episodes",
     "weekly",
     "drafts/active",
     "drafts/sent",

@@ -13,6 +13,10 @@ from typing import Any, Literal
 
 from session_keys import build_session_key
 
+# Sentinel for three-valued persona_id filter in list_active:
+# _UNSET (default) = no filter; None = IS NULL; string = exact match.
+_UNSET: object = object()
+
 # === PRD-7 §7.10 / Phase 4 (PRP-7d) — source tagging ===
 # Single source of truth for session-source values + default-hidden set.
 # Click `Choice`, `session list` filter, tests, and any future writer all
@@ -211,6 +215,7 @@ class Session:
     runtime_profile_key: str = ""
     runtime_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     source: str = "interactive"  # PRD-7 §7.10 / Phase 4 (PRP-7d)
+    persona_id: str | None = None
 
     @property
     def runtime_session_id(self) -> str:
@@ -463,6 +468,18 @@ class SQLiteSessionStore:
                 "ON chat_sessions(source, updated_at DESC)"
             )
 
+            # === Persona learning loop — nullable persona_id ===
+            try:
+                conn.execute(
+                    "ALTER TABLE chat_sessions ADD COLUMN persona_id TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chat_sessions_persona_source_updated "
+                "ON chat_sessions(persona_id, source, updated_at DESC)"
+            )
+
     def _row_to_session(self, row: sqlite3.Row) -> Session:
         """Convert a database row to a Session object."""
         runtime_session_id = (
@@ -514,6 +531,11 @@ class SQLiteSessionStore:
                 if "source" in row.keys()
                 else "interactive"
             ),
+            persona_id=(
+                row["persona_id"]
+                if "persona_id" in row.keys()
+                else None
+            ),
         )
 
     def _row_to_chat_message(self, row: sqlite3.Row) -> ChatMessage:
@@ -558,8 +580,8 @@ class SQLiteSessionStore:
                    (session_id, agent_session_id, runtime_session_id, runtime_lane, runtime_provider,
                     runtime_model, runtime_profile_key, platform, channel_id, thread_id, user_id,
                     created_at, updated_at, message_count, total_cost_usd,
-                    status, mode, tool_call_count, runtime_tool_calls_json, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    status, mode, tool_call_count, runtime_tool_calls_json, source, persona_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session.session_id,
                     session.agent_session_id,
@@ -581,6 +603,7 @@ class SQLiteSessionStore:
                     session.tool_call_count,
                     _serialize_tool_calls(session.runtime_tool_calls),
                     normalize_source(session.source),
+                    session.persona_id,
                 ),
             )
 
@@ -630,12 +653,16 @@ class SQLiteSessionStore:
         platform: str | None = None,
         source: str | None = None,
         sources: list[str] | None = None,
+        persona_id: str | None | object = _UNSET,
     ) -> list[Session]:
         """List active sessions, optionally filtered by platform and/or source.
 
         ``source`` is exact-match; ``sources`` is an ``IN (...)`` filter. Both
         are bound via ``?`` placeholders — never f-string interpolated. Existing
         callers that pass only ``platform`` (or nothing) keep working unchanged.
+
+        ``persona_id`` is three-valued: ``_UNSET`` (default) = no filter;
+        ``None`` = ``WHERE persona_id IS NULL``; string = exact match.
         """
         where_clauses: list[str] = ["status = 'active'"]
         params: list[Any] = []
@@ -649,6 +676,12 @@ class SQLiteSessionStore:
             placeholders = ",".join("?" * len(sources))
             where_clauses.append(f"source IN ({placeholders})")
             params.extend(sources)
+        if persona_id is not _UNSET:
+            if persona_id is None:
+                where_clauses.append("persona_id IS NULL")
+            else:
+                where_clauses.append("persona_id = ?")
+                params.append(persona_id)
         sql = (
             "SELECT * FROM chat_sessions WHERE "
             + " AND ".join(where_clauses)
@@ -1020,6 +1053,15 @@ class PostgresSessionStore:
             "ON chat_sessions(source, updated_at DESC)"
         )
 
+        # === Persona learning loop — nullable persona_id ===
+        cur.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS persona_id TEXT"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_sessions_persona_source_updated "
+            "ON chat_sessions(persona_id, source, updated_at DESC)"
+        )
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS heartbeat_threads (
                 id SERIAL PRIMARY KEY,
@@ -1091,8 +1133,9 @@ class PostgresSessionStore:
             # channel_id, thread_id, user_id, created_at, updated_at,
             # message_count, total_cost_usd, status, mode, runtime_lane,
             # tool_call_count, runtime_tool_calls_json — count = 20, so source
-            # is at index 20 = row[20]).
+            # is at index 20 = row[20]). persona_id is index 21.
             source=normalize_source(row[20]) if len(row) > 20 else "interactive",
+            persona_id=row[21] if len(row) > 21 else None,
         )
 
     def get(self, platform: str, channel_id: str, thread_id: str) -> Session | None:
@@ -1121,8 +1164,8 @@ class PostgresSessionStore:
                (session_id, agent_session_id, runtime_session_id, runtime_lane, runtime_provider,
                 runtime_model, runtime_profile_key, platform, channel_id, thread_id, user_id,
                 created_at, updated_at, message_count, total_cost_usd,
-                status, mode, tool_call_count, runtime_tool_calls_json, source)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                status, mode, tool_call_count, runtime_tool_calls_json, source, persona_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 session.session_id,
                 session.agent_session_id,
@@ -1144,6 +1187,7 @@ class PostgresSessionStore:
                 session.tool_call_count,
                 _serialize_tool_calls(session.runtime_tool_calls),
                 normalize_source(session.source),
+                session.persona_id,
             ),
         )
 
@@ -1193,12 +1237,16 @@ class PostgresSessionStore:
         platform: str | None = None,
         source: str | None = None,
         sources: list[str] | None = None,
+        persona_id: str | None | object = _UNSET,
     ) -> list[Session]:
         """List active sessions, optionally filtered by platform and/or source.
 
         ``source`` is exact-match; ``sources`` is an ``IN (...)`` filter. Both
         bind via ``%s`` placeholders. Existing callers that pass only
         ``platform`` (or nothing) keep working unchanged.
+
+        ``persona_id`` is three-valued: ``_UNSET`` (default) = no filter;
+        ``None`` = ``WHERE persona_id IS NULL``; string = exact match.
         """
         where_clauses: list[str] = ["status = 'active'"]
         params: list[Any] = []
@@ -1212,6 +1260,12 @@ class PostgresSessionStore:
             placeholders = ",".join(["%s"] * len(sources))
             where_clauses.append(f"source IN ({placeholders})")
             params.extend(sources)
+        if persona_id is not _UNSET:
+            if persona_id is None:
+                where_clauses.append("persona_id IS NULL")
+            else:
+                where_clauses.append("persona_id = %s")
+                params.append(persona_id)
         sql = (
             "SELECT * FROM chat_sessions WHERE "
             + " AND ".join(where_clauses)
@@ -1487,6 +1541,7 @@ def read_operator_user_turns(
     window_start: datetime,
     *,
     store: SQLiteSessionStore | PostgresSessionStore | None = None,
+    persona_id: str | None | object = _UNSET,
 ) -> list[str]:
     """Read the operator's VERBATIM ``role == "user"`` turns over a window (Living Self Act 1, B2).
 
@@ -1528,7 +1583,7 @@ def read_operator_user_turns(
 
         window_naive = normalize_physical_timestamp(window_start)
         turns: list[str] = []
-        for sess in store.list_active(source="interactive"):
+        for sess in store.list_active(source="interactive", persona_id=persona_id):
             # NM1: list_active is updated_at DESC — once a session's last
             # activity predates the window, every later session is older too.
             sess_updated = normalize_physical_timestamp(sess.updated_at)

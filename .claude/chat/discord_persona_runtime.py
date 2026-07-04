@@ -101,6 +101,7 @@ def _persist_turn(
     platform_str: str,
     channel_id: str,
     thread_id: str,
+    persona_id: str | None = None,
 ) -> None:
     if session_store is None:
         return
@@ -147,6 +148,7 @@ def _persist_turn(
                 runtime_profile_key=getattr(result, "profile_key", "") or "",
                 runtime_tool_calls=normalized_tool_calls,
                 source=getattr(incoming, "source", "interactive"),
+                persona_id=persona_id,
             )
         )
 
@@ -273,6 +275,7 @@ async def run_discord_persona_channel_turn(
         platform_str=platform_str,
         channel_id=channel_id,
         thread_id=thread_id,
+        persona_id=persona_id,
     )
     return OutgoingMessage(
         text=response_text,

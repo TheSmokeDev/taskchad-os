@@ -70,3 +70,20 @@ links, and similar reference material should pass through to the persona as
 chat context; direct requests to send, contact, book, post, publish, deploy, or
 otherwise mutate live state still require the existing explicit authorization
 path.
+
+## Learning Opt-In
+
+Persona learning (the scheduled belief-extraction loop) is controlled by a
+per-profile `config.yaml` field, NOT the capability matrix:
+
+```yaml
+# <profile>/config.yaml
+learning:
+  enabled: true   # default: false
+```
+
+Enable via `thehomie profile learning enable <name>`. This is separate from
+capability scoping — learning controls whether the persona forms beliefs from
+its interactions, not which env keys or skills it can access.
+
+See [Persona Learning Loop](persona-learning-loop.md) for full details.

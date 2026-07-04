@@ -10,7 +10,7 @@ Public API:
     derive_flush_meta(context_filename, *, now=None) -> FlushMeta
     parse_flush_sections(response_text) -> dict[str, str]
     write_episode_from_flush(memory_dir, *, context_filename, response_text,
-        now=None, settings=None) -> (EpisodeWriteStatus, Path | None)
+        now=None, settings=None, persona_id=None) -> (EpisodeWriteStatus, Path | None)
     list_open_episodes(memory_dir, *, days, now=None) -> list[Path]
     render_episodes_digest(paths, *, settings=None) -> str
     mark_episodes_consolidated(paths, *, now=None) -> int
@@ -322,6 +322,7 @@ def write_episode_from_flush(
     response_text: str,
     now: datetime | None = None,
     settings=None,
+    persona_id: str | None = None,
 ) -> tuple[EpisodeWriteStatus, Path | None]:
     """Write (or same-lifecycle-update) an episode from a flush response.
 
@@ -406,6 +407,7 @@ def write_episode_from_flush(
                 return (EpisodeWriteStatus.SKIPPED_DAY_CAP, None)
 
             summary_line = _sanitize_line(sections.get("Summary", ""), 100)
+            persona_line = f"persona_id: {persona_id}\n" if persona_id else ""
             content = (
                 "---\n"
                 "tags: [system, memory, living-mind]\n"
@@ -415,6 +417,7 @@ def write_episode_from_flush(
                 f"surface: {meta.surface}\n"
                 f'lifecycle: "{meta.lifecycle_ts}"\n'
                 f'summary: "{summary_line}"\n'
+                f"{persona_line}"
                 "---\n"
                 "\n"
                 f"# Episode: {meta.episode_date} — {meta.surface}\n"
@@ -457,6 +460,9 @@ def read_episode_frontmatter(path: Path) -> dict[str, str]:
         # Living Mind Act 4: the session-opening brief renders the episode's
         # frontmatter summary — additive key, existing consumers unchanged.
         "summary",
+        # Persona learning loop: persona-attributed episodes carry the
+        # persona_id that produced them — additive, omitted for main.
+        "persona_id",
     ):
         km = re.search(rf"^{key}:\s*(.+?)\s*$", fm_text, re.MULTILINE)
         if km:

@@ -98,7 +98,7 @@ class _FakeStore:
         self._messages = messages
         self._raise_on = raise_on
 
-    def list_active(self, source=None, sources=None, platform=None):
+    def list_active(self, source=None, sources=None, platform=None, persona_id=None):
         if self._raise_on == "list_active":
             raise RuntimeError("boom")
         return list(self._sessions)

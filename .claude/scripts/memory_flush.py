@@ -237,11 +237,15 @@ async def _run_flush_inner(context_file: Path, test_mode: bool = False) -> str |
         # episode failure never breaks the flush.
         try:
             from episodes import write_episode_from_flush
+            from personas.activity import get_active_profile_name
 
+            _profile = get_active_profile_name()
+            _flush_persona_id = _profile if _profile not in ("default", "custom") else None
             status, episode_path = write_episode_from_flush(
                 MEMORY_DIR,
                 context_filename=context_file.name,
                 response_text=response_text,
+                persona_id=_flush_persona_id,
             )
             print(f"[{now_local()}] Episode {status.value}: {episode_path}")
             if episode_path is not None:

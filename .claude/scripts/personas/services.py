@@ -484,6 +484,8 @@ def load_persona_config(persona_id: str | None = None) -> dict[str, Any]:
         _validate_cabinet_section(raw["cabinet"], config_path)
     if "voice" in raw:
         _validate_voice_section(raw["voice"], config_path)
+    if "learning" in raw:
+        _validate_learning_section(raw["learning"], config_path)
 
     return raw
 
@@ -643,6 +645,31 @@ def read_profile_config(profile_name: str | None = None, *, strict: bool = False
     if strict:
         return _read_yaml_strict(path)
     return _read_yaml_safe(path)
+
+
+def set_persona_learning(persona_id: str, enabled: bool) -> None:
+    """Toggle ``learning.enabled`` in a persona's ``config.yaml``.
+
+    Uses ``_read_yaml_strict`` + ``_minimal_yaml_write`` (strict-read RMW)
+    so a malformed config.yaml surfaces as ``ConfigShapeError`` instead of
+    being silently wiped. Same pattern as ``_write_persisted_port``.
+
+    Raises ``ConfigShapeError`` on parse failure or shape violation.
+    Creates the ``config.yaml`` (with a single ``learning`` block) when the
+    profile has none — a missing file is treated as an empty config, not an
+    error.
+    """
+    config_path = _resolve_profile_config_path(persona_id)
+    data = _read_yaml_strict(config_path)
+    learning = data.get("learning", {})
+    if not isinstance(learning, dict):
+        raise ConfigShapeError(
+            f"shape: {config_path}: learning must be mapping, "
+            f"got {type(learning).__name__}"
+        )
+    learning["enabled"] = enabled
+    data["learning"] = learning
+    _minimal_yaml_write(config_path, data)
 
 
 def _read_persisted_port(config_path: Path, service: str) -> int | None:
@@ -1013,6 +1040,19 @@ def _validate_voice_section(value: Any, config_path: Path) -> None:
                     f"in {config_path}"
                 )
 
+def _validate_learning_section(value: Any, config_path: Path) -> None:
+    """Validate the ``learning`` section: mapping with optional ``enabled`` bool.
+
+    Persona learning loop (PRP persona-learning-loop / US-005). The section
+    is opt-in per persona; ``learning.enabled`` defaults OFF when absent.
+    """
+    if not isinstance(value, dict):
+        raise _shape_error(config_path, "learning", value, "mapping")
+    if "enabled" in value and not isinstance(value["enabled"], bool):
+        raise _shape_error(
+            config_path, "learning.enabled", value["enabled"], "bool"
+        )
+
 
 # ── PRD-8 Phase 3 / WS2 (R1 B4) — validation helpers ─────────────────────
 #
@@ -1076,6 +1116,8 @@ def validate_config_dict(data: dict) -> None:
         _validate_cabinet_section(data["cabinet"], _DICT_VALIDATION_PATH)
     if "voice" in data:
         _validate_voice_section(data["voice"], _DICT_VALIDATION_PATH)
+    if "learning" in data:
+        _validate_learning_section(data["learning"], _DICT_VALIDATION_PATH)
 
 
 def validate_config_yaml_text(text: str) -> dict:

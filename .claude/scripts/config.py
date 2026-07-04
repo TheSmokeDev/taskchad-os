@@ -1104,6 +1104,55 @@ def get_background_models(
     return {"fast": fast, "quality": quality}
 
 
+class PersonaLearningSettings(NamedTuple):
+    """Effective persona-learning-tick knobs (call-time resolved)."""
+
+    enabled: bool
+    tick_interval_hours: float
+    silent_skip_window_hours: float
+
+
+def get_persona_learning_settings(
+    enabled: bool | None = None,
+    tick_interval_hours: float | None = None,
+    silent_skip_window_hours: float | None = None,
+) -> PersonaLearningSettings:
+    """Resolve persona-learning-tick knobs at CALL TIME (Rule 1).
+
+    The persona learning tick (``persona_learning_tick.py``) enumerates
+    learning-enabled personas and spawns per-persona reflection pipelines.
+    These knobs control the global tick behaviour; per-persona opt-in lives
+    in each profile's ``config.yaml`` (``learning.enabled``).
+
+    Knobs:
+        PERSONA_LEARNING_ENABLED ("true") — global kill switch for the tick.
+        PERSONA_LEARNING_TICK_INTERVAL ("12") — minimum hours between full
+            tick runs (recency guard, same pattern as dream-state).
+        PERSONA_LEARNING_SILENT_SKIP_WINDOW ("24") — hours: if a persona
+            has zero attributed rows newer than this window, skip it with no
+            model call (``PERSONA_REFLECT_SILENT``).
+
+    None-sentinel pattern: explicit values pass through; ``None`` resolves
+    the matching env var inside the body so ``monkeypatch.setenv`` takes
+    effect on the next call with no module reload.
+    """
+    if enabled is None:
+        enabled = os.getenv("PERSONA_LEARNING_ENABLED", "true").lower() == "true"
+    if tick_interval_hours is None:
+        tick_interval_hours = float(
+            os.getenv("PERSONA_LEARNING_TICK_INTERVAL", "12")
+        )
+    if silent_skip_window_hours is None:
+        silent_skip_window_hours = float(
+            os.getenv("PERSONA_LEARNING_SILENT_SKIP_WINDOW", "24")
+        )
+    return PersonaLearningSettings(
+        enabled=enabled,
+        tick_interval_hours=tick_interval_hours,
+        silent_skip_window_hours=silent_skip_window_hours,
+    )
+
+
 class SessionBriefSettings(NamedTuple):
     """Effective session-opening-brief knobs (call-time resolved)."""
 

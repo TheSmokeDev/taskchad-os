@@ -161,8 +161,14 @@ def run_hook_script(
     payload: dict[str, Any],
     *,
     timeout_seconds: float = 15.0,
+    env: dict[str, str] | None = None,
 ) -> HookInvocation:
-    """Invoke an existing hook script with JSON stdin."""
+    """Invoke an existing hook script with JSON stdin.
+
+    ``env`` overrides the subprocess environment when provided — used by
+    persona flush to re-root HOMIE_HOME so the inner hook writes to the
+    persona vault instead of the main vault.
+    """
 
     hook_path = HOOKS_DIR / hook_name
     if not hook_path.exists():
@@ -176,6 +182,7 @@ def run_hook_script(
         capture_output=True,
         timeout=timeout_seconds,
         creationflags=creation_flags,
+        env=env,
     )
     return HookInvocation(
         hook_name=hook_name,
@@ -195,6 +202,7 @@ def clear_session_with_lifecycle(
     engine: Any = None,
     source: str = "clear",
     trigger_source: str = "interactive",
+    hook_env: dict[str, str] | None = None,
 ) -> ClearLifecycleResult:
     """Run clear lifecycle steps and delete the session after hook attempts."""
 
@@ -229,8 +237,8 @@ def clear_session_with_lifecycle(
         "thread_id": thread_id,
         "transcript_path": str(result.transcript_path or ""),
     }
-    _invoke_hook(result, "session-end-flush.py", payload)
-    _invoke_hook(result, "session-start-context.py", payload)
+    _invoke_hook(result, "session-end-flush.py", payload, env=hook_env)
+    _invoke_hook(result, "session-start-context.py", payload, env=hook_env)
 
     deleted = store.delete(platform, channel_id, thread_id)
     result.add(
@@ -257,9 +265,11 @@ def _invoke_hook(
     result: ClearLifecycleResult,
     hook_name: str,
     payload: dict[str, Any],
+    *,
+    env: dict[str, str] | None = None,
 ) -> None:
     try:
-        invocation = run_hook_script(hook_name, payload)
+        invocation = run_hook_script(hook_name, payload, env=env)
     except Exception as exc:  # noqa: BLE001
         _record_failure(result, hook_name, exc)
         return

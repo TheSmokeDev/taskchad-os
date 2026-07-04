@@ -50,7 +50,7 @@ def test_clear_lifecycle_order_persists_hooks_delete_then_identity_reload(
         order.append("persist_transcript")
         return original_write(**kwargs)
 
-    def fake_hook(hook_name, payload, *, timeout_seconds=15.0):
+    def fake_hook(hook_name, payload, *, timeout_seconds=15.0, env=None):
         order.append(hook_name)
         assert payload["source"] == "clear"
         assert payload["session_id"] == session.session_id
@@ -116,7 +116,7 @@ def test_clear_lifecycle_hook_failure_still_deletes_and_reports_warning(
 
     monkeypatch.setattr(lifecycle, "get_state_dir", lambda: tmp_path / "state")
 
-    def fake_hook(hook_name, payload, *, timeout_seconds=15.0):
+    def fake_hook(hook_name, payload, *, timeout_seconds=15.0, env=None):
         hooks_seen.append(hook_name)
         if hook_name == "session-end-flush.py":
             raise RuntimeError("flush hook failed")
@@ -148,7 +148,7 @@ async def test_handle_clear_surfaces_lifecycle_warning(
     _seed_session(store)
     monkeypatch.setattr(lifecycle, "get_state_dir", lambda: tmp_path / "state")
 
-    def fake_hook(hook_name, payload, *, timeout_seconds=15.0):
+    def fake_hook(hook_name, payload, *, timeout_seconds=15.0, env=None):
         if hook_name == "session-end-flush.py":
             raise RuntimeError("flush hook failed")
         return lifecycle.HookInvocation(hook_name=hook_name, returncode=0)
@@ -216,7 +216,7 @@ def _act4_clear_setup(tmp_path, monkeypatch):
     for var in ("SESSION_BRIEF_ENABLED", "SESSION_BRIEF_AWAY_HOURS"):
         monkeypatch.delenv(var, raising=False)
 
-    def fake_hook(hook_name, payload, *, timeout_seconds=15.0):
+    def fake_hook(hook_name, payload, *, timeout_seconds=15.0, env=None):
         return lifecycle.HookInvocation(hook_name=hook_name, returncode=0)
 
     monkeypatch.setattr(lifecycle, "run_hook_script", fake_hook)

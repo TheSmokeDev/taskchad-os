@@ -26,6 +26,11 @@ links them rather than repeating them:
 - [Session Opening Brief](manual/features/session-opening-brief.md) — the
   "while you were out" block on the first interactive turn after an absence.
 
+**Act 5 — Persona Learning Loop:** The Living Self machinery pointed at every
+named persona profile. Specialist Homies form their own beliefs from their own
+interactions, with reflection-only provenance and injection screening.
+See [Persona Learning Loop](manual/features/persona-learning-loop.md).
+
 ## Table of Contents
 
 1. What The Living Self Is
@@ -34,13 +39,14 @@ links them rather than repeating them:
 4. Holding A Belief Against Conflict (the contradiction engine)
 5. Thinking Before Speaking (the gated cognitive pass)
 6. Earning A Belief (the evolve-to-identity adoption gate)
-7. Operator Runbook — commands and entry points
-8. Tuning — the configuration knobs
-9. Verifying The Self Is Alive
-10. Safety Boundaries
-11. Common Failure Modes
-12. File Ownership Map
-13. Current Scope And Non-Goals
+7. Persona Learning (Act 5)
+8. Operator Runbook — commands and entry points
+9. Tuning — the configuration knobs
+10. Verifying The Self Is Alive
+11. Safety Boundaries
+12. Common Failure Modes
+13. File Ownership Map
+14. Current Scope And Non-Goals
 
 ## 1. What The Living Self Is
 
@@ -232,7 +238,33 @@ turned it away.
 the store. This respects the framework's slice boundary: the search engine lives
 in Archon, the test-and-keep machinery and the ledger live in the assistant.
 
-## 7. Operator Runbook — commands and entry points
+## 7. Persona Learning (Act 5)
+
+Acts 1-4 give the main Homie a mind that forms, holds, and earns beliefs. Act 5
+points that same machinery at every named persona profile so specialist Homies
+compound experience from their own interactions.
+
+A scheduled tick (`persona_learning_tick.py`) enumerates learning-enabled personas
+and spawns per-persona reflection pipelines as subprocesses. Each child reads the
+install chat.db filtered by `persona_id`, gates turns through injection screening,
+extracts beliefs with forced `source="reflection"` provenance, and writes results
+into the persona's own vault. The main Homie's state is never touched.
+
+Key design choices:
+
+- **Reflection-only provenance.** Every persona-sourced belief is forced to
+  `source="reflection"` — no external text can mint the sacrosanct `explicit`
+  class.
+- **Subprocess isolation.** `config.py:40` binds paths at import time; the tick
+  spawns children with `-p <name>` via `build_capability_scoped_env`, never loops
+  profiles in-process.
+- **Install-DB corpus reads.** Persona turns live in the shared install chat.db;
+  the persona profile's own chat.db is empty. Corpus reads always open the install
+  DB explicitly.
+
+Full details: [Persona Learning Loop](manual/features/persona-learning-loop.md).
+
+## 8. Operator Runbook — commands and entry points
 
 ### Slash commands
 
@@ -254,11 +286,13 @@ in Archon, the test-and-keep machinery and the ledger live in the assistant.
 | Evolve `propose` (`evolve/evolve_loop.py propose`) | Scheduled (via `run_evolve` + the scheduler setup script) | The safe recall-tuning rail — replay, compare, regression corpus, decision artifact. No identity mutation. |
 | Evolve `propose-belief` (`evolve/evolve_loop.py propose-belief`) | Archon-driven, on-demand | The identity rail — evidence-read + floor + judge, then the audited amendment gate. |
 | Corpus migration (`self_model.py migrate-corpus`) | One-time, manual | Quarantines keyword-captured self-model records to a reversible backup. |
+| Persona learning tick (`persona_learning_tick.py`) | Scheduled | Enumerates learning-enabled personas, spawns per-persona reflection on background tiers. See [Persona Learning Loop](manual/features/persona-learning-loop.md). |
+| `thehomie profile learning enable\|disable <name>` | On-demand | Opt a persona into/out of learning (strict-read RMW + audit row). |
 
 The morning reflection is the integration seam: it is the single scheduled run
 that forms beliefs and then tests them against each other.
 
-## 8. Tuning — the configuration knobs
+## 9. Tuning — the configuration knobs
 
 Every knob is resolved at call time from an environment variable through a
 settings resolver (so a test or a live override takes effect without a code
@@ -311,7 +345,7 @@ change). Defaults below are the shipped values.
 The Living Mind subfeatures (heartbeat blocker escalation, ambient observations,
 episodes, the session brief) have their own knob tables on their feature pages.
 
-## 9. Verifying The Self Is Alive
+## 10. Verifying The Self Is Alive
 
 The cognitive state is inspectable. These are the operator's windows into
 whether the self is actually forming, holding, and earning beliefs.
@@ -332,7 +366,7 @@ A practical check: after a morning reflection, the new beliefs and any flagged
 contradictions appear in the self-model state; `/working` shows pending and
 applied amendments; and the next session brief reports what changed.
 
-## 10. Safety Boundaries
+## 11. Safety Boundaries
 
 - **Default-deny mutation.** Any surface that could change durable identity or
   touch an external account is default-denied and only acts through an explicit,
@@ -353,7 +387,7 @@ applied amendments; and the next session brief reports what changed.
 - **History purity.** Internal reasoning (the monologue) never enters the
   persisted transcript or the user-facing reply.
 
-## 11. Common Failure Modes
+## 12. Common Failure Modes
 
 | Symptom | What it means | What to do |
 |---|---|---|
@@ -363,7 +397,7 @@ applied amendments; and the next session brief reports what changed.
 | The monologue did not fire | The turn was trivial, below the length floor, or not a configured firing process | Expected — the gate keeps trivial turns at one call |
 | `held under tension` on a belief | Two beliefs genuinely conflict and the loser survived above threshold, or two explicit beliefs conflict | Surfaced deliberately for the operator; resolve it by stating which holds |
 
-## 12. File Ownership Map
+## 13. File Ownership Map
 
 | Concern | Location |
 |---|---|
@@ -375,13 +409,14 @@ applied amendments; and the next session brief reports what changed.
 | The evolve test-and-keep engine | `.claude/scripts/evolve/` (`evolve_loop.py`, `judge.py`, `belief_regression.py`, plus the recall harness) |
 | Scheduled reflection / weekly / dream | `.claude/scripts/memory_reflect.py`, `memory_weekly.py`, `memory_dream.py` |
 | The configuration resolvers | `.claude/scripts/config.py` |
+| Persona learning tick | `.claude/scripts/persona_learning_tick.py`, `personas/services.py` (learning opt-in) |
 | The Living Mind substrate | the Heartbeat Runtime, Episodes, and Session Opening Brief feature pages |
 
 The contradiction engine (`belief_conflicts.py`) is distinct from
 `contradictions.py`, which is a documentation-vs-code drift linter — a different
 concern.
 
-## 13. Current Scope And Non-Goals
+## 14. Current Scope And Non-Goals
 
 In scope and live: operator-belief formation, the contradiction engine, the
 gated cognitive pass, and the earned-belief adoption gate, all wired into the
