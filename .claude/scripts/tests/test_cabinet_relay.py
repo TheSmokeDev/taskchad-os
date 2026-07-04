@@ -16,8 +16,26 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 import cabinet_relay
 from models import Channel, Platform
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dead_registry(tmp_path, monkeypatch):
+    """Keep the relay's dead-target registry off the real ``config.STATE_DIR``.
+
+    The dead-target wiring lazily builds a module-singleton registry the first
+    time a relay send runs. Pin it to a per-test tmp file (and reset the cached
+    singleton) so these existing relay tests neither read nor write the real
+    state dir, and so a mark in one test can't leak into another.
+    """
+    from orchestration.dead_targets import DeadTargetRegistry
+
+    monkeypatch.setattr(cabinet_relay, "_dead_registry", None, raising=False)
+    reg = DeadTargetRegistry(path=tmp_path / "dead_targets.json")
+    monkeypatch.setattr(cabinet_relay, "_get_dead_registry", lambda: reg)
 
 
 # ---------------------------------------------------------------------------

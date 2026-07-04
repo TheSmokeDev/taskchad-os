@@ -2850,9 +2850,41 @@ def _validate_cron(schedule: str) -> None:
         raise HTTPException(status_code=422, detail=f"invalid cron: {schedule!r}")
 
 
+def _scan_scheduled_prompt(prompt: str | None) -> None:
+    """Reject a bot-lifecycle scheduled prompt (Deliverable 3, seam 2 — B1).
+
+    dashboard_api has NO global ValueError→HTTP mapper, so a genuine
+    ``BotLifecycleBlocked`` is TRANSLATED to ``HTTPException(400)`` explicitly (a
+    bare re-raise would surface as HTTP 500). The guard import lives INSIDE the
+    wrapper (R2 NM1) so an import failure of the new module ALLOWS the write
+    rather than 500-ing. Any non-block guard error is logged and allowed (M3).
+    """
+    if not prompt:
+        return
+    try:
+        from orchestration.lifecycle_guard import (
+            BotLifecycleBlocked,
+            check_bot_lifecycle,
+        )
+    except Exception:
+        logger.warning(
+            "lifecycle guard unavailable; allowing scheduled prompt", exc_info=True
+        )
+        return
+    try:
+        check_bot_lifecycle(prompt)
+    except BotLifecycleBlocked as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.warning(
+            "lifecycle guard errored; allowing scheduled prompt", exc_info=True
+        )
+
+
 @router.post("/api/scheduled")
 def create_scheduled(body: CreateScheduledBody) -> dict:
     _validate_cron(body.schedule)
+    _scan_scheduled_prompt(body.prompt)
     conn = get_connection()
     try:
         cur = conn.execute(
@@ -2876,6 +2908,8 @@ def patch_scheduled(task_id: int, body: PatchScheduledBody) -> dict:
     fields: dict[str, Any] = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if "schedule" in fields:
         _validate_cron(fields["schedule"])
+    if "prompt" in fields:
+        _scan_scheduled_prompt(fields["prompt"])
     if not fields:
         raise HTTPException(status_code=400, detail="no fields to update")
     sets = ", ".join(f"{k} = :{k}" for k in fields)

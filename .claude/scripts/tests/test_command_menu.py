@@ -39,13 +39,17 @@ def test_telegram_native_menu_is_curated_static_registry() -> None:
     names = [name for name, _desc in menu]
 
     assert names == list(commands.TELEGRAM_NATIVE_COMMANDS)
-    assert len(names) == 41
+    assert len(names) == 44
     assert "design" in names
     assert "linkedin" in names
     assert "video" in names
     assert "vault" in names
     assert "skills" in names
     assert "commands" in names
+    # Operator Automation UX (Phase 2)
+    assert "recap" in names
+    assert "blueprints" in names
+    assert "suggestions" in names
     assert "publish" not in names
     assert "blogstatus" not in names
     assert "prime" not in names

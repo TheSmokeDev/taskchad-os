@@ -49,6 +49,67 @@ _active_relays: set[int] = set()
 # when the meeting ends (no resume possible/needed past that point).
 _meeting_high_seq: dict[int, int] = {}
 
+# Lazily-constructed shared dead-target registry. A deleted/blocked origin
+# channel is proven dead once (a send raised a permanent whole-chat error) and
+# skipped on subsequent fan-outs, self-healing the instant a send succeeds. The
+# accessor is fail-open: if the registry can't be built the relay behaves
+# exactly as before (no skip, no mark, no clear).
+_dead_registry: Any = None
+
+
+def _get_dead_registry() -> Any:
+    """Return the shared DeadTargetRegistry, building it once. Fail-open: on any
+    error (import/construct) returns None so relay delivery is never affected."""
+    global _dead_registry
+    if _dead_registry is not None:
+        return _dead_registry
+    try:
+        from orchestration.dead_targets import DeadTargetRegistry  # scripts/ on chat path
+
+        _dead_registry = DeadTargetRegistry()
+    except Exception:  # noqa: BLE001 — fail-open: no registry → relay unchanged
+        return None
+    return _dead_registry
+
+
+def _origin_target(origin: Any) -> tuple[str, str] | None:
+    """(platform, chat_id) key for the dead-target registry, mirroring
+    ``Channel.unified_id`` composition. None when the origin is unusable."""
+    try:
+        return origin.platform.value, str(origin.platform_id)
+    except Exception:  # noqa: BLE001 — malformed origin never breaks relay
+        return None
+
+
+def _note_send_success(origin: Any) -> None:
+    """Self-heal: a successful send clears any dead flag on the origin. Fail-open
+    — a registry fault must never change ``_safe_send``'s result."""
+    try:
+        reg = _get_dead_registry()
+        target = _origin_target(origin)
+        if reg is not None and target is not None:
+            reg.clear(*target)
+    except Exception:  # noqa: BLE001 — fail-open
+        pass
+
+
+def _note_send_failure(origin: Any, exc: BaseException) -> None:
+    """Record the origin as dead only on a permanent whole-chat death
+    (forbidden / chat-not-found). Transient errors are NOT recorded. Fail-open
+    — a registry fault must never change ``_safe_send``'s result."""
+    try:
+        from orchestration.dead_targets import DeadTargetRegistry, classify_send_error
+
+        kind = classify_send_error(exc)
+        if not DeadTargetRegistry.is_dead_error_kind(kind):
+            return
+        reg = _get_dead_registry()
+        target = _origin_target(origin)
+        if reg is not None and target is not None:
+            reg.mark_dead(*target, reason=str(exc)[:200])
+    except Exception:  # noqa: BLE001 — fail-open
+        pass
+
 
 def _display_label(agent_id: str) -> str:
     """Human label for a persona id (``seo_content`` -> ``Seo Content``)."""
@@ -116,6 +177,24 @@ async def _relay_meeting(
     relayed = 0
     send_failures = 0
     try:
+        # Skip a proven-dead origin (the Hermes short-circuit): a prior send
+        # raised a permanent whole-chat error, so re-fanning-out here only
+        # burns the platform's flood-control envelope. Self-heals on the next
+        # successful send (see _note_send_success). Fail-open: a broken
+        # registry never blocks a relay.
+        reg = _get_dead_registry()
+        target = _origin_target(origin)
+        if reg is not None and target is not None:
+            try:
+                if reg.is_dead(*target):
+                    logger.info(
+                        "cabinet relay skipping proven-dead origin (meeting %s)",
+                        meeting_id,
+                    )
+                    return
+            except Exception:  # noqa: BLE001 — fail-open
+                pass
+
         from integrations import cabinet_api  # lazy (inside try so finally always cleans up)
 
         # Resume after the last seq we already delivered (None on the first
@@ -189,8 +268,18 @@ async def _safe_send(adapter: Any, origin: Any, text: str) -> bool:
     from models import OutgoingMessage  # lazy: flat chat import
 
     try:
-        await adapter.send(OutgoingMessage(text=text, channel=origin))
-        return True
-    except Exception:  # noqa: BLE001 — fail-open per-send
+        result = await adapter.send(OutgoingMessage(text=text, channel=origin))
+    except Exception as exc:  # noqa: BLE001 — fail-open per-send
         logger.warning("cabinet relay send failed (channel send raised)")
+        _note_send_failure(origin, exc)
         return False
+    # A falsy result for NON-EMPTY text means the adapter swallowed a delivery
+    # failure and returned no message id (e.g. slack.py catches chat_postMessage
+    # errors, prints, and returns None). Treat it as a failure so we never
+    # record a false success/clear — there is no exception to classify, so it is
+    # a transient miss (no mark_dead), the key invariant being no false clear.
+    if text.strip() and not result:
+        logger.warning("cabinet relay send failed (adapter returned no message id)")
+        return False
+    _note_send_success(origin)
+    return True

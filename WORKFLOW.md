@@ -1425,3 +1425,72 @@ earned (Act 4). The crux the audit said FAILS now PASSES. master is 4 commits ah
    quota; the OAuth blocker (Living Mind Act 1) promotes; a real /clear flips the receipt; an 8h gap fires the brief.
 5. **Docs-trail commit**: 2 PRDs + 8 PRPs + ~24 adversarial artifacts + WORKFLOW are uncommitted (acts committed code only).
 6. **Future hardening**: the Act-4 non-blocking recs + the Act-3 F5 (runtime-slice subprocess-cancellation PRP) + engine.py issue-#19 Langfuse debt.
+
+---
+
+## PRD-hermes-v18-tier1-ports — Phase 1 SHIPPED (2026-07-04)
+
+**PRD:** `PRDs/PRD-hermes-v18-tier1-ports.md` · **Queue source:** `PRPs/active/PRP-hermes-v18-YourProduct-best-of-ports.md` · **PRP:** `PRPs/PRP-PRD-hermes-v18-tier1-ports-phase-1.md`
+**Pre-build gate:** R1 **REJECT** (B1 missed `/api/scheduled` seam, B2 over-broad lifecycle regex, B3 stale repo claims) → revise (all 3 closed + 5 majors) → R2 **REJECT** on 1 new blocker (NB1 non-atomic breaker state write) + 1 major (NM1 guard import outside fail-open wrapper) → both mechanical, applied by orchestrator in place, greenlit. Artifacts: `PRPs/planning/PRD-hermes-v18-tier1-ports-phase-1-adversarial-{r1,r2}.md`.
+**Post-build gate:** iter1 **FIX-REQUIRED** (F1 over-broad "not found" fallback could dead-mark reachable chats + gas-station test; F2 breaker tripped on broken persistence) → fixes → iter2 **FIX-REQUIRED** (NEW F1 real-adapter semantics: Slack falsy-return = false success, Telegram wrapper lost provider detail; NEW F2 `upskill` matched `kill` — missing left boundary) → fixes → final **PASS, zero findings**. Artifacts: `...-post-build.md` (final PASS state), `...-post-build-{iter2,final}.md` (session logs).
+
+### Phase 1: Orchestration Resilience Pack
+- **Status**: completed
+- **Commit**: `659c4a49` (feat(orchestration): resilience pack — dead-targets, restart-loop breaker, lifecycle guard)
+- **Execution Mode**: team (3 executors: dead-targets, restart-loop, lifecycle-guard) + validator; fix loops routed back to owning executors
+- **Team Failure**: none (fail-fast check passed — all 3 modules + seams had output)
+- **Workstreams**:
+  - dead-targets: completed (dead_targets.py, test_dead_targets.py, cabinet_relay.py, test_cabinet_relay.py fixture, adapters/telegram.py 3-line chaining — sanctioned extension)
+  - restart-loop-breaker: completed (restart_loop_guard.py, test_restart_loop_guard.py, chat/main.py)
+  - lifecycle-guard: completed (lifecycle_guard.py, test_lifecycle_guard.py, convoy_service.py, dashboard_api.py, test_dashboard_api.py)
+- **Tests**: phase suite 336 passing (141 new/updated); known-failing baseline unchanged (AST audit 8 legacy violations, test_executor_boundary 403s — pre-existing, documented in PRD)
+- **Files Changed**: +1974 -8 across 13 files
+- **Validation**: validator PASS in 1 cycle; post-build PASS after 2 fix iterations
+- **Context Budget**: orchestrator relies on harness summarization; budget gate not binding
+- **Next Phase**: Phase 2 (Operator Automation UX — blueprint catalog, suggestions store, /recap; touches chat registration lines — coordinate with claude-cofounder PR rebase, see live-chat lane board 2026-07-04)
+- **Resume Instructions**: `/clutch PRDs/PRD-hermes-v18-tier1-ports.md 2` — PRD Global Constraints lists the known-failing baseline; multi-session lane protocol in live chat (ping before master merges). Phases 3 (backup/restore) and 4 (webhook adapter, --adversarial=aggressive) follow.
+
+### Phase 2: Operator Automation UX
+- **Status**: completed
+- **Commit**: `e0d24266` (feat(automation): operator automation UX — blueprints, suggestions, /recap)
+- **Execution Mode**: team (2 executors: orchestration upstream, chat downstream; frozen import contract in the PRP — held with zero deviations). LEAN GATE (2026-07-04 process change): single-pass PRP, NO pre-build review; all rigor post-build.
+- **Team Failure**: none. (Earlier same-day: the first Phase-2 research agent died on the session limit — relaunched post-reset in the lean shape.)
+- **Workstreams**:
+  - orchestration: completed (blueprint_catalog.py, suggestions.py, suggestion_catalog.py + 3 test files)
+  - chat: completed (recap.py, integrations/scheduled_api.py, core_handlers.py, commands.py append-only, test_command_menu 41→44, + 3 test files, docs/manual/features/automation-ux.md + README index line)
+- **Post-build gate**: iter1 FIX-REQUIRED (concurrent-accept race, reviewer-reproduced) → CAS claim protocol → iter2 FIX-REQUIRED (crash-stranded claim) → accepting_at+claim_token TTL recovery (30s=3x HTTP timeout) → final PASS zero findings. Artifacts: `PRPs/planning/PRD-hermes-v18-tier1-ports-phase-2-adversarial-post-build*.md`.
+- **Tests**: 105-test phase suite green; 125-test chat regression sweep green; AST-audit baseline unchanged (8 legacy, none phase-owned)
+- **Files Changed**: +3544 -1 across 16 files
+- **Validation**: post-build PASS after 2 fix iterations (no separate validator — lean gate)
+- **Next Phase**: Phase 3 (backup/restore + quick snapshots — `thehomie backup|restore`, WAL-safe sqlite3.backup(), traversal-guarded restore)
+- **Resume Instructions**: `/clutch PRDs/PRD-hermes-v18-tier1-ports.md 3` with the LEAN gate (single-pass PRP → execute → post-build only, per feedback_clutch_one_revision_lean_gate 2026-07-04). NOTE for committers: docs/manual/README.md carries another session's uncommitted line — stage index-surgically (hash-object + update-index), never `git add` the whole file while it's shared.
+
+### Phase 3: Backup / Restore + Quick Snapshots
+- **Status**: completed
+- **Commit**: `30846bc7` (feat(cli): backup/restore + quick snapshots)
+- **Execution Mode**: solo (piv-executor), lean gate (single-pass PRP, post-build only)
+- **Team Failure**: none
+- **Workstreams**: backup-tool: completed (backup_tool.py, cli_backup.py, cli.py 8 append lines, test_backup_tool.py 43 tests, docs/manual/features/backup-restore.md + surgical README index line)
+- **Post-build gate**: PASS FIRST PASS, zero findings; 2 non-blocking recs applied (WAL-test copy2-fallback forbidden w/ negative proof; manual page). Artifact: `PRPs/planning/PRD-hermes-v18-tier1-ports-phase-3-adversarial-post-build.md`.
+- **Tests**: 43/43 phase + test_cli/test_command_menu 49 green; AST baseline unchanged (scan 287→289 files, zero new violations). Live smoke: real 61.6MB backup 17.5s + dry-run restore.
+- **Files Changed**: +1825 across 6 files
+- **Key decisions**: .env excluded by default (--include-secrets opt-in); restore refuses while bot PID alive; curated roots never PROJECT_ROOT; Windows-safe read-only URI for sqlite3.backup().
+- **Next Phase**: Phase 4 (webhook event-trigger adapter — network ingress, deepest post-build treatment; routes default-dormant, HMAC/Svix validation, INSECURE_NO_AUTH blocked off-loopback)
+- **Resume Instructions**: `/clutch PRDs/PRD-hermes-v18-tier1-ports.md 4` with the lean gate. README.md still shared-dirty — index-surgical staging only.
+
+### Phase 4: Webhook Event-Trigger Adapter — QUEUE CLOSEOUT
+- **Status**: completed — **all 7 Tier-1 ports SHIPPED**
+- **Commit**: `36f71ae4` (feat(webhook): Phase 4 — webhook event-trigger adapter); tracking doc stamped `8fad4d8a`
+- **Execution Mode**: solo executor + `--adversarial=aggressive` (network ingress earns the deepest post-build treatment). Lean gate: single-pass PRP, all rigor post-build.
+- **Adapter**: dormant-by-default (no `WEBHOOK_ROUTES` → never constructed); POST `/webhooks/{route}`; per-route GitHub-HMAC / generic-HMAC / GitLab-token / Svix auth; `INSECURE_NO_AUTH` hard-blocked off-loopback; least-privilege ingress (`source="tool"`, `user_role="viewer"`, prefetched_context); `deliver_only` mode; per-route TTL+FIFO idempotency; fixed-window rate-limit; body-cap pre-read; audit row per accepted delivery; registered LAST so the resolver closure sees every sibling adapter.
+- **Post-build gate** (aggressive, this is where the value showed):
+  - iter1 **FIX-REQUIRED** — F1 global delivery-id cache = cross-route poisoning; F2 unbounded cache DoS; F3 400s emitted without audit rows → fixed (47→53 tests).
+  - final re-review **FIX-REQUIRED** — F1 body-only-signature replay via a mutated delivery-id header; F2 sanitized delivery-id collision suppresses distinct deliveries. Both rooted in ONE flaw: idempotency keyed on the lossy, attacker-controlled, non-signature-covered delivery-id header (F2's collision was introduced by an earlier sanitization request — caught before ship).
+  - **executor hit the session limit mid-fix** → account switched → fresh `executor-webhook-final` applied the convergent fix post-reset.
+  - **fix**: separate the idempotency KEY from the DISPLAY id — `_compute_replay_key()` = `sha256(raw_body)` for body-only modes (+ INSECURE_NO_AUTH loopback), signed `svix-id.timestamp.body` tuple for Svix, computed from the exact bytes the signature verified; sanitized `_sanitize_delivery_id()` kept for `channel.platform_id` + audit only. Structurally kills both findings at once.
+  - **final verification: codex PASS** with live probes — mutated `svix-id` + original signature returned `401` (proves svix-id IS signature-covered, so keying on it is sound), original `202`; rate-limit fixture confirmed still exercised (3 distinct bodies fill cap → 4th `429`, bad sig after → `401`); codex ran the suite itself → `58 passed`. Artifacts: `PRPs/planning/PRD-hermes-v18-tier1-ports-phase-4-adversarial-post-build*.md` + scratchpad `phase4-final-verify.md`/`phase4-final-verdict.md`.
+- **Tests**: 58 phase suite green; AST audit baseline unchanged (8 legacy violations, zero webhook files).
+- **Files Changed**: +2422 -1 across 6 files (new: webhook.py, webhook_audit.py, test_adapter_webhook.py; additive: models.py `Platform.WEBHOOK`, main.py dormant registration + resolver, config.py `get_webhook_settings`/`WebhookRoute`/`WebhookSettings`).
+- **Commit hygiene**: shared dirty tree (imagegen/discord-voice/proof-package/.env) never staged — targeted `git add` of exactly the 6 phase-owned files (all three modified files verified Phase-4-only before staging); no checkout/reset/stash (worktree-guard honored); committed under the YourAgent identity.
+- **Incident logged**: an earlier Phase-4 executor's chained shell carried a stray `git stash` (popped immediately; README/imagegen/website-design/memory verified intact, stash list clean) — disclosed in live chat, flagged for retro. No data lost.
+- **Queue status**: Tier-1 CLOSED. Commits — 659c4a49 (P1), e0d24266 (P2), 30846bc7 (P3), 36f71ae4 (P4), 8fad4d8a (tracking). Watchers (queue item pre-shipped) ad361fc9/96290af0. Tier-2 remains (context-compressor v3, ContextEngine ABC, etc.) — not in this run's scope.

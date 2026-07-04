@@ -132,6 +132,10 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("pdf", "Work with PDFs — extract, merge, split, create", "engine", "admin"),
     ("slides", "Generate a PPTX presentation", "engine", "admin"),
     ("sop", "Create a runbook or technical documentation", "engine", "admin"),
+    # -- Operator Automation UX (Phase 2) --
+    ("recap", "Session recap — turns, tools, files, last exchange (zero-LLM)", "router", "admin"),
+    ("blueprints", "Automation blueprints — list | <key> | <key> slot=val (proposes)", "router", "admin"),
+    ("suggestions", "Automation proposals — list | accept <n> | dismiss <n>", "router", "admin"),
 ]
 
 # Category groupings for help text
@@ -165,6 +169,8 @@ CATEGORIES: list[tuple[str, list[str]]] = [
          "commit", "prd", "e2e", "sysreview", "execreport", "clutch"],
     ),
     ("Dev Tools", ["diagram", "pdf", "slides", "sop"]),
+    # Operator Automation UX (Phase 2) — blueprints/suggestions + zero-LLM recap.
+    ("Automation", ["blueprints", "suggestions", "recap"]),
 ]
 
 TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
@@ -209,6 +215,9 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "design",
     "signal",
     "social",
+    "recap",
+    "blueprints",
+    "suggestions",
 )
 
 # Core data intents: (keywords, command, included_in_brief)

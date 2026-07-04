@@ -20,6 +20,8 @@ from typing import Any
 
 from session_keys import build_session_key, resolve_thread_id
 
+from recap import build_recap
+
 from runtime import routing as runtime_routing
 from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE
 from runtime.model_control import (
@@ -5194,6 +5196,265 @@ async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only:
 
 
 # ---------------------------------------------------------------------------
+# Operator Automation UX (Phase 2) — /recap, /blueprints, /suggestions
+#
+# /recap is pure-local zero-LLM over chat.db. /blueprints and /suggestions
+# consume the orchestration import contract (blueprint_catalog, suggestions,
+# suggestion_catalog) via LAZY imports inside the handler bodies so an import
+# failure degrades to a friendly line instead of crashing the router
+# (fail-open at the cross-slice seam). Accept flows THROUGH the guarded
+# /api/scheduled path via integrations.scheduled_api — never a local create.
+# ---------------------------------------------------------------------------
+
+
+async def handle_recap(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Zero-LLM session recap — turn counts, tool histogram, files touched, last exchange.
+
+    Reads the CURRENT session's recent messages from the chat store and renders
+    the pure-local recap. No engine invocation, no tokens. Uses
+    ``list_recent_messages`` (latest-N, chronological) — NOT ``list_messages``
+    (which returns the OLDEST 200). The scan window is capped at 120 messages;
+    ``build_recap`` further windows to the last 20 user/assistant turns.
+    """
+    store, existing, platform_str, *_ = _get_session(incoming)
+    if not existing:
+        return build_recap([], platform=platform_str)
+    try:
+        msgs = store.list_recent_messages(existing.session_id, limit=120)
+    except Exception:
+        msgs = []
+    payload = [
+        {"role": m.role, "content": m.content, "tool_calls": m.tool_calls}
+        for m in msgs
+    ]
+    return build_recap(
+        payload,
+        session_id=existing.session_id,
+        platform=platform_str,
+    )
+
+
+def _render_blueprint_list(blueprint_catalog: Any) -> str:
+    """Render the catalog as a slug list with usage footer."""
+    lines = ["*Automation Blueprints*", ""]
+    for bp in getattr(blueprint_catalog, "CATALOG", []):
+        lines.append(f"  `{bp.key}` — {bp.title}")
+        desc = getattr(bp, "description", "")
+        if desc:
+            lines.append(f"     {desc}")
+    lines.append("")
+    lines.append("Show one: `/blueprints <key>`")
+    lines.append("Propose: `/blueprints <key> slot=value ...`")
+    return "\n".join(lines)
+
+
+def _render_blueprint_detail(blueprint_catalog: Any, bp: Any) -> str:
+    """Render a single blueprint's slots + pre-filled command."""
+    lines = [f"*Blueprint: {bp.title}* (`{bp.key}`)"]
+    desc = getattr(bp, "description", "")
+    if desc:
+        lines.append(desc)
+    try:
+        entry = blueprint_catalog.blueprint_catalog_entry(bp)
+    except Exception:
+        entry = {}
+    sched_human = entry.get("scheduleHuman") if isinstance(entry, dict) else None
+    if sched_human:
+        lines.append(f"  Schedule: {sched_human}")
+
+    slots = getattr(bp, "slots", None) or []
+    if slots:
+        lines.append("")
+        lines.append("*Slots:*")
+        for slot in slots:
+            name = getattr(slot, "name", "")
+            label = getattr(slot, "label", None) or name
+            req = "" if getattr(slot, "optional", False) else " (required)"
+            default = getattr(slot, "default", None)
+            dflt = f" [default: {default}]" if default not in (None, "") else ""
+            options = getattr(slot, "options", None) or ()
+            opt = f" — options: {', '.join(map(str, options))}" if options else ""
+            lines.append(f"  `{name}` — {label}{req}{dflt}{opt}")
+
+    try:
+        cmd = blueprint_catalog.blueprint_slash_command(bp)
+    except Exception:
+        cmd = None
+    if cmd:
+        lines.append("")
+        lines.append(f"Pre-filled: `{cmd}`")
+    lines.append("")
+    lines.append("Propose it: `/blueprints <key> slot=value ...`")
+    return "\n".join(lines)
+
+
+async def handle_blueprints(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Automation blueprints — `list` | `<key>` | `<key> slot=val ...` (proposes).
+
+    Filling a blueprint registers a PENDING suggestion — it does NOT auto-create
+    a scheduled task (default-deny / propose-don't-auto-create). The operator
+    must explicitly `/suggestions accept <n>` to schedule it.
+    """
+    import hashlib
+
+    try:
+        from orchestration import blueprint_catalog, suggestions
+    except Exception:
+        return "Automation blueprints are unavailable right now."
+
+    raw = (args or "").strip()
+    try:
+        tokens = shlex.split(raw) if raw else []
+    except ValueError:
+        tokens = raw.split()
+
+    if not tokens or tokens[0].lower() in {"list", "ls"}:
+        return _render_blueprint_list(blueprint_catalog)
+
+    key = tokens[0]
+    bp = blueprint_catalog.get_blueprint(key)
+    if bp is None:
+        return f"No blueprint '{key}'. Use `/blueprints` to list them."
+
+    values: dict[str, str] = {}
+    for tok in tokens[1:]:
+        if "=" in tok:
+            name, _, val = tok.partition("=")
+            name = name.strip()
+            if name:
+                values[name] = val.strip()
+
+    if not values:
+        return _render_blueprint_detail(blueprint_catalog, bp)
+
+    # Fill → propose a pending suggestion (no auto-create).
+    try:
+        spec = blueprint_catalog.fill_blueprint(bp, values)
+    except blueprint_catalog.BlueprintFillError as exc:
+        return f"Could not fill '{key}': {exc}"
+    except Exception as exc:
+        return f"Could not fill '{key}': {exc}"
+
+    job_spec = blueprint_catalog.scheduled_kwargs_from_spec(spec)
+    dedup_basis = f"{bp.key}|{job_spec.get('schedule', '')}|{job_spec.get('prompt', '')}"
+    dedup_key = "blueprint:" + hashlib.sha1(dedup_basis.encode("utf-8")).hexdigest()[:12]
+    title = getattr(bp, "title", key)
+    description = getattr(bp, "description", "")
+    rec = suggestions.add_suggestion(
+        title=title,
+        description=description,
+        source="blueprint",
+        job_spec=job_spec,
+        dedup_key=dedup_key,
+    )
+    if rec is None:
+        return (
+            f"'{title}' is already proposed (or was dismissed). "
+            f"Use `/suggestions` to review pending proposals."
+        )
+    schedule = job_spec.get("schedule", "")
+    sched_txt = f" (`{schedule}`)" if schedule else ""
+    return (
+        f"Proposed '{title}'{sched_txt}. It's pending — review with `/suggestions`, "
+        f"then `/suggestions accept <n>` to schedule it through the guard."
+    )
+
+
+def _render_pending_suggestions(pending: list) -> str:
+    """Render the pending proposal list with 1-based refs."""
+    if not pending:
+        return (
+            "*Automation Suggestions*\n"
+            "No pending proposals. Fill a blueprint with "
+            "`/blueprints <key> slot=value ...`"
+        )
+    lines = ["*Automation Suggestions* (pending)", ""]
+    for i, s in enumerate(pending, start=1):
+        title = s.get("title") or "(untitled)"
+        spec = s.get("job_spec") or {}
+        schedule = spec.get("schedule", "")
+        head = f"  {i}. {title}" + (f" — `{schedule}`" if schedule else "")
+        lines.append(head)
+        desc = s.get("description")
+        if desc:
+            lines.append(f"     {desc}")
+    lines.append("")
+    lines.append("Accept: `/suggestions accept <n>`   Dismiss: `/suggestions dismiss <n>`")
+    return "\n".join(lines)
+
+
+async def handle_suggestions(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Automation proposals — `list` | `accept <ref>` | `dismiss <ref>`.
+
+    Listing seeds the curated starter catalog on first view (when the store is
+    empty). Accept renders the suggestion's job_spec and hands it THROUGH the
+    guarded ``/api/scheduled`` path (cross-process, server-side bot-lifecycle
+    guard) — a refused prompt returns the guard's verbatim message, never a 500.
+    Dismiss latches the dedup_key forever.
+    """
+    try:
+        from orchestration import suggestion_catalog, suggestions
+    except Exception:
+        return "Automation suggestions are unavailable right now."
+
+    parts = (args or "").split()
+    sub = parts[0].lower() if parts else "list"
+
+    if sub in {"list", "ls"}:
+        try:
+            if not suggestions.load_suggestions():
+                suggestion_catalog.seed_catalog_suggestions()
+        except Exception:
+            pass
+        try:
+            pending = suggestions.list_pending()
+        except Exception:
+            pending = []
+        return _render_pending_suggestions(pending)
+
+    if sub == "accept":
+        ref = parts[1] if len(parts) > 1 else ""
+        if not ref:
+            return "Usage: `/suggestions accept <n>`"
+        from integrations import scheduled_api  # lazy, cross-process, fail-open
+
+        origin = {
+            "platform": getattr(getattr(incoming, "platform", None), "value", None),
+            "chat_id": getattr(incoming, "chat_id", None),
+        }
+
+        async def _create(spec: dict) -> dict:
+            return await scheduled_api.create_scheduled_task(spec)
+
+        try:
+            job = await suggestions.accept_suggestion_async(
+                ref, create_fn=_create, origin=origin,
+            )
+        except scheduled_api.ScheduledAPIError as exc:
+            return exc.friendly_message
+        if job is None:
+            return "No such pending suggestion. Use `/suggestions` to list them."
+        return "Scheduled — it's now an active scheduled task."
+
+    if sub == "dismiss":
+        ref = parts[1] if len(parts) > 1 else ""
+        if not ref:
+            return "Usage: `/suggestions dismiss <n>`"
+        try:
+            ok = suggestions.dismiss_suggestion(ref)
+        except Exception:
+            ok = False
+        return "Dismissed — won't be offered again." if ok else "No such suggestion."
+
+    return (
+        "*Automation Suggestions*\n"
+        "`/suggestions` — list pending proposals\n"
+        "`/suggestions accept <n>` — schedule it (runs through the guard)\n"
+        "`/suggestions dismiss <n>` — never offer it again"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Handler lookup — maps command name to handler function
 # ---------------------------------------------------------------------------
 
@@ -5252,4 +5513,8 @@ CORE_HANDLERS: dict[str, Any] = {
     "design": handle_design,
     # Social post queue (Issue #77)
     "social": handle_social,
+    # Operator Automation UX (Phase 2) — zero-LLM recap + propose-don't-auto-create.
+    "recap": handle_recap,
+    "blueprints": handle_blueprints,
+    "suggestions": handle_suggestions,
 }

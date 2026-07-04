@@ -88,6 +88,8 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Memory And Recall System | Active baseline | [memory-and-recall-system](features/memory-and-recall-system.md) | `thehomie recall`, `/search`, `/file`, `/working`, `/vault-ops` |
 | Memory, Knowledge Graph, And Dashboard Chat | Active baseline, dashboard chat reliability proven | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
 | Scheduled Jobs, Settings, And Audit | Active baseline | [scheduled-settings-audit](features/scheduled-settings-audit.md) | `/scheduled`, `/settings`, `/audit` |
+| Operator Automation UX | Shipped (Phase 2), propose-don't-auto-create | [automation-ux](features/automation-ux.md) | `/recap`, `/blueprints`, `/suggestions` |
+| Backup, Restore, And Snapshots | Shipped (Phase 3), restore default-denied | [backup-restore](features/backup-restore.md) | `thehomie backup`, `thehomie restore`, `thehomie snapshot` |
 | Native Design (`/design`) | Phase 1 + B1 shipped, live-proven | [design-capability](features/design-capability.md) | `/design`, `/design system <slug>` |
 | Business Signal Engine | Shipped (#79), merged | [business-signal-engine](features/business-signal-engine.md) | `/signal`, `/signal refresh`, daily/weekly cadence |
 | Social Post Pipeline | Shipped (#80), default-denied, operator-gated | [social-post-pipeline](features/social-post-pipeline.md) | `/social` (draft/approve/post/schedule/cadence) |

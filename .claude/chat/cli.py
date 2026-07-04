@@ -38,6 +38,11 @@ from models import Platform  # noqa: E402, F401
 from router import ChatRouter  # noqa: E402
 from session import SOURCE_VALUES, get_session_store  # noqa: E402
 from cli_session import session as session_group  # noqa: E402
+from cli_backup import (  # noqa: E402
+    backup as backup_cmd,
+    restore as restore_cmd,
+    snapshot as snapshot_group,
+)
 
 from config import (  # noqa: E402
     CHAT_DB_PATH,
@@ -74,6 +79,9 @@ def main(ctx):
 
 
 main.add_command(session_group)
+main.add_command(backup_cmd)
+main.add_command(restore_cmd)
+main.add_command(snapshot_group)
 
 
 def _resolve_vault_memory_dir(vault: str) -> Path:

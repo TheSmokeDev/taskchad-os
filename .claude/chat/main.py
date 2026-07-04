@@ -180,6 +180,14 @@ def _shutdown_handler(signum: int, frame: object) -> None:
     """Handle SIGTERM/SIGINT for clean shutdown with PID cleanup."""
     print(f"\n[{datetime.now()}] Received signal {signum}, shutting down...")
     append_to_daily_log("Bot stopped (signal)", "Bot Lifecycle")
+    # Clean shutdown clears the restart-loop boot log so a legitimate operator
+    # restart never accumulates toward a false trip. Best-effort — a broken
+    # breaker must never block shutdown.
+    try:
+        from orchestration import restart_loop_guard
+        restart_loop_guard.clear()
+    except Exception:
+        pass
     try:
         from runtime.langfuse_setup import flush_langfuse
         flush_langfuse()
@@ -239,6 +247,59 @@ def _run_test_hold(unlock_path: Path) -> None:
         time.sleep(0.2)
 
 
+def _boot_breaker_decision(killed: object, *, guard: object = None) -> bool:
+    """Return True iff boot-time state restore should be SKIPPED.
+
+    Records this boot ONLY when there is a respawn signal (``killed`` is a
+    non-empty list from ``cleanup_all_bot_processes``), then reports whether
+    the restart-loop breaker has tripped. Fail-open at every seam: a broken
+    breaker must NEVER wedge boot — on any error (including the M2 NameError
+    class if ``config`` were referenced without import) it returns False so
+    the normal state restore proceeds. ``guard`` is injectable for tests.
+    """
+    if not killed:  # no respawn signal → never record/trip
+        return False
+    try:
+        import config  # M2: main.py imports names from config, not the module
+        from orchestration import restart_loop_guard as _g
+
+        g = guard or _g
+        if g.check_and_record():  # records this boot, reports tripped
+            print(
+                "[WARNING] Restart-loop breaker TRIPPED — skipping boot-time "
+                "state restore to break a suspected respawn loop. Delete "
+                f"{config.STATE_DIR / 'restart_loop.json'} if false positive.",
+                flush=True,
+            )
+            append_to_daily_log(
+                "Restart-loop breaker TRIPPED (rapid respawn)", "Bot Lifecycle"
+            )
+            return True
+    except Exception:  # a broken breaker must NEVER wedge boot
+        return False
+    return False
+
+
+def _make_webhook_adapter_resolver(router: object):
+    """Platform-value -> sibling adapter resolver for the webhook adapter.
+
+    Guards ``Platform(...)`` construction — an unknown platform string returns
+    ``None`` instead of raising into the delivery path. The closure reads
+    ``router.adapters`` live, so adapters registered after the webhook adapter
+    are still resolvable.
+    """
+    from models import Platform
+
+    def _resolve(platform_value: str) -> object | None:
+        try:
+            platform = Platform(platform_value)
+        except ValueError:
+            return None
+        return router.adapters.get(platform)
+
+    return _resolve
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="The Homie Chat Interface")
     parser.add_argument("--test", action="store_true", help="Dry run — print config and exit")
@@ -259,6 +320,7 @@ def main() -> None:
     parser.add_argument("--relay", action="store_true", help="Start relay WebSocket client only")
     parser.add_argument("--discord", action="store_true", help="Start Discord adapter only")
     parser.add_argument("--whatsapp", action="store_true", help="Start WhatsApp adapter only")
+    parser.add_argument("--webhook", action="store_true", help="Start webhook ingress adapter only")
     args = parser.parse_args()
 
     # Instance lock — prevents Windows venv double-spawn from running two polling loops
@@ -287,12 +349,20 @@ def main() -> None:
         _run_test_hold(unlock_path)
         return
 
+    # Restart-loop breaker — record this boot on a respawn signal and decide
+    # whether to skip state restore. Adapters still start regardless; the
+    # breaker only skips the restore that keeps replaying a fatal path.
+    _breaker_tripped = _boot_breaker_decision(killed)
+
     # Move 5a: Restore cognitive state from vault on startup
     try:
-        from state_sync import restore_state_from_vault
-        restored = restore_state_from_vault()
-        if restored:
-            print(f"  State restored from vault: {restored}")
+        if not _breaker_tripped:
+            from state_sync import restore_state_from_vault
+            restored = restore_state_from_vault()
+            if restored:
+                print(f"  State restored from vault: {restored}")
+        else:
+            print("  State restore skipped (restart-loop breaker tripped)")
     except Exception as e:
         print(f"  State restore skipped: {e}")
 
@@ -303,12 +373,20 @@ def main() -> None:
     # If no specific flag is set, start all configured adapters
     start_all = not (
         args.telegram or args.slack or args.relay or args.discord or args.whatsapp
+        or args.webhook
     )
 
     has_slack = bool(SLACK_BOT_TOKEN and SLACK_APP_TOKEN)
     has_telegram = bool(TELEGRAM_BOT_TOKEN)
     has_discord = bool(DISCORD_BOT_TOKEN)
     has_whatsapp = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID)
+
+    # Webhook ingress (hermes-v18 Phase 4) — dormant by default: the adapter
+    # is only ever CONSTRUCTED when WEBHOOK_ROUTES yields at least one valid
+    # route (Rule-1 call-time resolver; unset/malformed env -> routes == {}).
+    from config import get_webhook_settings
+    webhook_settings = get_webhook_settings()
+    has_webhook = bool(webhook_settings.routes)
 
     # PRP-7c R1 B2 — refuse to start when another profile is configured with
     # the SAME Telegram bot token. Telegram allows ONE polling process per
@@ -379,6 +457,14 @@ def main() -> None:
     else:
         print("  WhatsApp:      not configured")
 
+    if has_webhook:
+        print(
+            f"  Webhook:       {len(webhook_settings.routes)} route(s) on "
+            f"{webhook_settings.host}:{webhook_settings.port}"
+        )
+    else:
+        print("  Webhook:       not configured (set WEBHOOK_ROUTES to enable)")
+
     print(f"  Health check:  port {HEALTH_CHECK_PORT}")
 
     if has_heartbeat:
@@ -410,7 +496,14 @@ def main() -> None:
         print("ERROR: WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID not set in .env")
         sys.exit(1)
 
-    has_any = has_slack or has_telegram or has_relay or has_discord or has_whatsapp
+    if args.webhook and not has_webhook:
+        print("ERROR: WEBHOOK_ROUTES not set in .env (or no route passed validation)")
+        sys.exit(1)
+
+    has_any = (
+        has_slack or has_telegram or has_relay or has_discord or has_whatsapp
+        or has_webhook
+    )
     if start_all and not has_any:
         print("ERROR: No chat adapters configured.")
         print("Set TELEGRAM_BOT_TOKEN, SLACK_BOT_TOKEN + SLACK_APP_TOKEN, or RELAY_AUTH_TOKEN in .env")
@@ -522,6 +615,17 @@ def main() -> None:
             router.register(wa)
             print("  WhatsApp adapter OK")
 
+        if has_webhook and (start_all or args.webhook):
+            from adapters.webhook import WebhookAdapter
+            from webhook_audit import append_webhook_audit_record
+            wh = WebhookAdapter(
+                webhook_settings,
+                adapter_resolver=_make_webhook_adapter_resolver(router),
+                audit=append_webhook_audit_record,
+            )
+            router.register(wh)
+            print(f"  Webhook adapter OK ({len(webhook_settings.routes)} route(s))")
+
         if has_relay and (start_all or args.relay):
             print(f"  Relay WS OK ({relay_ws_url})")
 
@@ -580,6 +684,19 @@ def main() -> None:
         web_adapter.ws_client = relay_client
         # Register web adapter so router can route web platform messages
         router.register(web_adapter)
+
+    # Webhook ingress — registered LAST so the resolver closure sees every
+    # sibling adapter. Constructed ONLY when routes exist (dormant default).
+    if has_webhook and (start_all or args.webhook):
+        from adapters.webhook import WebhookAdapter
+        from webhook_audit import append_webhook_audit_record
+
+        webhook_adapter = WebhookAdapter(
+            webhook_settings,
+            adapter_resolver=_make_webhook_adapter_resolver(router),
+            audit=append_webhook_audit_record,
+        )
+        router.register(webhook_adapter)
 
     print(f"[{datetime.now()}] Starting chat interface...")
     append_to_daily_log(f"Bot started (PID {os.getpid()})", "Bot Lifecycle")
@@ -681,6 +798,11 @@ def main() -> None:
     except KeyboardInterrupt:
         print(f"\n[{datetime.now()}] Shutting down...")
         append_to_daily_log("Bot stopped (keyboard interrupt)", "Bot Lifecycle")
+        try:
+            from orchestration import restart_loop_guard
+            restart_loop_guard.clear()
+        except Exception:
+            pass
         try:
             from runtime.langfuse_setup import flush_langfuse
             flush_langfuse()

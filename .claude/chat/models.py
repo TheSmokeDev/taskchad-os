@@ -17,6 +17,7 @@ class Platform(Enum):
     WEB = "web"
     CLI = "cli"
     WHATSAPP = "whatsapp"
+    WEBHOOK = "webhook"  # Phase 4 (hermes-v18 Tier-1) — webhook event ingress
 
 
 class MessageType(Enum):

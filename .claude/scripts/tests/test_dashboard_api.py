@@ -1127,6 +1127,80 @@ def test_scheduled_invalid_cron_422(isolated_app):
     assert r.status_code == 422
 
 
+# ── /api/scheduled bot-lifecycle guard (B1 — Deliverable 3, seam 2) ───────
+
+
+def test_scheduled_create_rejects_bot_lifecycle_prompt_400(isolated_app):
+    # A bot-lifecycle prompt is rejected at creation with HTTP 400 (NOT 500 —
+    # dashboard_api has no global ValueError→HTTP mapper; the seam translates).
+    r = isolated_app.post(
+        "/api/scheduled",
+        json={"prompt": "Stop-Process -Name thehomie -Force", "schedule": "*/5 * * * *"},
+    )
+    assert r.status_code == 400
+
+
+def test_scheduled_patch_rejects_bot_lifecycle_prompt_400(isolated_app):
+    r = isolated_app.post(
+        "/api/scheduled",
+        json={"prompt": "echo hi", "schedule": "*/5 * * * *"},
+    )
+    task_id = r.json()["id"]
+    r = isolated_app.patch(
+        f"/api/scheduled/{task_id}", json={"prompt": "pkill -f chat/main.py"}
+    )
+    assert r.status_code == 400
+
+
+def test_scheduled_create_benign_prompt_allowed(isolated_app):
+    # ``python app/main.py`` is bare-main.py, NOT the bot launcher (B2 allow).
+    r = isolated_app.post(
+        "/api/scheduled",
+        json={"prompt": "python app/main.py", "schedule": "*/5 * * * *"},
+    )
+    assert r.status_code == 200
+
+
+def test_scheduled_create_fail_open_when_guard_raises(isolated_app, monkeypatch):
+    # M3: a non-BotLifecycleBlocked raise from the guard is caught + logged so a
+    # benign scheduled create still succeeds (never 500s).
+    from orchestration import lifecycle_guard
+
+    def _boom(*a, **k):
+        raise RuntimeError("regex engine exploded")
+
+    monkeypatch.setattr(lifecycle_guard, "check_bot_lifecycle", _boom)
+    r = isolated_app.post(
+        "/api/scheduled",
+        json={"prompt": "echo hi", "schedule": "*/5 * * * *"},
+    )
+    assert r.status_code == 200
+
+
+def test_scheduled_patch_fail_open_when_guard_raises(isolated_app, monkeypatch):
+    # M3: PATCH prompt-scan shares _scan_scheduled_prompt with create — a
+    # non-BotLifecycleBlocked guard raise is caught + logged so the update still
+    # succeeds (never 500s). Guard patched AFTER the benign create so the create
+    # is unaffected.
+    from orchestration import lifecycle_guard
+
+    r = isolated_app.post(
+        "/api/scheduled",
+        json={"prompt": "echo hi", "schedule": "*/5 * * * *"},
+    )
+    task_id = r.json()["id"]
+
+    def _boom(*a, **k):
+        raise RuntimeError("regex engine exploded")
+
+    monkeypatch.setattr(lifecycle_guard, "check_bot_lifecycle", _boom)
+    r = isolated_app.patch(
+        f"/api/scheduled/{task_id}", json={"prompt": "echo still fine"}
+    )
+    assert r.status_code == 200
+    assert r.json()["prompt"] == "echo still fine"
+
+
 # ── /api/memories ────────────────────────────────────────────────────────
 
 

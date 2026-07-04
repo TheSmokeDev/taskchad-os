@@ -21,6 +21,7 @@ PRP-7a Workstream 2 (config-refactor):
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime
@@ -1242,6 +1243,186 @@ def get_cabinet_relay_settings(
     if max_turns is None:
         max_turns = int(os.getenv("CABINET_CHAT_RELAY_MAX_TURNS", "0"))
     return CabinetRelaySettings(enabled=enabled, max_turns=max_turns)
+
+
+# Sentinel secret value that disables signature validation on a webhook route.
+# Loopback-only escape hatch for local testing (hermes-v18 Phase 4 port).
+WEBHOOK_INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
+
+# Hostnames/IP literals that only serve connections originating on the same
+# machine (mirrors orchestration/api.py + Hermes _LOOPBACK_HOSTS).
+_WEBHOOK_LOOPBACK_HOSTS = frozenset({
+    "127.0.0.1",
+    "localhost",
+    "::1",
+    "ip6-localhost",
+    "ip6-loopback",
+})
+
+
+def webhook_host_is_loopback(host: str) -> bool:
+    """True when ``host`` binds only to the local machine.
+
+    Falsy values (empty string, None) are conservatively treated as
+    NON-loopback because an unset host usually means a public default bind.
+    """
+    if not host:
+        return False
+    return str(host).strip().lower() in _WEBHOOK_LOOPBACK_HOSTS
+
+
+class WebhookRoute(NamedTuple):
+    """One operator-configured webhook route (hermes-v18 Phase 4)."""
+
+    name: str
+    secret: str                     # resolved (inline or via secret_env); never ""
+    events: tuple[str, ...]        # allowed event types (() = accept all)
+    prompt: str                     # template ("" = default JSON dump)
+    deliver: str                    # "log" | platform value | "github_comment"
+    deliver_extra: dict             # operator-fixed target config
+    deliver_only: bool              # True = skip engine, push rendered template
+    deliver_extra_templated: bool   # opt-in payload templating (default False)
+    enabled: bool                   # explicit False rejects events (403)
+
+
+class WebhookSettings(NamedTuple):
+    """Effective webhook-adapter knobs (call-time resolved)."""
+
+    host: str
+    port: int
+    allow_non_loopback: bool
+    rate_limit: int
+    max_body_bytes: int
+    idempotency_ttl: int
+    routes: dict[str, WebhookRoute]  # EMPTY by default -> adapter dormant
+
+
+def _parse_webhook_route(name: str, raw: object, *, host: str) -> WebhookRoute | None:
+    """Validate one WEBHOOK_ROUTES entry; return None (and log) when invalid.
+
+    Mirrors Hermes' dynamic-route rejection: an empty effective secret or an
+    INSECURE_NO_AUTH secret on a non-loopback host drops the route instead of
+    raising — a misconfigured route must never take the whole bot down.
+    """
+    if not isinstance(raw, dict):
+        print(f"[config] webhook route '{name}' skipped: not an object")
+        return None
+    secret = str(raw.get("secret", "") or "")
+    secret_env = str(raw.get("secret_env", "") or "")
+    if not secret and secret_env:
+        secret = os.getenv(secret_env, "") or ""
+    if not secret:
+        print(
+            f"[config] webhook route '{name}' skipped: no HMAC secret "
+            f"(set 'secret' or 'secret_env'; '{WEBHOOK_INSECURE_NO_AUTH}' "
+            f"disables auth for loopback testing only)"
+        )
+        return None
+    if secret == WEBHOOK_INSECURE_NO_AUTH and not webhook_host_is_loopback(host):
+        print(
+            f"[config] webhook route '{name}' skipped: {WEBHOOK_INSECURE_NO_AUTH} "
+            f"is only allowed on loopback hosts (host={host!r})"
+        )
+        return None
+    deliver = str(raw.get("deliver", "log") or "log")
+    deliver_only = bool(raw.get("deliver_only", False))
+    if deliver_only and deliver in ("", "log"):
+        print(
+            f"[config] webhook route '{name}' skipped: deliver_only=true "
+            f"requires a real deliver target (got {deliver!r})"
+        )
+        return None
+    events_raw = raw.get("events", [])
+    events = tuple(str(e) for e in events_raw) if isinstance(events_raw, list) else ()
+    deliver_extra = raw.get("deliver_extra", {})
+    if not isinstance(deliver_extra, dict):
+        deliver_extra = {}
+    return WebhookRoute(
+        name=name,
+        secret=secret,
+        events=events,
+        prompt=str(raw.get("prompt", "") or ""),
+        deliver=deliver,
+        deliver_extra=deliver_extra,
+        deliver_only=deliver_only,
+        deliver_extra_templated=bool(raw.get("deliver_extra_templated", False)),
+        enabled=raw.get("enabled", True) is not False,
+    )
+
+
+def get_webhook_settings(
+    host: str | None = None,
+    port: int | None = None,
+    allow_non_loopback: bool | None = None,
+    rate_limit: int | None = None,
+    max_body_bytes: int | None = None,
+    idempotency_ttl: int | None = None,
+    routes_json: str | None = None,
+) -> WebhookSettings:
+    """Resolve webhook-adapter knobs at CALL TIME (Rule 1) — hermes-v18 Phase 4.
+
+    Every arg uses the None-sentinel pattern: explicit values pass through;
+    ``None`` resolves the matching ``WEBHOOK_*`` env var inside the body so
+    ``monkeypatch.setenv`` takes effect on the next call with no module reload.
+
+    Knobs:
+        WEBHOOK_HOST ("127.0.0.1") — bind host (loopback by default).
+        WEBHOOK_PORT ("8622") — bind port.
+        WEBHOOK_ALLOW_NON_LOOPBACK ("false") — explicit opt-in for a
+            non-loopback bind (mirrors ORCHESTRATION_API_ALLOW_NON_LOOPBACK).
+        WEBHOOK_RATE_LIMIT ("30") — per-route fixed-window hits/minute.
+        WEBHOOK_MAX_BODY_BYTES ("1048576") — request body cap (1 MB).
+        WEBHOOK_IDEMPOTENCY_TTL_SECONDS ("3600") — delivery-id replay window.
+        WEBHOOK_ROUTES (JSON object) — the route table. UNSET/empty/malformed
+            -> ``routes == {}`` (the adapter stays fully dormant; malformed
+            JSON logs and NEVER raises). Per-route secrets resolve inline
+            (``secret``) or via an env-var name (``secret_env``); routes with
+            an empty effective secret are DROPPED, as are INSECURE_NO_AUTH
+            routes on a non-loopback host and deliver_only routes without a
+            real deliver target.
+    """
+    if host is None:
+        host = os.getenv("WEBHOOK_HOST", "127.0.0.1")
+    if port is None:
+        port = int(os.getenv("WEBHOOK_PORT", "8622"))
+    if allow_non_loopback is None:
+        allow_non_loopback = (
+            os.getenv("WEBHOOK_ALLOW_NON_LOOPBACK", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+    if rate_limit is None:
+        rate_limit = int(os.getenv("WEBHOOK_RATE_LIMIT", "30"))
+    if max_body_bytes is None:
+        max_body_bytes = int(os.getenv("WEBHOOK_MAX_BODY_BYTES", "1048576"))
+    if idempotency_ttl is None:
+        idempotency_ttl = int(os.getenv("WEBHOOK_IDEMPOTENCY_TTL_SECONDS", "3600"))
+    if routes_json is None:
+        routes_json = os.getenv("WEBHOOK_ROUTES", "")
+
+    routes: dict[str, WebhookRoute] = {}
+    if routes_json and routes_json.strip():
+        try:
+            parsed = json.loads(routes_json)
+        except (ValueError, TypeError) as exc:
+            print(f"[config] WEBHOOK_ROUTES is not valid JSON ({exc}) — webhook dormant")
+            parsed = None
+        if isinstance(parsed, dict):
+            for name, raw in parsed.items():
+                route = _parse_webhook_route(str(name), raw, host=host)
+                if route is not None:
+                    routes[str(name)] = route
+        elif parsed is not None:
+            print("[config] WEBHOOK_ROUTES must be a JSON object — webhook dormant")
+
+    return WebhookSettings(
+        host=host,
+        port=port,
+        allow_non_loopback=allow_non_loopback,
+        rate_limit=rate_limit,
+        max_body_bytes=max_body_bytes,
+        idempotency_ttl=idempotency_ttl,
+        routes=routes,
+    )
 
 
 # Canonical interactive-homie toolset — the full set the main chat engine grants

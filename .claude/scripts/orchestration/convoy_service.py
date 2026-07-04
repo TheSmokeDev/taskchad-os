@@ -41,6 +41,31 @@ from orchestration.models import (
 from orchestration.observability import orchestration_span
 
 
+def _scan_bot_lifecycle(text: str) -> None:
+    """Fail-open lifecycle-guard scan for a convoy's free text (Deliverable 3).
+
+    The guard IMPORT lives INSIDE this wrapper (R2 NM1) so an import-time
+    failure of the new module also fails OPEN — a legit convoy always creates.
+    Only a genuine ``BotLifecycleBlocked`` (a ``ValueError``) propagates → the
+    convoy API's global ValueError→HTTP 400 mapper surfaces it as a create
+    failure. Any OTHER guard error (regex/typo fault) is logged and allowed (M3).
+    """
+    try:
+        from orchestration.lifecycle_guard import (
+            BotLifecycleBlocked,
+            check_bot_lifecycle,
+        )
+    except Exception:
+        logger.warning("lifecycle guard unavailable; allowing create", exc_info=True)
+        return
+    try:
+        check_bot_lifecycle(text)
+    except BotLifecycleBlocked:
+        raise
+    except Exception:
+        logger.warning("lifecycle guard errored; allowing create", exc_info=True)
+
+
 class ConvoyService:
     """Framework-owned convoy orchestration service."""
 
@@ -55,6 +80,12 @@ class ConvoyService:
         inp: CreateConvoyInput,
         workspace_id: int = DEFAULT_WORKSPACE_ID,
     ) -> ConvoyWithSubtasks:
+        # Lifecycle guard (seam 1): reject a convoy whose free text schedules
+        # the bot's own death BEFORE any DB write. BotLifecycleBlocked
+        # propagates → api.py maps ValueError → 400; other guard faults fail open.
+        _scan_bot_lifecycle(f"{inp.title}\n{inp.description or ''}")
+        for _s in inp.subtasks:
+            _scan_bot_lifecycle(f"{_s.title}\n{_s.description or ''}")
         conn = self.db.conn
         with conn:
             cur = conn.execute(
@@ -898,6 +929,10 @@ class ConvoyService:
         subtasks: list[AddSubtaskInput],
         workspace_id: int = DEFAULT_WORKSPACE_ID,
     ) -> list[Subtask]:
+        # Lifecycle guard (seam 1): scan each new subtask's free text before any
+        # DB write. Same two-tier fail-open contract as create_convoy.
+        for _s in subtasks:
+            _scan_bot_lifecycle(f"{_s.title}\n{_s.description or ''}")
         conn = self.db.conn
         with conn:
             convoy_exists = conn.execute(

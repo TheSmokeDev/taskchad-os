@@ -303,6 +303,7 @@ class TelegramAdapter:
         chunks = self._split_message(text)
         first_id: str | None = None
         failed_chunks = 0
+        last_send_error: Exception | None = None  # chained into TelegramDeliveryError
 
         # Buttons ride on the LAST chunk so they sit under the final content
         # the user reads (matches Discord adapter behavior).
@@ -340,6 +341,7 @@ class TelegramAdapter:
                     )
                 except Exception as e2:
                     failed_chunks += 1
+                    last_send_error = e2
                     print(f"[{datetime.now()}] Telegram send failed after fallback: {e2}", flush=True)
 
         if failed_chunks:
@@ -350,7 +352,7 @@ class TelegramAdapter:
             )
             raise TelegramDeliveryError(
                 f"Telegram failed to deliver {failed_chunks} text chunk(s)"
-            )
+            ) from last_send_error
         if text.strip() and first_id is None:
             print(
                 f"[{datetime.now()}] Telegram delivery failed: "
