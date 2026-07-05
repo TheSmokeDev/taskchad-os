@@ -64,6 +64,8 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Live Lane Safety Contract | Active baseline | [live-lane-safety](features/live-lane-safety.md) | `live-safety proof`, status/doctor, orchestration live APIs |
 | Persona Lifecycle And Files | Active baseline | [persona-lifecycle-files](features/persona-lifecycle-files.md) | `/agents`, `/agents/:id/files` |
 | Persona Capability Matrix | Active baseline | [persona-capability-matrix](features/persona-capability-matrix.md) | `thehomie profile env-sync`, Discord persona channels, Cabinet personas |
+| Persona Team (AI Employee Company) | Active baseline — the operating model tying the persona layers together | [persona-team](features/persona-team.md) | `thehomie profile create\|env-sync\|learning`, `/agents`, persona channels |
+| Persona Learning Loop | Shipped, opt-in per profile, no-logs first-run fixed | [persona-learning-loop](features/persona-learning-loop.md) | `thehomie profile learning`, scheduled belief extraction |
 | Convoy, Work Queue, And Mailbox | Active baseline | [convoy-work-mailbox](features/convoy-work-mailbox.md) | `/convoy`, `/work`, mailbox APIs |
 | Team Operations And Executor | Active baseline | [team-operations-executor](features/team-operations-executor.md) | `/teams`, team APIs |
 | Tenant Isolation v0 | Phase A+B shipped, enforcement default-OFF | [tenant-isolation-v0](features/tenant-isolation-v0.md) | `thehomie tenant`, `HOMIE_TENANT_ENFORCEMENT`, orchestration/dashboard API |
@@ -88,11 +90,9 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Memory And Recall System | Active baseline | [memory-and-recall-system](features/memory-and-recall-system.md) | `thehomie recall`, `/search`, `/file`, `/working`, `/vault-ops` |
 | Memory, Knowledge Graph, And Dashboard Chat | Active baseline, dashboard chat reliability proven | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
 | Scheduled Jobs, Settings, And Audit | Active baseline | [scheduled-settings-audit](features/scheduled-settings-audit.md) | `/scheduled`, `/settings`, `/audit` |
-| Orchestration Resilience | Shipped (Phase 1), fail-open guards | [orchestration-resilience](features/orchestration-resilience.md) | automatic: boot restart-loop breaker, delivery self-heal, scheduled-job lifecycle guard |
 | Operator Automation UX | Shipped (Phase 2), propose-don't-auto-create | [automation-ux](features/automation-ux.md) | `/recap`, `/blueprints`, `/suggestions` |
-| Backup, Restore, And Snapshots | Shipped (Phase 3), restore default-denied | [backup-restore](features/backup-restore.md) | `thehomie backup`, `thehomie restore`, `thehomie snapshot` |
-| Webhook Event Triggers | Shipped (Phase 4), dormant by default | [webhook-event-triggers](features/webhook-event-triggers.md) | `POST /webhooks/{route}`, `WEBHOOK_ROUTES` |
 | Native Design (`/design`) | Phase 1 + B1 shipped, live-proven | [design-capability](features/design-capability.md) | `/design`, `/design system <slug>` |
+| Website Design Homie | Playbook/skill + client preview TOC | [website-design-homie](features/website-design-homie.md) | `website-design-homie`, `/design system <slug>` |
 | Business Signal Engine | Shipped (#79), merged | [business-signal-engine](features/business-signal-engine.md) | `/signal`, `/signal refresh`, daily/weekly cadence |
 | Social Post Pipeline | Shipped (#80), default-denied, operator-gated | [social-post-pipeline](features/social-post-pipeline.md) | `/social` (draft/approve/post/schedule/cadence) |
 | Skill-From-Experience Loop | Shipped, default-denied, operator-gated | [skill-from-experience-loop](features/skill-from-experience-loop.md) | `/skills` (review/promote/reject) |

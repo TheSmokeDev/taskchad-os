@@ -37,6 +37,7 @@ import hashlib
 import io
 import json
 import logging
+import base64
 import os
 import re
 import sqlite3
@@ -128,6 +129,11 @@ class DashboardChatSendBody(BaseModel):
     display_name: str | None = Field(default=None, max_length=128)
     source: str | None = Field(default=None, max_length=32)
     button_custom_id: str | None = Field(default=None, max_length=512)
+    # Camera-as-agent-tool (M3): a base64 JPEG captured on the phone. Written to
+    # disk + its path embedded in the turn text so the Claude SDK Read tool feeds
+    # it to the vision model (images bypass build_attachment_context). ~12M chars
+    # ≈ a 9MB base64 ≈ a 6.7MB photo — well above a downscaled phone capture.
+    image_base64: str | None = Field(default=None, max_length=12_000_000)
 
 
 # ── Browser Viewer (read-only) ───────────────────────────────────────────
@@ -4425,6 +4431,77 @@ def conversation_history(
     return {"turns": turns, "next_before_id": next_before}
 
 
+_DASHBOARD_PHOTO_DIR = Path(tempfile.gettempdir()) / "thehomie_photos"
+
+
+def _persist_dashboard_image(image_base64: str) -> tuple[Path, int]:
+    """Decode a base64 JPEG to disk (Telegram _on_photo convention).
+
+    Returns (path, size_bytes). The Claude SDK Read tool opens this path — images
+    never reach the vision model through build_attachment_context, so the file +
+    its path-in-text is the only route.
+    """
+    raw = image_base64.strip()
+    if raw.startswith("data:"):  # tolerate a data: URI prefix
+        raw = raw.split(",", 1)[-1]
+    data = base64.b64decode(raw, validate=False)
+    _DASHBOARD_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    path = _DASHBOARD_PHOTO_DIR / f"{uuid.uuid4().hex}.jpg"
+    path.write_bytes(data)
+    return path, len(data)
+
+
+async def _run_dashboard_persona_turn(persona_id: str, conversation_id: str, incoming: Any) -> None:
+    """Background persona turn (M5): Thinking... -> persona reply -> SSE events.
+
+    Mirrors the router path's event shape (a processing event replaced by the
+    final assistant_message via replaces_event_id) so web/mobile clients render
+    both paths identically. Fail-open: an exception becomes an SSE error event,
+    never an unhandled task crash.
+    """
+    processing_id = _conversation_event_append(
+        persona_id,
+        conversation_id,
+        "processing",
+        {"text": "Thinking...", "content": "Thinking...", "components": []},
+    )
+    try:
+        import web_persona_runtime  # noqa: PLC0415
+        from session import get_session_store  # noqa: PLC0415
+
+        text = await web_persona_runtime.run_web_persona_turn(
+            incoming=incoming,
+            persona_id=persona_id,
+            session_store=get_session_store(config.CHAT_DB_PATH),
+            project_root=config.PROJECT_ROOT,
+        )
+        _conversation_event_append(
+            persona_id,
+            conversation_id,
+            "assistant_message",
+            {
+                "text": text,
+                "content": text,
+                "components": [],
+                "is_update": True,
+                "replaces_event_id": processing_id,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _conversation_event_append(
+            persona_id,
+            conversation_id,
+            "error",
+            {
+                "text": f"Persona turn failed: {exc}",
+                "content": f"Persona turn failed: {exc}",
+                "components": [],
+                "is_error": True,
+                "replaces_event_id": processing_id,
+            },
+        )
+
+
 @router.post("/api/conversation/{persona_id}/send")
 async def conversation_send(persona_id: str, body: DashboardChatSendBody, request: Request) -> dict:
     _reject_main_translation(persona_id)
@@ -4443,13 +4520,55 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody, reques
     display_name = (body.display_name or "Dashboard").strip()[:128] or "Dashboard"
     raw_text = (body.text or "").strip()
     button_custom_id = (body.button_custom_id or "").strip()
-    if not raw_text and not button_custom_id:
-        raise HTTPException(status_code=400, detail="text or button_custom_id required")
 
-    from models import Channel, IncomingMessage, Platform, Thread, User  # noqa: PLC0415
+    # M5 — persona-scoped conversations answer AS the persona (no-tools turn via
+    # web_persona_runtime). Buttons and camera are main-engine features: buttons
+    # only originate from main-engine replies, and the persona path denies the
+    # Read tool the vision seam requires.
+    if persona_id != "default":
+        if button_custom_id:
+            raise HTTPException(status_code=400, detail="buttons are not supported in persona conversations")
+        if body.image_base64:
+            raise HTTPException(status_code=400, detail="camera turns are main-only for now")
+
+    # Camera-as-agent-tool (M3): persist the captured JPEG to disk. Images bypass
+    # build_attachment_context, so the ONLY route to the vision model is the Read
+    # tool opening this local file (path embedded in the turn text below).
+    image_path: Path | None = None
+    image_bytes = 0
+    if body.image_base64:
+        image_path, image_bytes = _persist_dashboard_image(body.image_base64)
+
+    if not raw_text and not button_custom_id and image_path is None:
+        raise HTTPException(status_code=400, detail="text, image, or button_custom_id required")
+
+    from models import Attachment, Channel, IncomingMessage, Platform, Thread, User  # noqa: PLC0415
 
     request_id = body.client_message_id or f"dash-{uuid.uuid4().hex}"
     incoming_text = f"__button:{button_custom_id}" if button_custom_id else raw_text
+    attachments: list[Any] = []
+    if image_path is not None:
+        # Telegram _on_photo pattern: embed the path + an explicit Read instruction.
+        incoming_text = (
+            f"[User sent a photo: {image_path}]\n"
+            "Use the Read tool to view the image at the path above, then respond.\n"
+        ) + (raw_text or "")
+        # Attachment truthiness keeps Read in allowed_tools (no text-only fast path).
+        attachments = [
+            Attachment(
+                filename=image_path.name,
+                mimetype="image/jpeg",
+                url=str(image_path),
+                size_bytes=image_bytes,
+            )
+        ]
+        _audit_write(
+            operator_id="mobile",
+            action="camera.capture",
+            target_persona_id=persona_id,
+            outcome="sent",
+            detail={"request_id": request_id, "bytes": image_bytes, "conversation_id": raw_conversation_id},
+        )
     user = User(Platform.WEB, user_id, display_name)
     channel = Channel(Platform.WEB, conversation_id, is_dm=True)
     thread = Thread(thread_id=conversation_id, parent_message_id=request_id)
@@ -4462,33 +4581,42 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody, reques
         platform_message_id=request_id,
         agent_type="thehomie",
         user_role="admin",
+        attachments=attachments,
         raw_event={
             "surface": "dashboard",
             "request_id": request_id,
             "button_custom_id": button_custom_id,
             "display_text": raw_text if not button_custom_id else "",
+            "has_image": image_path is not None,
         },
         source=body.source or "interactive",
     )
 
-    runtime = _get_dashboard_chat_runtime()
-    adapter = runtime["adapter"]
-    adapter.track(persona_id=persona_id, conversation_id=conversation_id)
+    if persona_id == "default":
+        runtime = _get_dashboard_chat_runtime()
+        adapter = runtime["adapter"]
+        adapter.track(persona_id=persona_id, conversation_id=conversation_id)
 
     if not button_custom_id:
+        display_text = raw_text
+        if image_path is not None:
+            display_text = f"📷 {raw_text}".strip() if raw_text else "📷 Photo"
         _conversation_event_append(
             persona_id,
             conversation_id,
             "user_message",
             {
-                "text": raw_text,
-                "content": raw_text,
+                "text": display_text,
+                "content": display_text,
                 "request_id": request_id,
                 "components": [],
             },
         )
 
-    runtime["router"]._queue_incoming(adapter, incoming)
+    if persona_id == "default":
+        runtime["router"]._queue_incoming(adapter, incoming)
+    else:
+        asyncio.create_task(_run_dashboard_persona_turn(persona_id, conversation_id, incoming))
     await asyncio.sleep(0)
     return {
         "ok": True,
@@ -4582,6 +4710,98 @@ async def conversation_stream(
             "Referrer-Policy": "no-referrer",
         },
     )
+
+
+# ── Voice round-trip (Homie Mobile M4 — ears) ────────────────────────────
+#
+# Two thin JSON endpoints wrapping the existing STT/TTS cascades in chat/voice.py
+# so the phone can talk hands-free: base64 audio → transcript, and reply text →
+# base64 MP3. The actual conversation turn reuses the normal pipeline — the phone
+# posts the transcript to /send and hears the reply by calling /tts on it. Mic is
+# a default-deny tool (per-use consent on the phone; audit row per capture).
+
+
+class VoiceSttBody(BaseModel):
+    audio_base64: str = Field(min_length=1, max_length=20_000_000)
+    ext: str | None = Field(default="m4a", max_length=8)
+
+
+class VoiceTtsBody(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
+
+
+@router.post("/api/voice/stt")
+async def voice_stt(body: VoiceSttBody) -> dict:
+    """Base64 audio → transcript via the STT cascade (Groq/Whisper).
+
+    Spills to a temp file because ``transcribe_audio_file`` takes a path
+    (Telegram _on_voice convention). Kill-switch gated inside the cascade.
+    """
+    import voice as voice_mod  # noqa: PLC0415
+    from security import kill_switches  # noqa: PLC0415
+
+    raw = body.audio_base64.strip()
+    if raw.startswith("data:"):
+        raw = raw.split(",", 1)[-1]
+    data = base64.b64decode(raw, validate=False)
+    suffix = "." + (body.ext or "m4a").lstrip(".")[:8]
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="homie_voice_")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        try:
+            text = await voice_mod.transcribe_audio_file(tmp_path)
+        except kill_switches.KillSwitchDisabled:
+            raise HTTPException(status_code=503, detail="voice transcription is disabled")
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("voice_stt failed: %s", _redact(str(exc)))
+            raise HTTPException(status_code=502, detail="could not transcribe audio")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    text = (text or "").strip()
+    _audit_write(
+        operator_id="mobile",
+        action="voice.capture",
+        target_persona_id="default",
+        outcome="transcribed" if text else "empty",
+        detail={"bytes": len(data), "chars": len(text)},
+    )
+    return {"text": text}
+
+
+@router.post("/api/voice/tts")
+async def voice_tts(body: VoiceTtsBody) -> dict:
+    """Reply text → base64 MP3 via Edge TTS (cross-platform mobile-safe)."""
+    import voice as voice_mod  # noqa: PLC0415
+    from security import kill_switches  # noqa: PLC0415
+
+    try:
+        kill_switches.requireEnabled("voice", caller="voice_tts")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(status_code=503, detail="voice synthesis is disabled")
+    # Match the framework's Edge default — Andrew, +14% rate (the operator's
+    # preferred "Andrew fast" voice, same as Telegram voice replies). EDGE_TTS_VOICE
+    # overrides. Rule 1: env resolved at call time. `ShortName|rate` is parsed by
+    # EdgeTtsProvider (_parse_edge_voice_spec).
+    voice_spec = (
+        os.getenv("EDGE_TTS_VOICE")
+        or os.getenv("VOICE_TTS_VOICE_EDGE")
+        or "en-US-AndrewMultilingualNeural|+14%"
+    )
+    try:
+        audio = await voice_mod.synthesize_edge(body.text, voice=voice_spec)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("voice_tts failed: %s", _redact(str(exc)))
+        raise HTTPException(status_code=502, detail="could not synthesize audio")
+    return {"audio_base64": base64.b64encode(audio).decode(), "mime": "audio/mpeg"}
 
 
 # ── Cabinet endpoints (PRD-8 Phase 5a / WS2) ─────────────────────────────

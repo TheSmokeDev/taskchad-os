@@ -226,6 +226,30 @@ JSONL shape.
 | `.claude/scripts/integrations/social_media.py` | Platform API wrappers (`post_to_platform`). |
 | `.claude/chat/commands.py`, `core_handlers.py` | `/social` registration + `handle_social`. |
 
+## External Scheduler Front-End (Deployment Pattern)
+
+The pipeline above is the framework-native path: draft → approve → gated dispatch
+via the browser/API executors it ships. Some operators prefer to run a **separate
+self-hosted social scheduler** (e.g. Postiz) as the publishing surface instead —
+connecting each channel through that tool's own OAuth and letting it own the
+calendar and multi-account fan-out.
+
+This is an **operator deployment choice, not a bundled integration**: the framework
+ships no scheduler client, and nothing here calls out to one. The pattern is
+documented only so the two approaches don't get conflated. If you go this route,
+keep the same posture the native pipeline enforces:
+
+- **OAuth-per-channel**, one brand's assets per connection — never cross-connect
+  accounts from different brands into one channel.
+- **Draft / private / unlisted first** — prove each platform end-to-end before any
+  auto-publish; treat "connected" as necessary, not sufficient.
+- **Secrets stay in env / token files, never in docs** — record account
+  identifiers and file *locations*, never key values.
+
+Operator-specific wiring for a given deployment (accounts, connected channels,
+credential-file locations) is private runbook material and lives outside this
+public page.
+
 ## Public Export Status
 
 Public-safe by construction (mechanism only, placeholder data, no account IDs, no

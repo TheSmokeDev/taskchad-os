@@ -129,6 +129,19 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/capabilities/status',
   '/api/executor/callback',
 
+  // pair.ts — QR device pairing (Homie Mobile M2). claim/poll are public
+  // (pre-credential; self-authenticated by bootstrap/poll secrets).
+  '/api/pair/start',
+  '/api/pair/claim',
+  '/api/pair/poll',
+  '/api/pair/pending',
+  '/api/pair/approve/:pairId',
+  '/api/pair/deny/:pairId',
+
+  // voice.ts — mobile push-to-talk round-trip (Homie Mobile M4).
+  '/api/voice/stt',
+  '/api/voice/tts',
+
   // work.ts — dashboard work queue over the framework orchestration API.
   '/api/work/tasks',
   '/api/work/tasks/:taskId',

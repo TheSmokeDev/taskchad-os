@@ -155,6 +155,24 @@ CREATE TABLE IF NOT EXISTS cabinet_client_msg_seen (
 CREATE INDEX IF NOT EXISTS idx_cabinet_client_msg_seen_age
     ON cabinet_client_msg_seen(created_at);
 
+CREATE TABLE IF NOT EXISTS pair_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bootstrap_hash TEXT NOT NULL UNIQUE,
+    gateway_url TEXT NOT NULL,
+    remote_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'issued',
+    device_name TEXT NOT NULL DEFAULT '',
+    device_platform TEXT NOT NULL DEFAULT '',
+    poll_secret_hash TEXT NOT NULL DEFAULT '',
+    released INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    expires_at INTEGER NOT NULL,
+    claimed_at INTEGER,
+    decided_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pair_status
+    ON pair_requests(status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     persona_id TEXT NOT NULL DEFAULT 'default',

@@ -216,13 +216,17 @@ def test_route_policy_covers_every_real_route(tmp_path, monkeypatch):
         api_mod._db.close()
 
 
-def test_route_policy_count_is_117(tmp_path, monkeypatch):
-    """113 declared routes + 4 FastAPI auto-routes = 117 (R2 count lock)."""
+def test_route_policy_count_is_125(tmp_path, monkeypatch):
+    """121 declared routes + 4 FastAPI auto-routes = 125 (R2 count lock).
+
+    History: 117 -> 123 on 2026-07-04 (+6 pairing routes, Homie Mobile M2);
+    123 -> 125 on 2026-07-05 (+2 voice STT/TTS routes, Homie Mobile M4).
+    """
     monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     api_mod = _reload_real_api(tmp_path / "count.db")
     try:
-        assert len(all_registered_routes(api_mod.app)) == 117
-        assert len(ROUTE_POLICY) == 117
+        assert len(all_registered_routes(api_mod.app)) == 125
+        assert len(ROUTE_POLICY) == 125
     finally:
         api_mod._db.close()
 

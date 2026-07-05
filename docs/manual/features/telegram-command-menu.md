@@ -88,8 +88,9 @@ uv run pytest tests/test_chat_router_timeout.py tests/test_adapter_telegram.py -
 - Result: shared native command menu tests passed with `/vault` included for
   Telegram, Discord flat commands reusing the same curated list, and Discord
   registering one typed `/vault` group instead of a duplicate flat `/vault`.
-- Live adapter proof: after restart, the bot log showed Telegram and Discord
-  registering native slash commands from the shared command surface.
+- Live adapter proof: after restart, the bot log showed Telegram registering
+  41 slash commands and Discord registering 41 slash commands from the shared
+  command surface.
 - Scope: local test proof plus live adapter sync proof. Platform clients may
   still cache native command menus until their UI refreshes.
 

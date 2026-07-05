@@ -2670,3 +2670,45 @@ def test_blocker2_single_tenant_conversation_history_parity(isolated_app, tmp_pa
     assert "TENANT-A SECRET MESSAGE" in contents, (
         "single-tenant parity broken: the unscoped default session must still resolve"
     )
+
+
+# ── Camera-as-agent-tool image persistence (M3) ──────────────────────────
+
+
+def test_persist_dashboard_image_writes_file_and_bytes(tmp_path, monkeypatch):
+    """Base64 JPEG -> disk with exact bytes (the Read-tool vision seam)."""
+    import base64 as _b64
+    import dashboard_api
+
+    monkeypatch.setattr(dashboard_api, "_DASHBOARD_PHOTO_DIR", tmp_path / "photos")
+    raw = b"\xff\xd8\xff\xe0JFIF-fake-jpeg-bytes\xff\xd9"
+    b64 = _b64.b64encode(raw).decode()
+
+    path, size = dashboard_api._persist_dashboard_image(b64)
+    assert path.exists()
+    assert path.suffix == ".jpg"
+    assert path.parent == tmp_path / "photos"
+    assert size == len(raw)
+    assert path.read_bytes() == raw
+
+
+def test_persist_dashboard_image_tolerates_data_uri_prefix(tmp_path, monkeypatch):
+    import base64 as _b64
+    import dashboard_api
+
+    monkeypatch.setattr(dashboard_api, "_DASHBOARD_PHOTO_DIR", tmp_path / "photos")
+    raw = b"\xff\xd8fake\xff\xd9"
+    b64 = "data:image/jpeg;base64," + _b64.b64encode(raw).decode()
+
+    path, size = dashboard_api._persist_dashboard_image(b64)
+    assert path.read_bytes() == raw
+    assert size == len(raw)
+
+
+def test_dashboard_send_body_accepts_image_field():
+    """The send body carries an optional base64 image (M3)."""
+    from dashboard_api import DashboardChatSendBody
+
+    body = DashboardChatSendBody(text="what is this?", image_base64="AAAA")
+    assert body.image_base64 == "AAAA"
+    assert DashboardChatSendBody(text="hi").image_base64 is None

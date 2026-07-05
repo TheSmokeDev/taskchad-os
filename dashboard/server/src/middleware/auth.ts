@@ -23,6 +23,11 @@ import { logger } from '../logger.js';
 
 const HEALTH_PATH = '/api/health';
 
+// Pairing claim/poll are pre-credential by construction — the phone has no
+// bearer yet. They self-authenticate with bootstrap/poll secrets in the body,
+// validated by the Python pairing surface (Homie Mobile M2).
+const PUBLIC_PAIR_PATHS = new Set(['/api/pair/claim', '/api/pair/poll']);
+
 /**
  * Extract the bearer token from Authorization header OR an approved query token.
  *
@@ -71,6 +76,12 @@ export function buildAuthMiddleware(): MiddlewareHandler {
 
     // /api/health — always unauthenticated.
     if (pathname === HEALTH_PATH) {
+      await next();
+      return;
+    }
+
+    // Pairing claim/poll — pre-credential, self-authenticated (see above).
+    if (c.req.method === 'POST' && PUBLIC_PAIR_PATHS.has(pathname)) {
       await next();
       return;
     }

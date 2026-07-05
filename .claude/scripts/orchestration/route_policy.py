@@ -272,6 +272,18 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     ("GET", "/api/conversation/{persona_id}/history"): "tenant_persona",
     ("POST", "/api/conversation/{persona_id}/send"): "tenant_persona",
     ("GET", "/api/conversation/{persona_id}/stream"): "tenant_persona",
+    # ── Pairing (Homie Mobile M2): claim/poll are pre-credential public
+    # (self-authenticated by bootstrap/poll secrets); operator actions admin ──
+    ("POST", "/api/pair/start"): "admin",
+    ("POST", "/api/pair/claim"): "public",
+    ("POST", "/api/pair/poll"): "public",
+    ("GET", "/api/pair/pending"): "admin",
+    ("POST", "/api/pair/approve/{pair_id}"): "admin",
+    ("POST", "/api/pair/deny/{pair_id}"): "admin",
+    # ── Voice round-trip (Homie Mobile M4) — mobile uses the admin credential;
+    # no persona/workspace dimension on these STT/TTS helpers ──
+    ("POST", "/api/voice/stt"): "admin",
+    ("POST", "/api/voice/tts"): "admin",
     # ── Dashboard: cabinet (admin — no workspace column, B6 v0) ─────────────
     ("GET", "/api/cabinet/list"): "admin",
     ("POST", "/api/cabinet/new"): "admin",

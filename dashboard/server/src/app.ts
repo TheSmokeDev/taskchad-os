@@ -33,6 +33,8 @@ import { workRoute } from './routes/work.js';
 import { cabinetRoute } from './routes/cabinet.js';
 import { jarvisRoute } from './routes/jarvis.js';
 import { browserViewerRoute } from './routes/browser-viewer.js';
+import { pairRoute } from './routes/pair.js';
+import { voiceRoute } from './routes/voice.js';
 import { mountStaticWeb } from './static-web.js';
 
 export function buildDashboardApp(): Hono {
@@ -58,6 +60,8 @@ export function buildDashboardApp(): Hono {
   app.route('/', cabinetRoute);
   app.route('/', jarvisRoute);
   app.route('/', browserViewerRoute);
+  app.route('/', pairRoute);
+  app.route('/', voiceRoute);
   mountStaticWeb(app);
 
   return app;

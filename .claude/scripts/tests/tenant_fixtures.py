@@ -40,7 +40,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _SCRIPTS_DIR = _REPO_ROOT / ".claude" / "scripts"
 
 # The canary the harness seeds into tenant A and hunts for in tenant B.
-TENANT_A_SECRET = "TENANT_A_SECRET_5f3c9b2e_example-client_retainer_confidential"
+TENANT_A_SECRET = "TENANT_A_SECRET_5f3c9b2e_acme_retainer_confidential"
 
 # Surfaces the harness probes. Each maps to a probe snippet run in a subprocess
 # pinned to a tenant's profile (see ``probe_surface_subprocess``).

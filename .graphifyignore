@@ -2,7 +2,16 @@
 # .graphifyignore takes priority over .gitignore, so big excludes are duplicated here.
 
 # === Personal / private data — never index ===
-TheHomie/
+# Vault (vault/memory) is FULLY indexed for the graph — its entire knowledge
+# layer (identity files, concepts/, connections/, repositories/, weekly/) is
+# re-included in Pass 2. Only the high-volume session-log noise stays out:
+vault/memory/daily/
+vault/memory/episodes/
+vault/memory/_archive/
+vault/memory/raw/
+vault/memory/drafts/
+TheHomie/.obsidian/
+vault/memory/.obsidian/
 PRPs/
 PRDs/
 drafts/
@@ -96,10 +105,17 @@ graphify-out/
 *.zip
 *.excalidraw
 
-# === Pass 2 re-includes: framework docs ONLY (the "why" layer) ===
-# Negations cannot reach dir-excluded trees (TheHomie/, PRPs/ etc.) — vault stays out.
+# === Pass 2 re-includes: framework docs + vault STRUCTURAL layer ===
+# Vault session logs (daily/episodes/_archive/raw/drafts) are dir-excluded above,
+# so these negations only reach the high-signal knowledge layer. PRPs/, PRDs/,
+# drafts/ remain fully excluded.
 !CLAUDE.md
 !README.md
 !.claude/sections/*.md
 !docs/*.md
 !docs/**/*.md
+!vault/memory/*.md
+!vault/memory/concepts/**/*.md
+!vault/memory/connections/**/*.md
+!vault/memory/repositories/**/*.md
+!vault/memory/weekly/**/*.md

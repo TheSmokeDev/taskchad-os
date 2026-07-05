@@ -426,6 +426,11 @@ async def auth_middleware(request: Request, call_next):
             return await call_next(request)
         if path == "/api/audit-log":
             return await call_next(request)
+        # Pairing claim/poll are pre-credential by construction (the phone has
+        # no bearer yet) — they self-authenticate via bootstrap/poll secrets in
+        # the body (pairing_api.py). Same class as /api/health.
+        if path in ("/api/pair/claim", "/api/pair/poll"):
+            return await call_next(request)
         if path.startswith("/api/cabinet/voice/"):
             if ORCHESTRATION_API_TOKEN is None:
                 return await call_next(request)
@@ -1485,3 +1490,12 @@ try:
     app.include_router(_dashboard_router)
 except Exception as _exc:  # noqa: BLE001
     logger.warning("dashboard_api router not mounted: %s", _exc)
+
+# QR device pairing (Homie Mobile M2) — same two-touch mount pattern as the
+# dashboard router: (a) the /api/pair/claim + /api/pair/poll exemptions in
+# auth_middleware above, (b) this include. Logic lives in pairing_api.py.
+try:
+    from pairing_api import router as _pairing_router
+    app.include_router(_pairing_router)
+except Exception as _exc:  # noqa: BLE001
+    logger.warning("pairing_api router not mounted: %s", _exc)
