@@ -89,7 +89,7 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 # Clone or use existing
 $repoDir = if ($env:THEHOMIE_DIR) { $env:THEHOMIE_DIR } else { "$HOME\thehomie" }
 if (-not (Test-Path $repoDir)) {
-    git clone https://github.com/your-github-user/thehomie-framework.git $repoDir
+    git clone https://github.com/TheSmokeDev/taskchad-os.git $repoDir
     Assert-LastExitCode "git clone"
 }
 

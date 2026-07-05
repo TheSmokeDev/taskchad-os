@@ -11,8 +11,8 @@
 
 ```bash
 # 1. Clone the public framework repo
-git clone https://github.com/your-github-user/thehomie-framework.git
-cd thehomie-framework
+git clone https://github.com/TheSmokeDev/taskchad-os.git
+cd taskchad-os
 
 # 2. Run the setup wizard
 cd .claude/scripts && uv run python setup_wizard.py
@@ -79,7 +79,7 @@ docker compose logs -f bot
 
 ```bash
 # 1. Copy files to server
-./deploy/deploy.sh root@your-server /opt/thehomie-framework
+./deploy/deploy.sh root@your-server /opt/taskchad-os
 
 # 2. Install the service
 sudo cp deploy/secondbrain.service /etc/systemd/system/thehomie.service

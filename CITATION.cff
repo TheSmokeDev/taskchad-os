@@ -6,8 +6,8 @@ date-released: "2026-06-05"
 authors:
   - name: "SmokeDev"
   - name: "The Homie Contributors"
-repository-code: "https://github.com/your-github-user/thehomie-framework"
-url: "https://github.com/your-github-user/thehomie-framework"
+repository-code: "https://github.com/TheSmokeDev/taskchad-os"
+url: "https://github.com/TheSmokeDev/taskchad-os"
 abstract: "An open-source cognitive agent OS with identity-first memory, canonical multi-channel ingress, Operating Room orchestration, and local desktop/operator surfaces."
 keywords:
   - cognitive-agent-os

@@ -47,7 +47,7 @@ features through Hono proxy routes over Python-owned APIs.
   memory/session writes.
 - Donor dashboards are references only. The repo-local dashboard is canonical.
 - Public framework export uses `scripts/sanitize.py`; never manually copy
-  dashboard files into `YourProduct-os`.
+  dashboard files into `taskchad-os`.
 - Dashboard routes that observe browser state must preserve the BrowserOps
   read-only/default-deny boundaries.
 

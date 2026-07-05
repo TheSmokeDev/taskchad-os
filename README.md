@@ -31,13 +31,13 @@ sponsored by, or endorsed by those projects. See [NOTICE.md](NOTICE.md) and
 
 ## Watch The Demo
 
-![The Homie v0.1.0-alpha.1 dashboard product tour](https://github.com/your-github-user/thehomie-framework/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo-preview.gif)
+![The Homie v0.1.0-alpha.1 dashboard product tour](https://github.com/TheSmokeDev/taskchad-os/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo-preview.gif)
 
 45-second product tour: dashboard, Desktop Stack controls, Mobile Access,
 Browser Viewer, Work Queue, Convoy, Operating Room, and clean shutdown proof.
 
 Full-quality MP4 is attached on the
-[v0.1.0-alpha.1 release](https://github.com/your-github-user/thehomie-framework/releases/tag/v0.1.0-alpha.1).
+[v0.1.0-alpha.1 release](https://github.com/TheSmokeDev/taskchad-os/releases/tag/v0.1.0-alpha.1).
 
 ---
 
@@ -82,19 +82,19 @@ confirm. Proof boundaries (what is *not* yet claimed) are listed under
 
 ```bash
 # Linux/macOS/WSL
-curl -sSL https://raw.githubusercontent.com/your-github-user/thehomie-framework/master/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/TheSmokeDev/taskchad-os/master/install.sh | bash
 ```
 
 ```powershell
 # Windows PowerShell
-irm https://raw.githubusercontent.com/your-github-user/thehomie-framework/master/install.ps1 | iex
+irm https://raw.githubusercontent.com/TheSmokeDev/taskchad-os/master/install.ps1 | iex
 ```
 
 Manual path:
 
 ```bash
-git clone https://github.com/your-github-user/thehomie-framework.git
-cd thehomie-framework/.claude/scripts
+git clone https://github.com/TheSmokeDev/taskchad-os.git
+cd taskchad-os/.claude/scripts
 uv sync
 cp .env.example .env
 uv run python setup_wizard.py

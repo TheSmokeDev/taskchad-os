@@ -131,7 +131,7 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
   using the public Windows installer and `THEHOMIE_DIR`
   - installer passed Python/Git/Node prerequisite checks with
     `Node.js 24.11.0`
-  - installer cloned `your-github-user/YourProduct-os`, ran `uv sync`, created
+  - installer cloned `TheSmokeDev/taskchad-os`, ran `uv sync`, created
     `.env` from `.env.example`, installed dashboard/server/web/desktop npm
     dependencies, built dashboard web assets, and validated
     `uv run thehomie desktop --shell --dry-run --json`
