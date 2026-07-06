@@ -51,6 +51,7 @@ DEFAULT_REGION_BUDGETS: dict[str, int] = {
     "prefetched_context": 24000,  # ~6K tokens — router pre-fetch
     "attachment_context": 4500,   # legacy/unused — attachment content moved to RuntimeRequest.prompt (Phase 2)
     "recent_conversation": 600,  # ~2.4K chars — last 4-6 turns, engine-injected
+    "portfolio": 800,            # ~200 tokens — cofounder agenda line statuses
 }
 
 

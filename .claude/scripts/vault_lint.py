@@ -183,9 +183,10 @@ def check_frontmatter_validation(vault_dir: Path) -> list[LintIssue]:
     required = {"tags", "date"}  # Minimum required for all note types
 
     for md in _all_md_files(vault_dir):
-        # Skip auto-generated infrastructure files
+        # Skip auto-generated infrastructure files (cofounder project
+        # frontmatter is machine-stamped: created/last_run, no date field)
         rel = md.relative_to(vault_dir)
-        if rel.parts and rel.parts[0] in ("_dashboards", "daily", "teams"):
+        if rel.parts and rel.parts[0] in ("_dashboards", "cofounder", "daily", "teams"):
             continue
         if rel.name == "BUILD-LOG.md":
             continue

@@ -486,6 +486,8 @@ def load_persona_config(persona_id: str | None = None) -> dict[str, Any]:
         _validate_voice_section(raw["voice"], config_path)
     if "learning" in raw:
         _validate_learning_section(raw["learning"], config_path)
+    if "delegation" in raw:
+        _validate_delegation_section(raw["delegation"], config_path)
 
     return raw
 
@@ -945,9 +947,20 @@ def _validate_cabinet_section(value: Any, config_path: Path) -> None:
         ``cabinet/voice/static/avatars/{persona_id}.png`` when unset.
       * ``tools`` (list[str]) — cabinet/warroom tool names
         (Q-naming lock: ClaudeClaw "warroom_tools" → our "cabinet.tools")
+      * ``portfolio_context`` (bool) — cofounder v2 WS1: inject the
+        operator-vault portfolio digest into this persona's cabinet turns
     """
     if not isinstance(value, dict):
         raise _shape_error(config_path, "cabinet", value, "mapping")
+    if "portfolio_context" in value and not isinstance(
+        value["portfolio_context"], bool
+    ):
+        raise _shape_error(
+            config_path,
+            "cabinet.portfolio_context",
+            value["portfolio_context"],
+            "bool",
+        )
     if "voice_id" in value and not isinstance(value["voice_id"], str):
         raise _shape_error(
             config_path, "cabinet.voice_id", value["voice_id"], "str"
@@ -984,6 +997,31 @@ def _validate_cabinet_section(value: Any, config_path: Path) -> None:
             if not isinstance(item, str):
                 raise _shape_error(
                     config_path, f"cabinet.tools[{idx}]", item, "str"
+                )
+
+
+def _validate_delegation_section(value: Any, config_path: Path) -> None:
+    """Validate the ``delegation`` section (cofounder v2 WS3).
+
+    The persona-side half of the delegation grain (Rule 4): a persona is a
+    delegation target ONLY when this block exists, and repo-scoped work
+    additionally requires the repo slug in ``repos``. Fail-closed by
+    absence — no block means the cofounder cannot assign work here.
+
+    Recognised fields:
+      * ``repos`` (list[str]) — REPOSITORIES.md slugs this persona may be
+        assigned repo work on. Empty list = non-repo work only.
+    """
+    if not isinstance(value, dict):
+        raise _shape_error(config_path, "delegation", value, "mapping")
+    if "repos" in value:
+        repos = value["repos"]
+        if not isinstance(repos, list):
+            raise _shape_error(config_path, "delegation.repos", repos, "list")
+        for idx, item in enumerate(repos):
+            if not isinstance(item, str):
+                raise _shape_error(
+                    config_path, f"delegation.repos[{idx}]", item, "str"
                 )
 
 
@@ -1118,6 +1156,8 @@ def validate_config_dict(data: dict) -> None:
         _validate_voice_section(data["voice"], _DICT_VALIDATION_PATH)
     if "learning" in data:
         _validate_learning_section(data["learning"], _DICT_VALIDATION_PATH)
+    if "delegation" in data:
+        _validate_delegation_section(data["delegation"], _DICT_VALIDATION_PATH)
 
 
 def validate_config_yaml_text(text: str) -> dict:

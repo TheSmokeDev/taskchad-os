@@ -22,6 +22,7 @@ import struct
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -367,6 +368,122 @@ def test_browser_viewer_error_redacts_urls(isolated_app, monkeypatch):
     assert "#frag" not in body
     assert audits[0]["outcome"] == "failed"
     assert audits[0]["reason"] == "failed at https://example.com/path"
+
+
+# ── /api/browser-viewer M12 phone-drive ─────────────────────────────────
+
+
+def _patch_browser_audits(monkeypatch) -> list[dict]:
+    import dashboard_api
+
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        dashboard_api,
+        "append_browser_audit_record",
+        lambda **kwargs: audits.append(kwargs) or {},
+    )
+    return audits
+
+
+def test_browser_viewer_elements_lists_snapshot_refs(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setattr(
+        dashboard_api,
+        "browser_snapshot_elements",
+        lambda: [{"ref": "e20", "role": "button", "name": "Google Search"}],
+    )
+
+    r = isolated_app.get("/api/browser-viewer/elements")
+
+    assert r.status_code == 200
+    assert r.json()["elements"][0]["ref"] == "e20"
+    assert audits[0]["workflow_id"] == "browser.viewer.elements"
+    assert audits[0]["outcome"] == "succeeded"
+
+
+def test_browser_viewer_act_click_runs_and_audits_label(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    calls: list[dict] = []
+
+    def fake_act(kind, **kwargs):
+        calls.append({"kind": kind, **kwargs})
+        return SimpleNamespace(ok=True, output="")
+
+    monkeypatch.setattr(dashboard_api, "browser_act", fake_act)
+
+    r = isolated_app.post(
+        "/api/browser-viewer/act",
+        json={"kind": "click", "ref": "e12", "label": "Sign in"},
+    )
+
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "kind": "click"}
+    assert calls[0]["kind"] == "click"
+    assert calls[0]["ref"] == "e12"
+    assert audits[0]["workflow_id"] == "browser.viewer.act"
+    assert audits[0]["outcome"] == "succeeded"
+    assert "Sign in" in audits[0]["reason"]
+
+
+def test_browser_viewer_act_rejects_unknown_kind(isolated_app, monkeypatch):
+    _patch_browser_audits(monkeypatch)
+
+    r = isolated_app.post("/api/browser-viewer/act", json={"kind": "eval"})
+
+    assert r.status_code == 400
+    assert "unknown action kind" in r.text
+
+
+def test_browser_viewer_act_bad_ref_blocks_with_audit(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+
+    def real_validation(kind, **kwargs):
+        # Use the REAL arg builder so shape validation is exercised.
+        import browser_control
+
+        browser_control.build_browser_act_args(kind, **{
+            k: v for k, v in kwargs.items() if k in ("ref", "text", "key", "direction", "amount")
+        })
+        raise AssertionError("should not reach the runner")
+
+    monkeypatch.setattr(dashboard_api, "browser_act", real_validation)
+
+    r = isolated_app.post(
+        "/api/browser-viewer/act",
+        json={"kind": "click", "ref": "not-a-ref"},
+    )
+
+    assert r.status_code == 400
+    assert audits[0]["outcome"] == "blocked"
+
+
+def test_browser_viewer_navigate_validates_url_and_audits(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    opened: list[str] = []
+    monkeypatch.setattr(
+        dashboard_api,
+        "run_agent_browser_open",
+        lambda url: opened.append(url) or SimpleNamespace(ok=True, output=""),
+    )
+
+    ok = isolated_app.post("/api/browser-viewer/navigate", json={"url": "https://example.com/page"})
+    bad = isolated_app.post("/api/browser-viewer/navigate", json={"url": "javascript:alert(1)"})
+
+    assert ok.status_code == 200
+    assert opened == ["https://example.com/page"]
+    assert audits[0]["workflow_id"] == "browser.viewer.navigate"
+    assert audits[0]["outcome"] == "succeeded"
+    assert bad.status_code == 403
+    assert opened == ["https://example.com/page"]  # blocked URL never shelled
+    assert audits[1]["outcome"] == "blocked"
 
 
 # ── /api/info ────────────────────────────────────────────────────────────

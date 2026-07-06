@@ -17,7 +17,11 @@ __pycache__/
 .claude/memory/
 
 # Heartbeat scripts
-# .claude/scripts/.env 
+# Live secrets — UNTRACKED as of 2026-07-05 (the old "tracked, no creds" note
+# was stale: the file carries 108 keys incl. bank/bot tokens + passwords).
+# History before the untrack commit still contains it; rotation is the
+# mitigation until a coordinated history scrub.
+.claude/scripts/.env
 .claude/scripts/.venv/
 .claude/scripts/heartbeat_runs.log
 .claude/scripts/monthly_finance_runs.log

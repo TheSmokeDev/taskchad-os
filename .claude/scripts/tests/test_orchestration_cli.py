@@ -21,9 +21,14 @@ from cli import main  # noqa: E402
 
 
 @pytest.fixture
-def runner(tmp_path):
+def runner(tmp_path, monkeypatch):
     """Each test gets an isolated orchestration DB via tmp_path."""
     db_path = tmp_path / "test_orch.db"
+    # Convoy dispatch is a live agent/factory action, default-denied by the
+    # live-safety contract (orchestration/live_safety.py). These CLI tests
+    # exercise dispatch mechanics, so opt in at fixture level — matching
+    # test_orchestration_api.py. Refusal behavior is covered separately.
+    monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     with patch("config.ORCHESTRATION_DB_PATH", db_path):
         yield CliRunner()
 

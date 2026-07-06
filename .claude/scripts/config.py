@@ -363,6 +363,11 @@ REGION_BUDGETS = {
     "prefetched_context": int(os.getenv("REGION_BUDGET_PREFETCHED", "2500")),
     "user_inferences": int(os.getenv("REGION_BUDGET_USER_INFERENCES", "500")),
     "working_memory": int(os.getenv("REGION_BUDGET_WORKING_MEMORY", "600")),
+    # Cofounder v2 Part C — the lean agenda-status region for the default
+    # chat (today's line statuses only; absent when no agenda exists). Kept
+    # small on purpose: the win32 27k append envelope is nearly full at the
+    # existing region caps.
+    "portfolio": int(os.getenv("REGION_BUDGET_PORTFOLIO", "200")),
     # Living Self Act 3: the gated cognitive-pass monologue renders here as a
     # role="system", region="internal" memory. 500 tokens (~2000 chars) caps a
     # runaway monologue; assemble_regions truncates per the budget. Without this
@@ -1243,6 +1248,347 @@ def get_cabinet_relay_settings(
     if max_turns is None:
         max_turns = int(os.getenv("CABINET_CHAT_RELAY_MAX_TURNS", "0"))
     return CabinetRelaySettings(enabled=enabled, max_turns=max_turns)
+
+
+class CofounderSettings(NamedTuple):
+    """Effective autonomous co-founder orchestrator knobs (call-time resolved)."""
+
+    enabled: bool
+    projects_dir: Path
+    max_iterations: int
+    max_wall_clock_hours: float
+    max_concurrent: int
+    notify_levels: tuple[str, ...]
+    zombie_stale_minutes: int
+    archon_db: Path
+    workflow_provider: str
+    workflow_model: str
+
+
+def get_cofounder_settings(
+    enabled: bool | None = None,
+    projects_dir: Path | str | None = None,
+    max_iterations: int | None = None,
+    max_wall_clock_hours: float | None = None,
+    max_concurrent: int | None = None,
+    notify_levels: str | tuple[str, ...] | list[str] | None = None,
+    zombie_stale_minutes: int | None = None,
+    archon_db: Path | str | None = None,
+    workflow_provider: str | None = None,
+    workflow_model: str | None = None,
+) -> CofounderSettings:
+    """Resolve autonomous co-founder knobs at CALL TIME (Rule 1).
+
+    The co-founder orchestrator (``cofounder/run_pass.py``) advances vault-spec
+    projects on the heartbeat cadence: dispatching detached Archon runs,
+    polling the run-state DB, running executable completion checks, and
+    notifying Telegram only on terminal flips. Every arg uses the
+    None-sentinel pattern: explicit values pass through; ``None`` resolves the
+    matching ``COFOUNDER_*`` env var inside the body. None of these values
+    become import-time globals — env overrides (and ``monkeypatch.setenv`` in
+    tests) take effect on the next call with no module reload.
+
+    Knobs:
+        COFOUNDER_ENABLED ("false") — master enable; ships OFF until the
+            operator's Phase 9 flip. The ``cofounder`` kill switch
+            (``HOMIE_KILLSWITCH_COFOUNDER``) is the refusal-counted gate on
+            top of this.
+        COFOUNDER_PROJECTS_DIR (MEMORY_DIR/cofounder) — watched vault folder
+            holding one markdown file per project (sanitizer-denied).
+        COFOUNDER_MAX_ITERATIONS ("50") — per-project dispatch cap before the
+            status flips to awaiting-human.
+        COFOUNDER_MAX_WALL_CLOCK_HOURS ("72") — per-project wall-clock cap
+            from first dispatch before the status flips to awaiting-human.
+        COFOUNDER_MAX_CONCURRENT ("2") — in-flight build cap across projects;
+            excess projects wait in new/queued order.
+        COFOUNDER_NOTIFY_LEVELS ("done,blocked,awaiting-human") —
+            comma-separated levels that may send a Telegram ping; parsed to an
+            order-preserving lowercased tuple (empties dropped; empty string
+            disables all notifications).
+        COFOUNDER_ZOMBIE_STALE_MINUTES ("60") — minutes without
+            ``last_activity_at`` movement (two heartbeat cycles) before a
+            running Archon row is a zombie CANDIDATE; the second signal
+            (no working_path mtime growth across a full pass) must also hold.
+        COFOUNDER_ARCHON_DB (~/.archon/archon.db) — Archon run-state SQLite
+            the engine adapter polls READ-ONLY (Rule 2: physical DB rows are
+            the only truth about in-flight builds; the adapter can never
+            write it).
+        COFOUNDER_WORKFLOW_PROVIDER ("claude") — the backend knob stamped by
+            CODE into every authored workflow YAML at BOTH the workflow level
+            and every loop-node level (loop nodes ignore per-node provider),
+            then re-stamped after each pass so an LLM edit can never drift it.
+        COFOUNDER_WORKFLOW_MODEL ("sonnet") — the model half of the same
+            backend knob; stamped and re-stamped alongside the provider.
+    """
+    if enabled is None:
+        enabled = os.getenv("COFOUNDER_ENABLED", "false").strip().lower() == "true"
+    if projects_dir is None:
+        raw_dir = os.getenv("COFOUNDER_PROJECTS_DIR", "").strip()
+        projects_dir = Path(raw_dir) if raw_dir else MEMORY_DIR / "cofounder"
+    else:
+        projects_dir = Path(projects_dir)
+    if max_iterations is None:
+        max_iterations = int(os.getenv("COFOUNDER_MAX_ITERATIONS", "50"))
+    if max_wall_clock_hours is None:
+        max_wall_clock_hours = float(os.getenv("COFOUNDER_MAX_WALL_CLOCK_HOURS", "72"))
+    if max_concurrent is None:
+        max_concurrent = int(os.getenv("COFOUNDER_MAX_CONCURRENT", "2"))
+    if notify_levels is None:
+        notify_levels = os.getenv(
+            "COFOUNDER_NOTIFY_LEVELS", "done,blocked,awaiting-human"
+        )
+    if isinstance(notify_levels, str):
+        parsed_levels = tuple(
+            level.strip().lower() for level in notify_levels.split(",") if level.strip()
+        )
+    else:
+        parsed_levels = tuple(
+            str(level).strip().lower() for level in notify_levels if str(level).strip()
+        )
+    if zombie_stale_minutes is None:
+        zombie_stale_minutes = int(os.getenv("COFOUNDER_ZOMBIE_STALE_MINUTES", "60"))
+    if archon_db is None:
+        raw_db = os.getenv("COFOUNDER_ARCHON_DB", "").strip()
+        archon_db = Path(raw_db) if raw_db else Path.home() / ".archon" / "archon.db"
+    else:
+        archon_db = Path(archon_db)
+    if workflow_provider is None:
+        workflow_provider = os.getenv("COFOUNDER_WORKFLOW_PROVIDER", "").strip() or "claude"
+    if workflow_model is None:
+        workflow_model = os.getenv("COFOUNDER_WORKFLOW_MODEL", "").strip() or "sonnet"
+    return CofounderSettings(
+        enabled=enabled,
+        projects_dir=projects_dir,
+        max_iterations=max_iterations,
+        max_wall_clock_hours=max_wall_clock_hours,
+        max_concurrent=max_concurrent,
+        notify_levels=parsed_levels,
+        zombie_stale_minutes=zombie_stale_minutes,
+        archon_db=archon_db,
+        workflow_provider=workflow_provider,
+        workflow_model=workflow_model,
+    )
+
+
+class CofounderAgendaSettings(NamedTuple):
+    """Effective co-founder morning-agenda knobs (call-time resolved)."""
+
+    enabled: bool
+    agenda_hour: int
+    max_items: int
+    max_attempts: int
+    notify: bool
+
+
+def get_cofounder_agenda_settings(
+    enabled: bool | None = None,
+    agenda_hour: int | None = None,
+    max_items: int | None = None,
+    max_attempts: int | None = None,
+    notify: bool | None = None,
+) -> CofounderAgendaSettings:
+    """Resolve co-founder v2 agenda knobs at CALL TIME (Rule 1).
+
+    The agenda pass (``cofounder/agenda.py``) is the WS2 propose-don't-act
+    surface: a once-daily portfolio scan that PROPOSES persona->repo
+    assignments as a vault artifact + Telegram card and never executes
+    anything. It is gated separately from ``COFOUNDER_ENABLED`` so the v2.0
+    agenda can bake while the v1 project pipeline stays dormant (and vice
+    versa); the shared ``cofounder`` kill switch sits on top of both.
+
+    Knobs:
+        COFOUNDER_AGENDA_ENABLED ("false") — master enable for the agenda
+            pass. Ships OFF (dormant-by-default, same family as v1).
+        COFOUNDER_AGENDA_HOUR ("7") — earliest LOCAL hour the daily scan may
+            run; the first heartbeat pass on/after this hour produces the day's
+            agenda.
+        COFOUNDER_AGENDA_MAX_ITEMS ("5") — cap on proposed agenda lines; the
+            validator truncates anything past it.
+        COFOUNDER_AGENDA_MAX_ATTEMPTS ("3") — per-day cap on failed proposal
+            attempts (LLM error/garbage); once reached the pass stays quiet
+            until tomorrow instead of retrying every heartbeat.
+        COFOUNDER_AGENDA_NOTIFY ("true") — send the agenda Telegram card
+            through the gated ``cofounder.notify`` sender (kill switch +
+            capability gate + audit row all still apply).
+    """
+    if enabled is None:
+        enabled = os.getenv("COFOUNDER_AGENDA_ENABLED", "false").strip().lower() == "true"
+    if agenda_hour is None:
+        agenda_hour = int(os.getenv("COFOUNDER_AGENDA_HOUR", "7"))
+    if max_items is None:
+        max_items = int(os.getenv("COFOUNDER_AGENDA_MAX_ITEMS", "5"))
+    if max_attempts is None:
+        max_attempts = int(os.getenv("COFOUNDER_AGENDA_MAX_ATTEMPTS", "3"))
+    if notify is None:
+        notify = os.getenv("COFOUNDER_AGENDA_NOTIFY", "true").strip().lower() == "true"
+    return CofounderAgendaSettings(
+        enabled=enabled,
+        agenda_hour=agenda_hour,
+        max_items=max_items,
+        max_attempts=max_attempts,
+        notify=notify,
+    )
+
+
+class CofounderDelegationSettings(NamedTuple):
+    """Effective co-founder delegation-transport knobs (call-time resolved)."""
+
+    enabled: bool
+    max_assignments_per_day: int
+    max_inflight_per_persona: int
+
+
+def get_cofounder_delegation_settings(
+    enabled: bool | None = None,
+    max_assignments_per_day: int | None = None,
+    max_inflight_per_persona: int | None = None,
+) -> CofounderDelegationSettings:
+    """Resolve co-founder v2 WS3 delegation knobs at CALL TIME (Rule 1).
+
+    The delegation transport (``cofounder/delegate.py``) turns an APPROVED
+    agenda line into a convoy + typed mailbox assignment for a persona.
+    The operator's per-line approval ("run it" / ``/cofounder run <n>``)
+    ALWAYS works — ``COFOUNDER_DELEGATION_ENABLED`` gates only AUTONOMOUS
+    (unapproved) delegation, which no shipped code path exercises yet
+    (operator resolution #4, 2026-07-05). The
+    ``cofounder_delegation`` kill switch
+    (``HOMIE_KILLSWITCH_COFOUNDER_DELEGATION``) sits on top of BOTH paths —
+    it is the emergency stop for the whole delegation surface.
+
+    Knobs:
+        COFOUNDER_DELEGATION_ENABLED ("false") — autonomous-delegation flag.
+            Ships OFF; flipping it is the operator's end-state call after
+            propose-only has earned trust. Approved lines do not need it.
+        COFOUNDER_MAX_ASSIGNMENTS_PER_DAY ("5") — cap on delegations per
+            local day across all personas (approved + autonomous combined).
+        COFOUNDER_MAX_INFLIGHT_PER_PERSONA ("1") — cap on un-acked
+            ``cofounder_assignment`` mailbox deliveries per persona
+            (physical mailbox state is the in-flight truth — Rule 2).
+    """
+    if enabled is None:
+        enabled = (
+            os.getenv("COFOUNDER_DELEGATION_ENABLED", "false").strip().lower()
+            == "true"
+        )
+    if max_assignments_per_day is None:
+        max_assignments_per_day = int(
+            os.getenv("COFOUNDER_MAX_ASSIGNMENTS_PER_DAY", "5")
+        )
+    if max_inflight_per_persona is None:
+        max_inflight_per_persona = int(
+            os.getenv("COFOUNDER_MAX_INFLIGHT_PER_PERSONA", "1")
+        )
+    return CofounderDelegationSettings(
+        enabled=enabled,
+        max_assignments_per_day=max_assignments_per_day,
+        max_inflight_per_persona=max_inflight_per_persona,
+    )
+
+
+class CofounderWorktickSettings(NamedTuple):
+    """Effective co-founder work-loop knobs (call-time resolved)."""
+
+    enabled: bool
+    max_per_tick: int
+    code_workflow: str
+
+
+def get_cofounder_worktick_settings(
+    enabled: bool | None = None,
+    max_per_tick: int | None = None,
+    code_workflow: str | None = None,
+) -> CofounderWorktickSettings:
+    """Resolve co-founder v2 WS4 work-loop knobs at CALL TIME (Rule 1).
+
+    The work loop (``cofounder/worktick.py``) rides the heartbeat: it claims
+    ``cofounder_assignment`` mailbox deliveries for delegable personas,
+    re-checks the delegation scope at claim (Rule 4's second half), executes
+    per the OPERATOR-APPROVED mode, and reports a typed ``cofounder_result``.
+    Shares the ``cofounder_delegation`` kill switch with the send side — one
+    emergency stop for the whole delegation surface.
+
+    Knobs:
+        COFOUNDER_WORKLOOP_ENABLED ("false") — master enable for the work
+            loop. Ships OFF (dormant-by-default family).
+        COFOUNDER_WORKLOOP_MAX_PER_TICK ("2") — assignments executed per
+            heartbeat tick across ALL personas (a tick is ~30 min; drafts
+            run on the background QUALITY tier).
+        COFOUNDER_WORKLOOP_CODE_WORKFLOW ("archon-ralph-dag") — the Archon
+            workflow used for ``mode: code`` assignments (detached worktree
+            dispatch, PR-for-review merge policy).
+    """
+    if enabled is None:
+        enabled = (
+            os.getenv("COFOUNDER_WORKLOOP_ENABLED", "false").strip().lower()
+            == "true"
+        )
+    if max_per_tick is None:
+        max_per_tick = int(os.getenv("COFOUNDER_WORKLOOP_MAX_PER_TICK", "2"))
+    if code_workflow is None:
+        code_workflow = (
+            os.getenv("COFOUNDER_WORKLOOP_CODE_WORKFLOW", "").strip()
+            or "archon-ralph-dag"
+        )
+    return CofounderWorktickSettings(
+        enabled=enabled,
+        max_per_tick=max_per_tick,
+        code_workflow=code_workflow,
+    )
+
+
+class CofounderReportSettings(NamedTuple):
+    """Effective co-founder reporting-loop knobs (call-time resolved)."""
+
+    enabled: bool
+    notify: bool
+    checkout_hour: int
+    poll_days: int
+
+
+def get_cofounder_report_settings(
+    enabled: bool | None = None,
+    notify: bool | None = None,
+    checkout_hour: int | None = None,
+    poll_days: int | None = None,
+) -> CofounderReportSettings:
+    """Resolve co-founder v2 WS5 reporting knobs at CALL TIME (Rule 1).
+
+    The reporting pass (``cofounder/report.py``) closes the delegation
+    circle: it ingests the personas' typed ``cofounder_result`` messages
+    (flipping agenda-line statuses), polls archon.db for dispatched
+    code-mode runs, sends an intraday batch card when results land, and
+    sends the once-daily end-of-day checkout card (operator resolution #3 —
+    morning agenda + intraday awareness + EOD checkout). Deterministic —
+    ZERO LLM calls. Shares the ``cofounder_delegation`` kill switch.
+
+    Knobs:
+        COFOUNDER_REPORT_ENABLED ("false") — master enable (dormant family).
+        COFOUNDER_REPORT_NOTIFY ("true") — send the intraday/checkout cards
+            (kill switch + capability gate + audit still apply; an emptied
+            COFOUNDER_NOTIFY_LEVELS mutes everything as always).
+        COFOUNDER_CHECKOUT_HOUR ("18") — earliest LOCAL hour the daily
+            checkout card may send.
+        COFOUNDER_REPORT_POLL_DAYS ("7") — how many recent agenda days to
+            scan for still-dispatched code runs.
+    """
+    if enabled is None:
+        enabled = (
+            os.getenv("COFOUNDER_REPORT_ENABLED", "false").strip().lower() == "true"
+        )
+    if notify is None:
+        notify = (
+            os.getenv("COFOUNDER_REPORT_NOTIFY", "true").strip().lower() == "true"
+        )
+    if checkout_hour is None:
+        checkout_hour = int(os.getenv("COFOUNDER_CHECKOUT_HOUR", "18"))
+    if poll_days is None:
+        poll_days = int(os.getenv("COFOUNDER_REPORT_POLL_DAYS", "7"))
+    return CofounderReportSettings(
+        enabled=enabled,
+        notify=notify,
+        checkout_hour=checkout_hour,
+        poll_days=poll_days,
+    )
 
 
 # Sentinel secret value that disables signature validation on a webhook route.

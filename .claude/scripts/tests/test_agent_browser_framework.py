@@ -623,3 +623,117 @@ async def test_linkedin_profile_nl_check_phrase_infers_status(
 
     assert "LinkedIn Browser status: reachable" in message
     assert calls == []
+
+
+# ── M12 phone-drive primitives ───────────────────────────────────────────
+
+_SNAPSHOT_SAMPLE = """\
+- link "About" [ref=e1]
+- button "Google apps" [expanded=false, ref=e15]
+- button "Share" [ref=e16]
+  - generic [ref=e22] clickable [cursor:pointer]
+- combobox "Search" [expanded=false, ref=e24]
+- button "Google Search" [ref=e20]
+- link "Privacy" [ref=e7]
+"""
+
+
+def test_parse_snapshot_elements_extracts_refs_and_drops_generic() -> None:
+    elements = browser_control.parse_snapshot_elements(_SNAPSHOT_SAMPLE)
+    refs = [e["ref"] for e in elements]
+    assert "e22" not in refs  # unnamed generic wrapper dropped
+    assert {"ref": "e20", "role": "button", "name": "Google Search"} in elements
+    assert {"ref": "e24", "role": "combobox", "name": "Search"} in elements
+    assert len(elements) == 6
+
+
+def test_parse_snapshot_elements_dedupes_refs() -> None:
+    doubled = _SNAPSHOT_SAMPLE + '- button "Google Search" [ref=e20]\n'
+    elements = browser_control.parse_snapshot_elements(doubled)
+    assert [e["ref"] for e in elements].count("e20") == 1
+
+
+def test_build_browser_act_args_maps_every_kind() -> None:
+    build = browser_control.build_browser_act_args
+    assert build("click", ref="e12") == ["click", "@e12"]
+    assert build("fill", ref="e24", text="hello world") == ["fill", "@e24", "hello world"]
+    assert build("press", key="Enter") == ["press", "Enter"]
+    assert build("press", key="Control+a") == ["press", "Control+a"]
+    assert build("scroll") == ["scroll", "down", "600"]
+    assert build("scroll", direction="up", amount=250) == ["scroll", "up", "250"]
+    assert build("back") == ["back"]
+    assert build("forward") == ["forward"]
+    assert build("reload") == ["reload"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "kwargs"),
+    [
+        ("click", {}),                             # missing ref
+        ("click", {"ref": "not-a-ref"}),           # malformed ref
+        ("click", {"ref": "e1; rm -rf"}),          # injection shape
+        ("fill", {"ref": "e2"}),                   # missing text
+        ("press", {"key": "Enter; whoami"}),       # malformed key
+        ("scroll", {"direction": "sideways"}),     # bad direction
+        ("scroll", {"amount": 999999}),            # out of range
+        ("eval", {}),                              # kind never allowed
+    ],
+)
+def test_build_browser_act_args_rejects_malformed_input(kind: str, kwargs: dict) -> None:
+    with pytest.raises(ValueError):
+        browser_control.build_browser_act_args(kind, **kwargs)
+
+
+def test_browser_act_shells_mapped_argv_with_cdp_port() -> None:
+    recorded: dict = {}
+
+    def fake_runner(argv, **kwargs):
+        recorded["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    result = browser_control.browser_act("click", ref="e12", port=18222, runner=fake_runner)
+    assert result.ok
+    assert recorded["argv"][-2:] == ["click", "@e12"]
+    assert "--cdp" in recorded["argv"]
+    assert "18222" in recorded["argv"]
+
+
+def test_browser_viewer_act_workflows_are_registered() -> None:
+    from browser_workflows import get_browser_workflow
+
+    act = get_browser_workflow("browser.viewer.act")
+    nav = get_browser_workflow("browser.viewer.navigate")
+    elements = get_browser_workflow("browser.viewer.elements")
+    assert act is not None and act.classification == "interact"
+    assert nav is not None and nav.is_navigation
+    assert elements is not None and elements.classification == "read"
+
+
+def test_ensure_browser_window_restored_windows_only(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="restored\n", stderr="")
+
+    monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
+    assert browser_control.ensure_browser_window_restored(port=18222, runner=fake_runner)
+    assert calls[0][0] == "powershell"
+    assert "remote-debugging-port=18222" in calls[0][-1]
+
+    monkeypatch.setattr(browser_control.platform, "system", lambda: "Linux")
+    assert browser_control.ensure_browser_window_restored(port=18222, runner=fake_runner) is False
+    assert len(calls) == 1  # non-Windows never shells
+
+
+def test_browser_act_restores_window_before_input(monkeypatch) -> None:
+    order: list[str] = []
+
+    def fake_runner(argv, **kwargs):
+        order.append("powershell" if argv[0] == "powershell" else "agent-browser")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
+    result = browser_control.browser_act("click", ref="e2", port=18222, runner=fake_runner)
+    assert result.ok
+    assert order == ["powershell", "agent-browser"]

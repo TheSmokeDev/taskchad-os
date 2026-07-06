@@ -502,9 +502,15 @@ def test_custom_executor_in_registry(convoy_svc, convoy_with_ready_subtask):
 
 
 @pytest.fixture
-def api_client(tmp_path):
+def api_client(tmp_path, monkeypatch):
     """API test client with isolated DB."""
     db_path = tmp_path / "test_executor_api.db"
+    # Dispatch is a live agent/factory action, default-denied by the
+    # live-safety contract (orchestration/live_safety.py). These are
+    # functional dispatch tests, so opt in at fixture level — matching
+    # test_orchestration_api.py's client fixture. Refusal behavior is
+    # covered separately there.
+    monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     with patch("config.ORCHESTRATION_DB_PATH", db_path):
         import importlib
         import orchestration.api as api_mod

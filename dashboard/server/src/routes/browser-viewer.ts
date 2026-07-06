@@ -7,6 +7,7 @@
  */
 
 import { Hono } from 'hono';
+import { streamSSE } from 'hono/streaming';
 import {
   authedFetch,
   authedFetchBinary,
@@ -90,3 +91,101 @@ browserViewerRoute.post('/api/browser-viewer/stream/enable', async (c) =>
 browserViewerRoute.post('/api/browser-viewer/stream/disable', async (c) =>
   forwardStreamMutation(c, '/api/browser-viewer/stream/disable'),
 );
+
+// M12 phone-drive — thin proxies; the default-deny workflow gates, input
+// validation, and audit rows all live in Python (dashboard_api.py).
+
+browserViewerRoute.get('/api/browser-viewer/elements', async (c) => {
+  const result = await authedFetchJson('/api/browser-viewer/elements');
+  return c.json(result.json as JsonRecord, result.status as 200);
+});
+
+async function forwardJsonPost(c: import('hono').Context, path: string): Promise<Response> {
+  const body = await c.req.json().catch(() => ({}));
+  const result = await authedFetchJson(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return c.json(result.json as JsonRecord, result.status as 200);
+}
+
+browserViewerRoute.post('/api/browser-viewer/act', (c) =>
+  forwardJsonPost(c, '/api/browser-viewer/act'),
+);
+
+browserViewerRoute.post('/api/browser-viewer/navigate', (c) =>
+  forwardJsonPost(c, '/api/browser-viewer/navigate'),
+);
+
+// M12 Phase 2 — live viewport relay. The agent-browser stream server is a
+// loopback-only unauthenticated WS (desktop connects directly via
+// direct_ws_url); remote clients (the phone) must NEVER reach it raw. This
+// route bridges it as SSE so it rides the normal bearer-auth middleware and
+// the app's existing expo/fetch stream reader. Node >= 22 global WebSocket
+// client — zero new dependencies. Frames relayed last-wins at ~4 fps.
+
+const FRAME_TICK_MS = 250;
+const KEEPALIVE_TICKS = 60; // ~15s of idle -> ping
+
+browserViewerRoute.get('/api/browser-viewer/stream/sse', async (c) => {
+  const statusRes = await authedFetchJson('/api/browser-viewer/status');
+  const statusJson = isRecord(statusRes.json) ? statusRes.json : null;
+  const stream = statusJson && isRecord(statusJson.stream) ? statusJson.stream : null;
+  const port = stream && typeof stream.port === 'number' ? stream.port : 0;
+  if (!stream || stream.enabled !== true || port <= 0 || port > 65535) {
+    return c.json({ detail: 'viewport stream is not enabled' }, 409);
+  }
+
+  const WebSocketCtor = (globalThis as { WebSocket?: new (url: string) => WsLike }).WebSocket;
+  if (!WebSocketCtor) {
+    return c.json({ detail: 'server runtime lacks a WebSocket client' }, 501);
+  }
+
+  return streamSSE(c, async (sse) => {
+    let latest: string | null = null;
+    let closed = false;
+    const upstream = new WebSocketCtor(`ws://127.0.0.1:${port}`);
+
+    const finish = () => {
+      closed = true;
+      try {
+        upstream.close();
+      } catch {
+        // already closed
+      }
+    };
+    upstream.onmessage = (ev) => {
+      latest = String(ev.data);
+    };
+    upstream.onclose = finish;
+    upstream.onerror = finish;
+    sse.onAbort(finish);
+
+    let idleTicks = 0;
+    while (!closed) {
+      await new Promise((r) => setTimeout(r, FRAME_TICK_MS));
+      if (closed) break;
+      try {
+        if (latest !== null) {
+          const frame = latest;
+          latest = null;
+          idleTicks = 0;
+          await sse.writeSSE({ data: frame });
+        } else if (++idleTicks >= KEEPALIVE_TICKS) {
+          idleTicks = 0;
+          await sse.writeSSE({ data: '{"type":"ping"}' });
+        }
+      } catch {
+        finish(); // client went away mid-write
+      }
+    }
+  });
+});
+
+interface WsLike {
+  close(): void;
+  onmessage: ((ev: { data: unknown }) => void) | null;
+  onclose: (() => void) | null;
+  onerror: (() => void) | null;
+}

@@ -55,6 +55,14 @@ class RuntimeRequest:
     # runtime/lanes/tools to the user. Provider-agnostic (Codex + Gemini share the
     # builder); ignored on the claude_native lane, which has no such preamble.
     conversational: bool = False
+    # Homie Mobile M7 — per-message cockpit controls. `effort` maps to the SDK
+    # options `effort` knob (low|medium|high|xhigh|max) on the claude_native lane;
+    # generic lanes ignore it. `on_tool_event` is a fail-open callback the
+    # claude_sdk message loop invokes per streamed ToolUseBlock
+    # ({id, name, input_preview}); it is consumed by the runtime loop itself,
+    # never forwarded into SDK options, and generic lanes emit no live events.
+    effort: str | None = None
+    on_tool_event: Any | None = None
 
 
 @dataclass(slots=True)

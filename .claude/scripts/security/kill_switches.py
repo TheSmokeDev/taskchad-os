@@ -3,6 +3,11 @@
 Backed by env vars HOMIE_KILLSWITCH_<name>=disabled (case-insensitive). Refusal
 counters in module state; surfaced via /api/health killSwitches field.
 
+Registered switch names are call-site defined (grep `requireEnabled("` for the
+live set). The ``cofounder`` switch (HOMIE_KILLSWITCH_COFOUNDER) gates the
+autonomous co-founder orchestrator surface — the heartbeat pass and its
+Telegram notify path (US-001).
+
 Rule 3 enforcement: every consumer MUST use module-attribute lookup:
 
     # CORRECT

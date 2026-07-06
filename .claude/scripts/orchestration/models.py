@@ -340,6 +340,46 @@ class VerifierFeedbackPayload:
 
 
 @dataclass
+class CofounderAssignmentPayload:
+    """Cofounder v2 WS3 — one delegated agenda line (cofounder -> persona).
+
+    ``agenda_ref`` anchors the assignment back to its artifact
+    (``AGENDA-YYYY-MM-DD.md#<line>``); ``repo`` is a REPOSITORIES.md slug or
+    None for non-repo work (research, outreach, content). ``mode`` is the
+    OPERATOR-APPROVED execution mode (WS4): ``draft`` = direct no-tools
+    runtime run producing a vault deliverable; ``code`` = detached Archon
+    worktree dispatch (repo required, PR-for-review).
+    """
+
+    subtask_id: int
+    task: str
+    repo: str | None = None
+    why: str = ""
+    priority: int = 2
+    agenda_ref: str = ""
+    due: str | None = None
+    mode: str = "draft"
+
+
+@dataclass
+class CofounderResultPayload:
+    """Cofounder v2 WS4 — one work-loop outcome (persona -> cofounder).
+
+    ``status``: ``done`` (draft deliverable written) | ``dispatched``
+    (Archon run started; completion tracking is WS5's) | ``failed`` |
+    ``refused`` (scope re-check at claim denied — Rule 4's second half).
+    """
+
+    subtask_id: int
+    agenda_ref: str = ""
+    status: str = "done"
+    summary: str = ""
+    deliverable_path: str | None = None
+    run_id: str | None = None
+    branch: str | None = None
+
+
+@dataclass
 class ShutdownRequestPayload:
     reason: str = "coordinator requested graceful shutdown"
 

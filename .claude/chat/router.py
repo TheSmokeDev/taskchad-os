@@ -235,6 +235,9 @@ class ChatRouter:
         self._pending_followup_choices: dict[str, tuple[Any, Any, str]] = {}
         self._turn_choice_counter = 0
         self._background_engine_tasks: set[asyncio.Task[Any]] = set()
+        # Homie Mobile M7 — in-flight engine turns by conversation key, so the
+        # dashboard /stop endpoint can cancel a running turn mid-flight.
+        self._active_turns: dict[str, asyncio.Task[Any]] = {}
 
     def register(self, adapter: Any) -> None:
         """Register a platform adapter."""
@@ -376,6 +379,20 @@ class ChatRouter:
         """
         self._background_engine_tasks.add(task)
         task.add_done_callback(self._background_engine_tasks.discard)
+
+    def cancel_active_turn(self, key_prefix: str) -> int:
+        """Cancel in-flight engine turns whose conversation key starts with prefix.
+
+        Homie Mobile M7 stop control (`POST /api/conversation/{id}/stop`). The
+        caller knows platform+channel+thread but not user_id, so this matches by
+        prefix over `_conversation_key` entries. Returns turns cancelled.
+        """
+        count = 0
+        for key, task in list(self._active_turns.items()):
+            if key.startswith(key_prefix) and not task.done():
+                task.cancel()
+                count += 1
+        return count
 
     def _queue_incoming(self, adapter: Any, incoming: Any) -> None:
         """Buffer quick conversational bursts, then handle in thread order."""
@@ -1007,6 +1024,21 @@ class ChatRouter:
         # Run engine with a progress ticker
         progress: dict[str, Any] = {"tool_calls": 0, "started": time.time()}
 
+        # Homie Mobile M7 — cockpit adapters (dashboard SSE) expose
+        # emit_turn_event; bind it with this turn's target so the engine's
+        # live tool telemetry reaches the stream. Other adapters: no-op.
+        _turn_emitter = getattr(adapter, "emit_turn_event", None)
+        if callable(_turn_emitter):
+            _turn_channel, _turn_thread = incoming.channel, incoming.thread
+
+            def _emit_turn_event(ev: dict[str, Any]) -> None:
+                try:
+                    _turn_emitter(ev, channel=_turn_channel, thread=_turn_thread)
+                except Exception:
+                    pass
+
+            progress["emit_turn_event"] = _emit_turn_event
+
         async def _tick_progress() -> None:
             """Update placeholder with elapsed time every 12 seconds."""
             while True:
@@ -1151,8 +1183,22 @@ class ChatRouter:
         )
 
         engine_task = asyncio.create_task(_run_engine())
+        _turn_key = self._conversation_key(incoming)
+        self._active_turns[_turn_key] = engine_task
         try:
             await asyncio.wait_for(asyncio.shield(engine_task), timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            # Homie Mobile M7 — operator stop: cancel_active_turn() killed the
+            # engine task. Its persistence died with it (history correctly shows
+            # no reply); deliver a stop marker instead. If the engine task is
+            # still alive, WE were cancelled from outside — propagate.
+            if not engine_task.cancelled():
+                raise
+            final_text = "⏹️ Stopped."
+            final_is_error = False
+            emit = progress.get("emit_turn_event")
+            if callable(emit):
+                emit({"type": "turn_aborted"})
         except asyncio.TimeoutError:
             formatted_timeout = _format_seconds(timeout_seconds)
             print(f"[{datetime.now()}] Engine timed out after {formatted_timeout}s")
@@ -1174,6 +1220,8 @@ class ChatRouter:
             final_text = f"Sorry, something went wrong: {e}"
             final_is_error = True
         finally:
+            if self._active_turns.get(_turn_key) is engine_task:
+                self._active_turns.pop(_turn_key, None)
             if progress_task:
                 progress_task.cancel()
 
@@ -2118,6 +2166,8 @@ class ChatRouter:
             await _video_handlers.handle_video_button(adapter, incoming, custom_id)
         elif custom_id.startswith("social:"):
             await self._handle_social_button(adapter, incoming, custom_id)
+        elif custom_id.startswith("cofounder:"):
+            await self._handle_cofounder_button(adapter, incoming, custom_id)
         else:
             # Unknown button — log and ignore
             print(f"[{datetime.now()}] Unknown button: {custom_id}")
@@ -2188,6 +2238,56 @@ class ChatRouter:
                 reply = f"Unknown social action: {action}"
         except Exception as e:  # noqa: BLE001 — never leave the tap on read
             reply = f"Social action failed: {type(e).__name__}: {e}"
+
+        await adapter.send(
+            OutgoingMessage(
+                text=reply,
+                channel=incoming.channel,
+                thread=incoming.thread,
+            )
+        )
+
+    async def _handle_cofounder_button(
+        self, adapter: Any, incoming: Any, custom_id: str
+    ) -> None:
+        """Route a co-founder notify-card button tap
+        (``cofounder:<action>:<slug>``) through the SAME dispatch path as the
+        typed ``/cofounder pause|approve`` — ``manager.dispatch`` applies the
+        command's role gate and calls the one registered handler, so a button
+        (or a typed ``__button:cofounder:...``) can never do more than the
+        slash command and no flip logic is duplicated (US-016).
+        """
+        parts = custom_id.split(":")
+        if len(parts) != 3 or not parts[2]:
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Malformed co-founder action: {custom_id}",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+        _, action, slug = parts
+        if action not in ("pause", "approve"):
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Unknown co-founder action: {action}",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        try:
+            reply = await self.manager.dispatch(
+                "cofounder", adapter, incoming, f"{action} {slug}"
+            )
+        except Exception as e:  # noqa: BLE001 — never leave the tap unanswered
+            reply = f"Co-founder action failed: {type(e).__name__}: {e}"
+        if reply is None:
+            reply = "Co-founder command is not available."
 
         await adapter.send(
             OutgoingMessage(

@@ -6,7 +6,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from memory_flush import build_memory_flush_prompt
-from memory_reflect import _assemble_reflect_identity_section
+from memory_reflect import (
+    _assemble_reflect_identity_section,
+    _assemble_reflect_repo_routing_section,
+)
 from repository_memory import (
     build_repository_briefing_section,
     validate_repository_memory,
@@ -148,3 +151,10 @@ def test_reflection_identity_includes_repositories(tmp_path: Path) -> None:
 
     assert "## Current REPOSITORIES.md (private repo routing context)" in section
     assert "thehomie" in section
+
+    # US-019: the prompt's routing rules cover BOTH Archon dispatches and
+    # co-founder project activity, each landing in `## Dispatch History`.
+    routing = _assemble_reflect_repo_routing_section()
+    assert "Append Archon/Codex dispatches" in routing
+    assert "co-founder" in routing
+    assert routing.count("`## Dispatch History`") == 2

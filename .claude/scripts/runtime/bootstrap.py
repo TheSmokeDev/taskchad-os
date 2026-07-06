@@ -268,6 +268,21 @@ def _build_memory_index(memory_dir: Path) -> str:
     return "\n".join(entries)
 
 
+def _build_cofounder_briefing_safe(memory_dir: Path) -> str:
+    """Lazy, guarded co-founder briefing (US-019).
+
+    The import happens inside the try so a broken ``cofounder`` package can
+    never break bootstrap (the heartbeat-seam lesson); the builder itself is
+    also fail-open, so this wrapper only guards the import edge.
+    """
+    try:
+        from cofounder.briefing import build_cofounder_briefing_section
+
+        return build_cofounder_briefing_section(memory_dir)
+    except Exception:
+        return ""
+
+
 def build_session_briefing(
     *,
     memory_dir: Path = MEMORY_DIR,
@@ -356,6 +371,11 @@ def build_session_briefing(
     repository_config = build_repository_config_briefing()
     if repository_config:
         parts.append(repository_config)
+
+    # 6.6. Co-founder projects (compact orchestrator briefing; fail-open).
+    cofounder_projects = _build_cofounder_briefing_safe(memory_dir)
+    if cofounder_projects:
+        parts.append(cofounder_projects)
 
     # 7. Urgents (date-filtered)
     urgents = _extract_urgents(memory) if memory else ""

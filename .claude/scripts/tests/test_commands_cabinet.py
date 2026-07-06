@@ -50,7 +50,16 @@ def test_three_commands_rows() -> None:
 def test_cabinet_category_exists() -> None:
     cats = {c[0]: c[1] for c in commands.CATEGORIES}
     assert "Cabinet" in cats, "Cabinet category missing from CATEGORIES"
-    assert set(cats["Cabinet"]) == {"cabinet", "standup", "discuss"}
+    # team/teamroom/teamtick joined the category with the team-orchestration
+    # phases (commands.py CATEGORIES); this set is the intentional roster.
+    assert set(cats["Cabinet"]) == {
+        "cabinet",
+        "standup",
+        "discuss",
+        "team",
+        "teamroom",
+        "teamtick",
+    }
 
 
 # ---------------------------------------------------------------------------

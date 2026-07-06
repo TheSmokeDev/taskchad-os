@@ -138,6 +138,37 @@ _WORKFLOWS: dict[str, BrowserWorkflow] = {
         default_url=None,
         audit_action="browser_viewer_stream_disable",
     ),
+    # M12 — phone-drive: OPERATOR-initiated remote control from the mobile
+    # viewer. "interact" = the human pushes each button live (not agent
+    # autonomy); agent-side writes keep their approval-phrase gates. Every
+    # attempt still audits through the dashboard endpoints.
+    "browser.viewer.elements": BrowserWorkflow(
+        workflow_id="browser.viewer.elements",
+        description="List the active tab's interactive elements (snapshot refs) for the mobile viewer.",
+        classification="read",
+        approval_level="none",
+        router_command=None,
+        default_url=None,
+        audit_action="browser_viewer_elements",
+    ),
+    "browser.viewer.act": BrowserWorkflow(
+        workflow_id="browser.viewer.act",
+        description="Operator-driven action (click/fill/press/scroll/history) on the visible browser from the mobile viewer.",
+        classification="interact",
+        approval_level="operator",
+        router_command=None,
+        default_url=None,
+        audit_action="browser_viewer_act",
+    ),
+    "browser.viewer.navigate": BrowserWorkflow(
+        workflow_id="browser.viewer.navigate",
+        description="Operator-driven navigation of the visible browser to an absolute http(s) URL from the mobile viewer.",
+        classification="navigation",
+        approval_level="operator",
+        router_command=None,
+        default_url=None,
+        audit_action="browser_viewer_navigate",
+    ),
     "linkedin.profile.open": BrowserWorkflow(
         workflow_id="linkedin.profile.open",
         description="Open the configured LinkedIn profile in the visible browser.",

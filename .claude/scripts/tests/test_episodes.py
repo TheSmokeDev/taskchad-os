@@ -908,6 +908,7 @@ class TestMarkEpisodesConsolidated:
 
 class TestIndexRecallReach:
     def test_sync_index_and_search_reach_episode(self, tmp_path, monkeypatch):
+        import config as cfg_mod
         import db as db_mod
         import memory_index
         import memory_search
@@ -928,27 +929,33 @@ class TestIndexRecallReach:
             if p != episode:
                 assert sentinel not in p.read_text(encoding="utf-8")
 
-        monkeypatch.setattr(db_mod, "DATABASE_PATH", tmp_path / "memory.db")
+        # sync_index + search resolve their SQLite file via
+        # ``resolve_db_path(memory_dir)`` (per-vault DB), which reads
+        # ``config.DATA_DIR`` at call time. Isolate that into ``tmp_path`` so the
+        # derived ``memory.vault.db`` is unique per test (no real-data-dir
+        # pollution, no cross-run collision) and index-write + search-read agree.
+        monkeypatch.setattr(cfg_mod, "DATA_DIR", tmp_path)
         monkeypatch.setattr(db_mod, "DATABASE_URL", "")
 
         stats = memory_index.sync_index(vault, generate_embeddings=False)
         assert stats["chunks_total"] > 0
         assert stats["files_indexed"] >= 2  # episode + daily both rglob'd
 
-        rows = memory_search.search_keyword(sentinel, limit=5)
+        rows = memory_search.search_keyword(sentinel, limit=5, memory_dir=vault)
         assert rows, "keyword search returned no rows for the episode sentinel"
         hit = rows[0]
         assert hit.path.startswith("episodes/")
         assert sentinel in hit.text
 
         prefixed = memory_search.search_keyword(
-            sentinel, limit=5, path_prefix="episodes/"
+            sentinel, limit=5, path_prefix="episodes/", memory_dir=vault
         )
         assert prefixed
         assert prefixed[0].path.startswith("episodes/")
         assert sentinel in prefixed[0].text
 
     def test_reindex_file_single_episode_reachable(self, tmp_path, monkeypatch):
+        import config as cfg_mod
         import db as db_mod
         import memory_search
         from recall_service import reindex_file
@@ -961,13 +968,17 @@ class TestIndexRecallReach:
             body=f"## Key Decisions\n\n- the {sentinel} single-file path works\n",
         )
 
-        monkeypatch.setattr(db_mod, "DATABASE_PATH", tmp_path / "memory.db")
+        # reindex_file + search both resolve their SQLite file via
+        # ``resolve_db_path(memory_dir)`` off ``config.DATA_DIR``; isolate it into
+        # ``tmp_path`` so the derived ``memory.vault.db`` is unique per test and
+        # the write + read hit the same file.
+        monkeypatch.setattr(cfg_mod, "DATA_DIR", tmp_path)
         monkeypatch.setattr(db_mod, "DATABASE_URL", "")
 
         chunks = reindex_file(episode, vault, generate_embeddings=False)
         assert chunks > 0
 
-        rows = memory_search.search_keyword(sentinel, limit=5)
+        rows = memory_search.search_keyword(sentinel, limit=5, memory_dir=vault)
         assert rows
         assert rows[0].path.startswith("episodes/")
         assert sentinel in rows[0].text

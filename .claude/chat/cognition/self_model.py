@@ -18,6 +18,19 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+# Boot-shim: resolve the active persona's paths BEFORE any framework import.
+# config imports here are lazy (inside functions), but the shim still runs at
+# module top level so a standalone diagnostic run picks up the right profile.
+import sys
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 
 @dataclass
 class InferenceRecord:

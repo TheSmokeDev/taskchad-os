@@ -384,6 +384,24 @@ class ConversationEngine:
             except Exception:
                 return ""
 
+    def _build_portfolio_region_text(self) -> str:
+        """Cofounder v2: the lean agenda-status digest for the turn regions.
+
+        Lazy module import (Rule 3 — tests patch cofounder.briefing) and
+        fail-open to "" at every seam: the portfolio region is optional
+        orientation, never a guard input, and must never break a chat turn.
+        Returns "" whenever today has no machine-readable agenda.
+        """
+        try:
+            from config import MEMORY_DIR
+            from cofounder import briefing as _cofounder_briefing
+
+            return _cofounder_briefing.build_portfolio_digest_compact(
+                MEMORY_DIR
+            ).strip()
+        except Exception:
+            return ""
+
     def _build_base_working_memory(
         self,
         *,
@@ -995,6 +1013,19 @@ class ConversationEngine:
                         flush=True,
                     )
 
+        # Homie Mobile M7 — explicit per-message cockpit overrides (dashboard
+        # send body → raw_event). An operator's explicit pick beats the env
+        # default and the PIV pin above.
+        requested_effort: str | None = None
+        _raw_event = getattr(message, "raw_event", None)
+        if isinstance(_raw_event, dict):
+            _override_model = str(_raw_event.get("model_override") or "").strip()
+            if _override_model:
+                requested_model = _override_model
+            _override_effort = str(_raw_event.get("reasoning_effort") or "").strip()
+            if _override_effort:
+                requested_effort = _override_effort
+
         system_prompt = {
             "type": "preset",
             "preset": "claude_code",
@@ -1280,6 +1311,18 @@ class ConversationEngine:
                     region="recalled_memory",
                     source="recall",
                 ))
+            # Cofounder v2 Part C: today's agenda line statuses ride the turn
+            # as a lean region — the co-founder's live portfolio awareness.
+            # Absent whenever today has no machine-readable agenda (zero cost
+            # on quiet days); fail-open — a broken digest is a bare turn.
+            portfolio_text = self._build_portfolio_region_text()
+            if portfolio_text:
+                turn_wm = turn_wm.with_memory(Memory(
+                    role="system",
+                    content=portfolio_text,
+                    region="portfolio",
+                    source="cofounder",
+                ))
             # Living Self Act 3: the gated cognitive pass — the mind thinks
             # before it speaks on substantive turns. Inserted HERE (after
             # turn_wm assembly, immediately before the region render) so the
@@ -1402,6 +1445,21 @@ class ConversationEngine:
 
         imagegen_turn = active_skill_name == "imagegen"
 
+        def _on_tool_event(ev: dict[str, Any]) -> None:
+            # Homie Mobile M7 — live tool telemetry: keeps the router's 12s
+            # ticker honest (progress["tool_calls"] was only written post-hoc
+            # from the result) and feeds cockpit adapters when the router
+            # bound an emit_turn_event hook.
+            if progress is None:
+                return
+            progress["tool_calls"] = int(progress.get("tool_calls") or 0) + 1
+            emit = progress.get("emit_turn_event")
+            if callable(emit):
+                try:
+                    emit({"type": "tool_call", **ev})
+                except Exception:
+                    pass
+
         runtime_request = RuntimeRequest(
             prompt=prompt_text,
             cwd=self.project_root,
@@ -1412,6 +1470,8 @@ class ConversationEngine:
             # on the TOOL_REASONING path (which uses the tool preamble).
             conversational=True,
             model=requested_model,
+            effort=requested_effort,
+            on_tool_event=_on_tool_event if progress is not None else None,
             max_turns=piv_max_turns,
             max_budget_usd=piv_max_budget,
             allowed_tools=allowed_tools,

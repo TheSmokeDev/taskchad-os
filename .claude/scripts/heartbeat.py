@@ -2412,6 +2412,19 @@ Your final text response goes directly to {owner}'s phone. Keep it to just bulle
 # =============================================================================
 
 
+def _log_cofounder_seam_error() -> None:
+    """Append a co-founder pass failure to heartbeat_errors.log (fail-open)."""
+    import traceback
+
+    err_log = PROJECT_ROOT / ".claude" / "scripts" / "heartbeat_errors.log"
+    try:
+        with open(err_log, "a", encoding="utf-8") as f:
+            f.write(f"\n=== {datetime.now().isoformat()} cofounder pass ===\n")
+            traceback.print_exc(file=f)
+    except Exception:
+        pass
+
+
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Heartbeat proactive check")
@@ -2444,6 +2457,45 @@ def main() -> None:
         print(f"\nHeartbeat result:\n{result}")
     else:
         print("\nHeartbeat complete: OK or skipped")
+
+    # Co-founder pass (US-006): must stay OUTSIDE run_heartbeat() — the
+    # active-hours gate lives inside it, and overnight builds still advance.
+    # Lazy import so a broken cofounder package can never break the heartbeat.
+    try:
+        from cofounder.run_pass import run_pass
+
+        run_pass(dry_run=args.test)
+    except Exception:
+        _log_cofounder_seam_error()
+
+    # Co-founder v2 morning agenda (WS2, propose-only): same guarded-seam
+    # shape, own enable flag (COFOUNDER_AGENDA_ENABLED) + due check inside.
+    try:
+        from cofounder.agenda import run_agenda_pass
+
+        run_agenda_pass(dry_run=args.test)
+    except Exception:
+        _log_cofounder_seam_error()
+
+    # Co-founder v2 persona work loop (WS4): claims approved assignments and
+    # executes them. Own enable flag (COFOUNDER_WORKLOOP_ENABLED) + the
+    # shared cofounder_delegation kill switch inside.
+    try:
+        from cofounder.worktick import run_worktick
+
+        run_worktick(dry_run=args.test)
+    except Exception:
+        _log_cofounder_seam_error()
+
+    # Co-founder v2 reporting loop (WS5): ingests persona results, polls
+    # dispatched Archon runs, intraday pulse + EOD checkout cards. Own flag
+    # (COFOUNDER_REPORT_ENABLED) + the shared delegation kill switch inside.
+    try:
+        from cofounder.report import run_report_pass
+
+        run_report_pass(dry_run=args.test)
+    except Exception:
+        _log_cofounder_seam_error()
 
 
 if __name__ == "__main__":

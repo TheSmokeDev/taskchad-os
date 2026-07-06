@@ -302,6 +302,17 @@ _ACTIONS: tuple[IntegrationAction, ...] = (
         config_hints=("INSTAGRAM_BUSINESS_ACCOUNT_ID", "FACEBOOK_PAGE_ACCESS_TOKEN"),
         description="Post to Instagram via Meta Graph API (requires image URL).",
     ),
+    # Autonomous co-founder orchestrator. The send runs from the heartbeat
+    # or cron process (never model-invoked) and the message itself IS the
+    # operator notification, so the exposure is internal.
+    _action(
+        "cofounder",
+        "notify",
+        "send",
+        exposures=("internal",),
+        config_hints=("TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_IDS"),
+        description="Co-founder terminal-flip notification to the operator's Telegram.",
+    ),
 )
 
 _ACTION_INDEX: dict[tuple[str, str], IntegrationAction] = {

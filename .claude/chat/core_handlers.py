@@ -3716,10 +3716,11 @@ async def handle_design(adapter: Any, incoming: Any, args: str, *, collect_only:
         result = await run_with_runtime_lanes(request)
     except Exception as exc:
         # Kill-switch (HOMIE_KILLSWITCH_LLM=disabled) → friendly message. Use
-        # isinstance via a late import (Codex LOW), not a class-name string.
+        # isinstance via a late MODULE import (Rule 3 — direct-symbol import
+        # breaks monkeypatch propagation and the killswitch import-style test).
         try:
-            from security.kill_switches import KillSwitchDisabled
-            if isinstance(exc, KillSwitchDisabled):
+            from security import kill_switches
+            if isinstance(exc, kill_switches.KillSwitchDisabled):
                 return "Design is unavailable: the LLM kill-switch is disabled (`HOMIE_KILLSWITCH_LLM`)."
         except ImportError:
             pass
@@ -5196,6 +5197,253 @@ async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only:
 
 
 # ---------------------------------------------------------------------------
+# /cofounder — autonomous co-founder project steering (US-015)
+# ---------------------------------------------------------------------------
+
+
+def _cofounder_usage_text() -> str:
+    return (
+        "*Co-Founder Projects*\n\n"
+        "`/cofounder status` — orchestrator overview\n"
+        "`/cofounder list` — projects with status\n"
+        "`/cofounder show <slug>` — one project in detail\n"
+        "`/cofounder steer <slug> <text>` — leave steering for the next pass\n"
+        "`/cofounder pause <slug>` — park a project as awaiting-human\n"
+        "`/cofounder resume <slug>` — restore a paused project's prior status\n"
+        "`/cofounder approve <slug>` — human verdict: flip a park to done + archive\n"
+        "`/cofounder agenda` — today's proposed agenda with delegation status\n"
+        "`/cofounder run <n>` — approve agenda line n: delegate it to its persona"
+    )
+
+
+def _cofounder_project_path(slug: str, projects_dir: Path) -> Path | None:
+    """Resolve a slug to its project file, or None when unknown.
+
+    Mirrors discovery's skip rules (no ``_``-prefix, no README*) and rejects
+    any character outside ``[A-Za-z0-9._-]`` so a slug can never traverse out
+    of the projects dir (path separators are not in the allowed set).
+    """
+    if not slug or slug.startswith("_") or slug.lower().startswith("readme"):
+        return None
+    if not all(ch.isalnum() or ch in "._-" for ch in slug):
+        return None
+    path = projects_dir / f"{slug}.md"
+    return path if path.is_file() else None
+
+
+def _cofounder_unknown_slug_text(slug: str, projects_dir: Path) -> str:
+    from cofounder import project_model
+
+    slugs = [p.slug for p in project_model.discover_projects(projects_dir)]
+    known = ", ".join(slugs) if slugs else "none yet"
+    return f"Unknown co-founder project '{slug}'. Known projects: {known}."
+
+
+def _cofounder_project_line(project: Any) -> str:
+    fm = project.frontmatter
+    gate = " [subjective]" if fm.subjective_gate else ""
+    return (
+        f"  {project.slug} — {fm.status}{gate} "
+        f"(iter {fm.iterations}/{fm.max_iterations})"
+    )
+
+
+async def handle_cofounder(
+    adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
+) -> str:
+    """Co-founder project steering — status|list|show|steer|pause|resume|approve.
+
+    Steering is file-mediated (prd Phase 6): handlers write markdown through
+    the cofounder ownership helpers ([steer] Activity Log lines, frontmatter
+    status re-stamps) and the heartbeat pass reads the files on its next
+    cycle — no cross-process registry. Deliberately NOT gated on the
+    cofounder kill switch: pause/steer are the operator's manual controls
+    for stopping the autonomous surface, so they must keep working while
+    the switch refuses passes and notifies.
+    """
+    import config  # scripts-side config (chat process has .claude/scripts on sys.path)
+    from cofounder import project_model
+    from cofounder import state as state_mod
+    from cofounder import status as status_mod
+
+    args = (args or "").strip()
+    if not args or args.lower() in {"help", "?"}:
+        return _cofounder_usage_text()
+
+    sub, _, rest = args.partition(" ")
+    sub = sub.lower()
+    rest = rest.strip()
+
+    try:
+        settings = config.get_cofounder_settings()
+        projects_dir = Path(settings.projects_dir)
+
+        # Cofounder v2 WS3 — the agenda approval surface. `run <n>` is the
+        # operator's per-line approval and works while the autonomous flag
+        # (COFOUNDER_DELEGATION_ENABLED) is false; the cofounder_delegation
+        # kill switch inside delegate.py is the emergency stop for both.
+        if sub == "agenda":
+            from cofounder import delegate as delegate_mod
+
+            return delegate_mod.render_agenda_status(date=rest or None)
+
+        if sub == "run":
+            from cofounder import delegate as delegate_mod
+
+            line_arg, _, _tail = rest.partition(" ")
+            try:
+                line_number = int(line_arg)
+            except (TypeError, ValueError):
+                return "Usage: /cofounder run <line-number> (see /cofounder agenda)"
+            result = delegate_mod.run_agenda_line(
+                line_number, approved_by=str(getattr(incoming, "user_id", "operator"))
+            )
+            return result.message
+
+        if sub == "status":
+            projects = project_model.discover_projects(projects_dir)
+            counts: dict[str, int] = {}
+            for p in projects:
+                counts[p.frontmatter.status] = counts.get(p.frontmatter.status, 0) + 1
+            summary = ""
+            if counts:
+                summary = " (" + ", ".join(
+                    f"{k}: {v}" for k, v in sorted(counts.items())
+                ) + ")"
+            lines = [
+                "*Co-Founder Orchestrator*",
+                f"Enabled: {'yes' if settings.enabled else 'no (COFOUNDER_ENABLED=false)'}",
+                f"Projects dir: {projects_dir}",
+                f"Projects: {len(projects)}{summary}",
+            ]
+            lines.extend(_cofounder_project_line(p) for p in projects)
+            return "\n".join(lines)
+
+        if sub == "list":
+            projects = project_model.discover_projects(projects_dir)
+            if not projects:
+                return f"No co-founder projects. Drop a spec file in {projects_dir}."
+            return "\n".join(
+                ["*Co-founder projects:*"]
+                + [_cofounder_project_line(p) for p in projects]
+            )
+
+        if sub in {"show", "steer", "pause", "resume", "approve"}:
+            slug, _, tail = rest.partition(" ")
+            slug = slug.strip()
+            tail = tail.strip()
+            if not slug:
+                extra = " <text>" if sub == "steer" else ""
+                return f"Usage: /cofounder {sub} <slug>{extra}"
+            path = _cofounder_project_path(slug, projects_dir)
+            if path is None:
+                return _cofounder_unknown_slug_text(slug, projects_dir)
+            project = project_model.parse_project_file(path)
+            fm = project.frontmatter
+
+            if sub == "show":
+                plan = project.plan.strip() or "(empty)"
+                if len(plan) > 600:
+                    plan = plan[:600] + " [...]"
+                log_lines = [ln for ln in project.activity_log.splitlines() if ln.strip()]
+                recent = log_lines[-5:] if log_lines else ["(none)"]
+                gate = " [subjective gate]" if fm.subjective_gate else ""
+                return "\n".join(
+                    [
+                        f"*{project.title}* ({project.slug})",
+                        f"Status: {fm.status}{gate}",
+                        f"Repo: {fm.repo or '-'} | Branch: {fm.branch or '-'}",
+                        f"Iterations: {fm.iterations}/{fm.max_iterations}",
+                        f"Job: {fm.current_job_id or 'none'}",
+                        "",
+                        "*Plan:*",
+                        plan,
+                        "",
+                        "*Recent activity:*",
+                        *recent,
+                    ]
+                )
+
+            if sub == "steer":
+                if not tail:
+                    return "Usage: /cofounder steer <slug> <text>"
+                # Activity Log entries are single-line (US-003 ownership
+                # contract) — collapse operator newlines/whitespace runs.
+                one_line = " ".join(tail.split())
+                entry = project_model.append_activity_log(path, f"[steer] {one_line}")
+                return (
+                    f"Steering noted for '{slug}' — the next pass will read it.\n{entry}"
+                )
+
+            if sub == "pause":
+                if fm.status == "awaiting-human":
+                    return f"'{slug}' is already awaiting-human."
+                if status_mod.is_terminal(fm.status):
+                    return f"'{slug}' is done — nothing to pause."
+                status_mod.transition(fm.status, "awaiting-human")
+                # Stash the prior status BEFORE the re-stamp so resume can
+                # restore it (a stash with an unchanged status is harmless).
+                state_mod.update_project_state(slug, paused_from=fm.status)
+                project_model.update_frontmatter(path, status="awaiting-human")
+                project_model.append_activity_log(
+                    path, f"[pause] paused by operator (was {fm.status})"
+                )
+                return (
+                    f"'{slug}' paused — status awaiting-human (was {fm.status}). "
+                    f"Resume with /cofounder resume {slug}."
+                )
+
+            if sub == "resume":
+                if fm.status != "awaiting-human":
+                    return (
+                        f"'{slug}' is not paused (status: {fm.status}) — only "
+                        "awaiting-human projects can be resumed."
+                    )
+                stash = state_mod.get_project_state(
+                    state_mod.load_state(), slug
+                ).get("paused_from")
+                # Restore the prior active status; a missing or non-restorable
+                # stash (paused from blocked / a rogue non-enum) re-enters the
+                # decision loop as `new` — code never writes a non-enum value.
+                target = (
+                    stash
+                    if isinstance(stash, str)
+                    and status_mod.can_transition("awaiting-human", stash)
+                    else "new"
+                )
+                project_model.update_frontmatter(path, status=target)
+                state_mod.update_project_state(slug, paused_from=None)
+                project_model.append_activity_log(
+                    path, f"[resume] resumed by operator (status: {target})"
+                )
+                return f"'{slug}' resumed — status {target}."
+
+            if sub == "approve":
+                if fm.status != "awaiting-human":
+                    return (
+                        f"'{slug}' is not awaiting a human verdict "
+                        f"(status: {fm.status}). Approve applies to "
+                        "awaiting-human projects."
+                    )
+                status_mod.transition(fm.status, "done")
+                project_model.append_activity_log(
+                    path, "[approve] approved by operator -> done"
+                )
+                project_model.update_frontmatter(path, status="done")
+                archived = project_model.archive_to_done(path)
+                return (
+                    f"'{slug}' approved — done and archived to "
+                    f"done/{archived.name}."
+                )
+
+        return _cofounder_usage_text()
+    except project_model.ProjectParseError as exc:
+        return f"Co-founder project file could not be read: {exc}"
+    except Exception as exc:  # friendly text, never a stack trace to chat
+        return f"Co-founder command failed: {exc}"
+
+
+# ---------------------------------------------------------------------------
 # Operator Automation UX (Phase 2) — /recap, /blueprints, /suggestions
 #
 # /recap is pure-local zero-LLM over chat.db. /blueprints and /suggestions
@@ -5513,6 +5761,8 @@ CORE_HANDLERS: dict[str, Any] = {
     "design": handle_design,
     # Social post queue (Issue #77)
     "social": handle_social,
+    # Co-founder projects (US-015) — file-mediated steering; slashless key.
+    "cofounder": handle_cofounder,
     # Operator Automation UX (Phase 2) — zero-LLM recap + propose-don't-auto-create.
     "recap": handle_recap,
     "blueprints": handle_blueprints,

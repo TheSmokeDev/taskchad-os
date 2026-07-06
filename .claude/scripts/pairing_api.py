@@ -65,6 +65,27 @@ def _lan_ip() -> str:
         return "127.0.0.1"
 
 
+def _mesh_ip() -> str | None:
+    """Best-effort mesh-VPN (Tailscale) IPv4 — an interface address inside the
+    CGNAT block 100.64.0.0/10 that tailnets use. None when no mesh is up, so
+    the QR simply omits ``rgw`` (fail-open; LAN pairing is unaffected)."""
+    import ipaddress  # noqa: PLC0415
+
+    mesh_net = ipaddress.ip_network("100.64.0.0/10")
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return None
+    for info in infos:
+        addr = info[4][0]
+        try:
+            if ipaddress.ip_address(addr) in mesh_net:
+                return addr
+        except ValueError:
+            continue
+    return None
+
+
 def _dashboard_token() -> str:
     """Resolve the credential to release, at CALL time (Rule 1).
 
@@ -101,7 +122,17 @@ def pair_start(body: PairStartBody) -> dict:
     # short enough to keep the QR low-density so a phone decodes it fast.
     bootstrap = secrets.token_urlsafe(9)
     gateway_url = (body.gateway_url or "").strip() or f"http://{_lan_ip()}:3141"
-    remote_url = (body.remote_url or "").strip()
+    # Remote (tailnet) URL — explicit body wins, then env, then mesh-interface
+    # autodetection. Carried as ``rgw`` so the app can reach the Homie from
+    # OFF the LAN with the same one-time pairing (Rule 1: resolved per call).
+    remote_url = (
+        (body.remote_url or "").strip()
+        or (os.getenv("HOMIE_REMOTE_GATEWAY_URL") or "").strip()
+    )
+    if not remote_url:
+        mesh = _mesh_ip()
+        if mesh:
+            remote_url = f"http://{mesh}:3141"
     now = int(time.time())
 
     conn = get_connection()

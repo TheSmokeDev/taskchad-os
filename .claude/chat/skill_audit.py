@@ -75,7 +75,9 @@ def _resolve_audit_path(path: Path | str | None = None) -> Path:
 
         base = Path(config.DATA_DIR)
     except Exception:  # pragma: no cover - import path fallback for direct scripts
-        base = Path(__file__).resolve().parents[1] / "data"
+        from personas import get_default_paths
+
+        base = get_default_paths()["data"]
     return base / AUDIT_FILE_NAME
 
 

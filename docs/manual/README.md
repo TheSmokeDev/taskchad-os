@@ -91,6 +91,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Memory, Knowledge Graph, And Dashboard Chat | Active baseline, dashboard chat reliability proven | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
 | Scheduled Jobs, Settings, And Audit | Active baseline | [scheduled-settings-audit](features/scheduled-settings-audit.md) | `/scheduled`, `/settings`, `/audit` |
 | Operator Automation UX | Shipped (Phase 2), propose-don't-auto-create | [automation-ux](features/automation-ux.md) | `/recap`, `/blueprints`, `/suggestions` |
+| Autonomous Co-Founder (v1 + v2) | v2 COMPLETE — agenda live; delegation/work-loop/reporting dormant pending bake-in | [autonomous-cofounder](features/autonomous-cofounder.md) | `/cofounder agenda`, `/cofounder run <n>`, heartbeat seams, `COFOUNDER_*` env |
 | Native Design (`/design`) | Phase 1 + B1 shipped, live-proven | [design-capability](features/design-capability.md) | `/design`, `/design system <slug>` |
 | Website Design Homie | Playbook/skill + client preview TOC | [website-design-homie](features/website-design-homie.md) | `website-design-homie`, `/design system <slug>` |
 | Business Signal Engine | Shipped (#79), merged | [business-signal-engine](features/business-signal-engine.md) | `/signal`, `/signal refresh`, daily/weekly cadence |
@@ -106,6 +107,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 
 | Document | Use |
 |---|---|
+| [The Co-Founder Manual](../cofounder-manual.md) | The org chart end to end — the Homie as the co-founder on every surface, the five heartbeat loops (agenda → approval → execution → reporting → checkout), delegation grants, safety model, the turn-it-on runbook, failure modes, architecture map. |
 | [The Living Self Manual](../the-living-self-manual.md) | The cognitive system end to end — sense, form beliefs, hold against conflict, think before speaking, earn convictions. Operator runbook + architecture + knobs + verification. Ties together Heartbeat Runtime, Episodes, and Session Opening Brief. |
 | [BrowserOps Agent Browser Manual](../browserops-agent-browser-manual.md) | Deep BrowserOps operating contract, safety policy, validation, and failure modes. |
 | [Social-Write Executor Manual](../social-write-executor-manual.md) | Deep operating contract for operator-approved LinkedIn and Reddit writes: the isolated-approval gate, the executor/driver split, audit policy, platform notes, and validation. |

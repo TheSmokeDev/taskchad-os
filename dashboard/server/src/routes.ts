@@ -43,6 +43,12 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/browser-viewer/screenshot',
   '/api/browser-viewer/stream/enable',
   '/api/browser-viewer/stream/disable',
+  // browser-viewer.ts — M12 phone-drive (operator-initiated, gated in Python)
+  '/api/browser-viewer/elements',
+  '/api/browser-viewer/act',
+  '/api/browser-viewer/navigate',
+  // browser-viewer.ts — M12 Phase 2: SSE relay of the loopback viewport stream
+  '/api/browser-viewer/stream/sse',
 
   // agents.ts — list / create
   '/api/agents',
@@ -74,6 +80,19 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/conversation/:id/history',
   '/api/conversation/:id/send',
   '/api/conversation/:id/stream',
+  '/api/conversation/:id/stop',
+  '/api/conversation/:id/steer',
+
+  // sessions.ts — M8 sessions browser (read-only)
+  '/api/sessions',
+  '/api/sessions/search',
+  '/api/sessions/messages',
+
+  // library.ts — M9 skills / files / system-jobs (read-only)
+  '/api/skills',
+  '/api/files/list',
+  '/api/files/read',
+  '/api/system-jobs',
 
   // scheduled.ts
   '/api/scheduled',

@@ -53,6 +53,11 @@ def test_default_profile_preserves_legacy_ports(
     monkeypatch.delenv("ORCHESTRATION_API_PORT", raising=False)
     monkeypatch.delenv("HEALTH_CHECK_PORT", raising=False)
     monkeypatch.delenv("WHATSAPP_WEBHOOK_PORT", raising=False)
+    # Step 2a reads the REAL profile .env from disk every call, so a dev
+    # machine with a legitimate override there (e.g. HEALTH_CHECK_PORT=8788)
+    # breaks this test's "no override" premise. Neutralize 2a here — the
+    # .env-override-wins behavior has its own dedicated tests below.
+    monkeypatch.setattr(_services, "_read_port_from_profile_env", lambda *a: "")
 
     assert _services.get_orchestration_api_port() == 4322
     assert _services.get_health_check_port() == 8787

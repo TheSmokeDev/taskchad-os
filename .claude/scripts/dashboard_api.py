@@ -91,6 +91,9 @@ if str(_CHAT_DIR) not in sys.path:
 from security import redact as _redact_mod  # noqa: E402
 from browser_audit import append_browser_audit_record  # noqa: E402
 from browser_control import (  # noqa: E402
+    BROWSER_ACT_KINDS,
+    browser_act,
+    browser_snapshot_elements,
     browser_stream_disable,
     browser_stream_enable,
     browser_viewer_status as collect_browser_viewer_status,
@@ -134,6 +137,41 @@ class DashboardChatSendBody(BaseModel):
     # it to the vision model (images bypass build_attachment_context). ~12M chars
     # ≈ a 9MB base64 ≈ a 6.7MB photo — well above a downscaled phone capture.
     image_base64: str | None = Field(default=None, max_length=12_000_000)
+    # Homie Mobile M7 — per-message cockpit overrides. Validated against the
+    # get_models() catalog / the SDK effort set in conversation_send; ride
+    # raw_event into the engine. Main-only (persona sends 400, image precedent).
+    model: str | None = Field(default=None, max_length=128)
+    reasoning_effort: str | None = Field(default=None, max_length=16)
+    # Homie Mobile M9 — attach-any-file. Persisted to disk; the engine's
+    # existing build_attachment_context (engine.py:1204) reads it into the
+    # prompt from the Attachment path. Main-only (image precedent).
+    # ~20M base64 chars ≈ a 15MB document.
+    document_base64: str | None = Field(default=None, max_length=20_000_000)
+    document_name: str | None = Field(default=None, max_length=256)
+
+
+_REASONING_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+
+def _catalog_model_ids() -> set[str]:
+    """Flatten get_models() into the set of pickable model ids (Rule 1 call-time)."""
+    catalog = get_models()
+    ids = {entry["model"] for entry in catalog.get("claude_native", [])}
+    for entries in catalog.get("generic_runtime", {}).values():
+        ids.update(entry["model"] for entry in entries)
+    return ids
+
+
+class DashboardChatStopBody(BaseModel):
+    conversation_id: str | None = Field(default=None, max_length=128)
+
+
+class DashboardChatSteerBody(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
+    conversation_id: str | None = Field(default=None, max_length=128)
+    client_message_id: str | None = Field(default=None, max_length=128)
+    user_id: str | None = Field(default=None, max_length=128)
+    display_name: str | None = Field(default=None, max_length=128)
 
 
 # ── Browser Viewer (read-only) ───────────────────────────────────────────
@@ -279,6 +317,150 @@ def post_browser_viewer_stream_disable() -> dict[str, Any]:
             reason=reason,
         )
         raise HTTPException(status_code=503, detail=reason) from exc
+
+
+# ── M12 — phone-drive: operator-initiated browser actions ────────────────
+# The human pushes each button from the mobile viewer. Kinds/refs/keys are
+# shape-validated in browser_control.build_browser_act_args before anything
+# is shelled; every attempt (allowed, blocked, failed) writes an audit row.
+# Agent-side social writes keep their approval-phrase gates — these routes
+# are admin-bearer dashboard surface only.
+
+
+class BrowserActBody(BaseModel):
+    kind: str = Field(min_length=2, max_length=16)
+    ref: str | None = Field(default=None, max_length=16)
+    text: str | None = Field(default=None, max_length=2000)
+    key: str | None = Field(default=None, max_length=32)
+    direction: str | None = Field(default=None, max_length=8)
+    amount: int | None = Field(default=None, ge=1, le=5000)
+    # Cosmetic element label for the audit trail ("clicked 'Sign in'").
+    label: str | None = Field(default=None, max_length=160)
+
+
+class BrowserNavigateBody(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+
+
+@router.get("/api/browser-viewer/elements")
+def get_browser_viewer_elements() -> dict[str, Any]:
+    command = "GET /api/browser-viewer/elements"
+    workflow_id = "browser.viewer.elements"
+    _require_browser_viewer_workflow(workflow_id, command)
+    try:
+        elements = browser_snapshot_elements()
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason=f"{len(elements)} elements listed",
+        )
+        return {"elements": elements}
+    except Exception as exc:
+        reason = redact_text_urls(str(exc))
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=reason,
+        )
+        raise HTTPException(status_code=503, detail=reason) from exc
+
+
+@router.post("/api/browser-viewer/act")
+def post_browser_viewer_act(body: BrowserActBody) -> dict[str, Any]:
+    command = "POST /api/browser-viewer/act"
+    workflow_id = "browser.viewer.act"
+    if body.kind not in BROWSER_ACT_KINDS:
+        raise HTTPException(status_code=400, detail=f"unknown action kind: {body.kind}")
+    _require_browser_viewer_workflow(workflow_id, command)
+    detail = f"{body.kind} {body.ref or ''} {redact_text_urls(body.label or '')}".strip()
+    try:
+        result = browser_act(
+            body.kind,
+            ref=body.ref,
+            text=body.text,
+            key=body.key,
+            direction=body.direction,
+            amount=body.amount,
+        )
+        if not result.ok:
+            raise RuntimeError(result.output or "agent-browser action failed")
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason=detail,
+        )
+        return {"ok": True, "kind": body.kind}
+    except ValueError as exc:
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="blocked",
+            reason=f"{detail}: {exc}",
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        reason = redact_text_urls(str(exc))
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=f"{detail}: {reason}",
+        )
+        raise HTTPException(status_code=503, detail=reason) from exc
+
+
+@router.post("/api/browser-viewer/navigate")
+def post_browser_viewer_navigate(body: BrowserNavigateBody) -> dict[str, Any]:
+    command = "POST /api/browser-viewer/navigate"
+    workflow_id = "browser.viewer.navigate"
+    # Navigation gate validates the URL shape (absolute http(s) only).
+    decision = require_browser_workflow_permission(
+        workflow_id, command, target_url=body.url
+    )
+    if not decision.allowed:
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome=decision.outcome,
+            reason=decision.reason,
+        )
+        raise HTTPException(status_code=403, detail=decision.reason)
+    try:
+        result = run_agent_browser_open(body.url)
+        if not result.ok:
+            raise RuntimeError(result.output or "agent-browser open failed")
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="succeeded",
+            reason=f"opened {decision.target_url}",
+        )
+        return {"ok": True, "url": decision.target_url}
+    except Exception as exc:
+        reason = redact_text_urls(str(exc))
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="failed",
+            reason=reason,
+        )
+        raise HTTPException(status_code=503, detail=reason) from exc
+
+
+def run_agent_browser_open(url: str):
+    """Navigate the visible browser (module-level so tests can stub it)."""
+    from browser_control import (  # noqa: PLC0415
+        ensure_browser_window_restored,
+        resolve_cdp_port,
+        run_agent_browser,
+    )
+
+    port = resolve_cdp_port()
+    ensure_browser_window_restored(port=port)
+    return run_agent_browser(["open", url], port=port, timeout=20)
 
 
 # ── Pydantic request bodies ──────────────────────────────────────────────
@@ -4315,6 +4497,24 @@ class _DashboardChatAdapter:
     async def send_typing(self, channel: Any) -> None:
         return None
 
+    def emit_turn_event(self, ev: dict, *, channel: Any = None, thread: Any = None) -> None:
+        """M7 cockpit telemetry: live tool_call / turn_aborted SSE events.
+
+        Bound by the router into progress["emit_turn_event"] for adapters that
+        expose it. New named SSE types are invisible to the web client
+        (EventSource only delivers subscribed event names — chat-stream.ts:141).
+        """
+        conversation_id = (
+            getattr(thread, "thread_id", None)
+            or getattr(channel, "platform_id", None)
+            or _DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID
+        )
+        persona_id = self._conversation_personas.get(conversation_id, "default")
+        event_type = str(ev.get("type") or "tool_call")
+        payload = {k: v for k, v in ev.items() if k != "type"}
+        payload.setdefault("components", [])
+        _conversation_event_append(persona_id, conversation_id, event_type, payload)
+
 
 _DASHBOARD_CHAT_RUNTIME: dict[str, Any] | None = None
 
@@ -4431,7 +4631,319 @@ def conversation_history(
     return {"turns": turns, "next_before_id": next_before}
 
 
+# ── /api/skills + /api/files + /api/system-jobs (M9 — read-only library) ──
+#
+# All admin-classified: server filesystem + operator-grade data. Files are
+# confined to an allowlisted set of roots with hard traversal blocking; no
+# write path exists (Decision: no new write surfaces).
+
+_FILE_BROWSER_MAX_READ_BYTES = 262_144  # 256 KB text cap per read
+
+
+def _file_browser_roots() -> dict[str, Path]:
+    """Allowlisted read-only roots (Rule 1 call-time — PROJECT_ROOT is config)."""
+    root = Path(config.PROJECT_ROOT)
+    return {
+        "memory": root / "TheHomie" / "Memory",
+        "docs": root / "docs" / "manual",
+    }
+
+
+def _resolve_browsable_path(root_key: str, rel_path: str) -> tuple[Path, Path]:
+    """Resolve a request path inside an allowlisted root or 400/404.
+
+    Defense: reject '..' segments up front, then containment-check the
+    RESOLVED path (covers symlink escapes) against the resolved root.
+    """
+    roots = _file_browser_roots()
+    if root_key not in roots:
+        raise HTTPException(status_code=400, detail=f"unknown root: {root_key}")
+    root_path = roots[root_key].resolve()
+    cleaned = (rel_path or "").strip().strip("/").replace("\\", "/")
+    if any(part == ".." for part in cleaned.split("/") if part):
+        raise HTTPException(status_code=400, detail="path traversal rejected")
+    candidate = (root_path / cleaned).resolve() if cleaned else root_path
+    try:
+        candidate.relative_to(root_path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="path traversal rejected")
+    if not candidate.exists():
+        raise HTTPException(status_code=404, detail="path not found")
+    return root_path, candidate
+
+
+@router.get("/api/skills")
+def skills_list(request: Request) -> dict:
+    """Installed skills (browse; search is client-side — Hermex parity)."""
+    try:
+        from runtime.framework_registry import discover_skills  # noqa: PLC0415
+
+        entries = discover_skills(config.PROJECT_ROOT)
+    except Exception:
+        return {"skills": []}
+    return {
+        "skills": [
+            {"name": e.name, "description": e.description, "path": e.path}
+            for e in entries
+        ]
+    }
+
+
+@router.get("/api/files/list")
+def files_list(
+    request: Request,
+    root: str = Query(default="memory", max_length=16),
+    path: str = Query(default="", max_length=512),
+) -> dict:
+    _, target = _resolve_browsable_path(root, path)
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail="not a directory")
+    entries = []
+    try:
+        for child in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+            if child.name.startswith("."):
+                continue
+            try:
+                size = child.stat().st_size if child.is_file() else None
+            except OSError:
+                size = None
+            entries.append(
+                {
+                    "name": child.name,
+                    "kind": "dir" if child.is_dir() else "file",
+                    "size": size,
+                }
+            )
+    except OSError:
+        raise HTTPException(status_code=404, detail="unreadable directory")
+    return {"root": root, "path": path.strip("/"), "entries": entries}
+
+
+@router.get("/api/files/read")
+def files_read(
+    request: Request,
+    root: str = Query(default="memory", max_length=16),
+    path: str = Query(min_length=1, max_length=512),
+) -> dict:
+    _, target = _resolve_browsable_path(root, path)
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="not a file")
+    try:
+        raw = target.read_bytes()
+    except OSError:
+        raise HTTPException(status_code=404, detail="unreadable file")
+    truncated = len(raw) > _FILE_BROWSER_MAX_READ_BYTES
+    raw = raw[:_FILE_BROWSER_MAX_READ_BYTES]
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=415, detail="binary file — not viewable")
+    return {
+        "root": root,
+        "path": path.strip("/"),
+        "content": content,
+        "size": target.stat().st_size,
+        "truncated": truncated,
+    }
+
+
+_SYSTEM_JOB_STATE_FILES: tuple[tuple[str, str], ...] = (
+    ("heartbeat", "HEARTBEAT_STATE_FILE"),
+    ("reflection", "REFLECTION_STATE_FILE"),
+    ("weekly", "WEEKLY_STATE_FILE"),
+    ("dream", "DREAM_STATE_FILE"),
+)
+
+
+@router.get("/api/system-jobs")
+def system_jobs(request: Request) -> dict:
+    """Read-only visibility for the framework's OS-scheduled jobs.
+
+    Truth = the physical state files (Rule 2), not any registry claim.
+    Only shallow scalar fields surface (no free-text leakage into panels).
+    """
+    jobs = []
+    for name, attr in _SYSTEM_JOB_STATE_FILES:
+        state_path = getattr(config, attr, None)
+        entry: dict[str, Any] = {"name": name, "exists": False}
+        if state_path is not None:
+            p = Path(state_path)
+            if p.is_file():
+                entry["exists"] = True
+                try:
+                    entry["modified_at"] = datetime.fromtimestamp(
+                        p.stat().st_mtime
+                    ).isoformat()
+                except OSError:
+                    pass
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        entry["state"] = {
+                            k: v
+                            for k, v in data.items()
+                            if isinstance(v, (str, int, float, bool))
+                        }
+                except Exception:
+                    pass
+        jobs.append(entry)
+    return {"jobs": jobs}
+
+
+# ── /api/sessions (M8 — browse/search/read every conversation, read-only) ──
+#
+# Classified `admin` in route_policy (chat_sessions has no workspace_id —
+# same B6 deferral as /api/hive-mind/recent). Reads only; resume happens
+# through the existing conversation endpoints (web sessions) client-side.
+
+
+@router.get("/api/sessions")
+def sessions_list(
+    request: Request,
+    limit: int = Query(default=60, ge=1, le=200),
+    platform: str | None = Query(default=None, max_length=32),
+) -> dict:
+    """Recent sessions across ALL platforms, hidden cron/tool sources excluded."""
+    from session import SOURCE_HIDDEN_BY_DEFAULT  # noqa: PLC0415
+
+    chat_db_path = Path(config.CHAT_DB_PATH)
+    if not chat_db_path.is_file():
+        return {"sessions": []}
+
+    where = ["1=1"]
+    params: list = []
+    if SOURCE_HIDDEN_BY_DEFAULT:
+        placeholders = ",".join("?" * len(SOURCE_HIDDEN_BY_DEFAULT))
+        where.append(f"COALESCE(s.source,'interactive') NOT IN ({placeholders})")
+        params.extend(SOURCE_HIDDEN_BY_DEFAULT)
+    if platform:
+        where.append("s.platform = ?")
+        params.append(platform)
+    params.append(limit)
+
+    try:
+        conn = sqlite3.connect(str(chat_db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT s.session_id, s.platform, s.source, s.persona_id,
+                       s.message_count, s.updated_at,
+                       (SELECT m.content FROM chat_messages m
+                        WHERE m.session_id = s.session_id
+                        ORDER BY m.id DESC LIMIT 1) AS preview
+                FROM chat_sessions s
+                WHERE {' AND '.join(where)}
+                ORDER BY s.updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return {"sessions": []}
+
+    sessions = []
+    for row in rows:
+        preview = (row["preview"] or "").strip().replace("\n", " ")
+        sessions.append(
+            {
+                "session_id": row["session_id"],
+                "platform": row["platform"],
+                "source": row["source"] or "interactive",
+                "persona_id": row["persona_id"] if "persona_id" in row.keys() else None,
+                "message_count": row["message_count"],
+                "updated_at": row["updated_at"],
+                "preview": preview[:200],
+            }
+        )
+    return {"sessions": sessions}
+
+
+@router.get("/api/sessions/search")
+def sessions_search(
+    request: Request,
+    q: str = Query(min_length=1, max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """FTS5 content search across every persisted conversation (session.py:847)."""
+    from session import get_session_store  # noqa: PLC0415
+
+    try:
+        store = get_session_store(config.CHAT_DB_PATH)
+        messages = store.search_messages(q, limit=limit)
+    except Exception:
+        return {"hits": []}
+
+    hits = []
+    for msg in messages:
+        content = (msg.content or "").strip().replace("\n", " ")
+        hits.append(
+            {
+                "message_id": msg.id,
+                "session_id": msg.session_id,
+                "role": msg.role,
+                "snippet": content[:240],
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            }
+        )
+    return {"hits": hits}
+
+
+@router.get("/api/sessions/messages")
+def sessions_messages(
+    request: Request,
+    session_id: str = Query(min_length=1, max_length=256),
+    limit: int = Query(default=80, ge=1, le=300),
+) -> dict:
+    """Read-only transcript for ANY session id (telegram/discord/web/cabinet…)."""
+    from session import get_session_store  # noqa: PLC0415
+
+    try:
+        store = get_session_store(config.CHAT_DB_PATH)
+        messages = store.list_recent_messages(session_id, limit=limit)
+    except Exception:
+        return {"messages": []}
+
+    return {
+        "messages": [
+            {
+                "id": msg.id,
+                "session_id": msg.session_id,
+                "role": msg.role,
+                "content": msg.content,
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+                # Same wire shape as conversation_history: a JSON string.
+                "tool_calls_json": json.dumps(msg.tool_calls or []),
+            }
+            for msg in messages
+        ]
+    }
+
+
 _DASHBOARD_PHOTO_DIR = Path(tempfile.gettempdir()) / "thehomie_photos"
+
+
+_DASHBOARD_DOC_DIR = Path(tempfile.gettempdir()) / "thehomie_docs"
+_SAFE_DOC_NAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
+
+
+def _persist_dashboard_document(document_base64: str, document_name: str) -> tuple[Path, int, str]:
+    """Decode an attached document to disk (M9 attach-any-file).
+
+    Returns (path, size_bytes, safe_name). The engine's build_attachment_context
+    reads the file from this path — same convention as Telegram doc uploads.
+    """
+    raw = document_base64.strip()
+    if raw.startswith("data:"):
+        raw = raw.split(",", 1)[-1]
+    data = base64.b64decode(raw, validate=False)
+    safe_name = _SAFE_DOC_NAME_RE.sub("_", Path(document_name).name).strip() or "attachment.txt"
+    _DASHBOARD_DOC_DIR.mkdir(parents=True, exist_ok=True)
+    path = _DASHBOARD_DOC_DIR / f"{uuid.uuid4().hex}-{safe_name}"
+    path.write_bytes(data)
+    return path, len(data), safe_name
 
 
 def _persist_dashboard_image(image_base64: str) -> tuple[Path, int]:
@@ -4530,6 +5042,22 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody, reques
             raise HTTPException(status_code=400, detail="buttons are not supported in persona conversations")
         if body.image_base64:
             raise HTTPException(status_code=400, detail="camera turns are main-only for now")
+        if body.model or body.reasoning_effort:
+            raise HTTPException(status_code=400, detail="model/effort overrides are main-only for now")
+        if body.document_base64:
+            raise HTTPException(status_code=400, detail="file attachments are main-only for now")
+
+    # M7 — validate cockpit overrides against the catalog before they ride
+    # raw_event into the engine.
+    override_model = (body.model or "").strip()
+    override_effort = (body.reasoning_effort or "").strip().lower()
+    if override_model and override_model not in _catalog_model_ids():
+        raise HTTPException(status_code=400, detail=f"unknown model: {override_model}")
+    if override_effort and override_effort not in _REASONING_EFFORT_LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"reasoning_effort must be one of {sorted(_REASONING_EFFORT_LEVELS)}",
+        )
 
     # Camera-as-agent-tool (M3): persist the captured JPEG to disk. Images bypass
     # build_attachment_context, so the ONLY route to the vision model is the Read
@@ -4539,8 +5067,18 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody, reques
     if body.image_base64:
         image_path, image_bytes = _persist_dashboard_image(body.image_base64)
 
-    if not raw_text and not button_custom_id and image_path is None:
-        raise HTTPException(status_code=400, detail="text, image, or button_custom_id required")
+    # M9 — attach-any-file: persist to disk; build_attachment_context
+    # (engine.py:1204) reads document attachments into the prompt.
+    doc_path: Path | None = None
+    doc_bytes = 0
+    doc_name = ""
+    if body.document_base64:
+        doc_path, doc_bytes, doc_name = _persist_dashboard_document(
+            body.document_base64, body.document_name or "attachment.txt"
+        )
+
+    if not raw_text and not button_custom_id and image_path is None and doc_path is None:
+        raise HTTPException(status_code=400, detail="text, image, document, or button_custom_id required")
 
     from models import Attachment, Channel, IncomingMessage, Platform, Thread, User  # noqa: PLC0415
 
@@ -4569,6 +5107,30 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody, reques
             outcome="sent",
             detail={"request_id": request_id, "bytes": image_bytes, "conversation_id": raw_conversation_id},
         )
+    if doc_path is not None:
+        # Telegram document convention: name the file in the turn text; the
+        # attachment carries the local path for build_attachment_context.
+        incoming_text = f"[Document received: {doc_name}]\n" + (incoming_text or "")
+        attachments.append(
+            Attachment(
+                filename=doc_name,
+                mimetype="application/octet-stream",
+                url=str(doc_path),
+                size_bytes=doc_bytes,
+            )
+        )
+        _audit_write(
+            operator_id="mobile",
+            action="document.attach",
+            target_persona_id=persona_id,
+            outcome="sent",
+            detail={
+                "request_id": request_id,
+                "bytes": doc_bytes,
+                "filename": doc_name,
+                "conversation_id": raw_conversation_id,
+            },
+        )
     user = User(Platform.WEB, user_id, display_name)
     channel = Channel(Platform.WEB, conversation_id, is_dm=True)
     thread = Thread(thread_id=conversation_id, parent_message_id=request_id)
@@ -4588,6 +5150,9 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody, reques
             "button_custom_id": button_custom_id,
             "display_text": raw_text if not button_custom_id else "",
             "has_image": image_path is not None,
+            # M7 cockpit overrides (validated above; engine reads these keys).
+            "model_override": override_model,
+            "reasoning_effort": override_effort,
         },
         source=body.source or "interactive",
     )
@@ -4601,6 +5166,8 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody, reques
         display_text = raw_text
         if image_path is not None:
             display_text = f"📷 {raw_text}".strip() if raw_text else "📷 Photo"
+        if doc_path is not None:
+            display_text = f"📎 {doc_name} {raw_text}".strip()
         _conversation_event_append(
             persona_id,
             conversation_id,
@@ -4625,6 +5192,114 @@ async def conversation_send(persona_id: str, body: DashboardChatSendBody, reques
         # Echo the RAW client id — the frontend re-sends it to history/stream,
         # which re-scope it server-side. The internal ws-prefixed key never
         # leaves the server.
+        "conversation_id": raw_conversation_id,
+        "request_id": request_id,
+    }
+
+
+@router.post("/api/conversation/{persona_id}/stop")
+async def conversation_stop(persona_id: str, body: DashboardChatStopBody, request: Request) -> dict:
+    """M7 — cancel the in-flight engine turn for a conversation (main-only).
+
+    Cancels via the router's active-turn registry; the router's CancelledError
+    path replaces the placeholder with a stop marker and emits `turn_aborted`.
+    """
+    _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
+    if persona_id != "default":
+        raise HTTPException(status_code=400, detail="stop is main-only for now")
+    conversation_id = _normalize_dashboard_chat_id(
+        body.conversation_id,
+        fallback=_DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID,
+    )
+    conversation_id = _scoped_conversation_id(request, conversation_id)
+    if _DASHBOARD_CHAT_RUNTIME is None:
+        # No chat runtime in this process → nothing can be in flight. Do not
+        # boot the engine just to cancel nothing.
+        return {"ok": True, "stopped": 0}
+    router_obj = _DASHBOARD_CHAT_RUNTIME["router"]
+    # _conversation_key shape: {platform}:{channel_id}:{thread_id}:{user_id};
+    # dashboard sends use conversation_id for both channel and thread.
+    stopped = router_obj.cancel_active_turn(f"web:{conversation_id}:{conversation_id}:")
+    return {"ok": True, "stopped": stopped}
+
+
+@router.post("/api/conversation/{persona_id}/steer")
+async def conversation_steer(persona_id: str, body: DashboardChatSteerBody, request: Request) -> dict:
+    """M7 — steer the in-flight turn (main-only, Hermex pending-leftover semantics).
+
+    Reuses the router's existing steer machinery: the steer-prefixed message is
+    queued serialized on the conversation's thread lock, so it runs immediately
+    after the current turn (or as a normal turn when nothing is in flight).
+    """
+    _reject_main_translation(persona_id)
+    _require_persona_in_scope(request, persona_id)  # WS3 tenant persona gate
+    if persona_id != "default":
+        raise HTTPException(status_code=400, detail="steer is main-only for now")
+    conversation_id = _normalize_dashboard_chat_id(
+        body.conversation_id,
+        fallback=_DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID,
+    )
+    raw_conversation_id = conversation_id
+    conversation_id = _scoped_conversation_id(request, conversation_id)
+    user_id = _normalize_dashboard_chat_id(body.user_id, fallback="dashboard-user")
+    display_name = (body.display_name or "Dashboard").strip()[:128] or "Dashboard"
+    steer_text = body.text.strip()
+    if not steer_text:
+        raise HTTPException(status_code=400, detail="text required")
+
+    from models import Channel, IncomingMessage, Platform, Thread, User  # noqa: PLC0415
+
+    request_id = body.client_message_id or f"dash-{uuid.uuid4().hex}"
+    # Same preamble the router's "Steer Current" button applies (router.py
+    # _apply_turn_followup_choice) — port the BEHAVIOR, one semantics.
+    incoming_text = (
+        "[Steer the in-flight conversation with this follow-up. "
+        "If the previous response already shipped, revise it instead "
+        "of treating this as an unrelated topic.]\n\n"
+        f"{steer_text}"
+    )
+    incoming = IncomingMessage(
+        text=incoming_text,
+        user=User(Platform.WEB, user_id, display_name),
+        channel=Channel(Platform.WEB, conversation_id, is_dm=True),
+        platform=Platform.WEB,
+        thread=Thread(thread_id=conversation_id, parent_message_id=request_id),
+        platform_message_id=request_id,
+        agent_type="thehomie",
+        user_role="admin",
+        raw_event={
+            "surface": "dashboard",
+            "request_id": request_id,
+            "display_text": steer_text,
+            "steer": True,
+        },
+        source="interactive",
+    )
+
+    runtime = _get_dashboard_chat_runtime()
+    adapter = runtime["adapter"]
+    router_obj = runtime["router"]
+    adapter.track(persona_id=persona_id, conversation_id=conversation_id)
+    _conversation_event_append(
+        persona_id,
+        conversation_id,
+        "user_message",
+        {
+            "text": f"🕹️ {steer_text}",
+            "content": f"🕹️ {steer_text}",
+            "request_id": request_id,
+            "components": [],
+        },
+    )
+    router_obj._retain_task(
+        asyncio.create_task(router_obj._handle_serialized(adapter, incoming))
+    )
+    await asyncio.sleep(0)
+    return {
+        "ok": True,
+        "queued": True,
+        "persona_id": persona_id,
         "conversation_id": raw_conversation_id,
         "request_id": request_id,
     }

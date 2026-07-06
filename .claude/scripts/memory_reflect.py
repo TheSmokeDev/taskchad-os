@@ -202,6 +202,33 @@ def _assemble_reflect_cognition_section(
     )
 
 
+def _assemble_reflect_repo_routing_section() -> str:
+    """Assemble the repository-pages routing rules for the reflection prompt.
+
+    Single source of truth for the ``### 5. Repository pages`` prompt block —
+    production (``_run_reflection_inner``) and the routing tests consume this
+    helper, so a dropped bullet breaks both at once. US-019 adds the
+    co-founder routing bullet: project activity from the vault's
+    ``cofounder/`` folder routes to the owning repo page's Dispatch History
+    exactly like Archon dispatches already do.
+    """
+
+    cofounder_bullet = (
+        f"- Route co-founder project activity ({MEMORY_DIR / 'cofounder'} builds, "
+        "dispatches, status flips) to the owning repo page's `## Dispatch History` "
+        "the same way, resolving the repo from the project file's `repo:` frontmatter."
+    )
+    return f"""### 5. Repository pages ({MEMORY_DIR / "repositories"})
+When the daily logs contain repository/codebase activity:
+- Resolve the repo slug from REPOSITORIES.md first.
+- Append Archon/Codex dispatches, workflow names, branches, worktrees, outcomes, and blockers to that repo page's `## Dispatch History`.
+{cofounder_bullet}
+- Append commits, pull requests, local proof, and validation results to `## Recent Activity`.
+- Append new repo-specific operating rules to `## Workflow Preferences`.
+- Do not auto-create a new repo page unless the repo appears in at least three daily logs or the user explicitly asked for the page.
+- Keep private local paths and dispatch history in the private memory vault only."""
+
+
 def _assemble_reflect_amendment_section(
     ledger_file: Path | None = None,
 ) -> str:
@@ -536,14 +563,7 @@ Do NOT propose for one-off mentions.
 
 1-2 sentences per entry. If nothing meets the bar, skip the proposal.
 
-### 5. Repository pages ({MEMORY_DIR / "repositories"})
-When the daily logs contain repository/codebase activity:
-- Resolve the repo slug from REPOSITORIES.md first.
-- Append Archon/Codex dispatches, workflow names, branches, worktrees, outcomes, and blockers to that repo page's `## Dispatch History`.
-- Append commits, pull requests, local proof, and validation results to `## Recent Activity`.
-- Append new repo-specific operating rules to `## Workflow Preferences`.
-- Do not auto-create a new repo page unless the repo appears in at least three daily logs or the user explicitly asked for the page.
-- Keep private local paths and dispatch history in the private memory vault only.
+{_assemble_reflect_repo_routing_section()}
 
 **Rules:**
 - Do not edit MEMORY.md, USER.md, SOUL.md, or SELF.md directly

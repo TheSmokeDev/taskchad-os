@@ -17,6 +17,8 @@ from orchestration.db import OrchestrationDB
 from orchestration.models import (
     AgentMessage,
     BlockedRequestPayload,
+    CofounderAssignmentPayload,
+    CofounderResultPayload,
     IdleReadyPayload,
     MessageWithDeliveries,
     SendMessageInput,
@@ -116,6 +118,7 @@ class MailboxService:
         workspace_id: int = DEFAULT_WORKSPACE_ID,
         convoy_id: int | None = None,
         limit: int = 10,
+        msg_type: str | None = None,
     ) -> list[MessageWithDeliveries]:
         conn = self.db.conn
         claim_token = str(uuid.uuid4())
@@ -133,6 +136,12 @@ class MailboxService:
         if convoy_id is not None:
             query += " AND m.convoy_id = ?"
             params.append(convoy_id)
+        # Same filter shape as get_inbox — a typed consumer (the cofounder
+        # work loop) must claim ONLY its own message type, never strand
+        # another consumer's deliveries in `claimed`.
+        if msg_type is not None:
+            query += " AND m.msg_type = ?"
+            params.append(msg_type)
         query += " ORDER BY m.created_at ASC LIMIT ?"
         params.append(limit)
 
@@ -184,6 +193,34 @@ class MailboxService:
 
     # ── Ack ────────────────────────────────────────────────────────────────
     # Parity: mailbox.ts:ackDelivery()
+
+    def recover_stale_claims(
+        self,
+        msg_type: str,
+        older_than_seconds: int,
+        workspace_id: int = DEFAULT_WORKSPACE_ID,
+    ) -> int:
+        """Age claimed-but-never-acked deliveries of ONE msg_type back to
+        pending (the ``suggestions._recover_stale_claims`` precedent — heal
+        a consumer that died between claim and ack).
+
+        Scoped by ``msg_type`` on purpose: each typed consumer owns its own
+        lease policy; this must never change another consumer's claim
+        semantics. Returns the number of recovered deliveries.
+        """
+        cutoff = int(time.time()) - int(older_than_seconds)
+        with self.db.conn as conn:
+            cur = conn.execute(
+                """UPDATE agent_deliveries
+                   SET status = 'pending', claim_token = NULL, claimed_at = NULL
+                   WHERE workspace_id = ? AND status = 'claimed'
+                     AND claimed_at IS NOT NULL AND claimed_at < ?
+                     AND message_id IN (
+                         SELECT id FROM agent_messages WHERE msg_type = ?
+                     )""",
+                (workspace_id, cutoff, msg_type),
+            )
+            return cur.rowcount
 
     def ack_delivery(
         self,
@@ -417,6 +454,44 @@ class MailboxService:
         return self._send_typed(
             from_agent, [to_agent], "work_handoff", payload,
             convoy_id, f"work_handoff: subtask {payload.subtask_id}", workspace_id,
+        )
+
+    def send_cofounder_assignment(
+        self,
+        from_agent: str,
+        to_agent: str,
+        payload: CofounderAssignmentPayload,
+        convoy_id: int | None = None,
+        workspace_id: int = DEFAULT_WORKSPACE_ID,
+    ) -> AgentMessage:
+        """Cofounder v2 WS3 — deliver one approved agenda line to a persona.
+
+        Transport only: the scope gate, caps, and audit rows live in
+        ``cofounder/delegate.py`` (the intended sole caller). Same Phase-3
+        typed shape as every helper here.
+        """
+        return self._send_typed(
+            from_agent, [to_agent], "cofounder_assignment", payload,
+            convoy_id, f"cofounder_assignment: {payload.task[:60]}", workspace_id,
+        )
+
+    def send_cofounder_result(
+        self,
+        from_agent: str,
+        to_agent: str,
+        payload: CofounderResultPayload,
+        convoy_id: int | None = None,
+        workspace_id: int = DEFAULT_WORKSPACE_ID,
+    ) -> AgentMessage:
+        """Cofounder v2 WS4 — report one work-loop outcome back up.
+
+        Transport only; the work loop (``cofounder/worktick.py``) owns the
+        execution, audit, and convoy transitions. WS5's reporting pass is
+        the intended consumer.
+        """
+        return self._send_typed(
+            from_agent, [to_agent], "cofounder_result", payload,
+            convoy_id, f"cofounder_result: {payload.status}", workspace_id,
         )
 
     def send_blocked_request(

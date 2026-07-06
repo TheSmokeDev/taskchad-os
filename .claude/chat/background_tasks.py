@@ -29,7 +29,9 @@ def _state_path() -> Path:
 
         return Path(STATE_DIR) / "background-engine-tasks.json"
     except Exception:
-        return Path(".claude") / "data" / "state" / "background-engine-tasks.json"
+        from personas import get_default_paths
+
+        return get_default_paths()["state"] / "background-engine-tasks.json"
 
 
 def _now() -> float:

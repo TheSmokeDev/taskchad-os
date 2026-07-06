@@ -54,7 +54,9 @@ def _data_dir() -> Path:
 
         return Path(DATA_DIR)
     except Exception:  # pragma: no cover - import path fallback for direct scripts
-        return Path(__file__).resolve().parents[1] / "data"
+        from personas import get_default_paths
+
+        return get_default_paths()["data"]
 
 
 def _memory_dir() -> Path:

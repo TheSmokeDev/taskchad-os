@@ -12,7 +12,9 @@ from browser_control import redact_text_urls, redact_url
 try:
     from config import DATA_DIR
 except Exception:  # pragma: no cover - import path fallback for direct scripts
-    DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+    from personas import get_default_paths
+
+    DATA_DIR = get_default_paths()["data"]
 
 
 BROWSER_AUDIT_LOG = DATA_DIR / "browser_actions.jsonl"

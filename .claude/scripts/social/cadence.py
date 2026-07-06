@@ -14,6 +14,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Boot-shim: must run BEFORE any framework imports (config, etc.).
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 # Load .env (via config's import-time load_dotenv) BEFORE any os.getenv check —
 # otherwise SOCIAL_CADENCE_ENABLED is invisible when cadence.py runs as a
 # standalone scheduled job and run_cadence_tick() silently no-ops "cadence disabled".

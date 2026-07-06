@@ -53,6 +53,36 @@ conversationRoute.post('/api/conversation/:id/send', async (c) => {
   return c.json(upstream.json, upstream.status as 200);
 });
 
+conversationRoute.post('/api/conversation/:id/stop', async (c) => {
+  const browserId = c.req.param('id');
+  const frameworkId = inboundPersonaId(browserId) ?? browserId;
+  const body = await c.req.json().catch(() => ({}));
+  const upstream = await authedFetchJson(
+    `/api/conversation/${encodeURIComponent(frameworkId)}/stop`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  return c.json(upstream.json, upstream.status as 200);
+});
+
+conversationRoute.post('/api/conversation/:id/steer', async (c) => {
+  const browserId = c.req.param('id');
+  const frameworkId = inboundPersonaId(browserId) ?? browserId;
+  const body = await c.req.json().catch(() => ({}));
+  const upstream = await authedFetchJson(
+    `/api/conversation/${encodeURIComponent(frameworkId)}/steer`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  return c.json(upstream.json, upstream.status as 200);
+});
+
 conversationRoute.get('/api/conversation/:id/stream', async (c) => {
   const browserId = c.req.param('id');
   const frameworkId = inboundPersonaId(browserId) ?? browserId;

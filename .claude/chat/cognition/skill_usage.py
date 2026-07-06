@@ -100,7 +100,9 @@ def _resolve_sidecar_path(path: Path | str | None = None) -> Path:
         # next call with no module reload (Rule 1 call-time resolution).
         base = Path(config.DATA_DIR)
     except Exception:  # pragma: no cover - import path fallback for direct scripts
-        base = Path(__file__).resolve().parents[2] / "data"
+        from personas import get_default_paths
+
+        base = get_default_paths()["data"]
     return base / SIDECAR_FILE_NAME
 
 

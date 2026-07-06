@@ -14,12 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from models import Platform
+from personas import get_default_paths
 
 
 DEFAULT_BINDINGS_FILE = (
-    Path(__file__).resolve().parent.parent
-    / "data"
-    / "discord-channel-bindings.json"
+    get_default_paths()["data"] / "discord-channel-bindings.json"
 )
 
 

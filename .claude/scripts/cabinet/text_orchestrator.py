@@ -223,12 +223,35 @@ def _profile_execution_context(persona_id: str) -> _ProfileExecutionContext:
         )
         skill_index = ""
 
+    # Cofounder v2 WS1 — a persona whose config declares
+    # ``cabinet.portfolio_context: true`` gets the operator-vault portfolio
+    # digest injected (cabinet turns are no-tools, so this is the only way
+    # portfolio truth reaches the turn). Declarative and persona-agnostic —
+    # no id is hardcoded. Fail-open: a broken digest is a bare turn.
+    portfolio_digest = ""
+    if cabinet_block.get("portfolio_context") is True:
+        try:
+            from cofounder import briefing as _cofounder_briefing
+
+            portfolio_digest = _cofounder_briefing.build_portfolio_digest(
+                config.MEMORY_DIR
+            ).strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "cabinet portfolio digest load failed for %s: %s",
+                _redact(canonical_id),
+                _redact(str(exc)),
+            )
+            portfolio_digest = ""
+
     system_prompt = ""
     prompt_blocks: list[str] = []
     if profile_context:
         prompt_blocks.append(profile_context)
     if skill_index:
         prompt_blocks.append("## Persona Skill Index\n" + skill_index)
+    if portfolio_digest:
+        prompt_blocks.append(portfolio_digest)
     if prompt_blocks:
         system_prompt = (
             "## Cabinet Participant Profile Context\n"

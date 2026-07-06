@@ -447,6 +447,178 @@ def capture_browser_screenshot_png(
             pass
 
 
+# ── M12 — phone-drive interaction primitives ────────────────────────────────
+# Operator-initiated remote driving of the visible browser (the human pushes
+# each button from the phone). NOT an agent surface: agent-side writes stay
+# behind the social-write approval-phrase gates; these helpers are consumed
+# only by the gated dashboard endpoints (browser.viewer.act / .elements /
+# .navigate workflows), which audit every attempt.
+
+_SNAPSHOT_ELEMENT_RE = re.compile(
+    r"^\s*-\s+(?P<role>[a-zA-Z]+)\s+(?:\"(?P<name>[^\"]*)\"\s*)?\[(?P<attrs>[^\]]*)\]"
+)
+_SNAPSHOT_REF_RE = re.compile(r"\bref=(?P<ref>e\d+)\b")
+_ACT_REF_RE = re.compile(r"^e\d{1,5}$")
+_ACT_KEY_RE = re.compile(r"^[A-Za-z0-9+]{1,32}$")
+_MAX_SNAPSHOT_ELEMENTS = 120
+
+BROWSER_ACT_KINDS = ("click", "fill", "press", "scroll", "back", "forward", "reload")
+_SCROLL_DIRECTIONS = frozenset({"up", "down", "left", "right"})
+
+
+def parse_snapshot_elements(text: str) -> list[dict[str, str]]:
+    """`snapshot -i -c` lines -> [{ref, role, name}] for the phone element list.
+
+    Format observed live (agent-browser 0.31.x):
+        - button "Google Search" [ref=e20]
+        - combobox "Search" [expanded=false, ref=e24]
+    Unnamed `generic` rows are clutter (clickable wrappers) and are dropped.
+    """
+
+    elements: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        match = _SNAPSHOT_ELEMENT_RE.match(line)
+        if not match:
+            continue
+        ref_match = _SNAPSHOT_REF_RE.search(match.group("attrs") or "")
+        if not ref_match:
+            continue
+        role = match.group("role")
+        name = (match.group("name") or "").strip()
+        if role == "generic" and not name:
+            continue
+        ref = ref_match.group("ref")
+        if ref in seen:
+            continue
+        seen.add(ref)
+        elements.append({"ref": ref, "role": role, "name": name[:120]})
+        if len(elements) >= _MAX_SNAPSHOT_ELEMENTS:
+            break
+    return elements
+
+
+def browser_snapshot_elements(
+    *,
+    port: int | None = None,
+    runner: Any = subprocess.run,
+) -> list[dict[str, str]]:
+    """Interactive-element snapshot of the visible browser's active tab."""
+
+    resolved_port = port if port is not None else resolve_cdp_port()
+    result = run_agent_browser(
+        ["snapshot", "-i", "-c"], port=resolved_port, timeout=20, runner=runner
+    )
+    if not result.ok:
+        raise RuntimeError(redact_text_urls(result.output or "agent-browser snapshot failed"))
+    return parse_snapshot_elements(result.stdout)
+
+
+def build_browser_act_args(
+    kind: str,
+    *,
+    ref: str | None = None,
+    text: str | None = None,
+    key: str | None = None,
+    direction: str | None = None,
+    amount: int | None = None,
+) -> list[str]:
+    """Map a validated phone action onto an agent-browser argv. ValueError on
+    anything malformed — refs/keys/directions are shape-checked here so the
+    endpoint never shells arbitrary operator strings as commands."""
+
+    if kind == "click":
+        if not ref or not _ACT_REF_RE.match(ref):
+            raise ValueError("click requires a snapshot ref like e12")
+        return ["click", f"@{ref}"]
+    if kind == "fill":
+        if not ref or not _ACT_REF_RE.match(ref):
+            raise ValueError("fill requires a snapshot ref like e12")
+        if text is None:
+            raise ValueError("fill requires text")
+        return ["fill", f"@{ref}", text]
+    if kind == "press":
+        if not key or not _ACT_KEY_RE.match(key):
+            raise ValueError("press requires a key like Enter or Control+a")
+        return ["press", key]
+    if kind == "scroll":
+        resolved_direction = direction or "down"
+        if resolved_direction not in _SCROLL_DIRECTIONS:
+            raise ValueError("scroll direction must be up/down/left/right")
+        resolved_amount = amount if amount is not None else 600
+        if not 1 <= resolved_amount <= 5000:
+            raise ValueError("scroll amount must be 1-5000 px")
+        return ["scroll", resolved_direction, str(resolved_amount)]
+    if kind in ("back", "forward", "reload"):
+        return [kind]
+    raise ValueError(f"unknown browser action kind: {kind}")
+
+
+def ensure_browser_window_restored(
+    *,
+    port: int | None = None,
+    runner: Any = subprocess.run,
+) -> bool:
+    """Best-effort un-minimize of the CDP Chrome window (Windows only).
+
+    agent-browser input goes through the compositor hit-test, which silently
+    DROPS clicks while the window is minimized — the CLI reports Done and
+    nothing happens (proven live 2026-07-05: ref click dead on a minimized
+    window, identical click lands after restore; JS eval clicks work either
+    way). Reads/snapshots are unaffected. Fail-open: any error returns False
+    and the action proceeds against whatever window state exists.
+    """
+
+    if platform.system() != "Windows":
+        return False
+    resolved_port = port if port is not None else resolve_cdp_port()
+    ps = (
+        "Add-Type 'using System; using System.Runtime.InteropServices; "
+        'public class W { [DllImport("user32.dll")] public static extern bool '
+        "ShowWindow(IntPtr h, int n); "
+        '[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h); }\'; '
+        "$procs = Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+        f"Where-Object {{ $_.CommandLine -like '*remote-debugging-port={resolved_port}*' }}; "
+        "foreach ($cim in $procs) { "
+        "$p = Get-Process -Id $cim.ProcessId -ErrorAction SilentlyContinue; "
+        "if ($p -and $p.MainWindowHandle -ne 0 -and [W]::IsIconic($p.MainWindowHandle)) { "
+        "[W]::ShowWindow($p.MainWindowHandle, 9) | Out-Null; 'restored' } }"
+    )
+    try:
+        result = runner(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        return False
+    return "restored" in (getattr(result, "stdout", "") or "")
+
+
+def browser_act(
+    kind: str,
+    *,
+    ref: str | None = None,
+    text: str | None = None,
+    key: str | None = None,
+    direction: str | None = None,
+    amount: int | None = None,
+    port: int | None = None,
+    runner: Any = subprocess.run,
+) -> CommandResult:
+    """Run one operator-driven action against the visible browser."""
+
+    args = build_browser_act_args(
+        kind, ref=ref, text=text, key=key, direction=direction, amount=amount
+    )
+    resolved_port = port if port is not None else resolve_cdp_port()
+    # Input is dropped by minimized windows (see ensure_browser_window_restored)
+    # — restore first so phone-drive works while the operator is away.
+    ensure_browser_window_restored(port=resolved_port, runner=runner)
+    return run_agent_browser(args, port=resolved_port, timeout=20, runner=runner)
+
+
 def _viewer_readiness(readiness: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": readiness.get("status", "attention"),

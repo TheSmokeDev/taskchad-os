@@ -149,7 +149,9 @@ def test_sync_index_rebuilds_when_meta_missing_but_schema_stale(
     # real embedding model.
     stdout_buf = io.StringIO()
     with redirect_stdout(stdout_buf):
-        mi.sync_index(memory_dir=empty_memory, generate_embeddings=False)
+        mi.sync_index(
+            memory_dir=empty_memory, generate_embeddings=False, db_path=db_path
+        )
     output = stdout_buf.getvalue()
 
     # The schema-vs-config mismatch should trigger a rebuild announcement.
@@ -203,7 +205,9 @@ def test_sync_index_skips_rebuild_when_schema_matches(
 
     stdout_buf = io.StringIO()
     with redirect_stdout(stdout_buf):
-        mi.sync_index(memory_dir=empty_memory, generate_embeddings=False)
+        mi.sync_index(
+            memory_dir=empty_memory, generate_embeddings=False, db_path=db_path
+        )
     output = stdout_buf.getvalue()
 
     assert "Embedding dim mismatch" not in output, (

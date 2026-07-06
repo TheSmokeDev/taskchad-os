@@ -72,6 +72,10 @@ class WorkingMemory:
         "working_memory",
         "continuity",
         "recalled_memory",
+        # Cofounder v2: the lean agenda-status region sits mid-prompt (after
+        # recall, before skills) — NOT tail-dumped, so the win32 head-keep
+        # cap can never make the co-founder go blind on heavy-context turns.
+        "portfolio",
         "procedural_memory",
         "prefetched_context",
         "attachment_context",

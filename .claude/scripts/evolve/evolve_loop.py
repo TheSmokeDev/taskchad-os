@@ -65,6 +65,11 @@ for _p in (_SCRIPTS_DIR, _CHAT_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+# Boot-shim: must run BEFORE any framework imports (config, cognition, etc.).
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 
 def _proposal_from(candidate: dict) -> Any:
     """B2 — build an ``AmendmentProposal`` via the field-filter, NEVER raw.

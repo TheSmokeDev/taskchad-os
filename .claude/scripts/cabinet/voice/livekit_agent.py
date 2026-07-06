@@ -19,13 +19,20 @@ from typing import Any
 
 logger = logging.getLogger("cabinet.voice.livekit_agent")
 
+# Boot-shim: must run BEFORE any framework imports (cabinet, security, etc.).
+from personas import apply_persona_override  # noqa: E402
+
+apply_persona_override()
+
 from cabinet.voice import livekit_session  # noqa: E402
 from security import redact as _redact_mod  # noqa: E402
 
 try:
     from dotenv import load_dotenv  # noqa: PLC0415
 
-    load_dotenv()
+    from config import ENV_FILE  # noqa: PLC0415
+
+    load_dotenv(ENV_FILE, override=True)
 except ImportError:  # pragma: no cover - python-dotenv is a base dependency.
     pass
 

@@ -93,6 +93,8 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("teamtick", "Run one autonomous team scheduler tick — /teamtick <team_id>", "router", "admin"),
     ("teamroom", "Run Growth Boardroom team workflow — /teamroom [--v2] [--runtime] <goal>", "router", "admin"),
     ("team", "Alias for /team room <goal>", "router", "admin"),
+    # -- Co-Founder (US-015) — file-mediated steering for autonomous projects --
+    ("cofounder", "Co-founder - agenda, run <n> (approve), status, steer, pause", "router", "admin"),
     ("send", "Send a draft email via Outlook (e.g. /send draft-01)", "router", "operator"),
     ("brief", "Quick briefing — /brief all for full dashboard", "router", "operator"),
     # -- Memory & Search --
@@ -156,6 +158,8 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ("Social Media", ["social"]),
     # Cabinet (Phase 5b) — chat-routed cabinet operator surface.
     ("Cabinet", ["cabinet", "standup", "discuss", "teamtick", "teamroom", "team"]),
+    # Co-Founder (US-015) — autonomous project steering.
+    ("Co-Founder", ["cofounder"]),
     ("Communication", ["send", "brief"]),
     ("Memory", ["search", "vault", "file", "working", "skills"]),
     (
@@ -204,6 +208,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "standup",
     "discuss",
     "teamroom",
+    "cofounder",
     "search",
     "vault",
     "file",

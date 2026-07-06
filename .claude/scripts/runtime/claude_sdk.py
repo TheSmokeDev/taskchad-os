@@ -210,6 +210,8 @@ class ClaudeSdkRuntime:
             options_kwargs["hooks"] = request.hooks
         if request.thinking is not None:
             options_kwargs["thinking"] = request.thinking
+        if request.effort is not None:
+            options_kwargs["effort"] = request.effort
         if request.env is not None:
             options_kwargs["env"] = request.env
         if request.resume is not None:
@@ -255,6 +257,20 @@ class ClaudeSdkRuntime:
                                     provider_type="tool_use",
                                 )
                             )
+                            if request.on_tool_event is not None:
+                                try:
+                                    preview = repr(getattr(block, "input", None) or {})
+                                    if len(preview) > 200:
+                                        preview = preview[:197] + "..."
+                                    request.on_tool_event(
+                                        {
+                                            "id": getattr(block, "id", ""),
+                                            "name": block.name,
+                                            "input_preview": preview,
+                                        }
+                                    )
+                                except Exception:
+                                    pass
                     if turn_text.strip():
                         response_text = turn_text
                 elif isinstance(message, ResultMessage):

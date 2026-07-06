@@ -13,6 +13,7 @@ import re
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -74,6 +75,11 @@ def _read_first_few_events(client, persona_id="default", **params):
         class _FakeRequest:
             url_path_params: dict = {}
             _scope: dict = {"type": "http", "headers": []}
+            # A real Starlette Request always carries `.state`; the tenant
+            # persona/workspace gate reads persona_scope/workspace_id off it via
+            # getattr-with-default, so an empty namespace = single-tenant
+            # admin-allow (dashboard_api._persona_scope docstring).
+            state = types.SimpleNamespace()
 
             def __init__(self, last_event_id: str | None = None):
                 raw_headers: list[tuple[bytes, bytes]] = []
@@ -234,6 +240,8 @@ def test_sse_stream_yields_events_appended_after_open(client):
         class _FakeRequest:
             _headers = Headers(raw=[])
             _calls = 0
+            # See note above: empty namespace = single-tenant admin-allow.
+            state = types.SimpleNamespace()
 
             @property
             def headers(self):
@@ -297,6 +305,9 @@ def test_dashboard_chat_send_builds_web_incoming_and_user_sse(client, monkeypatc
                 client_message_id="client-1",
                 user_id="operator",
             ),
+            # WS3 tenant gate reads scope/workspace off request.state via
+            # getattr-with-default; an empty namespace = single-tenant.
+            types.SimpleNamespace(state=types.SimpleNamespace()),
         )
     )
 

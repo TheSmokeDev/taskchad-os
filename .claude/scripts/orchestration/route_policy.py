@@ -215,6 +215,10 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     ("GET", "/api/browser-viewer/screenshot"): "admin",
     ("POST", "/api/browser-viewer/stream/enable"): "admin",
     ("POST", "/api/browser-viewer/stream/disable"): "admin",
+    # M12 phone-drive — operator-initiated actions from the mobile viewer.
+    ("GET", "/api/browser-viewer/elements"): "admin",
+    ("POST", "/api/browser-viewer/act"): "admin",
+    ("POST", "/api/browser-viewer/navigate"): "admin",
     # ── Dashboard: health/info (public) ─────────────────────────────────────
     ("GET", "/api/health"): "public",
     ("GET", "/api/jarvis/status"): "admin",
@@ -264,6 +268,17 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     ("GET", "/api/tokens"): "admin",
     # B6-deferred: chat_sessions has no workspace_id column; tenant-scope unsafe → admin until B6
     ("GET", "/api/hive-mind/recent"): "admin",
+    # M8 sessions browser — same B6 grain as hive-mind/recent (cross-platform
+    # chat_sessions reads with no workspace column): admin until B6.
+    ("GET", "/api/sessions"): "admin",
+    ("GET", "/api/sessions/search"): "admin",
+    ("GET", "/api/sessions/messages"): "admin",
+    # M9 library (read-only): skills registry, allowlisted file browser,
+    # framework system-job state — server filesystem grain → admin.
+    ("GET", "/api/skills"): "admin",
+    ("GET", "/api/files/list"): "admin",
+    ("GET", "/api/files/read"): "admin",
+    ("GET", "/api/system-jobs"): "admin",
     # ── Dashboard: settings (admin — global) ────────────────────────────────
     ("GET", "/api/dashboard/mobile-access"): "admin",
     ("GET", "/api/dashboard/settings"): "admin",
@@ -272,6 +287,9 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     ("GET", "/api/conversation/{persona_id}/history"): "tenant_persona",
     ("POST", "/api/conversation/{persona_id}/send"): "tenant_persona",
     ("GET", "/api/conversation/{persona_id}/stream"): "tenant_persona",
+    # M7 cockpit run-controls (main-only at the handler; same grain as send).
+    ("POST", "/api/conversation/{persona_id}/stop"): "tenant_persona",
+    ("POST", "/api/conversation/{persona_id}/steer"): "tenant_persona",
     # ── Pairing (Homie Mobile M2): claim/poll are pre-credential public
     # (self-authenticated by bootstrap/poll secrets); operator actions admin ──
     ("POST", "/api/pair/start"): "admin",

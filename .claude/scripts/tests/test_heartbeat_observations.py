@@ -681,15 +681,19 @@ class TestGatherSenseFacts:
         _ctx, _sids, _cands, facts = await heartbeat.gather_heartbeat_context()
         assert "haro_matched_count" not in facts["community"]
 
-        # HARO email with a non-matching body → counts present, zeroed
+        # HARO email with a non-matching body → keys ABSENT (matched-only
+        # contract since the business_signal/haro_fetcher refactor). The only
+        # consumer (heartbeat.py ambient observations) reads
+        # facts.get("haro_matched_count", 0) and acts on >= 1, so absent and
+        # zero are indistinguishable downstream — absent is the contract.
         _install_data_fakes(
             monkeypatch,
             haro_emails=[_ns(id="h1", sender_email="haro@helpareporter.com")],
             haro_body="short",
         )
         _ctx, _sids, _cands, facts = await heartbeat.gather_heartbeat_context()
-        assert facts["community"]["haro_matched_count"] == 0
-        assert facts["community"]["haro_drafts_created"] == 0
+        assert "haro_matched_count" not in facts["community"]
+        assert "haro_drafts_created" not in facts["community"]
 
     @pytest.mark.asyncio
     async def test_haro_kill_switch_early_return_honors_4_tuple(self, monkeypatch):

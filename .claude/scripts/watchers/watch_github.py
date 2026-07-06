@@ -31,6 +31,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _watermark import Watermark, format_items_as_markdown  # type: ignore
 
+# Boot-shim: resolve persona paths before framework imports; fail-open when
+# personas isn't importable (run standalone without the scripts dir on path).
+try:
+    from personas import apply_persona_override  # noqa: E402
+
+    apply_persona_override()
+except Exception:  # pragma: no cover - standalone/degraded boot path
+    pass
+
 
 VALID_SCOPES = ("issues", "pulls", "releases", "commits")
 

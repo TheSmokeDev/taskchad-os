@@ -553,6 +553,9 @@ def test_api_thin_no_business_logic():
         # owns its own router in dashboard_api.py; orchestration/api.py
         # only includes it via app.include_router. Slice ownership preserved.
         "from dashboard_api import router",
+        # Same router-mount-only pattern for the persona pairing API —
+        # api.py includes the router, owns none of its logic.
+        "from pairing_api import router",
     )
     for line in import_lines:
         assert any(line.startswith(p) for p in allowed_prefixes), (
