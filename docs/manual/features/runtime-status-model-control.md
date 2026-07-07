@@ -55,6 +55,31 @@ cd <repo>\.claude\scripts
 uv run pytest tests/test_runtime_selection.py tests/test_diagnostics.py tests/test_runtime_registry.py tests/test_cli.py tests/test_lane_router.py tests/test_runtime_routing.py tests/test_chat_runtime_engine.py -q
 ```
 
+## Model Pinning And Codex Aliases
+
+Runtime selection is lane-first: `/model claude`, `/model codex`, `/model
+gemini`, `/model openrouter`, `/model openai`, and `/model auto` choose where
+the next request runs. Provider-specific model pins use `provider:model`, but
+Codex also accepts short GPT-style aliases:
+
+```bash
+uv run thehomie chat -q "/model codex:default" -Q   # Codex plan default; no --model flag passed
+uv run thehomie chat -q "/model codex:gpt-5.5" -Q   # Pin a concrete Codex model
+uv run thehomie chat -q "/model gpt5.5" -Q           # Same pin, easier shorthand
+uv run thehomie chat -q "/model codex 5.5" -Q        # Same pin, provider + version shorthand
+uv run thehomie chat -m codex:gpt-5.5 -q "Reply OK" -Q
+```
+
+`codex:default`, `codex latest`, and `gpt latest` clear the Codex model pin and
+leave the Codex CLI/ChatGPT plan to choose its hidden backend model. Pinned
+values such as `codex:gpt-5.5`, `gpt5.5`, `gpt 5.5`, `gbt 5.5`, `codex 5.5`,
+and `codec 5.5` are normalized to `gpt-5.5`.
+
+`/provider`, `/diagnostics`, and `thehomie status --json` report the configured
+model. When Codex is set to `chatgpt-plan-default`, the CLI/ChatGPT plan
+chooses the concrete backend model and The Homie reports that backend as
+unobserved.
+
 ## Latest Live Proof
 
 Use current CLI/status checks before making a new live claim. Tracker entries
