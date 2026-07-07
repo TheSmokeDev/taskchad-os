@@ -66,14 +66,22 @@ from runtime.selection import (  # noqa: E402
     resolve_runtime_selection,
     runtime_selection_choice,
 )
+from update_check import check_for_update, get_current_version  # noqa: E402
 
 
 @click.group(invoke_without_command=True)
-@click.version_option(version="1.0.0", prog_name="thehomie")
+@click.version_option(version=get_current_version(), prog_name="thehomie")
 @click.pass_context
 def main(ctx):
     """The Homie — personal AI agent framework."""
     ctx.ensure_object(dict)
+    update = check_for_update()
+    if update:
+        current, latest = update
+        click.echo(
+            f"Update available: v{current} -> v{latest}. Run `thehomie update` to install.",
+            err=True,
+        )
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -690,6 +698,66 @@ def doctor():
         sys.exit(1)
     else:
         click.echo("\nAll checks passed.")
+
+
+@main.command()
+def update():
+    """Check for and install the latest taskchad-os release."""
+    from update_check import _version_tuple, get_latest_release_version
+
+    current = get_current_version()
+    click.echo(f"Current version: v{current}")
+    click.echo("Checking for the latest release...")
+    latest = get_latest_release_version(timeout=5.0)
+    if latest is None:
+        click.echo("Could not reach GitHub to check for updates.")
+        sys.exit(1)
+
+    if _version_tuple(latest) <= _version_tuple(current):
+        click.echo(f"Already up to date (v{current}).")
+        return
+
+    if not click.confirm(f"Update available: v{current} -> v{latest}. Install now?"):
+        click.echo("Skipped.")
+        return
+
+    repo_root = _resolve_git_repo_for_runner()
+    if not repo_root:
+        click.echo("Could not resolve the git repository root — are you in a git checkout?")
+        sys.exit(1)
+
+    import shutil
+    import subprocess as _subprocess
+
+    tag = f"v{latest}"
+    click.echo(f"Fetching {tag}...")
+    try:
+        _subprocess.run(["git", "fetch", "--tags"], cwd=repo_root, check=True)
+        _subprocess.run(["git", "checkout", tag], cwd=repo_root, check=True)
+    except _subprocess.CalledProcessError as e:
+        click.echo(f"git update failed: {e}")
+        sys.exit(1)
+
+    click.echo("Reinstalling dependencies...")
+    scripts_dir = str(Path(repo_root) / ".claude" / "scripts")
+    npm_cmd = shutil.which("npm") or "npm"
+    uv_cmd = shutil.which("uv") or "uv"
+    try:
+        _subprocess.run([uv_cmd, "sync"], cwd=scripts_dir, check=True)
+        for sub in ("server", "web", "desktop"):
+            dash_dir = str(Path(repo_root) / "dashboard" / sub)
+            if Path(dash_dir).exists():
+                _subprocess.run([npm_cmd, "install"], cwd=dash_dir, check=True)
+        web_dir = str(Path(repo_root) / "dashboard" / "web")
+        if Path(web_dir).exists():
+            _subprocess.run([npm_cmd, "run", "build"], cwd=web_dir, check=True)
+    except _subprocess.CalledProcessError as e:
+        click.echo(f"Dependency reinstall failed: {e}")
+        click.echo(f"Code is updated to {tag} — finish manually: cd {scripts_dir} && uv sync")
+        sys.exit(1)
+
+    click.echo(f"\nUpdated to {tag}. Restart the bot to run the new version:")
+    click.echo(f"  bash {repo_root}/.claude/chat/run_chat.sh")
 
 
 def _get_orchestration_services():

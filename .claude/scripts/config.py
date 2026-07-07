@@ -163,6 +163,11 @@ example_scout_ENABLED = os.getenv("example_scout_ENABLED", "true").lower() == "t
 example_scout_REPO = os.getenv("example_scout_REPO", "NousResearch/hermes-agent")
 example_scout_STATE_FILE = STATE_DIR / "example_scout-state.json"
 
+# === CLI Update-Check Configuration ===
+UPDATE_CHECK_STATE_FILE = STATE_DIR / "update-check-state.json"
+UPDATE_CHECK_MIN_INTERVAL_HOURS = int(os.getenv("UPDATE_CHECK_MIN_INTERVAL_HOURS", "24"))
+UPDATE_CHECK_REPO = os.getenv("UPDATE_CHECK_REPO", "TheSmokeDev/taskchad-os")
+
 # === Memory Recall Configuration ===
 RECALL_ENABLED = os.getenv("RECALL_ENABLED", "true").lower() == "true"
 RECALL_MIN_SCORE = float(os.getenv("RECALL_MIN_SCORE", "0.3"))
@@ -1159,6 +1164,47 @@ def get_persona_learning_settings(
     )
 
 
+class PhoneOpsSettings(NamedTuple):
+    """Effective PhoneOps knobs (call-time resolved)."""
+
+    enabled: bool
+
+
+def get_phoneops_settings(enabled: bool | None = None) -> PhoneOpsSettings:
+    """Resolve the PhoneOps master switch at CALL TIME (Rule 1) — P3.0.
+
+    HOMIE_PHONEOPS_ENABLED ("false") — default OFF: a ``phone`` browser target
+    with the switch off is refused (403) at the dashboard API gate, so absent
+    config is byte-identical desktop-only M12 behavior. The None-sentinel
+    pattern means ``monkeypatch.setenv`` takes effect on the next call with no
+    module reload.
+    """
+    if enabled is None:
+        enabled = os.getenv("HOMIE_PHONEOPS_ENABLED", "false").lower() == "true"
+    return PhoneOpsSettings(enabled=enabled)
+
+
+class GhostSettings(NamedTuple):
+    """Effective Ghost Phone knobs (call-time resolved)."""
+
+    enabled: bool
+
+
+def get_ghost_settings(enabled: bool | None = None) -> GhostSettings:
+    """Resolve the Ghost Phone master switch at CALL TIME (Rule 1) — P4.0.
+
+    HOMIE_GHOST_ENABLED ("false") — default OFF: a ``ghost`` browser target with
+    the switch off is refused (403) at the dashboard API gate, exactly like the
+    PhoneOps gate but as a DISTINCT capability (the ghost is a dedicated device
+    the operator owns, separate from driving the personal phone). The
+    None-sentinel pattern means ``monkeypatch.setenv`` takes effect on the next
+    call with no module reload.
+    """
+    if enabled is None:
+        enabled = os.getenv("HOMIE_GHOST_ENABLED", "false").lower() == "true"
+    return GhostSettings(enabled=enabled)
+
+
 class SessionBriefSettings(NamedTuple):
     """Effective session-opening-brief knobs (call-time resolved)."""
 
@@ -1248,6 +1294,46 @@ def get_cabinet_relay_settings(
     if max_turns is None:
         max_turns = int(os.getenv("CABINET_CHAT_RELAY_MAX_TURNS", "0"))
     return CabinetRelaySettings(enabled=enabled, max_turns=max_turns)
+
+
+class PostizSettings(NamedTuple):
+    """Effective Postiz publishing-transport knobs (call-time resolved)."""
+
+    api_url: str
+    api_key: str
+    timeout_s: float
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_url and self.api_key)
+
+
+def get_postiz_settings(
+    api_url: str | None = None,
+    api_key: str | None = None,
+    timeout_s: float | None = None,
+) -> PostizSettings:
+    """Resolve Postiz transport knobs at CALL TIME (Rule 1).
+
+    Postiz is an OPTIONAL self-hosted multi-platform publisher the social
+    slice can dispatch through (``execution_method: postiz`` in
+    ``social/channels.yaml``). The framework talks to an UNMODIFIED Postiz
+    over its Public API — no Postiz (AGPL-3.0) code is embedded. Knobs:
+
+        POSTIZ_API_URL ("") — backend API origin of the Postiz instance,
+            e.g. ``http://localhost:5000/api``. Empty == not configured;
+            every Postiz surface degrades gracefully (no network I/O).
+        POSTIZ_API_KEY ("") — the instance's Public API key. Sent RAW in
+            the ``Authorization`` header (Postiz does not use ``Bearer``).
+        POSTIZ_TIMEOUT_S ("15") — total request timeout seconds.
+    """
+    if api_url is None:
+        api_url = os.getenv("POSTIZ_API_URL", "").strip()
+    if api_key is None:
+        api_key = os.getenv("POSTIZ_API_KEY", "").strip()
+    if timeout_s is None:
+        timeout_s = float(os.getenv("POSTIZ_TIMEOUT_S", "15"))
+    return PostizSettings(api_url=api_url, api_key=api_key, timeout_s=timeout_s)
 
 
 class CofounderSettings(NamedTuple):
