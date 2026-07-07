@@ -20,7 +20,14 @@ from discord_channel_bindings import resolve_discord_channel_binding
 from discord_persona_runtime import run_discord_persona_channel_turn
 from engine import ConversationEngine
 from extension_manager import ExtensionManager
-from imagegen_workflow import build_imagegen_skill_prompt, build_persona_imagegen_skill_prompt
+# Tenant-specific imagegen bridge — denied by the public-export sanitizer, so
+# guard the import: without it, /image commands degrade to the generic engine
+# path instead of import-breaking the whole router (and every chat surface).
+try:
+    from imagegen_workflow import build_imagegen_skill_prompt, build_persona_imagegen_skill_prompt
+except Exception:  # pragma: no cover - sanitized export ships without the module
+    build_imagegen_skill_prompt = None  # type: ignore[assignment]
+    build_persona_imagegen_skill_prompt = None  # type: ignore[assignment]
 from models import OutgoingMessage, Platform
 from session import Session
 from session_keys import build_session_key, resolve_thread_id
@@ -852,7 +859,7 @@ class ChatRouter:
                     incoming.text = quote_prompt
                     incoming.is_piv = True
                     incoming.piv_command = "clutch"
-                elif command in {"image", "generate-image", "owner-image"}:
+                elif command in {"image", "generate-image", "owner-image"} and build_imagegen_skill_prompt is not None:
                     if isinstance(getattr(incoming, "raw_event", None), dict):
                         incoming.raw_event.setdefault("display_text", text)
                     if command == "owner-image":
