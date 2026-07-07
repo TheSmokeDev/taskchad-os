@@ -10,6 +10,7 @@ import { Usage } from '@/pages/Usage';
 import { Jarvis } from '@/pages/Jarvis';
 import { CapabilityGateway } from '@/pages/CapabilityGateway';
 import { Skills } from '@/pages/Skills';
+import { Sessions } from '@/pages/Sessions';
 
 function mockFetchOnce(payload: unknown) {
   globalThis.fetch = vi.fn(async () =>
@@ -1027,5 +1028,177 @@ describe('Skills page (Phase 2 — skills library)', () => {
     expect(decodeURIComponent(window.location.search)).toContain('/skills promote Daily Spend');
     // Default-deny invariant: zero non-GET requests from the dashboard.
     expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
+  });
+});
+
+describe('Sessions page (Phase 3 — conversation history + FTS5 search)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockSessionsFetch(calls: { method: string; url: string }[]) {
+    globalThis.fetch = vi.fn(async (url: any, init: any) => {
+      const u = String(url);
+      calls.push({ method: init?.method || 'GET', url: u });
+      if (u.includes('/api/sessions/messages')) {
+        return new Response(JSON.stringify({
+          messages: [
+            { id: 1, session_id: 'telegram:1:1', role: 'user', content: 'what is our runway?', created_at: '2026-07-06T10:00:00', tool_calls_json: '[]' },
+            { id: 2, session_id: 'telegram:1:1', role: 'assistant', content: 'About **14 months** at current burn.', created_at: '2026-07-06T10:00:05', tool_calls_json: '[]' },
+          ],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/api/sessions/search')) {
+        return new Response(JSON.stringify({
+          hits: [
+            { message_id: 2, session_id: 'telegram:1:1', role: 'assistant', snippet: 'About 14 months of runway at current burn.', created_at: '2026-07-06T10:00:05' },
+          ],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/api/sessions')) {
+        return new Response(JSON.stringify({
+          sessions: [
+            { session_id: 'telegram:1:1', platform: 'telegram', source: 'interactive', persona_id: null, message_count: 12, updated_at: '2026-07-06T10:00:05', preview: 'About 14 months at current burn.' },
+            { session_id: 'web:abc:abc', platform: 'web', source: 'interactive', persona_id: 'sales', message_count: 3, updated_at: '2026-07-05T09:00:00', preview: 'Pipeline review notes' },
+          ],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as any;
+  }
+
+  test('empty query lists recent sessions; clicking one opens the read-only transcript', async () => {
+    const calls: { method: string; url: string }[] = [];
+    mockSessionsFetch(calls);
+    render(<Sessions />);
+
+    await waitFor(() => {
+      expect(screen.getByText('telegram:1:1')).toBeInTheDocument();
+      expect(screen.getByText('web:abc:abc')).toBeInTheDocument();
+      expect(screen.getByText(/12 msgs/)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('telegram:1:1'));
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.includes('/api/sessions/messages') && c.url.includes('session_id=telegram%3A1%3A1'))).toBe(true);
+      expect(screen.getByText('what is our runway?')).toBeInTheDocument();
+      // Markdown renders through the shared lib renderer (bold survives).
+      expect(screen.getByText('14 months')).toBeInTheDocument();
+      expect(screen.getByText(/read-only/i)).toBeInTheDocument();
+    });
+    // Read-only surface: zero non-GET requests.
+    expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
+  });
+
+  test('typing a query debounces into /api/sessions/search and highlights the match', async () => {
+    const calls: { method: string; url: string }[] = [];
+    mockSessionsFetch(calls);
+    render(<Sessions />);
+    await waitFor(() => expect(screen.getByText('telegram:1:1')).toBeInTheDocument());
+
+    fireEvent.input(screen.getByLabelText('Search conversations'), { target: { value: 'runway' } });
+    // Debounce is ~300ms — no immediate search call.
+    expect(calls.some((c) => c.url.includes('/api/sessions/search'))).toBe(false);
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.includes('/api/sessions/search') && c.url.includes('q=runway'))).toBe(true);
+      expect(screen.getByText(/1 match for "runway"/)).toBeInTheDocument();
+    }, { timeout: 2000 });
+
+    // Client-side term highlighting wraps the matched term in <mark>.
+    const marked = document.querySelector('mark');
+    expect(marked?.textContent?.toLowerCase()).toBe('runway');
+  });
+
+  test('search failure fails open — empty state, no crash', async () => {
+    globalThis.fetch = vi.fn(async (url: any) => {
+      const u = String(url);
+      if (u.includes('/api/sessions/search')) {
+        return new Response(JSON.stringify({ error: 'fts index broken' }), { status: 500 });
+      }
+      return new Response(JSON.stringify({ sessions: [] }), { status: 200 });
+    }) as any;
+    render(<Sessions />);
+
+    fireEvent.input(screen.getByLabelText('Search conversations'), { target: { value: 'boom' } });
+    await waitFor(() => {
+      expect(screen.getByText(/Search unavailable/i)).toBeInTheDocument();
+    }, { timeout: 2000 });
+  });
+});
+
+describe('Usage insights section (Phase 3)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const TOKENS_FIXTURE = {
+    timeline: [],
+    summary: {
+      claude_native: { turns_today: 17, messages_today: 24, plan_quota_estimate_pct: 12 },
+      generic: { by_provider: {}, total_cost_usd: 0 },
+    },
+  };
+
+  test('renders surface counts, busiest day, and top commands beneath the token charts', async () => {
+    const insightUrls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: any) => {
+      const u = String(url);
+      if (u.includes('/api/insights')) {
+        insightUrls.push(u);
+        return new Response(JSON.stringify({
+          days: 7,
+          totals: { sessions: 3, messages: 42 },
+          sessions_by_surface: [
+            { surface: 'telegram', sessions: 2, messages: 30 },
+            { surface: 'web', sessions: 1, messages: 12 },
+          ],
+          messages_per_day: [
+            { date: '2026-07-05', messages: 10 },
+            { date: '2026-07-06', messages: 32 },
+          ],
+          most_active_sessions: [
+            { session_id: 'telegram:1:1', surface: 'telegram', messages: 20, last_activity: '2026-07-06T10:00:00' },
+          ],
+          top_commands: [{ command: '/budget', count: 5 }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify(TOKENS_FIXTURE), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as any;
+
+    render(<Usage />);
+    await waitFor(() => {
+      // Token summary intact...
+      expect(screen.getAllByText(/Claude Max/i).length).toBeGreaterThan(0);
+      // ...and the new insight tiles below it.
+      expect(screen.getByText(/Conversation insights/i)).toBeInTheDocument();
+      expect(screen.getAllByText('telegram').length).toBeGreaterThan(0);
+      expect(screen.getByText(/messages on 2026-07-06/)).toBeInTheDocument();
+      expect(screen.getByText('/budget')).toBeInTheDocument();
+      expect(screen.getByText('telegram:1:1')).toBeInTheDocument();
+    });
+    expect(insightUrls[0]).toContain('days=7');
+
+    // The 7/30/90 toggle refetches with the new window.
+    fireEvent.click(screen.getByLabelText('Insights window 30 days'));
+    await waitFor(() => {
+      expect(insightUrls.some((u) => u.includes('days=30'))).toBe(true);
+    });
+  });
+
+  test('insights fetch failure degrades to a note — token charts still render', async () => {
+    globalThis.fetch = vi.fn(async (url: any) => {
+      const u = String(url);
+      if (u.includes('/api/insights')) {
+        return new Response(JSON.stringify({ error: 'nope' }), { status: 500 });
+      }
+      return new Response(JSON.stringify(TOKENS_FIXTURE), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as any;
+
+    render(<Usage />);
+    await waitFor(() => {
+      expect(screen.getByText('17')).toBeInTheDocument();
+      expect(screen.getByText(/Insights unavailable/i)).toBeInTheDocument();
+    });
   });
 });

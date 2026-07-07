@@ -1,3 +1,4 @@
+import { useState } from 'preact/hooks';
 import { TopBar } from '@/components/TopBar';
 import { Empty } from '@/components/Empty';
 import { Spinner } from '@/components/Spinner';
@@ -19,6 +20,15 @@ interface TokensResponse {
     claude_native: { turns_today: number; messages_today: number; plan_quota_estimate_pct: number };
     generic: { by_provider: Record<string, any>; total_cost_usd: number };
   };
+}
+
+interface InsightsResponse {
+  days: number;
+  totals?: { sessions?: number; messages?: number };
+  sessions_by_surface?: { surface: string; sessions: number; messages: number }[];
+  messages_per_day?: { date: string; messages: number }[];
+  most_active_sessions?: { session_id: string; surface: string; messages: number; last_activity: string | null }[];
+  top_commands?: { command: string; count: number }[];
 }
 
 /**
@@ -109,8 +119,131 @@ export function Usage() {
             </tbody>
           </table>
         </section>
+
+        <InsightsSection />
       </div>
     </div>
+  );
+}
+
+const INSIGHT_RANGES = [7, 30, 90] as const;
+
+/**
+ * Conversation insights (Phase 3) — pure aggregation from /api/insights.
+ * The endpoint is fail-open (zeroed shape on any backend error), and this
+ * section is defensive about missing fields, so it can never take down
+ * the token charts above it. Simple styled tiles — no chart library.
+ */
+function InsightsSection() {
+  const [days, setDays] = useState<number>(7);
+  const { data, loading, error } = useFetch<InsightsResponse>(`/api/insights?days=${days}`, 60_000);
+
+  const surfaces = data?.sessions_by_surface ?? [];
+  const perDay = data?.messages_per_day ?? [];
+  const commands = data?.top_commands ?? [];
+  const active = data?.most_active_sessions ?? [];
+  const totalSessions = data?.totals?.sessions ?? 0;
+  const totalMessages = data?.totals?.messages ?? 0;
+  const busiest = perDay.reduce<{ date: string; messages: number } | null>(
+    (acc, d) => (acc && acc.messages >= d.messages ? acc : d),
+    null,
+  );
+
+  return (
+    <section>
+      <div class="flex items-center gap-3 mb-3">
+        <h3 class="text-[11px] uppercase tracking-wider text-[var(--color-text-faint)]">Conversation insights</h3>
+        <div class="inline-flex items-center rounded border border-[var(--color-border)] bg-[var(--color-elevated)] overflow-hidden">
+          {INSIGHT_RANGES.map((n) => (
+            <button
+              key={n}
+              type="button"
+              onClick={() => setDays(n)}
+              aria-label={`Insights window ${n} days`}
+              class={
+                days === n
+                  ? 'px-2 py-1 text-[11px] text-[var(--color-accent)] bg-[var(--color-accent-soft)]'
+                  : 'px-2 py-1 text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
+              }
+            >
+              {n}d
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading && !data && <div class="py-4"><Spinner size={14} /></div>}
+      {error && (
+        <div class="text-[12px] text-[var(--color-text-muted)] py-2">
+          Insights unavailable: {error}
+        </div>
+      )}
+
+      {data && (
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Card title={`Sessions by surface — ${days}d`}>
+            <div class="space-y-1.5">
+              <div class="text-[12px] text-[var(--color-text-muted)]">
+                {totalSessions} session{totalSessions === 1 ? '' : 's'} · {totalMessages} message{totalMessages === 1 ? '' : 's'}
+              </div>
+              {surfaces.length === 0 && (
+                <div class="text-[11px] text-[var(--color-text-faint)]">No activity in window.</div>
+              )}
+              {surfaces.map((s) => (
+                <div key={s.surface} class="flex items-center justify-between text-[12px]">
+                  <span class="text-[var(--color-text)]">{s.surface}</span>
+                  <span class="tabular-nums text-[var(--color-text-muted)]">{s.sessions} · {s.messages} msgs</span>
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <Card title="Busiest day">
+            {busiest ? (
+              <div class="space-y-1">
+                <div class="text-[18px] tabular-nums text-[var(--color-text)]">{busiest.messages}</div>
+                <div class="text-[11px] text-[var(--color-text-muted)]">messages on {busiest.date}</div>
+                <div class="text-[11px] text-[var(--color-text-faint)]">
+                  {perDay.length} active day{perDay.length === 1 ? '' : 's'} in window
+                </div>
+              </div>
+            ) : (
+              <div class="text-[11px] text-[var(--color-text-faint)]">No activity in window.</div>
+            )}
+          </Card>
+
+          <Card title="Top commands">
+            <div class="space-y-1.5">
+              {commands.length === 0 && (
+                <div class="text-[11px] text-[var(--color-text-faint)]">No slash commands in window.</div>
+              )}
+              {commands.slice(0, 6).map((c) => (
+                <div key={c.command} class="flex items-center justify-between text-[12px]">
+                  <span class="font-mono text-[var(--color-text)]">{c.command}</span>
+                  <span class="tabular-nums text-[var(--color-text-muted)]">{c.count}×</span>
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          {active.length > 0 && (
+            <div class="md:col-span-3">
+              <Card title="Most active sessions">
+                <div class="space-y-1">
+                  {active.map((s) => (
+                    <div key={s.session_id} class="flex items-center gap-3 text-[12px]">
+                      <span class="text-[10.5px] uppercase tracking-wider text-[var(--color-text-faint)] w-16 shrink-0">{s.surface}</span>
+                      <span class="font-mono text-[11px] text-[var(--color-text-muted)] truncate">{s.session_id}</span>
+                      <span class="ml-auto tabular-nums text-[var(--color-text-muted)] shrink-0">{s.messages} msgs</span>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 

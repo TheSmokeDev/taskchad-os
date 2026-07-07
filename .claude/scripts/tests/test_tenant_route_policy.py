@@ -229,13 +229,15 @@ def test_route_policy_count_is_134(tmp_path, monkeypatch):
     137 -> 138 on 2026-07-07 (+1 read-only slash-command registry route —
     /api/commands — chat composer autocomplete); 138 -> 140 on 2026-07-07
     (+2 read-only skills-library routes — /api/skills/detail,
-    /api/skills/drafts — Skills page; promote/reject stay chat-only).
+    /api/skills/drafts — Skills page; promote/reject stay chat-only);
+    140 -> 141 on 2026-07-07 (+1 read-only conversation-insights
+    aggregation route — /api/insights — Usage page insights section).
     """
     monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     api_mod = _reload_real_api(tmp_path / "count.db")
     try:
-        assert len(all_registered_routes(api_mod.app)) == 140
-        assert len(ROUTE_POLICY) == 140
+        assert len(all_registered_routes(api_mod.app)) == 141
+        assert len(ROUTE_POLICY) == 141
     finally:
         api_mod._db.close()
 

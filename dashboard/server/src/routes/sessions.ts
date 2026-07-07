@@ -31,3 +31,6 @@ function proxyGet(path: string) {
 sessionsRoute.get('/api/sessions', proxyGet('/api/sessions'));
 sessionsRoute.get('/api/sessions/search', proxyGet('/api/sessions/search'));
 sessionsRoute.get('/api/sessions/messages', proxyGet('/api/sessions/messages'));
+// Phase 3 — conversation insights (pure-Python aggregation in
+// dashboard_api.py; this stays a zero-logic pass-through).
+sessionsRoute.get('/api/insights', proxyGet('/api/insights'));

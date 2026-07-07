@@ -87,6 +87,7 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/sessions',
   '/api/sessions/search',
   '/api/sessions/messages',
+  '/api/insights',
 
   // library.ts — M9 skills / files / system-jobs (read-only)
   '/api/skills',

@@ -3,6 +3,7 @@ import {
   Brain, Network, Activity, ShieldCheck,
   Briefcase, Mic, Calendar,
   Kanban, Monitor, PlugZap, Settings as SettingsIcon, Sparkles,
+  History,
   Smartphone,
 } from 'lucide-preact';
 import type { ComponentChildren } from 'preact';
@@ -33,6 +34,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/memories',      label: 'Memories',        section: 'intelligence', icon: Brain,         shortcut: 'g e' },
   { path: '/hive',          label: 'Knowledge Graph', section: 'intelligence', icon: Network,       shortcut: 'g h' },
   { path: '/skills',        label: 'Skills',          section: 'intelligence', icon: Sparkles,      shortcut: 'g k' },
+  { path: '/sessions',      label: 'History',         section: 'intelligence', icon: History,       shortcut: 'g y' },
   { path: '/usage',         label: 'Usage',           section: 'intelligence', icon: Activity,      shortcut: 'g u' },
   { path: '/capabilities',  label: 'Capabilities',    section: 'intelligence', icon: PlugZap                      },
   { path: '/audit',         label: 'Audit',           section: 'intelligence', icon: ShieldCheck                   },

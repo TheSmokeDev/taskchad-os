@@ -5070,6 +5070,167 @@ def sessions_messages(
     }
 
 
+# ── /api/insights (Phase 3 — conversation search + insights, read-only) ──
+#
+# Pure-Python aggregation over chat.db — NO LLM call (this is a dashboard
+# read; background model tiers are for scheduled jobs). Same B6 grain as
+# the M8 sessions browser (chat_sessions has no workspace column):
+# classified `admin` in route_policy until B6.
+
+
+def _zeroed_insights(days: int) -> dict:
+    """Fail-open shape: 200 + zeroed aggregates, never 500."""
+    return {
+        "days": days,
+        "totals": {"sessions": 0, "messages": 0},
+        "sessions_by_surface": [],
+        "messages_per_day": [],
+        "most_active_sessions": [],
+        "top_commands": [],
+    }
+
+
+# Slash-command token shape: `/budget`, `/vault-ingest` — NOT `/home/user/x`
+# (paths) or bare `/`. Immutable module constant (same class as
+# _SAFE_DOC_NAME_RE — not Rule 2 state).
+_INSIGHTS_COMMAND_RE = re.compile(r"^/[A-Za-z][\w-]*$")
+
+
+@router.get("/api/insights")
+def insights(
+    request: Request,
+    days: int = Query(default=7),
+) -> dict:
+    """Aggregate conversation activity over the last ``days`` days.
+
+    ``days`` is CLAMPED (not 422-rejected) to 1..90 INSIDE the body —
+    Rule 1: nothing tunable bound in the signature default.
+
+    Derives from the SAME chat.db the session store owns (Rule 2 — reads
+    the physical DB on every call; the hidden cron/tool source list is
+    imported from ``session`` through the module-level ``_CHAT_DIR`` seam,
+    same as ``/api/sessions`` and ``/api/commands``).
+
+    Fail-open contract: ANY error → 200 + the zeroed shape from
+    ``_zeroed_insights`` — never 500.
+    """
+    days = max(1, min(90, days))
+    try:
+        from session import SOURCE_HIDDEN_BY_DEFAULT  # noqa: PLC0415
+
+        chat_db_path = Path(config.CHAT_DB_PATH)
+        if not chat_db_path.is_file():
+            return _zeroed_insights(days)
+
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+
+        conn = sqlite3.connect(str(chat_db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            # Rule 2 — inspect the physical schema: chat.db files created
+            # before the PRP-7d source migration have no `source` column.
+            # Filter hidden cron/tool sources only when the column exists.
+            session_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(chat_sessions)")
+            }
+            hidden_filter = ""
+            hidden_params: tuple = ()
+            if "source" in session_cols and SOURCE_HIDDEN_BY_DEFAULT:
+                placeholders = ",".join("?" * len(SOURCE_HIDDEN_BY_DEFAULT))
+                hidden_filter = (
+                    f" AND COALESCE(s.source,'interactive') NOT IN ({placeholders})"
+                )
+                hidden_params = tuple(SOURCE_HIDDEN_BY_DEFAULT)
+
+            base_from = (
+                "FROM chat_messages m "
+                "LEFT JOIN chat_sessions s ON s.session_id = m.session_id "
+                "WHERE m.created_at >= ?" + hidden_filter
+            )
+            base_params = (cutoff, *hidden_params)
+
+            surface_rows = conn.execute(
+                "SELECT COALESCE(s.platform, 'unknown') AS surface, "
+                "COUNT(DISTINCT m.session_id) AS sessions, COUNT(*) AS messages "
+                + base_from
+                + " GROUP BY surface ORDER BY messages DESC, surface ASC",
+                base_params,
+            ).fetchall()
+
+            day_rows = conn.execute(
+                "SELECT substr(m.created_at, 1, 10) AS day, COUNT(*) AS messages "
+                + base_from
+                + " GROUP BY day ORDER BY day ASC",
+                base_params,
+            ).fetchall()
+
+            active_rows = conn.execute(
+                "SELECT m.session_id AS session_id, "
+                "COALESCE(s.platform, 'unknown') AS surface, "
+                "COUNT(*) AS messages, MAX(m.created_at) AS last_activity "
+                + base_from
+                + " GROUP BY m.session_id "
+                "ORDER BY messages DESC, last_activity DESC LIMIT 5",
+                base_params,
+            ).fetchall()
+
+            command_rows = conn.execute(
+                "SELECT m.content AS content "
+                + base_from
+                + " AND m.role = 'user' AND m.content LIKE '/%'",
+                base_params,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        command_counts: dict[str, int] = {}
+        for row in command_rows:
+            content = str(row["content"] or "").strip()
+            if not content:
+                continue
+            token = content.split()[0].lower()
+            if _INSIGHTS_COMMAND_RE.match(token):
+                command_counts[token] = command_counts.get(token, 0) + 1
+        top_commands = [
+            {"command": name, "count": count}
+            for name, count in sorted(
+                command_counts.items(), key=lambda kv: (-kv[1], kv[0])
+            )[:10]
+        ]
+
+        return {
+            "days": days,
+            "totals": {
+                "sessions": sum(r["sessions"] for r in surface_rows),
+                "messages": sum(r["messages"] for r in surface_rows),
+            },
+            "sessions_by_surface": [
+                {
+                    "surface": r["surface"],
+                    "sessions": r["sessions"],
+                    "messages": r["messages"],
+                }
+                for r in surface_rows
+            ],
+            "messages_per_day": [
+                {"date": r["day"], "messages": r["messages"]} for r in day_rows
+            ],
+            "most_active_sessions": [
+                {
+                    "session_id": r["session_id"],
+                    "surface": r["surface"],
+                    "messages": r["messages"],
+                    "last_activity": r["last_activity"],
+                }
+                for r in active_rows
+            ],
+            "top_commands": top_commands,
+        }
+    except Exception as exc:  # pragma: no cover - defensive fail-open
+        logger.warning("GET /api/insights failed: %s", _redact(str(exc)))
+        return _zeroed_insights(days)
+
+
 _DASHBOARD_PHOTO_DIR = Path(tempfile.gettempdir()) / "thehomie_photos"
 
 

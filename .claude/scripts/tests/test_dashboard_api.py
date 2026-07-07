@@ -650,6 +650,151 @@ def test_skills_no_mutation_routes_exist(isolated_app):
         assert r.status_code in (404, 405)
 
 
+# ── /api/insights (Phase 3 — conversation insights, read-only) ───────────
+
+
+def _seed_insights_messages(chat_db: Path) -> None:
+    """Add user turns (2× /status command + plain text) to the fixture db."""
+    now = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
+    conn = sqlite3.connect(str(chat_db))
+    for session_id, role, content in (
+        ("recent-session", "user", "/status"),
+        ("recent-session", "user", "/status please"),
+        ("old-session", "user", "hello world"),
+    ):
+        conn.execute(
+            """INSERT INTO chat_messages (session_id, role, content, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (session_id, role, content, now.isoformat(timespec="seconds")),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_get_insights_returns_aggregate_shape(isolated_app):
+    """Pure-Python aggregation: surfaces, per-day counts, active sessions,
+    slash-command usage — all derived from chat.db, zero LLM involvement."""
+    import config
+
+    _seed_insights_messages(Path(config.CHAT_DB_PATH))
+    r = isolated_app.get("/api/insights")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["days"] == 7
+    # Fixture db: 2 assistant messages + 3 seeded user turns, 2 sessions,
+    # both on the default 'cli' platform.
+    assert body["totals"] == {"sessions": 2, "messages": 5}
+    assert body["sessions_by_surface"] == [
+        {"surface": "cli", "sessions": 2, "messages": 5}
+    ]
+    # Per-day buckets are date-keyed and sum to the window total.
+    assert sum(d["messages"] for d in body["messages_per_day"]) == 5
+    for bucket in body["messages_per_day"]:
+        assert len(bucket["date"]) == 10  # YYYY-MM-DD
+    # Most-active: recent-session has 3 messages, old-session 2.
+    assert body["most_active_sessions"][0]["session_id"] == "recent-session"
+    assert body["most_active_sessions"][0]["messages"] == 3
+    assert body["most_active_sessions"][0]["surface"] == "cli"
+    # Command usage from user turns starting with '/': first token only.
+    assert body["top_commands"] == [{"command": "/status", "count": 2}]
+
+
+def test_get_insights_days_clamped_not_rejected(isolated_app):
+    """Rule 1: days resolves in the body — out-of-range clamps to 1..90."""
+    r = isolated_app.get("/api/insights", params={"days": 500})
+    assert r.status_code == 200
+    assert r.json()["days"] == 90
+    r = isolated_app.get("/api/insights", params={"days": 0})
+    assert r.status_code == 200
+    assert r.json()["days"] == 1
+
+
+def test_get_insights_excludes_hidden_sources(isolated_app, tmp_path, monkeypatch):
+    """cron/tool sessions (SOURCE_HIDDEN_BY_DEFAULT) never inflate insights
+    — same hidden-source contract as /api/sessions."""
+    import config
+
+    chat_db = tmp_path / "insights-chat.db"
+    conn = sqlite3.connect(str(chat_db))
+    conn.executescript("""
+        CREATE TABLE chat_sessions (
+            session_id TEXT NOT NULL UNIQUE,
+            platform TEXT NOT NULL DEFAULT 'cli',
+            source TEXT DEFAULT 'interactive'
+        );
+        CREATE TABLE chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+    """)
+    now = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
+    stamp = now.isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT INTO chat_sessions VALUES (?, ?, ?)",
+        ("visible", "telegram", "interactive"),
+    )
+    conn.execute(
+        "INSERT INTO chat_sessions VALUES (?, ?, ?)", ("hidden", "cli", "tool")
+    )
+    conn.execute(
+        "INSERT INTO chat_messages (session_id, role, content, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("visible", "user", "hey there", stamp),
+    )
+    conn.execute(
+        "INSERT INTO chat_messages (session_id, role, content, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("hidden", "user", "/cron-noise", stamp),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(config, "CHAT_DB_PATH", chat_db)
+    r = isolated_app.get("/api/insights")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["totals"] == {"sessions": 1, "messages": 1}
+    assert body["sessions_by_surface"] == [
+        {"surface": "telegram", "sessions": 1, "messages": 1}
+    ]
+    assert body["top_commands"] == []
+
+
+def test_get_insights_fails_open_zeroed_on_missing_db(isolated_app, tmp_path, monkeypatch):
+    """No chat.db → 200 + zeroed shape, never 500."""
+    import config
+
+    monkeypatch.setattr(config, "CHAT_DB_PATH", tmp_path / "nope" / "chat.db")
+    r = isolated_app.get("/api/insights", params={"days": 30})
+    assert r.status_code == 200
+    assert r.json() == {
+        "days": 30,
+        "totals": {"sessions": 0, "messages": 0},
+        "sessions_by_surface": [],
+        "messages_per_day": [],
+        "most_active_sessions": [],
+        "top_commands": [],
+    }
+
+
+def test_get_insights_fails_open_zeroed_on_corrupt_db(isolated_app, tmp_path, monkeypatch):
+    """Garbage bytes where chat.db should be → 200 + zeroed shape, never 500."""
+    import config
+
+    corrupt = tmp_path / "corrupt-chat.db"
+    corrupt.write_bytes(b"this is not a sqlite database at all")
+    monkeypatch.setattr(config, "CHAT_DB_PATH", corrupt)
+    r = isolated_app.get("/api/insights")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["days"] == 7
+    assert body["totals"] == {"sessions": 0, "messages": 0}
+    assert body["sessions_by_surface"] == []
+
+
 # ── /api/agents ──────────────────────────────────────────────────────────
 
 

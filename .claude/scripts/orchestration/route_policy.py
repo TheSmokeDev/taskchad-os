@@ -275,6 +275,10 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     ("GET", "/api/sessions"): "admin",
     ("GET", "/api/sessions/search"): "admin",
     ("GET", "/api/sessions/messages"): "admin",
+    # Phase 3 insights — pure-Python aggregation over the same
+    # chat_sessions/chat_messages reads as the M8 sessions browser;
+    # same B6 grain (no workspace column) → admin until B6.
+    ("GET", "/api/insights"): "admin",
     # M9 library (read-only): skills registry, allowlisted file browser,
     # framework system-job state — server filesystem grain → admin.
     ("GET", "/api/skills"): "admin",
