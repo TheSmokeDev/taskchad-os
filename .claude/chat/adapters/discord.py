@@ -1119,7 +1119,13 @@ class DiscordAdapter:
         return name or "attachment"
 
     def _split_message(self, text: str, max_length: int = 1900) -> list[str]:
-        """Split long messages for Discord's 2000 char limit."""
+        """Split long messages for Discord's 2000 char limit.
+
+        Phase 5: code-fence aware — never splits inside a ``` block (an odd
+        fence count before the cut means the cut is mid-fence; back up to the
+        fence opener). Matches the Telegram adapter's splitter so long code
+        answers render correctly on every chunk.
+        """
         if len(text) <= max_length:
             return [text]
         chunks: list[str] = []
@@ -1129,6 +1135,11 @@ class DiscordAdapter:
                 chunks.append(remaining)
                 break
             split_at = max_length
+            # Don't split inside code blocks
+            if remaining[:split_at].count("```") % 2 == 1:
+                open_fence = remaining[:split_at].rfind("```")
+                if open_fence > 0:
+                    split_at = open_fence
             double_nl = remaining[:split_at].rfind("\n\n")
             if double_nl > max_length // 2:
                 split_at = double_nl + 2

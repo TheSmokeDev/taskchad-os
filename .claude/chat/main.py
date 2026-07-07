@@ -568,6 +568,7 @@ def main() -> None:
         engine=engine,
         adapters=router.adapters,
         bot_start_time=datetime.now(),
+        router=router,
     )
 
     if args.test:

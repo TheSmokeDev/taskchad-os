@@ -1215,6 +1215,67 @@ def get_session_brief_settings(
     )
 
 
+class TurnProgressSettings(NamedTuple):
+    """Effective turn-progress streaming knobs (call-time resolved)."""
+
+    activity_enabled: bool
+    edit_min_interval_s: float
+    stop_button_enabled: bool
+
+
+def get_turn_progress_settings(
+    activity_enabled: bool | None = None,
+    edit_min_interval_s: float | None = None,
+    stop_button_enabled: bool | None = None,
+) -> TurnProgressSettings:
+    """Resolve turn-progress streaming knobs at CALL TIME (Rule 1) — Phase 5.
+
+    The chat router's placeholder message ("Thinking...") progressively edits
+    into a live status while a long turn runs: elapsed time, tool-call count,
+    and the CURRENT tool activity ("Reading budget.md") derived from runtime
+    tool events, plus a Stop button wired to the same cancel primitive as the
+    dashboard's /stop endpoint. Knobs:
+
+        TURN_PROGRESS_ACTIVITY_ENABLED ("true") — master switch for the live
+            tool-activity label. When false the ticker keeps the legacy
+            "Working... (Ns) | N tool calls" text only.
+        TURN_PROGRESS_EDIT_MIN_INTERVAL_S ("1.5") — minimum seconds between
+            placeholder edits. Telegram allows ~1 edit/sec/chat and Discord
+            ~5 edits/5s/channel; 1.5s sits safely under both. Trailing state
+            always flushes after the interval.
+        TURN_PROGRESS_STOP_BUTTON_ENABLED ("true") — attach a Stop button to
+            the progress placeholder (Telegram inline keyboard / Discord
+            component). Stopping your own in-flight turn is not an external
+            mutation — no default-deny gate; scope is the tapper's own
+            conversation only.
+
+    None-sentinel pattern: explicit values pass through; ``None`` resolves the
+    matching env var inside the body so ``monkeypatch.setenv`` takes effect on
+    the next call with no module reload. All consumers are fail-open — a
+    progress-edit failure never fails the turn.
+    """
+    if activity_enabled is None:
+        activity_enabled = (
+            os.getenv("TURN_PROGRESS_ACTIVITY_ENABLED", "true").lower() == "true"
+        )
+    if edit_min_interval_s is None:
+        try:
+            edit_min_interval_s = float(
+                os.getenv("TURN_PROGRESS_EDIT_MIN_INTERVAL_S", "1.5")
+            )
+        except (TypeError, ValueError):
+            edit_min_interval_s = 1.5
+    if stop_button_enabled is None:
+        stop_button_enabled = (
+            os.getenv("TURN_PROGRESS_STOP_BUTTON_ENABLED", "true").lower() == "true"
+        )
+    return TurnProgressSettings(
+        activity_enabled=activity_enabled,
+        edit_min_interval_s=max(0.0, edit_min_interval_s),
+        stop_button_enabled=stop_button_enabled,
+    )
+
+
 class CabinetRelaySettings(NamedTuple):
     """Effective cabinet→chat relay knobs (call-time resolved)."""
 

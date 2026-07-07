@@ -369,13 +369,19 @@ async def test_update_falls_back_to_plain_send_and_returns_message_id() -> None:
     )
 
     assert delivered_id == "101"
+    # Phase 5: the edit path now retries plain (no parse_mode) BEFORE
+    # falling through to a new send — a Markdown-entity edit failure must
+    # edit in place instead of duplicating the message.
     assert [name for name, _ in bot.calls] == [
+        "edit_message_text",
         "edit_message_text",
         "send_message",
         "send_message",
     ]
-    assert bot.calls[1][1]["parse_mode"] == "Markdown"
-    assert "parse_mode" not in bot.calls[2][1]
+    assert bot.calls[0][1]["parse_mode"] == "Markdown"
+    assert "parse_mode" not in bot.calls[1][1]
+    assert bot.calls[2][1]["parse_mode"] == "Markdown"
+    assert "parse_mode" not in bot.calls[3][1]
 
 
 @pytest.mark.asyncio
@@ -397,6 +403,7 @@ async def test_update_raises_when_markdown_and_plain_delivery_fail() -> None:
         )
 
     assert [name for name, _ in bot.calls] == [
+        "edit_message_text",
         "edit_message_text",
         "send_message",
         "send_message",

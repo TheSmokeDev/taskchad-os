@@ -365,6 +365,7 @@ def chat(query, quiet, model, toolsets, resume_id, continue_last, voice_path, vo
         engine=engine,
         adapters=router.adapters,
         bot_start_time=datetime.now(),
+        router=router,
     )
     router.register(adapter)
 

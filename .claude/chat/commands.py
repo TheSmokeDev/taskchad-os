@@ -55,6 +55,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("diagnostics", "Full system health report — cognition, recall, runtime, sessions, adapters", "router", "admin"),
     ("cost", "Show current session cost in USD", "router", "viewer"),
     ("clear", "Clear conversation — start fresh in this chat", "router", "viewer"),
+    ("stop", "Stop the current in-flight turn in this chat", "router", "viewer"),
     ("new", "Start a brand new conversation (alias for /clear)", "router", "viewer"),
     ("extensions", "Extension diagnostics — list, doctor, enable/disable", "router", "admin"),
     # -- Integrations (passed to engine as natural language) --
@@ -145,7 +146,8 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Session & Mode",
         ["plan", "go", "execute", "mode", "provider", "model", "reload", "restart",
-         "help", "commands", "status", "diagnostics", "cost", "clear", "new", "extensions"],
+         "help", "commands", "status", "diagnostics", "cost", "clear", "new", "stop",
+         "extensions"],
     ),
     (
         "Integrations",
@@ -184,6 +186,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "brief",
     "clear",
     "new",
+    "stop",
     "provider",
     "model",
     "restart",

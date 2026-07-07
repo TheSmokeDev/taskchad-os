@@ -1453,6 +1453,26 @@ class ConversationEngine:
             if progress is None:
                 return
             progress["tool_calls"] = int(progress.get("tool_calls") or 0) + 1
+            # Phase 5 — live tool-activity stream: derive a human label from
+            # the tool event and hand it to the router's throttled progress
+            # editor (progress["notify_activity"], bound by TurnProgressReporter).
+            # Lane-agnostic: generic lanes never fire tool events, so the
+            # elapsed ticker simply runs without a label. Guarded imports +
+            # blanket except — a progress failure must never fail the turn.
+            try:
+                from config import get_turn_progress_settings
+
+                if get_turn_progress_settings().activity_enabled:
+                    from turn_activity import describe_tool_event
+
+                    label = describe_tool_event(ev)
+                    if label:
+                        progress["activity"] = label
+                        notify = progress.get("notify_activity")
+                        if callable(notify):
+                            notify(label)
+            except Exception:
+                pass
             emit = progress.get("emit_turn_event")
             if callable(emit):
                 try:

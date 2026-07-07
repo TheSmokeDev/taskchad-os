@@ -260,8 +260,13 @@ class ChatRouter:
         # Initialize core handler context (engine, adapters, start time)
         try:
             from core_handlers import set_context
-            set_context(engine=self.engine, adapters=self.adapters, bot_start_time=datetime.now())
-        except ImportError:
+            set_context(
+                engine=self.engine,
+                adapters=self.adapters,
+                bot_start_time=datetime.now(),
+                router=self,
+            )
+        except (ImportError, TypeError):
             pass  # core_handlers not available — handlers will degrade gracefully
 
         async def _connect_adapter(platform: Platform, adapter: Any) -> tuple[Platform, str | None]:
@@ -374,8 +379,12 @@ class ChatRouter:
     @staticmethod
     def _is_immediate_button(incoming: Any) -> bool:
         text = (getattr(incoming, "text", "") or "").strip()
-        return ChatRouter._is_turn_followup_button(incoming) or text.startswith(
-            "__button:social:"
+        return (
+            ChatRouter._is_turn_followup_button(incoming)
+            or text.startswith("__button:social:")
+            # Phase 5 — Stop must run NOW, not behind the very thread lock
+            # held by the turn it is trying to cancel.
+            or text.startswith("__button:turn_stop:")
         )
 
     def _retain_task(self, task: "asyncio.Task[Any]") -> None:
@@ -401,8 +410,63 @@ class ChatRouter:
                 count += 1
         return count
 
+    def _stop_scope_prefix(self, incoming: Any) -> str:
+        """Channel-grain prefix over `_conversation_key` for stop requests.
+
+        Same platform/channel derivation as `_conversation_key` (kept adjacent
+        so they cannot drift). Deliberately CHANNEL-scoped, not thread-scoped:
+        a Telegram button tap arrives with thread_id == chat_id even when the
+        running turn lives in a reply sub-thread (`{chat}:{msgid}`), so a
+        thread-grain prefix would miss its own turn. Channel scope still means
+        one chat can never stop another chat's turn (Rule 4: the authorizing
+        grain — the caller's own channel — is the grain the cancel is keyed at;
+        the trailing colon prevents `123` from prefix-matching `1234`).
+        """
+        channel = getattr(incoming, "channel", None)
+        platform = getattr(incoming, "platform", "")
+        platform_value = getattr(platform, "value", str(platform))
+        channel_id = getattr(channel, "platform_id", "")
+        return f"{platform_value}:{channel_id}:"
+
+    async def _handle_stop_request(self, adapter: Any, incoming: Any) -> None:
+        """Stop-button tap / typed /stop: cancel THIS conversation's turn.
+
+        Phase 5 interrupt parity — same primitive as the dashboard's
+        POST /api/conversation/{id}/stop (`cancel_active_turn`). Scope comes
+        from the CALLER's own conversation identity, never from the button
+        payload, so one chat can't stop another chat's turn. Stopping your
+        own turn is not an external mutation — no default-deny gate needed.
+        On success the cancelled turn's CancelledError path replaces the
+        placeholder with "⏹️ Stopped." — no extra message here.
+        """
+        stopped = self.cancel_active_turn(self._stop_scope_prefix(incoming))
+        if stopped:
+            print(
+                f"[{datetime.now()}] Stop request cancelled {stopped} turn(s) "
+                f"for {self._stop_scope_prefix(incoming)}",
+                flush=True,
+            )
+            return
+        try:
+            await adapter.send(
+                OutgoingMessage(
+                    text="Nothing is running in this chat.",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                )
+            )
+        except Exception:
+            pass
+
     def _queue_incoming(self, adapter: Any, incoming: Any) -> None:
         """Buffer quick conversational bursts, then handle in thread order."""
+        # Phase 5 — /stop must NOT ride `_handle_serialized`: the thread lock
+        # is held by the very turn it is trying to cancel, so a serialized
+        # /stop would only run after that turn finished on its own.
+        stripped = (getattr(incoming, "text", "") or "").strip().lower()
+        if stripped == "/stop" or stripped.startswith(("/stop ", "/stop@")):
+            self._retain_task(asyncio.create_task(self._handle(adapter, incoming)))
+            return
         if self._is_immediate_button(incoming):
             self._retain_task(asyncio.create_task(self._handle(adapter, incoming)))
             return
@@ -1016,6 +1080,16 @@ class ChatRouter:
         # of the real answer. With no placeholder, the final delivery below
         # goes through adapter.send(), which carries the voice-reply branch.
         placeholder_id: str | None = None
+        # Phase 5 — Stop affordance rides the progress placeholder. Adapters
+        # without component rendering ignore `components`; the cancel scope is
+        # resolved from the tapper's own conversation, never the payload.
+        stop_components: list[Any] = []
+        try:
+            from turn_activity import build_stop_components
+
+            stop_components = build_stop_components()
+        except Exception:
+            stop_components = []
         if not getattr(incoming, "voice_origin", False):
             try:
                 placeholder_id = await adapter.send(
@@ -1023,6 +1097,7 @@ class ChatRouter:
                         text="Thinking...",
                         channel=incoming.channel,
                         thread=incoming.thread,
+                        components=list(stop_components),
                     )
                 )
             except Exception as e:
@@ -1046,30 +1121,30 @@ class ChatRouter:
 
             progress["emit_turn_event"] = _emit_turn_event
 
-        async def _tick_progress() -> None:
-            """Update placeholder with elapsed time every 12 seconds."""
-            while True:
-                await asyncio.sleep(12)
-                elapsed = int(time.time() - progress["started"])
-                calls = progress.get("tool_calls", 0)
-                status = f"Working... ({elapsed}s)"
-                if calls:
-                    status += f" | {calls} tool calls"
-                try:
-                    if placeholder_id:
-                        await adapter.update(
-                            OutgoingMessage(
-                                text=status,
-                                channel=incoming.channel,
-                                thread=incoming.thread,
-                                is_update=True,
-                                update_message_id=placeholder_id,
-                            )
-                        )
-                except Exception:
-                    pass
+        # Phase 5 — live tool-activity streaming. The shared reporter owns
+        # ALL placeholder edits: the 12s elapsed ticker (legacy behavior) plus
+        # event-driven "🔧 Reading budget.md" edits fed by the engine through
+        # progress["notify_activity"], throttled per
+        # config.get_turn_progress_settings() (Telegram/Discord edit limits).
+        # Fail-open: reporter construction or any edit failing never fails
+        # the turn.
+        progress_reporter: Any = None
+        if placeholder_id:
+            try:
+                from turn_activity import TurnProgressReporter
 
-        progress_task = asyncio.create_task(_tick_progress()) if placeholder_id else None
+                progress_reporter = TurnProgressReporter(
+                    adapter,
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    placeholder_id=placeholder_id,
+                    progress=progress,
+                    components=stop_components,
+                )
+                progress_reporter.install()
+            except Exception as e:
+                print(f"[{datetime.now()}] Progress reporter unavailable: {e}")
+                progress_reporter = None
 
         final_text = ""
         final_is_error = False
@@ -1229,8 +1304,13 @@ class ChatRouter:
         finally:
             if self._active_turns.get(_turn_key) is engine_task:
                 self._active_turns.pop(_turn_key, None)
-            if progress_task:
-                progress_task.cancel()
+            # Close BEFORE final delivery so a stale progress edit can never
+            # overwrite the real answer.
+            if progress_reporter is not None:
+                try:
+                    progress_reporter.close()
+                except Exception:
+                    pass
 
         # Update the placeholder with the final response
         delivered_text = foreground_text if foreground_text is not None else final_text
@@ -2079,6 +2159,11 @@ class ChatRouter:
         Supports blog_publish:{draft_id}, blog_skip:{draft_id}, and
         other future button patterns.
         """
+        if custom_id.startswith("turn_stop:"):
+            # Phase 5 — Stop affordance on the progress message. Payload is
+            # inert; scope is the tapper's own conversation (see handler).
+            await self._handle_stop_request(adapter, incoming)
+            return
         if custom_id.startswith("turn_queue:"):
             await self._apply_turn_followup_choice(
                 adapter,

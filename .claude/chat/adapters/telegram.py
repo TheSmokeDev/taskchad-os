@@ -266,6 +266,15 @@ class TelegramAdapter:
             and len(text) <= 4096
             and not media_refs
         ):
+            # Phase 5: edits re-attach the inline keyboard — editMessageText
+            # without reply_markup DROPS an existing keyboard, which would
+            # strip the Stop button off the progress placeholder on the very
+            # first tick.
+            edit_markup = (
+                self._build_reply_markup(message.components)
+                if message.components
+                else None
+            )
             try:
                 msg_id = int(message.update_message_id)
                 await self._app.bot.edit_message_text(
@@ -273,6 +282,7 @@ class TelegramAdapter:
                     message_id=msg_id,
                     text=text,
                     parse_mode="Markdown",
+                    reply_markup=edit_markup,
                 )
                 print(
                     f"[{datetime.now()}] Telegram edit delivered "
@@ -285,8 +295,33 @@ class TelegramAdapter:
                 # "Message is not modified" is harmless — same content sent twice
                 if "is not modified" in err_msg:
                     return message.update_message_id
-                # Other edit failures — fall through to send new message
-                print(f"[{datetime.now()}] Telegram edit failed, sending new: {e}", flush=True)
+                # Phase 5: retry the EDIT without parse_mode before falling
+                # through — Telegram rejects unbalanced Markdown entities
+                # (e.g. a lone `_` in a filename inside a progress tick), and
+                # falling straight through would post a duplicate message and
+                # strand the placeholder.
+                try:
+                    await self._app.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=int(message.update_message_id),
+                        text=text,
+                        reply_markup=edit_markup,
+                    )
+                    print(
+                        f"[{datetime.now()}] Telegram plain edit fallback succeeded "
+                        f"message_id={message.update_message_id}",
+                        flush=True,
+                    )
+                    return message.update_message_id
+                except Exception as e2:
+                    if "is not modified" in str(e2):
+                        return message.update_message_id
+                    # Both edit attempts failed — fall through to a new send.
+                    print(
+                        f"[{datetime.now()}] Telegram edit failed, sending new: "
+                        f"{e} (plain retry: {e2})",
+                        flush=True,
+                    )
 
         # Send media natively when the runtime provides attachments or a Hermes-style
         # MEDIA:/path/to/file.png directive. This avoids echoing local paths into chat.

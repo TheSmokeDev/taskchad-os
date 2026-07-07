@@ -39,7 +39,8 @@ def test_telegram_native_menu_is_curated_static_registry() -> None:
     names = [name for name, _desc in menu]
 
     assert names == list(commands.TELEGRAM_NATIVE_COMMANDS)
-    assert len(names) == 45
+    assert len(names) == 46
+    assert "stop" in names  # Phase 5 — interrupt parity
     assert "design" in names
     assert "linkedin" in names
     assert "video" in names

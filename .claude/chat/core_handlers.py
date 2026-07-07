@@ -51,6 +51,7 @@ def set_context(
     engine: Any = None,
     adapters: dict | None = None,
     bot_start_time: datetime | None = None,
+    router: Any = None,
 ) -> None:
     """Set shared state for handlers. Called once by ChatRouter."""
     if engine is not None:
@@ -59,6 +60,9 @@ def set_context(
         _ctx["adapters"] = adapters
     if bot_start_time is not None:
         _ctx["bot_start_time"] = bot_start_time
+    if router is not None:
+        # Phase 5 — /stop needs the router's active-turn registry.
+        _ctx["router"] = router
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +326,33 @@ async def handle_clear(adapter: Any, incoming: Any, args: str, *, collect_only: 
             )
         return "Session cleared. Next message starts fresh."
     return "No active session to clear."
+
+
+async def handle_stop(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Stop the in-flight engine turn for THIS conversation (Phase 5).
+
+    Interrupt parity with the dashboard Stop button — same primitive
+    (`router.cancel_active_turn`), same per-conversation scope: the cancel
+    prefix is derived from the CALLER's own platform/channel/thread, so one
+    chat can never stop another chat's turn. The router dispatches typed
+    /stop outside the per-thread lock (see `_queue_incoming`), otherwise it
+    would deadlock behind the very turn it cancels.
+    """
+    router = _ctx.get("router")
+    if router is None or not hasattr(router, "cancel_active_turn"):
+        return "Stop is unavailable — the chat router is not wired for turn control."
+    if hasattr(router, "_stop_scope_prefix"):
+        prefix = router._stop_scope_prefix(incoming)
+    else:
+        platform = getattr(incoming, "platform", "")
+        platform_str = getattr(platform, "value", str(platform))
+        channel_id = getattr(getattr(incoming, "channel", None), "platform_id", "")
+        prefix = f"{platform_str}:{channel_id}:"
+    stopped = router.cancel_active_turn(prefix)
+    if stopped:
+        plural = "s" if stopped != 1 else ""
+        return f"⏹️ Stopping {stopped} in-flight turn{plural}."
+    return "Nothing is running in this chat."
 
 
 async def handle_plan(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
@@ -5714,6 +5745,8 @@ CORE_HANDLERS: dict[str, Any] = {
     "cost": handle_cost,
     "clear": handle_clear,
     "new": handle_clear,
+    # Phase 5 — interrupt parity with the dashboard Stop button.
+    "stop": handle_stop,
     "plan": handle_plan,
     "go": handle_go,
     "execute": handle_go,
