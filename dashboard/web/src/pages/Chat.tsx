@@ -1,4 +1,4 @@
-import { Send, Loader2 } from 'lucide-preact';
+import { Send, Loader2, Square } from 'lucide-preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { TopBar } from '@/components/TopBar';
 import { Empty } from '@/components/Empty';
@@ -39,6 +39,12 @@ interface HistoryTurn {
   content: string;
   timestamp?: number;
   created_at?: string;
+}
+
+interface SlashCommand {
+  name: string;
+  description: string;
+  category?: string;
 }
 
 function eventFromHistory(turn: HistoryTurn): ChatEvent {
@@ -104,19 +110,35 @@ function actorLabel(type: ChatEvent['type']): string {
   return 'homie';
 }
 
-const QUICK_COMMANDS = ['/video'];
+// Curated quick-chip candidates — rendered only when the fetched registry
+// confirms the command exists (fallback: the legacy /video chip).
+const QUICK_COMMAND_CANDIDATES = ['/video', '/status', '/help', '/clear'];
+const QUICK_COMMANDS_FALLBACK = ['/video'];
+const AUTOCOMPLETE_MAX_ROWS = 8;
 
 function streamPersonaMatches(streamPersonaId: unknown, browserPersonaId: string): boolean {
   if (!streamPersonaId) return true;
   return outboundPersonaId(String(streamPersonaId)) === browserPersonaId;
 }
 
+/** Status text that reads like tool/step output (e.g. "Read(foo.py)",
+ *  "$ npm test", "→ step 2/5") gets a monospace block treatment. Pure
+ *  presentation — the SSE contract is untouched. */
+function looksLikeToolLine(text: string): boolean {
+  return /^[\w.-]+\([^)]*\)|^\$\s|^`|^(→|>|\||\[)/m.test(text.trim());
+}
+
 export function Chat() {
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [pendingActions, setPendingActions] = useState<Set<string>>(new Set());
+  const [commands, setCommands] = useState<SlashCommand[]>([]);
+  const [acHighlight, setAcHighlight] = useState(0);
+  const [acDismissed, setAcDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
 
   const readOnly = dashboardChatReadOnly;
   const personaId = readOnly ? chatId : DASHBOARD_CHAT_PERSONA_ID;
@@ -126,6 +148,27 @@ export function Chat() {
     const params = new URLSearchParams({ conversation_id: conversationId });
     return `/api/conversation/${encodeURIComponent(personaId)}/history?${params.toString()}`;
   }, [conversationId, personaId]);
+
+  // Slash-command registry — fetched once on mount, fail-open to [].
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ commands?: SlashCommand[] }>('/api/commands')
+      .then((res) => {
+        if (cancelled || !Array.isArray(res.commands)) return;
+        setCommands(
+          res.commands.filter(
+            (cmd): cmd is SlashCommand =>
+              !!cmd && typeof cmd.name === 'string' && cmd.name.startsWith('/'),
+          ),
+        );
+      })
+      .catch(() => {
+        // Fail-open: autocomplete simply stays empty.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!personaId) return;
@@ -169,6 +212,40 @@ export function Chat() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [events.length]);
 
+  // A turn is in-flight while the latest event is a status placeholder that
+  // no terminal assistant_message/error has replaced yet.
+  const turnInFlight = useMemo(() => {
+    const last = events[events.length - 1];
+    return !!last && (last.type === 'processing' || last.type === 'progress');
+  }, [events]);
+
+  const quickCommands = useMemo(() => {
+    if (commands.length === 0) return QUICK_COMMANDS_FALLBACK;
+    const known = new Set(commands.map((cmd) => cmd.name));
+    const chips = QUICK_COMMAND_CANDIDATES.filter((name) => known.has(name));
+    return chips.length > 0 ? chips : QUICK_COMMANDS_FALLBACK;
+  }, [commands]);
+
+  // Autocomplete: only while the draft is a bare "/prefix" (no whitespace yet).
+  const autocompleteMatches = useMemo(() => {
+    if (readOnly || acDismissed) return [];
+    if (!draft.startsWith('/') || /\s/.test(draft)) return [];
+    const prefix = draft.slice(1).toLowerCase();
+    return commands
+      .filter((cmd) => cmd.name.slice(1).toLowerCase().startsWith(prefix))
+      .slice(0, AUTOCOMPLETE_MAX_ROWS);
+  }, [acDismissed, commands, draft, readOnly]);
+
+  const showAutocomplete = autocompleteMatches.length > 0;
+  const highlightIndex = Math.min(acHighlight, Math.max(0, autocompleteMatches.length - 1));
+
+  function acceptAutocomplete(cmd: SlashCommand | undefined) {
+    if (!cmd || readOnly) return;
+    setDraft(`${cmd.name} `);
+    setAcDismissed(true);
+    composerRef.current?.focus();
+  }
+
   async function submitMessage() {
     const text = draft.trim();
     if (!text || sending || readOnly) return;
@@ -187,6 +264,20 @@ export function Chat() {
       pushToast({ tone: 'error', title: 'Message failed', description: describeApiError(err) });
     } finally {
       setSending(false);
+    }
+  }
+
+  async function stopTurn() {
+    if (readOnly || stopping) return;
+    setStopping(true);
+    try {
+      await apiPost(`/api/conversation/${encodeURIComponent(DASHBOARD_CHAT_PERSONA_ID)}/stop`, {
+        conversation_id: conversationId,
+      });
+    } catch (err) {
+      pushToast({ tone: 'error', title: 'Stop failed', description: describeApiError(err) });
+    } finally {
+      setStopping(false);
     }
   }
 
@@ -215,6 +306,7 @@ export function Chat() {
   function insertQuickCommand(command: string) {
     if (readOnly) return;
     setDraft(command);
+    composerRef.current?.focus();
   }
 
   return (
@@ -240,12 +332,25 @@ export function Chat() {
                   {' · '}
                   {formatRelativeTime(ev.timestamp)}
                 </div>
-                {ev.text && (
+                {ev.text && (ev.type === 'processing' || ev.type === 'progress') ? (
+                  <div class="flex items-start gap-2">
+                    <Loader2 size={12} class="mt-[3px] shrink-0 animate-spin opacity-70" />
+                    <div
+                      class={`min-w-0 flex-1 whitespace-pre-wrap font-mono text-[12px] leading-relaxed ${
+                        looksLikeToolLine(ev.text)
+                          ? 'rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1'
+                          : ''
+                      }`}
+                    >
+                      {ev.text}
+                    </div>
+                  </div>
+                ) : ev.text ? (
                   <div
                     class="text-[13px] leading-relaxed prose-sm"
                     dangerouslySetInnerHTML={{ __html: renderMarkdown(ev.text) }}
                   />
-                )}
+                ) : null}
                 {ev.components && ev.components.length > 0 && (
                   <div class="mt-3 flex flex-wrap gap-2">
                     {ev.components.map((component) => (
@@ -281,7 +386,7 @@ export function Chat() {
         <div class="mx-auto flex max-w-4xl flex-col gap-2">
           {!readOnly && (
             <div class="flex flex-wrap gap-2">
-              {QUICK_COMMANDS.map((command) => (
+              {quickCommands.map((command) => (
                 <button
                   key={command}
                   type="button"
@@ -293,12 +398,68 @@ export function Chat() {
               ))}
             </div>
           )}
-          <div class="flex items-end gap-2">
+          <div class="relative flex items-end gap-2">
+          {showAutocomplete && (
+            <div class="absolute bottom-full left-0 right-0 z-20 mb-2 max-h-64 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] p-1 shadow-2xl">
+              {autocompleteMatches.map((cmd, idx) => {
+                const isActive = idx === highlightIndex;
+                return (
+                  <button
+                    key={cmd.name}
+                    type="button"
+                    onClick={() => acceptAutocomplete(cmd)}
+                    onMouseEnter={() => setAcHighlight(idx)}
+                    class={[
+                      'flex w-full items-baseline gap-2 rounded px-3 py-1.5 text-left text-[13px]',
+                      isActive
+                        ? 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
+                        : 'text-[var(--color-text-muted)]',
+                    ].join(' ')}
+                  >
+                    <span class="shrink-0 font-mono">{cmd.name}</span>
+                    <span class="min-w-0 flex-1 truncate text-[11px] opacity-70">{cmd.description}</span>
+                    {cmd.category && (
+                      <span class="shrink-0 text-[10px] uppercase tracking-wider text-[var(--color-text-faint)]">
+                        {cmd.category}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <textarea
+            ref={composerRef}
             value={draft}
             disabled={readOnly}
-            onInput={(event) => setDraft((event.currentTarget as HTMLTextAreaElement).value)}
+            onInput={(event) => {
+              setDraft((event.currentTarget as HTMLTextAreaElement).value);
+              setAcDismissed(false);
+              setAcHighlight(0);
+            }}
             onKeyDown={(event) => {
+              if (showAutocomplete) {
+                if (event.key === 'ArrowDown') {
+                  event.preventDefault();
+                  setAcHighlight((h) => Math.min(autocompleteMatches.length - 1, h + 1));
+                  return;
+                }
+                if (event.key === 'ArrowUp') {
+                  event.preventDefault();
+                  setAcHighlight((h) => Math.max(0, h - 1));
+                  return;
+                }
+                if (event.key === 'Enter' || event.key === 'Tab') {
+                  event.preventDefault();
+                  acceptAutocomplete(autocompleteMatches[highlightIndex]);
+                  return;
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setAcDismissed(true);
+                  return;
+                }
+              }
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
                 submitMessage();
@@ -308,6 +469,18 @@ export function Chat() {
             placeholder={readOnly ? 'Linked stream is read-only' : 'Message Homie or type /provider'}
             class="min-h-10 max-h-36 flex-1 resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2 text-[13px] text-[var(--color-text)] outline-none transition-colors placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent)] disabled:opacity-60"
           />
+          {!readOnly && turnInFlight && (
+            <button
+              type="button"
+              onClick={stopTurn}
+              disabled={stopping}
+              class="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md border border-[color-mix(in_srgb,var(--color-status-failed)_50%,transparent)] bg-[color-mix(in_srgb,var(--color-status-failed)_12%,transparent)] px-3 text-[12px] font-medium text-[var(--color-text)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-45"
+              title="Stop the in-flight turn"
+            >
+              {stopping ? <Loader2 size={13} class="animate-spin" /> : <Square size={13} />}
+              Stop
+            </button>
+          )}
           <button
             type="submit"
             disabled={readOnly || sending || !draft.trim()}

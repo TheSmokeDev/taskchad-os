@@ -223,6 +223,8 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     ("GET", "/api/health"): "public",
     ("GET", "/api/jarvis/status"): "admin",
     ("GET", "/api/info"): "public",
+    # Slash-command registry (read-only, framework-level — no tenant grain).
+    ("GET", "/api/commands"): "admin",
     # ── Dashboard: agents / personas ────────────────────────────────────────
     ("GET", "/api/agents"): "tenant_persona",
     ("POST", "/api/agents"): "admin",

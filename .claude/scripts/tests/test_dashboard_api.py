@@ -507,6 +507,42 @@ def test_get_info_no_secrets_or_paths(isolated_app):
         assert needle not in body_text
 
 
+# ── /api/commands (slash-command registry, read-only) ───────────────────
+
+
+def test_get_commands_returns_registry_shape(isolated_app):
+    r = isolated_app.get("/api/commands")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body["commands"], list)
+    assert len(body["commands"]) > 0
+    by_name = {c["name"]: c for c in body["commands"]}
+    # /help is a stable viewer-level core command with a category.
+    assert "/help" in by_name
+    assert by_name["/help"]["description"]
+    assert by_name["/help"]["category"] == "Session & Mode"
+    for entry in body["commands"]:
+        assert set(entry) == {"name", "description", "category"}
+        assert entry["name"].startswith("/")
+
+
+def test_get_commands_fails_open_to_empty_list(isolated_app, monkeypatch):
+    """Registry import failure → 200 + empty list, NEVER 500."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "commands":
+            raise ImportError("registry unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    r = isolated_app.get("/api/commands")
+    assert r.status_code == 200
+    assert r.json() == {"commands": []}
+
+
 # ── /api/agents ──────────────────────────────────────────────────────────
 
 

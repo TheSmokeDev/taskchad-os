@@ -94,6 +94,9 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/files/read',
   '/api/system-jobs',
 
+  // commands.ts — slash-command registry (read-only, composer autocomplete)
+  '/api/commands',
+
   // scheduled.ts
   '/api/scheduled',
   '/api/scheduled/:taskId',

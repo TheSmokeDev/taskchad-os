@@ -1316,6 +1316,45 @@ def get_info() -> dict:
     }
 
 
+# ── /api/commands (read-only slash-command registry) ─────────────────────
+
+
+@router.get("/api/commands")
+def list_commands() -> dict:
+    """Slash-command registry for the dashboard chat composer autocomplete.
+
+    Read-only projection of the chat slice's static registry
+    (``.claude/chat/commands.py`` — the same ``COMMANDS``/``CATEGORIES``
+    the Telegram help menu renders). Imported through the module-level
+    ``_CHAT_DIR`` sys.path seam shared with ``_get_dashboard_chat_runtime``
+    — no new import path.
+
+    Fail-open contract: ANY import/shape error returns ``{"commands": []}``
+    with 200 (the composer autocomplete degrades to nothing; chat keeps
+    working). Never 500.
+    """
+    try:
+        from commands import CATEGORIES, COMMANDS  # noqa: PLC0415
+
+        category_by_name: dict[str, str] = {}
+        for cat_name, cmd_names in CATEGORIES:
+            for cmd_name in cmd_names:
+                category_by_name.setdefault(cmd_name, cat_name)
+        return {
+            "commands": [
+                {
+                    "name": f"/{name}",
+                    "description": description,
+                    "category": category_by_name.get(name, "Other"),
+                }
+                for name, description, _type, _min_role in COMMANDS
+            ]
+        }
+    except Exception as exc:  # pragma: no cover - defensive fail-open
+        logger.warning("GET /api/commands registry load failed: %s", _redact(str(exc)))
+        return {"commands": []}
+
+
 # ── /api/agents — list / detail / create / soft-delete ───────────────────
 #
 # IMPORTANT: FastAPI matches routes in declaration order. Static routes
