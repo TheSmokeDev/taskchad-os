@@ -5231,6 +5231,99 @@ def insights(
         return _zeroed_insights(days)
 
 
+# ── /api/runtime/status (Phase 4 — runtime lane/provider/model, read-only) ──
+#
+# STRUCTURED projection of the current runtime selection for the Chat
+# model/provider pill. Read-only by design: the SWITCH rides the existing
+# gated `/model <target>` chat command (router-typed, instant) — there is
+# deliberately NO mutation HTTP route here. Calls the SAME structured
+# sources `/provider` and `/model` use (runtime.selection /
+# runtime.model_control / runtime.routing), never string-parses the
+# human-readable chat reply.
+
+
+def _unavailable_runtime_status() -> dict:
+    """Fail-open shape: 200 + explicit unavailable, never 500."""
+    return {
+        "available": False,
+        "lane": None,
+        "provider": None,
+        "provider_display": None,
+        "model": None,
+        "selection": None,
+        "choice": None,
+        "fallback_chain": [],
+        "warnings": [],
+    }
+
+
+@router.get("/api/runtime/status")
+def runtime_status() -> dict:
+    """Report the CURRENT runtime lane/provider/model selection.
+
+    Rule 2 — report physical state, not this process's cached claim:
+    `/model` persists the switch by writing the profile ``.env`` file
+    (``core_handlers._switch_provider`` → ``_write_env_var``). When the
+    switch happens in THIS process (dashboard chat send → in-process
+    router) ``os.environ`` is already updated, but a `/model` issued from
+    the separate bot process only reaches us through the ``.env`` file.
+    So the selection is resolved against ``os.environ`` overlaid with a
+    FRESH parse of ``config.ENV_FILE`` (file wins — the same precedence
+    as config.py's ``load_dotenv(override=True)``).
+
+    Rule 3 pattern — runtime modules are late-bound inside the body via
+    module attributes so test monkeypatching propagates and an import
+    failure degrades to the fail-open shape instead of breaking mount.
+
+    Lane doctrine: this is IDENTITY only (lane · provider · model +
+    fallback chain). No turns, no quota, no cost — the LaneStatusPill
+    never-mix rule stays intact because those fields simply don't exist
+    on this surface.
+    """
+    try:
+        from dotenv import dotenv_values  # noqa: PLC0415
+
+        from runtime import model_control as runtime_model_control  # noqa: PLC0415
+        from runtime import routing as runtime_routing  # noqa: PLC0415
+        from runtime import selection as runtime_selection  # noqa: PLC0415
+        from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE  # noqa: PLC0415
+
+        env_file = Path(config.ENV_FILE)
+        file_values: dict[str, str] = {}
+        if env_file.is_file():
+            file_values = {
+                key: value
+                for key, value in dotenv_values(str(env_file)).items()
+                if value is not None
+            }
+        env = {**os.environ, **file_values}
+
+        sel = runtime_selection.resolve_runtime_selection(env)
+        if sel.lane == RUNTIME_LANE_CLAUDE_NATIVE:
+            provider: str | None = "claude"
+        else:
+            provider = sel.generic_provider
+        return {
+            "available": True,
+            # None lane/provider/model = automatic routing (a real state,
+            # not an error — `available` disambiguates from the fail-open
+            # shape).
+            "lane": sel.lane,
+            "provider": provider,
+            "provider_display": (
+                runtime_selection.provider_display_name(provider) if provider else None
+            ),
+            "model": runtime_model_control.selected_runtime_model(sel, env),
+            "selection": runtime_selection.describe_runtime_selection(sel),
+            "choice": runtime_selection.runtime_selection_choice(sel),
+            "fallback_chain": list(runtime_routing.DEFAULT_PROVIDER_CHAIN),
+            "warnings": runtime_model_control.runtime_model_warnings(sel, env),
+        }
+    except Exception as exc:  # pragma: no cover - defensive fail-open
+        logger.warning("GET /api/runtime/status failed: %s", _redact(str(exc)))
+        return _unavailable_runtime_status()
+
+
 _DASHBOARD_PHOTO_DIR = Path(tempfile.gettempdir()) / "thehomie_photos"
 
 

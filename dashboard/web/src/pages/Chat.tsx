@@ -48,6 +48,72 @@ interface SlashCommand {
   category?: string;
 }
 
+interface RuntimeStatus {
+  available: boolean;
+  lane: string | null;
+  provider: string | null;
+  provider_display: string | null;
+  model: string | null;
+  selection: string | null;
+  choice: string | null;
+  fallback_chain: string[];
+  warnings: string[];
+}
+
+interface ModelCatalogEntry {
+  model: string;
+  alias: string;
+}
+
+interface ModelCatalog {
+  claude_native?: ModelCatalogEntry[];
+  generic_runtime?: Record<string, ModelCatalogEntry[]>;
+}
+
+interface SwitchTarget {
+  token: string;
+  label: string;
+  group: 'lane' | 'model';
+}
+
+// Lane/provider aliases from the /model command description — the switch
+// itself rides the EXISTING gated chat command (`/model <target>`), never
+// a new mutation HTTP route.
+const LANE_SWITCH_TARGETS: SwitchTarget[] = [
+  { token: 'auto', label: 'Auto lane/provider routing', group: 'lane' },
+  { token: 'claude', label: 'Claude — native lane', group: 'lane' },
+  { token: 'codex', label: 'Codex — generic lane', group: 'lane' },
+  { token: 'gemini', label: 'Gemini — generic lane', group: 'lane' },
+  { token: 'openrouter', label: 'OpenRouter — generic lane', group: 'lane' },
+  { token: 'openai', label: 'OpenAI — generic lane', group: 'lane' },
+];
+
+/** Merge the /api/agents/model catalog into provider:model switch tokens
+ *  (`/model claude:claude-opus-4-7`, `/model gemini:gemini-2.5-pro`). The
+ *  gated chat command validates targets server-side — unknown ones get a
+ *  friendly in-stream reply, never a silent switch. */
+function targetsFromCatalog(catalog: ModelCatalog | null | undefined): SwitchTarget[] {
+  if (!catalog) return [];
+  const out: SwitchTarget[] = [];
+  for (const entry of catalog.claude_native ?? []) {
+    if (!entry?.model) continue;
+    out.push({ token: `claude:${entry.model}`, label: `Claude · ${entry.alias || entry.model}`, group: 'model' });
+  }
+  for (const [provider, entries] of Object.entries(catalog.generic_runtime ?? {})) {
+    for (const entry of entries ?? []) {
+      if (!entry?.model) continue;
+      out.push({ token: `${provider}:${entry.model}`, label: `${provider} · ${entry.alias || entry.model}`, group: 'model' });
+    }
+  }
+  return out;
+}
+
+function runtimeLaneLabel(lane: string | null): string {
+  if (lane === 'claude_native') return 'claude native';
+  if (lane === 'generic_runtime') return 'generic';
+  return 'auto';
+}
+
 function eventFromHistory(turn: HistoryTurn): ChatEvent {
   const fallback = turn.created_at ? Date.parse(turn.created_at) / 1000 : Date.now() / 1000;
   return {
@@ -136,6 +202,10 @@ export function Chat() {
   const [stopping, setStopping] = useState(false);
   const [pendingActions, setPendingActions] = useState<Set<string>>(new Set());
   const [commands, setCommands] = useState<SlashCommand[]>([]);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [switchPending, setSwitchPending] = useState(false);
+  const [catalogTargets, setCatalogTargets] = useState<SwitchTarget[]>([]);
   const [acHighlight, setAcHighlight] = useState(0);
   const [acDismissed, setAcDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -183,6 +253,34 @@ export function Chat() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Runtime status pill — identity only (lane · provider · model). Never
+  // shows turns/quota/cost here: that stays LaneStatusPill's job and the
+  // two are never mixed. Fail-open: fetch failure hides the pill.
+  async function refreshRuntimeStatus() {
+    try {
+      const status = await apiGet<RuntimeStatus>('/api/runtime/status');
+      setRuntimeStatus(status && typeof status.available === 'boolean' ? status : null);
+    } catch {
+      setRuntimeStatus(null);
+    }
+  }
+
+  useEffect(() => {
+    void refreshRuntimeStatus();
+    const timer = window.setInterval(() => {
+      void refreshRuntimeStatus();
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Switch-target catalog — /api/agents/model merged with the /model lane
+  // aliases. Fail-open to the lane aliases alone.
+  useEffect(() => {
+    apiGet<ModelCatalog>('/api/agents/model')
+      .then((catalog) => setCatalogTargets(targetsFromCatalog(catalog)))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -275,6 +373,11 @@ export function Chat() {
         source: 'interactive',
       });
       setDraft('');
+      if (text.startsWith('/model')) {
+        window.setTimeout(() => {
+          void refreshRuntimeStatus();
+        }, 1500);
+      }
     } catch (err) {
       pushToast({ tone: 'error', title: 'Message failed', description: describeApiError(err) });
     } finally {
@@ -318,6 +421,43 @@ export function Chat() {
     }
   }
 
+  async function sendModelCommand(token: string) {
+    if (readOnly || switchPending) return;
+    setModelPickerOpen(false);
+    setSwitchPending(true);
+    try {
+      // The mutation IS the existing gated chat command — same send path as
+      // submitMessage; the router handles /model instantly and the reply
+      // (success or friendly rejection) appears in-stream.
+      await apiPost(`/api/conversation/${encodeURIComponent(DASHBOARD_CHAT_PERSONA_ID)}/send`, {
+        text: `/model ${token}`,
+        conversation_id: conversationId,
+        client_message_id: `dash-model-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        user_id: 'dashboard-user',
+        display_name: 'Dashboard',
+        source: 'interactive',
+      });
+      window.setTimeout(() => {
+        void refreshRuntimeStatus();
+      }, 1500);
+    } catch (err) {
+      pushToast({ tone: 'error', title: 'Model switch failed', description: describeApiError(err) });
+    } finally {
+      setSwitchPending(false);
+    }
+  }
+
+  const switchTargets = useMemo(
+    () => [...LANE_SWITCH_TARGETS, ...catalogTargets],
+    [catalogTargets],
+  );
+
+  function isActiveTarget(target: SwitchTarget): boolean {
+    if (!runtimeStatus?.available) return false;
+    if (target.group === 'lane') return runtimeStatus.choice === target.token;
+    return !!runtimeStatus.model && target.token.endsWith(`:${runtimeStatus.model}`);
+  }
+
   function insertQuickCommand(command: string) {
     if (readOnly) return;
     setDraft(command);
@@ -329,6 +469,68 @@ export function Chat() {
       <TopBar
         title="Chat"
         subtitle={readOnly ? 'linked stream · read-only' : (chatStreamConnected.value ? 'dashboard chat · live' : 'dashboard chat · reconnecting')}
+        actions={runtimeStatus && (
+          <div class="relative">
+            {/* Identity-only pill: lane · provider · model. claude_native
+                gets the accent tint like LaneStatusPill; no turns/quota/cost
+                ever renders here (never-mix rule). Read-only mode keeps the
+                status visible but disables switching. */}
+            <button
+              type="button"
+              disabled={readOnly || !runtimeStatus.available}
+              onClick={() => setModelPickerOpen((open) => !open)}
+              title={
+                runtimeStatus.available
+                  ? `${runtimeStatus.selection ?? 'runtime selection'} — fallback: ${runtimeStatus.fallback_chain.join(' → ')}${readOnly ? ' (read-only)' : ' · click to switch'}`
+                  : 'Runtime status unavailable'
+              }
+              class={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] tabular-nums transition-opacity disabled:cursor-default ${
+                runtimeStatus.available && runtimeStatus.lane === 'claude_native'
+                  ? 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
+                  : 'bg-[var(--color-elevated)] text-[var(--color-text-muted)]'
+              } ${readOnly ? 'opacity-70' : 'hover:opacity-85'}`}
+            >
+              {runtimeStatus.available ? (
+                <>
+                  <span class="font-medium">{runtimeLaneLabel(runtimeStatus.lane)}</span>
+                  <span class="opacity-60">·</span>
+                  <span>{runtimeStatus.provider_display ?? 'auto'}</span>
+                  <span class="opacity-60">·</span>
+                  <span class="font-mono">{runtimeStatus.model ?? 'auto'}</span>
+                </>
+              ) : (
+                <span class="opacity-70">runtime: unknown</span>
+              )}
+            </button>
+            {modelPickerOpen && !readOnly && runtimeStatus.available && (
+              <div class="absolute right-0 top-full z-30 mt-2 max-h-80 w-72 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] p-1 shadow-2xl">
+                <div class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[var(--color-text-faint)]">
+                  Switch runtime — sends /model
+                </div>
+                {switchTargets.map((target) => {
+                  const active = isActiveTarget(target);
+                  return (
+                    <button
+                      key={target.token}
+                      type="button"
+                      disabled={switchPending}
+                      onClick={() => sendModelCommand(target.token)}
+                      class={[
+                        'flex w-full items-baseline gap-2 rounded px-3 py-1.5 text-left text-[13px] disabled:opacity-50',
+                        active
+                          ? 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
+                          : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]',
+                      ].join(' ')}
+                    >
+                      <span class="min-w-0 flex-1 truncate">{target.label}</span>
+                      <span class="shrink-0 font-mono text-[11px] opacity-70">/model {target.token}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       />
 
       <div ref={scrollRef} class="flex-1 overflow-y-auto p-4 md:p-6">

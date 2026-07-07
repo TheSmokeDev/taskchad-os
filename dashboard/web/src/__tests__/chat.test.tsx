@@ -37,6 +37,31 @@ describe('dashboard chat', () => {
           headers: { 'content-type': 'application/json' },
         });
       }
+      if (url.includes('/api/runtime/status')) {
+        return new Response(
+          JSON.stringify({
+            available: true,
+            lane: 'claude_native',
+            provider: 'claude',
+            provider_display: 'Claude',
+            model: 'claude-opus-4-8',
+            selection: 'Claude native lane',
+            choice: 'claude',
+            fallback_chain: ['claude', 'openai_codex', 'gemini', 'openrouter', 'openai'],
+            warnings: [],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.includes('/api/agents/model')) {
+        return new Response(
+          JSON.stringify({
+            claude_native: [{ model: 'claude-opus-4-7', alias: 'Opus 4.7' }],
+            generic_runtime: { gemini: [{ model: 'gemini-2.5-pro', alias: 'Gemini 2.5 Pro' }] },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     }) as any;
   });
@@ -220,5 +245,56 @@ describe('dashboard chat', () => {
     });
 
     expect(await screen.findByText('Live SSE reached dashboard main.')).toBeTruthy();
+  });
+
+  test('runtime pill renders identity (lane · provider · model) from /api/runtime/status', async () => {
+    render(<Chat />);
+
+    expect(await screen.findByText('claude native')).toBeTruthy();
+    expect(await screen.findByText('Claude')).toBeTruthy();
+    expect(await screen.findByText('claude-opus-4-8')).toBeTruthy();
+    // Identity only — never-mix rule: no turns/quota/cost text in the pill.
+    expect(document.body.textContent).not.toContain('turns');
+    expect(document.body.textContent).not.toContain('quota');
+  });
+
+  test('choosing a switch target sends /model <target> through the chat send path', async () => {
+    render(<Chat />);
+
+    fireEvent.click(await screen.findByText('claude native'));
+    fireEvent.click(await screen.findByText('Auto lane/provider routing'));
+
+    await waitFor(() => {
+      const calls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+      const sendCall = calls.find(([url, init]) => {
+        if (!String(url).includes('/api/conversation/main/send') || !init?.body) return false;
+        return JSON.parse(init.body as string).text === '/model auto';
+      });
+      expect(sendCall).toBeTruthy();
+      const body = JSON.parse((sendCall?.[1] as RequestInit).body as string);
+      expect(body.conversation_id).toBe('dashboard-main');
+      expect(body.source).toBe('interactive');
+    });
+  });
+
+  test('switch dropdown merges catalog targets with lane aliases', async () => {
+    render(<Chat />);
+
+    fireEvent.click(await screen.findByText('claude native'));
+    expect(await screen.findByText('Claude · Opus 4.7')).toBeTruthy();
+    expect(await screen.findByText('gemini · Gemini 2.5 Pro')).toBeTruthy();
+    expect(screen.getByText('/model gemini:gemini-2.5-pro')).toBeTruthy();
+  });
+
+  test('read-only mode keeps the pill visible but disables switching (source contract)', () => {
+    const src = readFileSync(join(__dirname, '..', 'pages', 'Chat.tsx'), 'utf-8');
+    // The pill button is disabled in read-only mode…
+    expect(src).toMatch(/disabled=\{readOnly \|\| !runtimeStatus\.available\}/);
+    // …the dropdown never renders read-only…
+    expect(src).toMatch(/modelPickerOpen && !readOnly && runtimeStatus\.available/);
+    // …and the send function itself is gated (defense in depth).
+    expect(src).toMatch(/async function sendModelCommand[\s\S]*?if \(readOnly \|\| switchPending\) return;/);
+    // No new mutation HTTP route: the switch composes the /model chat command.
+    expect(src).toContain('`/model ${token}`');
   });
 });

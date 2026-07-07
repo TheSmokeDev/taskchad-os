@@ -795,6 +795,149 @@ def test_get_insights_fails_open_zeroed_on_corrupt_db(isolated_app, tmp_path, mo
     assert body["sessions_by_surface"] == []
 
 
+# ── /api/runtime/status (Phase 4 — runtime switcher pill, read-only) ─────
+
+
+_RUNTIME_SELECTION_ENV_KEYS = (
+    "SECOND_BRAIN_RUNTIME_LANE",
+    "SECOND_BRAIN_GENERIC_PROVIDER",
+    "SECOND_BRAIN_RUNTIME_PROVIDER",
+    "SECOND_BRAIN_CLAUDE_MODEL",
+    "SECOND_BRAIN_CODEX_MODEL",
+    "SECOND_BRAIN_GEMINI_MODEL",
+    "SECOND_BRAIN_OPENROUTER_MODEL",
+    "SECOND_BRAIN_OPENAI_MODEL",
+)
+
+
+def _isolate_runtime_env(tmp_path, monkeypatch, env_text: str = "") -> None:
+    """Point config.ENV_FILE at a tmp .env and clear process selection env."""
+    import config
+
+    env_file = tmp_path / "runtime-status.env"
+    env_file.unlink(missing_ok=True)  # re-invocation within a test resets state
+    if env_text:
+        env_file.write_text(env_text, encoding="utf-8")
+    monkeypatch.setattr(config, "ENV_FILE", env_file)
+    for key in _RUNTIME_SELECTION_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_get_runtime_status_claude_native_shape(isolated_app, tmp_path, monkeypatch):
+    """Pinned claude lane → structured lane/provider/model projection built
+    from runtime.selection/model_control (never the human /provider text)."""
+    _isolate_runtime_env(
+        tmp_path,
+        monkeypatch,
+        "SECOND_BRAIN_RUNTIME_LANE=claude_native\n"
+        "SECOND_BRAIN_CLAUDE_MODEL=claude-opus-4-8\n",
+    )
+    r = isolated_app.get("/api/runtime/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is True
+    assert body["lane"] == "claude_native"
+    assert body["provider"] == "claude"
+    assert body["provider_display"] == "Claude"
+    assert body["model"] == "claude-opus-4-8"
+    assert body["choice"] == "claude"
+    assert body["selection"] == "Claude native lane"
+    assert body["fallback_chain"] == [
+        "claude",
+        "openai_codex",
+        "gemini",
+        "openrouter",
+        "openai",
+    ]
+    assert body["warnings"] == []
+    # Identity only — the LaneStatusPill never-mix rule: no cost/turns/quota
+    # fields exist on this surface.
+    for forbidden in ("cost", "cost_usd", "turns", "quota", "quota_pct"):
+        assert forbidden not in body
+
+
+def test_get_runtime_status_generic_provider_and_auto(isolated_app, tmp_path, monkeypatch):
+    """Generic lane reports canonical provider + its configured model;
+    fully-auto reports null lane/provider/model with available=true."""
+    _isolate_runtime_env(
+        tmp_path,
+        monkeypatch,
+        "SECOND_BRAIN_RUNTIME_LANE=generic_runtime\n"
+        "SECOND_BRAIN_GENERIC_PROVIDER=gemini-cli\n",
+    )
+    r = isolated_app.get("/api/runtime/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is True
+    assert body["lane"] == "generic_runtime"
+    assert body["provider"] == "gemini-cli"
+    assert body["provider_display"] == "Gemini"
+    assert body["model"] == "gemini-2.5-flash"  # provider default, no pin
+    assert body["choice"] == "gemini"
+
+    # Auto: empty .env + no process env → automatic routing, still available.
+    _isolate_runtime_env(tmp_path, monkeypatch)
+    r = isolated_app.get("/api/runtime/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is True
+    assert body["lane"] is None
+    assert body["provider"] is None
+    assert body["model"] is None
+    assert body["choice"] == "auto"
+    assert body["selection"] == "automatic lane/provider routing"
+
+
+def test_get_runtime_status_env_file_wins_over_process_env(isolated_app, tmp_path, monkeypatch):
+    """Rule 2 — the .env FILE is the physical persistence /model writes.
+    A switch made in the separate bot process only reaches this process
+    through the file, so a fresh file parse must override stale process env."""
+    _isolate_runtime_env(
+        tmp_path,
+        monkeypatch,
+        "SECOND_BRAIN_RUNTIME_LANE=generic_runtime\n"
+        "SECOND_BRAIN_GENERIC_PROVIDER=openai-codex\n",
+    )
+    # Stale process env claims the claude lane; the file says codex.
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", "claude_native")
+    r = isolated_app.get("/api/runtime/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["lane"] == "generic_runtime"
+    assert body["provider"] == "openai-codex"
+    assert body["choice"] == "codex"
+    # chatgpt-plan-default sentinel surfaces the observability warning.
+    assert body["model"] == "chatgpt-plan-default"
+    assert len(body["warnings"]) == 1
+
+
+def test_get_runtime_status_fails_open_unavailable(isolated_app, tmp_path, monkeypatch):
+    """Resolver blow-up → 200 + explicit unavailable shape, never 500.
+    Patch through the module attribute — the endpoint late-binds
+    runtime.selection.resolve_runtime_selection at call time (Rule 3 pattern)."""
+    _isolate_runtime_env(tmp_path, monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("selection exploded")
+
+    import runtime.selection as runtime_selection
+
+    monkeypatch.setattr(runtime_selection, "resolve_runtime_selection", _boom)
+    r = isolated_app.get("/api/runtime/status")
+    assert r.status_code == 200
+    assert r.json() == {
+        "available": False,
+        "lane": None,
+        "provider": None,
+        "provider_display": None,
+        "model": None,
+        "selection": None,
+        "choice": None,
+        "fallback_chain": [],
+        "warnings": [],
+    }
+
+
 # ── /api/agents ──────────────────────────────────────────────────────────
 
 

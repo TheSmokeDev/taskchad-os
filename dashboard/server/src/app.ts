@@ -26,6 +26,7 @@ import { conversationRoute } from './routes/conversation.js';
 import { sessionsRoute } from './routes/sessions.js';
 import { libraryRoute } from './routes/library.js';
 import { commandsRoute } from './routes/commands.js';
+import { runtimeRoute } from './routes/runtime.js';
 import { scheduledRoute } from './routes/scheduled.js';
 import { memoriesRoute } from './routes/memories.js';
 import { brainRoute } from './routes/brain.js';
@@ -56,6 +57,7 @@ export function buildDashboardApp(): Hono {
   app.route('/', sessionsRoute);
   app.route('/', libraryRoute);
   app.route('/', commandsRoute);
+  app.route('/', runtimeRoute);
   app.route('/', scheduledRoute);
   app.route('/', memoriesRoute);
   app.route('/', brainRoute);

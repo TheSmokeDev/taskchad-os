@@ -231,13 +231,16 @@ def test_route_policy_count_is_134(tmp_path, monkeypatch):
     (+2 read-only skills-library routes — /api/skills/detail,
     /api/skills/drafts — Skills page; promote/reject stay chat-only);
     140 -> 141 on 2026-07-07 (+1 read-only conversation-insights
-    aggregation route — /api/insights — Usage page insights section).
+    aggregation route — /api/insights — Usage page insights section);
+    141 -> 142 on 2026-07-07 (+1 read-only runtime lane/provider/model
+    status route — /api/runtime/status — Chat model pill; the switch
+    itself stays the gated /model chat command).
     """
     monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     api_mod = _reload_real_api(tmp_path / "count.db")
     try:
-        assert len(all_registered_routes(api_mod.app)) == 141
-        assert len(ROUTE_POLICY) == 141
+        assert len(all_registered_routes(api_mod.app)) == 142
+        assert len(ROUTE_POLICY) == 142
     finally:
         api_mod._db.close()
 

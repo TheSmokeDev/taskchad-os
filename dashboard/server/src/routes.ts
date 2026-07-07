@@ -100,6 +100,10 @@ export const ROUTE_MANIFEST: readonly string[] = [
   // commands.ts — slash-command registry (read-only, composer autocomplete)
   '/api/commands',
 
+  // runtime.ts — runtime lane/provider/model status (read-only; the
+  // switch is the gated /model chat command, not an HTTP mutation).
+  '/api/runtime/status',
+
   // scheduled.ts
   '/api/scheduled',
   '/api/scheduled/:taskId',

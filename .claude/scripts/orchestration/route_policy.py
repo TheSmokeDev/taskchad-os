@@ -279,6 +279,11 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     # chat_sessions/chat_messages reads as the M8 sessions browser;
     # same B6 grain (no workspace column) → admin until B6.
     ("GET", "/api/insights"): "admin",
+    # Phase 4 runtime switcher — read-only projection of the runtime
+    # lane/provider/model selection (server-global .env grain, no
+    # workspace/persona dimension) → admin. The SWITCH stays chat-only
+    # (/model — no mutation HTTP route).
+    ("GET", "/api/runtime/status"): "admin",
     # M9 library (read-only): skills registry, allowlisted file browser,
     # framework system-job state — server filesystem grain → admin.
     ("GET", "/api/skills"): "admin",
