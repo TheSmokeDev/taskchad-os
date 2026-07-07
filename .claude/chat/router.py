@@ -20,10 +20,19 @@ from discord_channel_bindings import resolve_discord_channel_binding
 from discord_persona_runtime import run_discord_persona_channel_turn
 from engine import ConversationEngine
 from extension_manager import ExtensionManager
-from imagegen_workflow import build_imagegen_skill_prompt, build_persona_imagegen_skill_prompt
 from models import OutgoingMessage, Platform
 from session import Session
 from session_keys import build_session_key, resolve_thread_id
+
+try:
+    from imagegen_workflow import (
+        build_imagegen_skill_prompt,
+        build_persona_imagegen_skill_prompt,
+    )
+
+    _IMAGEGEN_AVAILABLE = True
+except ImportError:
+    _IMAGEGEN_AVAILABLE = False
 
 # gap-4 URL ingest — raw-regex match on the original message text BEFORE any
 # command parsing. Routing on parsed[0] == "vault-ingest" would NOT fire because
@@ -853,6 +862,17 @@ class ChatRouter:
                     incoming.is_piv = True
                     incoming.piv_command = "clutch"
                 elif command in {"image", "generate-image", "owner-image"}:
+                    if not _IMAGEGEN_AVAILABLE:
+                        reply = "Image generation isn't included in this build."
+                        await adapter.send(
+                            OutgoingMessage(
+                                text=reply,
+                                channel=incoming.channel,
+                                thread=incoming.thread,
+                            )
+                        )
+                        self._persist_router_turn(incoming, reply)
+                        return
                     if isinstance(getattr(incoming, "raw_event", None), dict):
                         incoming.raw_event.setdefault("display_text", text)
                     if command == "owner-image":
