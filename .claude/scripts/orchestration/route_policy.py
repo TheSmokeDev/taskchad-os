@@ -278,6 +278,10 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     # M9 library (read-only): skills registry, allowlisted file browser,
     # framework system-job state — server filesystem grain → admin.
     ("GET", "/api/skills"): "admin",
+    # Skills page (read-only detail + promotion-eligible drafts projection;
+    # promote/reject stay chat-command-only — no HTTP mutation surface).
+    ("GET", "/api/skills/detail"): "admin",
+    ("GET", "/api/skills/drafts"): "admin",
     ("GET", "/api/files/list"): "admin",
     ("GET", "/api/files/read"): "admin",
     ("GET", "/api/system-jobs"): "admin",

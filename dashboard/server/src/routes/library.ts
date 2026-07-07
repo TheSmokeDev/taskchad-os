@@ -25,6 +25,8 @@ function proxyGet(path: string) {
 }
 
 libraryRoute.get('/api/skills', proxyGet('/api/skills'));
+libraryRoute.get('/api/skills/detail', proxyGet('/api/skills/detail'));
+libraryRoute.get('/api/skills/drafts', proxyGet('/api/skills/drafts'));
 libraryRoute.get('/api/files/list', proxyGet('/api/files/list'));
 libraryRoute.get('/api/files/read', proxyGet('/api/files/read'));
 libraryRoute.get('/api/system-jobs', proxyGet('/api/system-jobs'));

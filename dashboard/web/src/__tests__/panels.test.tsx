@@ -9,6 +9,7 @@ import { Teams } from '@/pages/Teams';
 import { Usage } from '@/pages/Usage';
 import { Jarvis } from '@/pages/Jarvis';
 import { CapabilityGateway } from '@/pages/CapabilityGateway';
+import { Skills } from '@/pages/Skills';
 
 function mockFetchOnce(payload: unknown) {
   globalThis.fetch = vi.fn(async () =>
@@ -944,5 +945,87 @@ describe('panels populate from fixture API responses', () => {
     expect(screen.getByText('Telegram')).toBeInTheDocument();
     expect(screen.getByText('telegram.send_message')).toBeInTheDocument();
     expect(screen.getAllByText(/read_only/i).length).toBeGreaterThan(0);
+  });
+});
+
+describe('Skills page (Phase 2 — skills library)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockSkillsFetch(calls: { method: string; url: string }[]) {
+    globalThis.fetch = vi.fn(async (url: any, init: any) => {
+      const u = String(url);
+      calls.push({ method: init?.method || 'GET', url: u });
+      if (u.includes('/api/skills/drafts')) {
+        return new Response(JSON.stringify({
+          drafts: [{ name: 'Daily Spend', verdict: 'caution', recurrence_count: 4 }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/api/skills/detail')) {
+        return new Response(JSON.stringify({
+          name: 'agent-browser',
+          description: 'Browser skill.',
+          path: '.claude/skills/agent-browser/SKILL.md',
+          frontmatter: { name: 'agent-browser' },
+          body: '# Agent Browser\n\nUse this skill.',
+          truncated: false,
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/api/skills')) {
+        return new Response(JSON.stringify({
+          skills: [
+            { name: 'agent-browser', description: 'Browser skill.', path: '.claude/skills/agent-browser/SKILL.md' },
+            { name: 'vault-ingest', description: 'Ingest docs into the vault.', path: '.claude/skills/vault-ingest/SKILL.md' },
+          ],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as any;
+  }
+
+  test('renders installed skills, drafts with scan verdict, and the gated-promotion hint', async () => {
+    const calls: { method: string; url: string }[] = [];
+    mockSkillsFetch(calls);
+    render(<Skills />);
+
+    await waitFor(() => {
+      expect(screen.getByText('agent-browser')).toBeInTheDocument();
+      expect(screen.getByText('vault-ingest')).toBeInTheDocument();
+      expect(screen.getByText('Daily Spend')).toBeInTheDocument();
+      expect(screen.getByText(/scan: caution/i)).toBeInTheDocument();
+    });
+    // The visible hint that promotion runs through the gated chat command.
+    expect(screen.getByText(/default-deny/i)).toBeInTheDocument();
+  });
+
+  test('client-side search filters the skill list without a server round-trip', async () => {
+    const calls: { method: string; url: string }[] = [];
+    mockSkillsFetch(calls);
+    render(<Skills />);
+    await waitFor(() => expect(screen.getByText('vault-ingest')).toBeInTheDocument());
+
+    const before = calls.length;
+    fireEvent.input(screen.getByLabelText('Filter skills'), { target: { value: 'vault' } });
+    await waitFor(() => {
+      expect(screen.queryByText('agent-browser')).toBeNull();
+      expect(screen.getByText('vault-ingest')).toBeInTheDocument();
+    });
+    expect(calls.length).toBe(before); // no new fetches for search
+  });
+
+  test('draft Promote button NEVER issues a mutation — deep-links to chat with the /skills command', async () => {
+    const calls: { method: string; url: string }[] = [];
+    mockSkillsFetch(calls);
+    render(<Skills />);
+    await waitFor(() => expect(screen.getByText('Daily Spend')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText('Promote'));
+
+    // Deep-link: navigation carries the prefilled gated command.
+    expect(window.location.pathname).toBe('/chat');
+    expect(decodeURIComponent(window.location.search)).toContain('/skills promote Daily Spend');
+    // Default-deny invariant: zero non-GET requests from the dashboard.
+    expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
   });
 });

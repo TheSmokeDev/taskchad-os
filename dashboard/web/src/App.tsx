@@ -12,6 +12,7 @@ import { WorkQueue } from '@/pages/WorkQueue';
 import { Convoy } from '@/pages/Convoy';
 import { Memories } from '@/pages/Memories';
 import { HiveMind } from '@/pages/HiveMind';
+import { Skills } from '@/pages/Skills';
 import { Agents } from '@/pages/Agents';
 import { AgentDetail } from '@/pages/AgentDetail';
 import { Scheduled } from '@/pages/Scheduled';
@@ -66,6 +67,7 @@ export function App() {
           <Route path="/chat"><Chat /></Route>
           <Route path="/memories"><Memories /></Route>
           <Route path="/hive"><HiveMind /></Route>
+          <Route path="/skills"><Skills /></Route>
           <Route path="/usage"><Usage /></Route>
           <Route path="/audit"><Audit /></Route>
           <Route path="/cabinet"><Cabinet /></Route>

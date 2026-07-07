@@ -1,5 +1,6 @@
 import { Send, Loader2, Square } from 'lucide-preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useSearch } from 'wouter-preact';
 import { TopBar } from '@/components/TopBar';
 import { Empty } from '@/components/Empty';
 import { renderMarkdown } from '@/lib/markdown';
@@ -148,6 +149,20 @@ export function Chat() {
     const params = new URLSearchParams({ conversation_id: conversationId });
     return `/api/conversation/${encodeURIComponent(personaId)}/history?${params.toString()}`;
   }, [conversationId, personaId]);
+
+  // Deep-link prefill (?draft=...) — e.g. the Skills page composes the
+  // gated `/skills promote <name>` command here. Prefill ONLY: nothing is
+  // sent until the operator hits Send, so the default-deny chat gate is
+  // untouched. Ignored in read-only mode.
+  const search = useSearch();
+  useEffect(() => {
+    if (readOnly) return;
+    const prefillDraft = new URLSearchParams(search).get('draft');
+    if (prefillDraft) {
+      setDraft(prefillDraft);
+      composerRef.current?.focus();
+    }
+  }, [search, readOnly]);
 
   // Slash-command registry — fetched once on mount, fail-open to [].
   useEffect(() => {

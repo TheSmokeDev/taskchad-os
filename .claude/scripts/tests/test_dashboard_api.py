@@ -543,6 +543,113 @@ def test_get_commands_fails_open_to_empty_list(isolated_app, monkeypatch):
     assert r.json() == {"commands": []}
 
 
+# ── /api/skills/detail + /api/skills/drafts (Skills page, read-only) ─────
+
+
+def _make_skill_project_root(tmp_path: Path) -> Path:
+    """Fake PROJECT_ROOT with one installed skill + an out-of-root secret."""
+    project_root = tmp_path / "skills-project"
+    skill_dir = project_root / ".claude" / "skills" / "test-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: test-skill\ndescription: A test skill for the Skills page.\n---\n"
+        "# Test Skill\n\nBody text here.",
+        encoding="utf-8",
+    )
+    # A secret OUTSIDE the skills root a traversal/poisoned path would reach.
+    (project_root / ".env").write_text("SECRET=leak-me-not", encoding="utf-8")
+    return project_root
+
+
+def test_get_skills_detail_returns_frontmatter_and_body(isolated_app, tmp_path, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "PROJECT_ROOT", _make_skill_project_root(tmp_path))
+    r = isolated_app.get("/api/skills/detail", params={"name": "test-skill"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "test-skill"
+    assert body["frontmatter"]["description"] == "A test skill for the Skills page."
+    assert "# Test Skill" in body["body"]
+    assert not body["body"].startswith("---")  # frontmatter stripped from body
+    assert body["path"].endswith("SKILL.md")
+    assert body["truncated"] is False
+
+
+def test_get_skills_detail_weird_input_404_never_500(isolated_app, tmp_path, monkeypatch):
+    """Fail-open contract: unknown/traversal-shaped names → 404, no leakage."""
+    import config
+
+    monkeypatch.setattr(config, "PROJECT_ROOT", _make_skill_project_root(tmp_path))
+    for weird in (
+        "nope",
+        "../../.env",
+        "..\\..\\.env",
+        "test-skill/../../../.env",
+        ".env",
+    ):
+        r = isolated_app.get("/api/skills/detail", params={"name": weird})
+        assert r.status_code == 404, weird
+        assert "leak-me-not" not in r.text
+
+
+def test_get_skills_detail_poisoned_registry_path_rejected(isolated_app, tmp_path, monkeypatch):
+    """Defense-in-depth: even a registry entry whose path escapes the skills
+    root is containment-rejected (same resolve+relative_to discipline as
+    _resolve_browsable_path) — 404, never the file content."""
+    import config
+    from runtime import framework_registry as fr
+
+    monkeypatch.setattr(config, "PROJECT_ROOT", _make_skill_project_root(tmp_path))
+    poisoned = fr.SkillEntry(name="evil", description="x", path=".env")
+    monkeypatch.setattr(fr, "discover_skills", lambda root: [poisoned])
+    r = isolated_app.get("/api/skills/detail", params={"name": "evil"})
+    assert r.status_code == 404
+    assert "leak-me-not" not in r.text
+
+
+def test_get_skills_drafts_projects_review_helper(isolated_app, monkeypatch):
+    """The endpoint is a pure projection of the SAME helper /skills review uses."""
+    from cognition import skill_promotion
+
+    monkeypatch.setattr(
+        skill_promotion,
+        "list_promotable",
+        lambda: [{"name": "Daily Spend", "verdict": "caution", "recurrence_count": 4}],
+    )
+    r = isolated_app.get("/api/skills/drafts")
+    assert r.status_code == 200
+    assert r.json() == {
+        "drafts": [{"name": "Daily Spend", "verdict": "caution", "recurrence_count": 4}]
+    }
+
+
+def test_get_skills_drafts_fails_open_to_empty_list(isolated_app, monkeypatch):
+    """Helper failure → 200 + empty list, NEVER 500."""
+    from cognition import skill_promotion
+
+    def _boom():
+        raise RuntimeError("usage sidecar unavailable")
+
+    monkeypatch.setattr(skill_promotion, "list_promotable", _boom)
+    r = isolated_app.get("/api/skills/drafts")
+    assert r.status_code == 200
+    assert r.json() == {"drafts": []}
+
+
+def test_skills_no_mutation_routes_exist(isolated_app):
+    """Default-deny invariant: promote/reject are chat-command-only — the
+    dashboard exposes NO skills mutation surface."""
+    for path in ("/api/skills/promote", "/api/skills/reject"):
+        r = isolated_app.post(path)
+        assert r.status_code in (404, 405), path
+    for method in ("post", "put", "patch", "delete"):
+        r = getattr(isolated_app, method)("/api/skills/drafts")
+        assert r.status_code in (404, 405)
+        r = getattr(isolated_app, method)("/api/skills/detail?name=test-skill")
+        assert r.status_code in (404, 405)
+
+
 # ── /api/agents ──────────────────────────────────────────────────────────
 
 

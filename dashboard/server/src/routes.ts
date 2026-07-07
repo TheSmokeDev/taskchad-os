@@ -90,6 +90,8 @@ export const ROUTE_MANIFEST: readonly string[] = [
 
   // library.ts — M9 skills / files / system-jobs (read-only)
   '/api/skills',
+  '/api/skills/detail',
+  '/api/skills/drafts',
   '/api/files/list',
   '/api/files/read',
   '/api/system-jobs',

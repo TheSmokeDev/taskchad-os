@@ -4728,6 +4728,115 @@ def skills_list(request: Request) -> dict:
     }
 
 
+def _strip_skill_frontmatter(content: str) -> str:
+    """Return the markdown body after the leading ``---`` frontmatter block.
+
+    Mirrors the line-based frontmatter convention of
+    ``runtime.framework_registry._parse_skill_frontmatter`` — NO YAML import
+    (Q5 single-yaml-surface lock). Content without a frontmatter block is
+    returned unchanged.
+    """
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return content
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            return "\n".join(lines[idx + 1 :]).lstrip("\n")
+    return content
+
+
+@router.get("/api/skills/detail")
+def skills_detail(
+    request: Request,
+    name: str = Query(min_length=1, max_length=128),
+) -> dict:
+    """SKILL.md frontmatter + body for one installed skill (read-only).
+
+    The requested ``name`` is matched against ``discover_skills()`` output —
+    the SAME registry ``/api/skills`` lists (search stays client-side, Hermes
+    parity) — and is never used to build a filesystem path directly. The
+    matched entry's path is then containment-checked against the skills root
+    the same way ``_resolve_browsable_path`` confines the file browser
+    (resolve + ``relative_to``), as defense-in-depth against a poisoned
+    registry path.
+
+    Fail-open contract: weird input / unknown name / escape / read error →
+    404, never 500.
+    """
+    try:
+        from runtime.framework_registry import (  # noqa: PLC0415
+            _parse_skill_frontmatter,
+            discover_skills,
+        )
+
+        root = Path(config.PROJECT_ROOT).resolve()
+        skills_root = (root / ".claude" / "skills").resolve()
+        wanted = name.strip()
+        entry = next((e for e in discover_skills(root) if e.name == wanted), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="skill not found")
+        candidate = (root / entry.path).resolve()
+        try:
+            candidate.relative_to(skills_root)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="skill not found")
+        if not candidate.is_file():
+            raise HTTPException(status_code=404, detail="skill not found")
+        raw = candidate.read_bytes()
+        truncated = len(raw) > _FILE_BROWSER_MAX_READ_BYTES
+        content = raw[:_FILE_BROWSER_MAX_READ_BYTES].decode("utf-8", errors="replace")
+        return {
+            "name": entry.name,
+            "description": entry.description,
+            "path": entry.path,
+            "frontmatter": _parse_skill_frontmatter(content),
+            "body": _strip_skill_frontmatter(content),
+            "truncated": truncated,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive fail-open
+        logger.warning("GET /api/skills/detail failed: %s", _redact(str(exc)))
+        raise HTTPException(status_code=404, detail="skill not found")
+
+
+@router.get("/api/skills/drafts")
+def skills_drafts(request: Request) -> dict:
+    """Promotion-eligible generated skill drafts (read-only projection).
+
+    Calls the SAME helper the chat-side ``/skills review`` command uses
+    (``cognition.skill_promotion.list_promotable`` — imported through the
+    module-level ``_CHAT_DIR`` sys.path seam shared with ``/api/commands``)
+    so the dashboard never re-implements eligibility/scan logic.
+
+    There is deliberately NO promote/reject HTTP route: mutations stay on
+    the default-deny, security-scanned, kill-switchable, audited chat
+    command path (``/skills promote|reject`` in core_handlers.handle_skills).
+    The dashboard UI deep-links into Chat with the command prefilled.
+
+    Fail-open contract: ANY import/shape error returns ``{"drafts": []}``
+    with 200 — never 500.
+    """
+    try:
+        from cognition import skill_promotion  # noqa: PLC0415
+
+        drafts = []
+        for item in skill_promotion.list_promotable():
+            if not isinstance(item, dict):
+                continue
+            drafts.append(
+                {
+                    "name": str(item.get("name", "")),
+                    "verdict": str(item.get("verdict", "unknown")),
+                    "recurrence_count": int(item.get("recurrence_count") or 0),
+                }
+            )
+        return {"drafts": drafts}
+    except Exception as exc:  # pragma: no cover - defensive fail-open
+        logger.warning("GET /api/skills/drafts listing failed: %s", _redact(str(exc)))
+        return {"drafts": []}
+
+
 @router.get("/api/files/list")
 def files_list(
     request: Request,
