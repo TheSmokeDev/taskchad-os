@@ -139,3 +139,5 @@ skills-lock.json
 
 # Video render output — hundreds of MB of HTML/audio/video/image binaries; stays local
 .claude/video/
+# Runtime observability logs (test-run artifact)
+.omx/logs/
