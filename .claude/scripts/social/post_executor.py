@@ -72,6 +72,9 @@ def dispatch_post(
     if channel.execution_method == "browser":
         return _dispatch_browser(svc, post, channel)
 
+    if channel.execution_method == "postiz":
+        return _dispatch_postiz(svc, post, channel)
+
     svc.mark_failed(post_id, error=f"Unknown execution method: {channel.execution_method}")
     return False
 
@@ -140,17 +143,39 @@ def _dispatch_api(
             body_preview=post.body,
         )
 
-        # Instagram requires a publicly-fetchable image — generate a branded
-        # quote card and host it before posting. A failure here MUST fail the
-        # post (no text-only IG attempt — the Graph API rejects it anyway).
+        # Resolve the media asset to attach. A video draft (media_type=video)
+        # hosts the rendered MP4 → IG Reel / FB video; else Instagram gets a
+        # branded quote card. A hosting/render failure MUST fail the post.
         image_url = ""
-        if post.channel.lower() in ("instagram", "ig"):
+        video_url = ""
+        if post.media_type == "video" and post.media_path:
+            try:
+                from pathlib import Path as _Path
+
+                from social.image_host import upload_public
+
+                video_url = upload_public(_Path(post.media_path))
+            except Exception as exc:
+                error = f"Video host upload failed: {exc}"
+                svc.mark_failed(post.id, error=error)
+                append_social_audit_record(
+                    channel=post.channel, action="post", post_id=post.id,
+                    outcome="failed", error=error,
+                )
+                return False
+        elif post.channel.lower() in ("instagram", "ig"):
             try:
                 from social.image_host import upload_public
-                from social.quote_card import render_quote_card
 
-                card_path = render_quote_card(post.body, title=post.title)
-                image_url = upload_public(card_path)
+                if post.media_type == "image" and post.media_path:
+                    from pathlib import Path as _Path
+
+                    image_url = upload_public(_Path(post.media_path))
+                else:
+                    from social.quote_card import render_quote_card
+
+                    card_path = render_quote_card(post.body, title=post.title)
+                    image_url = upload_public(card_path)
             except Exception as exc:
                 error = f"Quote-card generation/upload failed: {exc}"
                 svc.mark_failed(post.id, error=error)
@@ -166,7 +191,9 @@ def _dispatch_api(
         # Now attempt the external post
         from integrations.social_media import post_to_platform
 
-        result = post_to_platform(post.channel, post.body, image_url=image_url)
+        result = post_to_platform(
+            post.channel, post.body, image_url=image_url, video_url=video_url
+        )
         if result.success:
             svc.mark_posted(post.id, post_url=result.post_url)
             # Update audit record with success
@@ -190,6 +217,166 @@ def _dispatch_api(
                 error=result.message,
             )
             return False
+    except IntegrationPolicyError as exc:
+        svc.mark_failed(post.id, error=str(exc))
+        append_social_audit_record(
+            channel=post.channel,
+            action="post",
+            post_id=post.id,
+            outcome="blocked",
+            error=f"Policy gate: {exc}",
+        )
+        raise
+    except Exception as exc:
+        svc.mark_failed(post.id, error=str(exc))
+        append_social_audit_record(
+            channel=post.channel,
+            action="post",
+            post_id=post.id,
+            outcome="failed",
+            error=str(exc),
+        )
+        return False
+
+
+def _dispatch_postiz(
+    svc: SocialPostService,
+    post: "SocialPost",  # noqa: F821
+    channel: "SocialChannel",  # noqa: F821
+) -> bool:
+    """Publish through the Postiz lane (optimistic accept + reconcile).
+
+    Same contract as _dispatch_api: gate FIRST, pre-send pending audit,
+    mark_posted/mark_failed + audit, blocked re-raise. Acceptance means
+    ENQUEUED — social/postiz_reconcile.py closes the loop on the next
+    cadence tick (Postiz has no webhooks).
+    """
+    action_map = {
+        "facebook": "post_facebook",
+        "fb": "post_facebook",
+        "instagram": "post_instagram",
+        "ig": "post_instagram",
+        "linkedin": "post_linkedin",
+        "li": "post_linkedin",
+        "x": "post_x",
+        "twitter": "post_x",
+        "reddit": "post_reddit",
+    }
+    action_name = action_map.get(post.channel.lower(), f"post_{post.channel.lower()}")
+
+    try:
+        # Gate check: require integration action before external post
+        require_integration_action("social", action_name, surface="operator_confirmed", caller="dispatch_postiz")
+
+        # Write pre-send gate record (audit trail of send attempt)
+        append_social_audit_record(
+            channel=post.channel,
+            action="post",
+            post_id=post.id,
+            outcome="pending",
+            body_preview=post.body,
+        )
+
+        from social.postiz_payload import (
+            VIDEO_REQUIRED_PLATFORMS,
+            build_platform_settings,
+            resolve_platform_type,
+        )
+
+        if not channel.postiz_integration_id:
+            error = (
+                f"No postiz_integration_id configured for '{post.channel}' — "
+                "bind it in social/channels.yaml (ids come from the instance's "
+                "channel list; see the dashboard Social tab)."
+            )
+            svc.mark_failed(post.id, error=error)
+            append_social_audit_record(
+                channel=post.channel,
+                action="post",
+                post_id=post.id,
+                outcome="failed",
+                error=error,
+            )
+            return False
+
+        platform_type = resolve_platform_type(channel)
+        # Video-required platforms (youtube) are fine WHEN a video is attached;
+        # only refuse when the draft has no video to satisfy them.
+        if platform_type in VIDEO_REQUIRED_PLATFORMS and not (
+            post.media_type == "video" and post.media_path
+        ):
+            error = (
+                f"'{platform_type}' requires a video attachment, but the draft "
+                "has no rendered video (media_type=video / media_path)."
+            )
+            svc.mark_failed(post.id, error=error)
+            append_social_audit_record(
+                channel=post.channel,
+                action="post",
+                post_id=post.id,
+                outcome="failed",
+                error=error,
+            )
+            return False
+
+        from integrations import postiz_api
+
+        # Attach media: a rendered video (Reels/Shorts) uploads straight into
+        # Postiz media storage; else Instagram gets a branded quote card.
+        media: list[dict] = []
+        if post.media_type == "video" and post.media_path:
+            try:
+                media = [postiz_api.upload_file(str(post.media_path))]
+            except Exception as exc:
+                error = f"Video upload to Postiz failed: {exc}"
+                svc.mark_failed(post.id, error=error)
+                append_social_audit_record(
+                    channel=post.channel, action="post", post_id=post.id,
+                    outcome="failed", error=error,
+                )
+                return False
+        elif platform_type in ("instagram", "instagram-standalone"):
+            try:
+                if post.media_type == "image" and post.media_path:
+                    media = [postiz_api.upload_file(str(post.media_path))]
+                else:
+                    from social.quote_card import render_quote_card
+
+                    card_path = render_quote_card(post.body, title=post.title)
+                    media = [postiz_api.upload_file(str(card_path))]
+            except Exception as exc:
+                error = f"Quote-card generation/upload failed: {exc}"
+                svc.mark_failed(post.id, error=error)
+                append_social_audit_record(
+                    channel=post.channel,
+                    action="post",
+                    post_id=post.id,
+                    outcome="failed",
+                    error=error,
+                )
+                return False
+
+        settings = build_platform_settings(platform_type, post, channel)
+        postiz_post_id = postiz_api.create_post(
+            integration_id=channel.postiz_integration_id,
+            content=post.body,
+            settings=settings,
+            media=media,
+        )
+
+        # Optimistic accept: enqueued, not yet platform-confirmed. post_url
+        # stays empty until the reconcile pass fills releaseURL.
+        svc.mark_posted(
+            post.id, external_ref=f"postiz:{postiz_post_id}"
+        )
+        append_social_audit_record(
+            channel=post.channel,
+            action="post",
+            post_id=post.id,
+            outcome="success",
+            body_preview=post.body,
+        )
+        return True
     except IntegrationPolicyError as exc:
         svc.mark_failed(post.id, error=str(exc))
         append_social_audit_record(

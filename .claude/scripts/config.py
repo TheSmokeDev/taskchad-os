@@ -130,6 +130,20 @@ def resolve_db_path(memory_dir: "Path | str | None" = None) -> Path:
     for _name, vdir in _VAULT_MEMORY_DIRS.items():
         if vdir and Path(vdir).resolve() == md:
             return _VAULT_DB_PATHS[_name]
+
+    # Self-contained vault root (profile layout): ``<root>/memory`` with its DB
+    # co-located at the sibling ``<root>/data/memory.db`` — exactly
+    # ``personas.get_persona_paths``'s contract (memory/data siblings under
+    # profile_root). Without this, every persona ``memory`` dir slugs to the
+    # SAME ``DATA_DIR/memory.memory.db`` in the MAIN vault (name collision +
+    # wrong root), silently reading/writing the wrong index — the cross-vault
+    # pollution the slug fallback was meant to prevent. Guard is structural
+    # (name == "memory") AND physical (sibling data/ exists — Rule 2), so it
+    # only fires for a real vault root; every other unknown dir keeps the
+    # legacy slug DB byte-identically. Registered vaults never reach here.
+    if md.name == "memory" and (md.parent / "data").is_dir():
+        return md.parent / "data" / "memory.db"
+
     import re as _re
 
     slug = _re.sub(r"[^A-Za-z0-9._-]+", "-", md.name) or "vault"
@@ -1334,6 +1348,41 @@ def get_postiz_settings(
     if timeout_s is None:
         timeout_s = float(os.getenv("POSTIZ_TIMEOUT_S", "15"))
     return PostizSettings(api_url=api_url, api_key=api_key, timeout_s=timeout_s)
+
+
+class ContentFactorySettings(NamedTuple):
+    """Effective social content-factory knobs (call-time resolved)."""
+
+    unattended: bool
+    video_duration_s: int
+
+
+def get_content_factory_settings(
+    unattended: bool | None = None,
+    video_duration_s: int | None = None,
+) -> ContentFactorySettings:
+    """Resolve social content-factory knobs at CALL TIME (Rule 1).
+
+    The content factory (``social/content_factory.py``) generates media +
+    copy and queues drafts. DEFAULT-DENY: it only auto-posts (approve +
+    dispatch) when unattended mode is explicitly enabled; otherwise it queues
+    for operator approval. Knobs:
+
+        HOMIE_SOCIAL_UNATTENDED ("false") — the autopilot switch. When false
+            (default), produce() QUEUES drafts only; the operator approves and
+            the Homie dispatches. When true, produce() also approves+dispatches
+            each draft (still per-post audited). Ships OFF — no accidental
+            unattended posting to real brand accounts.
+        CONTENT_FACTORY_VIDEO_DURATION_S ("18") — target seconds for a rendered
+            vertical video.
+    """
+    if unattended is None:
+        unattended = os.getenv("HOMIE_SOCIAL_UNATTENDED", "false").lower() == "true"
+    if video_duration_s is None:
+        video_duration_s = int(os.getenv("CONTENT_FACTORY_VIDEO_DURATION_S", "18"))
+    return ContentFactorySettings(
+        unattended=unattended, video_duration_s=video_duration_s
+    )
 
 
 class CofounderSettings(NamedTuple):

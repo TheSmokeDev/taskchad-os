@@ -14,6 +14,7 @@ persistence and recent-context helpers are shared imports from that module.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ def _web_persona_system_prompt(
     display_name: str,
     role: str,
     profile_context: str,
+    recalled_memory: str,
     persona_prompt: str,
     skill_index: str,
 ) -> str:
@@ -49,6 +51,8 @@ def _web_persona_system_prompt(
         blocks.append("# Persona Role\n" + role.strip())
     if profile_context:
         blocks.append("# Persona Memory Context\n" + profile_context.strip())
+    if recalled_memory:
+        blocks.append("# Persona Recalled Memory\n" + recalled_memory.strip())
     if skill_index:
         blocks.append("# Persona Skill Index\n" + skill_index.strip())
     if persona_prompt:
@@ -94,6 +98,30 @@ async def run_web_persona_turn(
         memory_dir=paths["memory"],
         daily_dir=paths["memory"] / "daily",
     ).strip()
+
+    # Per-persona semantic recall (issue #110) — same as the Discord persona
+    # path. ``memory_dir=paths["memory"]`` → config.resolve_db_path routes it to
+    # ``~/.homie/profiles/<name>/data/memory.db`` (per-persona-unique, NEVER the
+    # main vault). AUTO mode tier-gates cost; fail-open (failure OR empty index
+    # → briefing-only turn). One-time bulk build: ``memory_index.py -p <name>``.
+    recalled_memory = ""
+    try:
+        from recall_service import recall as recall_memory_service
+
+        recall_response = await recall_memory_service(
+            query=incoming.text,
+            memory_dir=paths["memory"],
+            caller="web_persona_chat",
+            max_results=5,
+            has_prefetched=bool(incoming.prefetched_context),
+        )
+        recalled_memory = recall_response.formatted_text or ""
+    except Exception as exc:  # noqa: BLE001 — recall is best-effort, never turn-killing
+        print(
+            f"[{datetime.now()}] [WebPersonaRecall] "
+            f"{persona_id}: recall failed (non-blocking): {exc}"
+        )
+
     try:
         skill_index = build_skill_index(
             project_root / ".claude" / "skills",
@@ -107,6 +135,7 @@ async def run_web_persona_turn(
         display_name=display_name,
         role=role,
         profile_context=profile_context,
+        recalled_memory=recalled_memory,
         persona_prompt=persona_prompt,
         skill_index=skill_index,
     )

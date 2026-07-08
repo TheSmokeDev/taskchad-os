@@ -1,9 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
-import { Camera, Monitor, Radio, RefreshCw, ShieldCheck, Square, Wifi, WifiOff } from 'lucide-preact';
+import { Camera, Ghost, Monitor, Radio, RefreshCw, ShieldCheck, Smartphone, Square, Wifi, WifiOff } from 'lucide-preact';
 import { TopBar } from '@/components/TopBar';
 import { Empty } from '@/components/Empty';
 import { Spinner } from '@/components/Spinner';
 import { apiGet, apiGetBlob, apiPost } from '@/lib/api';
+
+// P3.0 PhoneOps + P4.0 Ghost — which browser this viewer drives. The server
+// resolves the enum to a CDP port/serial and echoes the EXECUTED target back;
+// a raw port/serial is never accepted from the client. `desktop` sends NO
+// target param, keeping the legacy path byte-identical.
+type BrowserTarget = 'desktop' | 'phone' | 'ghost';
+
+const BROWSER_TARGETS: readonly { id: BrowserTarget; label: string; icon: typeof Monitor }[] = [
+  { id: 'desktop', label: 'Desktop', icon: Monitor },
+  { id: 'phone', label: 'Phone', icon: Smartphone },
+  { id: 'ghost', label: 'Ghost', icon: Ghost },
+];
+
+/** Append ?target= for non-desktop; desktop stays an absent query (M12 path). */
+function withTarget(path: string, target: BrowserTarget): string {
+  return target === 'desktop' ? path : `${path}?target=${encodeURIComponent(target)}`;
+}
 
 interface BrowserViewerReadiness {
   status: string;
@@ -26,6 +43,7 @@ interface BrowserViewerStream {
 
 interface BrowserViewerStatus {
   mode: 'read_only';
+  target?: string;
   readiness: BrowserViewerReadiness;
   stream: BrowserViewerStream;
   controls: {
@@ -80,6 +98,12 @@ function iconForStream(state: StreamState) {
 }
 
 export function BrowserViewer() {
+  const [target, setTarget] = useState<BrowserTarget>('desktop');
+  // Generation counter: bumped on every target switch so an in-flight slow
+  // response from the OLD target (phone/ghost status can take ~15s of adb
+  // probing) can never paint under the NEW target's toggle. The server echo
+  // defends against a proxy dropping the param; this defends against our race.
+  const targetGen = useRef(0);
   const [status, setStatus] = useState<BrowserViewerStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -91,24 +115,36 @@ export function BrowserViewer() {
   const screenshotUrlRef = useRef<string | null>(null);
 
   const refreshStatus = useCallback(async () => {
+    const gen = targetGen.current;
     try {
       setError(null);
-      const next = await apiGet<BrowserViewerStatus>('/api/browser-viewer/status');
+      const next = await apiGet<BrowserViewerStatus>(withTarget('/api/browser-viewer/status', target));
+      if (gen !== targetGen.current) return; // stale target — drop
+      // Echo assertion: the server names the target it actually drove, so a
+      // proxy silently dropping ?target= can never paint the wrong browser.
+      if (next.target && next.target !== target) {
+        setStatus(null);
+        setError(`server answered for ${next.target}, not ${target}`);
+        return;
+      }
       setStatus(next);
       if (!next.stream.direct_ws_url) {
         setStreamState(next.stream.enabled ? 'fallback' : 'offline');
       }
     } catch (err) {
+      if (gen !== targetGen.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (gen === targetGen.current) setLoading(false);
     }
-  }, []);
+  }, [target]);
 
   const captureScreenshot = useCallback(async (silent = false) => {
+    const gen = targetGen.current;
     try {
       if (!silent) setBusy('screenshot');
-      const blob = await apiGetBlob('/api/browser-viewer/screenshot');
+      const blob = await apiGetBlob(withTarget('/api/browser-viewer/screenshot', target));
+      if (gen !== targetGen.current) return; // stale target — drop the frame
       const nextUrl = URL.createObjectURL(blob);
       if (screenshotUrlRef.current) URL.revokeObjectURL(screenshotUrlRef.current);
       screenshotUrlRef.current = nextUrl;
@@ -116,19 +152,25 @@ export function BrowserViewer() {
       setLastFrameAt(new Date().toLocaleTimeString());
       if (!silent) setError(null);
     } catch (err) {
+      if (gen !== targetGen.current) return;
       if (!silent) setError(err instanceof Error ? err.message : String(err));
     } finally {
       if (!silent) setBusy(null);
     }
-  }, []);
+  }, [target]);
 
   async function enableStream() {
+    const gen = targetGen.current;
     try {
       setBusy('enable');
       setError(null);
-      const next = await apiPost<BrowserViewerStatus>('/api/browser-viewer/stream/enable');
+      const next = await apiPost<BrowserViewerStatus>(withTarget('/api/browser-viewer/stream/enable', target));
+      // Same stale-target guard + echo assertion as refreshStatus: a switch
+      // mid-flight must not let the old target's stream paint under the new one.
+      if (gen !== targetGen.current || (next.target && next.target !== target)) return;
       setStatus(next);
     } catch (err) {
+      if (gen !== targetGen.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(null);
@@ -136,18 +178,39 @@ export function BrowserViewer() {
   }
 
   async function disableStream() {
+    const gen = targetGen.current;
     try {
       setBusy('disable');
       setError(null);
-      const next = await apiPost<BrowserViewerStatus>('/api/browser-viewer/stream/disable');
+      const next = await apiPost<BrowserViewerStatus>(withTarget('/api/browser-viewer/stream/disable', target));
+      if (gen !== targetGen.current || (next.target && next.target !== target)) return;
       setStatus(next);
       setFrameSrc(null);
       setStreamState('offline');
     } catch (err) {
+      if (gen !== targetGen.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(null);
     }
+  }
+
+  // P3.0/P4.0 — switch which browser this viewer drives. Invalidate every
+  // in-flight old-target response, tear down the old stream/frame, then let the
+  // status effect reload for the new target.
+  function switchTarget(next: BrowserTarget) {
+    if (next === target) return;
+    targetGen.current += 1;
+    setFrameSrc(null);
+    if (screenshotUrlRef.current) URL.revokeObjectURL(screenshotUrlRef.current);
+    screenshotUrlRef.current = null;
+    setScreenshotUrl(null);
+    setStatus(null);
+    setError(null);
+    setStreamState('idle');
+    setLastFrameAt('never');
+    setLoading(true);
+    setTarget(next);
   }
 
   useEffect(() => {
@@ -211,8 +274,8 @@ export function BrowserViewer() {
   const stream = status?.stream;
   const activeImage = frameSrc ?? screenshotUrl;
   const subtitle = status
-    ? `${text(status.mode)} · CDP ${text(readiness?.cdp_port)} · ${text(streamState)}`
-    : 'browser viewer';
+    ? `${target} · ${text(status.mode)} · CDP ${text(readiness?.cdp_port)} · ${text(streamState)}`
+    : `${target} · browser viewer`;
 
   return (
     <div class="flex h-full flex-col">
@@ -261,7 +324,31 @@ export function BrowserViewer() {
       />
 
       <div class="flex-1 overflow-y-auto p-4 md:p-6">
-        <div class="mx-auto grid h-full max-w-7xl gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div class="mx-auto flex h-full max-w-7xl flex-col gap-4">
+          {/* P3.0/P4.0 — which browser this viewer drives (server-resolved enum). */}
+          <div class="flex flex-wrap gap-2" role="group" aria-label="Browser target">
+            {BROWSER_TARGETS.map(({ id, label, icon: IconCmp }) => {
+              const active = target === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => switchTarget(id)}
+                  aria-pressed={active}
+                  class={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-[12px] transition-colors ${
+                    active
+                      ? 'border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent)_16%,transparent)] text-[var(--color-text)]'
+                      : 'border-[var(--color-border)] bg-[var(--color-card)] text-[var(--color-text-muted)] hover:bg-[var(--color-elevated)] hover:text-[var(--color-text)]'
+                  }`}
+                >
+                  <IconCmp size={14} />
+                  <span>{label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div class="grid h-full gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
           <section class="min-h-[360px] overflow-hidden rounded-lg border border-[var(--color-border)] bg-black">
             {activeImage ? (
               <img
@@ -332,6 +419,7 @@ export function BrowserViewer() {
               </div>
             </section>
           </aside>
+          </div>
         </div>
       </div>
     </div>

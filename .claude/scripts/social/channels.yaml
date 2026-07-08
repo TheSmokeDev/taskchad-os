@@ -19,12 +19,16 @@ channels:
     cadence_enabled: true
     cadence_interval_hours: 24
     voice_profile: ""
+    design_file: brand_designs/YourBrand.json
     topic_pool:
       - community updates
       - product news
       - tips and tricks
       - behind the scenes
     browser_workflow_id: null
+    # Flip execution_method to "postiz" to publish through the Postiz lane.
+    # Binding from the configured instance's channel list (dashboard Social tab).
+    postiz_integration_id: ""
 
   x:
     display_name: X (Twitter)
@@ -57,11 +61,15 @@ channels:
     cadence_enabled: true
     cadence_interval_hours: 24
     voice_profile: ""
+    design_file: brand_designs/YourBrand.json
     topic_pool:
       - visual content
       - stories
       - reels ideas
     browser_workflow_id: null
+    postiz_integration_id: ""
+    postiz_settings:
+      post_type: post
 
   discord:
     display_name: Discord
@@ -71,3 +79,59 @@ channels:
     voice_profile: ""
     topic_pool: []
     browser_workflow_id: null
+
+  # --- Postiz-transport channels (ship disabled; operator opt-in) ---------
+  # Bind postiz_integration_id from the configured instance's channel list
+  # (dashboard Social tab or GET /api/social/channels), then flip
+  # cadence_enabled when ready.
+
+  mastodon:
+    display_name: Mastodon
+    execution_method: postiz
+    cadence_enabled: false
+    cadence_interval_hours: 24
+    voice_profile: ""
+    topic_pool:
+      - industry commentary
+      - build-in-public updates
+    browser_workflow_id: null
+    postiz_integration_id: ""
+
+  bluesky:
+    display_name: Bluesky
+    execution_method: postiz
+    cadence_enabled: false
+    cadence_interval_hours: 24
+    voice_profile: ""
+    topic_pool:
+      - industry commentary
+      - build-in-public updates
+    browser_workflow_id: null
+    postiz_integration_id: ""
+
+  threads:
+    display_name: Threads
+    execution_method: postiz
+    cadence_enabled: false
+    cadence_interval_hours: 24
+    voice_profile: ""
+    topic_pool:
+      - community updates
+      - behind the scenes
+    browser_workflow_id: null
+    postiz_integration_id: ""
+
+  youtube:
+    display_name: YouTube
+    execution_method: postiz
+    cadence_enabled: false
+    cadence_interval_hours: 168
+    voice_profile: ""
+    design_file: brand_designs/YourBrand.json
+    topic_pool: []
+    browser_workflow_id: null
+    # Video platform — listed for channel visibility; the v1 executor
+    # refuses video-required platforms (text/image only).
+    postiz_integration_id: ""
+    postiz_settings:
+      visibility: public

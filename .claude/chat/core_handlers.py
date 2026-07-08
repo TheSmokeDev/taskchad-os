@@ -238,6 +238,20 @@ async def handle_diagnostics(adapter: Any, incoming: Any, args: str, *, collect_
             f"{report.clear_lifecycle_last_failure}"
         )
     lines.append("")
+    lines.append("*Ghost* (the Homie's own background Android):")
+    ghost = report.ghost or {}
+    if not ghost.get("enabled"):
+        lines.append(f"  disabled ({ghost.get('detail') or 'HOMIE_GHOST_ENABLED not set'})")
+    else:
+        lines.append(
+            f"  running={bool(ghost.get('running'))} booted={bool(ghost.get('booted'))} "
+            f"serial={ghost.get('serial') or 'n/a'} avd={ghost.get('avd') or 'n/a'}"
+        )
+        lines.append(
+            f"  cdp={ghost.get('cdp_port') or 'n/a'} "
+            f"reachable={bool(ghost.get('cdp_reachable'))} (boot with /ghost up)"
+        )
+    lines.append("")
     lines.append("*Sessions*:")
     lines.append(f"  Active: {report.sessions_active}")
     lines.append(f"  Messages: {report.sessions_total_messages}")
@@ -668,6 +682,7 @@ def _audit_browser_action(
     target_url: str | None = None,
     subtask_id: int | None = None,
     executor_name: str | None = None,
+    target: str | None = None,
 ) -> None:
     from browser_audit import append_browser_audit_record
     from browser_workflows import get_browser_workflow
@@ -686,6 +701,7 @@ def _audit_browser_action(
         target_url=target_url,
         subtask_id=subtask_id,
         executor_name=executor_name,
+        target=target,
     )
 
 
@@ -698,21 +714,117 @@ def _format_browser_blocked(decision: Any) -> str:
     )
 
 
+def _reject_browser_target(value: str, targets: tuple[str, ...]) -> ValueError:
+    exc = ValueError(
+        f"unknown browser target {value!r} — valid targets: " + ", ".join(targets)
+    )
+    exc.rejected_target = value  # type: ignore[attr-defined]
+    return exc
+
+
+def _extract_browser_target(parts: list[str], targets: tuple[str, ...]) -> tuple[str, list[str]]:
+    """Pull an optional browser target out of a parsed ``/browser`` arg list.
+
+    Accepts ``--target X`` / ``-t X`` / ``--target=X`` anywhere, or a bare
+    ``phone`` / ``ghost`` keyword in LEADING or TRAILING position only —
+    whole-list bare-keyword scanning ate real arguments (PhoneOps review F3,
+    issue #91). A bare ``desktop`` is NOT stripped, so a real argument is never
+    mistaken for the target. An invalid value on the explicit flag forms raises
+    ValueError (mirrors the HTTP path's 400) instead of silently falling back
+    to the desktop — a typo must never reroute a command to the operator's
+    visible Chrome.
+    """
+
+    target = "desktop"
+    remaining: list[str] = []
+    i = 0
+    n = len(parts)
+    while i < n:
+        tok = parts[i]
+        low = tok.lower()
+        if low in ("--target", "-t") and i + 1 < n:
+            value = parts[i + 1].lower()
+            if value not in targets:
+                raise _reject_browser_target(parts[i + 1], targets)
+            target = value
+            i += 2
+            continue
+        if low.startswith("--target="):
+            value = low.split("=", 1)[1]
+            if value not in targets:
+                raise _reject_browser_target(value, targets)
+            target = value
+            i += 1
+            continue
+        if low in targets and low != "desktop" and i in (0, n - 1):
+            target = low
+            i += 1
+            continue
+        remaining.append(tok)
+        i += 1
+    return target, remaining
+
+
+def _format_ghost_status(st: dict[str, Any]) -> str:
+    running, booted = bool(st.get("running")), bool(st.get("booted"))
+    icon = "🟢" if (running and booted) else ("🟡" if running else "⚪")
+    lines = [f"*Ghost Phone* {icon}"]
+    lines.append(f"  running: {running}")
+    lines.append(f"  booted: {booted}")
+    lines.append(f"  serial: {st.get('serial') or '(unset — set HOMIE_GHOST_ADB_SERIAL)'}")
+    if st.get("avd"):
+        lines.append(f"  avd: {st.get('avd')}")
+    detail = str(st.get("detail") or "").strip()
+    if detail:
+        lines.append(f"  detail: {detail}")
+    return "\n".join(lines)
+
+
+async def handle_ghost(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Ghost Phone lifecycle — status | up | down (the Homie's own background Android)."""
+
+    import config
+    import ghost_control
+    from security import kill_switches
+
+    raw = (args or "").strip()
+    sub = raw.split()[0].lower() if raw else "status"
+
+    if sub in {"help", "-h", "--help"}:
+        return (
+            "*Ghost Phone*\n"
+            "  /ghost status — is the ghost up?\n"
+            "  /ghost up — boot the ghost (headless AVD, or connect a spare)\n"
+            "  /ghost down — shut it down, reclaim RAM\n\n"
+            "The Homie's own background Android. Drive its browser with "
+            "`/browser status ghost`. Needs HOMIE_GHOST_ENABLED=true."
+        )
+
+    if not config.get_ghost_settings().enabled:
+        return "Ghost is disabled — set HOMIE_GHOST_ENABLED=true to use the ghost phone."
+
+    if sub in {"up", "start", "boot"}:
+        try:
+            kill_switches.requireEnabled("ghost", caller="/ghost up")
+        except kill_switches.KillSwitchDisabled:
+            return "Ghost boot is disabled by kill-switch (HOMIE_KILLSWITCH_GHOST=disabled)."
+        result = ghost_control.ensure_ghost_running()
+        head = "🟢 Ghost is up" if result.get("ok") else "⚠️ Ghost boot did not complete"
+        return f"{head}\n  status: {result.get('status')}\n  {result.get('detail', '')}".rstrip()
+
+    if sub in {"down", "stop", "kill", "shutdown"}:
+        result = ghost_control.ghost_shutdown()
+        head = "⚪ Ghost shut down" if result.get("ok") else "⚠️ Ghost shutdown issue"
+        return f"{head}\n  status: {result.get('status')}\n  {result.get('detail', '')}".rstrip()
+
+    return _format_ghost_status(ghost_control.ghost_status())
+
+
 async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Framework-owned browser automation checks over visible Chrome CDP."""
 
-    from browser_control import (
-        browser_readiness,
-        browser_status,
-        format_browser_status,
-        format_tabs,
-        list_cdp_tabs,
-        redact_text_urls,
-        redact_url,
-        resolve_cdp_port,
-        run_agent_browser,
-    )
-    from browser_workflows import require_browser_workflow_permission
+    import config
+    from browser_control import BROWSER_TARGETS
 
     raw = (args or "").strip()
     if not raw or raw.lower() in {"help", "-h", "--help"}:
@@ -732,6 +844,10 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             "  /browser snapshot\n"
             "  /browser capabilities\n"
             "  /browser guide\n\n"
+            "Add a target to drive the phone or the ghost, e.g. "
+            "`/browser status ghost` or `/browser open <url> phone` "
+            "(default: the desktop's visible Chrome). Phone needs "
+            "HOMIE_PHONEOPS_ENABLED; ghost needs HOMIE_GHOST_ENABLED.\n"
             "Uses the persistent visible Chrome/Chromium CDP session. "
             "No headless/test browser fallback."
         )
@@ -748,15 +864,121 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             reason=f"command parse error: {exc}",
         )
         return f"Browser command parse error: {exc}"
+    try:
+        target, parts = _extract_browser_target(parts, BROWSER_TARGETS)
+    except ValueError as exc:
+        # PhoneOps review F3 (issue #91): an invalid --target value refuses
+        # loudly — it must never silently fall back to the desktop Chrome.
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command="/browser",
+            workflow_id=None,
+            outcome="blocked",
+            reason=str(exc),
+            target=getattr(exc, "rejected_target", None),
+        )
+        return f"Browser target error: {exc}"
+    if not parts:
+        return "Unknown browser command. Use: /browser status, tabs, open <url>, snapshot"
     subcommand = parts[0].lower()
     rest = parts[1:]
+
+    # Per-target gate (default-deny): phone and ghost are separate capabilities,
+    # each OFF until its own switch is set. Desktop stays ungated (M12).
+    # PhoneOps review F2 (issue #90): the gate runs BEFORE the browserops
+    # delegation — `/browser capabilities ghost` with the ghost disabled must
+    # refuse, not silently answer for the desktop.
+    if target == "phone" and not config.get_phoneops_settings().enabled:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/browser {subcommand}",
+            workflow_id=None,
+            outcome="blocked",
+            reason="PhoneOps is disabled (HOMIE_PHONEOPS_ENABLED off)",
+            target=target,
+        )
+        return "PhoneOps is disabled — set HOMIE_PHONEOPS_ENABLED=true to drive the phone browser."
+    if target == "ghost" and not config.get_ghost_settings().enabled:
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/browser {subcommand}",
+            workflow_id=None,
+            outcome="blocked",
+            reason="Ghost is disabled (HOMIE_GHOST_ENABLED off)",
+            target=target,
+        )
+        return "Ghost is disabled — set HOMIE_GHOST_ENABLED=true to drive the ghost browser."
 
     if subcommand in {"capabilities", "guide", "context", "specialist", "ops", "browserops"}:
         delegated = "capabilities" if subcommand in {"ops", "browserops", "specialist"} else subcommand
         return await handle_browserops(adapter, incoming, delegated, collect_only=collect_only)
 
+    # PhoneOps review F3 (issue #91): a leftover token past a subcommand's
+    # arity is almost always a mistyped target (`/browser open <url> ghsot`) —
+    # refuse loudly instead of running the command against the default desktop.
+    max_args = {"status": 0, "tabs": 0, "snapshot": 0, "open": 1}.get(subcommand)
+    if max_args is not None and len(rest) > max_args:
+        extra = " ".join(rest[max_args:])
+        _audit_browser_action(
+            adapter=adapter,
+            incoming=incoming,
+            command=f"/browser {subcommand}",
+            workflow_id=None,
+            outcome="blocked",
+            reason=f"unexpected argument(s): {extra}",
+            target=target,
+        )
+        return (
+            f"Unexpected browser argument(s): {extra}\n"
+            "If that was a target, valid targets are desktop | phone | ghost "
+            "(trailing keyword or --target <t>).\n"
+            "Usage: /browser status | tabs | open <url> | snapshot [target]"
+        )
+
+    # PhoneOps F6 (issue #94 class): everything below runs synchronous CDP
+    # probes (browser_readiness alone is up to ~4s of socket timeouts) and
+    # agent-browser subprocess spawns (20s timeout each). Off-loop, so a
+    # stalled browser stalls only this command — not every other chat user,
+    # the heartbeat, and the MC relay sharing this event loop.
+    return await asyncio.to_thread(
+        _handle_browser_subcommand_sync, adapter, incoming, raw, target, subcommand, rest
+    )
+
+
+def _handle_browser_subcommand_sync(
+    adapter: Any,
+    incoming: Any,
+    raw: str,
+    target: str,
+    subcommand: str,
+    rest: list[str],
+) -> str:
+    """Blocking tail of /browser — runs in a worker thread (issue #94 class)."""
+
+    from browser_control import (
+        _ensure_phone_transport,
+        _resolve_adb_serial_or_raise,
+        browser_readiness,
+        browser_status,
+        ensure_phone_chrome_ready,
+        format_browser_readiness,
+        format_browser_status,
+        format_tabs,
+        is_adb_target,
+        list_cdp_tabs,
+        redact_text_urls,
+        redact_url,
+        resolve_target_port,
+        run_agent_browser,
+        session_for_target,
+    )
+    from browser_workflows import require_browser_workflow_permission
+
     try:
-        port = resolve_cdp_port()
+        port = resolve_target_port(target)
     except ValueError as exc:
         _audit_browser_action(
             adapter=adapter,
@@ -765,10 +987,11 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             workflow_id=None,
             outcome="failed",
             reason=str(exc),
+            target=target,
         )
         return f"Browser config error: {exc}"
 
-    readiness = browser_readiness(port=port)
+    readiness = browser_readiness(port=port, target=target)
 
     if subcommand == "status":
         workflow_id = "browser.status"
@@ -778,18 +1001,25 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             incoming=incoming,
             command="/browser status",
             workflow_id=workflow_id,
+            target=target,
             outcome=decision.outcome,
             reason=decision.reason,
             readiness=readiness,
         )
         if not decision.allowed:
             return _format_browser_blocked(decision)
-        output = format_browser_status(browser_status(port=port))
+        if is_adb_target(target):
+            # adb targets have no desktop-window visibility guard; the readiness
+            # envelope (guard status + CDP + tabs) is the meaningful status.
+            output = format_browser_readiness(readiness, label=f"{target.capitalize()} Browser")
+        else:
+            output = format_browser_status(browser_status(port=port))
         _audit_browser_action(
             adapter=adapter,
             incoming=incoming,
             command="/browser status",
             workflow_id=workflow_id,
+            target=target,
             outcome="succeeded",
             reason="status rendered",
             readiness=readiness,
@@ -804,6 +1034,7 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             incoming=incoming,
             command="/browser tabs",
             workflow_id=workflow_id,
+            target=target,
             outcome=decision.outcome,
             reason=decision.reason,
             readiness=readiness,
@@ -816,6 +1047,7 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             incoming=incoming,
             command="/browser tabs",
             workflow_id=workflow_id,
+            target=target,
             outcome="succeeded" if tabs.get("reachable") else "failed",
             reason=str(tabs.get("error") or "tabs rendered"),
             readiness=readiness,
@@ -831,6 +1063,7 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
                 incoming=incoming,
                 command="/browser open",
                 workflow_id=workflow_id,
+                target=target,
                 outcome=decision.outcome,
                 reason=decision.reason,
                 readiness=readiness,
@@ -843,6 +1076,7 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             incoming=incoming,
             command="/browser open",
             workflow_id=workflow_id,
+            target=target,
             outcome=decision.outcome,
             reason=decision.reason,
             readiness=readiness,
@@ -851,13 +1085,21 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
         if not decision.allowed:
             return _format_browser_blocked(decision)
         try:
-            result = run_agent_browser(["open", url], port=port)
+            if is_adb_target(target):
+                # Ghost threads its OWN serial (raises if unset) — never the phone's.
+                ensure_phone_chrome_ready(
+                    local_port=port, serial=_resolve_adb_serial_or_raise(target)
+                )
+            result = run_agent_browser(
+                ["open", url], port=port, session=session_for_target(target)
+            )
         except Exception as exc:
             _audit_browser_action(
                 adapter=adapter,
                 incoming=incoming,
                 command="/browser open",
                 workflow_id=workflow_id,
+                target=target,
                 outcome="failed",
                 reason=str(exc),
                 readiness=readiness,
@@ -869,6 +1111,7 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             incoming=incoming,
             command="/browser open",
             workflow_id=workflow_id,
+            target=target,
             outcome="succeeded" if result.ok else "failed",
             reason=result.output[:1200] if not result.ok else "opened",
             readiness=readiness,
@@ -891,6 +1134,7 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             incoming=incoming,
             command="/browser snapshot",
             workflow_id=workflow_id,
+            target=target,
             outcome=decision.outcome,
             reason=decision.reason,
             readiness=readiness,
@@ -898,13 +1142,19 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
         if not decision.allowed:
             return _format_browser_blocked(decision)
         try:
-            result = run_agent_browser(["snapshot", "-i", "-c"], port=port)
+            if is_adb_target(target):
+                # Read prehook (heal forward, wake, dismiss) — no foregrounding.
+                _ensure_phone_transport(port, serial=_resolve_adb_serial_or_raise(target))
+            result = run_agent_browser(
+                ["snapshot", "-i", "-c"], port=port, session=session_for_target(target)
+            )
         except Exception as exc:
             _audit_browser_action(
                 adapter=adapter,
                 incoming=incoming,
                 command="/browser snapshot",
                 workflow_id=workflow_id,
+                target=target,
                 outcome="failed",
                 reason=str(exc),
                 readiness=readiness,
@@ -915,6 +1165,7 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
             incoming=incoming,
             command="/browser snapshot",
             workflow_id=workflow_id,
+            target=target,
             outcome="succeeded" if result.ok else "failed",
             reason=result.output[:1200] if not result.ok else "snapshot completed",
             readiness=readiness,
@@ -936,6 +1187,7 @@ async def handle_browser(adapter: Any, incoming: Any, args: str, *, collect_only
         outcome="failed",
         reason="unknown browser command",
         readiness=readiness,
+        target=target,
     )
     return "Unknown browser command. Use: /browser status, tabs, open <url>, snapshot"
 
@@ -948,6 +1200,23 @@ async def handle_browserops(
     collect_only: bool = False,
 ) -> str:
     """Load Browser Homie context and agent-browser best practices on demand."""
+
+    # PhoneOps F6 (issue #94 class): capability/guide/context all run the
+    # synchronous browser_readiness CDP probes (and the guide loader reads
+    # the installed agent-browser package) — same off-loop treatment as
+    # /browser subcommands so a dead CDP socket can't stall the whole bot.
+    return await asyncio.to_thread(
+        _handle_browserops_sync, adapter, incoming, args, collect_only
+    )
+
+
+def _handle_browserops_sync(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    collect_only: bool,
+) -> str:
+    """Blocking body of /browserops — runs in a worker thread (issue #94 class)."""
 
     from browser_control import browser_readiness
     from browser_ops import (
@@ -5729,6 +5998,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "accounts": handle_accounts,
     "browser": handle_browser,
     "browserops": handle_browserops,
+    "ghost": handle_ghost,
     "linkedin_profile": handle_linkedin_profile,
     "linkedin_post": handle_linkedin_post,
     "linkedin_connect": handle_linkedin_connect,

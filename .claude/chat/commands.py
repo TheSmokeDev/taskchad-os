@@ -65,6 +65,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("accounts", "Show all social media accounts and connection status", "router", "admin"),
     ("browser", "Browser ops - status, tabs, open, snapshot via visible Chrome CDP", "router", "admin"),
     ("browserops", "Browser Homie specialist context - agent-browser guide, readiness, policy", "router", "admin"),
+    ("ghost", "Ghost Phone lifecycle - status, up, down (the Homie's own background Android)", "router", "admin"),
     ("linkedin_profile", "LinkedIn profile browser ops - status or open via visible Chrome CDP", "router", "admin"),
     ("linkedin_post", "Post to LinkedIn via visible Chrome CDP - /linkedin_post <feed_url> | <body> | <approval phrase> (approval is the final pipe segment)", "router", "admin"),
     ("linkedin_connect", "Send a LinkedIn connection request via visible Chrome CDP - /linkedin_connect <profile_url> | <note> | <approval phrase> (approval is the final pipe segment)", "router", "admin"),
@@ -150,7 +151,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Integrations",
         ["email", "pemail", "inbox", "cleanup", "accounts", "post", "calendar", "tasks",
-         "browser", "browserops", "linkedin_profile", "linkedin_post", "linkedin_connect",
+         "browser", "browserops", "ghost", "linkedin_profile", "linkedin_post", "linkedin_connect",
          "x", "reddit", "slack", "sheets", "docs", "drive", "circle"],
     ),
     ("Analytics & Monitoring", ["gsc", "analytics", "signal"]),
@@ -197,6 +198,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "tasks",
     "browser",
     "browserops",
+    "ghost",
     "linkedin",
     "linkedin_profile",
     "linkedin_post",
@@ -249,7 +251,21 @@ CORE_INTENTS: list[tuple[list[str], str, bool]] = [
       "open this website", "use the browser", "work on my linkedin", "work on linkedin",
       "linkedin account", "linkedin operator", "linkedin browser", "boost my linkedin",
       "linkedin content", "linkedin post", "linkedin connection request",
-      "build my linkedin"], "browserops", False),
+      "build my linkedin",
+      # Ghost drive phrases — driving the Homie's own background Android's browser.
+      # Routes to the (ghost-aware) browserops context so the engine knows the
+      # ghost exists and whether it's booted before it acts.
+      "on the ghost", "on my ghost", "check the ghost", "using the ghost",
+      "drive the ghost", "the ghost phone", "ghost browser"], "browserops", False),
+    # Ghost lifecycle (P4.1 A3) — the Homie's own background Android. NL routes to
+    # /ghost, which dispatches with no args => STATUS (read-only). Booting a ~3.5GB
+    # emulator stays an explicit, kill-switchable act (`/ghost up`), never a fuzzy
+    # keyword auto-boot.
+    (["boot the ghost", "boot up the ghost", "start the ghost", "start up the ghost",
+      "spin up the ghost", "wake the ghost", "wake up the ghost", "shut down the ghost",
+      "shutdown the ghost", "kill the ghost", "stop the ghost", "turn off the ghost",
+      "ghost status", "is the ghost up", "is the ghost running", "ghost phone status"],
+     "ghost", False),
     # Reddit operator routes to the workflow-gated /reddit command (research is read-only;
     # comment/post require an explicit approval phrase). Profile-anchored so general
     # "browse the web" phrases stay on browserops above.

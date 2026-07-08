@@ -101,6 +101,78 @@ def load_agent_browser_core_guide(
     }
 
 
+def build_ghost_state() -> dict[str, Any]:
+    """Fail-open ghost snapshot for engine + operator context (P4.1 A3).
+
+    Config-gated: when ``HOMIE_GHOST_ENABLED`` is false we report ``disabled``
+    WITHOUT touching adb (Rule 1 — call-time env read). Every failure maps to a
+    safe dict; ghost awareness must never break the BrowserOps pack. The ghost is
+    the Homie's OWN background Android (a third browser target) — surfacing its
+    state here is what lets the engine know it exists and whether it's up.
+    """
+
+    try:
+        import config  # flat sys.path (chat slice)
+
+        enabled = bool(config.get_ghost_settings().enabled)
+    except Exception:  # pragma: no cover - config import/runtime dependent
+        enabled = False
+
+    if not enabled:
+        return {
+            "enabled": False,
+            "running": False,
+            "booted": False,
+            "serial": None,
+            "avd": None,
+            "cdp_port": None,
+            "cdp_reachable": False,
+            "readiness_status": "disabled",
+            "detail": "HOMIE_GHOST_ENABLED not set — the ghost is off",
+        }
+
+    lifecycle: dict[str, Any] = {}
+    try:
+        import ghost_control
+
+        lifecycle = ghost_control.ghost_status()
+    except Exception as exc:  # pragma: no cover - subprocess/runtime dependent
+        lifecycle = {
+            "running": False,
+            "booted": False,
+            "serial": None,
+            "avd": None,
+            "detail": redact_text_urls(str(exc)),
+        }
+
+    readiness: dict[str, Any] = {}
+    try:
+        from browser_control import ghost_readiness
+
+        readiness = ghost_readiness()
+    except Exception as exc:  # pragma: no cover - subprocess/runtime dependent
+        readiness = {
+            "status": "attention",
+            "cdp_port": None,
+            "cdp_reachable": False,
+            "reason": redact_text_urls(str(exc)),
+        }
+
+    return {
+        "enabled": True,
+        "running": bool(lifecycle.get("running")),
+        "booted": bool(lifecycle.get("booted")),
+        "serial": lifecycle.get("serial"),
+        "avd": lifecycle.get("avd"),
+        "cdp_port": readiness.get("cdp_port"),
+        "cdp_reachable": bool(readiness.get("cdp_reachable")),
+        "readiness_status": readiness.get("status", "attention"),
+        "detail": redact_text_urls(
+            str(lifecycle.get("detail") or readiness.get("reason") or "")
+        ),
+    }
+
+
 def build_browserops_capability_pack(
     user_text: str = "",
     *,
@@ -143,6 +215,7 @@ def build_browserops_capability_pack(
         "request": redact_text_urls(user_text.strip()),
         "readiness": _safe_readiness(readiness),
         "stream": _safe_stream(stream),
+        "ghost": build_ghost_state(),
         "guide": guide,
         "rules": list(_CORE_RULES),
         "linkedin_operator": {
@@ -183,6 +256,18 @@ def format_browserops_capabilities(pack: dict[str, Any]) -> str:
         f"port={stream.get('port') or 'n/a'}"
     )
     lines.append(f"  guide: {guide.get('source', _GUIDE_COMMAND)} ({guide.get('reason', 'unknown')})")
+    ghost = pack.get("ghost", {})
+    if ghost:
+        if ghost.get("enabled"):
+            lines.append(
+                "  ghost: "
+                f"enabled | running={bool(ghost.get('running'))} booted={bool(ghost.get('booted'))} "
+                f"serial={ghost.get('serial') or 'n/a'} avd={ghost.get('avd') or 'n/a'} "
+                f"cdp={ghost.get('cdp_port') or 'n/a'} reachable={bool(ghost.get('cdp_reachable'))} "
+                "(boot with /ghost up)"
+            )
+        else:
+            lines.append(f"  ghost: disabled ({ghost.get('detail', 'HOMIE_GHOST_ENABLED not set')})")
     lines.append("")
     lines.append("*Hard Rules*")
     for rule in pack.get("rules", []):
@@ -230,6 +315,7 @@ def build_browserops_prefetch_context(user_text: str = "") -> str:
     readiness = pack["readiness"]
     stream = pack["stream"]
     guide = pack["guide"]
+    ghost = pack.get("ghost", {})
 
     lines = [
         "## BrowserOps Specialist Context",
@@ -246,6 +332,24 @@ def build_browserops_prefetch_context(user_text: str = "") -> str:
         f"- visible_guard: {readiness.get('visible_guard')}",
         f"- tab_count: {readiness.get('tab_count')}",
         f"- reason: {readiness.get('reason')}",
+        "",
+        "Ghost Phone (the Homie's OWN background Android — a third browser target,",
+        "structurally isolated from the operator's personal phone):",
+        f"- enabled: {ghost.get('enabled')}",
+        f"- running: {ghost.get('running')}",
+        f"- booted: {ghost.get('booted')}",
+        f"- serial: {ghost.get('serial')}",
+        f"- avd: {ghost.get('avd')}",
+        f"- cdp_port: {ghost.get('cdp_port')}",
+        f"- cdp_reachable: {ghost.get('cdp_reachable')}",
+        f"- detail: {ghost.get('detail')}",
+        (
+            "- To use it: it must be booted first (`/ghost up`, ~3.5GB RAM); then drive "
+            "its Chrome with `/browser <cmd> ghost`. If the operator asks to 'check X "
+            "on the ghost' and it is not booted, boot it first."
+            if ghost.get("enabled")
+            else "- The ghost is disabled; set HOMIE_GHOST_ENABLED=true to use it."
+        ),
         "",
         "Current observation stream:",
         f"- enabled: {stream.get('enabled')}",
@@ -275,6 +379,8 @@ def build_browserops_prefetch_context(user_text: str = "") -> str:
             "- `/browser tabs` for URL-redacted tab inventory.",
             "- `/browser open <absolute http(s) url>` for navigation.",
             "- `/browser snapshot` for interactive text snapshot refs.",
+            "- `/browser <cmd> ghost` to drive the ghost's browser (once booted).",
+            "- `/ghost status | up | down` to check/boot/kill the ghost Android.",
             "- `/linkedin_profile status` for LinkedIn browser readiness.",
             "- `/linkedin` for LinkedIn post drafting through the content engine.",
             "- `/linkedin_profile edit` is write-capable and remains default-denied/not implemented.",

@@ -502,6 +502,124 @@ def status(json_mode):
         _print_profile_lifecycle_contract(lifecycle)
 
 
+@main.group()
+def ghost():
+    """Ghost Phone lifecycle — the Homie's own background Android (P4.1)."""
+    pass
+
+
+@ghost.command("status")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def ghost_status_cmd(json_mode):
+    """Physical ghost state (adb devices + boot_completed); never boots."""
+    ensure_directories()
+    import ghost_control
+
+    st = ghost_control.ghost_status()
+    if json_mode:
+        print(json_mod.dumps(st, indent=2))
+        return
+    running, booted = bool(st.get("running")), bool(st.get("booted"))
+    click.echo(
+        f"ghost: running={running} booted={booted} "
+        f"serial={st.get('serial')} avd={st.get('avd')}"
+    )
+    if st.get("detail"):
+        click.echo(f"  {st['detail']}")
+
+
+@ghost.command("up")
+def ghost_up_cmd():
+    """Boot the ghost (headless AVD, or connect a spare) + forward CDP."""
+    ensure_directories()
+    import config
+    import ghost_control
+    from security import kill_switches
+
+    if not config.get_ghost_settings().enabled:
+        click.echo("Ghost is disabled — set HOMIE_GHOST_ENABLED=true.")
+        raise SystemExit(1)
+    try:
+        kill_switches.requireEnabled("ghost", caller="thehomie ghost up")
+    except kill_switches.KillSwitchDisabled:
+        click.echo("Ghost boot is disabled by kill-switch (HOMIE_KILLSWITCH_GHOST=disabled).")
+        raise SystemExit(1)
+    result = ghost_control.ensure_ghost_running()
+    click.echo(f"ghost up: {result.get('status')} — {result.get('detail', '')}")
+    raise SystemExit(0 if result.get("ok") else 1)
+
+
+@ghost.command("down")
+def ghost_down_cmd():
+    """Shut the ghost down (adb emu kill for an AVD) + reclaim RAM."""
+    ensure_directories()
+    import ghost_control
+
+    result = ghost_control.ghost_shutdown()
+    click.echo(f"ghost down: {result.get('status')} — {result.get('detail', '')}")
+    raise SystemExit(0 if result.get("ok") else 1)
+
+
+# Expo Go — the AVD is the named Homie mobile test device (mobile/AGENTS.md).
+_EXPO_GO_PACKAGE = "host.exp.exponent"
+
+
+@ghost.command("test-app")
+@click.option("--package", "package", default=_EXPO_GO_PACKAGE, show_default=True,
+              help="App package to launch on the ghost (default: Expo Go).")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def ghost_test_app_cmd(package, json_mode):
+    """Launch the Homie's OWN mobile app on the ghost (Expo Go vs local Metro).
+
+    The ghost is the framework's self-test rig: boot it (`thehomie ghost up`),
+    start Metro (`cd mobile && npx expo start`), then this launches Expo Go on
+    the ghost so the Homie can smoke its own app on its own phone.
+    """
+    ensure_directories()
+    import config
+    import ghost_control
+    import ghost_device
+    from security import kill_switches
+
+    def _emit(payload: dict, ok: bool) -> None:
+        if json_mode:
+            print(json_mod.dumps(payload, indent=2))
+        raise SystemExit(0 if ok else 1)
+
+    if not config.get_ghost_settings().enabled:
+        if not json_mode:
+            click.echo("Ghost is disabled — set HOMIE_GHOST_ENABLED=true.")
+        _emit({"ok": False, "reason": "ghost_disabled"}, False)
+    try:
+        kill_switches.requireEnabled("ghost", caller="thehomie ghost test-app")
+    except kill_switches.KillSwitchDisabled:
+        if not json_mode:
+            click.echo("Ghost is disabled by kill-switch (HOMIE_KILLSWITCH_GHOST=disabled).")
+        _emit({"ok": False, "reason": "kill_switch"}, False)
+
+    st = ghost_control.ghost_status()
+    if not (st.get("running") and st.get("booted")):
+        if not json_mode:
+            click.echo("Ghost is not booted — run `thehomie ghost up` first.")
+        _emit({"ok": False, "reason": "ghost_not_booted", "status": st}, False)
+
+    try:
+        launched = ghost_device.ghost_app_launch(package)
+    except Exception as exc:  # capability denied / bad package / not installed
+        if not json_mode:
+            click.echo(f"Could not launch {package} on the ghost: {exc}")
+            if package == _EXPO_GO_PACKAGE:
+                click.echo("Install Expo Go first: `thehomie ghost` viewer -> Install APK, "
+                           "or `adb -s <serial> install expo-go.apk`.")
+        _emit({"ok": False, "reason": "launch_failed", "error": str(exc)}, False)
+
+    if not json_mode:
+        click.echo(f"Launched {launched['package']} on the ghost.")
+        click.echo("Next: in `mobile/`, run `npx expo start` (Metro on :8081), then in Expo Go on "
+                   "the ghost open the dev server (it shares the emulator's host network).")
+    _emit({"ok": True, **launched}, True)
+
+
 @main.group("live-safety")
 def live_safety_group():
     """Inspect the live agent/factory opt-in contract."""
@@ -672,6 +790,7 @@ def doctor():
     click.echo(f"Cognition: {'active' if report.cognition_available else 'unavailable'}")
     _print_cognitive_loop(report.cognitive_loop)
     _print_browser_readiness(report.browser)
+    _print_ghost_state(report.ghost)
     _print_live_execution(report.live_execution)
     click.echo(f"Sessions: {report.sessions_active} active")
     if report.clear_lifecycle_recent_failures:
@@ -1833,6 +1952,7 @@ def _print_status_human(report):
         click.echo(f"  {name}: {status}")
 
     _print_browser_readiness(report.browser)
+    _print_ghost_state(report.ghost)
 
     click.echo(f"\nMemory: {report.memory_doc_count} docs ({report.memory_embedding_status})")
     _print_cognitive_loop(report.cognitive_loop)
@@ -1899,6 +2019,24 @@ def _print_browser_readiness(browser):
         click.echo("")
         click.echo("Browser: attention")
         click.echo(f"  Attention: {exc}")
+
+
+def _print_ghost_state(ghost):
+    """Render the ghost (the Homie's own background Android) snapshot."""
+    if not ghost:
+        return
+    click.echo("")
+    if not ghost.get("enabled"):
+        click.echo(f"Ghost: disabled ({ghost.get('detail') or 'HOMIE_GHOST_ENABLED not set'})")
+        return
+    click.echo(
+        "Ghost: "
+        f"running={bool(ghost.get('running'))} booted={bool(ghost.get('booted'))} "
+        f"serial={ghost.get('serial') or 'n/a'} avd={ghost.get('avd') or 'n/a'} "
+        f"cdp={ghost.get('cdp_port') or 'n/a'} reachable={bool(ghost.get('cdp_reachable'))}"
+    )
+    if ghost.get("detail"):
+        click.echo(f"  {ghost['detail']}")
 
 
 def _print_cognitive_loop(cognitive_loop):
@@ -2971,9 +3109,15 @@ def profile_list(json_mode):
             for i in infos:
                 marker = "*" if i.is_default else " "
                 bot = "running" if i.bot_running else "idle"
+                inv = (
+                    ""
+                    if i.inventory_ok
+                    else f" inv=BROKEN({i.inventory_missing} missing)"
+                )
                 click.echo(
                     f"  {marker} {i.name:<16} [{bot}]  {i.path}  "
                     f"skills={i.skill_count} env={'yes' if i.has_env else 'no'}"
+                    f"{inv}"
                 )
     except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
         click.echo(f"Error: {exc}", err=True)
@@ -2986,7 +3130,11 @@ def profile_list(json_mode):
 def profile_show(name, json_mode):
     """Show details for a single profile."""
     try:
-        from personas.lifecycle import LifecycleError, show_profile
+        from personas.lifecycle import (
+            LifecycleError,
+            inspect_profile_inventory,
+            show_profile,
+        )
 
         info = show_profile(name)
         if json_mode:
@@ -3000,6 +3148,36 @@ def profile_show(name, json_mode):
             click.echo(f"  Skills:      {info.skill_count}")
             if info.alias_path is not None:
                 click.echo(f"  Alias:       {info.alias_path}")
+            if info.is_default:
+                pass  # install-dir layout — inventory contract N/A
+            elif info.inventory_ok:
+                click.echo("  Inventory:   ok")
+            else:
+                click.echo(
+                    f"  Inventory:   BROKEN ({info.inventory_missing} missing)"
+                )
+            # Detail lines (missing names + orphans) — lazy inspect, only
+            # for named profiles; fail-soft so show never breaks on it.
+            if not info.is_default:
+                try:
+                    rep = inspect_profile_inventory(name)
+                except Exception:  # noqa: BLE001
+                    rep = None
+                if rep is not None and not rep.healthy:
+                    for label, items in (
+                        ("Missing dirs", rep.missing_profile_dirs),
+                        ("Missing memory dirs", rep.missing_memory_dirs),
+                        ("Missing identity files", rep.missing_identity_files),
+                    ):
+                        if items:
+                            click.echo(f"    {label}: {', '.join(items)}")
+                    click.echo(f"    Fix: thehomie profile repair {name}")
+                if rep is not None and rep.orphaned_root_identity_files:
+                    click.echo(
+                        "    Orphaned root identity files (loader never "
+                        "reads these; move into memory/ manually): "
+                        f"{', '.join(rep.orphaned_root_identity_files)}"
+                    )
     except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
@@ -3337,6 +3515,113 @@ def profile_env_sync(name, all_profiles, write, matrix_path, master_env_path, js
         FileExistsError,
         FileNotFoundError,
     ) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+def _inventory_report_to_dict(report) -> dict:
+    """Serialize an InventoryReport dataclass for --json output."""
+    import dataclasses
+    d = dataclasses.asdict(report)
+    for k, v in list(d.items()):
+        if isinstance(v, Path):
+            d[k] = str(v)
+    d["healthy"] = report.healthy
+    d["missing_count"] = report.missing_count
+    return d
+
+
+@profile.command("repair")
+@click.argument("name", required=False)
+@click.option("--all", "all_profiles", is_flag=True, default=False, help="Repair every named profile.")
+@click.option("--check", is_flag=True, default=False, help="Inspect only — no writes. Exit 1 if violations found.")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_repair(name, all_profiles, check, json_mode):
+    """Repair a profile's memory inventory (seed-if-missing; never overwrites).
+
+    Idempotent: a healthy profile is a no-op (exit 0). Orphaned root
+    identity files are reported, never moved. Issue #109.
+    """
+    if name and all_profiles:
+        raise click.UsageError("Pass either NAME or --all, not both.")
+
+    try:
+        from personas.lifecycle import (
+            LifecycleError,
+            ensure_profile_inventory,
+            inspect_profile_inventory,
+            list_profiles,
+        )
+
+        if all_profiles:
+            targets = [info.name for info in list_profiles() if not info.is_default]
+        elif name:
+            targets = [name]
+        else:
+            raise click.UsageError("Pass NAME or --all.")
+
+        op = inspect_profile_inventory if check else ensure_profile_inventory
+        # Per-target guard (personas-owner review): a single un-repairable
+        # dir (e.g. a hand-created reserved-name folder under profiles/)
+        # must never abort the batch — skip, record, keep repairing the
+        # rest. Same posture as the doctor loop in diagnostics.py.
+        reports = []
+        failures: list[tuple[str, Exception]] = []
+        for target in targets:
+            try:
+                reports.append(op(target))
+            except (
+                LifecycleError,
+                ValueError,
+                FileExistsError,
+                FileNotFoundError,
+            ) as exc:
+                failures.append((target, exc))
+
+        if json_mode:
+            payload = [_inventory_report_to_dict(r) for r in reports]
+            payload.extend(
+                {"name": target, "error": str(exc)} for target, exc in failures
+            )
+            print(json_mod.dumps(payload, indent=2))
+        else:
+            mode = "CHECK" if check else "REPAIR"
+            click.echo(f"Profile inventory {mode}")
+            for rep in reports:
+                if rep.healthy:
+                    status = "ok"
+                elif check:
+                    status = f"BROKEN ({rep.missing_count} missing)"
+                else:
+                    dirs_created = len(rep.missing_profile_dirs) + len(
+                        rep.missing_memory_dirs
+                    )
+                    status = (
+                        f"repaired: created {dirs_created} dir(s), "
+                        f"seeded {len(rep.missing_identity_files)} file(s)"
+                    )
+                click.echo(f"  {rep.name:<16} {status}")
+                if not rep.healthy:
+                    for label, items in (
+                        ("missing dirs", rep.missing_profile_dirs),
+                        ("missing memory dirs", rep.missing_memory_dirs),
+                        ("missing identity files", rep.missing_identity_files),
+                    ):
+                        if items:
+                            click.echo(f"      {label}: {', '.join(items)}")
+                if rep.orphaned_root_identity_files:
+                    click.echo(
+                        "      orphaned root identity files (never "
+                        "auto-moved; move into memory/ manually): "
+                        f"{', '.join(rep.orphaned_root_identity_files)}"
+                    )
+
+        for target, exc in failures:
+            click.echo(f"Error: {target}: {exc}", err=True)
+
+        if failures or (check and any(not r.healthy for r in reports)):
+            sys.exit(1)
+    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 

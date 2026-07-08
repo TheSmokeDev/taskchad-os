@@ -298,6 +298,11 @@ Hard rules:
 - Do not let heartbeat execute LinkedIn writes until a dedicated bounded-autopilot
   PRP adds limits, cooldowns, opt-in policy, tests, and audit proof.
 - Keep browser state deployment-local.
+- PhoneOps (P3.0): the adb forward exposes the phone's *personal* Chrome
+  profile (all logged-in sessions) on `127.0.0.1:18223` to ANY local PC
+  process — the workflow gates and audit rows cover only the dashboard API
+  path, not arbitrary local processes. Keep `HOMIE_PHONEOPS_ENABLED` off when
+  not actively driving the phone.
 
 Chrome 136+ note:
 

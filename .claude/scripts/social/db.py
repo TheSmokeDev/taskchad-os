@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS social_post_queue (
     post_url TEXT,
     rejection_reason TEXT,
     error TEXT,
-    audit_id TEXT
+    audit_id TEXT,
+    external_ref TEXT,
+    media_path TEXT,
+    media_type TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_social_post_status ON social_post_queue(status);
 CREATE INDEX IF NOT EXISTS idx_social_post_channel ON social_post_queue(channel);
@@ -56,6 +59,21 @@ class SocialPostDB:
         conn = self._connect()
         try:
             conn.executescript(_SCHEMA_SQL)
+            # Idempotent migration for pre-external_ref databases (the CREATE
+            # above is IF NOT EXISTS, so existing tables keep their old shape).
+            try:
+                conn.execute(
+                    "ALTER TABLE social_post_queue ADD COLUMN external_ref TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            for _col in ("media_path", "media_type"):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE social_post_queue ADD COLUMN {_col} TEXT"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
             conn.commit()
         finally:
             conn.close()
@@ -66,8 +84,8 @@ class SocialPostDB:
             cur = conn.execute(
                 """INSERT INTO social_post_queue
                    (channel, status, title, body, voice_profile, topic_source,
-                    created_at, scheduled_for, audit_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    created_at, scheduled_for, audit_id, media_path, media_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     post.channel,
                     post.status,
@@ -78,6 +96,8 @@ class SocialPostDB:
                     post.created_at,
                     post.scheduled_for,
                     post.audit_id,
+                    post.media_path,
+                    post.media_type,
                 ),
             )
             conn.commit()
@@ -155,6 +175,33 @@ class SocialPostDB:
     ) -> bool:
         sets = ["status = ?"]
         params: list[str | int | None] = [new_status]
+        for col, val in fields.items():
+            sets.append(f"{col} = ?")
+            params.append(val)
+        params.append(post_id)
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                f"UPDATE social_post_queue SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def update_fields(self, post_id: int, **fields: str | None) -> bool:
+        """Update non-status columns (reconcile fills post_url etc.).
+
+        Status changes MUST go through the service transition table — this
+        helper refuses them.
+        """
+        if not fields:
+            return False
+        if "status" in fields:
+            raise ValueError("update_fields cannot change status — use update_status")
+        sets = []
+        params: list[str | int | None] = []
         for col, val in fields.items():
             sets.append(f"{col} = ?")
             params.append(val)

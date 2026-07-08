@@ -193,6 +193,51 @@ def _profile_execution_context(persona_id: str) -> _ProfileExecutionContext:
         return _ProfileExecutionContext(error=_redact(str(exc)))
 
     paths = personas.get_persona_paths(canonical_id)
+
+    # Issue #109 boot guard — a profile with no memory/ dir would fail open
+    # to an EMPTY profile_context below (read_file_safe returns "" — no
+    # raise, no log) and the persona answers with zero knowledge, silently.
+    # Happy path is ONE stat; the repair loop only runs when broken. Guard
+    # failure NEVER kills the turn (fail-open floor = today's behavior),
+    # but the violation stays on disk where `thehomie doctor` reports it.
+    if not paths["memory"].is_dir():
+        logger.error(
+            "cabinet persona %s memory dir missing at %s; attempting "
+            "inventory repair (issue #109)",
+            _redact(canonical_id),
+            paths["memory"],
+        )
+        try:
+            # Pre-check via is_disabled (not requireEnabled) so a broken
+            # profile doesn't spam refusal counters/audit rows every turn.
+            if kill_switches.is_disabled("persona_mutation"):
+                logger.warning(
+                    "inventory repair skipped for %s: persona_mutation "
+                    "kill-switch disabled (turn proceeds with empty "
+                    "profile context)",
+                    _redact(canonical_id),
+                )
+            else:
+                report = _persona_lifecycle.ensure_profile_inventory(
+                    canonical_id
+                )
+                logger.warning(
+                    "inventory repair for %s: created %d dir(s), seeded "
+                    "%d identity file(s)",
+                    _redact(canonical_id),
+                    len(report.missing_profile_dirs)
+                    + len(report.missing_memory_dirs),
+                    len(report.missing_identity_files),
+                )
+        except Exception as exc:  # noqa: BLE001 — guard never kills a turn
+            logger.error(
+                "inventory repair failed for %s: %s; run `thehomie "
+                "profile repair %s` (doctor will surface the violation)",
+                _redact(canonical_id),
+                _redact(str(exc)),
+                _redact(canonical_id),
+            )
+
     try:
         profile_context = build_session_start_context(
             source="cabinet_persona_turn",

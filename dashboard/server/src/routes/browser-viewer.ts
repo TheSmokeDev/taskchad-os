@@ -22,6 +22,28 @@ export const browserViewerRoute = new Hono();
 
 type JsonRecord = Record<string, unknown>;
 
+// P3.0 PhoneOps + P4.0 Ghost — the browser target dimension. The proxy
+// previously hardcoded every framework path, silently DROPPING a ?target=phone
+// query and driving the DESKTOP (a wrong-target hazard, not just a bug). Every
+// call site below threads the validated target RAW; Python re-validates the
+// enum (desktop | phone | ghost), gates phone behind HOMIE_PHONEOPS_ENABLED and
+// ghost behind HOMIE_GHOST_ENABLED, and echoes the executed target back so
+// clients can assert it. Because resolveTarget forwards the raw value, adding a
+// target (ghost) needs ZERO Hono change — Python is the sole enum authority.
+
+function resolveTarget(c: import('hono').Context): string | null {
+  // Pass the RAW value through — Python's enum validator is the single
+  // authority (case-tolerant, 400s unknowns). Coercing here would silently
+  // rewrite `target=Phone`/garbage to desktop: the wrong-target hazard again.
+  const raw = c.req.query('target');
+  return raw === undefined || raw === '' ? null : raw;
+}
+
+function withTarget(path: string, target: string | null): string {
+  // Absent target stays an absent query — byte-identical M12 desktop path.
+  return target === null ? path : `${path}?target=${encodeURIComponent(target)}`;
+}
+
 function isRecord(value: unknown): value is JsonRecord {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -59,22 +81,33 @@ function withDirectStreamUrl(c: import('hono').Context, payload: unknown): unkno
 }
 
 browserViewerRoute.get('/api/browser-viewer/status', async (c) => {
-  const result = await authedFetchJson('/api/browser-viewer/status');
+  const result = await authedFetchJson(withTarget('/api/browser-viewer/status', resolveTarget(c)));
   return c.json(withDirectStreamUrl(c, result.json) as JsonRecord, result.status as 200);
 });
 
 browserViewerRoute.get('/api/browser-viewer/screenshot', async (c) => {
-  const result = await authedFetchBinary('/api/browser-viewer/screenshot', {
-    headers: { Accept: 'image/png' },
-  });
+  const result = await authedFetchBinary(
+    withTarget('/api/browser-viewer/screenshot', resolveTarget(c)),
+    {
+      headers: { Accept: 'image/png' },
+    },
+  );
   return c.body(result.body, result.status as 200, {
     'Content-Type': result.headers.get('content-type') ?? 'image/png',
     'Cache-Control': result.headers.get('cache-control') ?? 'no-store',
+    'X-Browser-Target': result.headers.get('x-browser-target') ?? 'desktop',
   });
 });
 
 async function forwardStreamMutation(c: import('hono').Context, path: string): Promise<Response> {
-  const result = await authedFetch(path, { method: 'POST' });
+  // Query target -> Python body field (POST contract), raw value passed
+  // through so Python validates. Absent -> empty body (M12 shape).
+  const target = resolveTarget(c);
+  const result = await authedFetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(target === null ? {} : { target }),
+  });
   const json = result.json();
   if (isRecord(json)) {
     return c.json(withDirectStreamUrl(c, json) as JsonRecord, result.status as 200);
@@ -96,7 +129,9 @@ browserViewerRoute.post('/api/browser-viewer/stream/disable', async (c) =>
 // validation, and audit rows all live in Python (dashboard_api.py).
 
 browserViewerRoute.get('/api/browser-viewer/elements', async (c) => {
-  const result = await authedFetchJson('/api/browser-viewer/elements');
+  const result = await authedFetchJson(
+    withTarget('/api/browser-viewer/elements', resolveTarget(c)),
+  );
   return c.json(result.json as JsonRecord, result.status as 200);
 });
 
@@ -129,7 +164,17 @@ const FRAME_TICK_MS = 250;
 const KEEPALIVE_TICKS = 60; // ~15s of idle -> ping
 
 browserViewerRoute.get('/api/browser-viewer/stream/sse', async (c) => {
-  const statusRes = await authedFetchJson('/api/browser-viewer/status');
+  // The relay's internal status fetch must ride the SAME target as the
+  // client's stream request — a hardcoded path here would check the desktop
+  // stream state while relaying for a phone viewer.
+  const statusRes = await authedFetchJson(
+    withTarget('/api/browser-viewer/status', resolveTarget(c)),
+  );
+  // Surface Python's own verdict (400 unknown target / 403 PhoneOps off)
+  // instead of mislabeling it as a stream-state problem.
+  if (statusRes.status === 400 || statusRes.status === 403) {
+    return c.json(statusRes.json as JsonRecord, statusRes.status);
+  }
   const statusJson = isRecord(statusRes.json) ? statusRes.json : null;
   const stream = statusJson && isRecord(statusJson.stream) ? statusJson.stream : null;
   const port = stream && typeof stream.port === 'number' ? stream.port : 0;

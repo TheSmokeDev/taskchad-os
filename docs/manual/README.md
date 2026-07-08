@@ -66,12 +66,13 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Persona Capability Matrix | Active baseline | [persona-capability-matrix](features/persona-capability-matrix.md) | `thehomie profile env-sync`, Discord persona channels, Cabinet personas |
 | Persona Team (AI Employee Company) | Active baseline — the operating model tying the persona layers together | [persona-team](features/persona-team.md) | `thehomie profile create\|env-sync\|learning`, `/agents`, persona channels |
 | Persona Learning Loop | Shipped, opt-in per profile, no-logs first-run fixed | [persona-learning-loop](features/persona-learning-loop.md) | `thehomie profile learning`, scheduled belief extraction |
+| Persona Memory Isolation And Inventory Repair | Shipped 2026-07-07 — guaranteed per-persona memory vault, repair + doctor + boot guards | [persona-memory-isolation](features/persona-memory-isolation.md) | `thehomie profile repair`, `thehomie doctor`, boot self-heal |
 | Convoy, Work Queue, And Mailbox | Active baseline | [convoy-work-mailbox](features/convoy-work-mailbox.md) | `/convoy`, `/work`, mailbox APIs |
 | Team Operations And Executor | Active baseline | [team-operations-executor](features/team-operations-executor.md) | `/teams`, team APIs |
 | Tenant Isolation v0 | Phase A+B shipped, enforcement default-OFF | [tenant-isolation-v0](features/tenant-isolation-v0.md) | `thehomie tenant`, `HOMIE_TENANT_ENFORCEMENT`, orchestration/dashboard API |
 | Archon Repo Dispatch | Public-safe pattern and templates | [archon-repo-dispatch](features/archon-repo-dispatch.md) | `thehomie profile init-archon`, `thehomie archon ...`, `templates/repository-dispatch/` |
 | Dashboard Mobile Access | Shipped, live-proven | [dashboard-mobile-access](features/dashboard-mobile-access.md) | `/mobile` |
-| Homie Mobile App | Shipped (v1) | [homie-mobile-app](features/homie-mobile-app.md) | Capacitor iOS/Android over the dashboard |
+| Homie Mobile App | Shipped (v2 native, M0–M12 + PhoneOps P3.0, device-proven) | [homie-mobile-app](features/homie-mobile-app.md) | `mobile/` Expo app over the Hono proxy |
 | Team Room | V3 shipped, live-proven | [team-room](features/team-room.md) | `/teamroom`, `/teams` |
 | Autonomous Team Scheduler | Shipped, Telegram-proven | [autonomous-team-scheduler](features/autonomous-team-scheduler.md) | `/teamtick`, `/teams` |
 | BrowserOps + Browser Viewer | Shipped, live-proven | [browserops-browser-viewer](features/browserops-browser-viewer.md) | `/browserops`, `/browser` |
@@ -98,10 +99,12 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Social Post Pipeline | Shipped (#80), default-denied, operator-gated | [social-post-pipeline](features/social-post-pipeline.md) | `/social` (draft/approve/post/schedule/cadence) |
 | Skill-From-Experience Loop | Shipped, default-denied, operator-gated | [skill-from-experience-loop](features/skill-from-experience-loop.md) | `/skills` (review/promote/reject) |
 | Social Cadence Draft Delivery | Shipped, default-denied, operator-gated per tap | [social-cadence-draft-delivery](features/social-cadence-draft-delivery.md) | Telegram draft cards (Approve/Edit/Reject), `/social` |
+| Social Integrations (Meta Graph + Postiz + Social Tab) | Shipped — FB/IG direct via Meta Graph, Postiz for the rest | [social-postiz-integration](features/social-postiz-integration.md) | dashboard `/social` tab, `social/channels.yaml`, `social/postiz_canary.py` |
 | Intent-PRD and Clutch Review | Shipped (#78), merged | [intent-prd-and-clutch](features/intent-prd-and-clutch.md) | `create-prd`, `archon workflow run archon-clutch` |
 | Context-Economy DX | Shipped (#66), merged | [context-economy-dx](features/context-economy-dx.md) | `/prime-*`, `brownfield-day-1`, `vertical-slice-audit` |
 | Repositories System | Shipped (#63), merged | [repositories-system](features/repositories-system.md) | `thehomie repositories status\|validate` |
 | Archon Workflows | Active baseline, autonomous pipeline live-proven | [archon-workflows](features/archon-workflows.md) | `archon workflow list\|run\|status` |
+| CLI Update Check | Active baseline, live-proven | [cli-update-check](features/cli-update-check.md) | `thehomie update`, `thehomie --version`, `scripts/release.sh` |
 
 ### Existing Deep Public Manuals
 
@@ -109,6 +112,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 |---|---|
 | [The Co-Founder Manual](../cofounder-manual.md) | The org chart end to end — the Homie as the co-founder on every surface, the five heartbeat loops (agenda → approval → execution → reporting → checkout), delegation grants, safety model, the turn-it-on runbook, failure modes, architecture map. |
 | [The Living Self Manual](../the-living-self-manual.md) | The cognitive system end to end — sense, form beliefs, hold against conflict, think before speaking, earn convictions. Operator runbook + architecture + knobs + verification. Ties together Heartbeat Runtime, Episodes, and Session Opening Brief. |
+| [The Homie Mobile Manual](../homie-mobile-manual.md) | The phone app end to end — architecture, pairing, the chat cockpit (tools/model/effort/stop/steer), personas and War Room, sessions/library/gauges, desktop browser drive, PhoneOps (driving the phone's own Chrome: adb transport, freezer physics, act policy), safety model, failure modes, validation map. |
 | [BrowserOps Agent Browser Manual](../browserops-agent-browser-manual.md) | Deep BrowserOps operating contract, safety policy, validation, and failure modes. |
 | [Social-Write Executor Manual](../social-write-executor-manual.md) | Deep operating contract for operator-approved LinkedIn and Reddit writes: the isolated-approval gate, the executor/driver split, audit policy, platform notes, and validation. |
 | [Cabinet Room Manual](../cabinet-room-manual.md) | Deep Cabinet room-state, dashboard, and participant-control context. |

@@ -163,6 +163,22 @@ def test_missing_agenda_is_friendly(tmp_path, services):
     assert "No machine-readable agenda" in result.message
 
 
+def test_run_falls_back_to_latest_agenda_in_gap_window(
+    tmp_path, services, homie_root
+):
+    """The midnight gap symmetry: 'run 3' at 00:50 must target the SAME
+    agenda the digest is showing (yesterday's), not a not-yet-existing
+    today. Explicit --date still wins."""
+    _grant_persona(homie_root, "sales", ["YourProduct"])
+    agenda_path = _agenda(tmp_path, [_item()])  # dated 2026-07-05
+    result = _run(
+        tmp_path, services, now=datetime(2026, 7, 6, 0, 50)  # past midnight
+    )
+    assert result.outcome == delegate_mod.OUTCOME_SENT
+    data = json.loads(agenda_path.read_text(encoding="utf-8"))
+    assert data["items"][0]["status"] == "delegated"
+
+
 def test_bad_line_number(tmp_path, services):
     _agenda(tmp_path, [_item(n=1)])
     result = _run(tmp_path, services, n=7)

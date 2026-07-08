@@ -26,6 +26,8 @@ import { StandupConfig } from '@/pages/StandupConfig';
 import { AgentFiles } from '@/pages/AgentFiles';
 import { CapabilityGateway } from '@/pages/CapabilityGateway';
 import { BrowserViewer } from '@/pages/BrowserViewer';
+import { GhostViewer } from '@/pages/GhostViewer';
+import { Social } from '@/pages/Social';
 import { MobileAccess } from '@/pages/MobileAccess';
 import { DEFAULT_ROUTE } from '@/lib/routes';
 
@@ -74,6 +76,8 @@ export function App() {
           <Route path="/standup"><StandupConfig /></Route>
           <Route path="/capabilities"><CapabilityGateway /></Route>
           <Route path="/browser"><BrowserViewer /></Route>
+          <Route path="/ghost"><GhostViewer /></Route>
+          <Route path="/social"><Social /></Route>
           <Route path="/mobile"><MobileAccess /></Route>
           <Route path="/settings"><Settings /></Route>
 

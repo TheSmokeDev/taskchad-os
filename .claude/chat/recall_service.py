@@ -226,7 +226,7 @@ async def recall(
 
     # Explicit keyword mode — always available, no cognition needed
     if search_mode == SearchMode.KEYWORD:
-        result = _keyword_only_recall(query, caller, max_results)
+        result = _keyword_only_recall(query, caller, max_results, memory_dir=memory_dir)
         _persist_log(result.log)
         _update_span(result.log, result.results)
         return result
@@ -257,14 +257,26 @@ async def recall(
 
     else:
         # FALLBACK: keyword-only when cognition unavailable
-        result = _keyword_only_recall(query, caller, max_results)
+        result = _keyword_only_recall(query, caller, max_results, memory_dir=memory_dir)
         _persist_log(result.log)
         _update_span(result.log, result.results)
         return result
 
 
-def _keyword_only_recall(query: str, caller: str, max_results: int) -> RecallResponse:
-    """Fallback when cognition module unavailable or search_mode=KEYWORD."""
+def _keyword_only_recall(
+    query: str,
+    caller: str,
+    max_results: int,
+    memory_dir: Path | None = None,
+) -> RecallResponse:
+    """Fallback when cognition module unavailable or search_mode=KEYWORD.
+
+    ``memory_dir`` selects the per-vault DB (Rule 2: physical on-disk index).
+    Without it a persona-scoped recall in KEYWORD / cognition-unavailable mode
+    would silently read the MAIN vault DB — the same cross-vault pollution the
+    AUTO pipeline already avoids by threading ``memory_dir`` down to
+    ``search_keyword``.
+    """
     start = time.monotonic()
 
     log = _make_log(tier="fallback", caller=caller, search_mode="keyword")
@@ -273,7 +285,7 @@ def _keyword_only_recall(query: str, caller: str, max_results: int) -> RecallRes
         from config import RECALL_MIN_SCORE
         from memory_search import search_keyword
 
-        raw_results = search_keyword(query, limit=max_results)
+        raw_results = search_keyword(query, limit=max_results, memory_dir=memory_dir)
         raw_results = [r for r in raw_results if r.score >= RECALL_MIN_SCORE]
 
         # Convert SearchResult → uniform result type

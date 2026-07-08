@@ -38,6 +38,18 @@ export const ROUTE_MANIFEST: readonly string[] = [
   // jarvis.ts
   '/api/jarvis/status',
 
+  // social.ts — Postiz publishing lane + approval queue (draft-only compose;
+  // publish stays behind the gated Python dispatch)
+  '/api/social/status',
+  '/api/social/channels',
+  '/api/social/queue',
+  '/api/social/posts',
+  '/api/social/connect-url',
+  '/api/social/compose',
+  '/api/social/approve',
+  '/api/social/reject',
+  '/api/social/reconcile',
+
   // browser-viewer.ts — read-only visible CDP observer surface.
   '/api/browser-viewer/status',
   '/api/browser-viewer/screenshot',
@@ -49,6 +61,16 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/browser-viewer/navigate',
   // browser-viewer.ts — M12 Phase 2: SSE relay of the loopback viewport stream
   '/api/browser-viewer/stream/sse',
+
+  // ghost-viewer.ts — P4.1 Phase B: the ghost DEVICE surface (screen / tap /
+  // type / swipe / app), driven over raw adb; all policy + audit in Python.
+  '/api/ghost-viewer/screen',
+  '/api/ghost-viewer/tap',
+  '/api/ghost-viewer/text',
+  '/api/ghost-viewer/swipe',
+  '/api/ghost-viewer/key',
+  '/api/ghost-viewer/app/launch',
+  '/api/ghost-viewer/app/install',
 
   // agents.ts — list / create
   '/api/agents',

@@ -42,6 +42,18 @@ CHANNEL_CONSTRAINTS: dict[str, dict] = {
         "max_chars": 2000,
         "style": "Casual, community chat tone. Use markdown formatting.",
     },
+    "mastodon": {
+        "max_chars": 500,
+        "style": "Conversational, community-first fediverse tone. 1-2 hashtags max, only when organic.",
+    },
+    "bluesky": {
+        "max_chars": 300,
+        "style": "Punchy, direct. No hashtags. Every word earns its spot.",
+    },
+    "threads": {
+        "max_chars": 500,
+        "style": "Casual, conversational hook-first tone. No hashtag overload.",
+    },
 }
 
 

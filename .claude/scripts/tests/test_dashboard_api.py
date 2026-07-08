@@ -244,9 +244,10 @@ def test_get_health_response_has_no_secrets_or_pii(isolated_app):
 # ── /api/browser-viewer ─────────────────────────────────────────────────
 
 
-def _browser_viewer_payload() -> dict:
+def _browser_viewer_payload(target: str = "desktop") -> dict:
     return {
         "mode": "read_only",
+        "target": target,
         "readiness": {
             "status": "ready",
             "cdp_port": 9222,
@@ -303,7 +304,7 @@ def test_browser_viewer_screenshot_returns_png_no_store(isolated_app, monkeypatc
     monkeypatch.setattr(
         dashboard_api,
         "capture_browser_screenshot_png",
-        lambda: b"\x89PNG\r\n\x1a\nviewer",
+        lambda **_k: b"\x89PNG\r\n\x1a\nviewer",
     )
     monkeypatch.setattr(
         dashboard_api,
@@ -327,7 +328,7 @@ def test_browser_viewer_stream_enable_uses_read_only_workflow(isolated_app, monk
     audits: list[dict] = []
     enabled: list[bool] = []
     monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
-    monkeypatch.setattr(dashboard_api, "browser_stream_enable", lambda: enabled.append(True))
+    monkeypatch.setattr(dashboard_api, "browser_stream_enable", lambda **_k: enabled.append(True))
     monkeypatch.setattr(
         dashboard_api,
         "append_browser_audit_record",
@@ -348,7 +349,7 @@ def test_browser_viewer_error_redacts_urls(isolated_app, monkeypatch):
 
     audits: list[dict] = []
 
-    def fail_screenshot():
+    def fail_screenshot(**_kwargs):
         raise RuntimeError("failed at https://example.com/path?token=secret#frag")
 
     monkeypatch.setattr(dashboard_api, "capture_browser_screenshot_png", fail_screenshot)
@@ -392,7 +393,7 @@ def test_browser_viewer_elements_lists_snapshot_refs(isolated_app, monkeypatch):
     monkeypatch.setattr(
         dashboard_api,
         "browser_snapshot_elements",
-        lambda: [{"ref": "e20", "role": "button", "name": "Google Search"}],
+        lambda **_k: [{"ref": "e20", "role": "button", "name": "Google Search"}],
     )
 
     r = isolated_app.get("/api/browser-viewer/elements")
@@ -421,7 +422,7 @@ def test_browser_viewer_act_click_runs_and_audits_label(isolated_app, monkeypatc
     )
 
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "kind": "click"}
+    assert r.json() == {"ok": True, "kind": "click", "target": "desktop"}
     assert calls[0]["kind"] == "click"
     assert calls[0]["ref"] == "e12"
     assert audits[0]["workflow_id"] == "browser.viewer.act"
@@ -471,7 +472,7 @@ def test_browser_viewer_navigate_validates_url_and_audits(isolated_app, monkeypa
     monkeypatch.setattr(
         dashboard_api,
         "run_agent_browser_open",
-        lambda url: opened.append(url) or SimpleNamespace(ok=True, output=""),
+        lambda url, **_k: opened.append(url) or SimpleNamespace(ok=True, output=""),
     )
 
     ok = isolated_app.post("/api/browser-viewer/navigate", json={"url": "https://example.com/page"})
@@ -484,6 +485,578 @@ def test_browser_viewer_navigate_validates_url_and_audits(isolated_app, monkeypa
     assert bad.status_code == 403
     assert opened == ["https://example.com/page"]  # blocked URL never shelled
     assert audits[1]["outcome"] == "blocked"
+
+
+# ── /api/browser-viewer P3.0 PhoneOps target dimension ───────────────────
+
+
+def test_browser_viewer_rejects_unknown_target(isolated_app, monkeypatch):
+    audits = _patch_browser_audits(monkeypatch)
+
+    r = isolated_app.get("/api/browser-viewer/status?target=tablet")
+
+    assert r.status_code == 400
+    assert "unknown browser target" in r.text
+    assert audits[0]["outcome"] == "blocked"
+    # PhoneOps F12 (issue #100): the REJECTED raw value rides the structured column.
+    assert audits[0]["target"] == "tablet"
+
+
+def test_browser_viewer_phone_403_when_phoneops_disabled(isolated_app, monkeypatch):
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.delenv("HOMIE_PHONEOPS_ENABLED", raising=False)
+
+    r = isolated_app.get("/api/browser-viewer/status?target=phone")
+
+    assert r.status_code == 403
+    assert "HOMIE_PHONEOPS_ENABLED" in r.text
+    assert audits[0]["outcome"] == "blocked"
+    assert audits[0]["command"] == "GET /api/browser-viewer/status"
+    assert audits[0]["target"] == "phone"  # structured column (issue #100)
+
+
+# ── P4.0 Ghost — the third browser target gate ───────────────────────────────
+
+
+def test_browser_viewer_ghost_403_when_ghost_disabled(isolated_app, monkeypatch):
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.delenv("HOMIE_GHOST_ENABLED", raising=False)
+
+    r = isolated_app.get("/api/browser-viewer/status?target=ghost")
+
+    assert r.status_code == 403
+    assert "HOMIE_GHOST_ENABLED" in r.text
+    assert audits[0]["outcome"] == "blocked"
+    assert audits[0]["command"] == "GET /api/browser-viewer/status"
+    assert audits[0]["target"] == "ghost"  # structured column (issue #100)
+
+
+def test_browser_viewer_ghost_gate_is_distinct_from_phoneops(isolated_app, monkeypatch):
+    """Ghost and PhoneOps are separate capabilities: enabling one never opens the
+    other."""
+    import dashboard_api
+
+    _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    monkeypatch.delenv("HOMIE_PHONEOPS_ENABLED", raising=False)
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
+
+    ghost = isolated_app.get("/api/browser-viewer/status?target=ghost")
+    phone = isolated_app.get("/api/browser-viewer/status?target=phone")
+
+    assert ghost.status_code == 200
+    assert ghost.json()["target"] == "ghost"
+    assert phone.status_code == 403  # ghost's switch does NOT open the phone
+
+
+def test_browser_viewer_ghost_status_echoes_target_and_audits(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    seen: list[str] = []
+
+    def fake_status(target: str = "desktop"):
+        seen.append(target)
+        return _browser_viewer_payload(target)
+
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", fake_status)
+
+    r = isolated_app.get("/api/browser-viewer/status?target=ghost")
+
+    assert r.status_code == 200
+    assert r.json()["target"] == "ghost"
+    assert seen == ["ghost"]
+    assert audits[0]["command"] == "GET /api/browser-viewer/status"
+    assert audits[0]["target"] == "ghost"  # structured column (issue #100)
+    assert audits[0]["outcome"] == "succeeded"
+
+
+def test_browser_viewer_ghost_act_403_when_disabled_never_shells(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.delenv("HOMIE_GHOST_ENABLED", raising=False)
+    monkeypatch.setattr(
+        dashboard_api,
+        "browser_act",
+        lambda *_a, **_k: pytest.fail("gated ghost act must not reach the runner"),
+    )
+
+    r = isolated_app.post(
+        "/api/browser-viewer/act",
+        json={"kind": "click", "ref": "e2", "target": "ghost"},
+    )
+
+    assert r.status_code == 403
+    assert audits[0]["outcome"] == "blocked"
+    assert audits[0]["command"] == "POST /api/browser-viewer/act"
+    assert audits[0]["target"] == "ghost"  # structured column (issue #100)
+
+
+def test_browser_viewer_ghost_screenshot_header_echo(isolated_app, monkeypatch):
+    import dashboard_api
+
+    _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    monkeypatch.setattr(
+        dashboard_api,
+        "capture_browser_screenshot_png",
+        lambda **_k: b"\x89PNG\r\n\x1a\nghost",
+    )
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
+
+    r = isolated_app.get("/api/browser-viewer/screenshot?target=ghost")
+
+    assert r.status_code == 200
+    assert r.headers["x-browser-target"] == "ghost"
+
+
+# ── P4.1 Phase B — the ghost DEVICE viewer (screen) ──────────────────────────
+
+
+def test_ghost_viewer_screen_returns_png_and_dims(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    monkeypatch.setattr(
+        dashboard_api, "ghost_screencap", lambda: (b"\x89PNG\r\n\x1a\nghost-screen", 1080, 2400)
+    )
+
+    r = isolated_app.get("/api/ghost-viewer/screen")
+
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.headers["cache-control"] == "no-store"
+    assert r.headers["x-ghost-screen-width"] == "1080"
+    assert r.headers["x-ghost-screen-height"] == "2400"
+    assert r.content.startswith(b"\x89PNG")
+    assert audits[-1]["outcome"] == "succeeded"
+    assert audits[-1]["target"] == "ghost"
+
+
+def test_ghost_viewer_screen_403_when_ghost_disabled_never_shells(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.delenv("HOMIE_GHOST_ENABLED", raising=False)
+    monkeypatch.setattr(
+        dashboard_api,
+        "ghost_screencap",
+        lambda: pytest.fail("gated ghost screen must not reach adb"),
+    )
+
+    r = isolated_app.get("/api/ghost-viewer/screen")
+
+    assert r.status_code == 403
+    assert "HOMIE_GHOST_ENABLED" in r.text
+    assert audits[0]["outcome"] == "blocked"
+    assert audits[0]["target"] == "ghost"
+
+
+def test_ghost_viewer_screen_503_when_kill_switch_disabled_never_shells(isolated_app, monkeypatch):
+    """Adversarial-review MEDIUM (2026-07-07): HOMIE_KILLSWITCH_GHOST must stop
+    the ALREADY-BOOTED takeover routes, not only boot. A disabled kill-switch ->
+    503 + audit, and the device is never touched."""
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    monkeypatch.setenv("HOMIE_KILLSWITCH_GHOST", "disabled")
+    monkeypatch.setattr(
+        dashboard_api,
+        "ghost_screencap",
+        lambda: pytest.fail("kill-switched ghost must not reach adb"),
+    )
+
+    r = isolated_app.get("/api/ghost-viewer/screen")
+
+    assert r.status_code == 503
+    assert "kill-switch" in r.text.lower()
+    assert audits[0]["outcome"] == "blocked"
+    assert audits[0]["target"] == "ghost"
+
+
+def test_ghost_viewer_tap_503_when_kill_switch_disabled(isolated_app, monkeypatch):
+    import dashboard_api
+
+    _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    monkeypatch.setenv("HOMIE_KILLSWITCH_GHOST", "disabled")
+    monkeypatch.setattr(
+        dashboard_api, "ghost_tap", lambda *_a, **_k: pytest.fail("kill-switched tap must not shell")
+    )
+    r = isolated_app.post("/api/ghost-viewer/tap", json={"x": 0.5, "y": 0.5})
+    assert r.status_code == 503
+
+
+def test_ghost_viewer_screen_403_when_capability_killed(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+
+    def killed():
+        raise dashboard_api.GhostCapabilityDenied(
+            "ghost capability 'ghost.screen.view' is disabled — set "
+            "HOMIE_GHOST_CAP_SCREEN_VIEW=true to enable it"
+        )
+
+    monkeypatch.setattr(dashboard_api, "ghost_screencap", killed)
+
+    r = isolated_app.get("/api/ghost-viewer/screen")
+
+    assert r.status_code == 403
+    assert audits[-1]["outcome"] == "blocked"
+
+
+def test_ghost_viewer_screen_503_on_adb_failure(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+
+    def boom():
+        raise RuntimeError("device offline")
+
+    monkeypatch.setattr(dashboard_api, "ghost_screencap", boom)
+
+    r = isolated_app.get("/api/ghost-viewer/screen")
+
+    assert r.status_code == 503
+    assert audits[-1]["outcome"] == "failed"
+
+
+def test_ghost_viewer_tap_scales_and_audits(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    seen: list[tuple[float, float]] = []
+    monkeypatch.setattr(
+        dashboard_api,
+        "ghost_tap",
+        lambda x, y, **k: seen.append((x, y))
+        or {"x": 540, "y": 600, "width": 1080, "height": 2400},
+    )
+
+    r = isolated_app.post("/api/ghost-viewer/tap", json={"x": 0.5, "y": 0.25})
+
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "x": 540, "y": 600, "width": 1080, "height": 2400}
+    assert seen == [(0.5, 0.25)]
+    assert audits[-1]["outcome"] == "succeeded"
+    assert audits[-1]["target"] == "ghost"
+
+
+def test_ghost_viewer_tap_rejects_out_of_range_coords(isolated_app, monkeypatch):
+    import dashboard_api
+
+    _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    monkeypatch.setattr(
+        dashboard_api,
+        "ghost_tap",
+        lambda *_a, **_k: pytest.fail("out-of-range coords must be rejected before adb"),
+    )
+
+    r = isolated_app.post("/api/ghost-viewer/tap", json={"x": 1.5, "y": 0.5})
+
+    assert r.status_code == 422  # Pydantic ge/le validation
+
+
+def test_ghost_viewer_tap_403_when_ghost_disabled_never_shells(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.delenv("HOMIE_GHOST_ENABLED", raising=False)
+    monkeypatch.setattr(
+        dashboard_api,
+        "ghost_tap",
+        lambda *_a, **_k: pytest.fail("gated ghost tap must not reach adb"),
+    )
+
+    r = isolated_app.post("/api/ghost-viewer/tap", json={"x": 0.5, "y": 0.5})
+
+    assert r.status_code == 403
+    assert audits[0]["outcome"] == "blocked"
+
+
+def test_ghost_viewer_text_and_key_and_swipe_route(isolated_app, monkeypatch):
+    import dashboard_api
+
+    _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    monkeypatch.setattr(dashboard_api, "ghost_text", lambda text, **k: {"length": len(text)})
+    monkeypatch.setattr(dashboard_api, "ghost_keyevent", lambda code: {"keycode": code})
+    monkeypatch.setattr(
+        dashboard_api,
+        "ghost_swipe",
+        lambda *a, **k: {"x1": 0, "y1": 0, "x2": 1079, "y2": 2399, "duration_ms": k["duration_ms"]},
+    )
+
+    rt = isolated_app.post("/api/ghost-viewer/text", json={"text": "hi ghost"})
+    assert rt.status_code == 200 and rt.json()["length"] == len("hi ghost")
+
+    rk = isolated_app.post("/api/ghost-viewer/key", json={"keycode": 4})
+    assert rk.status_code == 200 and rk.json()["keycode"] == 4
+
+    rs = isolated_app.post(
+        "/api/ghost-viewer/swipe", json={"x1": 0, "y1": 0, "x2": 1, "y2": 1, "duration_ms": 250}
+    )
+    assert rs.status_code == 200 and rs.json()["duration_ms"] == 250
+
+
+def test_ghost_viewer_key_rejects_out_of_range(isolated_app, monkeypatch):
+    _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    r = isolated_app.post("/api/ghost-viewer/key", json={"keycode": 9999})
+    assert r.status_code == 422  # Pydantic le=320
+
+
+def test_ghost_viewer_app_launch_routes_and_audits(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    seen: list[str] = []
+    monkeypatch.setattr(
+        dashboard_api, "ghost_app_launch", lambda pkg: seen.append(pkg) or {"package": pkg}
+    )
+
+    r = isolated_app.post("/api/ghost-viewer/app/launch", json={"package": "com.android.chrome"})
+
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "package": "com.android.chrome"}
+    assert seen == ["com.android.chrome"]
+    assert audits[-1]["outcome"] == "succeeded"
+    assert audits[-1]["target"] == "ghost"
+
+
+def test_ghost_viewer_app_launch_bad_package_is_400(isolated_app, monkeypatch):
+    import dashboard_api
+
+    _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+
+    def bad(pkg):
+        raise ValueError(f"invalid Android package name: {pkg!r}")
+
+    monkeypatch.setattr(dashboard_api, "ghost_app_launch", bad)
+
+    r = isolated_app.post("/api/ghost-viewer/app/launch", json={"package": "nope; rm -rf"})
+    assert r.status_code == 400
+
+
+def test_ghost_viewer_app_install_routes(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
+    monkeypatch.setattr(dashboard_api, "ghost_app_install", lambda p: {"apk": "test.apk"})
+
+    r = isolated_app.post("/api/ghost-viewer/app/install", json={"apk_path": "C:/tmp/test.apk"})
+
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "apk": "test.apk"}
+    assert audits[-1]["outcome"] == "succeeded"
+
+
+def test_ghost_viewer_app_install_403_when_ghost_disabled_never_shells(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.delenv("HOMIE_GHOST_ENABLED", raising=False)
+    monkeypatch.setattr(
+        dashboard_api,
+        "ghost_app_install",
+        lambda *_a, **_k: pytest.fail("gated install must not reach adb"),
+    )
+
+    r = isolated_app.post("/api/ghost-viewer/app/install", json={"apk_path": "C:/tmp/x.apk"})
+
+    assert r.status_code == 403
+    assert audits[0]["outcome"] == "blocked"
+
+
+def test_browser_viewer_phone_status_echoes_target_and_audits(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_PHONEOPS_ENABLED", "true")
+    seen: list[str] = []
+
+    def fake_status(target: str = "desktop"):
+        seen.append(target)
+        return _browser_viewer_payload(target)
+
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", fake_status)
+
+    r = isolated_app.get("/api/browser-viewer/status?target=phone")
+
+    assert r.status_code == 200
+    assert r.json()["target"] == "phone"
+    assert seen == ["phone"]
+    assert audits[0]["command"] == "GET /api/browser-viewer/status"
+    assert audits[0]["target"] == "phone"  # structured column (issue #100)
+    assert audits[0]["outcome"] == "succeeded"
+
+
+def test_browser_viewer_desktop_default_is_byte_identical(isolated_app, monkeypatch):
+    """Absent target == explicit desktop, byte-for-byte; audit command unsuffixed."""
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
+
+    absent = isolated_app.get("/api/browser-viewer/status")
+    explicit = isolated_app.get("/api/browser-viewer/status?target=desktop")
+
+    assert absent.status_code == explicit.status_code == 200
+    assert absent.content == explicit.content
+    assert audits[0]["command"] == "GET /api/browser-viewer/status"
+    assert audits[1]["command"] == "GET /api/browser-viewer/status"
+
+
+def test_browser_viewer_phone_act_routes_target(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_PHONEOPS_ENABLED", "true")
+    calls: list[dict] = []
+
+    def fake_act(kind, **kwargs):
+        calls.append({"kind": kind, **kwargs})
+        return SimpleNamespace(ok=True, output="")
+
+    monkeypatch.setattr(dashboard_api, "browser_act", fake_act)
+
+    r = isolated_app.post(
+        "/api/browser-viewer/act",
+        json={"kind": "click", "ref": "e2", "target": "phone"},
+    )
+
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "kind": "click", "target": "phone"}
+    assert calls[0]["target"] == "phone"
+    assert audits[0]["command"] == "POST /api/browser-viewer/act"
+    assert audits[0]["target"] == "phone"  # structured column (issue #100)
+
+
+def test_browser_viewer_phone_act_403_when_disabled_never_shells(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.delenv("HOMIE_PHONEOPS_ENABLED", raising=False)
+    monkeypatch.setattr(
+        dashboard_api,
+        "browser_act",
+        lambda *_a, **_k: pytest.fail("gated phone act must not reach the runner"),
+    )
+
+    r = isolated_app.post(
+        "/api/browser-viewer/act",
+        json={"kind": "click", "ref": "e2", "target": "phone"},
+    )
+
+    assert r.status_code == 403
+    assert audits[0]["outcome"] == "blocked"
+
+
+def test_browser_viewer_phone_screenshot_header_echo(isolated_app, monkeypatch):
+    import dashboard_api
+
+    _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_PHONEOPS_ENABLED", "true")
+    monkeypatch.setattr(
+        dashboard_api,
+        "capture_browser_screenshot_png",
+        lambda **_k: b"\x89PNG\r\n\x1a\nphone",
+    )
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
+
+    r = isolated_app.get("/api/browser-viewer/screenshot?target=phone")
+
+    assert r.status_code == 200
+    assert r.headers["x-browser-target"] == "phone"
+
+    desktop = isolated_app.get("/api/browser-viewer/screenshot")
+    assert desktop.headers["x-browser-target"] == "desktop"
+
+
+def test_browser_viewer_phone_stream_enable_routes_target(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_PHONEOPS_ENABLED", "true")
+    targets: list[str | None] = []
+    monkeypatch.setattr(
+        dashboard_api,
+        "browser_stream_enable",
+        lambda **kwargs: targets.append(kwargs.get("target")),
+    )
+    monkeypatch.setattr(dashboard_api, "collect_browser_viewer_status", _browser_viewer_payload)
+
+    r = isolated_app.post("/api/browser-viewer/stream/enable", json={"target": "phone"})
+
+    assert r.status_code == 200
+    assert targets == ["phone"]
+    assert audits[0]["command"] == "POST /api/browser-viewer/stream/enable"
+    assert audits[0]["target"] == "phone"  # structured column (issue #100)
+
+
+def test_run_agent_browser_open_rides_the_phone_session(monkeypatch):
+    """Live-E2E regression (2026-07-06): navigate without --session hit the
+    freeze-wedged default daemon session and timed out while the phone was
+    healthy. The open path must ride session_for_target like every other
+    phone command."""
+    import browser_control
+    import dashboard_api
+
+    recorded: dict = {}
+
+    def fake_run(args, *, port, session=None, **_k):
+        recorded.update({"args": args, "port": port, "session": session})
+        return SimpleNamespace(ok=True, output="")
+
+    monkeypatch.setattr(browser_control, "run_agent_browser", fake_run)
+    monkeypatch.setattr(browser_control, "ensure_phone_chrome_ready", lambda **_k: True)
+    monkeypatch.setattr(browser_control, "ensure_browser_window_restored", lambda **_k: True)
+    monkeypatch.setattr(browser_control, "resolve_target_port", lambda t: 18223 if t == "phone" else 18222)
+
+    dashboard_api.run_agent_browser_open("https://example.com", target="phone")
+    assert recorded["session"] == "homie-phone"
+    assert recorded["port"] == 18223
+
+    dashboard_api.run_agent_browser_open("https://example.com")
+    assert recorded["session"] is None  # desktop keeps the default session
+    assert recorded["port"] == 18222
+
+
+def test_browser_viewer_phone_navigate_routes_target(isolated_app, monkeypatch):
+    import dashboard_api
+
+    audits = _patch_browser_audits(monkeypatch)
+    monkeypatch.setenv("HOMIE_PHONEOPS_ENABLED", "true")
+    opened: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        dashboard_api,
+        "run_agent_browser_open",
+        lambda url, **kw: opened.append((url, kw.get("target")))
+        or SimpleNamespace(ok=True, output=""),
+    )
+
+    r = isolated_app.post(
+        "/api/browser-viewer/navigate",
+        json={"url": "https://example.com/p", "target": "phone"},
+    )
+
+    assert r.status_code == 200
+    assert r.json()["target"] == "phone"
+    assert opened == [("https://example.com/p", "phone")]
+    assert audits[0]["command"] == "POST /api/browser-viewer/navigate"
+    assert audits[0]["target"] == "phone"  # structured column (issue #100)
 
 
 # ── /api/info ────────────────────────────────────────────────────────────
@@ -2829,3 +3402,204 @@ def test_dashboard_send_body_accepts_image_field():
     body = DashboardChatSendBody(text="what is this?", image_base64="AAAA")
     assert body.image_base64 == "AAAA"
     assert DashboardChatSendBody(text="hi").image_base64 is None
+
+
+# ── /api/social/* (Postiz lane + approval queue) ─────────────────────────
+
+
+def _silence_social_audit(monkeypatch, sink: list | None = None):
+    def _record(**kwargs):
+        if sink is not None:
+            sink.append(kwargs)
+        return "audit-test"
+
+    monkeypatch.setattr("social.audit.append_social_audit_record", _record)
+
+
+def test_social_status_unconfigured_has_no_secrets(isolated_app, monkeypatch):
+    monkeypatch.delenv("POSTIZ_API_URL", raising=False)
+    monkeypatch.delenv("POSTIZ_API_KEY", raising=False)
+
+    r = isolated_app.get("/api/social/status")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["postiz"]["configured"] is False
+    assert body["postiz"]["reachable"] is False
+    # Booleans/counts only — never the URL or key.
+    assert "api_url" not in json.dumps(body).lower()
+    assert "api_key" not in json.dumps(body).lower()
+
+
+def test_social_compose_lands_as_draft_only(isolated_app, monkeypatch):
+    _silence_social_audit(monkeypatch)
+
+    r = isolated_app.post(
+        "/api/social/compose",
+        json={"channel": "mastodon", "title": "T", "body": "Hello fedi"},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "draft"
+
+    q = isolated_app.get("/api/social/queue").json()
+    row = next(p for p in q["posts"] if p["id"] == body["id"])
+    assert row["status"] == "draft"  # compose NEVER approves or publishes
+
+
+def test_social_compose_unknown_channel_400(isolated_app, monkeypatch):
+    _silence_social_audit(monkeypatch)
+
+    r = isolated_app.post(
+        "/api/social/compose",
+        json={"channel": "myspace", "body": "hi"},
+    )
+
+    assert r.status_code == 400
+    assert "Unknown channel" in r.json()["detail"]
+
+
+def test_social_approve_dispatches_immediately(isolated_app, monkeypatch):
+    """Dashboard Approve & Post = approve + gated dispatch in one tap
+    (Telegram-button parity, operator decision 2026-07-06)."""
+    _silence_social_audit(monkeypatch)
+    dispatched: list[int] = []
+    monkeypatch.setattr(
+        "social.post_executor.dispatch_post",
+        lambda pid, **kw: dispatched.append(pid) or True,
+    )
+
+    pid1 = isolated_app.post(
+        "/api/social/compose", json={"channel": "mastodon", "body": "a"}
+    ).json()["id"]
+    pid2 = isolated_app.post(
+        "/api/social/compose", json={"channel": "mastodon", "body": "b"}
+    ).json()["id"]
+
+    a = isolated_app.post("/api/social/approve", json={"post_id": pid1})
+    assert a.status_code == 200
+    assert a.json()["dispatched"] is True
+    assert dispatched == [pid1]
+
+    b = isolated_app.post("/api/social/reject", json={"post_id": pid2})
+    assert b.status_code == 200
+    assert b.json()["status"] == "rejected"
+
+    # Approving a rejected post is an invalid transition -> 400, no dispatch.
+    again = isolated_app.post("/api/social/approve", json={"post_id": pid2})
+    assert again.status_code == 400
+    assert dispatched == [pid1]
+
+
+def test_social_approve_surfaces_dispatch_failure(isolated_app, monkeypatch):
+    """An unbound postiz channel fails the dispatch and the response says so
+    (no 500, no silent success)."""
+    from social.channels import SocialChannel
+
+    _silence_social_audit(monkeypatch)
+    monkeypatch.setattr(
+        "social.post_executor.append_social_audit_record", lambda **kw: "a"
+    )
+    # Pin the channel to an UNBOUND postiz channel so the test is deterministic
+    # regardless of channels.yaml/persona state left by other tests.
+    monkeypatch.setattr(
+        "social.post_executor.get_channel",
+        lambda cid, **kw: SocialChannel(
+            channel_id="bluesky", display_name="Bluesky",
+            execution_method="postiz", postiz_integration_id="",
+        ),
+    )
+
+    pid = isolated_app.post(
+        "/api/social/compose", json={"channel": "bluesky", "body": "hi"}
+    ).json()["id"]
+
+    r = isolated_app.post("/api/social/approve", json={"post_id": pid})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["dispatched"] is False
+    assert body["status"] == "failed"
+    assert "postiz_integration_id" in body["error"]
+
+
+def test_social_connect_url_in_body_but_never_audited(isolated_app, monkeypatch):
+    sensitive = "https://oauth.example/authorize?token=SENSITIVE-EXPIRING"
+    audits: list[dict] = []
+    _silence_social_audit(monkeypatch, audits)
+    monkeypatch.setattr(
+        "integrations.postiz_api.get_connect_url", lambda provider: sensitive
+    )
+
+    r = isolated_app.get("/api/social/connect-url?provider=mastodon")
+
+    assert r.status_code == 200
+    assert r.json()["url"] == sensitive
+    # The audit row records the provider only — the URL never lands in it.
+    assert audits, "connect-url must write an audit row"
+    assert sensitive not in json.dumps(audits)
+    assert audits[0]["channel"] == "mastodon"
+
+
+def test_social_connect_url_rejects_bad_provider(isolated_app, monkeypatch):
+    _silence_social_audit(monkeypatch)
+
+    r = isolated_app.get("/api/social/connect-url?provider=Bad_Provider!")
+
+    assert r.status_code == 400
+
+
+def test_social_channels_degrades_when_postiz_down(isolated_app, monkeypatch):
+    from integrations.postiz_api import PostizUnreachable
+
+    def _boom():
+        raise PostizUnreachable("refused")
+
+    monkeypatch.setattr("integrations.postiz_api.list_integrations", _boom)
+
+    r = isolated_app.get("/api/social/channels")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["postiz_error"]  # friendly message, not a stack trace
+    assert isinstance(body["channels"], list)  # registry still renders
+    assert any(c["channel_id"] == "mastodon" for c in body["channels"])
+
+
+def test_social_reconcile_on_demand(isolated_app, monkeypatch):
+    """POST /api/social/reconcile runs the same pass the cadence tick runs."""
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "social.postiz_reconcile.reconcile_postiz_posts",
+        lambda **kw: calls.append(True) or {"checked": 1, "confirmed": 1},
+    )
+
+    r = isolated_app.post("/api/social/reconcile")
+
+    assert r.status_code == 200
+    assert r.json()["confirmed"] == 1
+    assert calls == [True]
+
+
+def test_social_posts_view_slims_remote_rows(isolated_app, monkeypatch):
+    monkeypatch.setattr(
+        "integrations.postiz_api.list_posts",
+        lambda start, end: [
+            {
+                "id": "pz-1",
+                "content": "x" * 500,
+                "state": "PUBLISHED",
+                "releaseURL": "https://m.social/@x/1",
+                "integration": {"id": "i1", "providerIdentifier": "mastodon"},
+            }
+        ],
+    )
+
+    r = isolated_app.get("/api/social/posts")
+
+    assert r.status_code == 200
+    row = r.json()["posts"][0]
+    assert row["state"] == "PUBLISHED"
+    assert len(row["content"]) <= 280  # slimmed preview
+    assert row["integration"]["providerIdentifier"] == "mastodon"

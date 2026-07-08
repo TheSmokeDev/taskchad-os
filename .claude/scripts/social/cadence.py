@@ -138,6 +138,18 @@ def run_cadence_tick(
         dispatch_result = dispatch_due_posts(db_path=db_path)
         summary["posts_dispatched"] = dispatch_result.get("dispatched", 0)
 
+        # Close the async-publish loop for the Postiz lane (no webhooks —
+        # poll outcomes). Fail-open: reconcile never breaks the cadence.
+        try:
+            if config.get_postiz_settings().configured:
+                from social.postiz_reconcile import reconcile_postiz_posts
+
+                summary["postiz_reconcile"] = reconcile_postiz_posts(
+                    db_path=db_path
+                )
+        except Exception as exc:
+            logger.warning("Postiz reconcile failed: %s", exc)
+
     return summary
 
 

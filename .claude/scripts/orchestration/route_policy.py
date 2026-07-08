@@ -219,6 +219,27 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     ("GET", "/api/browser-viewer/elements"): "admin",
     ("POST", "/api/browser-viewer/act"): "admin",
     ("POST", "/api/browser-viewer/navigate"): "admin",
+    # ── Dashboard: ghost-viewer (admin — the ghost DEVICE surface, P4.1 B) ──
+    # Distinct from browser-viewer above: drives the whole ghost emulator over
+    # raw adb (screen / tap / app), structurally ghost-only, no tenant data.
+    ("GET", "/api/ghost-viewer/screen"): "admin",
+    ("POST", "/api/ghost-viewer/tap"): "admin",
+    ("POST", "/api/ghost-viewer/text"): "admin",
+    ("POST", "/api/ghost-viewer/swipe"): "admin",
+    ("POST", "/api/ghost-viewer/key"): "admin",
+    ("POST", "/api/ghost-viewer/app/launch"): "admin",
+    ("POST", "/api/ghost-viewer/app/install"): "admin",
+    # ── Dashboard: social (admin — operator surface; queue is global) ───────
+    # Compose lands as DRAFT only; publish stays behind the gated dispatch.
+    ("GET", "/api/social/status"): "admin",
+    ("GET", "/api/social/channels"): "admin",
+    ("GET", "/api/social/queue"): "admin",
+    ("GET", "/api/social/posts"): "admin",
+    ("POST", "/api/social/compose"): "admin",
+    ("GET", "/api/social/connect-url"): "admin",
+    ("POST", "/api/social/approve"): "admin",
+    ("POST", "/api/social/reject"): "admin",
+    ("POST", "/api/social/reconcile"): "admin",
     # ── Dashboard: health/info (public) ─────────────────────────────────────
     ("GET", "/api/health"): "public",
     ("GET", "/api/jarvis/status"): "admin",

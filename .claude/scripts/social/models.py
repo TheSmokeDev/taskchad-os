@@ -14,7 +14,9 @@ VALID_STATUSES: frozenset[str] = frozenset(
 SOCIAL_POST_TRANSITIONS: dict[str, frozenset[str]] = {
     "draft": frozenset(["approved", "rejected"]),
     "approved": frozenset(["posted", "failed"]),
-    "posted": frozenset(),
+    # posted → failed exists for async transports (Postiz): acceptance is
+    # optimistic mark_posted; the reconcile pass demotes on platform error.
+    "posted": frozenset(["failed"]),
     "failed": frozenset(),
     "rejected": frozenset(),
 }
@@ -37,3 +39,10 @@ class SocialPost:
     rejection_reason: str | None = None
     error: str | None = None
     audit_id: str | None = None
+    # Async-transport reference, e.g. "postiz:<postId>" — set on optimistic
+    # accept so the reconcile pass can match platform outcomes back to rows.
+    external_ref: str | None = None
+    # Rendered/generated media for the post. media_type ∈ {none,image,video}.
+    # Lives here (not in the body) so a local path never leaks into a caption.
+    media_path: str | None = None
+    media_type: str | None = None

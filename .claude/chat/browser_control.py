@@ -14,9 +14,124 @@ from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
 
+import adb_control
+
 DEFAULT_CDP_PORT = 9222
 DEFAULT_TIMEOUT_SECONDS = 20
 _HTTP_URL_PATTERN = re.compile(r"https?://[^\s]+")
+
+# ── P3.0 PhoneOps + P4.0 Ghost — the browser target dimension ───────────────
+# desktop | phone | ghost. The phone's and the ghost's Chrome both speak the
+# same CDP protocol; `adb forward tcp:<port> localabstract:chrome_devtools_remote`
+# makes each indistinguishable from 127.0.0.1:<port>, so every helper below
+# works against any target. 18223/18224 are adjacent to the desktop's 18222 and
+# outside the WSL-reserved 9188-9787 band. The target is resolved SERVER-SIDE
+# from a strict enum — a raw CDP port or serial is never accepted from a client.
+# The ghost (P4.0) is "another adb device": same transport, its own serial + CDP
+# port + isolated daemon session, behind its own HOMIE_GHOST_ENABLED gate.
+
+BROWSER_TARGETS = ("desktop", "phone", "ghost")
+PHONE_CDP_DEFAULT_PORT = 18223
+PHONE_CDP_ENV_NAMES = ("HOMIE_PHONE_CDP_PORT",)
+GHOST_CDP_DEFAULT_PORT = 18224
+GHOST_CDP_ENV_NAMES = ("HOMIE_GHOST_CDP_PORT",)
+
+# Isolated daemon sessions (spike evidence 2026-07-06): after an on-device
+# freeze event, agent-browser's DEFAULT cached session goes permanently stale
+# (10060 on every op) even once the device recovers, while a named session
+# reconnects instantly. Each adb target rides its OWN isolated session; desktop
+# keeps the default session (byte-identical M12).
+PHONE_AGENT_BROWSER_SESSION = "homie-phone"
+GHOST_AGENT_BROWSER_SESSION = "homie-ghost"
+
+# adb-transport targets (phone + ghost) vs the local desktop target.
+_ADB_TARGETS = frozenset({"phone", "ghost"})
+
+# Per-target adb serial env var. Phone may resolve None (adb_control autodetects
+# a single attached device); the ghost MUST resolve its own serial and NEVER
+# fall back to the phone (enforced in _resolve_adb_serial_or_raise).
+_TARGET_SERIAL_ENV: dict[str, str] = {
+    "phone": "HOMIE_PHONE_ADB_SERIAL",
+    "ghost": "HOMIE_GHOST_ADB_SERIAL",
+}
+
+
+def is_adb_target(target: str | None) -> bool:
+    """True when a target rides the adb / CDP-forward transport (phone or ghost)."""
+
+    return target in _ADB_TARGETS
+
+
+def resolve_target_serial(
+    target: str | None, *, environ: dict[str, str] | None = None
+) -> str | None:
+    """The adb serial for an adb target (call-time env read, Rule 1).
+
+    Phone / ghost read their OWN env var; a non-adb or unknown target -> None.
+    Empty / whitespace -> None (treated as unset).
+    """
+
+    env = environ if environ is not None else os.environ
+    name = _TARGET_SERIAL_ENV.get(target or "")
+    if not name:
+        return None
+    return (env.get(name) or "").strip() or None
+
+
+def _resolve_adb_serial_or_raise(
+    target: str | None, *, environ: dict[str, str] | None = None
+) -> str | None:
+    """Resolve the serial for an adb action, REFUSING wrong-device fallback.
+
+    The ghost must drive its OWN device: if HOMIE_GHOST_ADB_SERIAL is unset we
+    raise rather than let the adb call fall back to the phone's serial (which
+    would silently drive the operator's personal phone — a wrong-target leak).
+
+    Symmetrically (PhoneOps review F1, issue #89): once a ghost serial is
+    configured, phone-target actions must NOT ride single-device autodetect —
+    with only the ghost attached, an un-scoped adb call under the phone label
+    silently drives the ghost. Phone autodetect stays allowed only while no
+    ghost serial is configured (byte-identical for ghost-less deployments).
+    """
+
+    serial = resolve_target_serial(target, environ=environ)
+    if target == "ghost" and not serial:
+        raise RuntimeError(
+            "HOMIE_GHOST_ADB_SERIAL is not set — cannot reach the ghost device"
+        )
+    if target == "phone" and not serial and resolve_target_serial("ghost", environ=environ):
+        raise RuntimeError(
+            "HOMIE_PHONE_ADB_SERIAL is not set while a ghost serial is configured — "
+            "phone autodetect could drive the ghost; set HOMIE_PHONE_ADB_SERIAL to "
+            "the phone's adb serial"
+        )
+    # Misconfig guard: if the ghost and the personal phone resolve to the SAME
+    # serial, a ghost device power would drive the operator's real phone — the
+    # exact thing the structural invariant exists to prevent. Refuse rather than
+    # let a config typo bypass it (adversarial-review LOW, 2026-07-07).
+    if target == "ghost" and serial:
+        phone_serial = resolve_target_serial("phone", environ=environ)
+        if phone_serial and phone_serial == serial:
+            raise RuntimeError(
+                "HOMIE_GHOST_ADB_SERIAL equals HOMIE_PHONE_ADB_SERIAL — the ghost "
+                "and the personal phone must be different devices; refusing so a "
+                "ghost power can never drive the real phone"
+            )
+    return serial
+
+
+def session_for_target(target: str | None) -> str | None:
+    """The agent-browser daemon session a target's commands must ride."""
+
+    if target == "phone":
+        return PHONE_AGENT_BROWSER_SESSION
+    if target == "ghost":
+        return GHOST_AGENT_BROWSER_SESSION
+    return None
+
+
+# Internal alias (kept for the module's own call sites).
+_session_for_target = session_for_target
 
 
 @dataclass(frozen=True)
@@ -101,6 +216,53 @@ def resolve_cdp_port(
             raise ValueError(f"{name} must be between 1 and 65535")
         return port
     return default
+
+
+def resolve_target_port(
+    target: str | None = None,
+    *,
+    environ: dict[str, str] | None = None,
+) -> int:
+    """Resolve the CDP port for a browser target (Rule 1 — call-time env reads).
+
+    ``desktop`` keeps the exact legacy resolution (byte-identical default);
+    ``phone`` reuses the same parser against HOMIE_PHONE_CDP_PORT / 18223;
+    ``ghost`` against HOMIE_GHOST_CDP_PORT / 18224.
+    """
+
+    resolved = target if target is not None else "desktop"
+    if resolved == "desktop":
+        return resolve_cdp_port(environ=environ)
+    if resolved == "phone":
+        return resolve_cdp_port(
+            environ=environ,
+            env_names=PHONE_CDP_ENV_NAMES,
+            default=PHONE_CDP_DEFAULT_PORT,
+        )
+    if resolved == "ghost":
+        return resolve_cdp_port(
+            environ=environ,
+            env_names=GHOST_CDP_ENV_NAMES,
+            default=GHOST_CDP_DEFAULT_PORT,
+        )
+    raise ValueError(f"unknown browser target: {resolved}")
+
+
+def resolve_target(
+    target: str | None = None,
+    *,
+    environ: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Target registry — transport config for ``desktop``, ``phone``, ``ghost``."""
+
+    resolved = target if target is not None else "desktop"
+    if resolved not in BROWSER_TARGETS:
+        raise ValueError(f"unknown browser target: {resolved}")
+    return {
+        "target": resolved,
+        "transport": "adb" if is_adb_target(resolved) else "local",
+        "port": resolve_target_port(resolved, environ=environ),
+    }
 
 
 def resolve_linkedin_profile_url(*, environ: dict[str, str] | None = None) -> str | None:
@@ -229,10 +391,12 @@ def build_agent_browser_argv(
     args: list[str],
     *,
     port: int,
+    session: str | None = None,
     environ: dict[str, str] | None = None,
 ) -> tuple[list[str], AgentBrowserResolution]:
     resolution = resolve_agent_browser_command(environ=environ)
-    return [*resolution.command, "--cdp", str(port), *args], resolution
+    session_args = ["--session", session] if session else []
+    return [*resolution.command, "--cdp", str(port), *session_args, *args], resolution
 
 
 def build_agent_browser_global_argv(
@@ -246,15 +410,58 @@ def build_agent_browser_global_argv(
     return [*resolution.command, *args], resolution
 
 
+def _tree_kill_run(argv: list[str], **kwargs: Any) -> Any:
+    """subprocess.run drop-in that kills the whole PROCESS TREE on timeout.
+
+    Live E2E finding (2026-07-06, phone navigate): agent-browser resolves to a
+    .CMD wrapper on Windows; subprocess.run's timeout kills cmd.exe but the
+    node child underneath survives holding the inherited stdout/stderr pipes,
+    so the post-kill communicate() blocks until node exits on its own — a 20s
+    timeout became a 2-minute API stall while the phone's renderer crawled.
+    taskkill /T reaps the tree so TimeoutExpired surfaces ON TIME.
+    """
+
+    timeout = kwargs.pop("timeout", None)
+    if timeout is None or platform.system() != "Windows":
+        return subprocess.run(argv, timeout=timeout, **kwargs)
+    kwargs.pop("capture_output", None)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            capture_output=True,
+            timeout=10,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+
 def run_agent_browser(
     args: list[str],
     *,
     port: int,
+    session: str | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     environ: dict[str, str] | None = None,
-    runner: Any = subprocess.run,
+    runner: Any = None,
 ) -> CommandResult:
-    argv, resolution = build_agent_browser_argv(args, port=port, environ=environ)
+    if runner is None:
+        # Tree-kill ONLY on isolated-session (phone) commands: the phone's
+        # slow/freezable renderer is what makes node outlive the .CMD timeout
+        # kill. Desktop (default-session) callers keep plain subprocess.run —
+        # byte-identical M12 behavior, including the node child surviving a
+        # timeout to finish an in-flight action (social writes rely on it).
+        runner = _tree_kill_run if session is not None else subprocess.run
+    argv, resolution = build_agent_browser_argv(
+        args, port=port, session=session, environ=environ
+    )
+    session_label = f" --session {session}" if session else ""
     result = runner(
         argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
     )
@@ -263,7 +470,7 @@ def run_agent_browser(
         returncode=result.returncode,
         stdout=result.stdout or "",
         stderr=result.stderr or "",
-        command_label=f"{resolution.label} --cdp {port} {' '.join(args)}",
+        command_label=f"{resolution.label} --cdp {port}{session_label} {' '.join(args)}",
     )
 
 
@@ -339,12 +546,13 @@ def _parse_stream_status_result(result: CommandResult) -> dict[str, Any]:
 def browser_stream_status(
     *,
     port: int | None = None,
-    runner: Any = subprocess.run,
+    target: str = "desktop",
+    runner: Any = None,
 ) -> dict[str, Any]:
-    """Return the read-only agent-browser stream state for the visible CDP browser."""
+    """Return the read-only agent-browser stream state for the target CDP browser."""
 
     try:
-        resolved_port = port if port is not None else resolve_cdp_port()
+        resolved_port = port if port is not None else resolve_target_port(target)
     except ValueError as exc:
         return _stream_status_payload(reason=str(exc))
 
@@ -352,6 +560,7 @@ def browser_stream_status(
         result = run_agent_browser(
             ["--json", "stream", "status"],
             port=resolved_port,
+            session=_session_for_target(target),
             timeout=8,
             runner=runner,
         )
@@ -364,35 +573,50 @@ def browser_stream_enable(
     *,
     port: int | None = None,
     stream_port: int | None = None,
-    runner: Any = subprocess.run,
+    target: str = "desktop",
+    runner: Any = None,
 ) -> dict[str, Any]:
     """Enable the observation stream only; does not grant browser input control."""
 
-    resolved_port = port if port is not None else resolve_cdp_port()
+    resolved_port = port if port is not None else resolve_target_port(target)
+    if is_adb_target(target):
+        # Every adb action self-heals the forward first (spec invariant).
+        _ensure_phone_transport(
+            resolved_port, serial=_resolve_adb_serial_or_raise(target), runner=runner
+        )
+    session = _session_for_target(target)
     args = ["--json", "stream", "enable"]
     if stream_port is not None:
         if not 0 < stream_port < 65536:
             raise ValueError("stream_port must be between 1 and 65535")
         args.extend(["--port", str(stream_port)])
-    result = run_agent_browser(args, port=resolved_port, timeout=12, runner=runner)
+    result = run_agent_browser(
+        args, port=resolved_port, session=session, timeout=12, runner=runner
+    )
     if not result.ok:
         if "already enabled" in (result.output or "").lower():
-            return browser_stream_status(port=resolved_port, runner=runner)
+            return browser_stream_status(port=resolved_port, target=target, runner=runner)
         raise RuntimeError(redact_text_urls(result.output or "agent-browser stream enable failed"))
-    return browser_stream_status(port=resolved_port, runner=runner)
+    return browser_stream_status(port=resolved_port, target=target, runner=runner)
 
 
 def browser_stream_disable(
     *,
     port: int | None = None,
-    runner: Any = subprocess.run,
+    target: str = "desktop",
+    runner: Any = None,
 ) -> dict[str, Any]:
     """Disable the observation stream only; no browser state is persisted."""
 
-    resolved_port = port if port is not None else resolve_cdp_port()
+    resolved_port = port if port is not None else resolve_target_port(target)
+    if is_adb_target(target):
+        _ensure_phone_transport(
+            resolved_port, serial=_resolve_adb_serial_or_raise(target), runner=runner
+        )
     result = run_agent_browser(
         ["--json", "stream", "disable"],
         port=resolved_port,
+        session=_session_for_target(target),
         timeout=12,
         runner=runner,
     )
@@ -409,19 +633,24 @@ def browser_stream_disable(
                 "streaming is not enabled",
             )
         ):
-            return browser_stream_status(port=resolved_port, runner=runner)
+            return browser_stream_status(port=resolved_port, target=target, runner=runner)
         raise RuntimeError(redact_text_urls(result.output or "agent-browser stream disable failed"))
-    return browser_stream_status(port=resolved_port, runner=runner)
+    return browser_stream_status(port=resolved_port, target=target, runner=runner)
 
 
 def capture_browser_screenshot_png(
     *,
     port: int | None = None,
-    runner: Any = subprocess.run,
+    target: str = "desktop",
+    runner: Any = None,
 ) -> bytes:
     """Capture a transient PNG screenshot and remove the temporary file."""
 
-    resolved_port = port if port is not None else resolve_cdp_port()
+    resolved_port = port if port is not None else resolve_target_port(target)
+    if is_adb_target(target):
+        _ensure_phone_transport(
+            resolved_port, serial=_resolve_adb_serial_or_raise(target), runner=runner
+        )
     tmp = tempfile.NamedTemporaryFile(prefix="homie-browser-viewer-", suffix=".png", delete=False)
     tmp_path = Path(tmp.name)
     tmp.close()
@@ -429,7 +658,10 @@ def capture_browser_screenshot_png(
         result = run_agent_browser(
             ["screenshot", str(tmp_path)],
             port=resolved_port,
-            timeout=20,
+            session=_session_for_target(target),
+            # adb grabs ride a mobile renderer: cold-session + capture regularly
+            # exceeds the desktop's 20s (measured 2026-07-06, phone).
+            timeout=45 if is_adb_target(target) else 20,
             runner=runner,
         )
         if not result.ok:
@@ -501,13 +733,22 @@ def parse_snapshot_elements(text: str) -> list[dict[str, str]]:
 def browser_snapshot_elements(
     *,
     port: int | None = None,
-    runner: Any = subprocess.run,
+    target: str = "desktop",
+    runner: Any = None,
 ) -> list[dict[str, str]]:
-    """Interactive-element snapshot of the visible browser's active tab."""
+    """Interactive-element snapshot of the target browser's active tab."""
 
-    resolved_port = port if port is not None else resolve_cdp_port()
+    resolved_port = port if port is not None else resolve_target_port(target)
+    if is_adb_target(target):
+        _ensure_phone_transport(
+            resolved_port, serial=_resolve_adb_serial_or_raise(target), runner=runner
+        )
     result = run_agent_browser(
-        ["snapshot", "-i", "-c"], port=resolved_port, timeout=20, runner=runner
+        ["snapshot", "-i", "-c"],
+        port=resolved_port,
+        session=_session_for_target(target),
+        timeout=20,
+        runner=runner,
     )
     if not result.ok:
         raise RuntimeError(redact_text_urls(result.output or "agent-browser snapshot failed"))
@@ -557,7 +798,7 @@ def build_browser_act_args(
 def ensure_browser_window_restored(
     *,
     port: int | None = None,
-    runner: Any = subprocess.run,
+    runner: Any = None,
 ) -> bool:
     """Best-effort un-minimize of the CDP Chrome window (Windows only).
 
@@ -571,6 +812,8 @@ def ensure_browser_window_restored(
 
     if platform.system() != "Windows":
         return False
+    if runner is None:
+        runner = subprocess.run
     resolved_port = port if port is not None else resolve_cdp_port()
     ps = (
         "Add-Type 'using System; using System.Runtime.InteropServices; "
@@ -596,6 +839,74 @@ def ensure_browser_window_restored(
     return "restored" in (getattr(result, "stdout", "") or "")
 
 
+def _ensure_phone_transport(
+    local_port: int, *, serial: str | None = None, runner: Any = None
+) -> bool:
+    """adb READ-path prehook (phone OR ghost): heal the forward, then wake the
+    screen and dismiss a non-secure keyguard — WITHOUT foregrounding Chrome
+    (fail-open).
+
+    ``serial`` selects the device: None keeps the phone's single-device
+    autodetect (byte-identical M12), the ghost passes its own resolved serial so
+    it can never fall back to the phone. (Name kept from P3.0 for call-site and
+    test stability; it now serves every adb target.)
+
+    E2E evidence (2026-07-06): a dozing device freezes Chrome's renderer, so a
+    read against a sleeping device times out even though `/json/*` answers.
+    Waking the screen resumes whatever app was foreground — when that's Chrome
+    (the common drive-session case) reads recover; when the operator is in
+    another app, reads fail honestly rather than hijacking their foreground.
+    """
+
+    if runner is None:
+        runner = subprocess.run
+    try:
+        forward_ok = adb_control.ensure_forward(local_port, serial=serial, runner=runner)
+        adb_control.wake_screen(serial=serial, runner=runner)
+        adb_control.dismiss_keyguard(serial=serial, runner=runner)
+        return forward_ok
+    except Exception:
+        return False
+
+
+def ensure_phone_chrome_ready(
+    *,
+    local_port: int | None = None,
+    serial: str | None = None,
+    runner: Any = None,
+) -> bool:
+    """Best-effort adb pre-ACTION hook (phone OR ghost): heal the forward, wake
+    the screen, dismiss a non-secure keyguard, and bring Chrome to the
+    foreground. Fail-open — any error returns False and the action proceeds.
+
+    ``serial`` selects the device (None = phone single-device autodetect; the
+    ghost passes its own resolved serial). Name kept from P3.0.
+
+    Policy decided by the live freezer spike (2026-07-06, S24 over wireless
+    adb): a backgrounded/dozing device freezes Chrome's RENDERER within seconds
+    (browser-process HTTP keeps answering; page-level CDP ops time out), and
+    this exact wake -> dismiss-keyguard -> am start sequence recovered a
+    locked, dozing phone into a drivable Chrome. Foregrounding Chrome is
+    therefore REQUIRED for acts. Consequence for same-device driving: an act
+    pulls Chrome over whatever is foreground — best-effort by design; driving
+    from another device is the primary mode (the ghost, by design, never fights
+    the operator for a foreground). Read paths must NOT use this hook (they heal
+    the forward only and never hijack the device's foreground).
+    """
+
+    if runner is None:
+        runner = subprocess.run
+    try:
+        resolved_port = local_port if local_port is not None else resolve_target_port("phone")
+        forward_ok = adb_control.ensure_forward(resolved_port, serial=serial, runner=runner)
+        adb_control.wake_screen(serial=serial, runner=runner)
+        adb_control.dismiss_keyguard(serial=serial, runner=runner)
+        adb_control.chrome_to_foreground(serial=serial, runner=runner)
+        return forward_ok
+    except Exception:
+        return False
+
+
 def browser_act(
     kind: str,
     *,
@@ -605,18 +916,33 @@ def browser_act(
     direction: str | None = None,
     amount: int | None = None,
     port: int | None = None,
-    runner: Any = subprocess.run,
+    target: str = "desktop",
+    runner: Any = None,
 ) -> CommandResult:
-    """Run one operator-driven action against the visible browser."""
+    """Run one operator-driven action against the target browser."""
 
     args = build_browser_act_args(
         kind, ref=ref, text=text, key=key, direction=direction, amount=amount
     )
-    resolved_port = port if port is not None else resolve_cdp_port()
-    # Input is dropped by minimized windows (see ensure_browser_window_restored)
-    # — restore first so phone-drive works while the operator is away.
-    ensure_browser_window_restored(port=resolved_port, runner=runner)
-    return run_agent_browser(args, port=resolved_port, timeout=20, runner=runner)
+    resolved_port = port if port is not None else resolve_target_port(target)
+    if is_adb_target(target):
+        # ADB pre-hooks replace the desktop window restore (meaningless on-device).
+        ensure_phone_chrome_ready(
+            local_port=resolved_port,
+            serial=_resolve_adb_serial_or_raise(target),
+            runner=runner,
+        )
+    else:
+        # Input is dropped by minimized windows (see ensure_browser_window_restored)
+        # — restore first so phone-drive works while the operator is away.
+        ensure_browser_window_restored(port=resolved_port, runner=runner)
+    return run_agent_browser(
+        args,
+        port=resolved_port,
+        session=_session_for_target(target),
+        timeout=20,
+        runner=runner,
+    )
 
 
 def _viewer_readiness(readiness: dict[str, Any]) -> dict[str, Any]:
@@ -631,18 +957,25 @@ def _viewer_readiness(readiness: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def browser_viewer_status(*, port: int | None = None) -> dict[str, Any]:
-    """Return the stable read-only dashboard viewer envelope."""
+def browser_viewer_status(
+    *, port: int | None = None, target: str = "desktop"
+) -> dict[str, Any]:
+    """Return the stable read-only dashboard viewer envelope.
 
-    readiness = browser_readiness(port=port)
+    ``target`` is echoed back so clients can assert the request drove the
+    browser they asked for (defends against a proxy dropping the param).
+    """
+
+    readiness = browser_readiness(port=port, target=target)
     cdp_port = readiness.get("cdp_port")
     stream = (
-        browser_stream_status(port=int(cdp_port))
+        browser_stream_status(port=int(cdp_port), target=target)
         if isinstance(cdp_port, int)
         else _stream_status_payload(reason=str(readiness.get("reason") or "CDP unavailable"))
     )
     return {
         "mode": "read_only",
+        "target": target,
         "readiness": _viewer_readiness(readiness),
         "stream": stream,
         "controls": {
@@ -674,9 +1007,174 @@ def browser_status(*, port: int | None = None) -> dict[str, Any]:
     }
 
 
-def browser_readiness(*, port: int | None = None) -> dict[str, Any]:
+def adb_readiness(
+    *,
+    target: str = "phone",
+    local_port: int | None = None,
+    serial: str | None = None,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    """adb-Chrome readiness for an adb target (phone or ghost) — mirrors
+    ``browser_readiness`` key-for-key so ``_viewer_readiness``, the audit
+    plumbing, and clients work unchanged.
+
+    ``visible_guard`` carries the adb transport-guard status (device / offline /
+    unauthorized / no_device / no_forward / unknown); ``target`` + ``transport``
+    are additive. ``ready`` = guard ok AND CDP reachable through the forward.
+    ``serial`` selects the device (None = phone single-device autodetect).
+    """
+
+    device = target  # operator-facing device noun in the reason strings
+    try:
+        resolved_port = (
+            local_port if local_port is not None else resolve_target_port(target)
+        )
+    except ValueError as exc:
+        return {
+            "enabled": False,
+            "status": "attention",
+            "cdp_port": None,
+            "cdp_reachable": False,
+            "browser": "unknown",
+            "visible_guard": "unknown",
+            "tab_count": 0,
+            "agent_browser_command_source": "unknown",
+            "reason": str(exc),
+            "target": target,
+            "transport": "adb",
+        }
+
+    resolution = resolve_agent_browser_command()
+    # Guard first: it self-heals the forward the CDP probe depends on.
+    guard = adb_control.adb_transport_guard(resolved_port, serial=serial, runner=runner)
+    guard_status = str(guard.get("status") or "unknown")
+    version = get_cdp_version(resolved_port)
+    cdp_reachable = bool(version.get("reachable"))
+    tabs = list_cdp_tabs(resolved_port) if cdp_reachable else {"reachable": False, "tabs": []}
+    tab_count = len(tabs.get("tabs", [])) if tabs.get("reachable") else 0
+
+    ready = bool(guard.get("ok")) and cdp_reachable
+    reason = "ready"
+    if not guard.get("ok"):
+        detail = str(guard.get("detail") or f"adb guard is {guard_status}")
+        if device != "phone":
+            # adb_transport_guard's messages are phone-worded; rewrite the device
+            # noun so a ghost never reports "phone" (cosmetic — the serial/port
+            # actually targeted are already the ghost's, never the phone's).
+            detail = re.sub(r"\bphone\b", device, detail)
+        reason = redact_text_urls(detail)
+    elif not cdp_reachable:
+        error_text = str(version.get("error") or "").lower()
+        # "closed connection" = the adb forward accepted on the PC but the
+        # device-side abstract socket is gone — Chrome killed/fully frozen
+        # (seen live 2026-07-06 while the operator held the phone in the app).
+        if "refused" in error_text or "closed connection" in error_text:
+            reason = f"{device} Chrome devtools socket unavailable — open Chrome on the {device}"
+        elif "timed out" in error_text or "timeout" in error_text:
+            reason = f"{device} Chrome unresponsive (backgrounded or frozen)"
+        else:
+            reason = redact_text_urls(str(version.get("error") or "CDP unreachable"))
+
+    return {
+        "enabled": ready,
+        "status": "ready" if ready else "attention",
+        "cdp_port": resolved_port,
+        "cdp_reachable": cdp_reachable,
+        "browser": version.get("browser", "unknown") if cdp_reachable else "unknown",
+        "visible_guard": guard_status,
+        "tab_count": tab_count,
+        "agent_browser_command_source": resolution.source,
+        "reason": reason,
+        "target": target,
+        "transport": "adb",
+    }
+
+
+def phone_readiness(
+    *,
+    local_port: int | None = None,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    """Phone-Chrome readiness (P3.0). Byte-identical M12 envelope.
+
+    PhoneOps review F1 (issue #89): the probe is serial-scoped when
+    HOMIE_PHONE_ADB_SERIAL is set, and REFUSES to autodetect once a ghost
+    serial is configured — an un-scoped guard probe (ensure_forward /
+    wake_screen) with only the ghost attached would silently drive the ghost
+    under the phone label and report it ready. Pure autodetect survives only
+    for ghost-less deployments (byte-identical M12 behavior there).
+    """
+
+    serial = resolve_target_serial("phone")
+    if not serial and resolve_target_serial("ghost"):
+        try:
+            resolved_port = (
+                local_port if local_port is not None else resolve_target_port("phone")
+            )
+        except ValueError:
+            resolved_port = None
+        return {
+            "enabled": False,
+            "status": "attention",
+            "cdp_port": resolved_port,
+            "cdp_reachable": False,
+            "browser": "unknown",
+            "visible_guard": "unknown",
+            "tab_count": 0,
+            "agent_browser_command_source": resolve_agent_browser_command().source,
+            "reason": (
+                "HOMIE_PHONE_ADB_SERIAL not set while a ghost serial is configured — "
+                "set it so phone probes can never autodetect onto the ghost"
+            ),
+            "target": "phone",
+            "transport": "adb",
+        }
+    return adb_readiness(target="phone", local_port=local_port, serial=serial, runner=runner)
+
+
+def ghost_readiness(
+    *,
+    local_port: int | None = None,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    """Ghost-Chrome readiness (P4.0). Refuses to probe adb without the ghost's
+    OWN serial — a None serial would autodetect / fall back to the phone, so it
+    reports attention instead of ever touching the operator's personal device.
+    """
+
+    serial = resolve_target_serial("ghost")
+    if not serial:
+        try:
+            resolved_port = (
+                local_port if local_port is not None else resolve_target_port("ghost")
+            )
+        except ValueError:
+            resolved_port = None
+        return {
+            "enabled": False,
+            "status": "attention",
+            "cdp_port": resolved_port,
+            "cdp_reachable": False,
+            "browser": "unknown",
+            "visible_guard": "unknown",
+            "tab_count": 0,
+            "agent_browser_command_source": resolve_agent_browser_command().source,
+            "reason": "HOMIE_GHOST_ADB_SERIAL not set — set it to the ghost's adb serial",
+            "target": "ghost",
+            "transport": "adb",
+        }
+    return adb_readiness(target="ghost", local_port=local_port, serial=serial, runner=runner)
+
+
+def browser_readiness(
+    *, port: int | None = None, target: str = "desktop"
+) -> dict[str, Any]:
     """Return a stable, URL-free browser readiness envelope for operator surfaces."""
 
+    if target == "phone":
+        return phone_readiness(local_port=port)
+    if target == "ghost":
+        return ghost_readiness(local_port=port)
     try:
         resolved_port = port if port is not None else resolve_cdp_port()
     except ValueError as exc:

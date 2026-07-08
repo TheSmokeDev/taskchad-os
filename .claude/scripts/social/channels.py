@@ -22,6 +22,15 @@ class SocialChannel:
     voice_profile: str = ""
     topic_pool: list[str] = field(default_factory=list)
     browser_workflow_id: str | None = None
+    # Postiz transport binding (execution_method: postiz). The integration id
+    # comes from the instance's GET /integrations; empty == unbound (dispatch
+    # fails with a clear error instead of guessing).
+    postiz_integration_id: str = ""
+    postiz_settings: dict[str, Any] = field(default_factory=dict)
+    # Per-brand video design file (relative to social/ or absolute). Passed to
+    # video_pipeline.py --design-file so rendered clips use the brand palette /
+    # fonts instead of the dark "neutral" default. Empty == neutral default.
+    design_file: str = ""
 
 
 _DEFAULT_YAML_PATH: Path | None = None
@@ -53,6 +62,9 @@ def _load_channels(yaml_path: Path | None = None) -> dict[str, SocialChannel]:
             voice_profile=cfg.get("voice_profile", ""),
             topic_pool=cfg.get("topic_pool", []) or [],
             browser_workflow_id=cfg.get("browser_workflow_id"),
+            postiz_integration_id=str(cfg.get("postiz_integration_id", "") or ""),
+            postiz_settings=cfg.get("postiz_settings", {}) or {},
+            design_file=str(cfg.get("design_file", "") or ""),
         )
     return result
 

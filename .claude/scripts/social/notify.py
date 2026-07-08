@@ -81,6 +81,34 @@ def _build_reply_markup(post_id: int) -> dict:
     }
 
 
+def send_text_to_telegram(text: str) -> bool:
+    """Send a plain operator notification (no buttons). Fail-open: returns
+    False on any failure, never raises — used by the Postiz reconcile pass
+    to surface async publish failures."""
+    if not text:
+        return False
+    creds = _telegram_credentials()
+    if creds is None:
+        return False
+    token, chat_id = creds
+    try:
+        data = urllib.parse.urlencode(
+            {
+                "chat_id": chat_id,
+                "text": text[:_TG_TEXT_LIMIT],
+                "disable_web_page_preview": "true",
+            }
+        ).encode()
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except Exception as exc:
+        safe = _redact(f"{type(exc).__name__}: {exc}", token)
+        print(f"[social.notify] Telegram send failed: {safe}")
+        return False
+
+
 def deliver_draft_to_telegram(post: "SocialPost") -> bool:
     """Send the draft card with inline buttons to the operator's Telegram.
 

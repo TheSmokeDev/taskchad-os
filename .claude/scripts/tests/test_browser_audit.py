@@ -91,3 +91,68 @@ def test_surface_normalization_defaults_unknown() -> None:
     assert normalize_surface("WEB") == "mission_control"
     assert normalize_surface("telegram") == "telegram"
     assert normalize_surface("mastodon") == "unknown"
+
+
+def test_ghost_surface_survives_normalization(tmp_path: Path) -> None:
+    """PhoneOps F10 (issue #98): surface="ghost" must reach the written row
+    verbatim — before the KNOWN_SURFACES entry, normalize_surface silently
+    rewrote every ghost capability audit row to "unknown"."""
+    assert normalize_surface("ghost") == "ghost"
+
+    log_path = tmp_path / "browser_actions.jsonl"
+    append_browser_audit_record(
+        command="/ghost act",
+        workflow_id="ghost.act",
+        outcome="blocked",
+        reason="capability disabled",
+        surface="ghost",
+        path=log_path,
+    )
+    row = json.loads(log_path.read_text(encoding="utf-8"))
+    assert row["surface"] == "ghost"
+
+
+def test_dashboard_surface_survives_normalization(tmp_path: Path) -> None:
+    """Same class as issue #98: dashboard_api._browser_viewer_audit stamps
+    surface="dashboard" — before the KNOWN_SURFACES entry every browser-viewer
+    row was normalized to "unknown"."""
+    assert normalize_surface("dashboard") == "dashboard"
+
+    log_path = tmp_path / "browser_actions.jsonl"
+    append_browser_audit_record(
+        command="GET /api/browser-viewer/status",
+        workflow_id="browser.viewer.status",
+        outcome="succeeded",
+        reason="status rendered",
+        surface="dashboard",
+        path=log_path,
+    )
+    row = json.loads(log_path.read_text(encoding="utf-8"))
+    assert row["surface"] == "dashboard"
+
+
+def test_target_column_written_and_defaults_none(tmp_path: Path) -> None:
+    """PhoneOps F12 (issue #100): the browser target is a real structured
+    column — including the REJECTED raw value on invalid-target refusals —
+    not a `?target=` suffix smuggled into the command string."""
+    log_path = tmp_path / "browser_actions.jsonl"
+    append_browser_audit_record(
+        command="GET /api/browser-viewer/status",
+        workflow_id="browser.viewer.status",
+        outcome="failed",
+        reason="unknown browser target",
+        surface="dashboard",
+        target="tablet",
+        path=log_path,
+    )
+    append_browser_audit_record(
+        command="/browser status",
+        workflow_id="browser.status",
+        outcome="succeeded",
+        reason="status rendered",
+        surface="cli",
+        path=log_path,
+    )
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["target"] == "tablet"
+    assert rows[1]["target"] is None

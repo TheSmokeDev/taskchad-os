@@ -401,3 +401,85 @@ def test_activate_two_personas_do_not_corrupt_each_others_pid_files(tmp_path, mo
     eng_pid = (homie / "profiles" / "engineering" / "run" / "bot.pid").read_text().strip()
     assert sales_pid == "1001"
     assert eng_pid == "1002"
+
+
+# ── activate boot guard (issue #109) ─────────────────────────────────────
+
+
+def test_activate_repairs_broken_inventory_before_spawn(fake_profile):
+    """Missing memory/ at activate -> inventory repaired before Popen."""
+    import shutil
+
+    import dashboard_bot_lifecycle as dbl
+
+    shutil.rmtree(fake_profile / "memory")
+
+    fake_proc = MagicMock()
+    fake_proc.pid = 7777
+
+    with patch("dashboard_bot_lifecycle.shared.read_pid", return_value=None), \
+         patch("dashboard_bot_lifecycle.shared.is_pid_alive", return_value=False), \
+         patch("dashboard_bot_lifecycle.shared.file_lock") as fake_lock, \
+         patch("dashboard_bot_lifecycle.subprocess.Popen", return_value=fake_proc):
+        fake_lock.return_value.__enter__ = lambda *a, **k: None
+        fake_lock.return_value.__exit__ = lambda *a, **k: None
+        result = dbl.activate("sales")
+
+    assert result["status"] == "running"
+    assert (fake_profile / "memory" / "SOUL.md").exists()
+    assert (fake_profile / "memory" / "daily").is_dir()
+
+
+def test_activate_proceeds_when_repair_fails(fake_profile, monkeypatch, capsys):
+    """Guard failure never blocks the spawn (fail-open, loud on stderr)."""
+    import shutil
+
+    import dashboard_bot_lifecycle as dbl
+    from personas import lifecycle
+
+    shutil.rmtree(fake_profile / "memory")
+
+    def explode(name):
+        raise RuntimeError("repair exploded")
+
+    monkeypatch.setattr(lifecycle, "ensure_profile_inventory", explode)
+
+    fake_proc = MagicMock()
+    fake_proc.pid = 7777
+
+    with patch("dashboard_bot_lifecycle.shared.read_pid", return_value=None), \
+         patch("dashboard_bot_lifecycle.shared.is_pid_alive", return_value=False), \
+         patch("dashboard_bot_lifecycle.shared.file_lock") as fake_lock, \
+         patch("dashboard_bot_lifecycle.subprocess.Popen", return_value=fake_proc):
+        fake_lock.return_value.__enter__ = lambda *a, **k: None
+        fake_lock.return_value.__exit__ = lambda *a, **k: None
+        result = dbl.activate("sales")
+
+    assert result["status"] == "running", "repair failure must not block spawn"
+    err = capsys.readouterr().err
+    assert "inventory repair failed" in err
+
+
+def test_activate_healthy_profile_never_calls_repair(fake_profile, monkeypatch):
+    """Happy path is one stat — the repair primitive is never invoked."""
+    import dashboard_bot_lifecycle as dbl
+    from personas import lifecycle
+
+    monkeypatch.setattr(
+        lifecycle,
+        "ensure_profile_inventory",
+        lambda name: pytest.fail("repair must not run on a healthy profile"),
+    )
+
+    fake_proc = MagicMock()
+    fake_proc.pid = 7777
+
+    with patch("dashboard_bot_lifecycle.shared.read_pid", return_value=None), \
+         patch("dashboard_bot_lifecycle.shared.is_pid_alive", return_value=False), \
+         patch("dashboard_bot_lifecycle.shared.file_lock") as fake_lock, \
+         patch("dashboard_bot_lifecycle.subprocess.Popen", return_value=fake_proc):
+        fake_lock.return_value.__enter__ = lambda *a, **k: None
+        fake_lock.return_value.__exit__ = lambda *a, **k: None
+        result = dbl.activate("sales")
+
+    assert result["status"] == "running"

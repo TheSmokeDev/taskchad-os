@@ -3,7 +3,7 @@ import {
   Brain, Network, Activity, ShieldCheck,
   Briefcase, Mic, Calendar,
   Kanban, Monitor, PlugZap, Settings as SettingsIcon,
-  Smartphone,
+  Smartphone, Share2, Ghost,
 } from 'lucide-preact';
 import type { ComponentChildren } from 'preact';
 
@@ -28,6 +28,8 @@ export const ROUTES: RouteDef[] = [
   { path: '/agents',        label: 'Agents',          section: 'workspace',    icon: Users,         shortcut: 'g a' },
   { path: '/chat',          label: 'Chat',            section: 'workspace',    icon: MessageSquare, shortcut: 'g c' },
   { path: '/browser',       label: 'Browser Viewer',  section: 'workspace',    icon: Monitor,       shortcut: 'g b' },
+  { path: '/ghost',         label: 'Ghost Phone',     section: 'workspace',    icon: Ghost,         shortcut: 'g g' },
+  { path: '/social',        label: 'Social',          section: 'workspace',    icon: Share2,        shortcut: 'g o' },
   { path: '/mobile',        label: 'Mobile Access',   section: 'workspace',    icon: Smartphone,    shortcut: 'g p' },
 
   { path: '/memories',      label: 'Memories',        section: 'intelligence', icon: Brain,         shortcut: 'g e' },

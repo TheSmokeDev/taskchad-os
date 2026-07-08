@@ -355,6 +355,111 @@ class TestDispatchNonApproved:
             dispatch_post(9999, db_path=svc._db._db_path)
 
 
+class TestVideoDispatch:
+    """A media_type=video draft routes to the reel/video lane on every transport."""
+
+    def test_ig_reel_via_meta_graph(self, svc: SocialPostService):
+        pid = svc.create_draft(
+            channel="instagram", title="T", body="Reel time",
+            media_path="/tmp/reel.mp4", media_type="video",
+        )
+        svc.approve_post(pid)
+
+        seen = {}
+
+        def fake_post(platform, text, image_url="", video_url=""):
+            seen["platform"] = platform
+            seen["video_url"] = video_url
+            seen["image_url"] = image_url
+            from integrations.social_media import PostResult
+            return PostResult(platform=platform, success=True, message="ok",
+                              post_url="https://instagram.com/reel/x")
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record"), \
+             patch("social.image_host.upload_public", return_value="https://host/reel.mp4"), \
+             patch("integrations.social_media.post_to_platform", side_effect=fake_post):
+            mock_ch.return_value = SocialChannel(
+                channel_id="instagram", display_name="Instagram", execution_method="api",
+            )
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert ok is True
+        # Routed as VIDEO (video_url set, image_url empty), hosted the mp4.
+        assert seen["video_url"] == "https://host/reel.mp4"
+        assert seen["image_url"] == ""
+        assert svc.get_post(pid).post_url == "https://instagram.com/reel/x"
+
+    def test_video_host_failure_fails_post(self, svc: SocialPostService):
+        pid = svc.create_draft(
+            channel="instagram", title="T", body="B",
+            media_path="/tmp/reel.mp4", media_type="video",
+        )
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record"), \
+             patch("social.image_host.upload_public", side_effect=RuntimeError("supabase down")), \
+             patch("integrations.social_media.post_to_platform") as mock_post:
+            mock_ch.return_value = SocialChannel(
+                channel_id="instagram", display_name="Instagram", execution_method="api",
+            )
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert ok is False
+        mock_post.assert_not_called()
+        assert svc.get_post(pid).status == "failed"
+
+    def test_youtube_via_postiz_uploads_video(self, svc: SocialPostService):
+        pid = svc.create_draft(
+            channel="youtube", title="My Short", body="desc",
+            media_path="/tmp/short.mp4", media_type="video",
+        )
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record"), \
+             patch("integrations.postiz_api.upload_file", return_value={"id": "m1", "path": "p"}) as mock_up, \
+             patch("integrations.postiz_api.create_post", return_value="pz-yt") as mock_create:
+            mock_ch.return_value = SocialChannel(
+                channel_id="youtube", display_name="YouTube", execution_method="postiz",
+                postiz_integration_id="yt-int", postiz_settings={"visibility": "public"},
+            )
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert ok is True
+        mock_up.assert_called_once_with("/tmp/short.mp4")  # video uploaded, not a quote card
+        settings = mock_create.call_args.kwargs["settings"]
+        assert settings["__type"] == "youtube"
+        assert settings["title"] == "My Short"
+        assert svc.get_post(pid).external_ref == "postiz:pz-yt"
+
+    def test_youtube_without_video_still_refused(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="youtube", title="T", body="B")  # no media
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record"), \
+             patch("integrations.postiz_api.create_post") as mock_create:
+            mock_ch.return_value = SocialChannel(
+                channel_id="youtube", display_name="YouTube", execution_method="postiz",
+                postiz_integration_id="yt-int",
+            )
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert ok is False
+        mock_create.assert_not_called()
+        assert "no rendered video" in (svc.get_post(pid).error or "")
+
+
 class TestDispatchGateVerification:
     """Verify that every external write goes through require_integration_action."""
 
@@ -467,6 +572,263 @@ class TestDispatchDuePosts:
         result = dispatch_due_posts(db_path=svc._db._db_path)
 
         assert result["dispatched"] == 0
+
+
+def _postiz_channel(**overrides) -> SocialChannel:
+    defaults = dict(
+        channel_id="mastodon",
+        display_name="Mastodon",
+        execution_method="postiz",
+        postiz_integration_id="int-123",
+    )
+    defaults.update(overrides)
+    return SocialChannel(**defaults)
+
+
+class TestPostizDispatch:
+    """The postiz execution method honors the _dispatch_api contract:
+    gate FIRST, pre-send pending audit, optimistic accept, blocked re-raise."""
+
+    def test_postiz_dispatch_calls_gate(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="mastodon", title="T", body="B")
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action") as mock_gate, \
+             patch("social.post_executor.append_social_audit_record"), \
+             patch("integrations.postiz_api.create_post", return_value="pz-1"):
+            mock_ch.return_value = _postiz_channel()
+            from social.post_executor import dispatch_post
+            dispatch_post(pid, db_path=svc._db._db_path)
+
+        mock_gate.assert_called_once_with(
+            "social", "post_mastodon", surface="operator_confirmed", caller="dispatch_postiz",
+        )
+
+    def test_success_sets_external_ref_optimistically(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="mastodon", title="T", body="Hello fedi")
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record") as mock_audit, \
+             patch("integrations.postiz_api.create_post", return_value="pz-42") as mock_create:
+            mock_ch.return_value = _postiz_channel()
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert ok is True
+        post = svc.get_post(pid)
+        assert post.status == "posted"
+        assert post.external_ref == "postiz:pz-42"
+        assert not post.post_url  # filled later by reconcile
+
+        create_kwargs = mock_create.call_args.kwargs
+        assert create_kwargs["integration_id"] == "int-123"
+        assert create_kwargs["content"] == "Hello fedi"
+        assert create_kwargs["settings"]["__type"] == "mastodon"
+
+        outcomes = [c.kwargs.get("outcome") for c in mock_audit.call_args_list]
+        assert outcomes == ["pending", "success"]
+
+    def test_pending_audit_written_before_create(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="mastodon", title="T", body="B")
+        svc.approve_post(pid)
+        order: list[str] = []
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record",
+                   side_effect=lambda **kw: order.append(f"audit:{kw.get('outcome')}")), \
+             patch("integrations.postiz_api.create_post",
+                   side_effect=lambda **kw: order.append("create") or "pz-1"):
+            mock_ch.return_value = _postiz_channel()
+            from social.post_executor import dispatch_post
+            dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert order == ["audit:pending", "create", "audit:success"]
+
+    def test_missing_integration_id_fails_without_network(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="mastodon", title="T", body="B")
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record") as mock_audit, \
+             patch("integrations.postiz_api.create_post") as mock_create:
+            mock_ch.return_value = _postiz_channel(postiz_integration_id="")
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert ok is False
+        mock_create.assert_not_called()
+        post = svc.get_post(pid)
+        assert post.status == "failed"
+        assert "postiz_integration_id" in (post.error or "")
+        assert any(c.kwargs.get("outcome") == "failed" for c in mock_audit.call_args_list)
+
+    def test_video_platform_refused(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="youtube", title="T", body="B")
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record"), \
+             patch("integrations.postiz_api.create_post") as mock_create:
+            mock_ch.return_value = _postiz_channel(
+                channel_id="youtube", display_name="YouTube",
+            )
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert ok is False
+        mock_create.assert_not_called()
+        post = svc.get_post(pid)
+        assert post.status == "failed"
+        assert "video" in (post.error or "").lower()
+
+    def test_gate_blocked_reraises_and_audits(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="mastodon", title="T", body="B")
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action") as mock_gate, \
+             patch("social.post_executor.append_social_audit_record") as mock_audit:
+            mock_ch.return_value = _postiz_channel()
+            mock_gate.side_effect = IntegrationPolicyError("disabled by policy")
+            from social.post_executor import dispatch_post
+            with pytest.raises(IntegrationPolicyError):
+                dispatch_post(pid, db_path=svc._db._db_path)
+
+        post = svc.get_post(pid)
+        assert post.status == "failed"
+        assert any(c.kwargs.get("outcome") == "blocked" for c in mock_audit.call_args_list)
+
+    def test_postiz_error_marks_failed(self, svc: SocialPostService):
+        from integrations.postiz_api import PostizUnreachable
+
+        pid = svc.create_draft(channel="mastodon", title="T", body="B")
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record") as mock_audit, \
+             patch("integrations.postiz_api.create_post",
+                   side_effect=PostizUnreachable("refused")):
+            mock_ch.return_value = _postiz_channel()
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert ok is False
+        assert svc.get_post(pid).status == "failed"
+        assert any(c.kwargs.get("outcome") == "failed" for c in mock_audit.call_args_list)
+
+    def test_instagram_quote_card_failure_fails_post(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="instagram", title="T", body="B")
+        svc.approve_post(pid)
+
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch("social.post_executor.require_integration_action"), \
+             patch("social.post_executor.append_social_audit_record"), \
+             patch("social.quote_card.render_quote_card",
+                   side_effect=RuntimeError("pillow exploded")), \
+             patch("integrations.postiz_api.create_post") as mock_create:
+            mock_ch.return_value = _postiz_channel(
+                channel_id="instagram", display_name="Instagram",
+                postiz_settings={"post_type": "post"},
+            )
+            from social.post_executor import dispatch_post
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        assert ok is False
+        mock_create.assert_not_called()
+        assert "Quote-card" in (svc.get_post(pid).error or "")
+
+
+class TestPostizReconcile:
+    """Optimistic rows resolve against GET /posts states."""
+
+    def _posted_row(self, svc: SocialPostService, ref: str = "postiz:pz-1") -> int:
+        pid = svc.create_draft(channel="mastodon", title="T", body="B")
+        svc.approve_post(pid)
+        svc.mark_posted(pid, external_ref=ref)
+        return pid
+
+    def test_published_fills_post_url(self, svc: SocialPostService, monkeypatch):
+        monkeypatch.setenv("POSTIZ_API_URL", "http://postiz.test/api")
+        monkeypatch.setenv("POSTIZ_API_KEY", "k")
+        pid = self._posted_row(svc)
+
+        with patch("integrations.postiz_api.list_posts", return_value=[
+                {"id": "pz-1", "state": "PUBLISHED",
+                 "releaseURL": "https://mastodon.social/@x/1"}]), \
+             patch("social.audit.append_social_audit_record") as mock_audit:
+            from social.postiz_reconcile import reconcile_postiz_posts
+            summary = reconcile_postiz_posts(db_path=svc._db._db_path)
+
+        assert summary["confirmed"] == 1
+        post = svc.get_post(pid)
+        assert post.status == "posted"
+        assert post.post_url == "https://mastodon.social/@x/1"
+        assert any(c.kwargs.get("action") == "reconcile" for c in mock_audit.call_args_list)
+
+    def test_error_demotes_to_failed_and_notifies(self, svc: SocialPostService, monkeypatch):
+        monkeypatch.setenv("POSTIZ_API_URL", "http://postiz.test/api")
+        monkeypatch.setenv("POSTIZ_API_KEY", "k")
+        pid = self._posted_row(svc)
+
+        with patch("integrations.postiz_api.list_posts", return_value=[
+                {"id": "pz-1", "state": "ERROR"}]), \
+             patch("social.audit.append_social_audit_record"), \
+             patch("social.notify.send_text_to_telegram") as mock_notify:
+            from social.postiz_reconcile import reconcile_postiz_posts
+            summary = reconcile_postiz_posts(db_path=svc._db._db_path)
+
+        assert summary["failed"] == 1
+        assert svc.get_post(pid).status == "failed"
+        mock_notify.assert_called_once()
+
+    def test_queue_state_stays_pending(self, svc: SocialPostService, monkeypatch):
+        monkeypatch.setenv("POSTIZ_API_URL", "http://postiz.test/api")
+        monkeypatch.setenv("POSTIZ_API_KEY", "k")
+        pid = self._posted_row(svc)
+
+        with patch("integrations.postiz_api.list_posts", return_value=[
+                {"id": "pz-1", "state": "QUEUE"}]), \
+             patch("social.audit.append_social_audit_record"):
+            from social.postiz_reconcile import reconcile_postiz_posts
+            summary = reconcile_postiz_posts(db_path=svc._db._db_path)
+
+        assert summary["pending"] == 1
+        post = svc.get_post(pid)
+        assert post.status == "posted"
+        assert not post.post_url
+
+    def test_unconfigured_skips_without_network(self, svc: SocialPostService, monkeypatch):
+        monkeypatch.delenv("POSTIZ_API_URL", raising=False)
+        monkeypatch.delenv("POSTIZ_API_KEY", raising=False)
+        self._posted_row(svc)
+
+        with patch("integrations.postiz_api.list_posts") as mock_list:
+            from social.postiz_reconcile import reconcile_postiz_posts
+            summary = reconcile_postiz_posts(db_path=svc._db._db_path)
+
+        mock_list.assert_not_called()
+        assert summary.get("skipped") == "postiz not configured"
+
+    def test_non_postiz_posted_rows_ignored(self, svc: SocialPostService, monkeypatch):
+        monkeypatch.setenv("POSTIZ_API_URL", "http://postiz.test/api")
+        monkeypatch.setenv("POSTIZ_API_KEY", "k")
+        pid = svc.create_draft(channel="linkedin", title="T", body="B")
+        svc.approve_post(pid)
+        svc.mark_posted(pid, post_url="https://linkedin.com/post/1")
+
+        with patch("integrations.postiz_api.list_posts") as mock_list:
+            from social.postiz_reconcile import reconcile_postiz_posts
+            summary = reconcile_postiz_posts(db_path=svc._db._db_path)
+
+        mock_list.assert_not_called()  # no candidates -> no network call
+        assert summary["checked"] == 0
 
 
 class TestPreSendAuditRecord:

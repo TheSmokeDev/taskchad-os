@@ -225,13 +225,21 @@ def test_route_policy_count_is_134(tmp_path, monkeypatch):
     Mobile M7 cockpit); 127 -> 130 on 2026-07-05 (+3 read-only sessions
     routes, M8); 130 -> 134 on 2026-07-05 (+4 read-only library routes —
     skills, files list/read, system-jobs — M9); 134 -> 137 on 2026-07-05
-    (+3 phone-drive browser routes — elements, act, navigate — M12).
+    (+3 phone-drive browser routes — elements, act, navigate — M12);
+    137 -> 145 on 2026-07-06 (+8 social routes — status, channels, queue,
+    posts, compose, connect-url, approve, reject — Postiz Social tab);
+    145 -> 146 on 2026-07-06 (+1 on-demand social reconcile route);
+    146 -> 147 on 2026-07-07 (+1 ghost-viewer screen route — the ghost
+    DEVICE takeover surface, P4.1 Phase B B2); 147 -> 151 on 2026-07-07
+    (+4 ghost-viewer input routes — tap/text/swipe/key, P4.1 Phase B B3);
+    151 -> 153 on 2026-07-07 (+2 ghost-viewer app routes — launch/install,
+    P4.1 Phase B B4).
     """
     monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     api_mod = _reload_real_api(tmp_path / "count.db")
     try:
-        assert len(all_registered_routes(api_mod.app)) == 137
-        assert len(ROUTE_POLICY) == 137
+        assert len(all_registered_routes(api_mod.app)) == 153
+        assert len(ROUTE_POLICY) == 153
     finally:
         api_mod._db.close()
 

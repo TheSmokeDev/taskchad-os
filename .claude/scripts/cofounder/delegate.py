@@ -131,15 +131,29 @@ def run_agenda_line(
             # ledger's local_date and the agenda file name must agree on
             # what "today" means (adversarial-review Critical #1).
             now = config.now_local()
-        day = date or now.date().isoformat()
+        if date:
+            day = date
+            agenda_path = _agenda_json_path(settings.projects_dir, day)
+        else:
+            # Same fallback window as the portfolio digest: between midnight
+            # and the morning pass, "run <n>" must target the agenda the
+            # digest is SHOWING (yesterday's), not a not-yet-existing today.
+            from datetime import timedelta
 
-        agenda_path = _agenda_json_path(settings.projects_dir, day)
+            day = now.date().isoformat()
+            agenda_path = _agenda_json_path(settings.projects_dir, day)
+            for offset in range(1, 3):
+                if agenda_path.is_file():
+                    break
+                day = (now.date() - timedelta(days=offset)).isoformat()
+                agenda_path = _agenda_json_path(settings.projects_dir, day)
         if not agenda_path.is_file():
             return DelegationResult(
                 outcome=OUTCOME_NO_AGENDA,
                 message=(
-                    f"No machine-readable agenda for {day}. Run "
-                    "`uv run python -m cofounder.agenda --force` to produce one."
+                    f"No machine-readable agenda for {day} (or the 2 days "
+                    "prior). Run `uv run python -m cofounder.agenda --force` "
+                    "to produce one."
                 ),
             )
 
@@ -562,6 +576,41 @@ def _stamp_item_delegated_locked(
 # =============================================================================
 
 
+def build_arg_parser() -> "argparse.ArgumentParser":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m cofounder.delegate",
+        description=(
+            "Delegate one approved agenda line (the same gated path as "
+            "/cofounder run <n> — kill switch, scope, caps, audit all apply)."
+        ),
+    )
+    parser.add_argument("action", choices=["run"], help="only 'run' exists")
+    parser.add_argument("line", type=int, help="agenda line number (1-based)")
+    parser.add_argument(
+        "--date", default=None, help="agenda date (default: latest/today)"
+    )
+    parser.add_argument(
+        "--by",
+        default="operator-chat-confirm",
+        help="who approved (lands in the audit ledger's approved_by)",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI seam for the confirm-then-do chat flow: the co-founder OFFERS a
+    line in conversation, the operator confirms in plain words, and the
+    engine executes THIS command — one auditable entrypoint, byte-identical
+    gates to ``/cofounder run <n>``."""
+    args = build_arg_parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    result = run_agenda_line(args.line, date=args.date, approved_by=args.by)
+    print(result.message)
+    return 1 if result.outcome == OUTCOME_ERROR else 0
+
+
 def _resolve_audit_path(audit_path: Path | str | None = None) -> Path:
     if audit_path is not None:
         return Path(audit_path)
@@ -608,3 +657,7 @@ def _audit(
             fh.write(json.dumps(row) + "\n")
     except Exception as exc:
         logger.warning("cofounder.delegate: audit write failed (%s)", exc)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

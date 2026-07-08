@@ -21,6 +21,9 @@ Module exports (consumed by ``chat/cli.py`` Click handlers + tests):
     list_profiles()             — walk filesystem -> ProfileInfo list
     show_profile(name)          — single-profile lookup
     delete_profile(name, ...)   — quiesce + rmtree (delete-lock wrapped)
+    InventoryReport             — dataclass: per-profile inventory state
+    inspect_profile_inventory(name) — read-only inventory scan (issue #109)
+    ensure_profile_inventory(name)  — idempotent seed-if-missing repair
     use_profile(name)           — set sticky active_profile
     init_archon(name, **kw)     — thin re-export to ``personas.archon.init_archon``
                                   (Phase 5 / PRP-7e replaced the Phase 2 stub)
@@ -311,6 +314,76 @@ def _seed_identity_body(filename: str, profile_name: str) -> str:
     )
 
 
+def _inventory_state(
+    profile_dir: Path,
+) -> tuple[
+    tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]
+]:
+    """Pure inventory scan of *profile_dir* (Rule 2 — physical disk state).
+
+    Returns ``(missing_profile_dirs, missing_memory_dirs,
+    missing_identity_files, orphaned_root_identity_files)``.
+
+    Orphans are required-identity FILENAMES sitting directly under the
+    profile ROOT instead of ``<root>/memory/`` (a pre-contract /
+    hand-provisioning artifact the loader never reads — issue #109).
+    ``_IDENTITY_LOCK_FILES`` are consumer-managed and deliberately NOT
+    part of the required inventory. The contract is structural (dirs +
+    required files exist), not content richness — no heuristic here
+    should ever inspect file contents.
+    """
+    missing_profile_dirs = tuple(
+        d for d in _REQUIRED_PROFILE_DIRS if not (profile_dir / d).is_dir()
+    )
+    missing_memory_dirs = tuple(
+        d
+        for d in _REQUIRED_MEMORY_DIRS
+        if not (profile_dir / "memory" / d).is_dir()
+    )
+    missing_identity_files = tuple(
+        f
+        for f in _REQUIRED_IDENTITY_FILES
+        if not (profile_dir / "memory" / f).exists()
+    )
+    orphaned_root_identity_files = tuple(
+        f for f in _REQUIRED_IDENTITY_FILES if (profile_dir / f).is_file()
+    )
+    return (
+        missing_profile_dirs,
+        missing_memory_dirs,
+        missing_identity_files,
+        orphaned_root_identity_files,
+    )
+
+
+def _ensure_inventory_dirs(profile_dir: Path) -> None:
+    """Create every required profile + memory directory (idempotent).
+
+    Extracted verbatim from the ``create_profile`` bootstrap loops
+    (R1 B2 / R2 NM5) so create and repair can never drift.
+    """
+    for subdir in _REQUIRED_PROFILE_DIRS:
+        (profile_dir / subdir).mkdir(parents=True, exist_ok=True)
+    for memdir in _REQUIRED_MEMORY_DIRS:
+        (profile_dir / "memory" / memdir).mkdir(parents=True, exist_ok=True)
+
+
+def _seed_missing_identity_files(profile_dir: Path, profile_name: str) -> None:
+    """Seed required identity files that are MISSING — never overwrites.
+
+    Extracted verbatim from ``create_profile`` Step 5. The
+    ``if not path.exists()`` guard is the load-bearing invariant: an
+    authored identity file is never touched (issue #109 — the repaired
+    profiles are already authored).
+    """
+    for fname in _REQUIRED_IDENTITY_FILES:
+        path = profile_dir / "memory" / fname
+        if not path.exists():
+            path.write_text(
+                _seed_identity_body(fname, profile_name), encoding="utf-8"
+            )
+
+
 # =============================================================================
 # DATACLASSES
 # =============================================================================
@@ -346,6 +419,55 @@ class ProfileInfo:
     has_env: bool
     skill_count: int
     alias_path: Optional[Path] = None
+    # Issue #109 — Phase 2 inventory health (additive, defaulted so every
+    # existing constructor call keeps working; ``asdict`` consumers get two
+    # new JSON keys). Populated by ``list_profiles()`` / ``show_profile()``
+    # for NAMED profiles; the default profile keeps the healthy defaults
+    # (its memory contract is the install-dir layout, not the PRD tree).
+    inventory_ok: bool = True
+    inventory_missing: int = 0
+
+
+@dataclass(frozen=True)
+class InventoryReport:
+    """Result of an inventory inspect/repair pass over one profile.
+
+    The ``missing_*`` fields always hold the PRE-repair state — for
+    ``ensure_profile_inventory`` they are exactly what was created/seeded;
+    for ``inspect_profile_inventory`` they are what is missing right now.
+
+    ``orphaned_root_identity_files`` is report-only: repair NEVER moves
+    or deletes files — resolving an orphan is an operator decision.
+    """
+
+    name: str
+    path: Path
+    missing_profile_dirs: tuple[str, ...]
+    missing_memory_dirs: tuple[str, ...]
+    missing_identity_files: tuple[str, ...]
+    orphaned_root_identity_files: tuple[str, ...]
+    repaired: bool
+
+    @property
+    def healthy(self) -> bool:
+        """True iff the required inventory was fully present at scan time.
+
+        Orphans do NOT flip health — they don't break boot; every surface
+        renders them as warnings.
+        """
+        return not (
+            self.missing_profile_dirs
+            or self.missing_memory_dirs
+            or self.missing_identity_files
+        )
+
+    @property
+    def missing_count(self) -> int:
+        return (
+            len(self.missing_profile_dirs)
+            + len(self.missing_memory_dirs)
+            + len(self.missing_identity_files)
+        )
 
 
 # =============================================================================
@@ -542,20 +664,10 @@ def create_profile(
             # dirs. Run the SAME inventory-bootstrap loop the non-clone
             # path runs so the destination always satisfies the full
             # Phase 2 contract, regardless of what the source had.
-            for subdir in _REQUIRED_PROFILE_DIRS:
-                (profile_dir / subdir).mkdir(parents=True, exist_ok=True)
-            for memdir in _REQUIRED_MEMORY_DIRS:
-                (profile_dir / "memory" / memdir).mkdir(
-                    parents=True, exist_ok=True
-                )
+            _ensure_inventory_dirs(profile_dir)
         else:
             profile_dir.mkdir(parents=True, exist_ok=True)
-            for subdir in _REQUIRED_PROFILE_DIRS:
-                (profile_dir / subdir).mkdir(parents=True, exist_ok=True)
-            for memdir in _REQUIRED_MEMORY_DIRS:
-                (profile_dir / "memory" / memdir).mkdir(
-                    parents=True, exist_ok=True
-                )
+            _ensure_inventory_dirs(profile_dir)
             if source_dir is not None:
                 # Light-clone path: copy specific config files + memory
                 # files, NOT the full tree.
@@ -581,15 +693,9 @@ def create_profile(
         # For each file not already present (clone_all may have copied
         # some), write a sensible empty body with frontmatter so
         # bootstrap.py loaders see a coherent identity substrate. This
-        # loop runs on BOTH clone_all and non-clone paths — clone_all
-        # backfill ensures a partial source's missing identity files get
-        # seeded.
-        for fname in _REQUIRED_IDENTITY_FILES:
-            path = profile_dir / "memory" / fname
-            if not path.exists():
-                path.write_text(
-                    _seed_identity_body(fname, name), encoding="utf-8"
-                )
+        # runs on BOTH clone_all and non-clone paths — clone_all backfill
+        # ensures a partial source's missing identity files get seeded.
+        _seed_missing_identity_files(profile_dir, name)
 
         # Step 6: create wrapper alias unless suppressed (R1 B3).
         if not no_alias:
@@ -649,6 +755,96 @@ def create_profile(
         bot_running=False,  # freshly-created profile has no bot yet
         has_env=(profile_dir / ".env").exists(),
         skill_count=_count_skills(profile_dir / "skills"),
+    )
+
+
+# =============================================================================
+# INVENTORY — INSPECT / ENSURE (issue #109)
+# =============================================================================
+
+
+def _resolve_existing_profile_dir(name: str) -> Path:
+    """Validate *name* and return its root iff the profile EXISTS on disk.
+
+    Shared entry guard for inspect/ensure: ``validate_persona_name``
+    rejects ``"default"`` (its memory contract is the install-dir layout,
+    out of inventory scope) and reserved/invalid names; a missing root
+    raises ``FileNotFoundError`` — repair repairs, it does not create.
+    """
+    validate_persona_name(name)
+    profile_dir = _profile_root(name)
+    if not profile_dir.is_dir():
+        raise FileNotFoundError(
+            f"Profile '{name}' does not exist at {profile_dir}"
+        )
+    return profile_dir
+
+
+def inspect_profile_inventory(name: str) -> InventoryReport:
+    """Read-only Phase 2 inventory scan for one named profile.
+
+    Rule 2 — every check stats the disk; zero writes, no kill-switch
+    (nothing mutates). Consumed by ``thehomie doctor``,
+    ``profile list``/``show``, and ``profile repair --check``.
+    """
+    profile_dir = _resolve_existing_profile_dir(name)
+    missing_profile_dirs, missing_memory_dirs, missing_identity_files, orphans = (
+        _inventory_state(profile_dir)
+    )
+    return InventoryReport(
+        name=name,
+        path=profile_dir,
+        missing_profile_dirs=missing_profile_dirs,
+        missing_memory_dirs=missing_memory_dirs,
+        missing_identity_files=missing_identity_files,
+        orphaned_root_identity_files=orphans,
+        repaired=False,
+    )
+
+
+def ensure_profile_inventory(name: str) -> InventoryReport:
+    """Idempotently repair a named profile's Phase 2 inventory.
+
+    Runs the SAME primitives ``create_profile`` runs (mkdir exist_ok +
+    seed-if-missing) against an EXISTING profile: missing dirs are
+    created, missing identity files get seeded stubs, and an authored
+    identity file is NEVER overwritten. Orphaned root identity files are
+    reported, never moved (operator decision).
+
+    The returned report's ``missing_*`` fields hold the PRE-repair state
+    (i.e. exactly what this call created/seeded); ``repaired`` is True
+    iff anything was missing. Second call on the same profile returns
+    ``repaired=False`` — the idempotence contract.
+
+    PRD-8 Phase 7b — gated on the ``persona_mutation`` operator
+    kill-switch (symmetry with create/delete/use: this mutates disk).
+    Module-attribute lookup so monkeypatch propagates (Rule 3).
+    """
+    # Kill-switch BEFORE any filesystem work (late-bind import, Rule 3).
+    from security import kill_switches  # noqa: PLC0415
+
+    kill_switches.requireEnabled(
+        "persona_mutation", caller="lifecycle_ensure_profile_inventory"
+    )
+
+    profile_dir = _resolve_existing_profile_dir(name)
+    missing_profile_dirs, missing_memory_dirs, missing_identity_files, orphans = (
+        _inventory_state(profile_dir)
+    )
+    needs_repair = bool(
+        missing_profile_dirs or missing_memory_dirs or missing_identity_files
+    )
+    if needs_repair:
+        _ensure_inventory_dirs(profile_dir)
+        _seed_missing_identity_files(profile_dir, name)
+    return InventoryReport(
+        name=name,
+        path=profile_dir,
+        missing_profile_dirs=missing_profile_dirs,
+        missing_memory_dirs=missing_memory_dirs,
+        missing_identity_files=missing_identity_files,
+        orphaned_root_identity_files=orphans,
+        repaired=needs_repair,
     )
 
 
@@ -726,6 +922,7 @@ def list_profiles() -> list[ProfileInfo]:
                     bot_running = pid > 0 and is_pid_alive(pid)
                 except (ValueError, OSError):
                     pass
+            inventory_ok, inventory_missing = _inventory_summary(entry)
             profiles.append(
                 ProfileInfo(
                     name=entry.name,
@@ -734,9 +931,33 @@ def list_profiles() -> list[ProfileInfo]:
                     bot_running=bot_running,
                     has_env=(entry / ".env").exists(),
                     skill_count=_count_skills(entry / "skills"),
+                    inventory_ok=inventory_ok,
+                    inventory_missing=inventory_missing,
                 )
             )
     return profiles
+
+
+def _inventory_summary(profile_dir: Path) -> tuple[bool, int]:
+    """Fail-soft ``(inventory_ok, inventory_missing)`` for ProfileInfo.
+
+    Cheap stats via ``_inventory_state``; any OS failure leaves the
+    healthy defaults so ``list_profiles`` never raises (matches the
+    ``_count_skills`` posture). Orphans are excluded from the count —
+    they are warn-level, surfaced by ``inspect_profile_inventory``.
+    """
+    try:
+        missing_profile_dirs, missing_memory_dirs, missing_identity_files, _ = (
+            _inventory_state(profile_dir)
+        )
+    except OSError:
+        return True, 0
+    missing = (
+        len(missing_profile_dirs)
+        + len(missing_memory_dirs)
+        + len(missing_identity_files)
+    )
+    return missing == 0, missing
 
 
 def show_profile(name: str) -> ProfileInfo:
@@ -773,6 +994,7 @@ def show_profile(name: str) -> ProfileInfo:
         except (ValueError, OSError):
             pass
 
+    inventory_ok, inventory_missing = _inventory_summary(profile_dir)
     return ProfileInfo(
         name=name,
         path=profile_dir,
@@ -780,6 +1002,8 @@ def show_profile(name: str) -> ProfileInfo:
         bot_running=bot_running,
         has_env=(profile_dir / ".env").exists(),
         skill_count=_count_skills(profile_dir / "skills"),
+        inventory_ok=inventory_ok,
+        inventory_missing=inventory_missing,
     )
 
 

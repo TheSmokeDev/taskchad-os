@@ -302,6 +302,43 @@ _ACTIONS: tuple[IntegrationAction, ...] = (
         config_hints=("INSTAGRAM_BUSINESS_ACCOUNT_ID", "FACEBOOK_PAGE_ACCESS_TOKEN"),
         description="Post to Instagram via Meta Graph API (requires image URL).",
     ),
+    # Postiz-transport channels (execution_method: postiz in channels.yaml).
+    # The gate stays per-channel; Postiz is only the publishing transport.
+    _action(
+        "social",
+        "post_mastodon",
+        "external_post",
+        exposures=("operator_confirmed",),
+        config_hints=("POSTIZ_API_URL", "POSTIZ_API_KEY"),
+        description="Post to Mastodon via the Postiz publishing lane.",
+    ),
+    _action(
+        "social",
+        "post_bluesky",
+        "external_post",
+        exposures=("operator_confirmed",),
+        config_hints=("POSTIZ_API_URL", "POSTIZ_API_KEY"),
+        description="Post to Bluesky via the Postiz publishing lane.",
+    ),
+    _action(
+        "social",
+        "post_threads",
+        "external_post",
+        exposures=("operator_confirmed",),
+        config_hints=("POSTIZ_API_URL", "POSTIZ_API_KEY"),
+        description="Post to Threads via the Postiz publishing lane.",
+    ),
+    _action(
+        "social",
+        "post_youtube",
+        "external_post",
+        exposures=("operator_confirmed",),
+        config_hints=("POSTIZ_API_URL", "POSTIZ_API_KEY"),
+        description=(
+            "Publish to YouTube via the Postiz publishing lane. "
+            "Video platforms are refused by the v1 executor (text/image only)."
+        ),
+    ),
     # Autonomous co-founder orchestrator. The send runs from the heartbeat
     # or cron process (never model-invoked) and the message itself IS the
     # operator notification, so the exposure is internal.

@@ -1,7 +1,8 @@
-"""Public image hosting via Supabase Storage.
+"""Public media hosting via Supabase Storage.
 
-Uploads a PNG to a public Supabase Storage bucket and returns a public URL
-that Meta's Graph API can fetch when publishing an Instagram feed post.
+Uploads an image (PNG) or a video (MP4/MOV) to a public Supabase Storage
+bucket and returns a public URL that Meta's Graph API + YouTube can fetch
+when publishing a feed post, Reel, or Short.
 
 Env (resolved at call time, Rule 1):
 - NEXT_PUBLIC_SUPABASE_URL    — project base URL
@@ -19,6 +20,20 @@ from pathlib import Path
 import requests
 
 _DEFAULT_BUCKET = "social-cards"
+
+# Suffix → Content-Type. Meta Reels + YouTube validate the served content-type
+# of the fetched URL, so an MP4 MUST NOT be served as image/png.
+_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+}
+
+
+def _content_type_for(path: Path) -> str:
+    return _CONTENT_TYPES.get(path.suffix.lower(), "image/png")
 
 
 class ImageHostError(RuntimeError):
@@ -74,14 +89,17 @@ def _safe_detail(resp: requests.Response) -> str:
 
 
 def upload_public(path: Path, *, bucket: str = _DEFAULT_BUCKET) -> str:
-    """Upload ``path`` (a PNG) to a public Supabase bucket; return its public URL.
+    """Upload ``path`` (image or video) to a public Supabase bucket; return its
+    public URL.
 
-    The object name is derived from the filename so re-uploading the same card
-    is idempotent (``x-upsert: true``).
+    Content-Type is inferred from the file suffix (``.mp4`` → ``video/mp4``)
+    so Meta Reels / YouTube accept the fetched URL. The object name is derived
+    from the filename so re-uploading the same asset is idempotent
+    (``x-upsert: true``).
     """
     path = Path(path)
     if not path.is_file():
-        raise ImageHostError(f"Image not found: {path}")
+        raise ImageHostError(f"Media not found: {path}")
 
     url, key = _resolve_credentials()
     _ensure_bucket(url, key, bucket)
@@ -90,7 +108,7 @@ def upload_public(path: Path, *, bucket: str = _DEFAULT_BUCKET) -> str:
     try:
         data = path.read_bytes()
     except OSError as exc:
-        raise ImageHostError(f"Could not read image bytes: {exc}") from exc
+        raise ImageHostError(f"Could not read media bytes: {exc}") from exc
 
     try:
         resp = requests.post(
@@ -98,10 +116,10 @@ def upload_public(path: Path, *, bucket: str = _DEFAULT_BUCKET) -> str:
             data=data,
             headers={
                 "Authorization": f"Bearer {key}",
-                "Content-Type": "image/png",
+                "Content-Type": _content_type_for(path),
                 "x-upsert": "true",
             },
-            timeout=30,
+            timeout=120,
         )
     except requests.RequestException as exc:
         raise ImageHostError(f"Upload request failed: {exc}") from exc

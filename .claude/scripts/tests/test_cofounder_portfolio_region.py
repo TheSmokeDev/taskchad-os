@@ -98,6 +98,41 @@ def test_compact_digest_absent_agenda_is_empty(tmp_path, frozen_today):
     )
 
 
+def test_compact_digest_falls_back_to_latest_within_window(tmp_path, monkeypatch):
+    """The midnight-to-morning-pass gap (the 12:50am 'what's good?' incident):
+    when today's agenda doesn't exist yet, the newest one within 2 days rides
+    the region, labeled as not-today's."""
+    monkeypatch.setattr(
+        config, "now_local", lambda: datetime(2026, 7, 6, 0, 50)  # past midnight
+    )
+    _agenda(
+        tmp_path,
+        [{"n": 1, "persona": "sales", "repo": None, "task": "close leads", "status": "delegated"}],
+    )  # dated 2026-07-05
+    digest = briefing_mod.build_portfolio_digest_compact(
+        tmp_path, projects_dir=tmp_path / "cofounder"
+    )
+    assert f"Latest agenda ({TODAY}" in digest
+    assert "not today's" in digest
+    assert "⏳ 1." in digest
+
+
+def test_compact_digest_ignores_agendas_older_than_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        config, "now_local", lambda: datetime(2026, 7, 9, 10, 0)  # 4 days later
+    )
+    _agenda(
+        tmp_path,
+        [{"n": 1, "persona": "sales", "repo": None, "task": "t", "status": "proposed"}],
+    )  # dated 2026-07-05 — outside the 2-day window
+    assert (
+        briefing_mod.build_portfolio_digest_compact(
+            tmp_path, projects_dir=tmp_path / "cofounder"
+        )
+        == ""
+    )
+
+
 def test_compact_digest_garbage_json_is_empty(tmp_path, frozen_today):
     path = _agenda(tmp_path, [])
     path.write_text("{not json", encoding="utf-8")

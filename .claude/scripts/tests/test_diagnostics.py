@@ -157,6 +157,62 @@ class TestDiagnosticsReport:
         assert "https://www.linkedin.com" not in serialized
         assert "token=secret" not in serialized
 
+    def test_collect_diagnostics_includes_ghost_state(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import dataclasses
+
+        import browser_ops
+
+        monkeypatch.setattr(
+            browser_ops,
+            "build_ghost_state",
+            lambda: {
+                "enabled": True,
+                "running": True,
+                "booted": True,
+                "serial": "emulator-5554",
+                "avd": "homie_pixel",
+                "cdp_port": 18224,
+                "cdp_reachable": True,
+                "readiness_status": "ready",
+                "detail": "ok",
+            },
+        )
+
+        report = collect_diagnostics()
+
+        assert report.ghost["enabled"] is True
+        assert report.ghost["serial"] == "emulator-5554"
+        # `thehomie status --json` serializes via dataclasses.asdict → ghost rides along.
+        assert "ghost" in dataclasses.asdict(report)
+
+    def test_collect_diagnostics_ghost_disabled_when_off(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import browser_ops
+
+        monkeypatch.setattr(
+            browser_ops,
+            "build_ghost_state",
+            lambda: {
+                "enabled": False,
+                "running": False,
+                "booted": False,
+                "serial": None,
+                "avd": None,
+                "cdp_port": None,
+                "cdp_reachable": False,
+                "readiness_status": "disabled",
+                "detail": "HOMIE_GHOST_ENABLED not set — the ghost is off",
+            },
+        )
+
+        report = collect_diagnostics()
+
+        assert report.ghost["enabled"] is False
+        assert report.ghost["readiness_status"] == "disabled"
+
     def test_collect_diagnostics_reports_codex_stale_auth(
         self, monkeypatch: pytest.MonkeyPatch,
     ):
@@ -525,3 +581,91 @@ class TestCapabilitiesEnvelope:
         assert any(c["id"] == "runtime.overlay.claude" for c in overlay_caps), (
             f"Missing runtime.overlay.claude in: {[c['id'] for c in overlay_caps]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Persona profile inventory checks (issue #109)
+# ---------------------------------------------------------------------------
+
+
+class TestProfileInventoryCheck:
+    def test_check_environment_reports_broken_profile_inventory(
+        self, empty_homie_root
+    ):
+        """Missing memory/ dir -> error tuple with the repair hint."""
+        import shutil
+
+        from personas.lifecycle import create_profile
+
+        info = create_profile("sales", no_alias=True)
+        shutil.rmtree(info.path / "memory")
+
+        issues = check_environment()
+        inventory_errors = [
+            i for i in issues if i[0] == "error" and "'sales'" in i[1]
+        ]
+        assert len(inventory_errors) == 1, issues
+        level, msg, hint = inventory_errors[0]
+        assert "memory/" in msg
+        assert "thehomie profile repair sales" in hint
+
+    def test_check_environment_partial_inventory_is_warn(
+        self, empty_homie_root
+    ):
+        """Missing identity file (memory/ present) -> warn, not error."""
+        from personas.lifecycle import create_profile
+
+        info = create_profile("sales", no_alias=True)
+        (info.path / "memory" / "GOALS.md").unlink()
+
+        issues = check_environment()
+        sales_issues = [i for i in issues if "'sales'" in i[1]]
+        assert sales_issues, issues
+        assert all(i[0] == "warn" for i in sales_issues)
+        assert any("incomplete" in i[1] for i in sales_issues)
+
+    def test_check_environment_reports_orphaned_root_identity_files(
+        self, empty_homie_root
+    ):
+        from personas.lifecycle import create_profile
+
+        info = create_profile("sales", no_alias=True)
+        (info.path / "SOUL.md").write_text("# orphan\n", encoding="utf-8")
+
+        issues = check_environment()
+        orphan_warns = [
+            i for i in issues if i[0] == "warn" and "orphaned" in i[1]
+        ]
+        assert len(orphan_warns) == 1, issues
+        assert "SOUL.md" in orphan_warns[0][1]
+        assert "never auto-moves" in orphan_warns[0][2]
+
+    def test_check_environment_healthy_profile_adds_no_inventory_issues(
+        self, empty_homie_root
+    ):
+        from personas.lifecycle import create_profile
+
+        create_profile("sales", no_alias=True)
+
+        issues = check_environment()
+        assert not [i for i in issues if "'sales'" in i[1]], issues
+
+    def test_check_environment_inventory_block_fails_open(
+        self, empty_homie_root, monkeypatch
+    ):
+        """A raising inspect never crashes doctor — the block is fail-open."""
+        import shutil
+
+        from personas import lifecycle
+        from personas.lifecycle import create_profile
+
+        info = create_profile("sales", no_alias=True)
+        shutil.rmtree(info.path / "memory")
+
+        def explode(name):
+            raise RuntimeError("inspect exploded")
+
+        monkeypatch.setattr(lifecycle, "inspect_profile_inventory", explode)
+        issues = check_environment()  # must not raise
+        assert isinstance(issues, list)
+        assert not [i for i in issues if "'sales'" in i[1]]

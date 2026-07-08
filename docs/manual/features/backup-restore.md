@@ -106,9 +106,9 @@ effect immediately: `MEMORY_DIR`, `DATA_DIR`, `STATE_DIR`, `ENV_FILE`,
 ```powershell
 cd .claude/scripts
 uv run thehomie backup                                   # ~/thehomie-backup-<ts>.zip, no secrets
-uv run thehomie backup --out E:\backups --include-secrets
-uv run thehomie restore E:\backups\thehomie-backup-....zip --dry-run
-uv run thehomie restore E:\backups\thehomie-backup-....zip --yes --force
+uv run thehomie backup --out D:\backups --include-secrets
+uv run thehomie restore D:\backups\thehomie-backup-....zip --dry-run
+uv run thehomie restore D:\backups\thehomie-backup-....zip --yes --force
 uv run thehomie snapshot create --label pre-reindex
 uv run thehomie snapshot list
 uv run thehomie snapshot restore 20260704-181530-pre-reindex --yes

@@ -252,6 +252,50 @@ def activate(
                 except OSError:
                     pass
 
+            # Issue #109 boot guard — never spawn a persona bot over a
+            # missing memory/ inventory (it would run every turn with
+            # empty context, silently). One stat on the happy path; the
+            # repair loop only runs when broken. Fail-open: a guard
+            # failure never blocks the spawn — the violation stays on
+            # disk where `thehomie doctor` reports it.
+            if persona_id not in ("default", "custom") and not (
+                profile_root / "memory"
+            ).is_dir():
+                print(
+                    f"Warning: persona '{persona_id}' memory dir missing "
+                    f"at {profile_root / 'memory'}; attempting inventory "
+                    "repair (issue #109)",
+                    file=sys.stderr,
+                )
+                try:
+                    from personas import lifecycle as _lc
+                    from security import kill_switches as _ks
+
+                    if _ks.is_disabled("persona_mutation"):
+                        print(
+                            f"Warning: inventory repair skipped for "
+                            f"'{persona_id}': persona_mutation kill-switch "
+                            "disabled",
+                            file=sys.stderr,
+                        )
+                    else:
+                        rep = _lc.ensure_profile_inventory(persona_id)
+                        print(
+                            f"Repaired persona '{persona_id}' inventory: "
+                            f"created "
+                            f"{len(rep.missing_profile_dirs) + len(rep.missing_memory_dirs)}"
+                            f" dir(s), seeded "
+                            f"{len(rep.missing_identity_files)} file(s)",
+                            file=sys.stderr,
+                        )
+                except Exception as exc:  # noqa: BLE001 — never block spawn
+                    print(
+                        f"Warning: inventory repair failed for "
+                        f"'{persona_id}': {exc}; run `thehomie profile "
+                        f"repair {persona_id}`",
+                        file=sys.stderr,
+                    )
+
             # Build the subprocess command. We invoke the bot via the
             # same Python that started the dashboard process. Bot entry
             # point: chat/main.py.

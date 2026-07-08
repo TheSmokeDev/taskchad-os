@@ -38,9 +38,11 @@ Mechanics:
       STDIN. codex exec reads the prompt from stdin when no positional
       prompt is given; in non-interactive shells stdin MUST be
       piped/redirected or the process hangs waiting for a terminal.
-    - Output discovery: newest NEW png under ``~/.codex/generated_images``
-      (snapshot before/after), falling back to an absolute .png path printed
-      on stdout.
+    - Output discovery: newest NEW png under the codex image roots
+      (``$CODEX_HOME``/``~/.codex`` ``generated_images``), snapshot
+      before/after, falling back to an absolute .png path printed on stdout.
+      A reference-heavy run can outlast the timeout yet still have written
+      the file, so a timeout still attempts the before/after salvage.
     - The instruction derives from the caller's subject prompt plus the
       design's palette/mood tokens: one bold scene about the topic, with an
       explicit no-text/no-logos rule so the renderer owns all copy.
@@ -54,9 +56,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
-GENERATION_TIMEOUT_S = 300
+GENERATION_TIMEOUT_S = 900
 
 # Beat kinds that are eligible for generated art, and the default budget.
 ART_KINDS = ("hero", "quote", "payoff")
@@ -78,6 +81,13 @@ _IDENTITY_LOCK_LINE = (
     " same character/product/brand subject, new scene."
 )
 
+_RETOUCH_LINE = (
+    "If the subject is a person, keep their skin and face completely natural and"
+    " photo-realistic — do NOT airbrush, smooth, or beautify the skin. Make only"
+    " two corrections: no warts or moles on the face, and no bags or puffiness"
+    " under the eyes. Preserve their exact identity, features, and real skin texture."
+)
+
 
 def cli_available() -> bool:
     """True when the codex CLI is on PATH."""
@@ -86,18 +96,41 @@ def cli_available() -> bool:
 
 
 def _generated_images_root() -> Path:
-    """Where the codex CLI writes generated images (session subdirs)."""
+    """Primary dir the codex CLI writes generated images into (session subdirs).
 
-    return Path.home() / ".codex" / "generated_images"
+    Honors CODEX_HOME at call time (Rule 1); defaults to ``~/.codex``.
+    """
+
+    codex_home = os.environ.get("CODEX_HOME", "").strip()
+    base = Path(codex_home) if codex_home else Path.home() / ".codex"
+    return base / "generated_images"
 
 
-def _snapshot_pngs(root: Path) -> set[Path]:
-    try:
-        if not root.is_dir():
-            return set()
-        return set(root.rglob("*.png"))
-    except OSError:
-        return set()
+def _candidate_roots() -> list[Path]:
+    """Every dir to watch for a newly written png, primary first.
+
+    Resolved at call time (Rule 1). Always the active root; plus the default
+    ``~/.codex`` location when a CODEX_HOME override points elsewhere, so
+    discovery stays correct whether or not CODEX_HOME is set. De-duplicated.
+    """
+
+    roots: list[Path] = [_generated_images_root()]
+    if os.environ.get("CODEX_HOME", "").strip():
+        default_root = Path.home() / ".codex" / "generated_images"
+        if default_root not in roots:
+            roots.append(default_root)
+    return roots
+
+
+def _snapshot_pngs(roots: list[Path]) -> set[Path]:
+    found: set[Path] = set()
+    for root in roots:
+        try:
+            if root.is_dir():
+                found |= set(root.rglob("*.png"))
+        except OSError:
+            continue
+    return found
 
 
 def build_instruction(prompt: str, design: dict, aspect: str) -> str:
@@ -135,14 +168,44 @@ def build_instruction(prompt: str, design: dict, aspect: str) -> str:
     return "\n".join(lines)
 
 
-def _newest_new_png(root: Path, before: set[Path]) -> Path | None:
-    fresh = [p for p in _snapshot_pngs(root) - before if p.is_file()]
+def _newest_new_png(roots: list[Path], before: set[Path]) -> Path | None:
+    fresh = [p for p in _snapshot_pngs(roots) - before if p.is_file()]
     if not fresh:
         return None
     try:
         return max(fresh, key=lambda p: p.stat().st_mtime)
     except OSError:
         return None
+
+
+def _resolve_timeout() -> int:
+    """Generation timeout in seconds at call time: env VIDEO_ART_TIMEOUT_S >
+    GENERATION_TIMEOUT_S (Rule 1). Reference-heavy runs are slow, so the
+    default is generous; the knob lets a slower box widen it further."""
+
+    raw = os.environ.get("VIDEO_ART_TIMEOUT_S", "").strip()
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass  # ambient config never breaks a render
+    return GENERATION_TIMEOUT_S
+
+
+def _log_discovery_miss(roots: list[Path]) -> None:
+    """One stderr breadcrumb when no png was found, so a future None is
+    diagnosable. Never raises."""
+
+    try:
+        checked = ", ".join(str(r) for r in roots) or "(none)"
+        print(
+            f"[video_imagegen] generate_image: no new png found; checked roots: {checked}",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
 
 
 def _png_from_stdout(stdout: str) -> Path | None:
@@ -188,8 +251,8 @@ def generate_image(
         ref_paths = [Path(r) for r in (refs or []) if str(r or "").strip()]
         ref_paths = [p for p in ref_paths if p.is_file()]
 
-        root = _generated_images_root()
-        before = _snapshot_pngs(root)
+        roots = _candidate_roots()
+        before = _snapshot_pngs(roots)
 
         cmd = [
             exe,
@@ -204,23 +267,33 @@ def generate_image(
 
         instruction = build_instruction(prompt, design, aspect)
         if ref_paths:
-            instruction += "\n" + _IDENTITY_LOCK_LINE
+            instruction += "\n" + _IDENTITY_LOCK_LINE + "\n" + _RETOUCH_LINE
 
         # Prompt goes through stdin: codex exec reads instructions from stdin
         # when no positional prompt is supplied, and a non-interactive run
         # without piped stdin hangs waiting for a terminal.
-        result = subprocess.run(
-            cmd,
-            input=instruction,
-            capture_output=True,
-            text=True,
-            timeout=GENERATION_TIMEOUT_S,
-        )
+        stdout = ""
+        try:
+            result = subprocess.run(
+                cmd,
+                input=instruction,
+                capture_output=True,
+                text=True,
+                timeout=_resolve_timeout(),
+            )
+            stdout = result.stdout or ""
+        except subprocess.TimeoutExpired as exc:
+            # codex writes the png before it finishes its wrap-up output, so a
+            # slow reference-heavy run that trips the timeout may still have
+            # produced a file; salvage it from the root diff below.
+            partial = getattr(exc, "stdout", None) or getattr(exc, "output", None)
+            stdout = partial.decode(errors="replace") if isinstance(partial, bytes) else (partial or "")
 
-        png = _newest_new_png(root, before)
+        png = _newest_new_png(roots, before)
         if png is None:
-            png = _png_from_stdout(result.stdout or "")
+            png = _png_from_stdout(stdout)
         if png is None:
+            _log_discovery_miss(roots)
             return None  # quota walls / refusals land here: no new image
 
         dest_dir = Path(assets_dir)

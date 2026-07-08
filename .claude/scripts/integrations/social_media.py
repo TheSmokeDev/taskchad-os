@@ -182,7 +182,7 @@ def post_to_facebook(text: str) -> PostResult:
 
     try:
         resp = requests.post(
-            f"https://graph.facebook.com/v19.0/{page_id}/feed",
+            f"https://graph.facebook.com/v20.0/{page_id}/feed",
             data={"message": text, "access_token": access_token},
             timeout=15,
         )
@@ -225,37 +225,177 @@ def post_to_instagram(text: str, image_url: str = "") -> PostResult:
     try:
         # Step 1: Create media container
         resp = requests.post(
-            f"https://graph.facebook.com/v19.0/{account_id}/media",
+            f"https://graph.facebook.com/v20.0/{account_id}/media",
             data={
                 "image_url": image_url,
                 "caption": text,
                 "access_token": access_token,
             },
-            timeout=15,
+            timeout=30,
         )
         resp.raise_for_status()
         container_id = resp.json().get("id")
 
         # Step 2: Publish the container
         resp2 = requests.post(
-            f"https://graph.facebook.com/v19.0/{account_id}/media_publish",
+            f"https://graph.facebook.com/v20.0/{account_id}/media_publish",
             data={
                 "creation_id": container_id,
                 "access_token": access_token,
             },
-            timeout=15,
+            timeout=30,
         )
         resp2.raise_for_status()
         media_id = resp2.json().get("id", "")
+
+        # Step 3: resolve the real permalink (media_id is NOT the /p/<shortcode>).
+        post_url = ""
+        if media_id:
+            try:
+                pr = requests.get(
+                    f"https://graph.facebook.com/v20.0/{media_id}",
+                    params={"fields": "permalink", "access_token": access_token},
+                    timeout=15,
+                )
+                post_url = pr.json().get("permalink", "") if pr.ok else ""
+            except Exception:
+                post_url = ""
 
         return PostResult(
             platform="Instagram",
             success=True,
             message="Posted to feed",
-            post_url=f"https://instagram.com/p/{media_id}" if media_id else "",
+            post_url=post_url,
         )
     except Exception as e:
         return PostResult(platform="Instagram", success=False, message=f"Error: {e}")
+
+
+def post_reel_to_instagram(text: str, video_url: str = "") -> PostResult:
+    """Publish an Instagram Reel via Meta Graph.
+
+    Unlike the photo path, a REELS container processes asynchronously, so the
+    container status MUST be polled to FINISHED before publishing.
+    Specs: public https MP4 (H.264/AAC), 9:16, 3s-15min, <=300MB.
+    """
+    import time
+
+    account_id = os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID")
+    access_token = os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN")
+
+    if not account_id or not access_token:
+        return PostResult(
+            platform="Instagram",
+            success=False,
+            message="API not configured. Need INSTAGRAM_BUSINESS_ACCOUNT_ID + FACEBOOK_PAGE_ACCESS_TOKEN in .env.",
+        )
+    if not video_url:
+        return PostResult(
+            platform="Instagram",
+            success=False,
+            message="Instagram Reels require a public video URL.",
+        )
+
+    base = "https://graph.facebook.com/v20.0"
+    try:
+        # Step 1: create the REELS container.
+        resp = requests.post(
+            f"{base}/{account_id}/media",
+            data={
+                "media_type": "REELS",
+                "video_url": video_url,
+                "caption": text,
+                "access_token": access_token,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        container_id = resp.json().get("id")
+        if not container_id:
+            return PostResult(platform="Instagram", success=False,
+                              message="Reel container not created.")
+
+        # Step 2: poll container status until FINISHED (async processing).
+        # Meta transcode can take several minutes; env-tunable ceiling.
+        try:
+            poll_ceiling = float(os.getenv("INSTAGRAM_REEL_POLL_TIMEOUT_S", "600"))
+        except ValueError:
+            poll_ceiling = 600.0
+        deadline = time.time() + poll_ceiling
+        status = ""
+        while time.time() < deadline:
+            time.sleep(6)
+            sr = requests.get(
+                f"{base}/{container_id}",
+                params={"fields": "status_code", "access_token": access_token},
+                timeout=20,
+            )
+            status = (sr.json() or {}).get("status_code", "") if sr.ok else ""
+            if status in ("FINISHED", "ERROR", "EXPIRED"):
+                break
+        if status != "FINISHED":
+            return PostResult(platform="Instagram", success=False,
+                              message=f"Reel processing did not finish (status={status or 'timeout'}).")
+
+        # Step 3: publish.
+        pr = requests.post(
+            f"{base}/{account_id}/media_publish",
+            data={"creation_id": container_id, "access_token": access_token},
+            timeout=30,
+        )
+        pr.raise_for_status()
+        media_id = pr.json().get("id", "")
+
+        post_url = ""
+        if media_id:
+            try:
+                lr = requests.get(
+                    f"{base}/{media_id}",
+                    params={"fields": "permalink", "access_token": access_token},
+                    timeout=15,
+                )
+                post_url = lr.json().get("permalink", "") if lr.ok else ""
+            except Exception:
+                post_url = ""
+
+        return PostResult(platform="Instagram", success=True,
+                          message="Reel published", post_url=post_url)
+    except Exception as e:
+        return PostResult(platform="Instagram", success=False, message=f"Error: {e}")
+
+
+def post_video_to_facebook(text: str, video_url: str = "") -> PostResult:
+    """Publish a video to a Facebook Page via Graph (hosted-URL single call)."""
+    page_id = os.getenv("FACEBOOK_PAGE_ID")
+    access_token = os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN")
+
+    if not page_id or not access_token:
+        return PostResult(platform="Facebook", success=False,
+                          message="API not configured. Need FACEBOOK_PAGE_ID + FACEBOOK_PAGE_ACCESS_TOKEN.")
+    if not video_url:
+        return PostResult(platform="Facebook", success=False,
+                          message="Facebook video requires a public video URL.")
+
+    try:
+        resp = requests.post(
+            f"https://graph.facebook.com/v20.0/{page_id}/videos",
+            data={
+                "file_url": video_url,
+                "description": text,
+                "access_token": access_token,
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        vid = resp.json().get("id", "")
+        return PostResult(
+            platform="Facebook",
+            success=True,
+            message="Video posted to page",
+            post_url=f"https://facebook.com/{vid}" if vid else "",
+        )
+    except Exception as e:
+        return PostResult(platform="Facebook", success=False, message=f"Error: {e}")
 
 
 def post_to_linkedin(text: str) -> PostResult:
@@ -330,8 +470,11 @@ PLATFORM_POSTERS = {
 }
 
 
-def post_to_platform(platform: str, text: str, image_url: str = "") -> PostResult:
-    """Post to a specific platform."""
+def post_to_platform(
+    platform: str, text: str, image_url: str = "", video_url: str = ""
+) -> PostResult:
+    """Post to a specific platform. A ``video_url`` routes to the reel/video
+    lane (IG Reel / FB video); otherwise ``image_url`` → the photo lane."""
     key = platform.lower().strip()
     poster = PLATFORM_POSTERS.get(key)
     if not poster:
@@ -340,6 +483,13 @@ def post_to_platform(platform: str, text: str, image_url: str = "") -> PostResul
             success=False,
             message=f"Unknown platform. Options: x, facebook, instagram, linkedin",
         )
+    if video_url:
+        if key in ("instagram", "ig"):
+            return post_reel_to_instagram(text, video_url)
+        if key in ("facebook", "fb"):
+            return post_video_to_facebook(text, video_url)
+        return PostResult(platform=platform, success=False,
+                          message=f"Video posting not supported for '{platform}' on the direct API lane.")
     if key in ("instagram", "ig") and image_url:
         return post_to_instagram(text, image_url)
     return poster(text)

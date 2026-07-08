@@ -26,6 +26,8 @@ class SocialPostService:
         voice_profile: str = "",
         topic_source: str = "manual",
         scheduled_for: str | None = None,
+        media_path: str | None = None,
+        media_type: str | None = None,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         post = SocialPost(
@@ -37,6 +39,8 @@ class SocialPostService:
             topic_source=topic_source,
             created_at=now,
             scheduled_for=scheduled_for,
+            media_path=media_path,
+            media_type=media_type,
         )
         return self._db.insert(post)
 
@@ -81,12 +85,15 @@ class SocialPostService:
             rejection_reason=reason or "Rejected by operator",
         )
 
-    def mark_posted(self, post_id: int, post_url: str = "") -> SocialPost:
+    def mark_posted(
+        self, post_id: int, post_url: str = "", external_ref: str | None = None
+    ) -> SocialPost:
         return self._transition(
             post_id,
             "posted",
             posted_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             post_url=post_url or None,
+            external_ref=external_ref,
         )
 
     def mark_failed(self, post_id: int, error: str = "") -> SocialPost:
@@ -98,6 +105,14 @@ class SocialPostService:
 
     def count_by_status(self, channel: str | None = None) -> dict[str, int]:
         return self._db.count_by_status(channel)
+
+    def set_post_fields(self, post_id: int, **fields: str | None) -> SocialPost:
+        """Update non-status columns (e.g. reconcile filling post_url)."""
+        self._db.update_fields(post_id, **fields)
+        updated = self._db.get(post_id)
+        if updated is None:
+            raise ValueError(f"Post {post_id} not found")
+        return updated
 
     def _transition(
         self, post_id: int, new_status: str, **fields: str | None

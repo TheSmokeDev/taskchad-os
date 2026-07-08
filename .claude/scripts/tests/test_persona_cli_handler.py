@@ -34,7 +34,7 @@ def test_profile_group_is_registered():
     expected = {
         "create", "list", "show", "delete", "use",
         "clone", "clone-all", "init-archon",
-        "export", "import", "migrate-default",
+        "export", "import", "migrate-default", "repair",
     }
     assert expected.issubset(profile_grp.commands.keys()), (
         f"missing subcommands: {expected - set(profile_grp.commands.keys())}"
@@ -566,3 +566,181 @@ def test_profile_migrate_default_apply_writes_journal(empty_homie_root):
     assert result.exit_code == 0, result.output
     journal = empty_homie_root / "migration-journal.json"
     assert journal.exists()
+
+
+# ---------------------------------------------------------------------------
+# repair (issue #109)
+# ---------------------------------------------------------------------------
+
+
+def _broken_profile(name: str = "sales"):
+    """Create a profile in tmp HOMIE_HOME, then delete its memory/ tree."""
+    import shutil
+
+    from personas.lifecycle import create_profile
+
+    info = create_profile(name, no_alias=True)
+    shutil.rmtree(info.path / "memory")
+    return info.path
+
+
+def test_repair_name_repairs_broken_profile_exit_0(empty_homie_root):
+    profile_dir = _broken_profile()
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "sales"])
+    assert result.exit_code == 0, result.output
+    assert "repaired" in result.output
+    assert (profile_dir / "memory" / "SOUL.md").exists()
+
+
+def test_repair_healthy_profile_is_idempotent_exit_0(empty_homie_root):
+    from personas.lifecycle import create_profile
+
+    create_profile("sales", no_alias=True)
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "sales"])
+    assert result.exit_code == 0, result.output
+    assert "ok" in result.output
+
+
+def test_repair_all_repairs_every_named_profile(empty_homie_root):
+    from personas.lifecycle import create_profile
+
+    broken = _broken_profile("sales")
+    create_profile("ops", no_alias=True)  # healthy sibling
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "--all"])
+    assert result.exit_code == 0, result.output
+    assert (broken / "memory" / "SOUL.md").exists()
+    assert "sales" in result.output
+    assert "ops" in result.output
+
+
+def test_repair_name_and_all_is_usage_error(empty_homie_root):
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "sales", "--all"])
+    assert result.exit_code == 2, result.output
+    assert "not both" in result.output
+
+
+def test_repair_no_args_is_usage_error(empty_homie_root):
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair"])
+    assert result.exit_code == 2, result.output
+
+
+def test_repair_check_on_broken_profile_exits_1_without_writing(
+    empty_homie_root,
+):
+    profile_dir = _broken_profile()
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "sales", "--check"])
+    assert result.exit_code == 1, result.output
+    assert "BROKEN" in result.output
+    assert not (profile_dir / "memory").exists(), "--check must not write"
+
+
+def test_repair_check_on_healthy_profile_exits_0(empty_homie_root):
+    from personas.lifecycle import create_profile
+
+    create_profile("sales", no_alias=True)
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "sales", "--check"])
+    assert result.exit_code == 0, result.output
+
+
+def test_repair_unknown_profile_exits_1_with_error_prefix(empty_homie_root):
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "ghost"])
+    assert result.exit_code == 1, result.output
+    assert "Error" in result.output
+
+
+def test_repair_json_output_shape(empty_homie_root):
+    _broken_profile()
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "sales", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert isinstance(payload, list) and len(payload) == 1
+    rep = payload[0]
+    assert rep["name"] == "sales"
+    assert rep["repaired"] is True
+    assert rep["missing_count"] > 0
+    assert "missing_identity_files" in rep
+    assert "orphaned_root_identity_files" in rep
+
+
+def test_repair_reports_orphaned_root_identity_files(empty_homie_root):
+    from personas.lifecycle import create_profile
+
+    info = create_profile("sales", no_alias=True)
+    (info.path / "SOUL.md").write_text("# orphan\n", encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "sales"])
+    assert result.exit_code == 0, result.output
+    assert "orphaned root identity files" in result.output
+    assert (info.path / "SOUL.md").exists(), "never auto-moved"
+
+
+# ---------------------------------------------------------------------------
+# list / show inventory visibility (issue #109)
+# ---------------------------------------------------------------------------
+
+
+def test_profile_list_marks_broken_inventory(empty_homie_root):
+    _broken_profile()
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "list"])
+    assert result.exit_code == 0, result.output
+    assert "inv=BROKEN" in result.output
+
+
+def test_profile_list_healthy_has_no_inventory_marker(empty_homie_root):
+    from personas.lifecycle import create_profile
+
+    create_profile("sales", no_alias=True)
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "list"])
+    assert result.exit_code == 0, result.output
+    assert "inv=BROKEN" not in result.output
+
+
+def test_profile_show_prints_missing_and_fix_hint(empty_homie_root):
+    _broken_profile()
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "show", "sales"])
+    assert result.exit_code == 0, result.output
+    assert "BROKEN" in result.output
+    assert "thehomie profile repair sales" in result.output
+
+
+def test_profile_show_json_carries_inventory_fields(empty_homie_root):
+    _broken_profile()
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "show", "sales", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["inventory_ok"] is False
+    assert payload["inventory_missing"] > 0
+
+
+def test_repair_all_skips_unrepairable_dir_and_repairs_the_rest(
+    empty_homie_root,
+):
+    """personas-owner review fix — a hand-created reserved-name dir under
+    profiles/ (regex-valid, so list_profiles admits it; validate rejects it)
+    must never abort the batch: siblings still get repaired, exit 1 reports
+    the failure honestly."""
+    broken = _broken_profile("sales")
+    # "tmp" matches _PERSONA_ID_RE but is in core._RESERVED.
+    (empty_homie_root / "profiles" / "tmp").mkdir(parents=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "repair", "--all"])
+
+    assert result.exit_code == 1, result.output
+    assert "Error: tmp:" in result.output
+    assert (broken / "memory" / "SOUL.md").exists(), (
+        "siblings must still be repaired when one target is un-repairable"
+    )

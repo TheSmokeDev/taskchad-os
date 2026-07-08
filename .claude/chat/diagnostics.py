@@ -60,6 +60,9 @@ class DiagnosticsReport:
     # Browser readiness
     browser: dict[str, object] = field(default_factory=dict)
 
+    # Ghost Phone (the Homie's own background Android — P4.1 A2)
+    ghost: dict[str, object] = field(default_factory=dict)
+
     # Sessions
     sessions_active: int = 0
     sessions_total_messages: int = 0
@@ -94,6 +97,7 @@ def collect_diagnostics() -> DiagnosticsReport:
     _check_runtime(report)
     _check_live_execution(report)
     _check_browser(report)
+    _check_ghost(report)
     _check_sessions(report)
     _check_clear_lifecycle(report)
     _check_capabilities(report)
@@ -333,6 +337,29 @@ def _check_browser(report: DiagnosticsReport) -> None:
         }
 
 
+def _check_ghost(report: DiagnosticsReport) -> None:
+    """Populate the ghost snapshot (config-gated; disabled path never touches
+    adb). Reuses browser_ops.build_ghost_state so diagnostics and the engine
+    ghost-awareness pack share one fail-open source of truth (Rule 2)."""
+
+    try:
+        from browser_ops import build_ghost_state
+
+        report.ghost = build_ghost_state()
+    except Exception as exc:
+        report.ghost = {
+            "enabled": False,
+            "running": False,
+            "booted": False,
+            "serial": None,
+            "avd": None,
+            "cdp_port": None,
+            "cdp_reachable": False,
+            "readiness_status": "unknown",
+            "detail": _short_detail(str(exc)),
+        }
+
+
 def _check_sessions(report: DiagnosticsReport) -> None:
     """Aggregate session statistics."""
     try:
@@ -495,5 +522,45 @@ def check_environment() -> list[tuple[str, str, str]]:
             f"Memory vault not found at {MEMORY_DIR}",
             "Run `thehomie setup` to create it",
         ))
+
+    # Persona profile inventory (issue #109) — a profile missing its
+    # memory/ dir takes every turn with ZERO knowledge context, silently.
+    # Rule 2: inspect reads physical disk state, so a failed boot-guard
+    # repair is still visible here (no event log needed). Whole block is
+    # fail-open: doctor never crashes on a personas import/inspect failure.
+    try:
+        from personas.lifecycle import inspect_profile_inventory, list_profiles
+
+        for info in list_profiles():
+            if info.is_default:
+                continue  # install-dir layout — inventory contract N/A
+            try:
+                rep = inspect_profile_inventory(info.name)
+            except Exception:  # noqa: BLE001 — one bad profile never hides the rest
+                continue
+            if not (info.path / "memory").is_dir():
+                issues.append((
+                    "error",
+                    f"Profile '{info.name}' has NO memory/ dir — personas "
+                    "run with empty context, silently",
+                    f"Run: thehomie profile repair {info.name}",
+                ))
+            elif not rep.healthy:
+                issues.append((
+                    "warn",
+                    f"Profile '{info.name}' memory inventory incomplete "
+                    f"({rep.missing_count} missing)",
+                    f"Run: thehomie profile repair {info.name}",
+                ))
+            if rep.orphaned_root_identity_files:
+                issues.append((
+                    "warn",
+                    f"Profile '{info.name}' has orphaned root identity "
+                    "file(s) the loader never reads: "
+                    f"{', '.join(rep.orphaned_root_identity_files)}",
+                    "Move them into memory/ manually; repair never auto-moves",
+                ))
+    except Exception:  # noqa: BLE001
+        pass
 
     return issues

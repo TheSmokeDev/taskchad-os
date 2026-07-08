@@ -62,6 +62,7 @@ def _persona_system_prompt(
     display_name: str,
     role: str,
     profile_context: str,
+    recalled_memory: str,
     persona_prompt: str,
     skill_index: str,
     channel_name: str,
@@ -84,6 +85,8 @@ def _persona_system_prompt(
         blocks.append("# Persona Role\n" + role.strip())
     if profile_context:
         blocks.append("# Persona Memory Context\n" + profile_context.strip())
+    if recalled_memory:
+        blocks.append("# Persona Recalled Memory\n" + recalled_memory.strip())
     if skill_index:
         blocks.append("# Persona Skill Index\n" + skill_index.strip())
     if persona_prompt:
@@ -203,6 +206,34 @@ async def run_discord_persona_channel_turn(
         memory_dir=paths["memory"],
         daily_dir=paths["memory"] / "daily",
     ).strip()
+
+    # Per-persona semantic recall (issue #110). Mirror the main engine
+    # (engine.py:1211-1244) but bound to THIS persona's own on-disk index:
+    # ``memory_dir=paths["memory"]`` → config.resolve_db_path routes it to
+    # ``~/.homie/profiles/<name>/data/memory.db`` (Rule 2 physical state, and
+    # per-persona-unique — NEVER the main vault). AUTO mode lets tier
+    # classification gate cost (trivial turns short-circuit empty, ~ms; no
+    # unconditional LLM). Fail-open: any failure OR an empty/unbuilt persona
+    # index → briefing-only turn (today's behavior). Bulk-fed personas need a
+    # one-time ``memory_index.py -p <name>`` build before recall has content.
+    recalled_memory = ""
+    try:
+        from recall_service import recall as recall_memory_service
+
+        recall_response = await recall_memory_service(
+            query=incoming.text,
+            memory_dir=paths["memory"],
+            caller="discord_persona_channel",
+            max_results=5,
+            has_prefetched=bool(incoming.prefetched_context),
+        )
+        recalled_memory = recall_response.formatted_text or ""
+    except Exception as exc:  # noqa: BLE001 — recall is best-effort, never turn-killing
+        print(
+            f"[{datetime.now()}] [DiscordPersonaRecall] "
+            f"{persona_id}: recall failed (non-blocking): {exc}"
+        )
+
     try:
         skill_index = build_skill_index(
             project_root / ".claude" / "skills",
@@ -216,6 +247,7 @@ async def run_discord_persona_channel_turn(
         display_name=display_name,
         role=role,
         profile_context=profile_context,
+        recalled_memory=recalled_memory,
         persona_prompt=persona_prompt,
         skill_index=skill_index,
         channel_name=binding.name,

@@ -104,6 +104,18 @@ from browser_workflows import (  # noqa: E402
     get_browser_workflow,
     require_browser_workflow_permission,
 )
+# P4.1 Phase B — the ghost DEVICE surface (screen / tap / app). Imported into
+# this namespace so tests monkeypatch dashboard_api.<name> like the browser layer.
+from ghost_capabilities import GhostCapabilityDenied  # noqa: E402
+from ghost_device import (  # noqa: E402
+    ghost_app_install,
+    ghost_app_launch,
+    ghost_keyevent,
+    ghost_screencap,
+    ghost_swipe,
+    ghost_tap,
+    ghost_text,
+)
 _redact = _redact_mod.redact
 
 # ── Router ───────────────────────────────────────────────────────────────
@@ -176,6 +188,15 @@ class DashboardChatSteerBody(BaseModel):
 
 # ── Browser Viewer (read-only) ───────────────────────────────────────────
 
+# P3.0 PhoneOps + P4.0 Ghost — the browser target dimension. `target` is a
+# strict enum resolved SERVER-SIDE (query for GETs, body field for POSTs); a raw
+# CDP port or serial is never accepted from a client. Absent target defaults to
+# `desktop` (byte-identical M12); `phone` is gated behind HOMIE_PHONEOPS_ENABLED
+# and `ghost` behind HOMIE_GHOST_ENABLED (both default OFF — the
+# capability-off-by-default gates, each a DISTINCT capability).
+
+_BROWSER_TARGETS = ("desktop", "phone", "ghost")
+
 
 def _browser_viewer_audit(
     *,
@@ -184,6 +205,7 @@ def _browser_viewer_audit(
     outcome: str,
     reason: str,
     status: dict[str, Any] | None = None,
+    target: str | None = None,
 ) -> None:
     workflow = get_browser_workflow(workflow_id)
     readiness = status.get("readiness", {}) if status else {}
@@ -196,10 +218,82 @@ def _browser_viewer_audit(
         cdp_port=readiness.get("cdp_port") if isinstance(readiness, dict) else None,
         cdp_reachable=readiness.get("cdp_reachable") if isinstance(readiness, dict) else None,
         surface="dashboard",
+        # PhoneOps F12 (issue #100): structured target column — every branch
+        # (including an invalid-target rejection) must pass the value here
+        # instead of smuggling `?target=` into the command string.
+        target=target,
     )
 
 
-def _require_browser_viewer_workflow(workflow_id: str, command: str) -> None:
+def _resolve_browser_target(
+    target: str | None,
+    *,
+    command: str,
+    workflow_id: str,
+) -> str:
+    """Validate the browser target enum and enforce the PhoneOps gate."""
+
+    resolved = (target or "desktop").strip().lower()
+    if resolved not in _BROWSER_TARGETS:
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="blocked",
+            reason=f"unknown browser target: {resolved}",
+            # PhoneOps F12 (issue #100): the REJECTED raw value rides the
+            # structured column, never the command string.
+            target=resolved,
+        )
+        raise HTTPException(status_code=400, detail=f"unknown browser target: {resolved}")
+    if resolved == "phone" and not config.get_phoneops_settings().enabled:
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="blocked",
+            reason="PhoneOps is disabled (HOMIE_PHONEOPS_ENABLED off)",
+            target="phone",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="PhoneOps is disabled — set HOMIE_PHONEOPS_ENABLED=true to drive the phone browser",
+        )
+    if resolved == "ghost" and not config.get_ghost_settings().enabled:
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="blocked",
+            reason="Ghost is disabled (HOMIE_GHOST_ENABLED off)",
+            target="ghost",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Ghost is disabled — set HOMIE_GHOST_ENABLED=true to drive the ghost browser",
+        )
+    # Kill-switch covers the ALREADY-BOOTED ghost too (adversarial-review MEDIUM,
+    # 2026-07-07): HOMIE_KILLSWITCH_GHOST previously only gated boot, so the
+    # takeover routes kept serving on a running ghost. Now every ghost route
+    # (browser + device) honors the operator's emergency brake -> 503 + audit.
+    if resolved == "ghost":
+        from security import kill_switches
+
+        if kill_switches.is_disabled("ghost"):
+            _browser_viewer_audit(
+                command=command,
+                workflow_id=workflow_id,
+                outcome="blocked",
+                reason="Ghost is disabled by kill-switch (HOMIE_KILLSWITCH_GHOST=disabled)",
+                target="ghost",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Ghost is disabled by kill-switch (HOMIE_KILLSWITCH_GHOST=disabled)",
+            )
+    return resolved
+
+
+def _require_browser_viewer_workflow(
+    workflow_id: str, command: str, *, target: str = "desktop"
+) -> None:
     decision = require_browser_workflow_permission(workflow_id, command)
     if decision.allowed:
         return
@@ -208,46 +302,51 @@ def _require_browser_viewer_workflow(workflow_id: str, command: str) -> None:
         workflow_id=workflow_id,
         outcome=decision.outcome,
         reason=decision.reason,
+        target=target,
     )
     raise HTTPException(status_code=403, detail=decision.reason)
 
 
 @router.get("/api/browser-viewer/status")
-def get_browser_viewer_status() -> dict[str, Any]:
+def get_browser_viewer_status(target: str = Query("desktop")) -> dict[str, Any]:
     command = "GET /api/browser-viewer/status"
     workflow_id = "browser.viewer.status"
-    _require_browser_viewer_workflow(workflow_id, command)
-    status = collect_browser_viewer_status()
+    resolved_target = _resolve_browser_target(target, command=command, workflow_id=workflow_id)
+    _require_browser_viewer_workflow(workflow_id, command, target=resolved_target)
+    status = collect_browser_viewer_status(target=resolved_target)
     _browser_viewer_audit(
         command=command,
         workflow_id=workflow_id,
         outcome="succeeded",
         reason="status rendered",
         status=status,
+        target=resolved_target,
     )
     return status
 
 
 @router.get("/api/browser-viewer/screenshot")
-def get_browser_viewer_screenshot() -> Response:
+def get_browser_viewer_screenshot(target: str = Query("desktop")) -> Response:
     command = "GET /api/browser-viewer/screenshot"
     workflow_id = "browser.viewer.screenshot"
-    _require_browser_viewer_workflow(workflow_id, command)
+    resolved_target = _resolve_browser_target(target, command=command, workflow_id=workflow_id)
+    _require_browser_viewer_workflow(workflow_id, command, target=resolved_target)
     status: dict[str, Any] | None = None
     try:
-        content = capture_browser_screenshot_png()
-        status = collect_browser_viewer_status()
+        content = capture_browser_screenshot_png(target=resolved_target)
+        status = collect_browser_viewer_status(target=resolved_target)
         _browser_viewer_audit(
             command=command,
             workflow_id=workflow_id,
             outcome="succeeded",
             reason="screenshot captured",
             status=status,
+            target=resolved_target,
         )
     except Exception as exc:
         reason = redact_text_urls(str(exc))
         try:
-            status = collect_browser_viewer_status()
+            status = collect_browser_viewer_status(target=resolved_target)
         except Exception:
             status = None
         _browser_viewer_audit(
@@ -256,29 +355,229 @@ def get_browser_viewer_screenshot() -> Response:
             outcome="failed",
             reason=reason,
             status=status,
+            target=resolved_target,
         )
         raise HTTPException(status_code=503, detail=reason) from exc
     return Response(
         content=content,
         media_type="image/png",
-        headers={"Cache-Control": "no-store"},
+        # PNG body can't carry the JSON echo — the header is the echo channel.
+        headers={"Cache-Control": "no-store", "X-Browser-Target": resolved_target},
     )
 
 
+# ── P4.1 Phase B — the ghost DEVICE viewer (screen / tap / app) ───────────────
+# A separate surface from /api/browser-viewer/* above: that drives Chrome over
+# CDP; THIS drives the whole ghost device over raw adb. Every route resolves the
+# target to "ghost" (enforcing HOMIE_GHOST_ENABLED), runs the browser-viewer
+# workflow gate, then calls ghost_device (which re-checks the STRUCTURAL
+# ghost-only capability invariant + the ghost's own serial). Ghost-only by
+# construction: none of these accept a target param.
+
+
+def _ghost_viewer_audit(
+    *,
+    command: str,
+    workflow_id: str,
+    outcome: str,
+    reason: str,
+) -> None:
+    """Endpoint audit row for a ghost-viewer action (surface=dashboard,
+    target=ghost). The capability seam writes its OWN row (surface=ghost) on top."""
+
+    _browser_viewer_audit(
+        command=command,
+        workflow_id=workflow_id,
+        outcome=outcome,
+        reason=reason,
+        target="ghost",
+    )
+
+
+@router.get("/api/ghost-viewer/screen")
+def get_ghost_viewer_screen() -> Response:
+    command = "GET /api/ghost-viewer/screen"
+    workflow_id = "ghost.viewer.screen"
+    # Enforce HOMIE_GHOST_ENABLED (403 + audit if off) and pin the target.
+    _resolve_browser_target("ghost", command=command, workflow_id=workflow_id)
+    _require_browser_viewer_workflow(workflow_id, command, target="ghost")
+    try:
+        png, width, height = ghost_screencap()
+    except GhostCapabilityDenied as exc:
+        # A killed capability (HOMIE_GHOST_CAP_SCREEN_VIEW=false) — refuse, do
+        # not 503. The capability seam already wrote its own blocked row.
+        reason = redact_text_urls(str(exc))
+        _ghost_viewer_audit(
+            command=command, workflow_id=workflow_id, outcome="blocked", reason=reason
+        )
+        raise HTTPException(status_code=403, detail=reason) from exc
+    except Exception as exc:
+        reason = redact_text_urls(str(exc))
+        _ghost_viewer_audit(
+            command=command, workflow_id=workflow_id, outcome="failed", reason=reason
+        )
+        raise HTTPException(status_code=503, detail=reason) from exc
+    _ghost_viewer_audit(
+        command=command, workflow_id=workflow_id, outcome="succeeded", reason="screen captured"
+    )
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Ghost-Screen-Width": str(width),
+            "X-Ghost-Screen-Height": str(height),
+        },
+    )
+
+
+def _run_ghost_viewer(command: str, workflow_id: str, action) -> dict[str, Any]:
+    """Gate stack + exception mapping shared by the ghost input/app routes.
+
+    GhostCapabilityDenied -> 403 (a killed capability), ValueError -> 400 (bad
+    input), any other error -> 503 (adb/device failure). Success and every
+    refusal audit (surface=dashboard, target=ghost); the capability seam writes
+    its own surface=ghost row underneath.
+    """
+
+    _resolve_browser_target("ghost", command=command, workflow_id=workflow_id)
+    _require_browser_viewer_workflow(workflow_id, command, target="ghost")
+    try:
+        result = action()
+    except GhostCapabilityDenied as exc:
+        reason = redact_text_urls(str(exc))
+        _ghost_viewer_audit(command=command, workflow_id=workflow_id, outcome="blocked", reason=reason)
+        raise HTTPException(status_code=403, detail=reason) from exc
+    except ValueError as exc:
+        reason = redact_text_urls(str(exc))
+        _ghost_viewer_audit(command=command, workflow_id=workflow_id, outcome="blocked", reason=reason)
+        raise HTTPException(status_code=400, detail=reason) from exc
+    except Exception as exc:
+        reason = redact_text_urls(str(exc))
+        _ghost_viewer_audit(command=command, workflow_id=workflow_id, outcome="failed", reason=reason)
+        raise HTTPException(status_code=503, detail=reason) from exc
+    _ghost_viewer_audit(command=command, workflow_id=workflow_id, outcome="succeeded", reason="ok")
+    return {"ok": True, **result}
+
+
+class GhostTapBody(BaseModel):
+    """Normalized (0..1) tap coordinates relative to the displayed image. The
+    server scales to device pixels — a raw pixel is never accepted. ``humanize``
+    (default on) adds position jitter + press dwell so the touch reads as a real
+    finger, not a scripted zero-dwell tap."""
+
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    humanize: bool = True
+
+
+class GhostTextBody(BaseModel):
+    text: str = Field(max_length=1000)  # ghost_text caps to MAX_TEXT_LEN too
+    humanize: bool = True  # per-keystroke cadence vs one instant injection
+
+
+class GhostSwipeBody(BaseModel):
+    x1: float = Field(ge=0.0, le=1.0)
+    y1: float = Field(ge=0.0, le=1.0)
+    x2: float = Field(ge=0.0, le=1.0)
+    y2: float = Field(ge=0.0, le=1.0)
+    duration_ms: int = Field(default=300, ge=1, le=10_000)
+    humanize: bool = True  # curved variable-velocity path vs a straight line
+
+
+class GhostKeyBody(BaseModel):
+    keycode: int = Field(ge=0, le=320)
+
+
+@router.post("/api/ghost-viewer/tap")
+def post_ghost_viewer_tap(body: GhostTapBody) -> dict[str, Any]:
+    return _run_ghost_viewer(
+        "POST /api/ghost-viewer/tap",
+        "ghost.viewer.tap",
+        lambda: ghost_tap(body.x, body.y, humanize=body.humanize),
+    )
+
+
+@router.post("/api/ghost-viewer/text")
+def post_ghost_viewer_text(body: GhostTextBody) -> dict[str, Any]:
+    return _run_ghost_viewer(
+        "POST /api/ghost-viewer/text",
+        "ghost.viewer.text",
+        lambda: ghost_text(body.text, humanize=body.humanize),
+    )
+
+
+@router.post("/api/ghost-viewer/swipe")
+def post_ghost_viewer_swipe(body: GhostSwipeBody) -> dict[str, Any]:
+    return _run_ghost_viewer(
+        "POST /api/ghost-viewer/swipe",
+        "ghost.viewer.swipe",
+        lambda: ghost_swipe(
+            body.x1, body.y1, body.x2, body.y2,
+            duration_ms=body.duration_ms, humanize=body.humanize,
+        ),
+    )
+
+
+@router.post("/api/ghost-viewer/key")
+def post_ghost_viewer_key(body: GhostKeyBody) -> dict[str, Any]:
+    return _run_ghost_viewer(
+        "POST /api/ghost-viewer/key",
+        "ghost.viewer.key",
+        lambda: ghost_keyevent(body.keycode),
+    )
+
+
+class GhostAppLaunchBody(BaseModel):
+    package: str = Field(min_length=1, max_length=255)
+
+
+class GhostAppInstallBody(BaseModel):
+    apk_path: str = Field(min_length=1, max_length=4096)
+
+
+@router.post("/api/ghost-viewer/app/launch")
+def post_ghost_viewer_app_launch(body: GhostAppLaunchBody) -> dict[str, Any]:
+    return _run_ghost_viewer(
+        "POST /api/ghost-viewer/app/launch",
+        "ghost.viewer.app_launch",
+        lambda: ghost_app_launch(body.package),
+    )
+
+
+@router.post("/api/ghost-viewer/app/install")
+def post_ghost_viewer_app_install(body: GhostAppInstallBody) -> dict[str, Any]:
+    return _run_ghost_viewer(
+        "POST /api/ghost-viewer/app/install",
+        "ghost.viewer.app_install",
+        lambda: ghost_app_install(body.apk_path),
+    )
+
+
+class BrowserStreamBody(BaseModel):
+    """Optional stream-mutation body — absent body means desktop (M12 parity)."""
+
+    target: str | None = Field(default=None, max_length=16)
+
+
 @router.post("/api/browser-viewer/stream/enable")
-def post_browser_viewer_stream_enable() -> dict[str, Any]:
+def post_browser_viewer_stream_enable(body: BrowserStreamBody | None = None) -> dict[str, Any]:
     command = "POST /api/browser-viewer/stream/enable"
     workflow_id = "browser.viewer.stream_enable"
-    _require_browser_viewer_workflow(workflow_id, command)
+    resolved_target = _resolve_browser_target(
+        body.target if body else None, command=command, workflow_id=workflow_id
+    )
+    _require_browser_viewer_workflow(workflow_id, command, target=resolved_target)
     try:
-        browser_stream_enable()
-        status = collect_browser_viewer_status()
+        browser_stream_enable(target=resolved_target)
+        status = collect_browser_viewer_status(target=resolved_target)
         _browser_viewer_audit(
             command=command,
             workflow_id=workflow_id,
             outcome="succeeded",
             reason="stream enabled",
             status=status,
+            target=resolved_target,
         )
         return status
     except Exception as exc:
@@ -288,24 +587,29 @@ def post_browser_viewer_stream_enable() -> dict[str, Any]:
             workflow_id=workflow_id,
             outcome="failed",
             reason=reason,
+            target=resolved_target,
         )
         raise HTTPException(status_code=503, detail=reason) from exc
 
 
 @router.post("/api/browser-viewer/stream/disable")
-def post_browser_viewer_stream_disable() -> dict[str, Any]:
+def post_browser_viewer_stream_disable(body: BrowserStreamBody | None = None) -> dict[str, Any]:
     command = "POST /api/browser-viewer/stream/disable"
     workflow_id = "browser.viewer.stream_disable"
-    _require_browser_viewer_workflow(workflow_id, command)
+    resolved_target = _resolve_browser_target(
+        body.target if body else None, command=command, workflow_id=workflow_id
+    )
+    _require_browser_viewer_workflow(workflow_id, command, target=resolved_target)
     try:
-        browser_stream_disable()
-        status = collect_browser_viewer_status()
+        browser_stream_disable(target=resolved_target)
+        status = collect_browser_viewer_status(target=resolved_target)
         _browser_viewer_audit(
             command=command,
             workflow_id=workflow_id,
             outcome="succeeded",
             reason="stream disabled",
             status=status,
+            target=resolved_target,
         )
         return status
     except Exception as exc:
@@ -315,6 +619,7 @@ def post_browser_viewer_stream_disable() -> dict[str, Any]:
             workflow_id=workflow_id,
             outcome="failed",
             reason=reason,
+            target=resolved_target,
         )
         raise HTTPException(status_code=503, detail=reason) from exc
 
@@ -336,26 +641,31 @@ class BrowserActBody(BaseModel):
     amount: int | None = Field(default=None, ge=1, le=5000)
     # Cosmetic element label for the audit trail ("clicked 'Sign in'").
     label: str | None = Field(default=None, max_length=160)
+    # P3.0 — browser target enum; the server resolves the port, never the client.
+    target: str | None = Field(default=None, max_length=16)
 
 
 class BrowserNavigateBody(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
+    target: str | None = Field(default=None, max_length=16)
 
 
 @router.get("/api/browser-viewer/elements")
-def get_browser_viewer_elements() -> dict[str, Any]:
+def get_browser_viewer_elements(target: str = Query("desktop")) -> dict[str, Any]:
     command = "GET /api/browser-viewer/elements"
     workflow_id = "browser.viewer.elements"
-    _require_browser_viewer_workflow(workflow_id, command)
+    resolved_target = _resolve_browser_target(target, command=command, workflow_id=workflow_id)
+    _require_browser_viewer_workflow(workflow_id, command, target=resolved_target)
     try:
-        elements = browser_snapshot_elements()
+        elements = browser_snapshot_elements(target=resolved_target)
         _browser_viewer_audit(
             command=command,
             workflow_id=workflow_id,
             outcome="succeeded",
             reason=f"{len(elements)} elements listed",
+            target=resolved_target,
         )
-        return {"elements": elements}
+        return {"elements": elements, "target": resolved_target}
     except Exception as exc:
         reason = redact_text_urls(str(exc))
         _browser_viewer_audit(
@@ -363,6 +673,7 @@ def get_browser_viewer_elements() -> dict[str, Any]:
             workflow_id=workflow_id,
             outcome="failed",
             reason=reason,
+            target=resolved_target,
         )
         raise HTTPException(status_code=503, detail=reason) from exc
 
@@ -371,9 +682,19 @@ def get_browser_viewer_elements() -> dict[str, Any]:
 def post_browser_viewer_act(body: BrowserActBody) -> dict[str, Any]:
     command = "POST /api/browser-viewer/act"
     workflow_id = "browser.viewer.act"
+    resolved_target = _resolve_browser_target(
+        body.target, command=command, workflow_id=workflow_id
+    )
     if body.kind not in BROWSER_ACT_KINDS:
+        _browser_viewer_audit(
+            command=command,
+            workflow_id=workflow_id,
+            outcome="blocked",
+            reason=f"unknown action kind: {body.kind}",
+            target=resolved_target,
+        )
         raise HTTPException(status_code=400, detail=f"unknown action kind: {body.kind}")
-    _require_browser_viewer_workflow(workflow_id, command)
+    _require_browser_viewer_workflow(workflow_id, command, target=resolved_target)
     detail = f"{body.kind} {body.ref or ''} {redact_text_urls(body.label or '')}".strip()
     try:
         result = browser_act(
@@ -383,6 +704,7 @@ def post_browser_viewer_act(body: BrowserActBody) -> dict[str, Any]:
             key=body.key,
             direction=body.direction,
             amount=body.amount,
+            target=resolved_target,
         )
         if not result.ok:
             raise RuntimeError(result.output or "agent-browser action failed")
@@ -391,14 +713,16 @@ def post_browser_viewer_act(body: BrowserActBody) -> dict[str, Any]:
             workflow_id=workflow_id,
             outcome="succeeded",
             reason=detail,
+            target=resolved_target,
         )
-        return {"ok": True, "kind": body.kind}
+        return {"ok": True, "kind": body.kind, "target": resolved_target}
     except ValueError as exc:
         _browser_viewer_audit(
             command=command,
             workflow_id=workflow_id,
             outcome="blocked",
             reason=f"{detail}: {exc}",
+            target=resolved_target,
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -408,6 +732,7 @@ def post_browser_viewer_act(body: BrowserActBody) -> dict[str, Any]:
             workflow_id=workflow_id,
             outcome="failed",
             reason=f"{detail}: {reason}",
+            target=resolved_target,
         )
         raise HTTPException(status_code=503, detail=reason) from exc
 
@@ -416,6 +741,9 @@ def post_browser_viewer_act(body: BrowserActBody) -> dict[str, Any]:
 def post_browser_viewer_navigate(body: BrowserNavigateBody) -> dict[str, Any]:
     command = "POST /api/browser-viewer/navigate"
     workflow_id = "browser.viewer.navigate"
+    resolved_target = _resolve_browser_target(
+        body.target, command=command, workflow_id=workflow_id
+    )
     # Navigation gate validates the URL shape (absolute http(s) only).
     decision = require_browser_workflow_permission(
         workflow_id, command, target_url=body.url
@@ -426,10 +754,11 @@ def post_browser_viewer_navigate(body: BrowserNavigateBody) -> dict[str, Any]:
             workflow_id=workflow_id,
             outcome=decision.outcome,
             reason=decision.reason,
+            target=resolved_target,
         )
         raise HTTPException(status_code=403, detail=decision.reason)
     try:
-        result = run_agent_browser_open(body.url)
+        result = run_agent_browser_open(body.url, target=resolved_target)
         if not result.ok:
             raise RuntimeError(result.output or "agent-browser open failed")
         _browser_viewer_audit(
@@ -437,8 +766,9 @@ def post_browser_viewer_navigate(body: BrowserNavigateBody) -> dict[str, Any]:
             workflow_id=workflow_id,
             outcome="succeeded",
             reason=f"opened {decision.target_url}",
+            target=resolved_target,
         )
-        return {"ok": True, "url": decision.target_url}
+        return {"ok": True, "url": decision.target_url, "target": resolved_target}
     except Exception as exc:
         reason = redact_text_urls(str(exc))
         _browser_viewer_audit(
@@ -446,21 +776,36 @@ def post_browser_viewer_navigate(body: BrowserNavigateBody) -> dict[str, Any]:
             workflow_id=workflow_id,
             outcome="failed",
             reason=reason,
+            target=resolved_target,
         )
         raise HTTPException(status_code=503, detail=reason) from exc
 
 
-def run_agent_browser_open(url: str):
-    """Navigate the visible browser (module-level so tests can stub it)."""
+def run_agent_browser_open(url: str, target: str = "desktop"):
+    """Navigate the target browser (module-level so tests can stub it)."""
     from browser_control import (  # noqa: PLC0415
+        _resolve_adb_serial_or_raise,
         ensure_browser_window_restored,
-        resolve_cdp_port,
+        ensure_phone_chrome_ready,
+        is_adb_target,
+        resolve_target_port,
         run_agent_browser,
+        session_for_target,
     )
 
-    port = resolve_cdp_port()
-    ensure_browser_window_restored(port=port)
-    return run_agent_browser(["open", url], port=port, timeout=20)
+    port = resolve_target_port(target)
+    if is_adb_target(target):
+        # Ghost threads its OWN serial (raises if unset) — never the phone's.
+        ensure_phone_chrome_ready(
+            local_port=port, serial=_resolve_adb_serial_or_raise(target)
+        )
+    else:
+        ensure_browser_window_restored(port=port)
+    # session_for_target is mandatory here: an adb target's isolated session is
+    # what survives a freeze event (the default session stays wedged).
+    return run_agent_browser(
+        ["open", url], port=port, session=session_for_target(target), timeout=20
+    )
 
 
 # ── Pydantic request bodies ──────────────────────────────────────────────
@@ -1290,6 +1635,111 @@ def _build_jarvis_status() -> dict[str, Any]:
 def get_jarvis_status() -> dict:
     """Read-only Jarvis proof surface for Mission Control and dashboards."""
     return _build_jarvis_status()
+
+
+# ── Social (Postiz publishing lane + approval queue) ─────────────────────
+# Thin routes; assembly lives in social/dashboard_ops.py. Compose lands as
+# a DRAFT only — publishing happens exclusively through the gated
+# social/post_executor.py dispatch (default-deny + audit).
+
+
+class SocialComposeBody(BaseModel):
+    channel: str = Field(max_length=64)
+    title: str = Field(default="", max_length=300)
+    body: str = Field(max_length=20000)
+    scheduled_for: str | None = Field(default=None, max_length=64)
+
+
+class SocialPostActionBody(BaseModel):
+    post_id: int
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.get("/api/social/status")
+def get_social_status() -> dict:
+    """Postiz probe (booleans/counts only — no URL, no key) + queue counts."""
+    from social import dashboard_ops
+
+    return dashboard_ops.build_social_status()
+
+
+@router.get("/api/social/channels")
+def get_social_channels() -> dict:
+    from social import dashboard_ops
+
+    return dashboard_ops.build_channels_view()
+
+
+@router.get("/api/social/queue")
+def get_social_queue(limit: int = Query(default=20, ge=1, le=100)) -> dict:
+    from social import dashboard_ops
+
+    return dashboard_ops.build_queue_view(limit=limit)
+
+
+@router.get("/api/social/posts")
+def get_social_posts(days: int = Query(default=7, ge=1, le=30)) -> dict:
+    from social import dashboard_ops
+
+    return dashboard_ops.build_posts_view(days=days)
+
+
+@router.post("/api/social/compose")
+def post_social_compose(body: SocialComposeBody) -> dict:
+    from social import dashboard_ops
+
+    try:
+        return dashboard_ops.compose_draft(
+            channel=body.channel,
+            title=body.title,
+            body=body.body,
+            scheduled_for=body.scheduled_for,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/api/social/connect-url")
+def get_social_connect_url(provider: str = Query(max_length=64)) -> dict:
+    """Fresh OAuth connect URL. Body-only transport — never logged, never
+    audited (audit row records the provider name only)."""
+    from integrations.postiz_api import PostizAPIError
+    from social import dashboard_ops
+
+    try:
+        return dashboard_ops.connect_url(provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PostizAPIError as exc:
+        raise HTTPException(status_code=502, detail=exc.friendly_message)
+
+
+@router.post("/api/social/approve")
+def post_social_approve(body: SocialPostActionBody) -> dict:
+    from social import dashboard_ops
+
+    try:
+        return dashboard_ops.approve_post(body.post_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/api/social/reject")
+def post_social_reject(body: SocialPostActionBody) -> dict:
+    from social import dashboard_ops
+
+    try:
+        return dashboard_ops.reject_post(body.post_id, reason=body.reason or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/api/social/reconcile")
+def post_social_reconcile() -> dict:
+    """On-demand publish-outcome reconcile (fills post_url / demotes failed)."""
+    from social import dashboard_ops
+
+    return dashboard_ops.run_reconcile()
 
 
 _START_TIME = time.time()
