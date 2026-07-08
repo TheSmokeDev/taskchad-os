@@ -20,6 +20,7 @@ channels:
     cadence_interval_hours: 24
     voice_profile: ""
     design_file: brand_designs/YourBrand.json
+    persona_pack: owner-YourBusiness-rep
     topic_pool:
       - community updates
       - product news
@@ -62,6 +63,7 @@ channels:
     cadence_interval_hours: 24
     voice_profile: ""
     design_file: brand_designs/YourBrand.json
+    persona_pack: owner-YourBusiness-rep
     topic_pool:
       - visual content
       - stories
@@ -128,6 +130,7 @@ channels:
     cadence_interval_hours: 168
     voice_profile: ""
     design_file: brand_designs/YourBrand.json
+    persona_pack: owner-YourBusiness-rep
     topic_pool: []
     browser_workflow_id: null
     # Video platform — listed for channel visibility; the v1 executor

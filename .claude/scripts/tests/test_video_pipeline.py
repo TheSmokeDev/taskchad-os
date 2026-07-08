@@ -1417,9 +1417,13 @@ def test_render_brief_dossier_images_become_art_refs(
     )
     seen: dict = {}
 
-    def fake_plan(beats, design, aspect, assets_dir, *, refs=None, max_images=None):
+    def fake_plan(
+        beats, design, aspect, assets_dir, *, refs=None, max_images=None,
+        persona_refs=None,
+    ):
         seen["refs"] = refs
         seen["max_images"] = max_images
+        seen["persona_refs"] = persona_refs
         return {0: "assets/hero.png"}
 
     monkeypatch.setattr(video_pipeline.video_imagegen, "generate_art_plan", fake_plan)

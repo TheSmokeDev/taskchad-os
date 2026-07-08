@@ -98,6 +98,32 @@ class TestChannelRegistry:
         assert "insights" in ch.topic_pool
         assert "updates" in ch.topic_pool
 
+    def test_persona_pack_loads_from_yaml(self, tmp_path: Path):
+        data = {
+            "channels": {
+                "instagram": {
+                    "display_name": "Instagram",
+                    "execution_method": "api",
+                    "design_file": "brand_designs/YourBrand.json",
+                    "persona_pack": "owner-YourBusiness-rep",
+                },
+                "reddit": {
+                    "display_name": "Reddit",
+                    "execution_method": "browser",
+                },
+            }
+        }
+        p = tmp_path / "channels.yaml"
+        with open(p, "w") as f:
+            yaml.dump(data, f)
+        ig = get_channel("instagram", yaml_path=p)
+        assert ig is not None
+        assert ig.persona_pack == "owner-YourBusiness-rep"
+        # Absent key defaults to empty string (no persona).
+        reddit = get_channel("reddit", yaml_path=p)
+        assert reddit is not None
+        assert reddit.persona_pack == ""
+
     def test_missing_yaml_returns_empty(self, tmp_path: Path):
         missing = tmp_path / "nonexistent.yaml"
         channels = list_channels(yaml_path=missing)

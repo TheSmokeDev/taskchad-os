@@ -31,6 +31,10 @@ class SocialChannel:
     # video_pipeline.py --design-file so rendered clips use the brand palette /
     # fonts instead of the dark "neutral" default. Empty == neutral default.
     design_file: str = ""
+    # Per-channel image persona pack (dir under .claude/image-personas/). Its
+    # curated refs lock a face onto the hero + payoff beats of rendered video.
+    # Empty == no persona (gradient/brand art as before).
+    persona_pack: str = ""
 
 
 _DEFAULT_YAML_PATH: Path | None = None
@@ -65,6 +69,7 @@ def _load_channels(yaml_path: Path | None = None) -> dict[str, SocialChannel]:
             postiz_integration_id=str(cfg.get("postiz_integration_id", "") or ""),
             postiz_settings=cfg.get("postiz_settings", {}) or {},
             design_file=str(cfg.get("design_file", "") or ""),
+            persona_pack=str(cfg.get("persona_pack", "") or ""),
         )
     return result
 

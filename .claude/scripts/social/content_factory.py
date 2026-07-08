@@ -45,12 +45,35 @@ def _resolve_design_file(design_file: str) -> str | None:
     return str(p) if p.is_file() else None
 
 
+def _resolve_persona_refs(persona_pack: str) -> list[str]:
+    """Resolve a channel's persona_pack to its curated reference images. Empty
+    pack → []; else the operator-approved subset under
+    .claude/image-personas/<pack>/, filtered to files that exist. Never raises."""
+    if not persona_pack:
+        return []
+    try:
+        pack_dir = _SCRIPTS_DIR.parent / "image-personas" / persona_pack
+        curated = ["ref-01.png", "ref-02.png", "ref-03.png", "ref-07.png"]
+        return [
+            str(pack_dir / name)
+            for name in curated
+            if (pack_dir / name).is_file()
+        ]
+    except Exception:
+        return []
+
+
 def _render_video(
-    topic: str, *, duration_s: int = 18, design_file: str | None = None
+    topic: str,
+    *,
+    duration_s: int = 18,
+    design_file: str | None = None,
+    persona_pack: str = "",
 ) -> str | None:
     """Render a 9:16 vertical MP4 via the HyperFrames pipeline. A design_file
     (brand palette/fonts) makes the clip on-brand instead of the dark neutral
-    default. Returns the absolute mp4 path or None on any failure (never raises)."""
+    default. A persona_pack locks a face onto the hero + payoff beats. Returns
+    the absolute mp4 path or None on any failure (never raises)."""
     try:
         import config
 
@@ -62,6 +85,8 @@ def _render_video(
         resolved = _resolve_design_file(design_file or "")
         if resolved:
             cmd += ["--design-file", resolved]
+        for ref in _resolve_persona_refs(persona_pack):
+            cmd += ["--persona-ref", ref]
         proc = subprocess.run(
             cmd,
             cwd=str(_SCRIPTS_DIR),
@@ -190,6 +215,7 @@ def produce(
                 slot_topic,
                 duration_s=settings.video_duration_s,
                 design_file=channel.design_file,
+                persona_pack=channel.persona_pack,
             )
             media_type = "video" if media_path else None
         elif kind == "image":

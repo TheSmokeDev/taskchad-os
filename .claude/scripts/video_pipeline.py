@@ -2574,6 +2574,7 @@ def render_brief(
     art_max: int | None = None,
     vision: dict | None = None,
     imagery: str | None = None,
+    persona_refs: list[str] | None = None,
 ) -> dict:
     """Brief in, MP4 out. Synchronous; never raises for operational failures.
 
@@ -2814,6 +2815,7 @@ def render_brief(
                 str(assets_dir),
                 refs=ref_paths or None,
                 max_images=art_max,
+                persona_refs=persona_refs or None,
             )
             if plan:
                 art_map = dict(plan)
@@ -2981,6 +2983,13 @@ def main() -> None:
         dest="art_max",
         help="Max generated art images (default 1; env VIDEO_ART_MAX)",
     )
+    parser.add_argument(
+        "--persona-ref",
+        action="append",
+        default=None,
+        dest="persona_refs",
+        help="Persona reference image locked onto hero/payoff beats (repeatable)",
+    )
     parser.add_argument("--list-styles", action="store_true")
     parser.add_argument("--check-deps", action="store_true")
     args = parser.parse_args()
@@ -3010,6 +3019,7 @@ def main() -> None:
         captions=args.captions,
         research=args.research,
         art_max=args.art_max,
+        persona_refs=args.persona_refs,
     )
     print(json.dumps(outcome, indent=2))
     if not outcome.get("ok"):

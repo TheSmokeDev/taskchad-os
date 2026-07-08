@@ -408,3 +408,142 @@ def test_art_plan_passes_refs_through(
         [_beat("hero")], _design(), "16:9", str(tmp_path), refs=["ref0.png", "ref1.jpg"]
     )
     assert calls == [("hero", ("ref0.png", "ref1.jpg"))]
+
+
+# =============================================================================
+# 7. GENERATE_IMAGE ATTEMPTS RETRY
+# =============================================================================
+
+
+def test_generate_image_attempts_retries_until_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = {"n": 0}
+
+    def flaky_once(prompt, design, aspect, assets_dir, *, name="hero", refs=None):
+        calls["n"] += 1
+        return "assets/hero.png" if calls["n"] >= 3 else None
+
+    monkeypatch.setattr(video_imagegen, "_generate_image_once", flaky_once)
+    result = video_imagegen.generate_image(
+        "a scene", _design(), "16:9", str(tmp_path), attempts=3
+    )
+    assert result == "assets/hero.png"
+    assert calls["n"] == 3  # stopped on the first non-None
+
+
+def test_generate_image_attempts_all_fail_returns_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = {"n": 0}
+
+    def always_none(prompt, design, aspect, assets_dir, *, name="hero", refs=None):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(video_imagegen, "_generate_image_once", always_none)
+    result = video_imagegen.generate_image(
+        "a scene", _design(), "16:9", str(tmp_path), attempts=3
+    )
+    assert result is None
+    assert calls["n"] == 3  # exhausted every attempt
+
+
+def test_generate_image_default_attempts_is_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = {"n": 0}
+
+    def always_none(prompt, design, aspect, assets_dir, *, name="hero", refs=None):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(video_imagegen, "_generate_image_once", always_none)
+    assert (
+        video_imagegen.generate_image("a scene", _design(), "16:9", str(tmp_path))
+        is None
+    )
+    assert calls["n"] == 1  # no retry by default
+
+
+# =============================================================================
+# 8. GENERATE_ART_PLAN PERSONA REFS (per-beat scoping)
+# =============================================================================
+
+
+def _persona_plan_stub(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Stub generate_image capturing (name, refs, attempts) per call."""
+    calls: list[tuple[str, tuple | None, int]] = []
+
+    def fake_generate_image(
+        prompt, design, aspect, assets_dir, *, name="hero", refs=None, attempts=1
+    ):
+        calls.append((name, tuple(refs) if refs else None, attempts))
+        return f"assets/{name}.png"
+
+    monkeypatch.setattr(video_imagegen, "generate_image", fake_generate_image)
+    return calls
+
+
+def test_art_plan_persona_refs_only_on_hero_and_payoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("VIDEO_ART_MAX", raising=False)
+    calls = _persona_plan_stub(monkeypatch)
+    beats = [_beat("hero"), _beat("quote"), _beat("payoff")]
+    video_imagegen.generate_art_plan(
+        beats,
+        _design(),
+        "16:9",
+        str(tmp_path),
+        refs=["dossier.png"],
+        max_images=3,
+        persona_refs=["p1.png", "p2.png"],
+    )
+    by_name = {name: (refs, attempts) for name, refs, attempts in calls}
+    # hero + payoff lock onto persona refs with the retry budget...
+    assert by_name["hero"] == (("p1.png", "p2.png"), 3)
+    assert by_name["art2"] == (("p1.png", "p2.png"), 3)  # payoff beat (index 2)
+    # ...the quote beat keeps the dossier refs at the default single attempt.
+    assert by_name["art1"] == (("dossier.png",), 1)
+
+
+def test_art_plan_persona_none_is_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """persona_refs=None → every beat uses the dossier refs path, default attempts."""
+    monkeypatch.delenv("VIDEO_ART_MAX", raising=False)
+    calls = _persona_plan_stub(monkeypatch)
+    beats = [_beat("hero"), _beat("payoff"), _beat("quote")]
+    plan = video_imagegen.generate_art_plan(
+        beats, _design(), "16:9", str(tmp_path), refs=["dossier.png"], max_images=3
+    )
+    assert plan == {
+        0: "assets/hero.png",
+        1: "assets/art1.png",
+        2: "assets/art2.png",
+    }
+    # Not one call carries persona refs or a non-default attempts count.
+    assert all(refs == ("dossier.png",) and attempts == 1 for _n, refs, attempts in calls)
+
+
+def test_art_plan_persona_custom_beat_kinds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("VIDEO_ART_MAX", raising=False)
+    calls = _persona_plan_stub(monkeypatch)
+    beats = [_beat("hero"), _beat("payoff"), _beat("quote")]
+    video_imagegen.generate_art_plan(
+        beats,
+        _design(),
+        "16:9",
+        str(tmp_path),
+        max_images=3,
+        persona_refs=["p1.png"],
+        persona_beat_kinds=("quote",),
+        persona_attempts=5,
+    )
+    by_name = {name: (refs, attempts) for name, refs, attempts in calls}
+    assert by_name["art2"] == (("p1.png",), 5)  # the quote beat (index 2) locks on
+    assert by_name["hero"] == (None, 1)  # hero no longer persona-scoped
+    assert by_name["art1"] == (None, 1)  # payoff no longer persona-scoped

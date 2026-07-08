@@ -83,7 +83,7 @@ _IDENTITY_LOCK_LINE = (
 
 _RETOUCH_LINE = (
     "If the subject is a person, keep their skin and face completely natural and"
-    " photo-realistic — do NOT airbrush, smooth, or beautify the skin. Make only"
+    " photo-realistic. Do NOT airbrush, smooth, or beautify the skin. Make only"
     " two corrections: no warts or moles on the face, and no bags or puffiness"
     " under the eyes. Preserve their exact identity, features, and real skin texture."
 )
@@ -230,6 +230,7 @@ def generate_image(
     *,
     name: str = "hero",
     refs: list[str] | None = None,
+    attempts: int = 1,
 ) -> str | None:
     """Generate one image and copy it into the served assets dir.
 
@@ -237,9 +238,36 @@ def generate_image(
     failure (absence, quota, timeout, no output, copy error). ``refs`` are
     local reference image paths attached via repeatable ``-i <path>`` args;
     when at least one exists, an identity-lock line rides on the
-    instruction so the generated scene keeps the referenced subject. Never
-    raises.
+    instruction so the generated scene keeps the referenced subject.
+    ``attempts`` retries the (transiently flaky) generation up to that many
+    times, returning the first non-None result. Never raises.
     """
+
+    try:
+        tries = max(1, int(attempts))
+    except (TypeError, ValueError):
+        tries = 1
+    for _ in range(tries):
+        rel = _generate_image_once(
+            prompt, design, aspect, assets_dir, name=name, refs=refs
+        )
+        if rel is not None:
+            return rel
+    return None
+
+
+def _generate_image_once(
+    prompt: str,
+    design: dict,
+    aspect: str,
+    assets_dir: str,
+    *,
+    name: str = "hero",
+    refs: list[str] | None = None,
+) -> str | None:
+    """One generation attempt. Returns the relative served path or None on
+    ANY failure (absence, quota, timeout, no output, copy error). Never
+    raises."""
 
     try:
         if not str(prompt or "").strip():
@@ -350,6 +378,9 @@ def generate_art_plan(
     *,
     refs: list[str] | None = None,
     max_images: int | None = None,
+    persona_refs: list[str] | None = None,
+    persona_beat_kinds: tuple[str, ...] = ("hero", "payoff"),
+    persona_attempts: int = 3,
 ) -> dict[int, str]:
     """Generate art for the art-eligible beats. Returns {beat_index: rel_path}.
 
@@ -359,7 +390,12 @@ def generate_art_plan(
     Generation is sequential and skip-on-fail: a failed candidate consumes
     its budget slot (no refund) and is absent from the plan. Beat 0 keeps
     the ``hero.<ext>`` name; other beats are named ``art<index>.<ext>``.
-    Never raises.
+
+    When ``persona_refs`` is non-empty, art-eligible beats whose kind is in
+    ``persona_beat_kinds`` (default hero + payoff) lock onto the persona
+    references with ``persona_attempts`` retries; every other beat keeps the
+    dossier ``refs`` path. With ``persona_refs`` None the behavior is
+    byte-identical to the pre-persona path. Never raises.
     """
 
     try:
@@ -372,16 +408,33 @@ def generate_art_plan(
             for i, beat in enumerate(beat_list):
                 if str(getattr(beat, "kind", "") or "").strip().lower() == kind:
                     ordered.append(i)
+        persona_kinds = {
+            str(k).strip().lower() for k in (persona_beat_kinds or ())
+        }
         art_map: dict[int, str] = {}
         for i in ordered[:budget]:
-            rel = generate_image(
-                _beat_prompt(beat_list[i]),
-                design,
-                aspect,
-                assets_dir,
-                name="hero" if i == 0 else f"art{i}",
-                refs=refs,
-            )
+            beat = beat_list[i]
+            name = "hero" if i == 0 else f"art{i}"
+            kind = str(getattr(beat, "kind", "") or "").strip().lower()
+            if persona_refs and kind in persona_kinds:
+                rel = generate_image(
+                    _beat_prompt(beat),
+                    design,
+                    aspect,
+                    assets_dir,
+                    name=name,
+                    refs=persona_refs,
+                    attempts=persona_attempts,
+                )
+            else:
+                rel = generate_image(
+                    _beat_prompt(beat),
+                    design,
+                    aspect,
+                    assets_dir,
+                    name=name,
+                    refs=refs,
+                )
             if rel:
                 art_map[i] = rel
         return art_map

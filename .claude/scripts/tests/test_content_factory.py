@@ -7,8 +7,9 @@ from unittest.mock import patch
 
 import pytest
 
+from social import content_factory
 from social.channels import SocialChannel
-from social.content_factory import produce
+from social.content_factory import _resolve_persona_refs, produce
 from social.service import SocialPostService
 
 
@@ -95,3 +96,63 @@ def test_unknown_channel_returns_error(svc, monkeypatch):
     with patch("social.channels.get_channel", return_value=None):
         summary = produce("nope", db_path=svc._db._db_path)
     assert "error" in summary
+
+
+# --- persona pack → --persona-ref plumbing -----------------------------------
+
+
+def test_resolve_persona_refs_empty_pack_returns_empty():
+    assert _resolve_persona_refs("") == []
+
+
+def test_resolve_persona_refs_returns_curated_existing_subset(monkeypatch, tmp_path):
+    pack = tmp_path / "image-personas" / "test-pack"
+    pack.mkdir(parents=True)
+    # curated subset is ref-01/02/03/07; drop ref-07 to prove existence filter
+    for name in ("ref-01.png", "ref-02.png", "ref-03.png", "ref-99.png"):
+        (pack / name).write_bytes(b"x")
+    # _SCRIPTS_DIR.parent is the persona root — point it at tmp_path
+    monkeypatch.setattr(content_factory, "_SCRIPTS_DIR", tmp_path / "scripts")
+    refs = _resolve_persona_refs("test-pack")
+    names = [Path(r).name for r in refs]
+    assert names == ["ref-01.png", "ref-02.png", "ref-03.png"]  # ref-07 absent, filtered
+
+
+def test_resolve_persona_refs_missing_pack_returns_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(content_factory, "_SCRIPTS_DIR", tmp_path / "scripts")
+    assert _resolve_persona_refs("does-not-exist") == []
+
+
+def test_render_video_appends_persona_ref_args(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        raise RuntimeError("stop after cmd capture")  # fail-open past cmd build
+
+    monkeypatch.setattr(content_factory.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        content_factory, "_resolve_persona_refs",
+        lambda pack: ["/abs/p1.png", "/abs/p2.png"] if pack else [],
+    )
+    monkeypatch.setattr(content_factory, "_resolve_design_file", lambda d: None)
+
+    content_factory._render_video("a topic", persona_pack="owner-YourBusiness-rep")
+    cmd = captured["cmd"]
+    positions = [i for i, t in enumerate(cmd) if t == "--persona-ref"]
+    assert len(positions) == 2
+    assert [cmd[i + 1] for i in positions] == ["/abs/p1.png", "/abs/p2.png"]
+
+
+def test_render_video_no_pack_has_no_persona_ref_args(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        raise RuntimeError("stop after cmd capture")
+
+    monkeypatch.setattr(content_factory.subprocess, "run", fake_run)
+    monkeypatch.setattr(content_factory, "_resolve_design_file", lambda d: None)
+
+    content_factory._render_video("a topic")  # no persona_pack
+    assert "--persona-ref" not in captured["cmd"]
