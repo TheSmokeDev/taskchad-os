@@ -156,3 +156,57 @@ def test_render_video_no_pack_has_no_persona_ref_args(monkeypatch):
 
     content_factory._render_video("a topic")  # no persona_pack
     assert "--persona-ref" not in captured["cmd"]
+
+
+# --- _render_image: brand design + persona refs plumbing ---------------------
+
+
+def _capture_image_gen(monkeypatch):
+    """Patch video_imagegen.generate_image to capture its kwargs; returns dict."""
+    import video_imagegen
+
+    captured: dict = {}
+
+    def fake_gen(*, prompt, design, aspect, assets_dir, name, refs=None, **kw):
+        captured.update(
+            prompt=prompt, design=design, aspect=aspect, name=name, refs=refs
+        )
+        return "assets/scene.png"
+
+    monkeypatch.setattr(video_imagegen, "generate_image", fake_gen)
+    return captured
+
+
+def test_render_image_passes_design_and_refs_when_channel_has_them(monkeypatch):
+    captured = _capture_image_gen(monkeypatch)
+    monkeypatch.setattr(
+        content_factory, "_resolve_design_file", lambda d: "/abs/brand.json"
+    )
+    monkeypatch.setattr(
+        content_factory, "_resolve_persona_refs",
+        lambda pack: ["/abs/ref-01.png", "/abs/ref-02.png"] if pack else [],
+    )
+    import video_styles
+
+    monkeypatch.setattr(
+        video_styles, "resolve_design",
+        lambda **kw: {"palette": {"bg": "#FFF"}},
+    )
+
+    content_factory._render_image(
+        "instagram", "rate tips",
+        design_file="social/brand_designs/x.json", persona_pack="owner-rep",
+    )
+    assert captured["design"] == {"palette": {"bg": "#FFF"}}
+    assert captured["refs"] == ["/abs/ref-01.png", "/abs/ref-02.png"]
+
+
+def test_render_image_neutral_when_channel_has_neither(monkeypatch):
+    captured = _capture_image_gen(monkeypatch)
+    # No design file, no persona pack -> byte-identical to the prior behavior.
+    monkeypatch.setattr(content_factory, "_resolve_design_file", lambda d: None)
+    monkeypatch.setattr(content_factory, "_resolve_persona_refs", lambda pack: [])
+
+    content_factory._render_image("instagram", "rate tips")
+    assert captured["design"] == {}
+    assert captured["refs"] is None

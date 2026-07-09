@@ -1,0 +1,20 @@
+{
+  "name": "your-brand",
+  "tagline": "Replace with your brand's visual energy: describe the mood, palette feel, and tone so on-brand renders match your identity",
+  "palette": {
+    "bg": "#FFFFFF",
+    "fg": "#111418",
+    "accent": "#2D6CDF",
+    "accent_dim": "#DCE7FB"
+  },
+  "fonts": {
+    "display": "Manrope",
+    "body": "Manrope",
+    "mono": "JetBrains Mono",
+    "display_weight": 800,
+    "google_fonts_url": "https://fonts.googleapis.com/css2?family=Manrope:wght@600;700;800&family=JetBrains+Mono:wght@500&display=swap"
+  },
+  "motion": { "entrance_ease": "back.out(1.7)", "transition": "crossfade" },
+  "flags": { "uppercase_display": false, "pill_shapes": true, "grain": false, "vignette": false },
+  "extras": { "primary": "#2D6CDF", "primary_soft": "#E4F0FB", "success": "#12B76A" }
+}

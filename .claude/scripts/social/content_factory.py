@@ -47,13 +47,21 @@ def _resolve_design_file(design_file: str) -> str | None:
 
 def _resolve_persona_refs(persona_pack: str) -> list[str]:
     """Resolve a channel's persona_pack to its curated reference images. Empty
-    pack → []; else the operator-approved subset under
-    .claude/image-personas/<pack>/, filtered to files that exist. Never raises."""
+    pack → []; else the curated identity subset under
+    .claude/image-personas/<pack>/, filtered to files that exist. Never raises.
+
+    Prefers the freshest real-photo anchors (front + both profiles + neutral)
+    for the tightest feature lock, falling back to earlier refs when absent."""
     if not persona_pack:
         return []
     try:
         pack_dir = _SCRIPTS_DIR.parent / "image-personas" / persona_pack
-        curated = ["ref-01.png", "ref-02.png", "ref-03.png", "ref-07.png"]
+        # Good-hair curated real photos (2026-07-08): luscious dry hair + natural
+        # skin at the source, so the render does not inherit damp/greasy hair.
+        preferred = ["ref-17.jpeg", "ref-18.jpeg", "ref-19-new.jpeg", "ref-22.jpg", "ref-23.jpeg"]
+        curated = [name for name in preferred if (pack_dir / name).is_file()]
+        if not curated:
+            curated = ["ref-01.png", "ref-02.png", "ref-03.png", "ref-07.png"]
         return [
             str(pack_dir / name)
             for name in curated
@@ -117,9 +125,18 @@ def _render_video(
     return None
 
 
-def _render_image(channel_id: str, topic: str) -> str | None:
+def _render_image(
+    channel_id: str,
+    topic: str,
+    *,
+    design_file: str | None = None,
+    persona_pack: str = "",
+) -> str | None:
     """Generate a scene image via the codex CLI (free). Returns absolute path
-    or None (never raises)."""
+    or None (never raises). A design_file (brand palette/fonts) identity-tunes
+    the scene mood; a persona_pack locks a face onto it. Fail-open to the
+    neutral, ref-less scene when neither is set (byte-identical to the prior
+    behavior). Mirrors ``_render_video``'s brand/persona plumbing."""
     try:
         import config
         import video_imagegen
@@ -131,9 +148,20 @@ def _render_image(channel_id: str, topic: str) -> str | None:
             f"A clean, modern social-media scene about: {topic}. Editorial and "
             "brand-friendly, single strong focal point, generous negative space."
         )
+        design: dict = {}
+        resolved = _resolve_design_file(design_file or "")
+        if resolved:
+            try:
+                import video_styles
+
+                design = video_styles.resolve_design(design_file=resolved) or {}
+            except Exception as exc:  # design resolution never breaks the render
+                logger.warning("design resolve failed: %s", exc)
+                design = {}
+        refs = _resolve_persona_refs(persona_pack) or None
         rel = video_imagegen.generate_image(
-            prompt=prompt, design={}, aspect="1:1",
-            assets_dir=str(images_dir), name=name,
+            prompt=prompt, design=design, aspect="1:1",
+            assets_dir=str(images_dir), name=name, refs=refs,
         )
         return str(images_dir / Path(rel).name) if rel else None
     except Exception as exc:
@@ -219,7 +247,12 @@ def produce(
             )
             media_type = "video" if media_path else None
         elif kind == "image":
-            media_path = _render_image(channel_id, slot_topic)
+            media_path = _render_image(
+                channel_id,
+                slot_topic,
+                design_file=channel.design_file,
+                persona_pack=channel.persona_pack,
+            )
             media_type = "image" if media_path else None
 
         caption = _generate_caption(channel_id, slot_topic, channel.voice_profile)

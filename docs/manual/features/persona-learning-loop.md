@@ -2,7 +2,7 @@
 
 Status: Shipped
 Owner: Framework (memory pipelines + personas)
-Last updated: 2026-07-03
+Last updated: 2026-07-07
 
 ## What It Does
 
@@ -24,6 +24,20 @@ The feature ships as three workstreams that build on the existing Acts 1-4:
 3. **Reflection-only corpus semantics** — persona-sourced beliefs are ALWAYS
    `source="reflection"`, never `explicit`. No external text can mint a
    sacrosanct belief in any persona's state.
+
+### The read-back half (issue #110)
+
+Write-back alone is only half the loop — knowledge that accumulates in a
+persona's vault is useless if the persona never retrieves it at answer time.
+Shipped 2026-07-07: a persona-channel turn (Discord) AND a dashboard/web
+persona turn now run semantic recall over **that persona's own** memory index
+(`~/.homie/profiles/<name>/data/memory.db`) before answering — bound to the
+persona vault via `config.resolve_db_path(paths["memory"])`, per-persona-unique,
+never the main vault. So a persona can surface a fact it learned (or was fed)
+weeks ago, not just its frozen briefing + recent chat. Fail-open: an empty or
+unbuilt index → briefing-only turn. Full mechanics, the DB-path isolation trap
+it closed, and the one-time `memory_index.py -p <name>` bulk-index build are in
+[Persona Memory Isolation → Inference-Time Recall](persona-memory-isolation.md#inference-time-recall-discord-persona-turns).
 
 ## The Live Bug This Fixed
 

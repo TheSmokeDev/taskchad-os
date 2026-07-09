@@ -86,6 +86,12 @@ _RETOUCH_LINE = (
     " photo-realistic. Do NOT airbrush, smooth, or beautify the skin. Make only"
     " two corrections: no warts or moles on the face, and no bags or puffiness"
     " under the eyes. Preserve their exact identity, features, and real skin texture."
+    " Preserve their natural skin TONE and complexion exactly as shown in the"
+    " references; do NOT lighten, whiten, brighten, or wash out their skin color."
+    " Render their hair clean, dry, full, well-groomed and controlled, with soft"
+    " defined waves and minimal flyaways."
+    " Do NOT render hair as damp, oily, greasy, stringy, flat, clumped, frizzy, or wild, even if"
+    " the reference photos show it that way."
 )
 
 

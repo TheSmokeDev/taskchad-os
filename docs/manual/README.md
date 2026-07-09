@@ -66,7 +66,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Persona Capability Matrix | Active baseline | [persona-capability-matrix](features/persona-capability-matrix.md) | `thehomie profile env-sync`, Discord persona channels, Cabinet personas |
 | Persona Team (AI Employee Company) | Active baseline — the operating model tying the persona layers together | [persona-team](features/persona-team.md) | `thehomie profile create\|env-sync\|learning`, `/agents`, persona channels |
 | Persona Learning Loop | Shipped, opt-in per profile, no-logs first-run fixed | [persona-learning-loop](features/persona-learning-loop.md) | `thehomie profile learning`, scheduled belief extraction |
-| Persona Memory Isolation And Inventory Repair | Shipped 2026-07-07 — guaranteed per-persona memory vault, repair + doctor + boot guards | [persona-memory-isolation](features/persona-memory-isolation.md) | `thehomie profile repair`, `thehomie doctor`, boot self-heal |
+| Persona Memory Isolation And Inventory Repair | Shipped 2026-07-07 — guaranteed per-persona memory vault, repair + doctor + boot guards, plus inference-time recall over each persona's own index (#110) | [persona-memory-isolation](features/persona-memory-isolation.md) | `thehomie profile repair`, `thehomie doctor`, boot self-heal, Discord + web persona recall, `memory_index.py -p <name>` |
 | Convoy, Work Queue, And Mailbox | Active baseline | [convoy-work-mailbox](features/convoy-work-mailbox.md) | `/convoy`, `/work`, mailbox APIs |
 | Team Operations And Executor | Active baseline | [team-operations-executor](features/team-operations-executor.md) | `/teams`, team APIs |
 | Tenant Isolation v0 | Phase A+B shipped, enforcement default-OFF | [tenant-isolation-v0](features/tenant-isolation-v0.md) | `thehomie tenant`, `HOMIE_TENANT_ENFORCEMENT`, orchestration/dashboard API |
@@ -78,6 +78,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | BrowserOps + Browser Viewer | Shipped, live-proven | [browserops-browser-viewer](features/browserops-browser-viewer.md) | `/browserops`, `/browser` |
 | Social-Write Executor | Shipped, default-denied, operator-gated per action | [social-write-executor](features/social-write-executor.md) | `/linkedin_post`, `/linkedin_connect`, `/reddit comment\|post` |
 | Video Generation | Shipped, native command, model-agnostic | [video-generation](features/video-generation.md) | `/video`, `video_pipeline.py`, `video_styles.py` |
+| Persona Brand Media Generation | Shipped, provider-optional, default-deny posting | [persona-brand-media-generation](features/persona-brand-media-generation.md) | `content_factory`, `video_imagegen`, `.claude/image-personas/` |
 | Document Uploads And Ingest | Shipped, all 3 phases (truthfulness, full reads, /vault-ingest) | [document-uploads-and-ingest](features/document-uploads-and-ingest.md) | `attachment_context.py`, `router.py` `/vault-ingest` caption, Telegram + Discord |
 | Telegram Command Menu | Curated native menu | [telegram-command-menu](features/telegram-command-menu.md) | `/commands`, Telegram slash menu |
 | Native Vault Commands | Shared Telegram + Discord native command baseline | [native-vault-commands](features/native-vault-commands.md) | `/vault`, Discord `/vault` group, recall-backed vault search/context |
