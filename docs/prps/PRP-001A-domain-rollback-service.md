@@ -9,7 +9,7 @@
 
 Implement one safe, exact-byte compensating operation for one applied amendment, including durable intent, crash reconciliation, and cooperative writer serialization. Also make the existing direct apply write participate in the same lock scope. The deliverable is Python domain code/tests only.
 
-Allowed production files: `.claude/chat/cognition/amendments.py` and new `.claude/chat/cognition/amendment_rollback.py`. Allowed tests: new `.claude/scripts/tests/test_amendment_rollback.py` and narrowly necessary amendments-domain tests. Do not modify CLI, API, `route_policy`, dashboard, chat, commands/workflows, or manuals. No remote actor/auth/UI assumptions.
+Allowed production files: `.claude/chat/cognition/amendments.py`, new `.claude/chat/cognition/amendment_rollback.py`, and the narrow compatibility correction in `.claude/scripts/evolve/evolve_loop.py`. Allowed tests: new `.claude/scripts/tests/test_amendment_rollback.py` and narrowly necessary amendments-domain/living-self tests. The evolve correction is source-anchored scope discovered by TDD: generic ledger coercion must honor dataclass defaults for legacy rows, while live evolve candidates must still explicitly supply `evidence_paths`. Do not modify CLI, API, `route_policy`, dashboard, chat, commands/workflows, or manuals. No remote actor/auth/UI assumptions.
 
 ## 2. Exact source anchors
 
@@ -27,7 +27,9 @@ Allowed production files: `.claude/chat/cognition/amendments.py` and new `.claud
 
 ## 3. Model and compatibility
 
-Add statuses `rollback_pending`, `rolled_back`. Add **defaulted** proposal fields:
+Add statuses `apply_pending`, `rollback_pending`, `rolled_back`. `apply_pending`
+is the crash-safe direct-apply prepared state described in section 6, not an
+internal or transient status outside this model. Add **defaulted** proposal fields:
 
 ```python
 rollback_actor: str | None = None
@@ -49,7 +51,7 @@ Stable reason codes (no ad-hoc alternatives):
 - success: `rollback_completed`, `rollback_reconciled_after_crash`, `rollback_already_completed`;
 - refusal: `invalid_proposal_id`, `proposal_not_found`, `duplicate_proposal_id`, `proposal_not_applied`, `missing_apply_hashes`, `invalid_actor`, `invalid_reason`, `target_not_allowed`, `target_path_invalid`, `target_missing`, `target_unreadable`, `snapshot_path_invalid`, `snapshot_missing`, `snapshot_unreadable`, `snapshot_hash_mismatch`;
 - conflict: `target_hash_conflict`;
-- failure: `lock_timeout`, `rescue_snapshot_failed`, `ledger_prepare_failed`, `target_restore_failed`, `target_verify_failed`, `ledger_finalize_failed`.
+- failure: `lock_timeout`, `ledger_read_failed` (a discovered operational raw-ledger read failure), `rescue_snapshot_failed`, `ledger_prepare_failed`, `target_restore_failed`, `target_verify_failed`, `ledger_finalize_failed`.
 
 Duplicate parseable IDs are an integrity refusal distinct from not-found and mutate nothing.
 
@@ -74,9 +76,21 @@ Snapshot confinement: stored path may be legacy relative or absolute, but resolv
 
 ## 6. Lock and write protocol
 
-Implement target advisory lock `<target>.lock` with bounded timeout and same-thread reentrancy semantics. Always ledger lock then target lock. This guarantee covers only cooperative amendment-domain writers; external editors and other code ignoring the lock remain possible. Therefore re-read/hash immediately before replace, but acknowledge an unavoidable TOCTOU window with uncooperative writers—do not claim universal prevention.
+Implement target advisory lock `<target>.lock` with bounded timeout and same-thread reentrancy semantics. Always ledger lock then target lock. Repeat original-path/ancestor `lstat`/reparse validation immediately before each I/O/replace and perform post-write identity/hash verification. This is the strongest portable stdlib boundary here. Advisory locks cover only cooperative writers: an unprivileged, uncooperative process can mutate path components between syscalls, and portable stdlib code cannot provide handle-relative Windows replacement safety. Do not claim universal TOCTOU prevention.
 
 **Direct apply lock scope correction:** in `apply_amendment_if_allowed`, after pure policy evaluation, acquire outer ledger then target lock and re-read/reconcile target while locked; snapshot, target replace, verification, and ledger applied update stay in that critical section. Do not merely lock `write_text`. Use atomic write; preserve existing text semantics/output in this slice. Collapse keeps outer ledger lock and takes target lock around its target read/plan/snapshot/replace; no inverse order.
+
+Direct apply first durably records `apply_pending` with the original
+`before_hash`, prepared `after_hash`, and rollback snapshot path, then replaces
+the target. Recovery under ledger→target locks is byte/hash driven and does not
+depend on parsing an amendment marker: exact current bytes matching the prepared
+`after_hash` finalize `applied` while preserving that prepared metadata; exact
+current bytes matching `before_hash` retry the same prepared atomic replacement
+using the existing snapshot/metadata; any third hash returns a stable
+`apply_pending` conflict with zero mutation. Replacement or verification failure
+leaves `apply_pending` retryable. Repeated recovery therefore either finalizes
+the exact prepared bytes, retries from the exact original bytes, or conservatively
+refuses drift; it never creates a second snapshot or overwrites unknown state.
 
 Fresh rollback under both locks:
 
@@ -87,7 +101,7 @@ Fresh rollback under both locks:
 5. Re-read target and require `after_hash`, atomically replace with snapshot bytes, re-read and require `before_hash`.
 6. Uniquely finalize `rolled_back`, completion time, `rollback_after_hash=before_hash`, clear error. Return success only now.
 
-Recovery: pending+target=`after_hash` validates recorded rescue hash, restores without another rescue/actor overwrite, then finalizes; pending+target=`before_hash` only finalizes and returns reconciled; other hash conflicts. Rolled-back+target=`before_hash` returns already-completed with zero writes; drift conflicts. Missing/unreadable target/snapshot are refusal outcomes; operation-level I/O after validated preparation maps to the specific failed code and never false success.
+Recovery: pending+target=`after_hash` validates recorded rescue hash, restores without another rescue/actor overwrite, then finalizes; pending+target=`before_hash` only finalizes and returns reconciled; every unknown third hash conflicts with zero mutation (rescue is never authority to overwrite drift). Rolled-back+target=`before_hash` returns already-completed with zero writes; drift conflicts. Missing/unreadable target/snapshot are refusal outcomes; operation-level I/O after validated preparation maps to the specific failed code and never false success.
 
 ## 7. Detailed red/green plan
 
@@ -128,4 +142,4 @@ Before deploying older code: stop amendment producers; run this version to recon
 
 ## 11. Definition of done
 
-One agent can finish this slice without touching another surface; every listed test is real and green; full Python suite result is recorded (or an explicit pre-existing blocker); `git diff --check` is clean; diff contains only allowed domain/test files. B-D remain untouched.
+One agent can finish this slice without touching another surface; every listed test is real and green; focused rollback/amendment/living-self results are recorded (or an explicit blocker); Ruff and `git diff --check` are clean; diff contains only allowed domain/test files plus the documented narrow evolve compatibility correction. B-D remain untouched.
