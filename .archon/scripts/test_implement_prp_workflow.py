@@ -44,7 +44,12 @@ _EXPECTED_NODES = [
     ("docs-review", ["regression-validation"]),
     (
         "review-aggregate",
-        ["spec-review", "security-state-review", "simplification-review", "docs-review"],
+        [
+            "spec-review",
+            "security-state-review",
+            "simplification-review",
+            "docs-review",
+        ],
     ),
     ("review-gate", ["review-aggregate"]),
     ("package", ["review-gate"]),
@@ -95,7 +100,9 @@ def test_yaml_safe_loads_with_exact_22_node_order_and_dependencies():
     nodes = data["nodes"]
     assert len(nodes) == 22
     assert [(n["id"], n.get("depends_on", [])) for n in nodes] == _EXPECTED_NODES
-    assert {n_id for n_id, _ in _EXPECTED_NODES} == _BASH_NODE_IDS | _COMMAND_OR_APPROVAL_NODE_IDS
+    assert {
+        n_id for n_id, _ in _EXPECTED_NODES
+    } == _BASH_NODE_IDS | _COMMAND_OR_APPROVAL_NODE_IDS
 
 
 def test_required_and_produced_artifact_maps_match_all_22_rows():
@@ -103,7 +110,8 @@ def test_required_and_produced_artifact_maps_match_all_22_rows():
     import sys
 
     spec = importlib.util.spec_from_file_location(
-        "prp_artifact_contracts", _REPO_ROOT / ".archon" / "scripts" / "prp_artifact_contracts.py"
+        "prp_artifact_contracts",
+        _REPO_ROOT / ".archon" / "scripts" / "prp_artifact_contracts.py",
     )
     pac = importlib.util.module_from_spec(spec)
     sys.modules["prp_artifact_contracts"] = pac
@@ -133,8 +141,20 @@ def test_required_and_produced_artifact_maps_match_all_22_rows():
             "review_docs",
         ),
         "review-gate": ("review_aggregate", "focused_results", "regression"),
-        "package": ("baseline", "preflight", "focused_results", "regression", "review_aggregate"),
-        "package-gate": ("pr_package", "preflight", "baseline", "regression", "pr_body"),
+        "package": (
+            "baseline",
+            "preflight",
+            "focused_results",
+            "regression",
+            "review_aggregate",
+        ),
+        "package-gate": (
+            "pr_package",
+            "preflight",
+            "baseline",
+            "regression",
+            "pr_body",
+        ),
         "final-approval": (),
         "publish-pr": ("pr_package", "baseline", "approval_manifest", "pr_body"),
     }
@@ -191,11 +211,15 @@ def test_two_archon_approvals_remain_and_validator_does_not_infer_them():
     plan_approval = nodes["plan-approval"]
     final_approval = nodes["final-approval"]
     assert "approval" in plan_approval and plan_approval["depends_on"] == ["plan"]
-    assert "approval" in final_approval and final_approval["depends_on"] == ["package-gate"]
+    assert "approval" in final_approval and final_approval["depends_on"] == [
+        "package-gate"
+    ]
     forbidden = {"completed_nodes", "approvals", "validate_node", "NODE_PREREQUISITES"}
     for node in nodes.values():
         bash = node.get("bash", "")
-        assert not (forbidden & set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", bash))), node["id"]
+        assert not (forbidden & set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", bash))), node[
+            "id"
+        ]
 
 
 def test_each_exact_yaml_callsite_uses_inline_import_or_unchanged_command():
@@ -271,16 +295,24 @@ def test_literal_argv_shell_false_execution_unchanged():
                 continue
             if call.args:
                 first = call.args[0]
-                assert isinstance(first, (ast.List, ast.BinOp, ast.Name, ast.Starred)), (
+                assert isinstance(
+                    first, (ast.List, ast.BinOp, ast.Name, ast.Starred)
+                ), (
                     node_id,
                     ast.dump(first),
                 )
                 if isinstance(first, ast.Constant):
-                    raise AssertionError(f"{node_id}: subprocess.run called with a string command")
+                    raise AssertionError(
+                        f"{node_id}: subprocess.run called with a string command"
+                    )
             for kw in call.keywords:
                 if kw.arg == "shell":
-                    assert isinstance(kw.value, ast.Constant) and kw.value.value is False, node_id
-        assert "%" not in program.replace("'%'", "") or True  # no bare % string formatting used
+                    assert (
+                        isinstance(kw.value, ast.Constant) and kw.value.value is False
+                    ), node_id
+        assert (
+            "%" not in program.replace("'%'", "") or True
+        )  # no bare % string formatting used
         assert ".format(" not in program, node_id
         assert re.search(r'f[\'"].*\{.*(cmd|args|argv)', program) is None, node_id
 
@@ -298,19 +330,34 @@ def test_direct_writes_remain_non_atomic():
 def test_publish_checks_precede_add_commit_push_and_gh():
     bash = _nodes()["publish-pr"]["bash"]
     validate_at = bash.index("validate_publish_context(")
-    for needle in ("'git','add'", "'git','commit'", "'git','push'", "'gh','pr','create'"):
+    for needle in (
+        "'git','add'",
+        "'git','commit'",
+        "'git','push'",
+        "'gh','pr','create'",
+    ):
         idx = bash.index(needle)
         assert validate_at < idx, needle
 
 
-def test_every_import_is_preceded_by_committed_validator_pin():
+def test_every_import_is_preceded_by_filter_independent_crlf_safe_validator_pin():
     for node_id in _BASH_NODE_IDS:
         bash = _nodes()[node_id]["bash"]
         import_at = bash.index("from prp_artifact_contracts import")
-        pin_at = bash.index("git','show','HEAD:.archon/scripts/prp_artifact_contracts.py")
-        compare_at = bash.index("validator.read_bytes() != committed")
-        assert pin_at < compare_at < import_at, node_id
-        assert "shell=False" in bash[pin_at:import_at], node_id
+        pin_at = bash.index(
+            "git','show','HEAD:.archon/scripts/prp_artifact_contracts.py"
+        )
+        read_at = bash.index("validator.read_bytes()")
+        reject_at = bash.index("validator has invalid line endings")
+        compare_at = bash.index("validator_bytes.replace(crlf,lf)")
+        assert pin_at < read_at < reject_at < compare_at < import_at, node_id
+        prefix = bash[:import_at]
+        assert prefix.count("shell=False") >= 1, node_id
+        assert "check=True" in prefix[pin_at:], node_id
+        assert "cwd=root" in prefix or "cwd=trusted_root" in prefix, node_id
+        assert "hash-object" not in prefix, node_id
+        assert "check-attr" not in prefix, node_id
+        assert "show-object-format" not in prefix, node_id
 
 
 def test_mutable_baseline_root_cannot_select_validator_repository_or_import():
@@ -339,30 +386,109 @@ def test_mutable_baseline_root_cannot_select_validator_repository_or_import():
         ), node_id
 
 
-def test_validator_pin_rejects_tampering_before_import(tmp_path):
-    root = tmp_path / "repo"
-    script = root / ".archon" / "scripts" / "prp_artifact_contracts.py"
-    script.parent.mkdir(parents=True)
-    script.write_text("PIN_SENTINEL = 'committed'\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True, shell=False)
-    subprocess.run(["git", "add", "."], cwd=root, check=True, shell=False)
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@t.test", "commit", "-qm", "pin"],
-        cwd=root, check=True, shell=False,
-    )
-    script.write_text("raise RuntimeError('IMPORT RAN')\n", encoding="utf-8")
-    program = """
+_PIN_PROGRAM = """
 import pathlib, subprocess, sys
 root=pathlib.Path(sys.argv[1]).resolve()
 validator=root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
 committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
-if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+validator_bytes=validator.read_bytes()
+crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
 sys.path.insert(0, str(root / '.archon' / 'scripts'))
 from prp_artifact_contracts import PIN_SENTINEL
+print(PIN_SENTINEL)
 """
-    result = subprocess.run(
-        [sys.executable, "-c", program, str(root)], capture_output=True, text=True, shell=False
+
+
+def _pin_repo(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "repo"
+    script = root / ".archon" / "scripts" / "prp_artifact_contracts.py"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(b"PIN_SENTINEL = 'committed'\n")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, shell=False)
+    subprocess.run(["git", "add", "."], cwd=root, check=True, shell=False)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t.test",
+            "commit",
+            "-qm",
+            "pin",
+        ],
+        cwd=root,
+        check=True,
+        shell=False,
     )
+    return root, script
+
+
+def _run_pin(root: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", _PIN_PROGRAM, str(root)],
+        capture_output=True,
+        text=True,
+        shell=False,
+    )
+
+
+def test_validator_pin_accepts_crlf_only_checkout(tmp_path):
+    root, script = _pin_repo(tmp_path)
+    script.write_bytes(b"PIN_SENTINEL = 'committed'\r\n")
+    result = _run_pin(root)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "committed"
+
+
+def test_validator_pin_rejects_substantive_edit_before_import(tmp_path):
+    root, script = _pin_repo(tmp_path)
+    script.write_bytes(b"raise RuntimeError('IMPORT RAN')\r\n")
+    result = _run_pin(root)
+    assert result.returncode != 0
+    assert "validator differs from committed HEAD" in result.stderr
+    assert "IMPORT RAN" not in result.stderr
+
+
+def test_mutable_attributes_and_clean_filter_cannot_mask_malicious_validator(tmp_path):
+    root, script = _pin_repo(tmp_path)
+    cleaner = root / "mask.py"
+    cleaner.write_text(
+        "import sys\nsys.stdout.buffer.write(b\"PIN_SENTINEL = 'committed'\\n\")\n"
+    )
+    (root / ".gitattributes").write_text(
+        ".archon/scripts/prp_artifact_contracts.py filter=mask\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "config", "filter.mask.clean", f'"{sys.executable}" "{cleaner}"'],
+        cwd=root,
+        check=True,
+        shell=False,
+    )
+    script.write_bytes(b"raise RuntimeError('IMPORT RAN')\n")
+
+    # Demonstrate that the rejected Git-filter-aware approach is fooled.
+    filtered_oid = subprocess.run(
+        ["git", "hash-object", "--", ".archon/scripts/prp_artifact_contracts.py"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+        shell=False,
+    ).stdout.strip()
+    head_oid = subprocess.run(
+        ["git", "rev-parse", "HEAD:.archon/scripts/prp_artifact_contracts.py"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+        shell=False,
+    ).stdout.strip()
+    assert filtered_oid == head_oid
+
+    result = _run_pin(root)
     assert result.returncode != 0
     assert "validator differs from committed HEAD" in result.stderr
     assert "IMPORT RAN" not in result.stderr

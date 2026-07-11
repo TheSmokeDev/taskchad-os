@@ -23,7 +23,10 @@ nodes:
             'baseline_head':run('git','rev-parse','HEAD'),'baseline_status':''}
       validator=root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_payload
       result=validate_payload('baseline', data, policy='canonical')
@@ -60,7 +63,10 @@ nodes:
       root=pathlib.Path(subprocess.run(['git','rev-parse','--show-toplevel'],text=True,capture_output=True,check=True,shell=False).stdout.strip()).resolve()
       validator=root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_payload
       p=pathlib.Path(os.environ['ARTIFACTS_DIR'])/'preflight.json'
@@ -94,7 +100,10 @@ nodes:
       root=pathlib.Path(subprocess.run(['git','rev-parse','--show-toplevel'],text=True,capture_output=True,check=True,shell=False).stdout.strip()).resolve()
       validator=root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_payload
       d=json.loads((pathlib.Path(os.environ['ARTIFACTS_DIR'])/'reconnaissance.json').read_text())
@@ -137,7 +146,10 @@ nodes:
       root=pathlib.Path(subprocess.run(['git','rev-parse','--show-toplevel'],text=True,capture_output=True,check=True,shell=False).stdout.strip()).resolve()
       validator=root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_payload
       d=json.loads((pathlib.Path(os.environ['ARTIFACTS_DIR'])/'implementation.json').read_text())
@@ -165,7 +177,10 @@ nodes:
       base=pathlib.Path(os.environ['ARTIFACTS_DIR']); pre=json.loads((base/'preflight.json').read_text()); baseline=json.loads((base/'baseline.json').read_text()); trusted_root=pathlib.Path.cwd().resolve(); runs=[]
       validator=trusted_root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=trusted_root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(trusted_root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_argv
       root=pathlib.Path(baseline['root']).resolve()
@@ -191,7 +206,10 @@ nodes:
       base=pathlib.Path(os.environ['ARTIFACTS_DIR']); pre=json.loads((base/'preflight.json').read_text()); baseline=json.loads((base/'baseline.json').read_text()); trusted_root=pathlib.Path.cwd().resolve(); runs=[]
       validator=trusted_root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=trusted_root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(trusted_root / '.archon' / 'scripts'))
       from prp_artifact_contracts import compute_regression_diff_state, validate_argv
       root=pathlib.Path(baseline['root']).resolve()
@@ -234,7 +252,10 @@ nodes:
       root=pathlib.Path(subprocess.run(['git','rev-parse','--show-toplevel'],text=True,capture_output=True,check=True,shell=False).stdout.strip()).resolve()
       validator=root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_payload
       base=pathlib.Path(os.environ['ARTIFACTS_DIR']); names=['spec','security-state','simplification','docs']
@@ -259,7 +280,10 @@ nodes:
       root=pathlib.Path(subprocess.run(['git','rev-parse','--show-toplevel'],text=True,capture_output=True,check=True,shell=False).stdout.strip()).resolve()
       validator=root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_payload
       b=pathlib.Path(os.environ['ARTIFACTS_DIR']); a=json.loads((b/'review-aggregate.json').read_text()); t=json.loads((b/'test-results.json').read_text()); r=json.loads((b/'regression.json').read_text())
@@ -287,7 +311,10 @@ nodes:
       trusted_root=pathlib.Path.cwd().resolve()
       validator=trusted_root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=trusted_root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(trusted_root / '.archon' / 'scripts'))
       from prp_artifact_contracts import ArtifactSet, validate_package_context
       result=validate_package_context(ArtifactSet(artifacts_dir=b, values={'pkg':pkg,'preflight':pre,'baseline':base,'regression':regression}))
@@ -318,7 +345,10 @@ nodes:
       trusted_root=pathlib.Path.cwd().resolve()
       validator=trusted_root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=trusted_root,capture_output=True,check=True,shell=False).stdout
-      if validator.read_bytes() != committed: sys.exit('validator differs from committed HEAD')
+      validator_bytes=validator.read_bytes()
+      crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
       sys.path.insert(0, str(trusted_root / '.archon' / 'scripts'))
       from prp_artifact_contracts import ArtifactSet, validate_publish_context
       result=validate_publish_context(ArtifactSet(artifacts_dir=b, values={'pkg':pkg,'baseline':base,'approved':approved}))
