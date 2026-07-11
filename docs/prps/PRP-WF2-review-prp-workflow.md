@@ -1,10 +1,12 @@
 # PRP-WF2-review-prp-workflow: Review-PRP Workflow
 
 **Status:** draft — requires WF2 review and source-specific hardening
-**Depends on:** WF1
+**Depends on:** WF1; WF1B if this workflow publishes or claims secure publication binding
 
 ## Goal and context
 Add a bounded review-only workflow that validates one PRP against normative anchors, repository paths, scope, commands, security/concurrency, acceptance and backout before implementation eligibility. Current source is the merged `implement-prp` pilot; this slice may strengthen rails but may not change product behavior or auto-merge.
+
+The intended review-only form has no commit, push, or PR-creation side effects and therefore may proceed on WF1. If hardening expands WF2 to publish, or its acceptance claims that approval is bound securely to publication, [WF1B](PRP-WF1B-publication-binding-hardening.md) becomes a mandatory prerequisite; WF2 may not duplicate or waive that security ownership.
 
 ## Candidate scope (not an implementation allowlist)
 - `.archon/workflows/`
@@ -30,10 +32,10 @@ No product code, arbitrary command execution, direct-checkout mode, unattended p
 
 ## Ordered RED → GREEN steps
 1. RED fixtures for every malformed/hostile artifact and forbidden transition.
-2. RED race tests mutate baseline/diff between validate, approval and publish.
+2. RED race tests mutate baseline/diff between validation and review-manifest finalization.
 3. GREEN introduce the smallest reusable schema/validator and typed reasons.
 4. GREEN wire the workflow nodes, keeping fresh contexts and deterministic gates.
-5. GREEN add happy-path fixture plus blocked review/test/approval/publish cases.
+5. GREEN add happy-path fixture plus blocked review, test, approval, and stale-manifest-finalization cases; WF2 has no publication case.
 6. Run focused rail tests, full Python regression and diff check.
 
 ## Exact bootstrap and validation commands
@@ -48,7 +50,7 @@ git diff --check
 `tests/test_archon_workflow_rails.py` is the explicitly intended new test. If YAML-only files cannot be parsed by ruff, preflight must replace that focused ruff argv with the exact Python validator paths; it must not silently skip validation.
 
 ## Acceptance criteria
-All hostile and race fixtures fail with stable reasons and zero publication side effects; happy path emits schema-valid artifacts; command/path allowlists and redaction are enforced; approval remains two-stage where publication is possible; full regression and diff check pass.
+All hostile and race fixtures fail with stable reasons and zero repository mutation or publication side effects; happy path emits a schema-valid review manifest bound to the reviewed revision and diff; command/path allowlists and redaction are enforced; full regression and diff check pass. WF2 does not commit, push, create a PR, or publish.
 
 ## Documentation impact
 Update [Polish Architecture Execution Program](../manual/features/polish-architecture-execution-program.md) and [Archon Workflows](../manual/features/archon-workflows.md) only for shipped behavior.

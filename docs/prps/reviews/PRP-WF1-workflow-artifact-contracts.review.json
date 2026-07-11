@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "review_kind": "prp_independent_contract_review",
+  "status": "reviewed",
+  "implementation_ready": true,
+  "prp": {
+    "path": "docs/prps/PRP-WF1-workflow-artifact-contracts.md",
+    "git_blob_sha1": "6bc1d874c05c9b692a7e69dca728b3759f61aae9",
+    "sha256": "26315093aba28674a0a8459f11a9c981dd42a26b7f80f86eb2f74af9d0124192"
+  },
+  "source_snapshot": {
+    "git_commit": "fdf0d90b53e50666313876864170bc061d58d478",
+    "workflow_path": ".archon/workflows/implement-prp.yaml",
+    "workflow_git_blob_sha1": "3e7e84008f686b9e61908ef3009a11bf2a6b9416"
+  },
+  "required_review_checks": [
+    "all referenced prp command producers and every inline artifact reader/writer inspected",
+    "preservation decision and implementation scope are internally consistent",
+    "canonical payload fields and behavior-preserving consumer policies match source",
+    "all 22 nodes have literal required/produced/timing/call-site mappings and match the Archon DAG",
+    "approval and completion remain Archon orchestration state and are absent from validator authority",
+    "separate regression and publication diff computations match source bytes and ordering",
+    "producer cross-field rules and shape-versus-context boundaries match every command source",
+    "package-gate and publish-pr preserve literal node-local first-failure order",
+    "WF1 limitations are explicit and publication binding/race/atomicity work is owned by draft WF1B",
+    "plain-file import and CLI wiring require no package installation",
+    "RED/GREEN sequence and verification commands are executable in a clean clone"
+  ],
+  "reviewer": {
+    "identity": "independent adversarial review batch deleg_4d9c24ee; human approval authority SmokeDev/Hermes",
+    "reviewed_at": "2026-07-11T21:25:24Z",
+    "verdict": "pass",
+    "findings": [],
+    "verified_prp_git_blob_sha1": "6bc1d874c05c9b692a7e69dca728b3759f61aae9",
+    "verified_prp_sha256": "26315093aba28674a0a8459f11a9c981dd42a26b7f80f86eb2f74af9d0124192"
+  },
+  "instructions": "Reviewer must recompute both PRP digests. If either differs, set verdict to stale and do not review. Only an independent reviewer may set verdict to pass and implementation_ready to true."
+}

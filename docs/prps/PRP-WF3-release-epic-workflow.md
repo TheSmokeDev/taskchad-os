@@ -1,7 +1,7 @@
 # PRP-WF3-release-epic-workflow: Release-Epic Workflow
 
 **Status:** draft — requires WF2 review and source-specific hardening
-**Depends on:** WF1, WF2
+**Depends on:** WF1, WF1B, WF2
 
 ## Goal and context
 Aggregate merged slice proof for one epic, recompute dependency/requirement coverage, require human approval, and publish a release-readiness package without equating it to merge or conformance. Current source is the merged `implement-prp` pilot; this slice may strengthen rails but may not change product behavior or auto-merge.

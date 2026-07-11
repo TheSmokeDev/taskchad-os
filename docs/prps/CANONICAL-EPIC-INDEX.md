@@ -21,8 +21,10 @@ WF2 bootstraps before its own implementation through documented independent huma
 ## Dependency DAG
 
 ```text
-WF1 → WF2 → reviewed PRP → implementation-ready PRP → implement-prp
-WF1/WF2 → WF3; WF1-WF3 → WF4
+WF1 → WF1B (publication hardening) → secure publication workflows
+WF1 → review-only WF2; WF2 → reviewed PRP → implementation-ready PRP → implement-prp
+WF2 depends on WF1B if it publishes or claims secure publication binding
+WF1/WF1B/WF2 → WF3; WF1-WF3 → WF4
 E01A → E01A2/E01A3 → E01B → E01C → E01D → E01E
 E01 → E02 → E03
 E03A → E03B → E03J → E03K
@@ -35,9 +37,10 @@ E02/E03/E05 → E09; E01-E09 + WF3 → E10
 
 | ID | Prerequisite | Status |
 |---|---|---|
-| [WF1](PRP-WF1-workflow-artifact-contracts.md) | none | draft — review found unresolved schema/state/wiring blockers |
-| [WF2](PRP-WF2-review-prp-workflow.md) | WF1 | draft — requires WF2 review and source-specific hardening |
-| [WF3](PRP-WF3-release-epic-workflow.md) | WF1, WF2 | draft — requires WF2 review and source-specific hardening |
+| [WF1](PRP-WF1-workflow-artifact-contracts.md) | none | **implementation-ready** — digest-bound independent review passed |
+| [WF1B](PRP-WF1B-publication-binding-hardening.md) | WF1 | draft — publication binding/race/atomicity hardening; not implementation-ready |
+| [WF2](PRP-WF2-review-prp-workflow.md) | WF1; WF1B if publication is in scope | draft — requires WF2 review and source-specific hardening |
+| [WF3](PRP-WF3-release-epic-workflow.md) | WF1, WF1B, WF2 | draft — requires WF2 review and source-specific hardening |
 | [WF4](PRP-WF4-workflow-rail-self-tests.md) | WF1-WF3 | draft — requires WF2 review and source-specific hardening |
 
 ## Epic 1 — Trustworthy Self-Amendment
