@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "review_kind": "prp_independent_security_contract_review",
+  "status": "reviewed",
+  "implementation_ready": true,
+  "prp": {
+    "path": "docs/prps/PRP-WF1B-publication-binding-hardening.md",
+    "byte_source": "Exact staged Git blob payload bytes; hashes are newline-conversion independent.",
+    "git_blob_sha1": "723d6efa3a7fc85b240ec56ef591632514051e06",
+    "sha256": "d7d55ade7fd80f635b61c27a33a386c554da08ebd8dca766cf967519a6a91162"
+  },
+  "source_snapshot": {
+    "git_commit": "e50dcd4",
+    "byte_source": "Exact Git blob payload bytes from git show e50dcd4:<path>; git_blob_sha1 is git rev-parse e50dcd4:<path>; sha256 is over those same Git object bytes, never working-tree bytes or newline-converted text.",
+    "files": {
+      ".archon/workflows/implement-prp.yaml": {
+        "git_blob_sha1": "0765c42c1aa4c4f04a902435d23c1ad051c7d0d7",
+        "sha256": "dd38d26a8f0cb3907afcd9a07fe94042be1c3a0ddd8e60697c912bcded0bcefb"
+      },
+      ".archon/scripts/prp_artifact_contracts.py": {
+        "git_blob_sha1": "3ef459a9072318a47f86d413354fb12391f20094",
+        "sha256": "0fdf504981b09e4468faf7e65aea8b28c105ac38c8062a784bc3bf1ff7ef07dd"
+      },
+      ".archon/scripts/test_prp_artifact_contracts.py": {
+        "git_blob_sha1": "b62c551e36233169291932c5c900196d7371f42e",
+        "sha256": "a75c014e2adc66ae253db7a0e3bf13b098b563949a2431bc58496ea9db7a4db2"
+      },
+      ".archon/scripts/test_implement_prp_workflow.py": {
+        "git_blob_sha1": "dcb997a6cbb2def8a9103f81e720121b2e3dcdeb",
+        "sha256": "eb4feb702720544a2f02f745ffae01eccee5fbee5e6d4f8b32a3c45ceadc241b"
+      }
+    },
+    "wf1_contract_path": "docs/prps/PRP-WF1-workflow-artifact-contracts.md",
+    "wf1_review_path": "docs/prps/reviews/PRP-WF1-workflow-artifact-contracts.review.json"
+  },
+  "required_review_checks": [
+    "WF1 landed files, exports, private publication helpers, CLI and both workflow callers are reconciled",
+    "absent, baseline and expected remote lease behavior is separated with explicit empty expected value",
+    "raw Git grammar, rename policy, all mode/OID/status/score/path fields and package path projection are normative",
+    "object inventory framing/content/order and three fixed digest vectors are normative",
+    "sealed package/body/metadata paths, copy timing, permissions/fsync, manifest lookup and verification are exact",
+    "final approval uses Archon-compatible package-gate output and binds repository identity and PR base branch",
+    "retry matrix is exhaustive for local, remote and repository-qualified PR observations including ambiguous outcomes",
+    "PR body is final-read as valid UTF-8/no-NUL immutable bytes and gh create uses literal --body-file - with shell=False and those exact stdin bytes",
+    "every create outcome is repository-qualified re-queried and exact body bytes/digest are reconciled without automatic remote mutation",
+    "portable filesystem limitation is explicit without overclaiming hostile concurrent mutation resistance",
+    "both existing Archon approval nodes remain and manifest existence is never approval authority",
+    "focused/regression/YAML/Archon/link/diff evidence is independently rerun",
+    "no auto-merge, approval bypass, product change or schema-1 approval reuse is introduced",
+    "secret scanning is explicitly separate and no disclosure-safety claim is made"
+  ],
+  "reviewer": {
+    "identity": "independent adversarial reviews deleg_b6107aae and deleg_29754763; human approval authority SmokeDev/Hermes",
+    "reviewed_at": "2026-07-11T23:25:30Z",
+    "verdict": "pass",
+    "findings": [],
+    "note": "The sole final lease contradiction identified by deleg_29754763 was corrected before readiness. WF1 head e50dcd4 adds only the independently approved, filter-independent CRLF-safe validator pin reviewed GO by deleg_b81f4eca; WF1B APIs and publication semantics are unchanged."
+  },
+  "instructions": "Independent reviewer must recompute every bound digest and verify commit e50dcd4. If any differs, set status stale and do not review. The author must not set implementation_ready true or a passing verdict."
+}
