@@ -99,6 +99,7 @@ class TestInstagramDispatchWiring:
         mock_post.assert_called_once_with(
             "instagram", "Caption body for IG",
             image_url="https://cdn.example.com/card-abc.png",
+            video_url="",
         )
         assert svc.get_post(pid).status == "posted"
 
@@ -174,4 +175,4 @@ class TestInstagramDispatchWiring:
         assert ok is True
         mock_render.assert_not_called()
         mock_upload.assert_not_called()
-        mock_post.assert_called_once_with("facebook", "FB body", image_url="")
+        mock_post.assert_called_once_with("facebook", "FB body", image_url="", video_url="")

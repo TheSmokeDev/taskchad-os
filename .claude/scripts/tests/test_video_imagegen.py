@@ -12,6 +12,7 @@ generated-images root (a tmp dir). Covers:
 
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 from pathlib import Path
@@ -30,8 +31,55 @@ def _design() -> dict:
     return video_styles.resolve_design(style="bold-poster")
 
 
-def _completed(stdout: str = "", returncode: int = 0) -> SimpleNamespace:
-    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+class _FakeStdin:
+    """Captures the UTF-8 instruction bytes written to codex's stdin."""
+
+    def __init__(self, captured: dict) -> None:
+        self._c = captured
+
+    def write(self, b) -> None:
+        self._c["input"] = b.decode("utf-8") if isinstance(b, (bytes, bytearray)) else b
+
+    def close(self) -> None:
+        pass
+
+
+def _install_codex(monkeypatch, tmp_path, *, write_png=True, stdout_text="",
+                   exits=True):
+    """Wire a fake codex render at the Popen seam (the code no longer uses
+    subprocess.run for the render). On construction the fake optionally writes a
+    png into a session subdir (the fresh-png-diff path) and/or exposes a stdout
+    path line (codex's own reported-path path). Returns the capture dict."""
+    images_root = tmp_path / "generated"
+    monkeypatch.setattr(video_imagegen.shutil, "which", lambda name: "/fake/bin/tool")
+    monkeypatch.setattr(video_imagegen, "_generated_images_root", lambda: images_root)
+    monkeypatch.setattr(video_imagegen, "_POLL_INTERVAL_S", 0.01)
+    captured: dict = {}
+    png_path = images_root / "session-1" / "ig_0001.png"
+
+    class _Popen:
+        def __init__(self, cmd, stdin=None, stdout=None, stderr=None, **kw):
+            captured["cmd"] = cmd
+            self.pid = 4242
+            self.stdin = _FakeStdin(captured)
+            if write_png:
+                png_path.parent.mkdir(parents=True, exist_ok=True)
+                png_path.write_bytes(b"\x89PNG fake")
+            self.stdout = io.BytesIO(stdout_text.encode("utf-8"))
+
+        def poll(self):
+            return 0 if exits else None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(video_imagegen.subprocess, "Popen", _Popen)
+    # no-op the taskkill teardown so tests never spawn a real process
+    monkeypatch.setattr(video_imagegen.subprocess, "run", lambda *a, **k: None)
+    return captured
 
 
 # =============================================================================
@@ -73,22 +121,8 @@ def test_empty_prompt_returns_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 def test_success_copies_newest_png_into_assets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    images_root = tmp_path / "generated"
     assets_dir = tmp_path / "assets"
-    monkeypatch.setattr(video_imagegen.shutil, "which", lambda name: "/fake/bin/tool")
-    monkeypatch.setattr(video_imagegen, "_generated_images_root", lambda: images_root)
-
-    captured: dict = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["input"] = kwargs.get("input", "")
-        session = images_root / "session-1"
-        session.mkdir(parents=True, exist_ok=True)
-        (session / "ig_0001.png").write_bytes(b"\x89PNG fake")
-        return _completed()
-
-    monkeypatch.setattr(video_imagegen.subprocess, "run", fake_run)
+    captured = _install_codex(monkeypatch, tmp_path)
 
     result = video_imagegen.generate_hero(
         "a stadium at night", _design(), "9:16", str(assets_dir)
@@ -106,18 +140,11 @@ def test_success_copies_newest_png_into_assets(
 def test_stdout_path_fallback_discovery(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    images_root = tmp_path / "generated"  # never populated
     assets_dir = tmp_path / "assets"
-    side_png = tmp_path / "elsewhere.png"
+    side_png = tmp_path / "elsewhere.png"  # written by "codex" outside the roots
     side_png.write_bytes(b"\x89PNG fake")
-
-    monkeypatch.setattr(video_imagegen.shutil, "which", lambda name: "/fake/bin/tool")
-    monkeypatch.setattr(video_imagegen, "_generated_images_root", lambda: images_root)
-    monkeypatch.setattr(
-        video_imagegen.subprocess,
-        "run",
-        lambda cmd, **kwargs: _completed(stdout=f"done\n{side_png}\n"),
-    )
+    # No png in the roots; codex reports the path on stdout instead.
+    _install_codex(monkeypatch, tmp_path, write_png=False, stdout_text=f"done\n{side_png}\n")
 
     result = video_imagegen.generate_hero(
         "a stadium at night", _design(), "16:9", str(assets_dir)
@@ -131,16 +158,13 @@ def test_stdout_path_fallback_discovery(
 # =============================================================================
 
 
-def test_timeout_returns_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(video_imagegen.shutil, "which", lambda name: "/fake/bin/tool")
-    monkeypatch.setattr(
-        video_imagegen, "_generated_images_root", lambda: tmp_path / "generated"
-    )
-
-    def fake_run(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="tool", timeout=300)
-
-    monkeypatch.setattr(video_imagegen.subprocess, "run", fake_run)
+def test_no_output_within_timeout_returns_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # codex never writes a png and never exits -- the watch loop must give up at
+    # the deadline, force-kill the tree, and return None (never hang, never raise).
+    monkeypatch.setattr(video_imagegen, "_resolve_timeout", lambda: 1)
+    _install_codex(monkeypatch, tmp_path, write_png=False, stdout_text="", exits=False)
     assert (
         video_imagegen.generate_hero("a scene", _design(), "16:9", str(tmp_path / "a"))
         is None
@@ -150,17 +174,9 @@ def test_timeout_returns_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
 def test_quota_wall_no_output_returns_none(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # The CLI runs but produces no new image and no path on stdout
+    # The CLI runs and exits but produces no new image and no path on stdout
     # (quota walls and refusals look exactly like this).
-    monkeypatch.setattr(video_imagegen.shutil, "which", lambda name: "/fake/bin/tool")
-    monkeypatch.setattr(
-        video_imagegen, "_generated_images_root", lambda: tmp_path / "generated"
-    )
-    monkeypatch.setattr(
-        video_imagegen.subprocess,
-        "run",
-        lambda cmd, **kwargs: _completed(stdout="usage limit reached", returncode=1),
-    )
+    _install_codex(monkeypatch, tmp_path, write_png=False, stdout_text="usage limit reached")
     assert (
         video_imagegen.generate_hero("a scene", _design(), "16:9", str(tmp_path / "a"))
         is None
@@ -197,22 +213,7 @@ def test_build_instruction_defaults_unknown_aspect_to_landscape() -> None:
 
 def _wire_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     """Mock the CLI seams for a successful generation; returns the capture dict."""
-
-    images_root = tmp_path / "generated"
-    monkeypatch.setattr(video_imagegen.shutil, "which", lambda name: "/fake/bin/tool")
-    monkeypatch.setattr(video_imagegen, "_generated_images_root", lambda: images_root)
-    captured: dict = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["input"] = kwargs.get("input", "")
-        session = images_root / "session-1"
-        session.mkdir(parents=True, exist_ok=True)
-        (session / "ig_0001.png").write_bytes(b"\x89PNG fake")
-        return _completed()
-
-    monkeypatch.setattr(video_imagegen.subprocess, "run", fake_run)
-    return captured
+    return _install_codex(monkeypatch, tmp_path)
 
 
 def test_generate_image_named_output_with_refs_cmd_shape(
@@ -420,7 +421,7 @@ def test_generate_image_attempts_retries_until_success(
 ) -> None:
     calls = {"n": 0}
 
-    def flaky_once(prompt, design, aspect, assets_dir, *, name="hero", refs=None):
+    def flaky_once(prompt, design, aspect, assets_dir, *, name="hero", refs=None, **kw):
         calls["n"] += 1
         return "assets/hero.png" if calls["n"] >= 3 else None
 
@@ -437,7 +438,7 @@ def test_generate_image_attempts_all_fail_returns_none(
 ) -> None:
     calls = {"n": 0}
 
-    def always_none(prompt, design, aspect, assets_dir, *, name="hero", refs=None):
+    def always_none(prompt, design, aspect, assets_dir, *, name="hero", refs=None, **kw):
         calls["n"] += 1
         return None
 
@@ -454,7 +455,7 @@ def test_generate_image_default_attempts_is_one(
 ) -> None:
     calls = {"n": 0}
 
-    def always_none(prompt, design, aspect, assets_dir, *, name="hero", refs=None):
+    def always_none(prompt, design, aspect, assets_dir, *, name="hero", refs=None, **kw):
         calls["n"] += 1
         return None
 
@@ -511,7 +512,7 @@ def test_art_plan_persona_refs_only_on_hero_and_payoff(
 def test_art_plan_persona_none_is_byte_identical(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """persona_refs=None → every beat uses the dossier refs path, default attempts."""
+    """persona_refs=None -> every beat uses the dossier refs path, default attempts."""
     monkeypatch.delenv("VIDEO_ART_MAX", raising=False)
     calls = _persona_plan_stub(monkeypatch)
     beats = [_beat("hero"), _beat("payoff"), _beat("quote")]

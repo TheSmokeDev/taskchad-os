@@ -92,6 +92,10 @@ class CompilationReport:
     files_reindexed: int = 0
     entities_processed: int = 0
     entities_skipped: int = 0
+    # Link-economy guardrails (default-OFF; empty/zero unless enforced).
+    entities_staged: list[str] = field(default_factory=list)
+    updates_skipped_ceiling: list[str] = field(default_factory=list)
+    links_skipped_cap: int = 0
 
 
 @dataclass(frozen=True)
@@ -998,18 +1002,53 @@ summary: "{entity.description or entity.name}"
     return page_path
 
 
+def _count_related_links(page_text: str) -> int:
+    """Count entries in the ``related:`` frontmatter list.
+
+    Accepts either a whole concept page (with ``---`` delimiters) or a bare
+    frontmatter block. Scans the indented ``- ...`` items directly under the
+    ``related:`` key and stops at the next top-level key, so ``compiled_from:``
+    / ``sources:`` entries below it are never miscounted.
+    """
+    fm = re.match(r"^---\n(.*?)\n---", page_text, re.DOTALL)
+    fm_text = fm.group(1) if fm else page_text
+    count = 0
+    in_related = False
+    for line in fm_text.splitlines():
+        if re.match(r"^related:\s*$", line):
+            in_related = True
+            continue
+        if in_related:
+            if re.match(r"^\s+-\s", line):
+                count += 1
+            elif re.match(r"^\S", line):  # a new top-level key ends the block
+                break
+    return count
+
+
 def update_concept_page(
     entity: ExtractedEntity,
     source_path: str,
     page_path: Path,
-) -> None:
-    """Append a new source section to an existing concept page."""
+    related_link_cap: int | None = None,
+) -> bool:
+    """Append a new source section to an existing concept page.
+
+    Returns ``True`` iff the page was written (a new ``## From [[src]]`` section
+    was added). A same-source re-compile is a no-op and returns ``False`` so the
+    caller's edit-ceiling accounting only counts real writes.
+
+    When ``related_link_cap`` is set, the ``related:`` frontmatter insertion is
+    skipped once the page already holds ``>= cap`` entries — the ``## From``
+    section and the ``compiled_from`` entry STILL write (the cap governs graph
+    edges, not content).
+    """
     source_stem = Path(source_path).stem if source_path else "unknown"
     existing = page_path.read_text(encoding="utf-8")
 
     # Don't double-add from the same source
     if f"From [[{source_stem}]]" in existing:
-        return
+        return False
 
     claims_text = ""
     if entity.source_claims:
@@ -1034,42 +1073,60 @@ def update_concept_page(
             f'\\1  - "[[{source_stem}]]"\n',
             updated,
         )
-        # Add to related
-        if f'  - "[[{source_stem}]]"' not in updated:
+        # Add to related (skip only this insertion once the per-page cap is hit)
+        capped = related_link_cap is not None and _count_related_links(updated) >= related_link_cap
+        if not capped and f'  - "[[{source_stem}]]"' not in updated:
             updated = re.sub(
                 r"(related:\n)",
                 f'\\1  - "[[{source_stem}]]"\n',
                 updated,
             )
         page_path.write_text(updated, encoding="utf-8")
+    return True
 
 
 def update_source_frontmatter(
     source_path: Path,
     concept_names: list[str],
-) -> None:
-    """Add compiled concept pages to source note's related: frontmatter."""
+    related_link_cap: int | None = None,
+) -> int:
+    """Add compiled concept pages to a source note's ``related:`` frontmatter.
+
+    Returns the number of link insertions that were SKIPPED by
+    ``related_link_cap`` (0 when the cap is unset). A source with no ``related:``
+    field is a silent no-op for a given name — neither an insertion nor a skip —
+    because ``re.subn``'s regex simply doesn't match there.
+    """
     if not source_path.exists():
-        return
+        return 0
 
     content = source_path.read_text(encoding="utf-8")
     fm_match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
     if not fm_match:
-        return
+        return 0
 
     fm_text = fm_match.group(1)
+    skipped = 0
+    running = _count_related_links(fm_text)
     for name in concept_names:
         slug = ExtractedEntity(name=name).slug
         link = f'  - "[[{slug}]]"'
-        if link not in fm_text:
-            fm_text = re.sub(
-                r"(related:\n)",
-                f"\\1{link}\n",
-                fm_text,
-            )
+        if link in fm_text:
+            continue
+        if related_link_cap is not None and running >= related_link_cap:
+            skipped += 1
+            continue
+        fm_text, n = re.subn(
+            r"(related:\n)",
+            f"\\1{link}\n",
+            fm_text,
+        )
+        if n:
+            running += 1
 
     new_content = f"---\n{fm_text}\n---{content[fm_match.end():]}"
     source_path.write_text(new_content, encoding="utf-8")
+    return skipped
 
 
 # ---------------------------------------------------------------------------
@@ -1264,6 +1321,12 @@ def _append_build_log(report: CompilationReport, source_path: str, vault_dir: Pa
         entry += f"- Connections: {', '.join(connections)}\n"
     if report.contradictions_found:
         entry += f"- Contradictions: {len(report.contradictions_found)}\n"
+    if report.entities_staged:
+        entry += f"- Staged (below min-mentions): {len(report.entities_staged)}\n"
+    if report.updates_skipped_ceiling:
+        entry += f"- Updates skipped (ceiling): {len(report.updates_skipped_ceiling)}\n"
+    if report.links_skipped_cap:
+        entry += f"- Links skipped (cap): {report.links_skipped_cap}\n"
     entry += f"- Entities: {report.entities_processed} processed, {report.entities_skipped} skipped\n\n"
 
     with open(log_path, "a", encoding="utf-8") as f:
@@ -1570,15 +1633,96 @@ def generate_root_index(vault_dir: Path) -> Path:
     return index_path
 
 
+# ---------------------------------------------------------------------------
+# Link-economy guardrails — per-vault entity-mention ledger (default-OFF)
+# ---------------------------------------------------------------------------
+
+# Prune single-source ledger entries older than this on every save so a
+# never-promoted one-off mention can't accumulate forever.
+_LEDGER_TTL_DAYS = 180
+
+
+def _resolve_guardrail_settings():
+    """Late-bind the link-economy guardrail settings (Rule 1 + Rule 3).
+
+    Lazily imports ``config`` so no module-level config binding leaks in; falls
+    back to a disabled-default tuple if config is unavailable so a broken import
+    never blocks compilation (fail-open).
+    """
+    try:
+        from config import get_entity_guardrail_settings
+
+        return get_entity_guardrail_settings()
+    except Exception:
+        from collections import namedtuple
+
+        _Disabled = namedtuple(
+            "EntityGuardrailSettings",
+            "enabled page_min_mentions edit_ceiling link_cap",
+        )
+        return _Disabled(False, 2, 5, 8)
+
+
+def _mention_ledger_path(vault_dir: Path) -> Path:
+    """Per-vault staging ledger location (``_state`` is skip-listed everywhere)."""
+    return vault_dir / "_state" / "entity-mentions.json"
+
+
+def _load_mention_ledger(vault_dir: Path) -> dict:
+    """Load the entity-mention ledger; corrupt/missing/version-mismatch → fresh.
+
+    Never raises — a bad or absent ledger degrades to a fresh empty one so the
+    caller's fail-open path (legacy create) is preserved.
+    """
+    from shared import load_state
+
+    try:
+        data = load_state(_mention_ledger_path(vault_dir))
+    except Exception:
+        return {"version": 1, "entities": {}}
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != 1
+        or not isinstance(data.get("entities"), dict)
+    ):
+        return {"version": 1, "entities": {}}
+    return data
+
+
+def _save_mention_ledger(vault_dir: Path, ledger: dict) -> None:
+    """Prune stale single-source entries, then atomically persist the ledger."""
+    from shared import save_state
+
+    cutoff = (date.today() - timedelta(days=_LEDGER_TTL_DAYS)).isoformat()
+    entities = ledger.get("entities", {})
+    for slug in list(entities.keys()):
+        sources = entities[slug].get("sources", {})
+        if len(sources) == 1:
+            only = next(iter(sources.values()))
+            if str(only.get("date", "")) < cutoff:
+                del entities[slug]
+    save_state(ledger, _mention_ledger_path(vault_dir))
+
+
 def compile_entities(
     entities: list[ExtractedEntity],
     source_path: str,
     vault_dir: Path,
     memory_dir: Path | None = None,
     event_type: str = "compile",
+    enforce_guardrails: bool | None = None,
 ) -> CompilationReport:
-    """Main compilation: for each entity, find or create concept page, check contradictions."""
+    """Main compilation: for each entity, find or create concept page, check contradictions.
+
+    ``enforce_guardrails`` (None → resolve ``get_entity_guardrail_settings().enabled``)
+    gates the link-economy guardrails. When it resolves False the code path is
+    byte-identical to the pre-guardrail behavior; when True, the ≥N-mention
+    create gate, per-run edit ceiling, and per-page/-source link caps apply.
+    """
     report = CompilationReport()
+
+    settings = _resolve_guardrail_settings()
+    enforce = settings.enabled if enforce_guardrails is None else enforce_guardrails
 
     # Filter by confidence threshold (stricter for daily logs)
     effective_threshold = _DAILY_LOG_THRESHOLD if _is_daily_log(source_path) else CONFIDENCE_THRESHOLD
@@ -1589,28 +1733,128 @@ def compile_entities(
     if eligible:
         _enforce_source_frontmatter(source_path, vault_dir, operation=event_type)
 
+    # Ledger only matters in enforce mode. Acquire the lock BEFORE any writes so
+    # a lock-acquire failure fails open to the legacy path with nothing done yet.
+    ledger = None
+    _lock = None
+    if enforce:
+        try:
+            from shared import file_lock
+
+            _lock = file_lock(_mention_ledger_path(vault_dir), timeout=10)
+            _lock.__enter__()
+            ledger = _load_mention_ledger(vault_dir)
+        except Exception:
+            if _lock is not None:
+                try:
+                    _lock.__exit__(None, None, None)
+                except Exception:
+                    pass
+            _lock = None
+            ledger = None
+            enforce = False
+
     concept_names: list[str] = []
+    connectable: list[ExtractedEntity] = []
+    writes = 0
+    try:
+        for entity in eligible:
+            existing = find_existing_concept(entity.name, vault_dir)
 
-    for entity in eligible:
-        existing = find_existing_concept(entity.name, vault_dir)
+            if existing:
+                if not enforce:
+                    update_concept_page(entity, source_path, existing)
+                    report.pages_updated.append(str(existing))
+                    contras = check_contradictions(existing)
+                    if contras:
+                        insert_contradiction_callouts(existing, contras)
+                        report.contradictions_found.extend(contras)
+                    concept_names.append(entity.name)
+                    continue
 
-        if existing:
-            update_concept_page(entity, source_path, existing)
-            report.pages_updated.append(str(existing))
+                # Stale-ledger purge: a bypassed backfill already created this
+                # page, so drop any lingering staging record. Key by entity.slug
+                # (how the CREATE branch stages it), which equals existing.stem on
+                # an exact match and stays correct under an alias match.
+                ledger["entities"].pop(entity.slug, None)
 
-            # Check for contradictions on updated page
-            contras = check_contradictions(existing)
-            if contras:
-                insert_contradiction_callouts(existing, contras)
-                report.contradictions_found.extend(contras)
-        else:
-            page = create_concept_page(entity, source_path, vault_dir)
-            report.pages_created.append(str(page))
+                if writes >= settings.edit_ceiling:
+                    report.updates_skipped_ceiling.append(existing.stem)
+                    concept_names.append(entity.name)  # page exists; link valid
+                    connectable.append(entity)
+                    continue
 
-        concept_names.append(entity.name)
+                wrote = update_concept_page(
+                    entity, source_path, existing, related_link_cap=settings.link_cap
+                )
+                if wrote:
+                    writes += 1
+                    report.pages_updated.append(str(existing))
+                    contras = check_contradictions(existing)
+                    if contras:
+                        insert_contradiction_callouts(existing, contras)
+                        report.contradictions_found.extend(contras)
+                concept_names.append(entity.name)
+                connectable.append(entity)
+            else:
+                if not enforce:
+                    page = create_concept_page(entity, source_path, vault_dir)
+                    report.pages_created.append(str(page))
+                    concept_names.append(entity.name)
+                    continue
 
-    # Detect and create connection articles between related entities
-    connections = _detect_connections(eligible)
+                # ≥N-mention create gate: stage in the ledger; only create the
+                # page once distinct sources reach the threshold, then replay the
+                # prior stored sources so first-source provenance isn't lost.
+                slug = entity.slug
+                rec = ledger["entities"].setdefault(
+                    slug, {"name": entity.name, "first_seen": _today(), "sources": {}}
+                )
+                stem = Path(source_path).stem if source_path else "unknown"
+                rec["sources"][stem] = {
+                    "date": _today(),
+                    "description": entity.description,
+                    "claims": list(entity.source_claims),
+                }
+                if len(rec["sources"]) >= settings.page_min_mentions:
+                    page = create_concept_page(entity, source_path, vault_dir)
+                    report.pages_created.append(str(page))
+                    for prior_stem, payload in rec["sources"].items():
+                        if prior_stem == stem:
+                            continue
+                        prior = ExtractedEntity(
+                            name=entity.name,
+                            entity_type=entity.entity_type,
+                            description=payload.get("description", ""),
+                            source_claims=list(payload.get("claims", [])),
+                        )
+                        update_concept_page(
+                            prior, f"{prior_stem}.md", page,
+                            related_link_cap=settings.link_cap,
+                        )
+                    del ledger["entities"][slug]
+                    concept_names.append(entity.name)
+                    connectable.append(entity)
+                else:
+                    report.entities_staged.append(entity.name)
+    finally:
+        # Persist + release the ledger lock as soon as the staging work is done;
+        # everything after this (connections, reindex, logs) never touches it.
+        if _lock is not None:
+            if ledger is not None:
+                try:
+                    _save_mention_ledger(vault_dir, ledger)
+                except Exception:
+                    pass
+            try:
+                _lock.__exit__(None, None, None)
+            except Exception:
+                pass
+
+    # Detect and create connection articles between related entities. In enforce
+    # mode staged entities are excluded (no page yet → broken [[SLUG]] links);
+    # the legacy path feeds every eligible entity, unchanged.
+    connections = _detect_connections(connectable if enforce else eligible)
     for conn in connections:
         conn_path = create_connection_article(
             conn.entity_a, conn.entity_b, conn.evidence,
@@ -1622,7 +1866,10 @@ def compile_entities(
     # Update source note's related: frontmatter
     src = Path(source_path)
     if src.exists():
-        update_source_frontmatter(src, concept_names)
+        skipped = update_source_frontmatter(
+            src, concept_names, related_link_cap=settings.link_cap if enforce else None
+        )
+        report.links_skipped_cap += skipped
 
     # Reindex modified files
     if memory_dir:
@@ -1674,6 +1921,12 @@ def compile_entities(
                 bullets.append(f"connections: +{len(report.connections_created)}")
             if report.contradictions_found:
                 bullets.append(f"contradictions: {len(report.contradictions_found)}")
+            if report.entities_staged:
+                bullets.append(f"staged: {len(report.entities_staged)} (below min-mentions)")
+            if report.updates_skipped_ceiling:
+                bullets.append(f"updates skipped: {len(report.updates_skipped_ceiling)} (ceiling)")
+            if report.links_skipped_cap:
+                bullets.append(f"links skipped: {report.links_skipped_cap} (cap)")
             append_vault_log(vault_dir, event_type, source_stem, bullets=bullets)
         except Exception:
             pass  # Vault log is best-effort
@@ -1721,14 +1974,21 @@ def backfill_vault(
     skip_compiled: bool = True,
     dry_run: bool = False,
     operation: str = "backfill",
+    enforce_guardrails: bool | None = None,
 ) -> dict[str, int]:
     """Compile entities from all uncompiled vault notes.
 
     Scans all .md files in the vault (excluding concepts/, raw/, _templates/, etc.),
     extracts entities via heuristic, and compiles concept pages.
+
+    ``enforce_guardrails`` is threaded to ``compile_entities`` unchanged (None →
+    env-gated). The CLI ``backfill`` handler passes ``False`` (operator
+    bootstrap); ``sweep_uncompiled`` leaves it None so the nightly reflection
+    sweep stays env-gated and does not bypass the ≥N-mention gate.
     """
     totals = {"files_scanned": 0, "files_compiled": 0, "files_skipped": 0,
-              "pages_created": 0, "pages_updated": 0, "contradictions": 0}
+              "pages_created": 0, "pages_updated": 0, "contradictions": 0,
+              "files_staged": 0}
 
     # Load schema once for the entire backfill run
     schema = load_schema(vault_dir)
@@ -1770,11 +2030,16 @@ def backfill_vault(
             totals["files_skipped"] += 1
             continue
 
-        report = compile_entities(entities, str(md_file), vault_dir, memory_dir)
+        report = compile_entities(
+            entities, str(md_file), vault_dir, memory_dir,
+            enforce_guardrails=enforce_guardrails,
+        )
         totals["files_compiled"] += 1
         totals["pages_created"] += len(report.pages_created)
         totals["pages_updated"] += len(report.pages_updated)
         totals["contradictions"] += len(report.contradictions_found)
+        if report.entities_staged and not report.pages_created and not report.pages_updated:
+            totals["files_staged"] += 1
 
         rel = md_file.relative_to(vault_dir)
         print(f"  {rel}: +{len(report.pages_created)} created, ~{len(report.pages_updated)} updated")
@@ -1925,6 +2190,16 @@ def _print_report(report: CompilationReport) -> None:
         print(f"Contradictions flagged: {len(report.contradictions_found)}")
         for c in report.contradictions_found:
             print(f"  ! {c.concept_page}: [{c.source_a}] vs [{c.source_b}] ({c.severity})")
+    if report.entities_staged:
+        print(f"Entities staged (below min-mentions): {len(report.entities_staged)}")
+        for n in report.entities_staged:
+            print(f"  . {n}")
+    if report.updates_skipped_ceiling:
+        print(f"Updates skipped (edit ceiling): {len(report.updates_skipped_ceiling)}")
+        for s in report.updates_skipped_ceiling:
+            print(f"  = {s}")
+    if report.links_skipped_cap:
+        print(f"Links skipped (cap): {report.links_skipped_cap}")
     print(f"Files reindexed: {report.files_reindexed}")
 
 
@@ -2086,6 +2361,7 @@ def main() -> None:
                 vault_dir, memory_dir,
                 skip_compiled=not args.include_compiled,
                 dry_run=args.dry_run,
+                enforce_guardrails=False,
             )
         except VaultFrontmatterError as e:
             print(f"Error: {e}", file=sys.stderr)

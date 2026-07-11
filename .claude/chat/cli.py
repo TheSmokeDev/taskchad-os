@@ -164,7 +164,7 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, caller, json_
     search_mode = mode_map[mode]
 
     async def _run():
-        return await recall_fn(
+        resp = await recall_fn(
             query=query,
             memory_dir=memory_dir,
             search_mode=search_mode,
@@ -172,6 +172,10 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, caller, json_
             max_results=max_results,
             is_slash_command=False,  # keep AUTO/HYBRID reachable to TIER_1 -- do NOT flip
         )
+        # Give the rerank SDK subprocess transport a beat to close before the
+        # loop tears down (Windows Proactor "Event loop is closed" mitigation).
+        await asyncio.sleep(0.15)
+        return resp
 
     # Swallow framework stdout (e.g. the "[Recall] tier=..." event-log line that
     # log_recall_event prints) during the run so --json stays a clean machine
@@ -218,10 +222,8 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, caller, json_
             )
         else:
             click.echo(f"Error: {exc}", err=True)
-        return
-
-    log = resp.log
-    if json_out:
+    elif json_out:
+        log = resp.log
         payload = {
             "query": query,
             "vault": vault,
@@ -249,19 +251,46 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, caller, json_
             },
         }
         print(json_mod.dumps(payload, ensure_ascii=False))
-        return
+    else:
+        out_parts = []
+        if brief_text:
+            out_parts.append(brief_text)
+        if resp.formatted_text:
+            out_parts.append(resp.formatted_text)
+        output = "\n\n".join(out_parts).strip()
+        if output:
+            try:
+                click.echo(output)
+            except UnicodeEncodeError:
+                click.echo(output.encode("ascii", errors="replace").decode("ascii"))
+    _console_hard_exit()
 
-    out_parts = []
-    if brief_text:
-        out_parts.append(brief_text)
-    if resp.formatted_text:
-        out_parts.append(resp.formatted_text)
-    output = "\n\n".join(out_parts).strip()
-    if output:
-        try:
-            click.echo(output)
-        except UnicodeEncodeError:
-            click.echo(output.encode("ascii", errors="replace").decode("ascii"))
+
+def _console_hard_exit() -> None:
+    """Skip interpreter teardown on real console runs (exit code stays 0).
+
+    The recall pipeline's haiku rerank spawns an SDK subprocess; on Windows
+    ProactorEventLoop its transport ``__del__`` prints "Event loop is closed"
+    spew during interpreter shutdown after ``asyncio.run()`` returns. Hard-exit
+    after flushing output so shelling skills get clean stdout/stderr. Gated to
+    the console-script path (cli_entry sets ``THEHOMIE_CONSOLE_ENTRY``) — the
+    in-process CliRunner tests import ``cli.main`` directly and never reach
+    ``os._exit``.
+    """
+    if os.environ.get("THEHOMIE_CONSOLE_ENTRY") != "1":
+        return
+    try:
+        from runtime.langfuse_setup import flush_langfuse
+
+        flush_langfuse()
+    except Exception:
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(0)
 
 
 @main.command()

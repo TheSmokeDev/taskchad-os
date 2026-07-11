@@ -76,6 +76,45 @@ def test_autopilot_posts_only_when_flag_on(svc, monkeypatch):
     assert dispatched == summary["queued"]
 
 
+def test_autopilot_false_forces_queue_even_when_flag_on(svc, monkeypatch):
+    """autopilot=False overrides HOMIE_SOCIAL_UNATTENDED=true → queue-only.
+    This is the contract the operator-approval cadence relies on: it must never
+    auto-post even if the operator flipped the global flag for the batch lane."""
+    monkeypatch.setenv("HOMIE_SOCIAL_UNATTENDED", "true")
+    dispatched = []
+    with patch("social.channels.get_channel", return_value=_ch()), \
+         patch("social.content_factory._render_image", return_value="/tmp/x.png"), \
+         patch("social.content_factory._render_video", return_value="/tmp/x.mp4"), \
+         patch("social.content_factory._generate_caption", return_value="cap"), \
+         patch("social.audit.append_social_audit_record"), \
+         patch("social.post_executor.dispatch_post",
+               side_effect=lambda pid, **kw: dispatched.append(pid) or True):
+        summary = produce("instagram", count=1, autopilot=False, db_path=svc._db._db_path)
+
+    assert summary["mode"] == "queue"
+    assert summary["posted"] == []
+    assert dispatched == []
+    assert svc.get_post(summary["queued"][0]).status == "draft"
+
+
+def test_autopilot_true_forces_post_even_when_flag_off(svc, monkeypatch):
+    """autopilot=True overrides an absent flag → posts."""
+    monkeypatch.delenv("HOMIE_SOCIAL_UNATTENDED", raising=False)
+    dispatched = []
+    with patch("social.channels.get_channel", return_value=_ch()), \
+         patch("social.content_factory._render_image", return_value="/tmp/x.png"), \
+         patch("social.content_factory._render_video", return_value="/tmp/x.mp4"), \
+         patch("social.content_factory._generate_caption", return_value="cap"), \
+         patch("social.audit.append_social_audit_record"), \
+         patch("social.post_executor.dispatch_post",
+               side_effect=lambda pid, **kw: dispatched.append(pid) or True):
+        summary = produce("instagram", count=1, autopilot=True, db_path=svc._db._db_path)
+
+    assert summary["mode"] == "autopilot"
+    assert len(summary["posted"]) == 1
+    assert dispatched == summary["queued"]
+
+
 def test_media_failure_degrades_to_caption_only(svc, monkeypatch):
     """A media render failure never crashes the run — slot becomes caption-only."""
     monkeypatch.delenv("HOMIE_SOCIAL_UNATTENDED", raising=False)

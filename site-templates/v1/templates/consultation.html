@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- INCLUDE:head-meta -->
+  </head>
+  <body>
+    <!-- INCLUDE:header -->
+    <main>
+      <section class="hero page-hero--cinematic" style="background-image:url('{{site.base}}/assets/{{page.hero_poster}}');">
+<!-- IF:page.hero_video -->
+        <video class="hero-video" autoplay muted loop playsinline preload="metadata" poster="{{site.base}}/assets/{{page.hero_poster}}" aria-hidden="true">
+          <source data-src="{{site.base}}/assets/{{page.hero_webm}}" type="video/webm" />
+          <source data-src="{{site.base}}/assets/{{page.hero_mp4}}" type="video/mp4" />
+        </video>
+<!-- ENDIF -->
+        <div class="hero-copy">
+          <p class="{{page.hero_label_class}}">{{copy.hero_label}}</p>
+          <h1>{{copy.hero_headline}}</h1>
+          <p class="page-lede">{{copy.hero_lede}}</p>
+          <dl class="contact-strip">
+            <div><dt>Phone</dt><dd><a href="tel:{{site.phone_tel}}">{{site.phone_display}}</a></dd></div>
+            <div><dt>Email</dt><dd><a href="mailto:{{site.email}}">{{site.email}}</a></dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="section split">
+        <div>
+          <p class="section-label">{{copy.left_label}}</p>
+          <h2>{{copy.left_heading}}</h2>
+{{&copy.left_body_html}}
+        </div>
+        <form class="form-card" data-contact-form>
+          <div class="form-grid">
+            <div class="field">
+              <label for="name">Name</label>
+              <input id="name" name="name" autocomplete="name" />
+            </div>
+            <div class="field">
+              <label for="phone">Phone</label>
+              <input id="phone" name="phone" autocomplete="tel" />
+            </div>
+            <div class="field full">
+              <label for="email">Email</label>
+              <input id="email" name="email" autocomplete="email" />
+            </div>
+            <div class="field full">
+              <label for="interest">Service of interest</label>
+              <select id="interest" name="interest">
+                <option value="">Select a topic</option>
+<!-- BEGIN:services -->
+                <option>{{.form_label}}</option>
+<!-- END:services -->
+              </select>
+            </div>
+            <div class="field full">
+              <label for="message">Question</label>
+              <textarea id="message" name="message"></textarea>
+            </div>
+          </div>
+          <p class="form-status" data-form-status aria-live="polite"></p>
+          <button class="button primary" type="submit">{{copy.form_submit_label}}</button>
+        </form>
+      </section>
+    </main>
+    <!-- INCLUDE:footer -->
+  </body>
+</html>

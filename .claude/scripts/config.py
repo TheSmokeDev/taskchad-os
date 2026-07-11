@@ -221,12 +221,12 @@ EMBEDDING_CACHE_DIR = Path(os.getenv("EMBEDDING_CACHE_DIR", str(DATA_DIR / "mode
 # === Integration Configuration (Phase 5) ===
 INTEGRATIONS_DIR = _paths["credentials"]
 
-# Google OAuth (AI account — your-calendar@gmail.com)
+# Google OAuth (shared token for all Google services; account identity lives in USER.md)
 GOOGLE_CREDENTIALS_FILE = INTEGRATIONS_DIR / "google_credentials.json"
 GOOGLE_TOKEN_FILE = INTEGRATIONS_DIR / "google_token.json"
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/documents.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
@@ -812,6 +812,71 @@ def get_inference_extraction_settings(
         min_chars=min_chars,
         write_time_contradiction=write_time_contradiction,
     )
+
+
+class EntityGuardrailSettings(NamedTuple):
+    """Effective link-economy guardrail knobs (call-time resolved) — Karpathy port."""
+
+    enabled: bool
+    page_min_mentions: int
+    edit_ceiling: int
+    link_cap: int
+
+
+def get_entity_guardrail_settings(
+    enabled: bool | None = None,
+    page_min_mentions: int | None = None,
+    edit_ceiling: int | None = None,
+    link_cap: int | None = None,
+) -> EntityGuardrailSettings:
+    """Resolve entity-compilation link-economy guardrail knobs at CALL TIME (Rule 1).
+
+    Every arg uses the None-sentinel pattern: explicit values pass through;
+    ``None`` resolves the matching ``ENTITY_*`` env var inside the body, so env
+    overrides (and ``monkeypatch.setenv`` in tests) take effect on the next call
+    with no module reload. ``entity_extractor.compile_entities`` reads this
+    resolver at call time.
+
+    Knobs (all DEFAULT-OFF / conservative — the scheduled compile + full-vault
+    lint pipelines stay byte-identical until an operator flips
+    ``ENTITY_GUARDRAILS_ENABLED``):
+        ENTITY_GUARDRAILS_ENABLED ("false") — master switch for the ≥N-mention
+            create gate, the per-run edit ceiling, and the per-page link cap.
+        ENTITY_PAGE_MIN_MENTIONS (2) — distinct sources that must mention an
+            entity before its concept page is created (staged in the mention
+            ledger until then).
+        ENTITY_EDIT_CEILING (5) — max concept-page WRITES per compile run;
+            further updates are skipped (the page + its link stay valid).
+        ENTITY_LINK_CAP (8) — max ``related:`` graph edges per concept page and
+            per source note.
+    """
+    if enabled is None:
+        enabled = os.getenv("ENTITY_GUARDRAILS_ENABLED", "false").lower() == "true"
+    if page_min_mentions is None:
+        page_min_mentions = int(os.getenv("ENTITY_PAGE_MIN_MENTIONS", "2"))
+    if edit_ceiling is None:
+        edit_ceiling = int(os.getenv("ENTITY_EDIT_CEILING", "5"))
+    if link_cap is None:
+        link_cap = int(os.getenv("ENTITY_LINK_CAP", "8"))
+    return EntityGuardrailSettings(
+        enabled=enabled,
+        page_min_mentions=page_min_mentions,
+        edit_ceiling=edit_ceiling,
+        link_cap=link_cap,
+    )
+
+
+def get_lint_delta_enabled(enabled: bool | None = None) -> bool:
+    """Resolve the ``LINT_DELTA_ENABLED`` knob at CALL TIME (Rule 1).
+
+    ``None`` resolves ``LINT_DELTA_ENABLED`` ("false") inside the body so env
+    overrides take effect with no module reload. ``vault_lint.run_lint`` reads
+    this (lazily, with an ``os.getenv`` fallback for dependency-light subprocess
+    callers) to decide whether to run the incremental delta path.
+    """
+    if enabled is None:
+        enabled = os.getenv("LINT_DELTA_ENABLED", "false").lower() == "true"
+    return enabled
 
 
 class ContradictionSettings(NamedTuple):

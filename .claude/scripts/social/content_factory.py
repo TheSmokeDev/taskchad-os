@@ -202,6 +202,8 @@ def produce(
     count: int = 1,
     media: str = "auto",
     topic: str | None = None,
+    topic_source: str = "factory",
+    autopilot: bool | None = None,
     db_path: str | None = None,
 ) -> dict:
     """Generate ``count`` drafts for ``channel_id`` and queue them.
@@ -210,6 +212,11 @@ def produce(
     failed: [ids]}``. In queue mode (default) ``posted`` is empty — the
     operator approves + the Homie dispatches. In unattended mode each draft is
     also approved + dispatched through the gated executor.
+
+    ``autopilot`` overrides the global ``HOMIE_SOCIAL_UNATTENDED`` flag for this
+    call: ``None`` (default) honors the flag; ``False`` forces queue-only (the
+    operator-approval cadence uses this so it never auto-posts regardless of the
+    flag); ``True`` forces autopilot.
     """
     import config
     from social.audit import append_social_audit_record
@@ -217,6 +224,7 @@ def produce(
     from social.service import SocialPostService
 
     settings = config.get_content_factory_settings()
+    do_autopilot = settings.unattended if autopilot is None else bool(autopilot)
     channel = get_channel(channel_id)
     if channel is None:
         return {"error": f"unknown channel: {channel_id}"}
@@ -224,7 +232,7 @@ def produce(
     svc = SocialPostService(db_path=db_path)
     summary: dict = {
         "channel": channel_id,
-        "mode": "autopilot" if settings.unattended else "queue",
+        "mode": "autopilot" if do_autopilot else "queue",
         "queued": [],
         "posted": [],
         "failed": [],
@@ -263,7 +271,7 @@ def produce(
             title=title,
             body=caption,
             voice_profile=channel.voice_profile,
-            topic_source="factory",
+            topic_source=topic_source,
             media_path=media_path,
             media_type=media_type,
         )
@@ -275,7 +283,7 @@ def produce(
 
         # Autopilot: post directly ONLY when the operator has enabled unattended
         # mode. Default-deny — without the flag, the draft waits for approval.
-        if settings.unattended:
+        if do_autopilot:
             try:
                 from social.post_executor import dispatch_post
 

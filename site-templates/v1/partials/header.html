@@ -1,0 +1,10 @@
+<header class="site-header">
+      <a class="brand" href="{{site.base}}" aria-label="{{site.display_name}}, {{site.org_short}} home"><span class="brand-mark" aria-hidden="true">{{site.brand_mark}}</span><span><strong>{{site.display_name}}</strong><small>{{site.org_name}}</small></span></a>
+      <button class="nav-toggle" type="button" data-nav-toggle aria-label="Open navigation"><span></span><span></span><span></span></button>
+      <nav class="site-nav" data-nav>
+<!-- BEGIN:site.nav -->
+        <a href="{{.href}}">{{.label}}</a>
+<!-- END:site.nav -->
+        <a class="nav-cta" href="{{site.nav_cta.href}}">{{site.nav_cta.label}}</a>
+      </nav>
+    </header>

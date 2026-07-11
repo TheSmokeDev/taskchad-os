@@ -40,6 +40,29 @@ def _intent_autodispatch_default(monkeypatch):
         pass
 
 
+@pytest.fixture(autouse=True)
+def _entity_guardrail_defaults(monkeypatch):
+    """Pin the link-economy guardrail + delta-lint knobs to their code defaults.
+
+    ``config.py`` loads the operator's personal ``.env`` via
+    ``load_dotenv(override=True)``, so a future personal
+    ``ENTITY_GUARDRAILS_ENABLED=true`` (or ``LINT_DELTA_ENABLED=true``) would
+    leak into the test process and flip the framework default under existing
+    tests. Delenv all five knobs so the resolvers fall back to their in-code
+    defaults (guardrails OFF, delta OFF); tests that exercise the ON path set
+    them with their own ``monkeypatch``. Mirror of
+    ``_intent_autodispatch_default`` above.
+    """
+    for name in (
+        "ENTITY_GUARDRAILS_ENABLED",
+        "ENTITY_PAGE_MIN_MENTIONS",
+        "ENTITY_EDIT_CEILING",
+        "ENTITY_LINK_CAP",
+        "LINT_DELTA_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_path: Path) -> Path:
     """Provide a temporary state directory for PID files."""

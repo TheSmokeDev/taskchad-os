@@ -14,11 +14,29 @@ The Repositories System is the dispatch arm for coding work across tracked repos
 | `.claude/scripts/repository_memory.py` | Read/validate repo index and per-repo pages, build briefing sections |
 | `.claude/scripts/repository_config.py` | Profile-owned repo config, validation, config briefing builder |
 | `vault/memory/REPOSITORIES.md` | Private repo index — slug table, dispatch defaults, page rules |
-| `vault/memory/repositories/*.md` | Per-repo pages (4 active) — 6 required H2 sections each |
+| `vault/memory/repositories/*.md` | Per-repo pages (6 active) — 6 required H2 sections each |
 
 ### Coding Dispatch Rule
 
 For substantive coding work in tracked repos, dispatch through Archon with isolated worktrees. Resolve the repo slug via `REPOSITORIES.md` and read the matching per-repo page before dispatch. Skip Archon for trivial edits, read-only explanations, planning conversations, or urgent hotfixes. Full repo context, dispatch history, and workflow preferences are documented in `vault/memory/REPOSITORIES.md`.
+
+### YourProduct Repo Family (voice ≠ website ≠ homie)
+
+YourProduct is a **family of repos**, not one repo. Resolve the right one before touching code —
+and never commit YourProduct product changes into `thehomie` (the Homie cockpit).
+
+| Slug | GitHub | Stack / Deploy | Role |
+|------|--------|----------------|------|
+| `YourProduct-voice-platform` | your-github-user/YourProduct-voice-platform | Python/Docker → AWS EC2 (`tcvp-*` on box `203.0.113.10`) · **Dograh fork** | Voice agents — wf18/Ryan, telephony, engine |
+| `YourProduct` | your-github-user/YourProduct | Next.js 15 → Vercel (`b2b-umbrella`) | Website YourProduct.com |
+| `YourProduct-sites` | your-github-user/YourProduct-sites | Next.js → Vercel | Client demo sites (`client.YourProduct.com/<slug>`) |
+| `thehomie` | thehomie-framework/thehomie | Python framework | The Homie **cockpit** — never commit product changes here |
+
+**Drift warning (voice):** the `tcvp` box is NOT a git checkout. `telephony.py` and the Pipecat
+engine run as bind-mounted patches under `/home/ec2-user/tcvp-patches/`, and workflow/tool/def
+config is DB state — so `YourProduct-voice-platform` lags production. Deploy proof for voice is live
+container health + run transcripts + DB values, not preview URLs. Full context:
+`repositories/YourProduct-voice-platform.md`.
 
 ### Dispatch Defaults
 

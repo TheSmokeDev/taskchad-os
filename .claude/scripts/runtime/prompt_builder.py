@@ -20,6 +20,9 @@ INTEGRATION_HINTS = (
     "- Analytics: uv run python -m integrations.analytics_api overview\n"
     "- Memory search: uv run python memory_search.py "
     '"query" --mode keyword --limit 5\n'
+    "- Memory recall (ranked hybrid — FTS5 + vector + graph + rerank): "
+    "uv run --project .claude/scripts thehomie recall "
+    '"query" --vault thehomie --mode hybrid -n 6\n'
     "- Deployment-specific integrations may also be configured. "
     "Use .claude/scripts/integrations/capabilities.py as the canonical "
     "action/effect policy; registry.py reports availability and "

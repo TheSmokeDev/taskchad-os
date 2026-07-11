@@ -1,0 +1,379 @@
+name: image-node-factory
+description: |
+  Marketplace-public Codex image-node factory.
+
+  A truly native Archon workflow that turns a natural language visual brief into
+  a production-ready image prompt pack, then optional Codex-generated bitmaps.
+  The intelligence comes from the awesome-gpt-image-2 style library, pinned and
+  checksum-verified into a local cache: 511 worked cases (ids run 1..514 with 3
+  gaps, so 514 is the highest id, NOT the count) and 22 structured templates
+  across 13 categories. The select node picks a template and cites case ids; the
+  ground node resolves those ids offline against the pinned corpus. The library
+  is not vendored into this repo. It is a pinned dependency the workflow
+  resolves and attributes.
+
+  Two render disciplines are supported and the operator picks. Neither is forced:
+    baked   - text is rendered inside the image, the library native approach
+    overlay - a text-free scene plus a separate copy JSON for crisp HTML overlay,
+              the house discipline captured in .archon/image-nodes/ cards
+
+  Input is a natural language visual brief. Optional inline controls:
+    category=<library category or auto>
+    render_mode=baked|overlay
+    aspect=<ratio or size>
+    count=<number>
+    render=true|false
+    design_file=<optional relative brand design reference or none>
+    persona_pack=<optional relative subject reference or none>
+    subject_mode=generic|placeholder (placeholder: the pack never invents a
+      subject; every prompt carries a [SUBJECT SUPPLIED AT RENDER TIME] slot a
+      downstream renderer fills with its own reference-locked subject)
+    exact_text="<verbatim copy for the baked variant>"
+
+  Default behavior is render=false, which produces a prompt pack, packet, and
+  manifest with BOTH a baked and an overlay variant, without generating images.
+  When render=true the render node uses Codex built-in image generation only. It
+  does not call OpenAI API keys or external services, and it saves nothing from
+  private local run paths into the public pack.
+
+  Outputs:
+    - image-node-brief.json
+    - image-node-selection.json
+    - image-node-prompt-pack.md
+    - image-node-prompt-pack.json
+    - image-node-imagegen-packet.json
+    - images/manifest.json
+    - qa-report.md
+    - image-node-final-report.md
+
+provider: codex
+modelReasoningEffort: medium
+webSearchMode: disabled
+
+worktree:
+  enabled: false
+
+nodes:
+  - id: preflight
+    bash: |
+      set -euo pipefail
+      mkdir -p "$ARTIFACTS_DIR/images"
+      node - "$ARTIFACTS_DIR" <<'NODE' | tee "$ARTIFACTS_DIR/image-node-preflight.json"
+      const artifactsDir = process.argv[2];
+      const payload = {
+        workflow: "image-node-factory",
+        prompt_engine: "gpt-image-2-style-library",
+        prompt_engine_attribution: "awesome-gpt-image-2 style library",
+        render_requested: "parsed_by_intake",
+        render_mode: "parsed_by_intake",
+        imagegen_capability: "checked_at_render_time",
+        count: "parsed_by_intake",
+        api_key_dependency: "none",
+        private_dependency: "none",
+        artifact_dir: artifactsDir,
+        notes: [
+          "The select and prompt-pack nodes call the gpt-image-2-style-library skill for template intelligence.",
+          "The prompt pack always emits both a baked variant and an overlay variant. The operator picks render_mode.",
+          "Codex image generation is used only when render_requested is true.",
+          "Do not use OPENAI_API_KEY or fallback CLI/API rendering in this workflow.",
+          "If built-in image generation is unavailable, the render node must write a blocked manifest."
+        ]
+      };
+
+      console.log(JSON.stringify(payload));
+      NODE
+    timeout: 30000
+
+  - id: intake
+    command: image-node-intake
+    depends_on: [preflight]
+    context: fresh
+    output_format:
+      type: object
+      properties:
+        brief:
+          type: string
+        render_requested:
+          type: string
+          enum: ["true", "false"]
+        render_mode:
+          type: string
+          enum: ["baked", "overlay"]
+        count:
+          type: number
+          minimum: 1
+          maximum: 8
+        subject_mode:
+          type: string
+          enum: ["generic", "placeholder"]
+        category_hint:
+          type: string
+        aspect:
+          type: string
+        exact_text:
+          type: string
+        style_tags:
+          type: array
+          items:
+            type: string
+        subject_tags:
+          type: array
+          items:
+            type: string
+        design_file:
+          type: string
+        persona_pack:
+          type: string
+        brand_context:
+          type: string
+        constraints:
+          type: array
+          items:
+            type: string
+        risk_flags:
+          type: array
+          items:
+            type: string
+      required:
+        - brief
+        - render_requested
+        - render_mode
+        - count
+        - subject_mode
+        - category_hint
+        - aspect
+        - exact_text
+        - style_tags
+        - subject_tags
+        - design_file
+        - persona_pack
+        - brand_context
+        - constraints
+        - risk_flags
+
+  - id: select
+    command: image-node-select
+    depends_on: [intake]
+    context: fresh
+    output_format:
+      type: object
+      properties:
+        template_id:
+          type: string
+          enum:
+            - ui-screenshot-system
+            - infographic-engine
+            - scientific-scale-diagram
+            - poster-layout-system
+            - sports-campaign-poster
+            - conceptual-typography-poster
+            - ink-double-exposure-poster
+            - nature-science-poster
+            - product-commerce-visual
+            - personalized-beauty-report
+            - brand-identity-package
+            - brand-touchpoint-board
+            - architecture-space
+            - realistic-photography
+            - street-accident-moment
+            - illustration-art-style
+            - character-design-sheet
+            - 3d-collectible-toy
+            - scene-storytelling
+            - history-classical-themes
+            - document-publishing
+            - concept-product-breakdown
+        category:
+          type: string
+          enum:
+            - "UI & Interfaces"
+            - "Charts & Infographics"
+            - "Posters & Typography"
+            - "Products & E-commerce"
+            - "Brand & Logos"
+            - "Architecture & Spaces"
+            - "Photography & Realism"
+            - "Illustration & Art"
+            - "Characters & People"
+            - "Scenes & Storytelling"
+            - "History & Classical Themes"
+            - "Documents & Publishing"
+            - "Other Use Cases"
+        discipline_card:
+          type: string
+          enum:
+            - campaign-social-visual
+            - product-commerce-visual
+            - realistic-photography
+            - typography-poster
+            - brand-identity
+            - people-character
+            - infographic-explainer
+        example_case_ids:
+          type: array
+          items:
+            type: integer
+        style_tags:
+          type: array
+          items:
+            type: string
+        scene_tags:
+          type: array
+          items:
+            type: string
+        prompt_structure:
+          type: array
+          items:
+            type: string
+        selection_reason:
+          type: string
+        qa_focus:
+          type: array
+          items:
+            type: string
+        negative_constraints:
+          type: array
+          items:
+            type: string
+      required:
+        - template_id
+        - category
+        - discipline_card
+        - example_case_ids
+        - style_tags
+        - scene_tags
+        - prompt_structure
+        - selection_reason
+        - qa_focus
+        - negative_constraints
+
+  # Retrieval is deterministic and offline. The AI decides (select), a script resolves
+  # (ground), the AI consumes (prompt-pack). The AI never fetches: this node runs with
+  # webSearchMode disabled, which is exactly why a URL-only reference resolves to
+  # nothing. Exits non-zero ONLY when the corpus is unprovisioned or corrupt, which
+  # skips every dependant rather than letting a hollow citation reach the pack.
+  # Zero matches is not an error: it exits 0 with grounded=false and nothing is stamped.
+  - id: ground
+    script: style-corpus
+    runtime: uv
+    depends_on: [select]
+    timeout: 120000
+
+  - id: prompt-pack
+    command: image-node-prompt-pack
+    depends_on: [preflight, intake, select, ground]
+    context: fresh
+    output_format:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: ["ready"]
+        render_requested:
+          type: string
+          enum: ["true", "false"]
+        render_mode:
+          type: string
+          enum: ["baked", "overlay"]
+        prompt_count:
+          type: number
+        baked_variant_present:
+          type: string
+          enum: ["true", "false"]
+        overlay_variant_present:
+          type: string
+          enum: ["true", "false"]
+        prompt_pack_md_path:
+          type: string
+        prompt_pack_json_path:
+          type: string
+        packet_path:
+          type: string
+        manifest_path:
+          type: string
+      required:
+        - status
+        - render_requested
+        - render_mode
+        - prompt_count
+        - baked_variant_present
+        - overlay_variant_present
+        - prompt_pack_md_path
+        - prompt_pack_json_path
+        - packet_path
+        - manifest_path
+
+  # Deterministic re-check of the pack against the PHYSICAL grounding artifact.
+  # The stamping rule in image-node-prompt-pack.md is an instruction to an LLM;
+  # this node is the enforcement: a grounded=false pack carrying prompt_engine,
+  # a cited case id the grounding never resolved, a count over the cap, an empty
+  # prompt variant, or a local absolute path all exit 1 and skip every dependant.
+  - id: validate-pack
+    script: pack-validate
+    runtime: uv
+    depends_on: [intake, ground, prompt-pack]
+    timeout: 60000
+
+  - id: render
+    command: image-node-render
+    depends_on: [intake, prompt-pack, validate-pack]
+    when: "$intake.output.render_requested == 'true'"
+    context: fresh
+    idle_timeout: 900000
+    output_format:
+      type: object
+      properties:
+        render_status:
+          type: string
+          enum: ["rendered", "blocked"]
+        render_mode:
+          type: string
+          enum: ["baked", "overlay"]
+        image_count:
+          type: number
+        manifest_path:
+          type: string
+        blocked_reason:
+          type: string
+      required:
+        - render_status
+        - render_mode
+        - image_count
+        - manifest_path
+        - blocked_reason
+
+  - id: qa
+    command: image-node-qa
+    depends_on: [prompt-pack, validate-pack, render]
+    trigger_rule: none_failed_min_one_success
+    context: fresh
+    output_format:
+      type: object
+      properties:
+        pass:
+          type: string
+          enum: ["true", "false"]
+        render_status:
+          type: string
+        render_mode:
+          type: string
+        manual_review_required:
+          type: string
+          enum: ["true", "false"]
+        issue_count:
+          type: number
+        qa_report_path:
+          type: string
+      required:
+        - pass
+        - render_status
+        - render_mode
+        - manual_review_required
+        - issue_count
+        - qa_report_path
+
+  - id: report
+    command: image-node-report
+    depends_on: [qa, render]
+    trigger_rule: none_failed_min_one_success
+    context: fresh

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- INCLUDE:head-meta -->
+  </head>
+  <body>
+    <!-- INCLUDE:header -->
+    <main>
+      <section class="hero page-hero--cinematic" style="background-image:url('{{site.base}}/assets/{{page.hero_poster}}');">
+<!-- IF:page.hero_video -->
+        <video class="hero-video" autoplay muted loop playsinline preload="metadata" poster="{{site.base}}/assets/{{page.hero_poster}}" aria-hidden="true">
+          <source data-src="{{site.base}}/assets/{{page.hero_webm}}" type="video/webm" />
+          <source data-src="{{site.base}}/assets/{{page.hero_mp4}}" type="video/mp4" />
+        </video>
+<!-- ENDIF -->
+        <div class="hero-copy">
+          <p class="{{page.hero_label_class}}">{{copy.hero_label}}</p>
+          <h1>{{copy.hero_headline}}</h1>
+          <p class="page-lede">{{copy.hero_lede}}</p>
+        </div>
+      </section>
+
+      <section class="section detail-layout">
+        <aside class="detail-nav">
+<!-- BEGIN:copy.detail_nav -->
+          <a href="{{.href}}">{{.label}}</a>
+<!-- END:copy.detail_nav -->
+        </aside>
+        <div class="detail-content">
+{{&copy.content_html}}
+        </div>
+      </section>
+    </main>
+    <!-- INCLUDE:footer -->
+  </body>
+</html>

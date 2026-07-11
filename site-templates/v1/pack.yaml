@@ -1,0 +1,20 @@
+# client-site-factory template pack v1.
+# Derived once from a shipped donor build, then de-branded: zero client
+# literals (enforced by the born-clean gate in site-validate.py's test suite
+# and the P1 canary). Versioned — shipped client sites never mutate under a
+# template change; a breaking change is v2/.
+version: 1
+engine: slot-v1   # {{path}} escaped, {{&path}} raw, BEGIN/END lists, IF/ENDIF, INCLUDE partials
+templates:
+  home: templates/home.html
+  service-index: templates/service-index.html
+  service-detail: templates/service-detail.html
+  consultation: templates/consultation.html
+  article: templates/article.html
+partials:
+  - partials/head-meta.html
+  - partials/header.html
+  - partials/footer.html
+assets:
+  - assets/site.css   # brand tokens injected into :root
+  - assets/site.js    # widget/form copy injected as JSON

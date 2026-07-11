@@ -22,10 +22,6 @@ catalog below maps each intent to the workflow that owns it.
 Archon is a coding-workflow surface that an operator invokes. It is not a
 runtime task scheduler (that is Convoy/Mailbox — see the comparison below) and
 it does not auto-dispatch, auto-merge, or run unattended against tracked repos.
-The merged `implement-prp` workflow is a stricter bounded implementation
-program with deterministic artifacts and two operator approvals; see
-[Polish Architecture And Execution Program](polish-architecture-execution-program.md).
-Its current PRP-001A pilot does not make amendment rollback a shipped feature.
 
 ## When To Use Which Workflow
 
@@ -39,7 +35,6 @@ is always authoritative and may include more than this table.
 | "review this PR", "code review" | `archon-smart-pr-review` | Automated PR review against codebase standards. |
 | "fix vault health", "vault A-grade" | `archon-vault-a-grade` | Fixes the tracked Obsidian vaults to a health target in parallel, then runs a verification pass. |
 | "run the clutch gates on this PRD" | `archon-clutch` | The multi-gate review→implement pipeline: adversarial review → fix → parallel judges → synthesize → reality-check gate → execute → validate. See `intent-prd-and-clutch.md` for the full gate model. |
-| "implement this one bounded PRP" | `implement-prp` | Linked-worktree-only, test-first PRP delivery with preflight/reconnaissance gates, focused and regression tests, four reviews, exact-diff packaging, and separate plan/publish approvals. It opens a PR only after final approval and never auto-merges. |
 
 Rule of thumb: reach for `archon-ralph-dag` when you trust the spec and want it
 built end-to-end; reach for `archon-piv-loop` when you want to approve the plan

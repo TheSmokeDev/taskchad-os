@@ -29,13 +29,16 @@ $trigger = New-ScheduledTaskTrigger `
     -Daily `
     -At "07:00"
 
-# Create settings (15 min limit — the tick makes a background-model draft call)
+# Create settings (30 min limit — the tick makes a background-model draft call
+# AND, for channels with brand assets, renders an on-brand image per channel.
+# Each render is best-effort capped via VIDEO_ART_TIMEOUT_S; this 30-min window
+# is the hard backstop that force-terminates a stuck render.)
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
     -RunOnlyIfNetworkAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 
 # Create principal (run as current user)
 $principal = New-ScheduledTaskPrincipal `

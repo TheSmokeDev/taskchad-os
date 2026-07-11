@@ -1,0 +1,16 @@
+<footer class="site-footer">
+      <div class="footer-brand">
+        <span class="footer-mark" aria-hidden="true">{{site.brand_mark}}</span>
+        <div>
+          <strong>{{site.display_name}}</strong>
+          <p>{{site.org_name}}</p>
+        </div>
+      </div>
+      <div class="footer-links">
+<!-- BEGIN:site.footer_links -->
+        <a href="{{.href}}"{{&.attrs}}>{{.label}}</a>
+<!-- END:site.footer_links -->
+      </div>
+      <p class="fine-print">{{site.fine_print}}</p>
+    </footer>
+    <script src="{{site.base}}/assets/site.js"></script>

@@ -90,8 +90,16 @@ Two behaviors are load-bearing:
   escape (no embedding model load); `auto` mirrors the chat engine's
   tier-classified behavior.
 - **Fail-open.** If recall is disabled, the index is stale, or anything errors,
-  the command prints nothing and exits 0 — never a stack trace. That is what
-  lets the slash commands shell it with `|| true` and degrade gracefully.
+  the command prints nothing and exits 0 — never a stack trace. Shelling skills
+  pair this with a visible degradation marker
+  (`|| echo "[recall] UNAVAILABLE - degraded to floor reads"`) so a missing
+  shim or dead index is SEEN, never silently swallowed (the old bare `|| true`
+  hid a dead semantic layer for weeks — 2026-07-10 lesson).
+
+The console script only materializes inside `.claude/scripts/.venv/` on
+`uv sync` — it is NOT on PATH by itself. Reach it from any cwd via the
+`~/bin/thehomie` shim (deployment glue) or explicitly:
+`uv run --project .claude/scripts thehomie recall ...`.
 
 ## Multi-Vault Setup
 
@@ -131,9 +139,11 @@ Two invariants make this safe:
 - **Invariant I-3 — single recall entrypoint.** The skill only **shells the
   CLI**; it never imports `recall_service`, `memory_search`, or `cognition`.
   That keeps one search path, one observability surface, and one kill-switch.
-- **Additive + fail-open.** Recall augments the Markdown floor, it never
-  replaces it. Every call is wrapped with `|| true`, so an empty, stale, or
-  disabled index is a silent no-op and the command proceeds on its plain reads.
+- **Additive + fail-open (visible).** Recall augments the Markdown floor, it
+  never replaces it. Every call is wrapped with
+  `|| echo "[recall] UNAVAILABLE - degraded to floor reads"` — the command
+  still proceeds on its plain reads, but the degradation prints a marker
+  instead of vanishing behind a silent `|| true`.
 
 The native `/vault search` and `/vault context` chat commands are recall-backed
 the same way — see [Native Vault Commands](native-vault-commands.md).

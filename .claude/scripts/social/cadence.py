@@ -52,6 +52,12 @@ def _is_cadence_enabled() -> bool:
     return os.getenv("SOCIAL_CADENCE_ENABLED", "false").lower() == "true"
 
 
+def _is_media_enabled() -> bool:
+    """Whether the cadence renders an on-brand image for asset-carrying channels.
+    Default ON; set SOCIAL_CADENCE_MEDIA=false to force caption-only cards."""
+    return os.getenv("SOCIAL_CADENCE_MEDIA", "true").lower() == "true"
+
+
 def _hours_since(iso_str: str) -> float:
     try:
         then = datetime.fromisoformat(iso_str)
@@ -77,9 +83,15 @@ def run_cadence_tick(
         return {"drafts_created": 0, "posts_dispatched": 0, "skipped": "cadence disabled"}
 
     from social.channels import list_active_channels
-    from social.draft_generator import generate_draft
+    from social import content_factory
     from social.post_executor import dispatch_due_posts
     import random
+
+    media_on = _is_media_enabled()
+    # Cap the per-image render so one slow generation can't blow the scheduled
+    # task window — a timeout degrades to a caption-only card (video_imagegen is
+    # fail-open). setdefault so an explicit env override still wins.
+    os.environ.setdefault("VIDEO_ART_TIMEOUT_S", "420")
 
     state = _load_state(state_path)
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -108,16 +120,41 @@ def run_cadence_tick(
             summary["drafts_created"] += 1
             continue
 
-        pid = generate_draft(
-            ch.channel_id,
-            topic,
-            topic_source="cadence",
-            db_path=db_path,
-        )
+        # Render an on-brand image when the channel carries brand assets
+        # (design_file or persona_pack); otherwise stay caption-only. Route
+        # through content_factory.produce — the same engine the Archon
+        # social-content-factory workflow uses — so the daily card inherits the
+        # face-locked, brand-designed media path. media="none" is behaviorally
+        # equivalent to the prior caption-only draft. This lane routes with
+        # autopilot=False so it NEVER auto-posts, regardless of the global
+        # HOMIE_SOCIAL_UNATTENDED flag (the operator approves via the card).
+        media_kind = "image" if (media_on and (ch.design_file or ch.persona_pack)) else "none"
+        # Fail-open at the channel grain: a media miss degrades to caption-only
+        # inside produce(); a hard error (e.g. a transient shared-DB lock) is
+        # caught here so one channel can never abort the rest of the tick, the
+        # dedup save, or the dispatch of already-approved posts.
+        try:
+            cf_summary = content_factory.produce(
+                ch.channel_id,
+                count=1,
+                media=media_kind,
+                topic=topic,
+                topic_source="cadence",
+                autopilot=False,
+                db_path=db_path,
+            )
+            pid = (cf_summary.get("queued") or [None])[0]
+        except Exception as exc:
+            logger.warning("Draft generation for %s failed: %s", ch.channel_id, exc)
+            summary["channels_skipped"].append(ch.channel_id)
+            continue
 
         if pid:
             summary["drafts_created"] += 1
             state[last_key] = now_iso
+            # Persist dedup state per channel so a force-kill at the task time
+            # limit can't discard an already-drafted channel's stamp (re-draft).
+            _save_state(state, state_path)
             # Deliver the draft to the operator's Telegram with approve/reject
             # buttons. Fail-open: a delivery miss never blocks the cadence or
             # un-counts the draft (it is already persisted in the queue DB).

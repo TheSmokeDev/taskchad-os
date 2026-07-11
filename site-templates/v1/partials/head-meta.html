@@ -1,0 +1,24 @@
+<meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{page.title}}</title>
+    <meta name="description" content="{{page.description}}" />
+    <link rel="canonical" href="{{page.canonical}}" />
+<!-- IF:page.meta_robots -->
+    <meta name="robots" content="noindex, nofollow" />
+<!-- ENDIF -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='{{design.favicon_bg}}'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='21' font-weight='600' fill='{{design.favicon_fg}}' text-anchor='middle'%3E{{site.brand_mark}}%3C/text%3E%3C/svg%3E" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="{{site.org_name}}" />
+    <meta property="og:title" content="{{page.og_title}}" />
+    <meta property="og:description" content="{{page.og_description}}" />
+    <meta property="og:url" content="{{page.canonical}}" />
+    <meta property="og:image" content="{{page.og_image_url}}" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="{{page.og_title}}" />
+    <meta name="twitter:description" content="{{page.og_description}}" />
+    <meta name="twitter:image" content="{{page.og_image_url}}" />
+{{&design.font_preload_html}}
+    <link rel="stylesheet" href="{{site.base}}/assets/site.css" />
+<!-- IF:page.jsonld -->
+{{&page.jsonld}}
+<!-- ENDIF -->

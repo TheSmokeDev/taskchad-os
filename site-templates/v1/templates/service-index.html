@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- INCLUDE:head-meta -->
+  </head>
+  <body>
+    <!-- INCLUDE:header -->
+
+    <main>
+      <section class="hero page-hero--cinematic" style="background-image:url('{{site.base}}/assets/{{page.hero_poster}}');">
+<!-- IF:page.hero_video -->
+        <video class="hero-video" autoplay muted loop playsinline preload="metadata" poster="{{site.base}}/assets/{{page.hero_poster}}" aria-hidden="true">
+          <source data-src="{{site.base}}/assets/{{page.hero_webm}}" type="video/webm" />
+          <source data-src="{{site.base}}/assets/{{page.hero_mp4}}" type="video/mp4" />
+        </video>
+<!-- ENDIF -->
+        <div class="hero-copy">
+          <p class="{{page.hero_label_class}}">{{copy.hero_label}}</p>
+          <h1>{{copy.hero_headline}}</h1>
+          <p class="page-lede">{{copy.hero_lede}}</p>
+        </div>
+      </section>
+
+      <section class="section band">
+        <div class="vignette-list">
+<!-- BEGIN:copy.vignettes -->
+          <a class="vignette" href="{{.href}}">
+            <span class="vignette-num" aria-hidden="true">{{.num2}}</span>
+            <div class="vignette-body">
+              <h3>{{.title}}</h3>
+              <p>{{.blurb}}</p>
+            </div>
+            <span class="vignette-arrow" aria-hidden="true">&#8594;</span>
+          </a>
+<!-- END:copy.vignettes -->
+        </div>
+      </section>
+
+      <section class="section split">
+        <div>
+          <p class="eyebrow">{{copy.split_eyebrow}}</p>
+          <h2>{{copy.split_heading}}</h2>
+        </div>
+        <div class="prose">
+{{&copy.split_prose_html}}
+          <a class="button primary" href="{{site.cta_href}}">{{copy.split_cta_label}}</a>
+        </div>
+      </section>
+
+      <section class="section band">
+        <div class="section-heading">
+          <p class="eyebrow">{{copy.band2_eyebrow}}</p>
+          <h2>{{copy.band2_heading}}</h2>
+          <p>{{copy.band2_note}}</p>
+        </div>
+        <div class="question-grid">
+<!-- BEGIN:copy.question_cards -->
+          <article class="question-card">
+            <h3>{{.heading}}</h3>
+            <p>{{.note}}</p>
+          </article>
+<!-- END:copy.question_cards -->
+        </div>
+      </section>
+    </main>
+
+    <!-- INCLUDE:footer -->
+  </body>
+</html>

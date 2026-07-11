@@ -109,3 +109,91 @@ class TestDelivery:
         assert ok is False
         out = capsys.readouterr().out
         assert "SUPERSECRET" not in out  # token must be redacted from logs
+
+
+class TestPhotoCaption:
+    def test_caption_capped_at_1024(self):
+        cap = notify._build_photo_caption(_post(body="y" * 5000))
+        assert len(cap) <= notify._TG_CAPTION_LIMIT
+        assert "Approve & Post" in cap
+
+    def test_caption_utf16_capped_with_emoji(self):
+        # Supplementary-plane emoji count as 2 UTF-16 units each; a body of them
+        # can stay <=1024 code points while exceeding Telegram's 1024 UTF-16 cap.
+        cap = notify._build_photo_caption(_post(body="🔥" * 2000))
+        assert notify._utf16_len(cap) <= notify._TG_CAPTION_LIMIT
+
+    def test_utf16_truncate_never_splits_surrogate_pair(self):
+        out = notify._utf16_truncate("a" + "🔥" * 10, 5)
+        assert notify._utf16_len(out) <= 5
+        out.encode("utf-16")  # a split surrogate pair would raise here
+
+
+class TestPhotoDelivery:
+    def _img(self, tmp_path):
+        p = tmp_path / "card.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)  # non-empty fake PNG
+        return str(p)
+
+    def test_sends_photo_when_image_attached(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok123")
+        monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "55555")
+        captured: dict = {}
+
+        def fake_urlopen(req, timeout=30):
+            captured["url"] = req.full_url
+            captured["ctype"] = req.get_header("Content-type")
+            captured["data"] = req.data
+            return None
+
+        monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
+        post = _post(id=9, body="Body.", media_path=self._img(tmp_path), media_type="image")
+        ok = notify.deliver_draft_to_telegram(post)
+        assert ok is True
+        assert "bottok123/sendPhoto" in captured["url"]
+        assert "multipart/form-data" in (captured["ctype"] or "")
+        # the approve/edit/reject buttons still ride with the photo
+        assert b"social:approve:9" in captured["data"]
+
+    def test_text_card_when_no_media(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok123")
+        monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "55555")
+        captured: dict = {}
+        monkeypatch.setattr(
+            notify.urllib.request, "urlopen",
+            lambda req, timeout=10: captured.update(url=req.full_url),
+        )
+        ok = notify.deliver_draft_to_telegram(_post(id=3))
+        assert ok is True
+        assert "sendMessage" in captured["url"]
+
+    def test_missing_file_falls_back_to_text(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok123")
+        monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "55555")
+        captured: dict = {}
+        monkeypatch.setattr(
+            notify.urllib.request, "urlopen",
+            lambda req, timeout=10: captured.update(url=req.full_url),
+        )
+        post = _post(id=6, media_path="/no/such/file.png", media_type="image")
+        ok = notify.deliver_draft_to_telegram(post)
+        assert ok is True
+        assert "sendMessage" in captured["url"]
+
+    def test_photo_send_failure_falls_back_to_text(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok123")
+        monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "55555")
+        calls: list = []
+
+        def fake_urlopen(req, timeout=10):
+            calls.append(req.full_url)
+            if "sendPhoto" in req.full_url:
+                raise RuntimeError("boom")
+            return None
+
+        monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
+        post = _post(id=4, media_path=self._img(tmp_path), media_type="image")
+        ok = notify.deliver_draft_to_telegram(post)
+        assert ok is True  # text card still delivered
+        assert any("sendPhoto" in u for u in calls)
+        assert any("sendMessage" in u for u in calls)

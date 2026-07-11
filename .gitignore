@@ -139,3 +139,8 @@ skills-lock.json
 
 # Video render output — hundreds of MB of HTML/audio/video/image binaries; stays local
 .claude/video/
+
+# client-site factory: client data stays UNTRACKED until scripts/sanitize.py
+# gains a clients/ DENY_DIRS entry (that file is owned by a parallel session
+# right now). Untracked = git ls-files never sees it = can never ship publicly.
+clients/

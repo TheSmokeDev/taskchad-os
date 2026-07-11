@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- INCLUDE:head-meta -->
+  </head>
+  <body>
+    <!-- INCLUDE:header -->
+
+    <main>
+      <section class="hero hero-home">
+<!-- IF:page.hero_video -->
+        <video class="hero-video" autoplay muted loop playsinline preload="metadata" poster="{{site.base}}/assets/{{page.hero_poster}}" aria-hidden="true">
+          <source data-src="{{site.base}}/assets/{{page.hero_webm}}" type="video/webm" />
+          <source data-src="{{site.base}}/assets/{{page.hero_mp4}}" type="video/mp4" />
+        </video>
+<!-- ENDIF -->
+        <div class="hero-copy">
+          <p class="eyebrow">{{copy.hero_eyebrow}}</p>
+          <h1>{{copy.hero_headline}}</h1>
+          <p class="hero-lede">{{copy.hero_lede}}</p>
+          <div class="hero-actions">
+            <a class="button primary" href="{{site.cta_href}}">{{copy.hero_cta_primary_label}}</a>
+            <a class="button secondary" href="tel:{{site.phone_tel}}">{{copy.hero_cta_secondary_label}}</a>
+          </div>
+          <dl class="contact-strip">
+            <div>
+              <dt>{{copy.contact_strip_term}}</dt>
+              <dd>{{copy.contact_strip_value}}</dd>
+            </div>
+            <div>
+              <dt>Email</dt>
+              <dd><a href="mailto:{{site.email}}">{{site.email}}</a></dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="readiness" data-readiness aria-label="{{copy.readiness_aria}}">
+          <div class="readiness-head">
+            <p class="eyebrow">{{copy.readiness_eyebrow}}</p>
+            <strong>{{copy.readiness_title}}</strong>
+            <p>{{copy.readiness_note}}</p>
+          </div>
+
+<!-- BEGIN:readiness.questions -->
+          <div class="readiness-q" data-q="{{.key}}">
+            <p>{{.question}}</p>
+            <div class="readiness-toggle" role="group" aria-label="{{.aria}}">
+              <button type="button" data-answer="yes" aria-pressed="false">Yes</button>
+              <button type="button" data-answer="no" aria-pressed="false">No</button>
+            </div>
+          </div>
+<!-- END:readiness.questions -->
+
+          <button class="button primary readiness-run" type="button" data-readiness-run>{{copy.readiness_run_label}}</button>
+
+          <div class="readiness-result" data-readiness-result hidden>
+            <p class="eyebrow">{{copy.readiness_result_eyebrow}}</p>
+            <strong class="readiness-rhead" data-readiness-headline></strong>
+            <ul class="readiness-priorities" data-readiness-list></ul>
+            <a class="button primary" href="{{site.cta_href}}">{{copy.readiness_result_cta_label}}</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section founder split">
+        <aside class="legacy-panel" aria-label="{{copy.panel_aria}}">
+          <blockquote class="legacy-quote">{{&copy.panel_quote_html}}</blockquote>
+          <ol class="legacy-lanes">
+<!-- BEGIN:copy.panel_lanes -->
+            <li><span class="lane-num" aria-hidden="true">{{.num2}}</span> {{.label}}</li>
+<!-- END:copy.panel_lanes -->
+          </ol>
+        </aside>
+        <div class="prose">
+          <p class="eyebrow">{{copy.founder_eyebrow}}</p>
+          <h2>{{copy.founder_heading}}</h2>
+{{&copy.founder_prose_html}}
+          <p class="signature">{{copy.founder_signature}}</p>
+        </div>
+      </section>
+
+      <section class="section band">
+        <div class="section-heading">
+          <p class="eyebrow">{{copy.band_eyebrow}}</p>
+          <h2>{{copy.band_heading}}</h2>
+          <p>{{copy.band_note}}</p>
+        </div>
+        <div class="vignette-list">
+<!-- BEGIN:copy.vignettes -->
+          <a class="vignette" href="{{.href}}">
+            <span class="vignette-num" aria-hidden="true">{{.num2}}</span>
+            <div class="vignette-body">
+              <h3>{{.title}}</h3>
+              <p>{{.blurb}}</p>
+            </div>
+            <span class="vignette-arrow" aria-hidden="true">&#8594;</span>
+          </a>
+<!-- END:copy.vignettes -->
+        </div>
+      </section>
+
+      <section class="section feature-row">
+        <div class="visual-card">
+          <img src="{{site.base}}/assets/{{copy.feature_img}}" alt="{{copy.feature_img_alt}}" />
+        </div>
+        <div class="prose">
+          <p class="eyebrow">{{copy.feature_eyebrow}}</p>
+          <h2>{{copy.feature_heading}}</h2>
+{{&copy.feature_prose_html}}
+          <ul class="check-list">
+{{&copy.feature_checklist_html}}
+          </ul>
+        </div>
+      </section>
+
+      <section class="section two-column-cta">
+        <div>
+          <p class="eyebrow">{{copy.cta_eyebrow}}</p>
+          <h2>{{copy.cta_heading}}</h2>
+          <p>{{copy.cta_note}}</p>
+        </div>
+        <a class="button primary" href="{{copy.cta_button_href}}">{{copy.cta_button_label}}</a>
+      </section>
+    </main>
+
+    <!-- INCLUDE:footer -->
+  </body>
+</html>
