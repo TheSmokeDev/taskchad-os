@@ -85,6 +85,15 @@ def _proposal_from(candidate: dict) -> Any:
     """
     from cognition.amendments import AmendmentProposal, _coerce_dataclass
 
+    # Incoming evolve candidates must cite evidence explicitly. The amendment
+    # ledger coercer intentionally honors dataclass defaults for legacy rows,
+    # but that compatibility behavior must not silently turn malformed live
+    # candidates into evidence-free proposals.
+    if "evidence_paths" not in candidate:
+        raise ValueError(
+            f"candidate is missing required evidence_paths: keys={sorted(candidate)}"
+        )
+
     prop = _coerce_dataclass(AmendmentProposal, candidate)
     if prop is None:
         raise ValueError(
