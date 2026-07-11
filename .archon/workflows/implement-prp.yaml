@@ -54,11 +54,11 @@ nodes:
       specs=d.get('focused_tests'),d.get('regression_tests')
       allowed=d.get('allowed_paths')
       def valid_spec(s):
-          if not isinstance(s,dict) or set(s)!= {'cwd','argv'} or not isinstance(s['cwd'],str) or not s['cwd'] or '\\' in s['cwd']: return False
+          if not isinstance(s,dict) or set(s)!= {'cwd','argv'} or not isinstance(s['cwd'],str) or not s['cwd'] or chr(92) in s['cwd']: return False
           p=pathlib.PurePosixPath(s['cwd']); a=s['argv']
           if p.is_absolute() or '..' in p.parts or ':' in s['cwd'] or not isinstance(a,list) or not all(isinstance(x,str) and x for x in a): return False
           return (a[:4]==['uv','run','--extra','dev'] and len(a)>=5 and a[4] in ('pytest','ruff')) or a[:2]==['npm','test'] or a[:3]==['npm','run','typecheck']
-      valid_paths=isinstance(allowed,list) and bool(allowed) and all(isinstance(x,str) and x and '\\' not in x and ':' not in x and not pathlib.PurePosixPath(x).is_absolute() and '..' not in pathlib.PurePosixPath(x).parts for x in allowed)
+      valid_paths=isinstance(allowed,list) and bool(allowed) and all(isinstance(x,str) and x and chr(92) not in x and ':' not in x and not pathlib.PurePosixPath(x).is_absolute() and '..' not in pathlib.PurePosixPath(x).parts for x in allowed)
       ok=d.get('schema')==1 and d.get('decision')=='proceed' and not d.get('blockers') and valid_paths and all(isinstance(x,list) and x and all(valid_spec(s) for s in x) for x in specs)
       if not ok: print('preflight gate rejected authoritative artifact',file=sys.stderr); sys.exit(1)
       print('PREFLIGHT_GATE_OK')
