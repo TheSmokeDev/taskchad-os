@@ -255,6 +255,8 @@ _BOLD_DEF_PERIOD_TRAILING_RE = re.compile(r"^\s+[A-Z]")
 _SKIP_NAMES = {
     "overview", "summary", "introduction", "conclusion", "references",
     "notes", "todo", "table of contents", "appendix", "changelog",
+    "for future claude",  # the AI-first preamble heading, never a concept
+
     "getting started", "quick start", "installation", "usage",
     "step 1", "step 2", "step 3", "step 4", "step 5", "step 6",
     # Vault infrastructure (not knowledge concepts)
@@ -978,6 +980,8 @@ def create_concept_page(
     else:
         claims_text = f"- Referenced in [[{source_stem}]]"
 
+    preamble = entity.description or f"Auto-compiled concept page for {entity.name}."
+
     content = f"""---
 aliases: ["{entity.name}"]
 tags: [concept, auto-compiled, {entity.entity_type}]
@@ -992,7 +996,10 @@ summary: "{entity.description or entity.name}"
 
 # {entity.name}
 
-{entity.description}
+## For future Claude
+
+{preamble} Claims accumulate below in dated per-source sections — treat the
+newest section as current; `related:` frontmatter carries the graph edges.
 
 ## From [[{source_stem}]] ({_today()})
 

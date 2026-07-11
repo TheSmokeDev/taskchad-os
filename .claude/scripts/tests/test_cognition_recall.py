@@ -163,3 +163,48 @@ async def test_rerank_fallback_on_import_error():
     results = _make_results(10)
     reranked = await _llm_rerank(results, "test query", top_n=10, return_n=5)
     assert len(reranked) == 5
+
+
+@pytest.mark.asyncio
+async def test_rerank_blend_protects_retrieval_head(monkeypatch):
+    """The LLM demoting retrieval's #1 to dead last must not bury it (qmd blend)."""
+    async def mock_run(prompt):
+        return "2,3,4,5,6,7,8,9,10,1"  # LLM buries retrieval's top hit
+
+    import cognition.recall
+    monkeypatch.setattr(cognition.recall, "_run_rerank_request", mock_run, raising=False)
+
+    results = _make_results(10)
+    reranked = await _llm_rerank(results, "test query", top_n=10, return_n=5)
+    # doc-0 (retrieval #1) keeps 75% retrieval weight: demoted at most a slot
+    # or two, never out of the returned head.
+    assert results[0] in reranked[:3]
+
+
+@pytest.mark.asyncio
+async def test_rerank_blend_agreement_preserves_order(monkeypatch):
+    """When the LLM agrees with retrieval, the blend changes nothing."""
+    async def mock_run(prompt):
+        return "1,2,3,4,5,6,7,8,9,10"
+
+    import cognition.recall
+    monkeypatch.setattr(cognition.recall, "_run_rerank_request", mock_run, raising=False)
+
+    results = _make_results(10)
+    reranked = await _llm_rerank(results, "test query", top_n=10, return_n=5)
+    assert reranked == results[:5]
+
+
+@pytest.mark.asyncio
+async def test_rerank_blend_tail_follows_llm(monkeypatch):
+    """A tail hit (rank 10) promoted to #1 by the LLM enters the returned set."""
+    async def mock_run(prompt):
+        return "10,1,2,3,4,5,6,7,8,9"
+
+    import cognition.recall
+    monkeypatch.setattr(cognition.recall, "_run_rerank_request", mock_run, raising=False)
+
+    results = _make_results(10)
+    reranked = await _llm_rerank(results, "test query", top_n=10, return_n=5)
+    # Tail band trusts the reranker 60%: the promoted hit must make the cut.
+    assert results[9] in reranked

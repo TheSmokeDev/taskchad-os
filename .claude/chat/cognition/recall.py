@@ -276,15 +276,58 @@ def _search_with_fallback(
     return results
 
 
+# Position-aware retrieval/reranker blend (qmd pattern). A verbatim rerank
+# lets one bad model call bury an exact match that retrieval put at #1; the
+# blend keeps the reranker advisory for the retrieval head and decisive only
+# for the tail. Bands scaled to our top_n=10 candidate pool (qmd's 1-3/4-10/11+
+# bands assume ~30): original rank 0-2 -> 75% retrieval weight, 3-5 -> 60%,
+# 6+ -> 40%. k=10 (not qmd's 60) so rank gaps stay meaningful over 10 items.
+_RERANK_RETRIEVAL_WEIGHT_BANDS = ((3, 0.75), (6, 0.60))
+_RERANK_RETRIEVAL_WEIGHT_TAIL = 0.40
+_RERANK_RRF_K = 10
+
+
+def _rerank_blend(
+    candidates: list[RecallResult],
+    llm_indices: list[int],
+) -> list[RecallResult]:
+    """Blend the original retrieval order with the LLM ordering, position-aware.
+
+    Both orderings are converted to RRF-style scores (1/(k+rank)); each
+    candidate's blend weight depends on its ORIGINAL retrieval rank per the
+    band constants above. Candidates the LLM omitted rank behind everything it
+    did rank, preserving their relative retrieval order. Deterministic
+    tiebreak on retrieval position.
+    """
+    llm_rank = {idx: pos for pos, idx in enumerate(llm_indices)}
+    unranked_base = len(llm_indices)
+    scored = []
+    for retr_pos, result in enumerate(candidates):
+        weight = _RERANK_RETRIEVAL_WEIGHT_TAIL
+        for band_end, band_weight in _RERANK_RETRIEVAL_WEIGHT_BANDS:
+            if retr_pos < band_end:
+                weight = band_weight
+                break
+        retr_score = 1.0 / (_RERANK_RRF_K + retr_pos)
+        rr_pos = llm_rank.get(retr_pos, unranked_base + retr_pos)
+        rr_score = 1.0 / (_RERANK_RRF_K + rr_pos)
+        blended = weight * retr_score + (1.0 - weight) * rr_score
+        scored.append((blended, retr_pos, result))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return [r for _, _, r in scored]
+
+
 async def _llm_rerank(
     results: list[RecallResult],
     query: str,
     top_n: int = 10,
     return_n: int = 5,
 ) -> list[RecallResult]:
-    """LLM re-ranking: feed top_n results to a fast model, return reordered top return_n.
+    """LLM re-ranking: feed top_n results to a fast model, return blended top return_n.
 
-    Ported from Karpathy's qmd pattern. Only called for Tier 1 queries.
+    Ported from Karpathy's qmd pattern, including its position-aware blend —
+    the LLM ordering is fused with the retrieval ordering rather than taken
+    verbatim (see _rerank_blend). Only called for Tier 1 queries.
     On any failure (parse error, timeout, quota), returns original results unchanged.
     """
     import asyncio
@@ -328,10 +371,7 @@ async def _llm_rerank(
                     indices.append(idx)
 
         if len(indices) >= 2:
-            reranked = [candidates[i] for i in indices[:return_n]]
-            # Append any remaining that weren't in the LLM's ranking
-            remaining = [r for i, r in enumerate(candidates) if i not in indices]
-            return (reranked + remaining)[:return_n]
+            return _rerank_blend(candidates, indices)[:return_n]
 
     except (asyncio.TimeoutError, Exception):
         pass  # Timeout or any error — return original ranking

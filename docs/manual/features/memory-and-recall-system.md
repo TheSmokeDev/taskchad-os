@@ -183,6 +183,16 @@ is supposed to page everything); the nightly reflection `sweep` does **not**
 bypass (otherwise every staged entity would be promoted within 24h and the gate
 would be a delay, not a filter).
 
+New concept pages also carry an **AI-first contract** (adopted 2026-07-11 from
+the obsidian-thehomie field research): a `## For future Claude` preamble so
+retrieval lands on self-contained context, dated per-source claim sections, and
+three retrieval-honesty rules enforced in the vault skills — the false-absence
+ban (never claim a note doesn't exist without exhaustive search), enumerate
+never sample, and `TBD` over invention. The vault's `SCHEMA.md` carries the
+full contract. The Stage-5 re-rank also uses a **position-aware blend** (qmd
+pattern): the reranker is advisory for retrieval's top hits and decisive only
+for the tail, so one bad model call can never bury an exact match.
+
 ```bash
 cd .claude/scripts
 uv run python entity_extractor.py compile "path/to/source.md" --vault-dir "<vault>"   # guardrails per env
