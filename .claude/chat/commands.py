@@ -33,7 +33,6 @@ PIV_INSTRUCTIONS: dict[str, str] = {
     "generate-image": "SKILL",            # descriptive alias for /image
     "owner-image": "SKILL",               # saved owner / YourBusiness rep image persona
     "quote": "SKILL",                     # TurboRater quote via Skill("turborater-quote")
-    "linkedin": "linkedin.md",            # deterministic LinkedIn/Social Homie prompt
 }
 
 # Each command: (name, description, type, min_role)
@@ -110,7 +109,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("generate-image", "Generate or edit an image through Codex imagegen", "engine", "admin"),
     ("owner-image", "Generate a saved owner / YourBusiness rep persona image", "engine", "admin"),
     ("quote", "Generate an insurance quote via TurboRater using the turborater-quote skill", "engine", "admin"),
-    ("linkedin", "LinkedIn/Social Homie - draft posts, ideas, and revisions only", "engine", "admin"),
+    ("linkedin", "LinkedIn workshop - Cook Together or Run It for Me, then approve the exact post and image", "router", "admin"),
     ("tweet", "Draft an X (Twitter) post or thread", "engine", "admin"),
     ("instagram", "Create Instagram content — carousel or caption", "engine", "admin"),
     ("yt_script", "Write a YouTube video script", "engine", "admin"),
@@ -191,7 +190,10 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "diagnostics",
     "working",
     "email",
+    "pemail",
     "inbox",
+    "cleanup",
+    "accounts",
     "send",
     "budget",
     "calendar",
@@ -210,6 +212,8 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "standup",
     "discuss",
     "teamroom",
+    "team",
+    "teamtick",
     "cofounder",
     "search",
     "vault",
@@ -218,13 +222,41 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "blog",
     "image",
     "tweet",
+    "quote",
     "instagram",
     "design",
+    "gsc",
+    "analytics",
     "signal",
     "social",
     "recap",
     "blueprints",
     "suggestions",
+)
+
+# Every COMMANDS row that is deliberately NOT in the native menu must be listed
+# here with a reason. The completeness test in test_command_menu.py asserts
+#   set(COMMANDS names) == set(TELEGRAM_NATIVE_COMMANDS) | NATIVE_MENU_EXCLUDED
+# with an empty intersection — so a newly-added command that skips the menu
+# decision fails CI instead of silently never autocompleting (the documented
+# `/video` drift). To add a command: put its name in TELEGRAM_NATIVE_COMMANDS
+# (shows in the Telegram/Discord slash menu) OR here (typed-only) — not neither.
+NATIVE_MENU_EXCLUDED: frozenset[str] = frozenset(
+    {
+        # Mode toggles — session state, not user-facing actions.
+        "plan", "go", "execute", "mode", "reload", "cost", "extensions",
+        # Raw engine integrations — reached NL-first through the engine, no slash menu.
+        "post", "slack", "sheets", "docs", "drive", "circle",
+        # Hyphenated names — Telegram command names are lowercase alnum+underscore only.
+        "generate-image", "owner-image",
+        # Content long-tail — typed on demand, kept off the menu to reduce clutter.
+        "yt_script", "shorts",
+        # PIV coding-session workflow — a dev-loop sequence, not chat commands.
+        "prime", "planning", "implement", "validate", "review", "reviewfix",
+        "commit", "prd", "e2e", "sysreview", "execreport", "clutch",
+        # Dev tools — engine-only document/diagram builders.
+        "diagram", "pdf", "slides", "sop",
+    }
 )
 
 # Core data intents: (keywords, command, included_in_brief)

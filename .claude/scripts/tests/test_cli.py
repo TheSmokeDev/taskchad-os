@@ -668,6 +668,66 @@ class TestCognitiveLoopCLI:
         assert "working_memory: SHADOW_ONLY" in result.output
         assert "Keep WorkingMemory shadow-only until production cutover." in result.output
 
+    def test_doctor_prints_native_commands_section_in_sync(self, monkeypatch):
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
+        import cli as cli_module
+        import commands as commands_module
+        import diagnostics as diagnostics_module
+
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            runtime_providers={"claude": "ON"},
+        )
+        monkeypatch.setattr(diagnostics_module, "check_environment", lambda: [])
+        monkeypatch.setattr(diagnostics_module, "collect_diagnostics", lambda: report)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:FAKE")
+        monkeypatch.delenv("DISCORD_ALLOWED_GUILDS", raising=False)
+
+        expected = len(commands_module.get_telegram_bot_commands())
+        called = {}
+
+        def _fake_fetch(token):
+            called["token"] = token
+            return expected, ""
+
+        monkeypatch.setattr(cli_module, "_fetch_telegram_command_count", _fake_fetch)
+
+        result = CliRunner().invoke(cli_main, ["doctor"])
+
+        assert result.exit_code == 0
+        assert "Native commands:" in result.output
+        assert f"Telegram menu (expected): {expected}" in result.output
+        assert f"Telegram live: {expected} (in sync)" in result.output
+        # Discord scope defaults to global sync when no guild allowlist is set.
+        assert "global sync (up to ~1h" in result.output
+        # The mocked fetch received the token; the token is never echoed.
+        assert called["token"] == "123:FAKE"
+        assert "123:FAKE" not in result.output
+
+    def test_doctor_native_commands_no_token_branch(self, monkeypatch):
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
+        import diagnostics as diagnostics_module
+
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            runtime_providers={"claude": "ON"},
+        )
+        monkeypatch.setattr(diagnostics_module, "check_environment", lambda: [])
+        monkeypatch.setattr(diagnostics_module, "collect_diagnostics", lambda: report)
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.setenv("DISCORD_ALLOWED_GUILDS", "11111")
+
+        result = CliRunner().invoke(cli_main, ["doctor"])
+
+        assert result.exit_code == 0
+        assert "Telegram live: not checked (TELEGRAM_BOT_TOKEN not set)" in result.output
+        # Guild allowlist present → instant per-guild scope reported.
+        assert "per-guild instant sync" in result.output
+
     @pytest.mark.asyncio
     async def test_router_diagnostics_prints_cognitive_loop_section(self, monkeypatch):
         from diagnostics import DiagnosticsReport

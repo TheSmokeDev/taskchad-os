@@ -104,8 +104,8 @@ def _resolve_vault_memory_dir(vault: str) -> Path:
     memory_dir, _db_path = resolve_vault(vault)
     if memory_dir is None:
         raise click.ClickException(
-            f"vault '{vault}' is not configured — set HOMIE_CODING_VAULT_DIR / "
-            "HOMIE_UNIFIED_VAULT_DIR in .env (thehomie is always available)"
+            f"vault '{vault}' is not configured — set HOMIE_CODING_VAULT_DIR "
+            "in .env (thehomie is always available)"
         )
     return Path(memory_dir)
 
@@ -114,9 +114,9 @@ def _resolve_vault_memory_dir(vault: str) -> Path:
 @click.argument("query", required=False, default="")
 @click.option(
     "--vault",
-    type=click.Choice(["thehomie", "coding-vault", "unified-vault"]),
+    type=click.Choice(["thehomie", "coding-vault"]),
     default="thehomie",
-    help="Which vault to recall over (each has its own BGE index; coding/unified need their HOMIE_*_VAULT_DIR env set).",
+    help="Which vault to recall over (each has its own BGE index; coding-vault needs HOMIE_CODING_VAULT_DIR set).",
 )
 @click.option(
     "--memory-dir",
@@ -829,6 +829,8 @@ def doctor():
         )
         if report.clear_lifecycle_last_failure:
             click.echo(f"Last clear lifecycle warning: {report.clear_lifecycle_last_failure}")
+
+    _print_native_commands()
 
     # Check for real failures: env errors OR zero runtime providers
     errors = [i for i in issues if i[0] == "error"]
@@ -2095,6 +2097,77 @@ def _print_cognitive_loop(cognitive_loop):
         click.echo("  Next actions:")
         for action in next_actions:
             click.echo(f"    - {action}")
+
+
+def _fetch_telegram_command_count(token: str) -> tuple[int | None, str]:
+    """Live count of Telegram default-scope commands via getMyCommands.
+
+    Fail-open: any network/parse/API error returns (None, <reason>). The bot
+    token is NEVER echoed — it rides only inside the request URL.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = f"https://api.telegram.org/bot{token}/getMyCommands"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 (fixed https host)
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError:
+        return None, "network error"
+    except Exception:
+        return None, "request failed"
+    if not isinstance(data, dict) or not data.get("ok"):
+        return None, "api error"
+    result = data.get("result")
+    if not isinstance(result, list):
+        return None, "unexpected response"
+    return len(result), ""
+
+
+def _print_native_commands() -> None:
+    """Native slash-command menu registration status (Telegram + Discord).
+
+    Expected count comes from the registry; the live Telegram count is verified
+    against Bot API getMyCommands when a token is present. Fail-open at every
+    seam — doctor never crashes on a registry/network error.
+    """
+    try:
+        import os
+
+        import commands as commands_mod
+
+        menu = commands_mod.get_telegram_bot_commands()
+        expected = len(menu)
+    except Exception:
+        click.echo("\nNative commands: unverifiable (registry load failed)")
+        return
+
+    click.echo("\nNative commands:")
+    click.echo(f"  Telegram menu (expected): {expected}")
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        click.echo("  Telegram live: not checked (TELEGRAM_BOT_TOKEN not set)")
+    else:
+        live, reason = _fetch_telegram_command_count(token)
+        if live is None:
+            click.echo(f"  Telegram live: unverifiable ({reason})")
+        elif live == expected:
+            click.echo(f"  Telegram live: {live} (in sync)")
+        else:
+            click.echo(
+                f"  Telegram live: {live} (mismatch — restart the bot to re-register)"
+            )
+
+    flat = len([n for n in commands_mod.TELEGRAM_NATIVE_COMMANDS if n != "vault"])
+    guilds = os.getenv("DISCORD_ALLOWED_GUILDS", "").strip()
+    scope = (
+        "per-guild instant sync"
+        if guilds
+        else "global sync (up to ~1h to appear on fresh installs)"
+    )
+    click.echo(f"  Discord: {flat} flat commands + /vault group ({scope})")
 
 
 def _run_setup_wizard(advanced: bool, headless_google: bool):

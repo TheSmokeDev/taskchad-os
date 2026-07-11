@@ -48,7 +48,11 @@ cd .claude/chat && bash run_chat.sh
 3. Enable **Privileged Gateway Intents**: MESSAGE CONTENT, SERVER MEMBERS
 4. Invite bot to your server with `bot` + `applications.commands` scopes
 5. Set `DISCORD_BOT_TOKEN` in `.env`
-6. Optionally set `DISCORD_ALLOWED_GUILDS` and `DISCORD_ALLOWED_USERS`
+6. **Set `DISCORD_ALLOWED_GUILDS` to your server ID** so native slash commands
+   register **per-guild and appear instantly**. Leave it empty and the bot syncs
+   commands **globally**, which Discord can take **up to ~1 hour** to propagate
+   to a fresh install — the `/` picker looks empty until then (normal Discord
+   behavior, not a bug). Optionally also set `DISCORD_ALLOWED_USERS`.
 
 ### WhatsApp
 

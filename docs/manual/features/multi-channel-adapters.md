@@ -105,6 +105,23 @@ in code, and without the matching portal toggle every message arrives blank.
 | `DISCORD_WATCHED_CHANNELS` | Comma-separated channel IDs the bot auto-listens in without an `@mention`. |
 | `DISCORD_WATCH_ALL_GUILD_CHANNELS` | `true` to auto-listen to every channel in the allowed guild(s) with no `@mention`. Scoped by `DISCORD_ALLOWED_GUILDS`; pair with `DISCORD_ALLOWED_USERS` to lock who can drive it. |
 
+### Slash-command sync scope (fresh-install fast path)
+
+`DISCORD_ALLOWED_GUILDS` also controls how fast the native slash commands
+appear:
+
+- **Set (recommended for a fresh install):** the adapter syncs commands
+  per-guild, which Discord applies **instantly**. The bot log shows
+  `Registered N Discord slash commands` and the `/` picker is populated right
+  away.
+- **Unset (empty = all guilds):** the adapter does a **global** sync. Discord
+  can take **up to ~1 hour** to propagate global commands to fresh installs, so
+  the slash picker may look empty at first. This is normal Discord behavior, not
+  a bug — set `DISCORD_ALLOWED_GUILDS` to your server ID to skip the wait.
+
+`thehomie doctor` reports the Discord scope mode and expected flat count so you
+can tell which path you're on.
+
 ## Continuity Configuration
 
 | Env var | Default | Effect |

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -74,6 +75,36 @@ def _adapter_with_fake_bot(bot: FakeTelegramBot) -> TelegramAdapter:
 
 def _channel() -> Channel:
     return Channel(platform=Platform.TELEGRAM, platform_id="123", is_dm=True)
+
+
+@pytest.mark.asyncio
+async def test_connect_registers_curated_menu_with_telegram() -> None:
+    """connect() calls set_my_commands with exactly the (name, description) pairs
+    from get_telegram_bot_commands() — the missing adapter-level guard on the
+    #54 native-command wiring (telegram.py:147-149). A menu edit that never
+    reaches Telegram's setMyCommands now fails here."""
+    import commands as commands_mod
+
+    bot = SimpleNamespace(
+        set_my_commands=AsyncMock(),
+        get_me=AsyncMock(return_value=SimpleNamespace(username="homie_bot")),
+    )
+    app = SimpleNamespace(
+        bot=bot,
+        add_handler=lambda *a, **k: None,
+        initialize=AsyncMock(),
+        start=AsyncMock(),
+        updater=SimpleNamespace(start_polling=AsyncMock()),
+    )
+    adapter = TelegramAdapter.__new__(TelegramAdapter)
+    adapter._app = app
+
+    await adapter.connect()
+
+    bot.set_my_commands.assert_awaited_once()
+    registered = bot.set_my_commands.await_args.args[0]
+    pairs = [(cmd.command, cmd.description) for cmd in registered]
+    assert pairs == commands_mod.get_telegram_bot_commands()
 
 
 def test_extract_media_directive_removes_path_from_text() -> None:

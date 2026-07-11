@@ -39,7 +39,6 @@ def test_telegram_native_menu_is_curated_static_registry() -> None:
     names = [name for name, _desc in menu]
 
     assert names == list(commands.TELEGRAM_NATIVE_COMMANDS)
-    assert len(names) == 45
     assert "design" in names
     assert "linkedin" in names
     assert "video" in names
@@ -50,9 +49,39 @@ def test_telegram_native_menu_is_curated_static_registry() -> None:
     assert "recap" in names
     assert "blueprints" in names
     assert "suggestions" in names
+    # Menu currency (+8, 2026-07-11): sibling commands that dispatched but were
+    # missing from the native menu.
+    for added in ("pemail", "cleanup", "accounts", "gsc", "analytics", "team", "teamtick", "quote"):
+        assert added in names, added
     assert "publish" not in names
     assert "blogstatus" not in names
     assert "prime" not in names
+
+
+def test_every_command_makes_an_explicit_menu_decision() -> None:
+    """Every COMMANDS row is either in the native menu or explicitly excluded —
+    never silently omitted. Closes the `/video` drift class: a command that
+    forgets the menu decision fails here instead of never autocompleting.
+
+    Also proves neither set has zombie entries (names that no longer exist in
+    COMMANDS)."""
+    registry = {name for name, *_rest in commands.COMMANDS}
+    menu = set(commands.TELEGRAM_NATIVE_COMMANDS)
+    excluded = set(commands.NATIVE_MENU_EXCLUDED)
+
+    # A command can't be both shown and hidden.
+    assert menu & excluded == set(), sorted(menu & excluded)
+    # The two buckets exactly cover the registry — nothing unclassified, no zombies.
+    assert menu | excluded == registry, {
+        "unclassified": sorted(registry - menu - excluded),
+        "menu_zombies": sorted(menu - registry),
+        "excluded_zombies": sorted(excluded - registry),
+    }
+    # Every excluded name actually exists in COMMANDS (no dead entries).
+    assert excluded <= registry, sorted(excluded - registry)
+    # Every menu name actually exists in COMMANDS (a menu name with no COMMANDS
+    # row is silently dropped by get_telegram_command_menu — catch it here).
+    assert menu <= registry, sorted(menu - registry)
 
 
 def test_telegram_native_menu_is_curated_with_manager() -> None:
@@ -63,7 +92,7 @@ def test_telegram_native_menu_is_curated_with_manager() -> None:
 
     assert names == list(commands.TELEGRAM_NATIVE_COMMANDS)
     assert hidden_count == len(commands.COMMANDS) - len(menu)
-    assert dict(menu)["linkedin"].startswith("LinkedIn/Social Homie")
+    assert dict(menu)["linkedin"].startswith("LinkedIn workshop")
 
 
 def test_telegram_command_constraints_hold() -> None:
@@ -102,7 +131,7 @@ async def test_commands_native_handler_shows_menu_and_hidden_count() -> None:
     )
 
     assert "*Native Telegram Commands*" in reply
-    assert "/linkedin - LinkedIn/Social Homie" in reply
+    assert "/linkedin - LinkedIn workshop" in reply
     assert "/vault - Vault operations" in reply
     assert "Hidden registered commands:" in reply
     assert "/prime" not in reply

@@ -2,7 +2,7 @@
 
 Status: Active baseline
 Owner: `.claude/chat/` command registry (`commands.py`, `core_handlers.py`, `router.py`)
-Last updated: 2026-06-27
+Last updated: 2026-07-11
 
 ## What It Does
 
@@ -27,6 +27,37 @@ Commands come in three layers:
 Most commands require the `admin` role; a few are `operator` or `viewer`.
 Mutating "write to the outside world" commands are **default-denied** and need an
 explicit, exact approval phrase (see [Approval-gated writes](#approval-gated-writes)).
+
+### Native menu vs text-only
+
+Every command in this catalog works when typed. A curated subset also shows up
+in the **native slash menu** (Telegram's `/` dropdown and Discord's slash
+picker) — 54 commands today. The rest are **text-only**: they dispatch fine but
+are kept off the menu on purpose (`NATIVE_MENU_EXCLUDED` in `commands.py`).
+
+- **Menu-registered families:** system/session basics (`/help`, `/status`,
+  `/diagnostics`, `/clear`, `/provider`, `/model`, `/restart`), integrations
+  (`/email`, `/pemail`, `/cleanup`, `/accounts`, `/inbox`, `/calendar`,
+  `/tasks`), browser/social (`/browser`, `/browserops`, `/ghost`, `/x`,
+  `/reddit`, the LinkedIn commands, `/video`), analytics (`/gsc`, `/analytics`,
+  `/signal`), finance (`/budget`), cabinet/team (`/cabinet`, `/standup`,
+  `/discuss`, `/teamroom`, `/team`, `/teamtick`, `/cofounder`), memory
+  (`/search`, `/vault`, `/file`, `/skills`, `/working`), content (`/blog`,
+  `/image`, `/tweet`, `/quote`, `/instagram`, `/design`), and automation
+  (`/recap`, `/blueprints`, `/suggestions`).
+- **Text-only families:** mode toggles (`/plan`, `/go`, `/mode`, `/reload`,
+  `/cost`, `/extensions`), raw engine integrations (`/post`, `/slack`,
+  `/sheets`, `/docs`, `/drive`, `/circle`), hyphenated aliases
+  (`/generate-image`, `/owner-image` — Telegram command names can't contain
+  hyphens), content long-tail (`/yt_script`, `/shorts`), the PIV coding-session
+  workflow (`/prime`, `/planning`, `/implement`, `/validate`, `/review`,
+  `/reviewfix`, `/commit`, `/prd`, `/e2e`, `/sysreview`, `/execreport`,
+  `/clutch`), and engine-only dev tools (`/diagram`, `/pdf`, `/slides`, `/sop`).
+
+Discord inherits the same menu minus the flat `vault` (it registers a typed
+`/vault` command group instead). See
+[Telegram Command Menu](telegram-command-menu.md) for the drift-proofing
+contract.
 
 ---
 
