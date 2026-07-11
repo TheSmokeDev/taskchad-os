@@ -1,6 +1,6 @@
 # Polish Architecture And Execution Program
 
-Status: execution foundation shipped; architecture target adoption in progress
+Status: execution foundation shipped; canonical ten-epic program planned; architecture target adoption in progress
 Owner: architecture, Archon workflow, and subsystem owners
 Last updated: 2026-07-10
 
@@ -21,8 +21,9 @@ separately reviewed and merged.
 - CLI: `archon workflow run implement-prp --branch <branch> <prp-path>` from a
   regular shell; `archon workflow status` to observe a run.
 - Dashboard/API: no polish conformance control surface is shipped.
-- Documents: the canonical specification, one bounded PRP, and the resulting
-  pull request are the operator's planning and review surfaces.
+- Documents: the canonical specification, the staged PRP index, one independently
+  reviewed implementation-ready PRP per run, and the resulting pull request are
+  the operator's planning and review surfaces.
 
 ## Architecture And Evidence Are Separate Axes
 
@@ -85,7 +86,8 @@ worktree model, see [Archon Workflows](archon-workflows.md).
 | Source assessment | `docs/specs/taskchad-os-hermes-polish-assessment.md` |
 | Execution workflow | `.archon/workflows/implement-prp.yaml` |
 | Gate commands | `.archon/commands/prp-*.md` |
-| Initial bounded program | `docs/prps/PRP-001-amendment-aware-rollback.md`, `docs/prps/PRP-001A-domain-rollback-service.md` through `PRP-001D-dashboard-rollback-ui.md` |
+| Canonical program plan | [`docs/prps/CANONICAL-EPIC-INDEX.md`](../../prps/CANONICAL-EPIC-INDEX.md), a staged roadmap whose current canonical slices are all drafts pending closure of independent review findings and digest-bound WF2 review |
+| Legacy bounded pilot | `docs/prps/PRP-001-amendment-aware-rollback.md`, `docs/prps/PRP-001A-domain-rollback-service.md` through `PRP-001D-dashboard-rollback-ui.md`; these map into canonical E01C-E01E and are not the whole of Epic 1 |
 | Operator docs | `docs/manual/features/polish-architecture-execution-program.md`, [Amendment-Aware Rollback](amendment-aware-rollback.md) |
 
 ## Safety Boundaries
@@ -148,7 +150,7 @@ pass and the resulting pull request is reviewed and merged.
 | PRPs execute in a bounded linked worktree | `implement-prp.yaml` worktree, preflight, and package gates | Workflow source is merged; each run must produce its own baseline, scope, test, review, and package artifacts |
 | Two operator approvals and no auto-merge | `plan-approval`, `final-approval`, `publish-pr` nodes | Source inspection; publication follows final approval, while merge is not a workflow node |
 | Foundation is shipped | foundation PR #9 / commit `5088d23` | Merged files listed above; no product behavior claim follows from this merge |
-| Amendment rollback is the first implementation program | PRP-001 epic and A-D slices | PRP-001A is ready for bounded implementation; see the rollback manual for the unshipped status and acceptance gates |
+| Amendment rollback is the legacy implementation pilot | PRP-001 epic and A-D slices, mapped by the canonical index | PR #12 is open implementation of the rollback domain; it does not complete canonical Epic 1 or establish an architecture-level claim |
 
 ## Public Export Status
 
@@ -158,8 +160,16 @@ path.
 
 ## Next Slices
 
-- Complete and independently prove PRP-001A before beginning B-D.
+- Review and land workflow-foundation PRPs WF1-WF4 in dependency order; these
+  strengthen planning/release rails and do not themselves change product
+  conformance.
+- Treat PRP-001A-D as the legacy rollback pilot. Complete and independently
+  prove open PR #12's rollback domain, then map its evidence to canonical E01D;
+  do not mark Epic 1 complete until E01A-E01E all satisfy their gates.
+- Execute only slices explicitly marked implementation-ready in the
+  [Canonical Epic Index](../../prps/CANONICAL-EPIC-INDEX.md). Harden and review
+  remaining Epic 1-3 drafts through WF2 before implementation; do not treat the
+  staged catalog as executable wholesale.
 - Generate scoped applicability and Proof Manifests before claiming an
-  architecture level.
-- Continue the specification's dependency order without creating parallel
+  architecture level, and continue the ten-epic DAG without creating parallel
   domain authorities.
