@@ -1,0 +1,6 @@
+---
+description: Validate one PRP and serialize authoritative preflight data.
+argument-hint: <path/to/one-prp.md>
+---
+# PRP Preflight
+Treat `$ARGUMENTS` as exactly one repository-relative PRP path. Read `baseline.json`; do not edit tracked files. Resolve the path inside the repository (reject traversal), read repository instructions and the complete PRP, and discover real focused and broad regression tests. Classify `proceed`, `revise`, `escalate`, or `abort`; only `proceed` may continue. Create one authoritative `$ARTIFACTS_DIR/preflight.json` object with exactly: `schema: 1`, `decision`, normalized `prp_path`, bounded `scope`, nonempty repository-relative `allowed_paths`, nonempty `focused_tests`, nonempty `regression_tests`, and `blockers`. Each test is exactly `{"cwd":"repository/relative/directory","argv":["executable","literal-arg",...]}`; never emit command strings. Only these argv families are permitted: `uv run --extra dev pytest ...`, `uv run --extra dev ruff ...`, `npm test ...`, and `npm run typecheck ...`. Paths must be normalized repository-relative paths without `..`; allowed paths are exact files or directory prefixes and must be no broader than the PRP. Then output exactly the same JSON object. Never claim command success here; this is discovery only.

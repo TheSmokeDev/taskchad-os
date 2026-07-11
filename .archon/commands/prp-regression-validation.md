@@ -1,0 +1,6 @@
+---
+description: Execute regression commands and serialize exact exit statuses.
+argument-hint: (reads workflow artifacts)
+---
+# PRP Regression Validation
+Independently read the PRP, plan, implementation, test evidence, repository rules, and diff. Do not edit product code. Execute every structured focused and regression test spec from authoritative preflight data as literal argv with `shell=False` and a cwd confined beneath the repository, capturing the spec, exact integer exit code, and concise output evidence. Never execute command strings or shell syntax. This validation must occur after the final code change. Check unwanted/out-of-scope files and acceptance evidence. Write authoritative `$ARTIFACTS_DIR/regression.json`: `{"schema":1,"status":"pass|fail","runs":[{"spec":{"cwd":"...","argv":[...]},"exit_code":0,"evidence":"..."}],"skipped":[],"blockers":[],"changed_files":[...],"validated_diff_digest":"..."}`. The deterministic workflow computes the changed-file list and digest immediately after tests so later gates reject any code change that was not followed by focused and regression reruns. `pass` requires a nonempty list, every exit code zero, no skipped command, no blockers, and no scope violation. Output the exact JSON; never normalize or narratively override a nonzero exit.

@@ -1,0 +1,308 @@
+name: implement-prp
+description: |
+  Deterministically gate and deliver one bounded PRP as a pull request. Run in an
+  Archon-created linked worktree with --branch; --no-worktree is forbidden.
+provider: claude
+model: sonnet
+
+nodes:
+  - id: worktree-guard
+    bash: |
+      set -eu
+      python - <<'PY'
+      import json, os, pathlib, subprocess, sys
+      run=lambda *a: subprocess.run(a, text=True, capture_output=True, check=True).stdout.strip()
+      root=pathlib.Path(run('git','rev-parse','--show-toplevel')).resolve()
+      gitdir=pathlib.Path(run('git','rev-parse','--git-dir')).resolve()
+      common=pathlib.Path(run('git','rev-parse','--git-common-dir')).resolve()
+      branch=run('git','symbolic-ref','--short','HEAD')
+      status=run('git','status','--porcelain=v1','--untracked-files=all')
+      if gitdir == common or not branch or status:
+          print('linked worktree, attached branch, and clean baseline are required', file=sys.stderr); sys.exit(1)
+      data={'schema':1,'root':str(root),'git_dir':str(gitdir),'common_dir':str(common),'branch':branch,
+            'baseline_head':run('git','rev-parse','HEAD'),'baseline_status':''}
+      p=pathlib.Path(os.environ['ARTIFACTS_DIR'])/'baseline.json'; p.parent.mkdir(parents=True,exist_ok=True)
+      p.write_text(json.dumps(data,sort_keys=True,indent=2)+'\n')
+      print(json.dumps(data,sort_keys=True))
+      PY
+
+  - id: preflight
+    command: prp-preflight
+    depends_on: [worktree-guard]
+    context: fresh
+    output_format:
+      type: object
+      properties:
+        schema: {type: integer, enum: [1]}
+        decision: {type: string, enum: [proceed, revise, escalate, abort]}
+        prp_path: {type: string}
+        scope: {type: string}
+        allowed_paths: {type: array, items: {type: string}}
+        focused_tests: {type: array, items: {type: object}}
+        regression_tests: {type: array, items: {type: object}}
+        blockers: {type: array, items: {type: string}}
+      required: [schema, decision, prp_path, scope, allowed_paths, focused_tests, regression_tests, blockers]
+
+  - id: preflight-gate
+    depends_on: [preflight]
+    bash: |
+      set -eu
+      python - <<'PY'
+      import json, os, pathlib, sys
+      p=pathlib.Path(os.environ['ARTIFACTS_DIR'])/'preflight.json'
+      d=json.loads(p.read_text())
+      specs=d.get('focused_tests'),d.get('regression_tests')
+      allowed=d.get('allowed_paths')
+      def valid_spec(s):
+          if not isinstance(s,dict) or set(s)!= {'cwd','argv'} or not isinstance(s['cwd'],str) or not s['cwd'] or '\\' in s['cwd']: return False
+          p=pathlib.PurePosixPath(s['cwd']); a=s['argv']
+          if p.is_absolute() or '..' in p.parts or ':' in s['cwd'] or not isinstance(a,list) or not all(isinstance(x,str) and x for x in a): return False
+          return (a[:4]==['uv','run','--extra','dev'] and len(a)>=5 and a[4] in ('pytest','ruff')) or a[:2]==['npm','test'] or a[:3]==['npm','run','typecheck']
+      valid_paths=isinstance(allowed,list) and bool(allowed) and all(isinstance(x,str) and x and '\\' not in x and ':' not in x and not pathlib.PurePosixPath(x).is_absolute() and '..' not in pathlib.PurePosixPath(x).parts for x in allowed)
+      ok=d.get('schema')==1 and d.get('decision')=='proceed' and not d.get('blockers') and valid_paths and all(isinstance(x,list) and x and all(valid_spec(s) for s in x) for x in specs)
+      if not ok: print('preflight gate rejected authoritative artifact',file=sys.stderr); sys.exit(1)
+      print('PREFLIGHT_GATE_OK')
+      PY
+
+  - id: reconnaissance
+    command: prp-reconnaissance
+    depends_on: [preflight-gate]
+    context: fresh
+    output_format:
+      type: object
+      properties:
+        schema: {type: integer, enum: [1]}
+        status: {type: string, enum: [ready, revise, escalate, abort]}
+        files: {type: array, items: {type: string}}
+        invariants: {type: array, items: {type: string}}
+        risks: {type: array, items: {type: string}}
+        evidence: {type: array, items: {type: string}}
+      required: [schema, status, files, invariants, risks, evidence]
+
+  - id: reconnaissance-gate
+    depends_on: [reconnaissance]
+    bash: |
+      set -eu
+      python - <<'PY'
+      import json,os,pathlib,sys
+      d=json.loads((pathlib.Path(os.environ['ARTIFACTS_DIR'])/'reconnaissance.json').read_text())
+      if d.get('schema') != 1 or d.get('status') != 'ready' or not d.get('files') or not d.get('evidence'): sys.exit('reconnaissance not ready')
+      print('RECONNAISSANCE_GATE_OK')
+      PY
+
+  - id: plan
+    command: prp-plan
+    depends_on: [reconnaissance-gate]
+    context: fresh
+
+  - id: plan-approval
+    approval:
+      message: |
+        Approve this bounded plan to start implementation. Rejection may revise
+        only the plan; reject permanently if scope or safety is unresolved.
+        $plan.output
+      capture_response: true
+      on_reject:
+        prompt: |
+          Revise only the plan from this feedback; do not edit product code:
+          $REJECTION_REASON
+        max_attempts: 3
+    depends_on: [plan]
+
+  - id: implementation
+    command: prp-implement-test-first
+    depends_on: [plan-approval]
+    context: fresh
+    idle_timeout: 900000
+
+  - id: implementation-gate
+    depends_on: [implementation]
+    bash: |
+      set -eu
+      python - <<'PY'
+      import json,os,pathlib,sys
+      d=json.loads((pathlib.Path(os.environ['ARTIFACTS_DIR'])/'implementation.json').read_text())
+      if d.get('schema') != 1 or d.get('status') != 'ready' or not d.get('red_green_evidence'): sys.exit('implementation is not ready')
+      print('IMPLEMENTATION_GATE_OK')
+      PY
+
+  - id: focused-test-fix
+    loop:
+      prompt: |
+        Follow .archon/commands/prp-test-fix.md for one bounded iteration. The
+        authoritative result is test-results.json. Print the exact sentinel
+        __ARCHON_FOCUSED_PASS_9E31C7__ only when that artifact records pass.
+      until: "__ARCHON_FOCUSED_PASS_9E31C7__"
+      max_iterations: 4
+    depends_on: [implementation-gate]
+
+  - id: focused-test-gate
+    depends_on: [focused-test-fix]
+    bash: |
+      set -eu
+      python - <<'PY'
+      import json,os,pathlib,subprocess,sys
+      base=pathlib.Path(os.environ['ARTIFACTS_DIR']); pre=json.loads((base/'preflight.json').read_text()); root=pathlib.Path(json.loads((base/'baseline.json').read_text())['root']).resolve(); runs=[]
+      def validate(s):
+          if set(s)!= {'cwd','argv'} or not isinstance(s['cwd'],str) or not isinstance(s['argv'],list) or not all(isinstance(x,str) and x for x in s['argv']): sys.exit('invalid test spec')
+          cwd=(root/s['cwd']).resolve()
+          try: cwd.relative_to(root)
+          except ValueError: sys.exit('test cwd escapes repository')
+          a=s['argv']; allowed=(a[:4]==['uv','run','--extra','dev'] and len(a)>=5 and a[4] in ('pytest','ruff')) or a[:2]==['npm','test'] or a[:3]==['npm','run','typecheck']
+          if not allowed: sys.exit('test argv is not allowlisted')
+          return cwd,a
+      for spec in pre['focused_tests']:
+          cwd,argv=validate(spec); p=subprocess.run(argv,cwd=cwd,shell=False,text=True,capture_output=True)
+          runs.append({'spec':spec,'exit_code':p.returncode,'evidence':(p.stdout+p.stderr)[-4000:]})
+      d={'schema':1,'status':'pass' if runs and all(r['exit_code']==0 for r in runs) else 'fail','runs':runs,'blockers':[]}
+      (base/'test-results.json').write_text(json.dumps(d,sort_keys=True,indent=2)+'\n')
+      if d['status'] != 'pass': sys.exit('focused tests did not pass')
+      print('FOCUSED_TEST_GATE_OK')
+      PY
+
+  - id: regression-validation
+    depends_on: [focused-test-gate]
+    timeout: 900000
+    bash: |
+      set -eu
+      python - <<'PY'
+      import json,os,pathlib,subprocess,sys
+      base=pathlib.Path(os.environ['ARTIFACTS_DIR']); pre=json.loads((base/'preflight.json').read_text()); root=pathlib.Path(json.loads((base/'baseline.json').read_text())['root']).resolve(); runs=[]
+      def validate(s):
+          if set(s)!= {'cwd','argv'} or not isinstance(s['cwd'],str) or not isinstance(s['argv'],list) or not all(isinstance(x,str) and x for x in s['argv']): sys.exit('invalid test spec')
+          cwd=(root/s['cwd']).resolve()
+          try: cwd.relative_to(root)
+          except ValueError: sys.exit('test cwd escapes repository')
+          a=s['argv']; allowed=(a[:4]==['uv','run','--extra','dev'] and len(a)>=5 and a[4] in ('pytest','ruff')) or a[:2]==['npm','test'] or a[:3]==['npm','run','typecheck']
+          if not allowed: sys.exit('test argv is not allowlisted')
+          return cwd,a
+      for spec in pre['regression_tests']:
+          cwd,argv=validate(spec); p=subprocess.run(argv,cwd=cwd,shell=False,text=True,capture_output=True)
+          runs.append({'spec':spec,'exit_code':p.returncode,'evidence':(p.stdout+p.stderr)[-4000:]})
+      changed=sorted(x for x in (subprocess.run(['git','diff','--name-only','-z','HEAD'],cwd=root,text=True,capture_output=True,check=True,shell=False).stdout+subprocess.run(['git','ls-files','--others','--exclude-standard','-z'],cwd=root,text=True,capture_output=True,check=True,shell=False).stdout).split('\0') if x)
+      h=__import__('hashlib').sha256(); h.update(subprocess.run(['git','diff','--binary','HEAD','--'],cwd=root,capture_output=True,check=True,shell=False).stdout)
+      for path in subprocess.run(['git','ls-files','--others','--exclude-standard','-z'],cwd=root,text=True,capture_output=True,check=True,shell=False).stdout.split('\0'):
+          if path: h.update(path.encode()+b'\0'+(root/path).read_bytes()+b'\0')
+      d={'schema':1,'status':'pass' if runs and all(r['exit_code']==0 for r in runs) else 'fail','runs':runs,'skipped':[],'blockers':[],'changed_files':changed,'validated_diff_digest':h.hexdigest()}
+      (base/'regression.json').write_text(json.dumps(d,sort_keys=True,indent=2)+'\n')
+      if d['status'] != 'pass': sys.exit('regression exit-status gate failed')
+      print('REGRESSION_GATE_OK')
+      PY
+
+  - id: spec-review
+    command: prp-review-spec
+    depends_on: [regression-validation]
+    context: fresh
+  - id: security-state-review
+    command: prp-review-security-state
+    depends_on: [regression-validation]
+    context: fresh
+  - id: simplification-review
+    command: prp-review-simplification
+    depends_on: [regression-validation]
+    context: fresh
+  - id: docs-review
+    command: prp-docs-verification
+    depends_on: [regression-validation]
+    context: fresh
+
+  - id: review-aggregate
+    depends_on: [spec-review, security-state-review, simplification-review, docs-review]
+    bash: |
+      set -eu
+      python - <<'PY'
+      import json,os,pathlib,sys
+      base=pathlib.Path(os.environ['ARTIFACTS_DIR']); names=['spec','security-state','simplification','docs']; reviews={}
+      for n in names:
+          d=json.loads((base/('review-'+n+'.json')).read_text())
+          if d.get('schema') != 1 or d.get('verdict') not in ['pass','block'] or not isinstance(d.get('findings'),list): sys.exit('invalid review artifact: '+n)
+          reviews[n]=d
+      verdict='pass' if all(v['verdict']=='pass' for v in reviews.values()) else 'block'
+      out={'schema':1,'verdict':verdict,'reviews':{n:v['verdict'] for n,v in reviews.items()}}
+      (base/'review-aggregate.json').write_text(json.dumps(out,sort_keys=True,indent=2)+'\n'); print(json.dumps(out,sort_keys=True))
+      PY
+
+  - id: review-gate
+    depends_on: [review-aggregate]
+    bash: |
+      set -eu
+      python - <<'PY'
+      import json,os,pathlib,sys
+      b=pathlib.Path(os.environ['ARTIFACTS_DIR']); a=json.loads((b/'review-aggregate.json').read_text()); t=json.loads((b/'test-results.json').read_text()); r=json.loads((b/'regression.json').read_text())
+      if a.get('schema') != 1 or a.get('verdict') != 'pass' or set(a.get('reviews',{}).values()) != {'pass'}: sys.exit('review aggregate blocked; abandon run and restart after remediation')
+      if t.get('status') != 'pass' or any(x.get('exit_code') != 0 for x in t.get('runs',[])): sys.exit('focused tests failed')
+      if r.get('status') != 'pass' or r.get('skipped') or any(x.get('exit_code') != 0 for x in r.get('runs',[])): sys.exit('regression tests failed')
+      print('REVIEW_GATE_OK')
+      PY
+
+  - id: package
+    command: prp-package
+    depends_on: [review-gate]
+    context: fresh
+
+  - id: package-gate
+    depends_on: [package]
+    bash: |
+      set -eu
+      python - <<'PY'
+      import hashlib,json,os,pathlib,subprocess,sys
+      b=pathlib.Path(os.environ['ARTIFACTS_DIR']); pkg=json.loads((b/'pr-package.json').read_text()); pre=json.loads((b/'preflight.json').read_text()); base=json.loads((b/'baseline.json').read_text()); regression=json.loads((b/'regression.json').read_text())
+      run=lambda a,check=True: subprocess.run(a,cwd=base['root'],text=True,capture_output=True,check=check)
+      branch=run(['git','symbolic-ref','--short','HEAD']).stdout.strip(); head=run(['git','rev-parse','HEAD']).stdout.strip()
+      if head != base['baseline_head'] or branch != base['branch']: sys.exit('baseline HEAD or branch changed before approval')
+      if run(['git','merge-base','--is-ancestor',base['baseline_head'],head],False).returncode: sys.exit('baseline is not an ancestor')
+      required={'schema','status','title','commit_message','branch','body_file','changed_files','test_evidence'}
+      if set(pkg)!=required or pkg['schema']!=1 or pkg['status']!='packaged' or pkg['branch']!=branch or pkg['body_file']!='pr-body.md' or not all(isinstance(pkg[x],str) and pkg[x].strip() for x in ('title','commit_message')): sys.exit('invalid package schema/status/branch')
+      body=b/'pr-body.md'
+      if not body.is_file() or not body.read_text().strip(): sys.exit('missing/empty PR body')
+      tracked=run(['git','diff','--name-only','-z',base['baseline_head']]).stdout.split('\0'); extra=run(['git','ls-files','--others','--exclude-standard','-z']).stdout.split('\0'); changed=sorted(set(x.replace('\\','/') for x in tracked+extra if x))
+      allowed=pre.get('allowed_paths');
+      if not isinstance(allowed,list) or not allowed or any(not isinstance(x,str) or not x or pathlib.PurePosixPath(x).is_absolute() or '..' in pathlib.PurePosixPath(x).parts for x in allowed): sys.exit('invalid preflight allowed_paths')
+      def in_scope(p): return any(p==a.rstrip('/') or p.startswith(a.rstrip('/')+'/') for a in allowed)
+      if not changed or any(not in_scope(p) for p in changed) or sorted(pkg['changed_files'])!=changed: sys.exit('changed paths violate preflight scope or package')
+      h=hashlib.sha256(); h.update(subprocess.run(['git','diff','--binary',base['baseline_head'],'--'],cwd=base['root'],capture_output=True,check=True,shell=False).stdout)
+      for p in sorted(set(extra)-{''}): h.update(p.encode()+b'\0'+(pathlib.Path(base['root'])/p).read_bytes()+b'\0')
+      if regression.get('validated_diff_digest') != h.hexdigest() or regression.get('changed_files') != changed: sys.exit('code changed after deterministic regression validation')
+      manifest={'schema':1,'baseline_head':head,'branch':branch,'changed_files':changed,'approved_diff_digest':h.hexdigest()}
+      (b/'approval-manifest.json').write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n'); print(json.dumps(manifest,sort_keys=True))
+      PY
+
+  - id: final-approval
+    approval:
+      message: |
+        Final human publish approval. Approval authorizes the next deterministic
+        node to commit, push the current branch, and open a PR. Rejection does
+        not edit code: abandon this run, then resume/re-run the full pipeline
+        after making corrections because Archon 0.5.0 has no safe approval cycle.
+        $package.output
+      capture_response: true
+    depends_on: [package-gate]
+
+  - id: publish-pr
+    depends_on: [final-approval]
+    timeout: 300000
+    bash: |
+      set -eu
+      python - <<'PY'
+      import hashlib,json,os,pathlib,re,subprocess,sys
+      b=pathlib.Path(os.environ['ARTIFACTS_DIR']); pkg=json.loads((b/'pr-package.json').read_text()); base=json.loads((b/'baseline.json').read_text()); approved=json.loads((b/'approval-manifest.json').read_text())
+      run=lambda a,check=True,text=True: subprocess.run(a,cwd=base['root'],text=text,capture_output=True,check=check,shell=False)
+      branch=run(['git','symbolic-ref','--short','HEAD']).stdout.strip(); head=run(['git','rev-parse','HEAD']).stdout.strip()
+      if head != base['baseline_head'] or approved.get('baseline_head') != head: sys.exit('HEAD changed since baseline/approval (agent commits forbidden)')
+      if branch != base['branch'] or branch != pkg['branch'] or branch != approved.get('branch'): sys.exit('branch/package mismatch')
+      if run(['git','merge-base','--is-ancestor',base['baseline_head'],head],False).returncode: sys.exit('baseline ancestry failed')
+      tracked=run(['git','diff','--name-only','-z',head]).stdout.split('\0'); extra=run(['git','ls-files','--others','--exclude-standard','-z']).stdout.split('\0'); changed=sorted(set(x.replace('\\','/') for x in tracked+extra if x))
+      if changed != approved.get('changed_files') or changed != sorted(pkg.get('changed_files',[])): sys.exit('changed files differ from approved package')
+      diff=run(['git','diff','--binary',head,'--'],text=False).stdout; h=hashlib.sha256(); h.update(diff)
+      for p in sorted(set(extra)-{''}): h.update(p.encode()+b'\0'+(pathlib.Path(base['root'])/p).read_bytes()+b'\0')
+      if h.hexdigest() != approved.get('approved_diff_digest'): sys.exit('approved diff digest changed')
+      if not changed: sys.exit('nothing to publish')
+      run(['git','add','--']+changed)
+      staged=sorted(x for x in run(['git','diff','--cached','--name-only','-z']).stdout.split('\0') if x)
+      if staged != changed: sys.exit('explicit staging mismatch')
+      run(['git','commit','-m',pkg['commit_message']]); run(['git','push','--set-upstream','origin',branch])
+      p=run(['gh','pr','create','--title',pkg['title'],'--body-file',str(b/'pr-body.md')]); url=p.stdout.strip().splitlines()[-1]
+      if not re.fullmatch(r'https://github\.com/[^/]+/[^/]+/pull/[1-9][0-9]*',url): sys.exit('gh did not return a valid GitHub PR URL')
+      out={'schema':1,'status':'published','branch':branch,'commit':run(['git','rev-parse','HEAD']).stdout.strip(),'url':url}
+      (b/'publish.json').write_text(json.dumps(out,sort_keys=True,indent=2)+'\n'); print(json.dumps(out,sort_keys=True))
+      PY
