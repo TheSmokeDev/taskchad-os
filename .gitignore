@@ -144,3 +144,6 @@ skills-lock.json
 # gains a clients/ DENY_DIRS entry (that file is owned by a parallel session
 # right now). Untracked = git ls-files never sees it = can never ship publicly.
 clients/
+
+# Archived (retired) skills — consolidated into vault-ops 2026-07-11
+.claude/_archive/

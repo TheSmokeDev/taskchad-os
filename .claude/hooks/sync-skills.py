@@ -39,21 +39,9 @@ from shared import log_hook_execution  # noqa: E402
 # (some user-level skills are genuinely per-machine, e.g. private credentials).
 # Add to this list when a project-level skill needs to be the source-of-truth.
 SKILLS_TO_SYNC = [
-    "vault",
-    "vault-audit",
-    "vault-autolink",
-    "vault-build",
-    "vault-daily-review",
-    "vault-de-ai-ify",
-    "vault-discover",
-    "vault-health-fix",
-    "vault-ingest",
+    # Vault skills consolidated into the single vault-ops skill (2026-07-11);
+    # the 14 atomic vault-* skills were archived to .claude/_archive/skills/.
     "vault-ops",
-    "vault-research-assistant",
-    "vault-sync",
-    "vault-tasks",
-    "vault-thinking-partner",
-    "vault-weekly-synthesis",
     # CLUTCH v3 — added 2026-04-29 alongside adversarial-review reference + templates.
     # Project-level clutch is the source of truth; user-level is the cache Claude Code loads.
     "clutch",

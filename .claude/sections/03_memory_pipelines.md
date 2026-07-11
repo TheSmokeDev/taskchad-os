@@ -123,7 +123,7 @@ When a document is ingested, the compilation engine extracts key entities/concep
 
 | Trigger | When | Automatic? |
 |---------|------|-----------|
-| `/vault-ingest` Step 3.5 | Ingest any doc | Manual |
+| `/vault-ops ingest` Step 3.5 | Ingest any doc | Manual |
 | `/file` command | After a good bot answer | Manual (nudged) |
 | `/file` nudge | After long analytical response (>800 chars + analysis signals) | Auto-suggested |
 | Daily reflection hook | 8 AM daily (after `memory_reflect.py`) | Automatic |
@@ -179,17 +179,17 @@ uv run python vault_lint.py --vault-dir "vault/memory" --format json
 - `{vault}/INDEX.md` — whole-wiki catalog (auto-refreshed by `compile_entities()` + `index-root` CLI). Single first-read surface covering identity files, MOCs, concepts-by-type (capped at 25/type), and top-level directories.
 - `{vault}/concepts/INDEX.md` — concept-only drill-down catalog.
 - `{vault}/LOG.md` — append-only chronological timeline of wiki-evolution events (`ingest`, `compile`, `reflect`, `weekly`, `dream`, `archive`). Grep-friendly: `grep "^## \[" LOG.md | tail -5`. Heartbeat excluded (too noisy).
-- `{vault}/raw/` — immutable original sources. Never modified. Preserved via `preserve_raw()` helper, invoked by `/vault-ingest` Step 2.5 and `finance_ingest.py`.
+- `{vault}/raw/` — immutable original sources. Never modified. Preserved via `preserve_raw()` helper, invoked by `/vault-ops ingest` Step 2.5 and `finance_ingest.py`.
 
 **Key design decisions:**
 - Concept pages live in flat `vault/memory/concepts/` folder with `tags: [concept, auto-compiled]`
 - Confidence threshold: 0.6 (extract up to 15, only compile those above threshold)
-- Heuristic extraction (headings, bold, wikilinks, frontmatter) — no LLM API call. The vault-ingest skill's LLM layer enhances extraction when running in an LLM context.
+- Heuristic extraction (headings, bold, wikilinks, frontmatter) — no LLM API call. The vault-ops ingest pipeline's LLM layer enhances extraction when running in an LLM context.
 - Heading number stripping: leading `N. ` / `N- ` prefixes removed from entity names before slugging (prevents `1-SYSTEM-ARCHITECTURE.md`)
 - LLM re-ranking on recall: haiku model, Tier 1 only, 3s hard timeout, `RECALL_RERANK_ENABLED` env var kill switch
 - All hooks are non-blocking (try/except wrapped) — compilation failure never breaks reflection/synthesis
 - Dedup: same source can't add to a concept page twice. Different sources accumulate sections.
-- Raw source preservation: `/vault-ingest` Step 2.5 copies original to `raw/` (immutable) before compilation
+- Raw source preservation: `/vault-ops ingest` Step 2.5 copies original to `raw/` (immutable) before compilation
 - Lint strips code blocks before wikilink scanning — template `[[Link-1]]` examples in SCHEMA.md won't trigger false positives
 - Auto-generated files (daily logs, BUILD-LOG.md, team plans) excluded from frontmatter validation
 - Connection articles include `date:` field in frontmatter (auto-generated)

@@ -91,7 +91,7 @@ Deep dive: [BrowserOps + Browser Viewer](browserops-browser-viewer.md) · [Socia
 | `/reddit` | Reddit ops — research (read-only), comment / post | **yes** for comment/post |
 | `/x` | X scout — scout / timeline / search the X timeline | read-only |
 | `/social` | Social post queue — status, queue, draft, approve, reject, post, cadence | post is gated |
-| `/linkedin` | LinkedIn/Social Homie — draft posts, ideas, revisions only | draft-only |
+| `/linkedin` | Guided LinkedIn workshop — Cook Together or Run It for Me, revise copy/image, approve exact queue row | **yes** — only Approve & Post publishes |
 
 ## Cabinet & Team
 
@@ -187,8 +187,8 @@ engine-passed developer tooling:
 | `/slides` | Generate a PPTX presentation |
 | `/sop` | Create a runbook or technical documentation |
 
-Skills layer (invoked as `/skill-name`): the `vault-*` family (`/vault-build`,
-`/vault-ingest`, `/vault-sync`, `/vault-discover`, `/vault-audit`, …),
+Skills layer (invoked as `/skill-name`): `/vault-ops` (the single consolidated
+vault skill — orient/debrief/weekly, ingest, query, maintain, discover, build),
 `/graphify` (queryable code+docs knowledge graph), `/direct-integrations`
 (direct Gmail/Calendar/Asana/Slack/Sheets/Docs/Drive access), and the content /
 documentation skills. Run the skill name directly in a coding session.
