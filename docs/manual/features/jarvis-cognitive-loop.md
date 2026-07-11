@@ -30,8 +30,10 @@ truth surfaces. Some internal files still carry the legacy Jarvis name.
 ## Safety Boundaries
 
 - Automatic durable-memory writes stay policy-gated.
-- Self-amendment uses proposal/ledger/rollback paths; do not silently rewrite
-  SELF/SOUL/USER/MEMORY.
+- Self-amendment uses proposal/ledger safeguards; do not silently rewrite
+  SELF/SOUL/USER/MEMORY. The conflict-safe restore lifecycle is **in
+  development**, not part of this page's shipped cognition claim; see
+  [Amendment-Aware Rollback](amendment-aware-rollback.md).
 - Scheduled probes should support no-write/no-external-send test modes.
 - Live proof must distinguish root checkout, worktree checkout, and live bot
   process state.
