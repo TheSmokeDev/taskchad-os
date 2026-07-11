@@ -1,8 +1,8 @@
 # Memory And Recall System
 
 Status: Active baseline
-Owner: Memory pipelines + recall service (`.claude/chat/recall_service.py`, `.claude/chat/cognition/`, `.claude/scripts/memory_*.py`)
-Last updated: 2026-06-27
+Owner: Memory pipelines + recall service (`.claude/chat/recall_service.py`, `.claude/chat/cognition/`, `.claude/scripts/memory_*.py`, `.claude/scripts/entity_extractor.py`, `.claude/scripts/vault_lint.py`)
+Last updated: 2026-07-11
 
 ## What It Does
 
@@ -21,9 +21,10 @@ Two things sit on top of that index:
    weekly synthesis, the `/vault-ops` skill, and the `thehomie recall` CLI all
    call the same function. There is no second search path (Invariant I-3).
 
-The background pipelines each have their own deep pages; this chapter is about
-**recall** — how memory is read, what the `thehomie recall` CLI does, the
-multi-vault layout, and how the slash commands tap it.
+The background pipelines each have their own deep pages; this chapter covers
+**recall** (how memory is read, what the `thehomie recall` CLI does, the
+multi-vault layout, how the slash commands tap it) and the **vault maintenance
+surface** (the compilation engine's link-economy guardrails and delta-lint).
 
 | Pipeline | Cadence | Job | Deep page |
 |---|---|---|---|
@@ -148,12 +149,86 @@ Two invariants make this safe:
 The native `/vault search` and `/vault context` chat commands are recall-backed
 the same way — see [Native Vault Commands](native-vault-commands.md).
 
+## The Compilation Engine And Link-Economy Guardrails
+
+The write side of memory is the entity compilation engine
+(`.claude/scripts/entity_extractor.py`) — the Karpathy LLM-Wiki port. When a
+source is ingested (or reflection/synthesis runs), it extracts entities and
+creates or updates concept pages in `{vault}/concepts/`, cross-links them, and
+flags contradictions. Pure Python, zero LLM calls.
+
+Left unchecked, that pattern link-explodes: every one-off mention becomes a
+page, every ingest touches 10-15 pages, and the graph rots. The **link-economy
+guardrails** (shipped 2026-07-11, from the 30-day field research on the
+LLM-Wiki pattern) put a budget on it:
+
+| Guardrail | Knob (default) | What it does |
+|---|---|---|
+| Create gate | `ENTITY_PAGE_MIN_MENTIONS` (`2`) | A new entity is **staged**, not paged, on first sight. The page is created only when a second *different* source mentions it — and the first source's claims are replayed onto the new page, so no provenance is lost. |
+| Edit ceiling | `ENTITY_EDIT_CEILING` (`5`) | One ingest updates at most N existing concept pages. Only real writes count — recompiling the same source burns no slots. |
+| Link cap | `ENTITY_LINK_CAP` (`8`) | Per-page ceiling on `related:` frontmatter links. A capped page still receives its `## From [[source]]` content section — the cap governs graph edges, not knowledge. |
+| Master switch | `ENTITY_GUARDRAILS_ENABLED` (`false`) | Everything above is default-OFF. When off, compilation is byte-identical to the pre-guardrail engine. |
+
+How staging works: first-sight entities land in a per-vault ledger at
+`{vault}/_state/entity-mentions.json` (per-source payloads, atomic writes under
+a file lock, 180-day TTL on single-source entries). Staged entities are
+excluded from connection articles and source `related:` links, so staging never
+manufactures broken wikilinks. The compile report and `concepts/BUILD-LOG.md`
+show `Staged` / `Skipped (edit ceiling)` / `Skipped (link cap)` counters, so the
+guardrails are always visible, never silent. Any ledger failure fails open to
+legacy create-immediately behavior.
+
+Bypass semantics: the CLI `backfill` command bypasses the create gate (bootstrap
+is supposed to page everything); the nightly reflection `sweep` does **not**
+bypass (otherwise every staged entity would be promoted within 24h and the gate
+would be a delay, not a filter).
+
+```bash
+cd .claude/scripts
+uv run python entity_extractor.py compile "path/to/source.md" --vault-dir "<vault>"   # guardrails per env
+uv run python entity_extractor.py backfill --vault-dir "<vault>"                      # bootstrap: gate bypassed
+uv run python entity_extractor.py sweep --vault-dir "<vault>"                         # gate respected
+```
+
+## Vault Lint And Delta-Lint
+
+`vault_lint.py` runs 8 health checks (orphans, broken wikilinks, frontmatter,
+tags, stale content, page size, index completeness, contradictions) over a
+vault. Historically every run re-read every note. **Delta-lint** (shipped
+2026-07-11) re-lints only what changed:
+
+```bash
+cd .claude/scripts
+uv run python vault_lint.py --vault-dir "<vault>"           # full scan (default)
+uv run python vault_lint.py --vault-dir "<vault>" --delta   # changed files + their linkers
+```
+
+- State lives at `{vault}/_state/lint-state.json`: a sha256 content-hash
+  snapshot per file plus its outbound wikilinks and cached content-pure issues.
+  The reverse linker map is derived in memory, never persisted.
+- **The output invariant: delta results are identical to a full scan, always.**
+  Unchanged files replay their cached issues; time-dependent checks
+  (`stale_content`) are recomputed every run; global checks (orphans, broken
+  links) are evaluated from the updated link map. This is what keeps the
+  scheduled "Vault lint: NE/NW" health line truthful.
+- Full scan is forced automatically when the state is missing/corrupt, when
+  `SCHEMA.md` changes (tag-taxonomy invalidation), or when a `--check` subset is
+  requested. The whole delta path fails open to a full scan — `run_lint` never
+  raises.
+- `LINT_DELTA_ENABLED` (default `false`) flips the scheduled reflection lint to
+  delta mode without touching the CLI default.
+
+Both `_state/` files are per-vault, invisible to the recall index (`.md`-only
+walk), and skipped by lint, backfill, and index generation.
+
 ## Operator Entry Points
 
 - CLI: `thehomie recall "<query>" --vault <name> --mode hybrid [--brief] [--json]`
 - Chat: `/search`, `/vault search <query>`, `/vault context <topic>`, `/file`, `/working`
 - Skill: `/vault-ops orient | debrief | weekly | context | think | research`
 - Re-index: `uv run python memory_index.py --vault <name>`
+- Compile: `uv run python entity_extractor.py compile|backfill|sweep --vault-dir <vault>`
+- Lint: `uv run python vault_lint.py --vault-dir <vault> [--delta] [--format json]`
 
 ## Source Of Truth Files
 
@@ -165,12 +240,17 @@ the same way — see [Native Vault Commands](native-vault-commands.md).
 | Search backends | `.claude/scripts/memory_search.py`, `.claude/scripts/db.py` |
 | Index builder | `.claude/scripts/memory_index.py` |
 | Vault registry | `.claude/scripts/config.py` (`resolve_vault`, `resolve_db_path`) |
+| Compilation engine + guardrails | `.claude/scripts/entity_extractor.py`; knobs in `config.py` (`get_entity_guardrail_settings`) |
+| Vault lint + delta | `.claude/scripts/vault_lint.py`; knob in `config.py` (`get_lint_delta_enabled`) |
 | Skill integration | `.claude/skills/vault-ops/references/{routines,intelligence,pipelines}.md` |
-| Tests | `.claude/scripts/tests/test_recall_cli.py`, `test_recall_service.py`, `test_cognition_recall.py` |
+| Tests | `.claude/scripts/tests/test_recall_cli.py`, `test_recall_service.py`, `test_cognition_recall.py`, `test_entity_guardrails.py`, `test_vault_lint.py` |
 
 ## Safety Boundaries
 
-- Read-only. Recall retrieves and ranks notes; it never writes the vault.
+- Recall is read-only: it retrieves and ranks notes; it never writes the vault.
+  The write side (compilation, lint state) touches only `concepts/`,
+  `connections/`, source `related:` frontmatter, and `{vault}/_state/` — and
+  every new write behavior ships default-OFF behind an env knob.
 - Recalled text is injection-sanitized before it enters any prompt.
 - The skills never import the recall machinery — they shell the CLI, so the
   kill-switch and observability cover every caller (Invariant I-3).

@@ -89,7 +89,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Cognitive Loop | Shipped/live-runtime proven; dashboard route hidden from public nav | [jarvis-cognitive-loop](features/jarvis-cognitive-loop.md) | status/doctor, scheduled loops |
 | Heartbeat Runtime | Active baseline, runtime contract corrected | [heartbeat-runtime](features/heartbeat-runtime.md) | `heartbeat.py`, `HEARTBEAT.md`, scheduled loop |
 | Direct Integration Capability Contract | Shipped, policy-enforced | [direct-integration-capability-contract](features/direct-integration-capability-contract.md) | direct integration wrapper, `/send`, status/doctor |
-| Memory And Recall System | Active baseline | [memory-and-recall-system](features/memory-and-recall-system.md) | `thehomie recall`, `/search`, `/file`, `/working`, `/vault-ops` |
+| Memory And Recall System | Active baseline; 2026-07-11 added link-economy guardrails + delta-lint | [memory-and-recall-system](features/memory-and-recall-system.md) | `thehomie recall`, `/search`, `/file`, `/working`, `/vault-ops`, `entity_extractor.py`, `vault_lint.py --delta` |
 | Memory, Knowledge Graph, And Dashboard Chat | Active baseline, dashboard chat reliability proven | [memory-hive-chat-observer](features/memory-hive-chat-observer.md) | `/memories`, `/hive`, `/chat` |
 | Scheduled Jobs, Settings, And Audit | Active baseline | [scheduled-settings-audit](features/scheduled-settings-audit.md) | `/scheduled`, `/settings`, `/audit` |
 | Operator Automation UX | Shipped (Phase 2), propose-don't-auto-create | [automation-ux](features/automation-ux.md) | `/recap`, `/blueprints`, `/suggestions` |
@@ -100,6 +100,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Social Post Pipeline | Shipped (#80), default-denied, operator-gated | [social-post-pipeline](features/social-post-pipeline.md) | `/social` (draft/approve/post/schedule/cadence) |
 | Skill-From-Experience Loop | Shipped, default-denied, operator-gated | [skill-from-experience-loop](features/skill-from-experience-loop.md) | `/skills` (review/promote/reject) |
 | Social Cadence Draft Delivery | Shipped, default-denied, operator-gated per tap | [social-cadence-draft-delivery](features/social-cadence-draft-delivery.md) | Telegram draft cards (Approve/Edit/Reject), `/social` |
+| LinkedIn Personal Brand Engine | First authority + network-growth slice implemented and locally scheduled | [linkedin-personal-brand-engine](features/linkedin-personal-brand-engine.md) | `social.linkedin_growth`, social cadence, Image Node Factory |
 | Social Integrations (Meta Graph + Postiz + Social Tab) | Shipped — FB/IG direct via Meta Graph, Postiz for the rest | [social-postiz-integration](features/social-postiz-integration.md) | dashboard `/social` tab, `social/channels.yaml`, `social/postiz_canary.py` |
 | Intent-PRD and Clutch Review | Shipped (#78), merged | [intent-prd-and-clutch](features/intent-prd-and-clutch.md) | `create-prd`, `archon workflow run archon-clutch` |
 | Context-Economy DX | Shipped (#66), merged | [context-economy-dx](features/context-economy-dx.md) | `/prime-*`, `brownfield-day-1`, `vertical-slice-audit` |
