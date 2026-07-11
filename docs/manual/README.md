@@ -27,6 +27,11 @@ machine-specific proof artifacts stay outside the public manual.
 6. Read [Heartbeat Runtime](features/heartbeat-runtime.md) before changing
    proactive background reasoning, heartbeat model overrides, or scheduler
    behavior.
+7. Maintainers implementing architecture work should read
+   [Polish Architecture And Execution Program](features/polish-architecture-execution-program.md)
+   for the normative-spec/evidence distinction and bounded PRP gates. Then read
+   [Amendment-Aware Rollback](features/amendment-aware-rollback.md) for the
+   **in-development** first program; do not treat its planned surfaces as shipped.
 
 ## Ecosystem Positioning
 
@@ -105,6 +110,8 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Context-Economy DX | Shipped (#66), merged | [context-economy-dx](features/context-economy-dx.md) | `/prime-*`, `brownfield-day-1`, `vertical-slice-audit` |
 | Repositories System | Shipped (#63), merged | [repositories-system](features/repositories-system.md) | `thehomie repositories status\|validate` |
 | Archon Workflows | Active baseline, autonomous pipeline live-proven | [archon-workflows](features/archon-workflows.md) | `archon workflow list\|run\|status` |
+| Polish Architecture And Execution Program | Execution foundation merged (#9); target adoption and conformance proof in progress | [polish-architecture-execution-program](features/polish-architecture-execution-program.md) | canonical spec, `archon workflow run implement-prp --branch ...` |
+| Amendment-Aware Rollback | **IN DEVELOPMENT** — PRP-001A ready for bounded implementation; B-D planned; no rollback surface shipped | [amendment-aware-rollback](features/amendment-aware-rollback.md) | future domain/CLI/API/Audit surfaces |
 | CLI Update Check | Active baseline, live-proven | [cli-update-check](features/cli-update-check.md) | `thehomie update`, `thehomie --version`, `scripts/release.sh` |
 
 ### Existing Deep Public Manuals
@@ -113,7 +120,6 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 |---|---|
 | [The Co-Founder Manual](../cofounder-manual.md) | The org chart end to end — the Homie as the co-founder on every surface, the five heartbeat loops (agenda → approval → execution → reporting → checkout), delegation grants, safety model, the turn-it-on runbook, failure modes, architecture map. |
 | [The Living Self Manual](../the-living-self-manual.md) | The cognitive system end to end — sense, form beliefs, hold against conflict, think before speaking, earn convictions. Operator runbook + architecture + knobs + verification. Ties together Heartbeat Runtime, Episodes, and Session Opening Brief. |
-| [The Homie Mobile Manual](../homie-mobile-manual.md) | The phone app end to end — architecture, pairing, the chat cockpit (tools/model/effort/stop/steer), personas and War Room, sessions/library/gauges, desktop browser drive, PhoneOps (driving the phone's own Chrome: adb transport, freezer physics, act policy), safety model, failure modes, validation map. |
 | [BrowserOps Agent Browser Manual](../browserops-agent-browser-manual.md) | Deep BrowserOps operating contract, safety policy, validation, and failure modes. |
 | [Social-Write Executor Manual](../social-write-executor-manual.md) | Deep operating contract for operator-approved LinkedIn and Reddit writes: the isolated-approval gate, the executor/driver split, audit policy, platform notes, and validation. |
 | [Cabinet Room Manual](../cabinet-room-manual.md) | Deep Cabinet room-state, dashboard, and participant-control context. |
