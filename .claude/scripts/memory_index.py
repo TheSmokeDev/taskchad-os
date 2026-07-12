@@ -334,7 +334,7 @@ def main() -> None:
     parser.add_argument(
         "--vault",
         default="thehomie",
-        help="Which vault to index: thehomie | coding-vault | unified-vault",
+        help="Which vault to index: thehomie | coding-vault",
     )
     args = parser.parse_args()
 
@@ -345,8 +345,8 @@ def main() -> None:
     memory_dir, db_path = resolve_vault(args.vault)
     if memory_dir is None:
         print(
-            f"Vault '{args.vault}' is not configured — set its HOMIE_CODING_VAULT_DIR / "
-            "HOMIE_UNIFIED_VAULT_DIR env var (thehomie is always available)."
+            f"Vault '{args.vault}' is not configured — set its HOMIE_CODING_VAULT_DIR "
+            "env var (thehomie is always available)."
         )
         raise SystemExit(1)
 

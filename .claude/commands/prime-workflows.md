@@ -51,7 +51,6 @@ Note: default workflows (archon-ralph-dag, archon-piv-loop, archon-smart-pr-revi
 @.archon/commands/video-report.md
 @.archon/commands/fix-coding-vault.md
 @.archon/commands/fix-thehomie.md
-@.archon/commands/fix-unified-vault.md
 
 ### PIV command suite (the core dev loop invoked by workflows)
 @.claude/commands/core_piv_loop/plan-feature.md

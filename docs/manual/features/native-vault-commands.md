@@ -19,7 +19,7 @@ Homie exposes one shared vault command surface across chat channels:
 ```
 
 The default vault is `thehomie`. Valid vault names are `thehomie`,
-`coding-vault`, and `unified-vault`, resolved through the configured vault
+and `coding-vault`, resolved through the configured vault
 registry.
 
 The native command baseline is shared. Telegram exposes `/vault` in the normal

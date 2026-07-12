@@ -291,7 +291,6 @@ class DiscordAdapter:
         vault_choices = [
             app_commands.Choice(name="thehomie", value="thehomie"),
             app_commands.Choice(name="coding-vault", value="coding-vault"),
-            app_commands.Choice(name="unified-vault", value="unified-vault"),
         ]
         mode_choices = [
             app_commands.Choice(name="hybrid", value="hybrid"),
@@ -317,7 +316,7 @@ class DiscordAdapter:
 
         group = app_commands.Group(
             name="vault",
-            description="Vault operations across thehomie, coding, and unified vaults",
+            description="Vault operations across the thehomie and coding vaults",
         )
 
         async def status(interaction: Any, vault: str = "thehomie") -> None:

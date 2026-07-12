@@ -85,7 +85,6 @@ _DEFAULT_MATRIX: dict[str, Any] = {
         ],
         "vault_memory": [
             "HOMIE_CODING_VAULT_DIR",
-            "HOMIE_UNIFIED_VAULT_DIR",
             "HOMIE_VAULT_DIR",
         ],
         "discord_ingress": [

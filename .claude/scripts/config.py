@@ -80,27 +80,23 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # === Multi-vault recall registry (DB-per-vault) ===
 # The recall index (memory.db) historically covered ONLY the thehomie Homie
-# vault. These env-resolved paths let recall + indexing address coding-vault and
-# unified-vault too, each with its own SQLite DB under DATA_DIR. Framework code
+# vault. These env-resolved paths let recall + indexing address coding-vault
+# too, with its own SQLite DB under DATA_DIR. Framework code
 # must NOT hardcode personal vault paths — they come from env (scrubbed on the
 # public export). Unset env => None => that vault is simply unavailable.
+# (unified-vault was merged into the thehomie vault on 2026-07-11.)
 HOMIE_CODING_VAULT_DIR = (
     Path(os.getenv("HOMIE_CODING_VAULT_DIR")) if os.getenv("HOMIE_CODING_VAULT_DIR") else None
-)
-HOMIE_UNIFIED_VAULT_DIR = (
-    Path(os.getenv("HOMIE_UNIFIED_VAULT_DIR")) if os.getenv("HOMIE_UNIFIED_VAULT_DIR") else None
 )
 
 # thehomie keeps memory.db (back-compat); the others get suffixed DBs.
 _VAULT_MEMORY_DIRS: dict[str, "Path | None"] = {
     "thehomie": MEMORY_DIR,
     "coding-vault": HOMIE_CODING_VAULT_DIR,
-    "unified-vault": HOMIE_UNIFIED_VAULT_DIR,
 }
 _VAULT_DB_PATHS: dict[str, Path] = {
     "thehomie": DATABASE_PATH,
     "coding-vault": DATA_DIR / "memory.coding-vault.db",
-    "unified-vault": DATA_DIR / "memory.unified-vault.db",
 }
 VAULT_NAMES = tuple(_VAULT_MEMORY_DIRS.keys())
 

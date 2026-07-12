@@ -61,7 +61,12 @@ _SKIP_LINT_DIRS = {".obsidian", "_templates", "_canvas", "_state", ".conversatio
                    # Native /design artifacts + bundled DESIGN.md systems: HTML
                    # artifacts and brand-system docs do not follow the vault-note
                    # frontmatter schema (see .claude/scripts/design/).
-                   "design"}
+                   "design",
+                   # Ops ledger (append-only history, discovery/review reports):
+                   # operational telemetry migrated from unified-vault 2026-07-11.
+                   # Its records cite cross-vault notes by design — not lintable
+                   # knowledge content.
+                   "_ops"}
 
 
 def _all_md_files(vault_dir: Path) -> list[Path]:

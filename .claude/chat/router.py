@@ -109,8 +109,6 @@ VAULT_NAME_ALIASES = {
     "thehomie": "thehomie",
     "coding": "coding-vault",
     "coding-vault": "coding-vault",
-    "unified": "unified-vault",
-    "unified-vault": "unified-vault",
 }
 VAULT_RECALL_MODES = {"auto", "hybrid", "keyword"}
 VAULT_OPS_ROUTINES = {
@@ -1379,7 +1377,7 @@ class ChatRouter:
                 await self._send_vault_reply(
                     adapter,
                     incoming,
-                    "Usage: `/vault search <query> [--vault thehomie|coding-vault|unified-vault] [--mode auto|hybrid|keyword] [--limit N]`",
+                    "Usage: `/vault search <query> [--vault thehomie|coding-vault] [--mode auto|hybrid|keyword] [--limit N]`",
                     is_error=True,
                 )
                 return True
@@ -1387,7 +1385,7 @@ class ChatRouter:
                 await self._send_vault_reply(
                     adapter,
                     incoming,
-                    "Usage: `/vault context <topic> [--vault thehomie|coding-vault|unified-vault]`",
+                    "Usage: `/vault context <topic> [--vault thehomie|coding-vault]`",
                     is_error=True,
                 )
                 return True
@@ -1566,7 +1564,7 @@ class ChatRouter:
         if not normalized:
             return (
                 f"Unknown vault `{options['vault']}`. "
-                "Use `thehomie`, `coding-vault`, or `unified-vault`."
+                "Use `thehomie` or `coding-vault`."
             )
         options["vault"] = normalized
 
@@ -1711,7 +1709,7 @@ class ChatRouter:
             "`/vault contacts [query] [--vault name]`\n"
             "`/vault ingest <url> [--vault name]`\n"
             "`/vault ops <routine> [args] [--vault name]`\n\n"
-            "Vaults: `thehomie`, `coding-vault`, `unified-vault`."
+            "Vaults: `thehomie`, `coding-vault`."
         )
 
     async def _handle_file_subcommand(self, sub: str, auto_id: str) -> str:

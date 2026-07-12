@@ -77,7 +77,7 @@ thehomie recall "<query>" --vault thehomie --mode hybrid --max-results 6 --brief
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--vault` | `thehomie` | Which vault to search: `thehomie`, `coding-vault`, or `unified-vault`. |
+| `--vault` | `thehomie` | Which vault to search: `thehomie` or `coding-vault`. |
 | `--mode` | `hybrid` | `auto` (tier-classified), `hybrid` (force Tier 1 — reaches the re-rank), or `keyword` (FTS5 only, no model load). |
 | `--max-results` / `-n` | `5` | Cap on returned hits. |
 | `--brief` | off | Prepend the proactive "while you were out" brief. |
@@ -110,7 +110,6 @@ Recall addresses three independent vaults, each with its own index file:
 |---|---|---|---|
 | `thehomie` | always present | `memory.db` | Always (the Homie's own vault). |
 | `coding-vault` | `HOMIE_CODING_VAULT_DIR` | `memory.coding-vault.db` | Only when the env var is set. |
-| `unified-vault` | `HOMIE_UNIFIED_VAULT_DIR` | `memory.unified-vault.db` | Only when the env var is set. |
 
 The default (no extra env vars set) is byte-identical single-vault behavior. A
 `--vault` request whose env path is unset returns a friendly error rather than
