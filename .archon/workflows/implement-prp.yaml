@@ -11,29 +11,36 @@ nodes:
       set -eu
       python - <<'PY'
       import json, os, pathlib, subprocess, sys
-      run=lambda *a: subprocess.run(a, text=True, capture_output=True, check=True).stdout.strip()
-      root=pathlib.Path(run('git','rev-parse','--show-toplevel')).resolve()
-      gitdir=pathlib.Path(run('git','rev-parse','--git-dir')).resolve()
-      common=pathlib.Path(run('git','rev-parse','--git-common-dir')).resolve()
-      branch=run('git','symbolic-ref','--short','HEAD')
-      status=run('git','status','--porcelain=v1','--untracked-files=all')
-      if gitdir == common or not branch or status:
-          print('linked worktree, attached branch, and clean baseline are required', file=sys.stderr); sys.exit(1)
-      data={'schema':1,'root':str(root),'git_dir':str(gitdir),'common_dir':str(common),'branch':branch,
-            'baseline_head':run('git','rev-parse','HEAD'),'baseline_status':''}
+      root=pathlib.Path(subprocess.run(['git','rev-parse','--show-toplevel'],text=True,capture_output=True,check=True,shell=False).stdout.strip()).resolve()
       validator=root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
       validator_bytes=validator.read_bytes()
       crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
-      if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
+      if any(nul in d or cr in d.replace(crlf,b'') for d in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
       if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
+      ppb_validator=root / '.archon' / 'scripts' / 'prp_publication_binding.py'
+      ppb_committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_publication_binding.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
+      ppb_validator_bytes=ppb_validator.read_bytes()
+      if any(nul in d or cr in d.replace(crlf,b'') for d in (ppb_validator_bytes,ppb_committed)): sys.exit('ppb validator has invalid line endings')
+      if ppb_validator_bytes.replace(crlf,lf) != ppb_committed.replace(crlf,lf): sys.exit('ppb validator differs from committed HEAD')
       sys.path.insert(0, str(root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_payload
+      from prp_publication_binding import discover_repository, atomic_write, RepositoryIdentityError
+      try:
+          identity=discover_repository(root)
+      except RepositoryIdentityError as exc:
+          print(str(exc), file=sys.stderr); sys.exit(1)
+      status=subprocess.run(['git','status','--porcelain=v1','--untracked-files=all'],cwd=root,text=True,capture_output=True,check=True,shell=False).stdout
+      if status:
+          print('a clean baseline is required', file=sys.stderr); sys.exit(1)
+      data={'schema':2,'root':str(identity.root),'git_dir':str(identity.git_dir),'common_dir':str(identity.common_dir),
+            'worktree_id':identity.worktree_id,'object_format':identity.object_format,'branch_ref':identity.branch_ref,
+            'baseline_commit':identity.baseline_commit}
       result=validate_payload('baseline', data, policy='canonical')
       if not result.ok:
           print(result.detail, file=sys.stderr); sys.exit(1)
       p=pathlib.Path(os.environ['ARTIFACTS_DIR'])/'baseline.json'; p.parent.mkdir(parents=True,exist_ok=True)
-      p.write_text(json.dumps(data,sort_keys=True,indent=2)+'\n')
+      atomic_write(p, (json.dumps(data,sort_keys=True,indent=2)+'\n').encode('utf-8'), mode=0o600)
       print(json.dumps(data,sort_keys=True))
       PY
 
@@ -181,8 +188,14 @@ nodes:
       crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
       if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
       if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
+      ppb_validator=trusted_root / '.archon' / 'scripts' / 'prp_publication_binding.py'
+      ppb_committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_publication_binding.py'],cwd=trusted_root,capture_output=True,check=True,shell=False).stdout
+      ppb_validator_bytes=ppb_validator.read_bytes()
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (ppb_validator_bytes,ppb_committed)): sys.exit('ppb validator has invalid line endings')
+      if ppb_validator_bytes.replace(crlf,lf) != ppb_committed.replace(crlf,lf): sys.exit('ppb validator differs from committed HEAD')
       sys.path.insert(0, str(trusted_root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_argv
+      from prp_publication_binding import atomic_write
       root=pathlib.Path(baseline['root']).resolve()
       for spec in pre['focused_tests']:
           result=validate_argv(spec, root)
@@ -191,7 +204,7 @@ nodes:
           p=subprocess.run(argv,cwd=cwd,shell=False,text=True,capture_output=True)
           runs.append({'spec':spec,'exit_code':p.returncode,'evidence':(p.stdout+p.stderr)[-4000:]})
       d={'schema':1,'status':'pass' if runs and all(r['exit_code']==0 for r in runs) else 'fail','runs':runs,'blockers':[]}
-      (base/'test-results.json').write_text(json.dumps(d,sort_keys=True,indent=2)+'\n')
+      atomic_write(base/'test-results.json', (json.dumps(d,sort_keys=True,indent=2)+'\n').encode('utf-8'), mode=0o600)
       if d['status'] != 'pass': sys.exit('focused tests did not pass')
       print('FOCUSED_TEST_GATE_OK')
       PY
@@ -210,8 +223,14 @@ nodes:
       crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
       if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
       if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
+      ppb_validator=trusted_root / '.archon' / 'scripts' / 'prp_publication_binding.py'
+      ppb_committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_publication_binding.py'],cwd=trusted_root,capture_output=True,check=True,shell=False).stdout
+      ppb_validator_bytes=ppb_validator.read_bytes()
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (ppb_validator_bytes,ppb_committed)): sys.exit('ppb validator has invalid line endings')
+      if ppb_validator_bytes.replace(crlf,lf) != ppb_committed.replace(crlf,lf): sys.exit('ppb validator differs from committed HEAD')
       sys.path.insert(0, str(trusted_root / '.archon' / 'scripts'))
       from prp_artifact_contracts import compute_regression_diff_state, validate_argv
+      from prp_publication_binding import atomic_write
       root=pathlib.Path(baseline['root']).resolve()
       for spec in pre['regression_tests']:
           result=validate_argv(spec, root)
@@ -221,7 +240,7 @@ nodes:
           runs.append({'spec':spec,'exit_code':p.returncode,'evidence':(p.stdout+p.stderr)[-4000:]})
       diff_state=compute_regression_diff_state(root, 'HEAD')
       d={'schema':1,'status':'pass' if runs and all(r['exit_code']==0 for r in runs) else 'fail','runs':runs,'skipped':[],'blockers':[],'changed_files':list(diff_state.changed_files),'validated_diff_digest':diff_state.digest}
-      (base/'regression.json').write_text(json.dumps(d,sort_keys=True,indent=2)+'\n')
+      atomic_write(base/'regression.json', (json.dumps(d,sort_keys=True,indent=2)+'\n').encode('utf-8'), mode=0o600)
       if d['status'] != 'pass': sys.exit('regression exit-status gate failed')
       print('REGRESSION_GATE_OK')
       PY
@@ -256,8 +275,14 @@ nodes:
       crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
       if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
       if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
+      ppb_validator=root / '.archon' / 'scripts' / 'prp_publication_binding.py'
+      ppb_committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_publication_binding.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
+      ppb_validator_bytes=ppb_validator.read_bytes()
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (ppb_validator_bytes,ppb_committed)): sys.exit('ppb validator has invalid line endings')
+      if ppb_validator_bytes.replace(crlf,lf) != ppb_committed.replace(crlf,lf): sys.exit('ppb validator differs from committed HEAD')
       sys.path.insert(0, str(root / '.archon' / 'scripts'))
       from prp_artifact_contracts import validate_payload
+      from prp_publication_binding import atomic_write
       base=pathlib.Path(os.environ['ARTIFACTS_DIR']); names=['spec','security-state','simplification','docs']
       kinds={'spec':'review_spec','security-state':'review_security_state','simplification':'review_simplification','docs':'review_docs'}
       reviews={}
@@ -268,7 +293,7 @@ nodes:
           reviews[n]=d
       verdict='pass' if all(v['verdict']=='pass' for v in reviews.values()) else 'block'
       out={'schema':1,'verdict':verdict,'reviews':{n:v['verdict'] for n,v in reviews.items()}}
-      (base/'review-aggregate.json').write_text(json.dumps(out,sort_keys=True,indent=2)+'\n'); print(json.dumps(out,sort_keys=True))
+      atomic_write(base/'review-aggregate.json', (json.dumps(out,sort_keys=True,indent=2)+'\n').encode('utf-8'), mode=0o600); print(json.dumps(out,sort_keys=True))
       PY
 
   - id: review-gate
@@ -315,22 +340,34 @@ nodes:
       crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
       if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
       if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
+      ppb_validator=trusted_root / '.archon' / 'scripts' / 'prp_publication_binding.py'
+      ppb_committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_publication_binding.py'],cwd=trusted_root,capture_output=True,check=True,shell=False).stdout
+      ppb_validator_bytes=ppb_validator.read_bytes()
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (ppb_validator_bytes,ppb_committed)): sys.exit('ppb validator has invalid line endings')
+      if ppb_validator_bytes.replace(crlf,lf) != ppb_committed.replace(crlf,lf): sys.exit('ppb validator differs from committed HEAD')
       sys.path.insert(0, str(trusted_root / '.archon' / 'scripts'))
       from prp_artifact_contracts import ArtifactSet, validate_package_context
+      from prp_publication_binding import atomic_write, canonical_json
       result=validate_package_context(ArtifactSet(artifacts_dir=b, values={'pkg':pkg,'preflight':pre,'baseline':base,'regression':regression}))
       if not result.ok: sys.exit(result.detail)
       manifest=result.normalized
-      (b/'approval-manifest.json').write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n'); print(json.dumps(manifest,sort_keys=True))
+      manifest_bytes=canonical_json(manifest)
+      atomic_write(b/'approval-manifest.json', manifest_bytes, mode=0o600)
+      written_bytes=(b/'approval-manifest.json').read_bytes()
+      if written_bytes != manifest_bytes: sys.exit('manifest write changed canonical bytes')
+      written=json.loads(written_bytes)
+      payload=written['payload']
+      line={'approval_revision':written['approval_revision'],'approval_digest':written['approval_digest'],'repository_slug':payload['repository']['repository_slug'],'pr_base_branch':payload['pr_base_branch'],'branch_ref':payload['branch_ref'],'baseline_commit':payload['baseline_commit'],'tree_oid':payload['tree_oid'],'commit_oid':payload['commit_oid'],'title':payload['title'],'package_bytes_digest':payload['package_bytes_digest'],'body_bytes_digest':payload['body_bytes_digest']}
+      print(canonical_json(line).decode('utf-8'))
       PY
 
   - id: final-approval
     approval:
       message: |
-        Final human publish approval. Approval authorizes the next deterministic
-        node to commit, push the current branch, and open a PR. Rejection does
-        not edit code: abandon this run, then resume/re-run the full pipeline
-        after making corrections because Archon 0.5.0 has no safe approval cycle.
-        $package.output
+        FINAL PUBLICATION APPROVAL (schema 2)
+        Approve exactly the repository, base, head, content and commit encoded below.
+        A manifest alone is not approval. Rejection abandons this run.
+        $package-gate.output
       capture_response: true
     depends_on: [package-gate]
 
@@ -340,8 +377,8 @@ nodes:
     bash: |
       set -eu
       python - <<'PY'
-      import json,os,pathlib,re,subprocess,sys
-      b=pathlib.Path(os.environ['ARTIFACTS_DIR']); pkg=json.loads((b/'pr-package.json').read_text()); base=json.loads((b/'baseline.json').read_text()); approved=json.loads((b/'approval-manifest.json').read_text())
+      import json,os,pathlib,subprocess,sys
+      b=pathlib.Path(os.environ['ARTIFACTS_DIR']); base=json.loads((b/'baseline.json').read_text())
       trusted_root=pathlib.Path.cwd().resolve()
       validator=trusted_root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
       committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=trusted_root,capture_output=True,check=True,shell=False).stdout
@@ -349,18 +386,15 @@ nodes:
       crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
       if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
       if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
+      ppb_validator=trusted_root / '.archon' / 'scripts' / 'prp_publication_binding.py'
+      ppb_committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_publication_binding.py'],cwd=trusted_root,capture_output=True,check=True,shell=False).stdout
+      ppb_validator_bytes=ppb_validator.read_bytes()
+      if any(nul in data or cr in data.replace(crlf,b'') for data in (ppb_validator_bytes,ppb_committed)): sys.exit('ppb validator has invalid line endings')
+      if ppb_validator_bytes.replace(crlf,lf) != ppb_committed.replace(crlf,lf): sys.exit('ppb validator differs from committed HEAD')
       sys.path.insert(0, str(trusted_root / '.archon' / 'scripts'))
+      from prp_publication_binding import atomic_write  # noqa: F401 -- pins the module into sys.modules before validate_publish_context transitively reuses it
       from prp_artifact_contracts import ArtifactSet, validate_publish_context
-      result=validate_publish_context(ArtifactSet(artifacts_dir=b, values={'pkg':pkg,'baseline':base,'approved':approved}))
+      result=validate_publish_context(ArtifactSet(artifacts_dir=b, values={'baseline':base}))
       if not result.ok: sys.exit(result.detail)
-      changed=result.normalized
-      run=lambda a,check=True,text=True: subprocess.run(a,cwd=base['root'],text=text,capture_output=True,check=check,shell=False)
-      run(['git','add','--']+changed)
-      staged=sorted(x for x in run(['git','diff','--cached','--name-only','-z']).stdout.split('\0') if x)
-      if staged != changed: sys.exit('explicit staging mismatch')
-      run(['git','commit','-m',pkg['commit_message']]); run(['git','push','--set-upstream','origin',base['branch']])
-      p=run(['gh','pr','create','--title',pkg['title'],'--body-file',str(b/'pr-body.md')]); url=p.stdout.strip().splitlines()[-1]
-      if not re.fullmatch(r'https://github\.com/[^/]+/[^/]+/pull/[1-9][0-9]*',url): sys.exit('gh did not return a valid GitHub PR URL')
-      out={'schema':1,'status':'published','branch':base['branch'],'commit':run(['git','rev-parse','HEAD']).stdout.strip(),'url':url}
-      (b/'publish.json').write_text(json.dumps(out,sort_keys=True,indent=2)+'\n'); print(json.dumps(out,sort_keys=True))
+      print(json.dumps(result.normalized,sort_keys=True))
       PY

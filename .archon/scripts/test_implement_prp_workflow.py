@@ -264,13 +264,15 @@ def test_commands_artifact_names_contexts_timeouts_and_sentinel_unchanged():
         "regression.json",
         "review-aggregate.json",
         "pr-package.json",
-        "pr-body.md",
         "approval-manifest.json",
-        "publish.json",
     ]
     full_text = _WORKFLOW.read_text(encoding="utf-8")
     for name in artifact_names:
         assert name in full_text, name
+    # pr-body.md / publish.json are no longer referenced by name in the YAML
+    # text itself (PRP-WF1B): package-gate/publish-pr now read/write them
+    # exclusively through prp_publication_binding's confined readers/atomic
+    # writer, not an inline literal in the node's own bash text.
 
     # the four per-review artifact names are built dynamically as
     # 'review-'+n+'.json' for n in this exact literal list (unchanged from
@@ -327,17 +329,17 @@ def test_direct_writes_remain_non_atomic():
             assert "rename" not in bash.lower() or "rename" not in window.lower()
 
 
-def test_publish_checks_precede_add_commit_push_and_gh():
-    bash = _nodes()["publish-pr"]["bash"]
-    validate_at = bash.index("validate_publish_context(")
-    for needle in (
-        "'git','add'",
-        "'git','commit'",
-        "'git','push'",
-        "'gh','pr','create'",
-    ):
-        idx = bash.index(needle)
-        assert validate_at < idx, needle
+# NOTE: `test_publish_checks_precede_add_commit_push_and_gh` (historical)
+# asserted that literal 'git','add'/'git','commit'/'git','push'/'gh','pr',
+# 'create' argv markers existed in publish-pr's bash AFTER its context
+# check. PRP-WF1B removes every one of those markers from the YAML node
+# entirely -- the whole install/CAS/push/PR-create sequence now lives
+# inside `prp_publication_binding.publish_sealed_transaction`, exercised by
+# `test_publish_never_invokes_add_commit_or_hooks` in
+# test_prp_publication_binding.py. Superseded by
+# `test_publish_validation_precedes_first_object_ref_push_or_gh_side_effect`
+# below, which asserts those markers are now categorically absent from the
+# node's own bash text.
 
 
 def test_every_import_is_preceded_by_filter_independent_crlf_safe_validator_pin():
@@ -390,11 +392,17 @@ _PIN_PROGRAM = """
 import pathlib, subprocess, sys
 root=pathlib.Path(sys.argv[1]).resolve()
 validator=root / '.archon' / 'scripts' / 'prp_artifact_contracts.py'
-committed=subprocess.run(['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],cwd=root,capture_output=True,check=True,shell=False).stdout
+committed=subprocess.run(
+    ['git','show','HEAD:.archon/scripts/prp_artifact_contracts.py'],
+    cwd=root,capture_output=True,check=True,shell=False,
+).stdout
 validator_bytes=validator.read_bytes()
 crlf=bytes((13,10)); cr=bytes((13,)); nul=bytes((0,)); lf=bytes((10,))
-if any(nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)): sys.exit('validator has invalid line endings')
-if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf): sys.exit('validator differs from committed HEAD')
+if any(
+    nul in data or cr in data.replace(crlf,b'') for data in (validator_bytes,committed)
+): sys.exit('validator has invalid line endings')
+if validator_bytes.replace(crlf,lf) != committed.replace(crlf,lf):
+    sys.exit('validator differs from committed HEAD')
 sys.path.insert(0, str(root / '.archon' / 'scripts'))
 from prp_artifact_contracts import PIN_SENTINEL
 print(PIN_SENTINEL)
@@ -492,3 +500,204 @@ def test_mutable_attributes_and_clean_filter_cannot_mask_malicious_validator(tmp
     assert result.returncode != 0
     assert "validator differs from committed HEAD" in result.stderr
     assert "IMPORT RAN" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# PRP-WF1B stubs (Stage 0 RED scaffolding) -- fleshed out stage-by-stage.
+# ---------------------------------------------------------------------------
+
+
+def test_exact_22_nodes_two_approvals_and_no_auto_merge_remain():
+    # extends test_yaml_safe_loads_with_exact_22_node_order_and_dependencies
+    # and test_two_archon_approvals_remain_and_validator_does_not_infer_them
+    # with an explicit full-text scan for merge-related tokens (PRP-WF1B
+    # §2/§13): no auto-merge command or API may exist anywhere in the DAG.
+    data = _load_workflow()
+    nodes = data["nodes"]
+    assert len(nodes) == 22
+    assert [(n["id"], n.get("depends_on", [])) for n in nodes] == _EXPECTED_NODES
+
+    plan_approval = _nodes()["plan-approval"]
+    final_approval = _nodes()["final-approval"]
+    assert (
+        "approval" in plan_approval
+        and plan_approval["approval"]["capture_response"] is True
+    )
+    assert (
+        "approval" in final_approval
+        and final_approval["approval"]["capture_response"] is True
+    )
+
+    full_text = _WORKFLOW.read_text(encoding="utf-8")
+    for merge_token in (
+        "auto-merge",
+        "automerge",
+        "gh pr merge",
+        "'merge'",
+        '"merge"',
+        "--auto",
+        "--squash",
+        "--merge",
+    ):
+        assert merge_token not in full_text, merge_token
+
+
+def test_final_approval_renders_revision_digest_tree_commit_and_content_digests():
+    nodes = _nodes()
+    final_approval = nodes["final-approval"]
+    assert final_approval["depends_on"] == ["package-gate"]
+    assert final_approval["approval"]["capture_response"] is True
+
+    message = final_approval["approval"]["message"]
+    lines = message.splitlines()
+    assert lines[0] == "FINAL PUBLICATION APPROVAL (schema 2)"
+    assert (
+        lines[1]
+        == "Approve exactly the repository, base, head, content and commit encoded below."
+    )
+    assert lines[2] == "A manifest alone is not approval. Rejection abandons this run."
+    assert "$package-gate.output" in lines
+    package_bash = nodes["package-gate"]["bash"]
+    assert "manifest_bytes=canonical_json(manifest)" in package_bash
+    assert "indent=2" not in package_bash
+    # the node-output interpolation is a standalone scalar line -- it visibly
+    # binds full repository identity, base, head, revision/digest,
+    # baseline/tree/commit, title, and package/body digests (via
+    # package-gate's own 11-key canonical-JSON output line), not embedded
+    # inside other prose or subject to shell interpolation.
+    output_line = next(line for line in lines if "$package-gate.output" in line)
+    assert output_line.strip() == "$package-gate.output"
+    assert "$(" not in message and "`" not in message
+
+
+def test_publish_validation_precedes_first_object_ref_push_or_gh_side_effect():
+    bash = _nodes()["publish-pr"]["bash"]
+    assert (
+        "from prp_artifact_contracts import ArtifactSet, validate_publish_context"
+        in bash
+    )
+    assert "validate_publish_context(" in bash
+    assert "approval-manifest.json" not in bash
+    assert "'approved':" not in bash
+    # every mutating git/gh side effect now lives inside
+    # prp_publication_binding.publish_sealed_transaction (invoked exclusively
+    # through validate_publish_context, itself gated behind `if not
+    # result.ok: sys.exit(...)`); the node's own bash text must never
+    # construct these argv literals directly (PRP-WF1B §5.2/§9).
+    for needle in (
+        "'git','add'",
+        "'git','commit'",
+        "'git','push'",
+        "'gh','pr','create'",
+    ):
+        assert needle not in bash, needle
+    # the only write this node performs is printing the already-validated,
+    # already-persisted result; it never writes publish.json itself.
+    assert "publish.json" not in bash
+
+
+_ATOMIC_WRITER_NODE_IDS = {
+    "worktree-guard": "baseline.json",
+    "focused-test-gate": "test-results.json",
+    "regression-validation": "regression.json",
+    "review-aggregate": "review-aggregate.json",
+    "package-gate": "approval-manifest.json",
+}
+
+
+def test_all_deterministic_authoritative_writers_use_atomic_write():
+    nodes = _nodes()
+    for node_id, artifact_name in _ATOMIC_WRITER_NODE_IDS.items():
+        bash = nodes[node_id]["bash"]
+        assert artifact_name in bash, node_id
+        import_line = next(
+            line
+            for line in bash.splitlines()
+            if "from prp_publication_binding import" in line
+        )
+        assert "atomic_write" in import_line, node_id
+        assert "atomic_write(" in bash, node_id
+        # no node authors its artifact via a bare .write_text(...) call
+        # anymore (PRP-WF1B §7) -- every deterministic write goes through
+        # the shared atomic writer.
+        assert ".write_text(" not in bash, node_id
+
+    # publish-pr writes nothing itself -- publish.json is written by
+    # publish_sealed_transaction's own atomic_write, one level down. Its
+    # bash imports `atomic_write` only to pin prp_publication_binding into
+    # sys.modules before validate_publish_context transitively reuses it
+    # (see test_prp_publication_binding_import_is_preceded_by_its_own_crlf_safe_pin);
+    # it never calls atomic_write(...) itself.
+    assert ".write_text(" not in nodes["publish-pr"]["bash"]
+    assert "atomic_write(" not in nodes["publish-pr"]["bash"]
+
+
+_ALLOWED_WF1B_PATHS = {
+    ".archon/workflows/implement-prp.yaml",
+    ".archon/scripts/prp_artifact_contracts.py",
+    ".archon/scripts/test_prp_artifact_contracts.py",
+    ".archon/scripts/test_implement_prp_workflow.py",
+    ".archon/scripts/prp_publication_binding.py",
+    ".archon/scripts/test_prp_publication_binding.py",
+    "docs/prps/reviews/PRP-WF1B-publication-binding-hardening.review.json",
+}
+
+# This run's recorded baseline_head (worktree-guard's baseline.json,
+# ba51a4d3ead101722d13de8211a14c88): the commit HEAD pointed to when this
+# implementation began, after the PRP document and its review were already
+# committed. Every change *this implementation* makes lives strictly between
+# that commit and the current working tree.
+_WF1B_BASELINE_COMMIT = "b78dbff7f0f63ba1630fe8bd6e4334ec96af2c61"
+
+
+def test_no_product_command_or_unallowlisted_file_changes():
+    tracked = subprocess.run(
+        ["git", "diff", "--name-only", "-z", _WF1B_BASELINE_COMMIT],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        shell=False,
+    ).stdout
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        shell=False,
+    ).stdout
+    changed = {p.replace("\\", "/") for p in (tracked + untracked).split("\0") if p}
+    unallowlisted = changed - _ALLOWED_WF1B_PATHS
+    assert not unallowlisted, unallowlisted
+    # no product/package file, lockfile, other workflow, or command file was
+    # touched -- only the 7 paths PRP-WF1B §3 allows.
+    assert not any(p.startswith(".archon/commands/") for p in changed)
+
+
+def test_prp_publication_binding_import_is_preceded_by_its_own_crlf_safe_pin():
+    ppb_node_ids = {
+        "worktree-guard",
+        "focused-test-gate",
+        "regression-validation",
+        "review-aggregate",
+        "package-gate",
+        "publish-pr",
+    }
+    for node_id in ppb_node_ids:
+        bash = _nodes()[node_id]["bash"]
+        import_at = bash.index("from prp_publication_binding import")
+        pin_at = bash.index(
+            "git','show','HEAD:.archon/scripts/prp_publication_binding.py"
+        )
+        read_at = bash.index("ppb_validator.read_bytes()")
+        reject_at = bash.index("ppb validator has invalid line endings")
+        compare_at = bash.index("ppb_validator_bytes.replace(crlf,lf)")
+        assert pin_at < read_at < reject_at < compare_at < import_at, node_id
+        # the ppb pin reuses this node's own already-verified crlf/cr/nul/lf
+        # byte constants and shell=False/check=True subprocess discipline --
+        # it does not redefine or weaken them -- and both pins must pass
+        # before either extracted module is imported.
+        pac_import_at = bash.index("from prp_artifact_contracts import")
+        assert pin_at < pac_import_at, node_id
+        assert import_at < len(bash)
