@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
@@ -79,6 +80,14 @@ class TelegramAdapter:
         # Hashed callback_data → original custom_id. Telegram's callback_data
         # limit is 64 bytes; longer IDs are hashed and resolved on tap.
         self._callback_id_map: dict[str, str] = {}
+        # Liveness bookkeeping — read by probe_liveness() / the /health snapshot.
+        self._last_poll_error: str | None = None
+        self._last_update_at: float | None = None
+        # None until connect() completes. The supervisor starts concurrently with
+        # the router, so without this it would probe a not-yet-connected adapter
+        # and read the boot state as a wedge — "never started" and "died" look
+        # identical through updater.running alone.
+        self._connected_at: float | None = None
 
         self.configure_voice(
             openai_api_key=openai_api_key,
@@ -114,6 +123,10 @@ class TelegramAdapter:
             tts_voice_edge=voice_tts_voice_edge,
             tts_voice_openai=voice_tts_voice_openai,
         )
+
+    # A gateway the operator talks THROUGH: if polling dies, the bot is deaf on
+    # Telegram and no amount of waiting fixes it. Worth restarting the process.
+    liveness_critical = True
 
     @property
     def platform(self) -> Platform:
@@ -151,14 +164,81 @@ class TelegramAdapter:
         await self._app.start()
         await self._app.updater.start_polling(
             drop_pending_updates=False,
-            error_callback=lambda e: print(f"[{datetime.now()}] [TG-POLL-ERR] {e}", flush=True),
+            error_callback=self._on_poll_error,
         )
 
         # Get bot info
         bot = await self._app.bot.get_me()
         self._bot_username = bot.username
+        self._connected_at = time.time()
         print(f"[{datetime.now()}] Telegram adapter connected (bot: @{bot.username})")
         print(f"[{datetime.now()}] Registered {len(tg_commands)} slash commands with Telegram")
+
+    def _on_poll_error(self, error: Exception) -> None:
+        """PTB polling error callback.
+
+        PTB swallows these: it logs and keeps (or stops) polling without ever
+        surfacing anything to ``listen()``. Recording the last one gives the
+        liveness probe a human-readable cause to report instead of a bare
+        "updater not running".
+        """
+        self._last_poll_error = f"{type(error).__name__}: {error}"
+        print(f"[{datetime.now()}] [TG-POLL-ERR] {error}", flush=True)
+
+    async def probe_liveness(self) -> Any:
+        """Prove long-polling is PHYSICALLY alive (Rule 2), not just registered.
+
+        Two checks, cheapest first:
+
+        1. ``updater.running`` — PTB's own physical polling flag. This is the
+           bit that silently flipped to False during the 6-week wedge while
+           ``listen()`` sat on an empty queue forever and /health kept saying
+           ``telegram: true``.
+        2. ``bot.get_me()`` — a real Telegram round-trip, proving the token is
+           still valid and the network path is open. ``updater.running`` alone
+           can stay True while every request 401s.
+
+        Bounded by the supervisor's ``asyncio.wait_for``; never raises.
+        """
+        from liveness import ProbeResult
+
+        updater = self._app.updater
+        if updater is None or not updater.running:
+            detail = "updater not running"
+            if self._last_poll_error:
+                detail = f"{detail} (last poll error: {self._last_poll_error})"
+            return ProbeResult(False, detail)
+
+        try:
+            bot = await self._app.bot.get_me()
+        except Exception as exc:  # noqa: BLE001 — a failing API call IS a failure
+            return ProbeResult(False, f"get_me failed: {type(exc).__name__}: {exc}")
+
+        return ProbeResult(True, f"polling as @{bot.username}")
+
+    async def reconnect(self) -> None:
+        """Restart long-polling in place, without restarting the process.
+
+        The common wedge (PTB's updater dying while the Application object stays
+        healthy) is recoverable without dropping the process, the session store,
+        or the other adapters. The supervisor re-probes afterwards and never
+        trusts this coroutine's own return.
+        """
+        updater = self._app.updater
+        if updater is None:
+            raise RuntimeError("telegram application has no updater to restart")
+
+        if updater.running:
+            await updater.stop()
+        if not self._app.running:
+            await self._app.start()
+
+        self._last_poll_error = None
+        await updater.start_polling(
+            drop_pending_updates=False,
+            error_callback=self._on_poll_error,
+        )
+        print(f"[{datetime.now()}] Telegram polling restarted in-process")
 
     async def disconnect(self) -> None:
         """Stop polling and shut down."""
@@ -169,8 +249,24 @@ class TelegramAdapter:
         await self._app.shutdown()
         print(f"[{datetime.now()}] Telegram adapter disconnected")
 
+    async def _enqueue(self, message: IncomingMessage) -> None:
+        """Queue an inbound message and stamp the last-update clock.
+
+        The timestamp is forensics only — it feeds ``last_update_at`` in /health
+        and never gates liveness. A bot with no traffic is quiet, not dead; the
+        probe decides that question. (Had this field existed, a six-week-old
+        ``last_update_at`` on the dashboard would have been impossible to miss.)
+        """
+        self._last_update_at = time.time()
+        await self._queue.put(message)
+
     async def listen(self) -> Any:
-        """Yield incoming messages from the queue (infinite loop)."""
+        """Yield incoming messages from the queue (infinite loop).
+
+        NOTE: this loop can never detect a dead updater — an empty queue and a
+        dead poller look identical from here. That is precisely why
+        ``probe_liveness()`` exists; do not add wedge detection to this method.
+        """
         while True:
             message = await self._queue.get()
             yield message
@@ -577,7 +673,7 @@ class TelegramAdapter:
             raw_event=msg.to_dict(),
         )
 
-        await self._queue.put(incoming)
+        await self._enqueue(incoming)
 
     async def _on_voice(self, update: Any, context: Any) -> None:
         """Handle incoming voice messages — transcribe and queue as text."""
@@ -714,7 +810,7 @@ class TelegramAdapter:
         # Mark this thread for voice reply
         self._voice_reply_threads.add(thread_id)
 
-        await self._queue.put(incoming)
+        await self._enqueue(incoming)
 
     async def _on_document(self, update: Any, context: Any) -> None:
         """Handle incoming document uploads and queue them as attachments."""
@@ -809,7 +905,7 @@ class TelegramAdapter:
                 )
             return
 
-        await self._queue.put(incoming)
+        await self._enqueue(incoming)
 
     @staticmethod
     def _document_turn_text(
@@ -852,7 +948,7 @@ class TelegramAdapter:
             self._pending_document_tasks.pop(group_key, None)
             if not batch:
                 return
-            await self._queue.put(self._merge_document_group(batch, group_key))
+            await self._enqueue(self._merge_document_group(batch, group_key))
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1016,7 +1112,7 @@ class TelegramAdapter:
                 "callback_data": raw,
             },
         )
-        await self._queue.put(incoming)
+        await self._enqueue(incoming)
 
     async def _on_photo(self, update: Any, context: Any) -> None:
         """Handle incoming photos — download and queue with image path for Claude."""
@@ -1096,7 +1192,7 @@ class TelegramAdapter:
             raw_event=msg.to_dict(),
         )
 
-        await self._queue.put(incoming)
+        await self._enqueue(incoming)
 
     # ── Voice reply strategy ────────────────────────────────────────
 

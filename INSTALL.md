@@ -20,8 +20,10 @@ cd .claude/scripts && uv run python setup_wizard.py
 # 3. Configure your .env
 # The wizard creates .env from the template — edit it with your tokens
 
-# 4. Start the bot
+# 4. Start the bot (background — writes bot.log, bot.pid)
 cd .claude/chat && bash run_chat.sh
+# or run in the foreground:
+# cd .claude/scripts && uv run python ../chat/main.py
 ```
 
 ## Platform Setup
@@ -107,6 +109,32 @@ cp -r example-vault/ vault/memory/
 ```
 
 Or create your own vault with the required files. See [docs/vault-setup.md](docs/vault-setup.md) for details.
+
+## Integrations (Google OAuth, Asana, Slack)
+
+```bash
+cd .claude/scripts
+uv run python setup_auth.py           # Walk through each integration
+uv run python setup_auth.py --check   # Verify everything is connected
+```
+
+## Memory Search Index
+
+```bash
+cd .claude/scripts
+uv run python memory_index.py --rebuild   # ~80MB ONNX model, one-time download
+```
+
+## Background Jobs (Windows — Task Scheduler)
+
+```powershell
+# Creates: heartbeat (30 min), daily reflection (8 AM),
+#          weekly synthesis (Sun 8 PM), dream consolidation (post-weekly + on-demand)
+powershell -ExecutionPolicy Bypass -File .claude/scripts/setup_scheduler.ps1   # Run as Admin
+```
+
+On Linux, the Docker Compose scheduler service covers the same jobs
+(`docker compose up` runs bot + scheduler), or use systemd timers.
 
 ## Troubleshooting
 

@@ -66,7 +66,14 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module 'service' has no attribute {name!r}")
 
 try:
-    from notifications import send_notification  # noqa: E402
+    # NOTE: the symbol is ``send_toast_notification`` — there is no bare
+    # ``send_notification`` in notifications.py, so the old
+    # ``from notifications import send_notification`` ALWAYS raised ImportError
+    # and left this None. The ``if send_notification:`` guard below then
+    # silently skipped every "bot down" alert this supervisor ever tried to
+    # send. Same silent-monitoring class as the wedge itself: the alarm was
+    # wired to nothing.
+    from notifications import send_toast_notification as send_notification  # noqa: E402
 except ImportError:
     send_notification = None  # type: ignore[assignment]
 

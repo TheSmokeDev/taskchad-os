@@ -19,6 +19,7 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -701,13 +702,30 @@ def main() -> None:
     print(f"[{datetime.now()}] Starting chat interface...")
     append_to_daily_log(f"Bot started (PID {os.getpid()})", "Bot Lifecycle")
 
-    async def _mc_heartbeat_loop(url: str, api_key: str, interval: int = 300) -> None:
-        """POST to MC heartbeat endpoint every `interval` seconds."""
+    async def _mc_heartbeat_loop(
+        url: str,
+        api_key: str,
+        status_fn: Callable[[], str] | None = None,
+        interval: int = 300,
+    ) -> None:
+        """POST to the MC heartbeat endpoint every `interval` seconds.
+
+        The payload is rebuilt EVERY iteration from live liveness state. It used
+        to be a constant ``{"status": "online"}`` encoded once before the loop —
+        which is why Mission Control cheerfully reported the bot "online" for the
+        entire six weeks it was wedged. A heartbeat that cannot say "I am sick"
+        is not a health signal, it is a liveness signal for the loop itself.
+        """
         import urllib.request
         import json as _json
-        payload = _json.dumps({"status": "online", "version": "1.0.0"}).encode()
+
         headers = {"x-api-key": api_key, "Content-Type": "application/json"}
         while True:
+            try:
+                state = status_fn() if status_fn else "online"
+            except Exception:  # noqa: BLE001 — never let reporting kill the loop
+                state = "online"
+            payload = _json.dumps({"status": state, "version": "1.0.0"}).encode()
             try:
                 req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -724,36 +742,70 @@ def main() -> None:
         doesn't kill the others silently.
         """
         # Start health check server (runs in background via aiohttp)
+        from config import get_bot_liveness_settings
         from health import HealthServer, HealthStatus
+        from liveness import (
+            AdapterWedgedError,
+            DiagnosticsCache,
+            LivenessSupervisor,
+            resolve_health_status,
+        )
+
+        live = get_bot_liveness_settings()
+        boot_at = time.monotonic()
+
+        def _notify_operator(title: str, message: str) -> None:
+            """Desktop toast + Slack. Fail-open — a dead toast never stops the bot."""
+            try:
+                from notifications import send_toast_notification
+
+                send_toast_notification(title, message, caller="chat.liveness")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{datetime.now()}] [liveness] notify failed: {exc}", flush=True)
+
+        supervisor = LivenessSupervisor(
+            adapters={p.value: a for p, a in router.adapters.items()},
+            interval_seconds=live.interval_seconds,
+            probe_timeout_seconds=live.probe_timeout_seconds,
+            failure_threshold=live.failure_threshold,
+            reconnect_attempts=live.reconnect_attempts,
+            fail_fast=live.fail_fast,
+            startup_grace_seconds=live.startup_grace_seconds,
+            notify=_notify_operator,
+        )
+        diag_cache = DiagnosticsCache(ttl_seconds=live.diagnostics_ttl_seconds)
 
         def _build_health_status() -> HealthStatus:
-            adapters_status = {
-                p.value: True for p in router.adapters.keys()
-            }
-            runtime_providers: dict[str, str] = {}
-            memory_doc_count = 0
-            memory_embedding_status = ""
-            cognition_available = True
-            try:
-                from diagnostics import collect_diagnostics
+            """Assemble /health WITHOUT touching the network, the DB, or disk.
 
-                report = collect_diagnostics()
-                runtime_providers = report.runtime_providers
-                memory_doc_count = report.memory_doc_count
-                memory_embedding_status = report.memory_embedding_status
-                cognition_available = report.cognition_available
-            except Exception:
-                # Health must remain available even if diagnostics has a transient failure.
-                pass
+            Everything here is an in-memory read. The old builder called
+            ``collect_diagnostics()`` inline — cold imports, a chunk-table COUNT,
+            runtime resolution, CDP/adb probes — synchronously on the aiohttp
+            event loop, so /health took ~3.4s warm and effectively hung at boot.
+            A health endpoint that can hang is a health endpoint that cannot be
+            trusted to report a hang.
+            """
+            adapters_status = supervisor.adapter_health_map()
+            diag = diag_cache.snapshot() or {}
+            status = resolve_health_status(
+                adapters=adapters_status,
+                any_unhealthy=supervisor.any_unhealthy(),
+                has_diagnostics=bool(diag),
+                uptime_seconds=time.monotonic() - boot_at,
+                warmup_seconds=live.warmup_seconds,
+            )
+
             return HealthStatus(
-                status="ok" if adapters_status else "degraded",
+                status=status,
                 uptime_seconds=0.0,  # filled by HealthServer
                 adapters=adapters_status,
                 sessions_active=len(store.list_active()),
-                cognition_available=cognition_available,
-                runtime_providers=runtime_providers,
-                memory_doc_count=memory_doc_count,
-                memory_embedding_status=memory_embedding_status,
+                cognition_available=bool(diag.get("cognition_available", False)),
+                runtime_providers=diag.get("runtime_providers", {}),
+                memory_doc_count=diag.get("memory_doc_count", 0),
+                memory_embedding_status=diag.get("memory_embedding_status", ""),
+                adapter_liveness=supervisor.snapshot(),
+                diagnostics_age_seconds=diag_cache.age_seconds(),
             )
 
         health_srv = HealthServer(HEALTH_CHECK_PORT, _build_health_status)
@@ -765,12 +817,31 @@ def main() -> None:
         if relay_client:
             tasks["relay"] = asyncio.create_task(relay_client.connect_forever())
 
-        # MC heartbeat loop
+        # MC heartbeat loop — reports degraded when an adapter is proven dead.
         if has_heartbeat:
-            tasks["mc_heartbeat"] = asyncio.create_task(_mc_heartbeat_loop(mc_heartbeat_url, mc_agent_api_key))
+            tasks["mc_heartbeat"] = asyncio.create_task(
+                _mc_heartbeat_loop(
+                    mc_heartbeat_url,
+                    mc_agent_api_key,
+                    status_fn=lambda: "degraded" if supervisor.any_unhealthy() else "online",
+                )
+            )
 
         # Router.run() handles adapter connect + listen
         tasks["router"] = asyncio.create_task(router.run())
+
+        # Diagnostics refresher — keeps the expensive sweep OFF the /health path.
+        tasks["diagnostics"] = asyncio.create_task(diag_cache.run())
+
+        # Liveness supervisor — the watcher that did not exist during the wedge.
+        if live.enabled:
+            tasks["liveness"] = asyncio.create_task(supervisor.run())
+        else:
+            print(f"[{datetime.now()}] [liveness] DISABLED via BOT_LIVENESS_ENABLED", flush=True)
+
+        # Tasks whose death means the bot cannot serve messages. Everything else
+        # (relay, heartbeat, diagnostics) is best-effort and may die quietly.
+        fatal_tasks = {"router", "liveness"}
 
         # Monitor all tasks — if any crashes, log it and keep the rest alive
         while tasks:
@@ -784,11 +855,16 @@ def main() -> None:
                 if exc:
                     print(f"[{datetime.now()}] FATAL: Task '{name}' crashed: {type(exc).__name__}: {exc}", flush=True)
                     append_to_daily_log(f"Bot task '{name}' crashed: {exc}", "Bot Lifecycle")
-                    # If router dies, the bot is useless — exit
-                    if name == "router":
-                        print(f"[{datetime.now()}] Router died — shutting down bot", flush=True)
+                    if name in fatal_tasks:
+                        print(f"[{datetime.now()}] '{name}' died — shutting down bot", flush=True)
                         for remaining in tasks.values():
                             remaining.cancel()
+                        # A wedged adapter must exit NON-ZERO so the watchdog /
+                        # service supervisor restarts a clean process. Re-raise
+                        # instead of returning: `return` here exits 0 and every
+                        # external restarter reads that as a clean shutdown.
+                        if isinstance(exc, AdapterWedgedError):
+                            raise exc
                         return
                 else:
                     print(f"[{datetime.now()}] Task '{name}' completed normally", flush=True)
@@ -820,6 +896,11 @@ def main() -> None:
         except Exception:
             pass
         # atexit handles remove_pid()
+        # Exit NON-ZERO. This branch used to fall through and return 0, so a
+        # crashed bot was indistinguishable from a clean shutdown to service.py
+        # (which checks the return code) and to any supervisor with a
+        # restart-on-failure policy. A crash must look like a crash.
+        sys.exit(1)
 
 
 if __name__ == "__main__":

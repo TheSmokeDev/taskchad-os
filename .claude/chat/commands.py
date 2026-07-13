@@ -103,6 +103,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("file", "File the last answer as a vault note with entity compilation", "engine", "admin"),
     ("working", "Show cross-session scratchpad — open threads, hypotheses, questions", "router", "admin"),
     ("skills", "Review/promote/reject self-authored skill drafts", "router", "operator"),
+    ("learn", "Author a reusable skill from a URL, local dir, this conversation, or pasted notes (staged for /skills)", "router", "operator"),
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
     ("image", "Generate or edit an image through Codex imagegen", "engine", "admin"),
@@ -161,7 +162,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     # Co-Founder (US-015) — autonomous project steering.
     ("Co-Founder", ["cofounder"]),
     ("Communication", ["send", "brief"]),
-    ("Memory", ["search", "vault", "file", "working", "skills"]),
+    ("Memory", ["search", "vault", "file", "working", "skills", "learn"]),
     (
         "Content Creation",
         ["blog", "image", "generate-image", "owner-image", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts", "video"],
@@ -219,6 +220,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "vault",
     "file",
     "skills",
+    "learn",
     "blog",
     "image",
     "tweet",

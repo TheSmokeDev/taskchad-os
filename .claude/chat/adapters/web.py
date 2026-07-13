@@ -6,9 +6,10 @@ import asyncio
 import base64
 import os
 import tempfile
+import time
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from models import Channel, IncomingMessage, OutgoingMessage, Platform
 
@@ -38,6 +39,15 @@ class WebAdapter:
         # Strong refs for fire-and-forget tasks (CPython only weak-refs
         # running tasks — unreferenced ones can be GC'd mid-await).
         self._bg_tasks: set[asyncio.Task] = set()
+        # Liveness bookkeeping — read by the /health snapshot.
+        self._last_update_at: float | None = None
+
+    # Not a gateway the operator talks THROUGH — it is an outbound link to an
+    # EXTERNAL service (the Mission Control relay). Its death is reported, never
+    # restarted over: a bot restart cannot fix an MC outage, and RelayWSClient
+    # already reconnects itself with backoff. Marking this critical would turn
+    # every MC blip into a bot restart loop.
+    liveness_critical = False
 
     @property
     def platform(self) -> Platform:
@@ -50,6 +60,57 @@ class WebAdapter:
     async def disconnect(self) -> None:
         """No-op -- disconnection is managed by RelayWSClient."""
         print(f"[{datetime.now()}] Web adapter disconnected")
+
+    def liveness_ready(self) -> bool:
+        """Whether the relay socket is actually up.
+
+        This adapter's ``connect()`` is a no-op — the real connection lives in
+        RelayWSClient — so it has no ``_connected_at`` of its own to stamp. The
+        supervisor calls this instead to tell "still dialling" apart from "was
+        connected and dropped".
+        """
+        return bool(self.ws_client is not None and self.ws_client.is_connected)
+
+    async def probe_liveness(self) -> Any:
+        """Prove the relay websocket is PHYSICALLY connected (Rule 2).
+
+        Same blind spot as the other adapters: ``listen()`` here is an await on a
+        queue that RelayWSClient fills. If the relay drops, the queue simply goes
+        quiet — the adapter never notices, and before this probe /health happily
+        reported ``web: true`` off registration presence alone. Dashboard chat
+        would be dead with nothing saying so.
+        """
+        from liveness import ProbeResult
+
+        client = self.ws_client
+        if client is None:
+            return ProbeResult(False, "no relay client attached")
+        if not client.is_connected:
+            return ProbeResult(False, "relay websocket not connected")
+        return ProbeResult(True, f"relay connected to {client.relay_url}")
+
+    async def reconnect(self) -> None:
+        """Nothing to do — and saying so honestly matters.
+
+        RelayWSClient.connect_forever() is an infinite retry loop with backoff
+        that never raises, so the socket is already being redialled continuously.
+        A "reconnect" here would be theatre. The supervisor re-probes after this
+        returns and keeps reporting the adapter down until the relay is genuinely
+        back, which is the truthful outcome.
+        """
+        print(
+            f"[{datetime.now()}] Web adapter: relay reconnect is owned by "
+            f"RelayWSClient (auto-retrying) — nothing to restart here"
+        )
+
+    def _enqueue(self, message: IncomingMessage) -> None:
+        """Queue an inbound relay message and stamp the last-update clock.
+
+        Forensics only — a quiet relay is not a dead relay; probe_liveness()
+        decides that.
+        """
+        self._last_update_at = time.time()
+        self._queue.put_nowait(message)
 
     async def listen(self) -> AsyncIterator[IncomingMessage]:
         """Yield incoming messages pushed by the relay client."""
@@ -239,7 +300,7 @@ class WebAdapter:
         text-only requests (legacy path preserved).
         """
         if message is not None:
-            self._queue.put_nowait(message)
+            self._enqueue(message)
             return
 
         if audio_bytes is not None:
@@ -262,7 +323,7 @@ class WebAdapter:
                         channel=Channel(Platform.WEB, "web", is_dm=True),
                         platform=Platform.WEB,
                     )
-                    self._queue.put_nowait(placeholder)
+                    self._enqueue(placeholder)
                 except Exception as e:
                     print(f"[{datetime.now()}] Web binary ingress failed: {e}")
 
@@ -278,4 +339,4 @@ class WebAdapter:
                 channel=Channel(Platform.WEB, "web", is_dm=True),
                 platform=Platform.WEB,
             )
-            self._queue.put_nowait(placeholder)
+            self._enqueue(placeholder)

@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import threading
@@ -34,6 +35,9 @@ PROPOSAL_STATUSES = frozenset({
     "policy_rejected",
     "skipped",
     "superseded",
+    "rollback_pending",
+    "apply_pending",
+    "rolled_back",
 })
 _SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passwd|bearer\s+[a-z0-9._-]{12,}|"
@@ -68,6 +72,15 @@ class AmendmentProposal:
     after_hash: str = ""
     rollback_snapshot_path: str = ""
     applied_at: str | None = None
+    rollback_actor: str | None = None
+    rollback_reason: str | None = None
+    rollback_requested_at: str | None = None
+    rolled_back_at: str | None = None
+    rollback_before_hash: str = ""
+    rollback_after_hash: str = ""
+    rollback_rescue_snapshot_path: str = ""
+    rollback_error: str | None = None
+    apply_prepare_error: str | None = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -187,6 +200,88 @@ def _ledger_lock(
 ledger_file_lock = _ledger_lock
 
 
+# Separate thread-local reentrancy registry from the ledger's, per the
+# ledger-then-target lock-order contract: same-thread nesting of the ledger
+# lock must never be confused with same-thread nesting of the target lock.
+_HELD_TARGET_LOCKS = threading.local()
+
+
+def _held_target_lock_paths() -> set[str]:
+    paths = getattr(_HELD_TARGET_LOCKS, "paths", None)
+    if paths is None:
+        paths = set()
+        _HELD_TARGET_LOCKS.paths = paths
+    return paths
+
+
+@contextlib.contextmanager
+def _target_lock(
+    path: Path | str,
+    timeout: float = _LEDGER_LOCK_TIMEOUT_S,
+) -> Iterator[None]:
+    """Cross-process target-file lock; same-thread nesting is a no-op.
+
+    Structurally identical to ``_ledger_lock`` (same msvcrt/fcntl acquire +
+    retry loop, same ``<path>.lock`` lockfile naming) but keyed off its own
+    thread-local reentrancy registry (``_HELD_TARGET_LOCKS``), deliberately
+    not shared with the ledger lock's registry. Callers must always acquire
+    the ledger lock before this one, never the inverse.
+    """
+
+    lock_file = _ledger_lock_file(path)
+    key = str(lock_file)
+    held = _held_target_lock_paths()
+    if key in held:
+        yield
+        return
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_file, "w", encoding="utf-8")  # noqa: SIM115
+    acquired = False
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Could not acquire lock on {lock_file} within {timeout}s"
+                    )
+                time.sleep(0.05)
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
+    finally:
+        if acquired:
+            if sys.platform == "win32":
+                import msvcrt
+
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+# Public alias for amendment_rollback.py and other target-mutating callers.
+target_file_lock = _target_lock
+
+
 def _parse_record_line(line: str) -> dict[str, Any] | None:
     """Parse one raw JSONL line into a record dict, or None if unparseable."""
 
@@ -283,13 +378,18 @@ class ProposalLedger:
     def _read_raw_lines(self) -> list[str]:
         """Return the raw ledger lines (no parsing, no filtering)."""
 
-        if not self._path.exists():
-            return []
         try:
-            with open(self._path, encoding="utf-8") as handle:
-                return handle.read().splitlines()
-        except OSError:
+            raw = self._path.read_bytes()
+        except FileNotFoundError:
             return []
+        return raw.decode("utf-8").splitlines()
+
+    def _read_raw_bytes(self) -> bytes:
+        """Read without newline translation; an absent ledger is empty."""
+        try:
+            return self._path.read_bytes()
+        except FileNotFoundError:
+            return b""
 
     def _iter_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
@@ -374,6 +474,46 @@ class ProposalLedger:
                     "".join(line + "\n" for line in out_lines),
                 )
             return found
+
+    def _update_record_unique(
+        self, proposal_id: str, updates: dict[str, Any]
+    ) -> str:
+        """Update the single record matching ``proposal_id``, or refuse.
+
+        Unlike ``_update_record`` (which silently updates every duplicate-ID
+        row), this is a duplicate-ID-safe primitive for rollback: it counts
+        raw-line matches first and only mutates when exactly one is found.
+        Returns ``"updated"``, ``"not_found"``, or ``"duplicate"``; the
+        latter two make zero writes. Line-based rewrite: every other line —
+        including unparseable ones — is preserved verbatim.
+        """
+
+        with _ledger_lock(self._path):
+            raw_lines = self._read_raw_bytes().splitlines(keepends=True)
+            match_count = 0
+            for line in raw_lines:
+                record = _parse_record_line(line.decode("utf-8"))
+                if record is not None and record.get("id") == proposal_id:
+                    match_count += 1
+            if match_count == 0:
+                return "not_found"
+            if match_count > 1:
+                return "duplicate"
+            out_lines: list[bytes] = []
+            for line in raw_lines:
+                record = _parse_record_line(line.decode("utf-8"))
+                if record is not None and record.get("id") == proposal_id:
+                    record.update(updates)
+                    ending = bytes((13, 10)) if line.endswith(bytes((13, 10))) else (
+                        b"\n" if line.endswith(b"\n") else b""
+                    )
+                    out_lines.append(
+                        json.dumps(record, ensure_ascii=False).encode("utf-8") + ending
+                    )
+                else:
+                    out_lines.append(line)
+            _atomic_write_bytes(self._path, b"".join(out_lines))
+            return "updated"
 
     def _active_dedupe_keys(self) -> set[str]:
         return {
@@ -551,7 +691,7 @@ def apply_policy_approved_amendments(
     results: list[AmendmentApplyResult] = []
     candidates = [
         proposal for proposal in ledger.read_all()
-        if proposal.status in {"pending", "approved"}
+        if proposal.status in {"pending", "approved", "apply_pending"}
     ]
 
     physical_writes = 0
@@ -583,30 +723,11 @@ def apply_amendment_if_allowed(
 
     active_policy = policy or AmendmentPolicy()
     memory_root = Path(memory_dir)
-    target = memory_root / proposal.target_file
-    before: str | None = None
-    if proposal.target_file in AMENDMENT_TARGETS:
-        before = _read_text(target)
-        if _amendment_already_present(before, proposal):
-            now = datetime.now(UTC).isoformat()
-            ledger._update_record(
-                proposal.id,
-                {
-                    "status": "applied",
-                    "policy_decision": "apply",
-                    "policy_reason": "already_present_reconciled",
-                    "reviewer": "machine_policy",
-                    "reviewed_at": now,
-                    "applied_at": now,
-                },
-            )
-            return AmendmentApplyResult(
-                proposal_id=proposal.id,
-                target_file=proposal.target_file,
-                status="applied",
-                policy_decision="reconcile",
-                policy_reason="already_present_in_target",
-            )
+    target, path_reason = _confined_amendment_target(memory_root, proposal.target_file)
+    if path_reason is not None:
+        return AmendmentApplyResult(
+            proposal.id, proposal.target_file, "policy_rejected", "reject", path_reason
+        )
 
     # Living Self Act 4 — additive evidence-READ seam (default None = parity, the
     # block is skipped). When bound (only by evolve_loop.py), a candidate whose
@@ -655,31 +776,170 @@ def apply_amendment_if_allowed(
             policy_reason=reason,
         )
 
-    if before is None:
-        before = _read_text(target)
-    before_hash = _sha256(before)
-    rollback = _write_rollback_snapshot(
-        ledger.path, proposal.target_file, proposal.id, before
-    )
-    after = _append_autonomous_amendment(before, proposal, section_cap=section_cap)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(after, encoding="utf-8")
-    after_hash = _sha256(after)
-    applied_at = datetime.now(UTC).isoformat()
-    ledger_updated = ledger._update_record(
-        proposal.id,
-        {
-            "status": "applied",
-            "policy_decision": "apply",
-            "policy_reason": reason,
-            "before_hash": before_hash,
-            "after_hash": after_hash,
-            "rollback_snapshot_path": str(rollback),
-            "applied_at": applied_at,
-            "reviewed_at": applied_at,
-            "reviewer": "machine_policy",
-        },
-    )
+    # Outer ledger-then-target critical section: compare, snapshot, replace,
+    # verify, and the ledger applied-update all happen while both locks are
+    # held so a concurrent cooperative writer (rollback, collapse) cannot
+    # interleave with this apply. ledger_file_lock is the same reentrant
+    # _ledger_lock, so this nests as a no-op under evolve_loop.py's
+    # already-held ledger_file_lock(AMENDMENT_LEDGER_FILE).
+    with _ledger_lock(ledger.path):
+        with _target_lock(target):
+            locked_target, path_reason = _confined_amendment_target(
+                memory_root, proposal.target_file
+            )
+            if path_reason is not None or locked_target != target:
+                return AmendmentApplyResult(
+                    proposal.id,
+                    proposal.target_file,
+                    "policy_rejected",
+                    "reject",
+                    path_reason or "target_path_invalid",
+                )
+            before_bytes = target.read_bytes() if target.exists() else b""
+            before = before_bytes.decode("utf-8")
+            if proposal.status == "apply_pending":
+                current_hash = hashlib.sha256(before_bytes).hexdigest()
+                if not proposal.before_hash or not proposal.after_hash:
+                    return AmendmentApplyResult(
+                        proposal.id,
+                        proposal.target_file,
+                        "apply_pending",
+                        "conflict",
+                        "target_hash_conflict",
+                        proposal.before_hash,
+                        proposal.after_hash,
+                        proposal.rollback_snapshot_path,
+                    )
+                if current_hash == proposal.after_hash:
+                    # Crash after replacement: exact prepared bytes are
+                    # authoritative. Finalize without semantic marker parsing.
+                    applied_at = datetime.now(UTC).isoformat()
+                    finalized = ledger._update_record_unique(proposal.id, {
+                        "status": "applied", "policy_decision": "apply",
+                        "policy_reason": "apply_reconciled_after_crash",
+                        "reviewer": "machine_policy", "reviewed_at": applied_at,
+                        "applied_at": applied_at,
+                    })
+                    if finalized != "updated":
+                        raise OSError("apply finalize ledger update failed")
+                    return AmendmentApplyResult(
+                        proposal.id, proposal.target_file, "applied", "reconcile",
+                        "apply_reconciled_after_crash", proposal.before_hash,
+                        proposal.after_hash, proposal.rollback_snapshot_path,
+                    )
+                if current_hash != proposal.before_hash:
+                    # Unknown third-state bytes are never overwritten.
+                    return AmendmentApplyResult(
+                        proposal.id, proposal.target_file, "apply_pending",
+                        "conflict", "target_hash_conflict", proposal.before_hash,
+                        proposal.after_hash, proposal.rollback_snapshot_path,
+                    )
+
+                # Crash before replacement (or a retryable replacement failure):
+                # reproduce the prepared bytes from the exact original state,
+                # retaining the original snapshot and hashes.
+                after = _append_autonomous_amendment(
+                    before, proposal, section_cap=section_cap
+                )
+                after_bytes = after.encode("utf-8")
+                if hashlib.sha256(after_bytes).hexdigest() != proposal.after_hash:
+                    return AmendmentApplyResult(
+                        proposal.id, proposal.target_file, "apply_pending",
+                        "conflict", "target_hash_conflict", proposal.before_hash,
+                        proposal.after_hash, proposal.rollback_snapshot_path,
+                    )
+                replace_target, path_reason = _confined_amendment_target(
+                    memory_root, proposal.target_file
+                )
+                if path_reason is not None or replace_target != target:
+                    raise OSError(path_reason or "target_path_invalid")
+                _atomic_write_bytes(target, after_bytes)
+                verify_target, path_reason = _confined_amendment_target(
+                    memory_root, proposal.target_file
+                )
+                if path_reason is not None or verify_target != target:
+                    raise OSError(path_reason or "target_path_invalid")
+                actual_after = target.read_bytes()
+                if actual_after != after_bytes:
+                    raise OSError("target verification failed")
+                applied_at = datetime.now(UTC).isoformat()
+                finalized = ledger._update_record_unique(proposal.id, {
+                    "status": "applied", "policy_decision": "apply",
+                    "policy_reason": "apply_retried_after_crash",
+                    "reviewer": "machine_policy", "reviewed_at": applied_at,
+                    "applied_at": applied_at,
+                })
+                if finalized != "updated":
+                    raise OSError("apply finalize ledger update failed")
+                return AmendmentApplyResult(
+                    proposal.id, proposal.target_file, "applied", "apply",
+                    "apply_retried_after_crash", proposal.before_hash,
+                    proposal.after_hash, proposal.rollback_snapshot_path,
+                )
+            if _amendment_already_present(before, proposal):
+                now = datetime.now(UTC).isoformat()
+                ledger._update_record(proposal.id, {
+                    "status": "applied", "policy_decision": "apply",
+                    "policy_reason": "already_present_reconciled",
+                    "reviewer": "machine_policy", "reviewed_at": now,
+                    "applied_at": now,
+                    "before_hash": proposal.before_hash,
+                    "after_hash": proposal.after_hash
+                    or hashlib.sha256(before_bytes).hexdigest(),
+                    "rollback_snapshot_path": proposal.rollback_snapshot_path,
+                })
+                return AmendmentApplyResult(
+                    proposal.id, proposal.target_file, "applied", "reconcile",
+                    "already_present_in_target"
+                )
+            before_hash = hashlib.sha256(before_bytes).hexdigest()
+            rollback = _write_rollback_snapshot(
+                ledger.path, proposal.target_file, proposal.id, before_bytes
+            )
+            after = _append_autonomous_amendment(
+                before, proposal, section_cap=section_cap
+            )
+            after_bytes = after.encode("utf-8")
+            after_hash = hashlib.sha256(after_bytes).hexdigest()
+            prepared = ledger._update_record_unique(proposal.id, {
+                "status": "apply_pending",
+                "before_hash": before_hash,
+                "after_hash": after_hash,
+                "rollback_snapshot_path": str(rollback),
+                "apply_prepare_error": None,
+            })
+            if prepared != "updated":
+                raise OSError("apply prepare ledger update failed")
+            replace_target, path_reason = _confined_amendment_target(
+                memory_root, proposal.target_file
+            )
+            if path_reason is not None or replace_target != target:
+                raise OSError(path_reason or "target_path_invalid")
+            _atomic_write_bytes(target, after_bytes)
+            verify_target, path_reason = _confined_amendment_target(
+                memory_root, proposal.target_file
+            )
+            if path_reason is not None or verify_target != target:
+                raise OSError(path_reason or "target_path_invalid")
+            actual_after = target.read_bytes()
+            if actual_after != after_bytes:
+                raise OSError("target verification failed")
+            after_hash = hashlib.sha256(actual_after).hexdigest()
+            applied_at = datetime.now(UTC).isoformat()
+            ledger_updated = ledger._update_record(
+                proposal.id,
+                {
+                    "status": "applied",
+                    "policy_decision": "apply",
+                    "policy_reason": reason,
+                    "before_hash": before_hash,
+                    "after_hash": after_hash,
+                    "rollback_snapshot_path": str(rollback),
+                    "applied_at": applied_at,
+                    "reviewed_at": applied_at,
+                    "reviewer": "machine_policy",
+                },
+            )
     return AmendmentApplyResult(
         proposal_id=proposal.id,
         target_file=proposal.target_file,
@@ -719,30 +979,34 @@ def collapse_autonomous_amendments(
     # reconciliation is content-based, so no marker rewrite is needed.
     # The whole section holds the ledger lock so producers cannot interleave.
     with _ledger_lock(ledger.path):
-        original_text = _read_text(target)
-        head, blocks = _split_amendment_section(original_text)
+        # Target lock nests inside the ledger lock, scoped only around the
+        # target compare/plan/snapshot/replace step — never around the
+        # ledger reconciliation loop below, and never in the inverse order.
+        with _target_lock(target):
+            original_text = _read_text(target)
+            head, blocks = _split_amendment_section(original_text)
 
-        kept_blocks: list[str] = []
-        kept_keys: list[str] = []
-        seen: set[str] = set()
-        for block in blocks:
-            key = _normalize_for_match(_block_content(block))
-            if key in seen:
-                continue
-            seen.add(key)
-            kept_blocks.append(block)
-            kept_keys.append(key)
-        if len(kept_blocks) > section_cap:
-            kept_blocks = kept_blocks[-section_cap:]
-            kept_keys = kept_keys[-section_cap:]
-        planned_keys = set(kept_keys)
+            kept_blocks: list[str] = []
+            kept_keys: list[str] = []
+            seen: set[str] = set()
+            for block in blocks:
+                key = _normalize_for_match(_block_content(block))
+                if key in seen:
+                    continue
+                seen.add(key)
+                kept_blocks.append(block)
+                kept_keys.append(key)
+            if len(kept_blocks) > section_cap:
+                kept_blocks = kept_blocks[-section_cap:]
+                kept_keys = kept_keys[-section_cap:]
+            planned_keys = set(kept_keys)
 
-        collapsed_text = head + "".join(kept_blocks)
-        if collapsed_text != original_text:
-            _write_rollback_snapshot(
-                ledger.path, str(target_path), "collapse", original_text
-            )
-            _atomic_write_text(target, collapsed_text)
+            collapsed_text = head + "".join(kept_blocks)
+            if collapsed_text != original_text:
+                _write_rollback_snapshot(
+                    ledger.path, str(target_path), "collapse", original_text
+                )
+                _atomic_write_text(target, collapsed_text)
 
         # Phase 4 — the ONLY ledger touch point (read_all's id-heal included)
         # runs after the target write succeeded.
@@ -829,7 +1093,7 @@ def _dedupe_key(*parts: str) -> str:
 def _coerce_dataclass(cls, record: dict[str, Any]):
     names = {field.name for field in fields(cls)}
     try:
-        return cls(**{name: record.get(name) for name in names})
+        return cls(**{name: record[name] for name in names if name in record})
     except (TypeError, ValueError):
         return None
 
@@ -868,19 +1132,20 @@ def _read_text(path: Path) -> str:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write text durably via a sibling tempfile + os.replace."""
+    """Write UTF-8 text through the exact-byte durable replacement primitive."""
 
+    _atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Durably atomically replace a file with exact bytes."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        dir=path.parent,
-        delete=False,
-        encoding="utf-8",
-        suffix=".tmp",
-    )
+    handle = tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, delete=False, suffix=".tmp")
     try:
         with handle:
-            handle.write(text)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(handle.name, path)
     except OSError:
         try:
@@ -888,6 +1153,58 @@ def _atomic_write_text(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+    if sys.platform != "win32":
+        try:
+            directory_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    attrs = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(
+        attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _has_link_or_reparse_component(path: Path) -> bool:
+    current = path.absolute()
+    while True:
+        if _is_link_or_reparse(current):
+            return True
+        if current == current.parent:
+            return False
+        current = current.parent
+
+
+def _confined_amendment_target(
+    memory_dir: Path | str, target_file: str
+) -> tuple[Path | None, str | None]:
+    """Strongest portable stdlib confinement for apply-side target I/O."""
+    if target_file not in AMENDMENT_TARGETS or Path(target_file).name != target_file:
+        return None, "target_not_allowed"
+    original_root = Path(memory_dir)
+    original_target = original_root / target_file
+    try:
+        if _has_link_or_reparse_component(original_root) or _is_link_or_reparse(
+            original_target
+        ):
+            return None, "target_path_invalid"
+        resolved_root = original_root.resolve(strict=True)
+        resolved_target = original_target.resolve(strict=False)
+    except OSError:
+        return None, "target_path_invalid"
+    if resolved_target.parent != resolved_root or resolved_target.name not in AMENDMENT_TARGETS:
+        return None, "target_path_invalid"
+    return resolved_target, None
 
 
 def _sha256(text: str) -> str:
@@ -950,7 +1267,7 @@ def _write_rollback_snapshot(
     ledger_path: Path,
     target_file: str,
     record_id: str,
-    before: str,
+    before: str | bytes,
 ) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     safe_id = str(record_id).replace("-", "")[:12]
@@ -958,7 +1275,8 @@ def _write_rollback_snapshot(
     rollback_dir = ledger_path.parent / "rollback"
     rollback_dir.mkdir(parents=True, exist_ok=True)
     rollback_path = rollback_dir / f"{safe_name}.{timestamp}.{safe_id}.bak"
-    rollback_path.write_text(before, encoding="utf-8")
+    data = before if isinstance(before, bytes) else before.encode("utf-8")
+    _atomic_write_bytes(rollback_path, data)
     return rollback_path
 
 
@@ -1004,4 +1322,5 @@ __all__ = (
     "normalize_target_file",
     "parse_amendment_records",
     "process_amendment_output",
+    "target_file_lock",
 )

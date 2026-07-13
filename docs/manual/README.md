@@ -27,6 +27,12 @@ machine-specific proof artifacts stay outside the public manual.
 6. Read [Heartbeat Runtime](features/heartbeat-runtime.md) before changing
    proactive background reasoning, heartbeat model overrides, or scheduler
    behavior.
+7. Maintainers implementing architecture work should read
+   [Polish Architecture And Execution Program](features/polish-architecture-execution-program.md)
+   for the normative-spec/evidence distinction and bounded PRP gates. Then read
+   [Amendment-Aware Rollback](features/amendment-aware-rollback.md) for the
+   first program under it (the PRP-001A domain rollback service is implemented;
+   the CLI/API/dashboard surfaces are still planned).
 
 ## Ecosystem Positioning
 
@@ -77,6 +83,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Autonomous Team Scheduler | Shipped, Telegram-proven | [autonomous-team-scheduler](features/autonomous-team-scheduler.md) | `/teamtick`, `/teams` |
 | BrowserOps + Browser Viewer | Shipped, live-proven | [browserops-browser-viewer](features/browserops-browser-viewer.md) | `/browserops`, `/browser` |
 | Social-Write Executor | Shipped, default-denied, operator-gated per action | [social-write-executor](features/social-write-executor.md) | `/linkedin_post`, `/linkedin_connect`, `/reddit comment\|post` |
+| LinkedIn On-The-Fly Workshop | Shipped, queue-backed, operator-gated | [linkedin-on-the-fly-workshop](features/linkedin-on-the-fly-workshop.md) | `/linkedin`, Cook Together, Run It for Me, copy/image revision |
 | Video Generation | Shipped, native command, model-agnostic | [video-generation](features/video-generation.md) | `/video`, `video_pipeline.py`, `video_styles.py` |
 | Persona Brand Media Generation | Shipped, provider-optional, default-deny posting | [persona-brand-media-generation](features/persona-brand-media-generation.md) | `content_factory`, `video_imagegen`, `.claude/image-personas/` |
 | Document Uploads And Ingest | Shipped, all 3 phases (truthfulness, full reads, /vault-ingest) | [document-uploads-and-ingest](features/document-uploads-and-ingest.md) | `attachment_context.py`, `router.py` `/vault-ingest` caption, Telegram + Discord |

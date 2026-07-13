@@ -141,7 +141,8 @@ Deep dive: [Cabinet Rooms](cabinet-rooms.md) · [Cabinet Voice](cabinet-voice.md
 
 | Command | What it does | Sub-commands |
 |---|---|---|
-| `/budget` | Personal finance snapshot | `status` / `bills` / `loans` / `accounts` / `transactions` / `spending` / `add bill` / `add loan` / `sync` / `import <csv>` |
+| `/budget` | Personal finance snapshot | `status` / `bills` / `loans` / `accounts` / `transactions` / `spending` / `add bill` / `add loan` / `sync` / `import <csv>` / `connect` (Teller / Plaid) |
+| `/forecast` | Forecast cash flow + bill timing | |
 
 > No dedicated feature page yet — a Finance manual page is a planned follow-up.
 
@@ -240,6 +241,53 @@ the approval is a distinct final pipe segment.
 
 See [Social-Write Executor](social-write-executor.md) for the full write
 contract.
+
+## The `thehomie` Shell CLI
+
+Slash commands run inside a chat session; the `thehomie` CLI is the shell-side
+surface for session startup, health, and orchestration:
+
+```bash
+# Chat
+thehomie chat                    # Interactive REPL
+thehomie chat -q "hello"         # Single query, stdout response
+thehomie chat -q "hello" -Q      # JSON output (machine/API contract)
+thehomie chat --resume <id>      # Resume session by ID
+thehomie chat -c                 # Resume most recent session
+thehomie chat -m claude          # Force a specific provider/lane
+
+# System
+thehomie setup                   # Interactive onboarding wizard
+thehomie setup --check           # Verify all integrations without changing anything
+thehomie status                  # System health overview
+thehomie status --json           # JSON health report
+thehomie doctor                  # Deep diagnostics with actionable fix hints
+thehomie desktop --shell         # Launch the Desktop dashboard app
+
+# Multi-agent convoy
+thehomie convoy create ...       # Create convoy with subtasks + deps
+thehomie convoy list             # List convoys (optional: --status active)
+thehomie convoy show <id>        # Convoy detail + subtask status
+thehomie convoy dispatch <sid>   # Dispatch a subtask via executor
+thehomie convoy complete <sid>   # Mark subtask complete
+thehomie convoy fail <sid>       # Mark subtask failed
+thehomie convoy cancel <id>      # Cancel convoy
+thehomie convoy add-task <id>    # Add subtask to existing convoy
+
+# Mailbox
+thehomie mailbox send ...        # Send typed inter-agent message
+thehomie mailbox inbox <agent>   # Check agent inbox
+thehomie mailbox claim <agent>   # Claim deliveries
+thehomie mailbox ack <did>       # Acknowledge delivery
+
+# Team sessions
+thehomie team list               # List active team sessions
+thehomie team status <id>        # Team detail + members + mailbox backlog
+thehomie team members <id>       # Member list with roles
+thehomie team shutdown <id>      # Request graceful shutdown
+thehomie team ping <id>          # Bump activity timestamp
+thehomie team close <id>         # Force-close team session
+```
 
 ## Source Of Truth Files
 

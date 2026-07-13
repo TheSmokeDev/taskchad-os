@@ -13,10 +13,22 @@ _START_TIME = time.monotonic()
 
 @dataclass
 class HealthStatus:
-    """Health check response payload."""
+    """Health check response payload.
 
-    status: str  # "ok" | "degraded" | "error"
+    Field additions are ADDITIVE ONLY — Mission Control and the bot watchdog
+    both parse this payload, so existing keys keep their names and types.
+    """
+
+    # "ok" | "degraded" | "error" | "warming".
+    # "warming" (added with the liveness work) means the process is up and
+    # adapters are not proven dead, but the diagnostics snapshot has not landed
+    # yet. Consumers that don't know the value should treat it as "not ok yet",
+    # NOT as a failure — the watchdog grants it a grace window.
+    status: str
     uptime_seconds: float
+    # Probe-backed truth, NOT registration presence. An adapter reports False
+    # only when a liveness probe PROVED it dead; unprobed/warming adapters
+    # report True so a missing probe can never manufacture a false alarm.
     adapters: dict[str, bool]
     sessions_active: int
     cognition_available: bool
@@ -26,6 +38,16 @@ class HealthStatus:
     runtime_providers: dict[str, str] = field(default_factory=dict)
     memory_doc_count: int = 0
     memory_embedding_status: str = ""
+    # Liveness extensions (additive).
+    # adapter_liveness: per-adapter probe detail — healthy (True/False/None for
+    #   not-yet-probed), consecutive_failures, last_ok_at, last_update_at,
+    #   reconnects. This is the forensic surface that was missing when the bot
+    #   sat wedged for six weeks.
+    # diagnostics_age_seconds: age of the cached diagnostics snapshot; None
+    #   until the first refresh lands. Diagnostics is collected on a background
+    #   interval, never on this request path.
+    adapter_liveness: dict[str, Any] = field(default_factory=dict)
+    diagnostics_age_seconds: float | None = None
 
 
 class HealthServer:

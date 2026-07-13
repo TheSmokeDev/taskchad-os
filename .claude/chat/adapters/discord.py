@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -129,10 +130,16 @@ class DiscordAdapter:
             c.strip() for c in _excl.split(",") if c.strip()
         }
 
+        # Liveness bookkeeping — read by probe_liveness() / the /health snapshot.
+        # None until on_ready fires; see probe_liveness() for why this matters.
+        self._connected_at: float | None = None
+        self._last_update_at: float | None = None
+
         # Register event handlers
         @self._client.event
         async def on_ready() -> None:
             self._bot_user_id = self._client.user.id
+            self._connected_at = time.time()
             print(f"[{datetime.now()}] Discord adapter connected ({self._client.user})")
             _sync_task = asyncio.create_task(self._sync_native_slash_commands(discord))
             self._bg_tasks.add(_sync_task)
@@ -163,7 +170,7 @@ class DiscordAdapter:
                 self._voice_reply_channels.add(str(msg.channel.id))
                 incoming = self._normalize_message(msg, is_dm, voice_text, [])
                 incoming.voice_origin = True
-                await self._queue.put(incoming)
+                await self._enqueue(incoming)
                 return
 
             # Download image/document attachments to local disk.
@@ -172,7 +179,7 @@ class DiscordAdapter:
             context_text = "\n".join(part for part in (img_text, doc_text) if part)
             attachments = [*img_attachments, *doc_attachments]
             incoming = self._normalize_message(msg, is_dm, context_text, attachments)
-            await self._queue.put(incoming)
+            await self._enqueue(incoming)
 
         self._register_native_slash_commands(discord)
 
@@ -240,7 +247,12 @@ class DiscordAdapter:
                     "guild": str(interaction.guild_id or ""),
                 },
             )
-            await self._queue.put(incoming)
+            await self._enqueue(incoming)
+
+    # A gateway the operator talks THROUGH: a dead Discord gateway means the bot
+    # is deaf there. discord.py cannot be revived in place, so recovery is a
+    # process restart — see reconnect().
+    liveness_critical = True
 
     @property
     def platform(self) -> Platform:
@@ -255,6 +267,62 @@ class DiscordAdapter:
         await self._client.close()
         if hasattr(self, "_task") and not self._task.done():
             self._task.cancel()
+
+    async def probe_liveness(self) -> Any:
+        """Prove the Discord gateway is PHYSICALLY connected (Rule 2).
+
+        Discord has the same shape of blind spot Telegram did — arguably worse.
+        ``connect()`` fires ``client.start()`` into a background task and never
+        looks at it again: if that task dies, the exception is swallowed, and
+        ``listen()`` (an empty-queue await, exactly like Telegram's) never
+        notices. Three checks, cheapest first:
+
+        1. the gateway task is still running (a finished task = a dead adapter,
+           and its exception is the cause nobody was reading);
+        2. the client is not closed;
+        3. the client is ready — i.e. the gateway handshake completed.
+
+        No network call is needed: discord.py maintains the gateway heartbeat
+        itself, so ``latency`` is a live reading, not a cached claim.
+        """
+        from liveness import ProbeResult
+
+        task = getattr(self, "_task", None)
+        if task is not None and task.done():
+            detail = "gateway task exited"
+            exc = task.exception() if not task.cancelled() else None
+            if exc:
+                detail = f"gateway task died: {type(exc).__name__}: {exc}"
+            return ProbeResult(False, detail)
+
+        if self._client.is_closed():
+            return ProbeResult(False, "gateway closed")
+        if not self._client.is_ready():
+            return ProbeResult(False, "gateway not ready")
+
+        latency = self._client.latency  # seconds; nan when not connected
+        if latency != latency:  # NaN check
+            return ProbeResult(False, "gateway latency unavailable (not connected)")
+        return ProbeResult(True, f"gateway ready ({latency * 1000:.0f}ms)")
+
+    async def reconnect(self) -> None:
+        """Discord CANNOT be revived in place.
+
+        discord.py marks a closed ``Client`` permanently done — restarting means
+        constructing a new Client and re-registering every event handler, which
+        is strictly more fragile than restarting the process. So we refuse
+        honestly and let the supervisor fail fast; the watchdog then brings up a
+        clean process with a fresh gateway.
+
+        This is not a gap: discord.py already auto-reconnects the gateway
+        internally, so a transient blip heals itself long before the failure
+        threshold (3 consecutive probes, ~3 minutes) is crossed. Reaching this
+        method means the gateway has been genuinely dead for minutes.
+        """
+        raise RuntimeError(
+            "discord gateway cannot be restarted in-process — a process restart "
+            "is the only clean recovery"
+        )
 
     def _register_native_slash_commands(self, discord: Any) -> None:
         """Expose the curated Homie command menu as Discord slash commands."""
@@ -571,7 +639,7 @@ class DiscordAdapter:
                 "display_text": text,
             },
         )
-        await self._queue.put(incoming)
+        await self._enqueue(incoming)
 
     @staticmethod
     def _build_native_vault_text(
@@ -654,6 +722,15 @@ class DiscordAdapter:
             url=str(local_path),
             size_bytes=size,
         )
+
+    async def _enqueue(self, message: IncomingMessage) -> None:
+        """Queue an inbound message and stamp the last-update clock.
+
+        Forensics only — a quiet adapter is not a dead adapter; probe_liveness()
+        decides that. See the Telegram adapter for the full rationale.
+        """
+        self._last_update_at = time.time()
+        await self._queue.put(message)
 
     async def listen(self) -> Any:
         """Yield incoming messages from the queue."""

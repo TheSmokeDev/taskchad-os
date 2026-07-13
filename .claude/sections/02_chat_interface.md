@@ -21,16 +21,25 @@ cd .claude/scripts && uv run python ../chat/main.py --test
 |-----------|-------------|
 | **Instance lock** | Windows named mutex (`Global\SecondBrainTelegramBot`). Prevents double-spawn from venv launcher. Auto-recovers orphaned mutexes by checking if the PID that holds it is alive. |
 | **PID tracking** | `bot.pid` written on startup, cleaned on exit via `atexit`. Signal handlers (SIGTERM/SIGINT) ensure clean shutdown. |
-| **Task supervision** | `_run_all()` uses `asyncio.wait()` (not `gather`) — if relay WS or MC heartbeat crashes, it's logged and the router keeps running. If the router itself dies, the whole bot exits with a logged error. |
-| **Listener retry** | `_listen()` retries with exponential backoff (up to 5 attempts, max 30s) on transient errors instead of dying silently. |
+| **Task supervision** | `_run_all()` uses `asyncio.wait()` (not `gather`) — if relay WS or MC heartbeat crashes, it's logged and the router keeps running. If the router or the **liveness supervisor** dies, the whole bot exits with a logged error and a **non-zero exit code**. |
+| **Listener retry** | `_listen()` retries with exponential backoff (up to 5 attempts, max 30s) on transient errors instead of dying silently. **This cannot catch a wedge** — `listen()` is an await on a queue, so a dead poller and an idle one look identical from there. That's what the liveness probe is for. |
 | **Adapter isolation** | Each adapter connects independently — one failing doesn't block the others. |
-| **Crash logging** | Top-level `except Exception` around `asyncio.run()` ensures no crash ever goes unlogged. |
+| **Crash logging** | Top-level `except Exception` around `asyncio.run()` ensures no crash ever goes unlogged, and exits `1` (it used to fall through and exit `0`, so a crash was indistinguishable from a clean shutdown). |
+| **Adapter liveness** | `.claude/chat/liveness.py` — `LivenessSupervisor` probes each adapter's PHYSICAL state on an interval (Telegram: `updater.running` + a live `get_me()`; Discord: gateway task alive + `is_ready()`; web: relay socket connected). K consecutive failures → in-process reconnect → re-probe (never trust the reconnect's own return) → fail fast. Knobs: `BOT_LIVENESS_*` via `config.get_bot_liveness_settings()`. |
+| **Gateway criticality** | Adapters declare `liveness_critical`. Telegram/Discord are **gateways** (the operator talks through them) — their death is restart-worthy. The web/relay adapter is **not** — it dials OUT to Mission Control and redials itself, so a dead relay is reported but never restarted over (restarting can't fix someone else's outage). |
+| **External watchdog** | `.claude/scripts/bot_watchdog.py` + scheduled task `SecondBrain-BotWatchdog` (every 5 min). Polls `/health`, restarts via `run_chat.sh` when a gateway is dead or the process is gone, verifies recovery by re-polling `/health`, and enforces a 5-restarts-per-hour budget. Catches what the in-bot supervisor can't: a hard hang, an OOM kill, or a bot that never started. |
+
+**The wedge (2026-07-12).** The bot ran wedged for ~6 weeks: process alive, PID file present, `/health` reporting `telegram: true` — while Telegram polling was dead. Three blind spots, all now closed: (1) `listen()` can't detect a dead poller; (2) `/health` reported *registration presence*, not liveness, and ran `collect_diagnostics()` synchronously on the event loop (~3.4s warm, hung at boot — now cached off the request path, ~4ms); (3) nothing external ever polled `/health` — `service.py` is crash-only and a wedge never exits. Corollary fixed at the same time: `service.py` imported a `send_notification` symbol that does not exist, so its "bot down" alert had never once fired.
+
+**Restart trap:** `run_chat.bat` hardcodes `--telegram` — restarting through it silently resurrects a Telegram-only bot with no Discord and no relay. Always restart with `run_chat.sh` (the watchdog does).
 
 ### Key Files
 
 | File | Purpose |
 |------|---------|
 | `main.py` | Entry point — instance lock, PID lifecycle, signal handlers, task supervision |
+| `liveness.py` | Adapter liveness supervisor, gateway criticality, off-request-path diagnostics cache, `resolve_health_status()` |
+| `../scripts/bot_watchdog.py` | External watchdog — polls `/health`, restarts a wedged/dead bot, restart budget, operator toast |
 | `run_chat.sh` | Shell wrapper — resolves real cpython (skips venv shim), kills old process, starts background |
 | `router.py` | Routes messages: slash commands handled instantly, natural language → engine |
 | `engine.py` | Runtime-backed conversations via Claude Agent SDK |

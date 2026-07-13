@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import time
@@ -25,9 +26,11 @@ from cognition.amendments import (  # noqa: E402
     _ledger_lock,
     _ledger_lock_file,
     _split_amendment_section,
+    apply_amendment_if_allowed,
     apply_policy_approved_amendments,
     build_amendment_gate_section,
     collapse_autonomous_amendments,
+    ledger_file_lock,
     parse_amendment_records,
     process_amendment_output,
 )
@@ -222,9 +225,17 @@ def test_parse_and_process_amendment_output(tmp_path: Path) -> None:
     memory_dir.mkdir()
     (memory_dir / "USER.md").write_text("# USER\n", encoding="utf-8")
     ledger = ProposalLedger(tmp_path / "amendments.jsonl")
-    output = """
-{"target_file":"USER.md","summary":"Preference","rationale":"Explicit ask","evidence_paths":["daily/2026-05-23.md"],"proposed_content":"Prefers explicit model control.","confidence_score":0.95,"status":"pending"}
-"""
+    output = json.dumps(
+        {
+            "target_file": "USER.md",
+            "summary": "Preference",
+            "rationale": "Explicit ask",
+            "evidence_paths": ["daily/2026-05-23.md"],
+            "proposed_content": "Prefers explicit model control.",
+            "confidence_score": 0.95,
+            "status": "pending",
+        }
+    )
 
     parsed = parse_amendment_records(output, default_source="memory_reflect")
     results = process_amendment_output(output, ledger, memory_dir, default_source="memory_reflect")
@@ -700,3 +711,295 @@ def test_superseded_status_round_trips(tmp_path: Path) -> None:
     ledger = ProposalLedger(tmp_path / "amendments.jsonl")
     assert ledger.append(proposal) is True
     assert ledger.read_all()[0].status == "superseded"
+
+
+def test_rollback_field_defaults_for_legacy_row(tmp_path: Path) -> None:
+    """A legacy row with none of the 8 rollback keys deserializes to defaults."""
+
+    ledger_path = tmp_path / "amendments.jsonl"
+    legacy_row = _raw_llm_record("Legacy row predates rollback fields.")
+    legacy_row["id"] = str(uuid.uuid4())
+    legacy_row["created_at"] = "2026-06-09T00:00:00+00:00"
+    _write_raw_ledger(ledger_path, [legacy_row])
+    ledger = ProposalLedger(ledger_path)
+
+    proposal = ledger.read_all()[0]
+
+    assert proposal.rollback_actor is None
+    assert proposal.rollback_reason is None
+    assert proposal.rollback_requested_at is None
+    assert proposal.rolled_back_at is None
+    assert proposal.rollback_before_hash == ""
+    assert proposal.rollback_after_hash == ""
+    assert proposal.rollback_rescue_snapshot_path == ""
+    assert proposal.rollback_error is None
+
+
+def test_coerce_dataclass_only_passes_present_keys(tmp_path: Path) -> None:
+    """_coerce_dataclass must not override defaults with an absent-key None."""
+
+    ledger_path = tmp_path / "amendments.jsonl"
+    row = _raw_llm_record("Known values survive; unknown keys are ignored.")
+    row["id"] = str(uuid.uuid4())
+    row["created_at"] = "2026-06-09T00:00:00+00:00"
+    # Known existing field, explicitly present.
+    row["policy_reason"] = "policy_allowed"
+    # Explicitly-present None on a field with a non-None default must survive
+    # as None, not be silently coerced back to the dataclass default.
+    row["reviewer"] = None
+    # Unknown extra key must be ignored without rejecting the row.
+    row["totally_unknown_future_field"] = "ignore me"
+    _write_raw_ledger(ledger_path, [row])
+    ledger = ProposalLedger(ledger_path)
+
+    proposal = ledger.read_all()[0]
+
+    assert proposal.policy_reason == "policy_allowed"
+    assert proposal.reviewer is None
+    assert proposal.rollback_before_hash == ""  # untouched default, not overridden
+
+
+def test_new_rollback_statuses_status_round_trips(tmp_path: Path) -> None:
+    ledger = ProposalLedger(tmp_path / "amendments.jsonl")
+    pending_proposal = AmendmentProposal(
+        source="test",
+        target_file="MEMORY.md",
+        summary="Rollback requested",
+        proposed_content="Content pending rollback.",
+        status="rollback_pending",
+    )
+    rolled_back_proposal = AmendmentProposal(
+        source="test",
+        target_file="MEMORY.md",
+        summary="Rollback completed",
+        proposed_content="Content already rolled back.",
+        status="rolled_back",
+    )
+
+    assert pending_proposal.status == "rollback_pending"
+    assert rolled_back_proposal.status == "rolled_back"
+    assert ledger.append(pending_proposal) is True
+    assert ledger.append(rolled_back_proposal) is True
+
+    statuses = sorted(proposal.status for proposal in ledger.read_all())
+    assert statuses == ["rollback_pending", "rolled_back"]
+
+
+def test_update_record_unique_preserves_unrelated_lines_byte_identical(
+    tmp_path: Path,
+) -> None:
+    """FIX: unique-update rewrites only the matched row's line."""
+
+    ledger_path = tmp_path / "amendments.jsonl"
+    malformed_line = (
+        '{"source": "memory_reflect", "target_file": "MEMORY.md", "proposed'
+    )
+    unrelated_a = _raw_llm_record("Unrelated row A stays untouched.")
+    unrelated_a["id"] = str(uuid.uuid4())
+    unrelated_a["created_at"] = "2026-06-09T00:00:00+00:00"
+    unrelated_b = _raw_llm_record("Unrelated row B stays untouched.")
+    unrelated_b["id"] = str(uuid.uuid4())
+    unrelated_b["created_at"] = "2026-06-09T00:00:00+00:00"
+    target_row = _raw_llm_record("Target row gets updated.")
+    target_id = str(uuid.uuid4())
+    target_row["id"] = target_id
+    target_row["created_at"] = "2026-06-09T00:00:00+00:00"
+    unrelated_a_line = json.dumps(unrelated_a, ensure_ascii=False)
+    unrelated_b_line = json.dumps(unrelated_b, ensure_ascii=False)
+    target_line = json.dumps(target_row, ensure_ascii=False)
+    ledger_path.write_text(
+        malformed_line
+        + "\n"
+        + unrelated_a_line
+        + "\n"
+        + target_line
+        + "\n"
+        + unrelated_b_line
+        + "\n",
+        encoding="utf-8",
+    )
+    ledger = ProposalLedger(ledger_path)
+
+    outcome = ledger._update_record_unique(target_id, {"status": "applied"})
+
+    assert outcome == "updated"
+    lines_after = ledger_path.read_text(encoding="utf-8").splitlines()
+    assert lines_after[0] == malformed_line
+    assert lines_after[1] == unrelated_a_line
+    assert lines_after[3] == unrelated_b_line
+    updated_row = json.loads(lines_after[2])
+    assert updated_row["id"] == target_id
+    assert updated_row["status"] == "applied"
+
+
+def test_update_record_unique_refuses_duplicate_ids(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "amendments.jsonl"
+    duplicate_id = str(uuid.uuid4())
+    first = _raw_llm_record("First duplicate row.")
+    first["id"] = duplicate_id
+    first["created_at"] = "2026-06-09T00:00:00+00:00"
+    second = _raw_llm_record("Second duplicate row.")
+    second["id"] = duplicate_id
+    second["created_at"] = "2026-06-09T00:00:00+00:00"
+    _write_raw_ledger(ledger_path, [first, second])
+    ledger = ProposalLedger(ledger_path)
+    before = ledger_path.read_bytes()
+
+    outcome = ledger._update_record_unique(duplicate_id, {"status": "applied"})
+
+    assert outcome == "duplicate"
+    assert ledger_path.read_bytes() == before  # zero mutation
+
+
+def test_update_record_unique_not_found(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "amendments.jsonl"
+    row = _raw_llm_record("Only row present.")
+    row["id"] = str(uuid.uuid4())
+    row["created_at"] = "2026-06-09T00:00:00+00:00"
+    _write_raw_ledger(ledger_path, [row])
+    ledger = ProposalLedger(ledger_path)
+    before = ledger_path.read_bytes()
+
+    outcome = ledger._update_record_unique(str(uuid.uuid4()), {"status": "applied"})
+
+    assert outcome == "not_found"
+    assert ledger_path.read_bytes() == before  # zero mutation
+
+
+def test_apply_lock_covers_reread_through_ledger_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outer ledger+target lock must be held through the ledger update."""
+
+    memory_dir = tmp_path / "Memory"
+    memory_dir.mkdir()
+    target = memory_dir / "SELF.md"
+    target.write_text("# SELF\n\n- original\n", encoding="utf-8")
+    ledger = ProposalLedger(tmp_path / "state" / "amendments.jsonl")
+    proposal = AmendmentProposal(
+        source="test",
+        target_file="SELF.md",
+        summary="Lock coverage check",
+        rationale="Repeated evidence.",
+        evidence_paths=["daily/2026-06-09.md"],
+        proposed_content="Prove the target lock spans the ledger update.",
+        confidence_score=0.92,
+    )
+    assert ledger.append(proposal) is True
+
+    observed: dict[str, bool] = {}
+    real_update_record = ProposalLedger._update_record
+
+    def spy_update_record(self: ProposalLedger, proposal_id: str, updates: dict) -> bool:
+        lock_file = amendments_module._ledger_lock_file(target)
+        held = amendments_module._held_target_lock_paths()
+        observed["target_lock_held"] = str(lock_file) in held
+        return real_update_record(self, proposal_id, updates)
+
+    monkeypatch.setattr(ProposalLedger, "_update_record", spy_update_record)
+
+    result = apply_amendment_if_allowed(proposal, ledger, memory_dir)
+
+    assert observed["target_lock_held"] is True
+    assert result.status == "applied"
+
+
+def test_apply_nests_under_evolve_loop_style_ledger_lock_without_deadlock(
+    tmp_path: Path,
+) -> None:
+    """Mirrors evolve_loop.py: apply called inside an already-held ledger lock."""
+
+    memory_dir = tmp_path / "Memory"
+    memory_dir.mkdir()
+    target = memory_dir / "SELF.md"
+    target.write_text("# SELF\n\n- original\n", encoding="utf-8")
+    ledger = ProposalLedger(tmp_path / "state" / "amendments.jsonl")
+    proposal = AmendmentProposal(
+        source="test",
+        target_file="SELF.md",
+        summary="Nested apply under held ledger lock",
+        rationale="Repeated evidence.",
+        evidence_paths=["daily/2026-06-09.md"],
+        proposed_content="Prove nested apply does not deadlock or double-timeout.",
+        confidence_score=0.92,
+    )
+    assert ledger.append(proposal) is True
+
+    start = time.monotonic()
+    with ledger_file_lock(ledger.path):  # same pattern as evolve_loop.py:363-368
+        result = apply_amendment_if_allowed(proposal, ledger, memory_dir)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 4.0  # never hit the 5s timeout spin
+    assert result.status == "applied"
+
+
+def test_apply_atomic_text_output_unchanged(tmp_path: Path) -> None:
+    """The written text stays byte-identical to the unchanged append helper."""
+
+    memory_dir = tmp_path / "Memory"
+    memory_dir.mkdir()
+    target = memory_dir / "SELF.md"
+    original = "# SELF\n\n- original\n"
+    target.write_text(original, encoding="utf-8")
+    ledger = ProposalLedger(tmp_path / "state" / "amendments.jsonl")
+    proposal = AmendmentProposal(
+        source="test",
+        target_file="SELF.md",
+        summary="Text output regression",
+        rationale="Repeated evidence.",
+        evidence_paths=["daily/2026-06-09.md"],
+        proposed_content="Locking must not change the written bytes.",
+        confidence_score=0.92,
+    )
+    assert ledger.append(proposal) is True
+    expected_after = amendments_module._append_autonomous_amendment(
+        original, proposal, section_cap=20
+    )
+
+    apply_amendment_if_allowed(proposal, ledger, memory_dir)
+
+    assert target.read_text(encoding="utf-8") == expected_after
+
+
+def test_collapse_lock_order_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Collapse's target-lock acquisition happens only inside the ledger lock."""
+
+    memory_dir = tmp_path / "Memory"
+    memory_dir.mkdir()
+    target = memory_dir / "MEMORY.md"
+    content = "Collapse target lock nests inside ledger lock."
+    head = "# MEMORY\n\nDurable head facts stay.\n\n## Autonomous Amendments\n"
+    duplicated_blocks = "".join(
+        f"\n<!-- HOMIE_AUTO_AMENDMENT:{uuid.uuid4()} -->\n"
+        f"- {content}\n"
+        "  - source: memory_reflect\n"
+        "  - evidence: daily/2026-06-09.md\n"
+        for _ in range(3)
+    )
+    target.write_text(head + duplicated_blocks, encoding="utf-8")
+    ledger_path = tmp_path / "state" / "amendments.jsonl"
+    _write_raw_ledger(ledger_path, [_raw_llm_record(content)])
+    ledger = ProposalLedger(ledger_path)
+
+    observed: dict[str, bool] = {}
+    real_target_lock = amendments_module._target_lock
+
+    @contextlib.contextmanager
+    def spy_target_lock(path, timeout=amendments_module._LEDGER_LOCK_TIMEOUT_S):
+        ledger_lock_file = amendments_module._ledger_lock_file(ledger.path)
+        held = amendments_module._held_ledger_lock_paths()
+        observed["ledger_lock_held_at_target_lock_acquire"] = (
+            str(ledger_lock_file) in held
+        )
+        with real_target_lock(path, timeout=timeout):
+            yield
+
+    monkeypatch.setattr(amendments_module, "_target_lock", spy_target_lock)
+
+    report = collapse_autonomous_amendments(target, ledger, section_cap=20)
+
+    assert observed["ledger_lock_held_at_target_lock_acquire"] is True
+    assert report.blocks_kept == 1

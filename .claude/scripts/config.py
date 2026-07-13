@@ -725,6 +725,172 @@ def get_episode_settings(
     )
 
 
+class BotLivenessSettings(NamedTuple):
+    """Effective in-bot adapter-liveness knobs (call-time resolved)."""
+
+    enabled: bool
+    interval_seconds: int
+    probe_timeout_seconds: float
+    failure_threshold: int
+    reconnect_attempts: int
+    fail_fast: bool
+    startup_grace_seconds: float
+    diagnostics_ttl_seconds: float
+    warmup_seconds: float
+
+
+def get_bot_liveness_settings(
+    enabled: bool | None = None,
+    interval_seconds: int | None = None,
+    probe_timeout_seconds: float | None = None,
+    failure_threshold: int | None = None,
+    reconnect_attempts: int | None = None,
+    fail_fast: bool | None = None,
+    startup_grace_seconds: float | None = None,
+    diagnostics_ttl_seconds: float | None = None,
+    warmup_seconds: float | None = None,
+) -> BotLivenessSettings:
+    """Resolve adapter-liveness knobs at CALL TIME (Rule 1).
+
+    Every arg uses the None-sentinel pattern: explicit values pass through;
+    ``None`` resolves the matching ``BOT_LIVENESS_*`` / ``BOT_HEALTH_*`` env
+    var inside the body. These knobs deliberately do NOT exist as module-level
+    constants so env overrides (and ``monkeypatch.setenv`` in tests) take
+    effect on the next call with no module reload.
+
+    Knobs:
+        BOT_LIVENESS_ENABLED (true) — master switch for the probe loop.
+        BOT_LIVENESS_INTERVAL_SECONDS (60) — seconds between probe rounds.
+        BOT_LIVENESS_PROBE_TIMEOUT_SECONDS (10) — hard cap per adapter probe;
+            a hung probe MUST NOT wedge the supervisor that watches for wedges.
+        BOT_LIVENESS_FAILURE_THRESHOLD (3) — consecutive failed probes before
+            an adapter is declared unhealthy (rides out transient API blips).
+        BOT_LIVENESS_RECONNECT_ATTEMPTS (1) — in-process reconnects tried
+            before fail-fast.
+        BOT_LIVENESS_FAIL_FAST (true) — exit non-zero when reconnect fails, so
+            the external watchdog / service supervisor restarts a clean process.
+            Safe ONLY because bot_watchdog.py restarts an unreachable bot.
+        BOT_LIVENESS_STARTUP_GRACE_SECONDS (60) — window in which an adapter that
+            has not finished connect() yet is skipped rather than counted as
+            dead. The supervisor and the router start concurrently; without this
+            the first probe races adapter connect. Past the window a
+            never-connected adapter IS counted as a failure.
+        BOT_HEALTH_DIAGNOSTICS_TTL_SECONDS (30) — age at which the cached
+            diagnostics snapshot is refreshed OFF the /health request path.
+        BOT_HEALTH_WARMUP_SECONDS (90) — uptime below which a bot with no
+            diagnostics snapshot yet reports ``status: "warming"``.
+    """
+    if enabled is None:
+        enabled = os.getenv("BOT_LIVENESS_ENABLED", "true").lower() == "true"
+    if interval_seconds is None:
+        interval_seconds = int(os.getenv("BOT_LIVENESS_INTERVAL_SECONDS", "60"))
+    if probe_timeout_seconds is None:
+        probe_timeout_seconds = float(
+            os.getenv("BOT_LIVENESS_PROBE_TIMEOUT_SECONDS", "10")
+        )
+    if failure_threshold is None:
+        failure_threshold = int(os.getenv("BOT_LIVENESS_FAILURE_THRESHOLD", "3"))
+    if reconnect_attempts is None:
+        reconnect_attempts = int(os.getenv("BOT_LIVENESS_RECONNECT_ATTEMPTS", "1"))
+    if fail_fast is None:
+        fail_fast = os.getenv("BOT_LIVENESS_FAIL_FAST", "true").lower() == "true"
+    if startup_grace_seconds is None:
+        startup_grace_seconds = float(
+            os.getenv("BOT_LIVENESS_STARTUP_GRACE_SECONDS", "60")
+        )
+    if diagnostics_ttl_seconds is None:
+        diagnostics_ttl_seconds = float(
+            os.getenv("BOT_HEALTH_DIAGNOSTICS_TTL_SECONDS", "30")
+        )
+    if warmup_seconds is None:
+        warmup_seconds = float(os.getenv("BOT_HEALTH_WARMUP_SECONDS", "90"))
+    return BotLivenessSettings(
+        enabled=enabled,
+        interval_seconds=interval_seconds,
+        probe_timeout_seconds=probe_timeout_seconds,
+        failure_threshold=failure_threshold,
+        reconnect_attempts=reconnect_attempts,
+        fail_fast=fail_fast,
+        startup_grace_seconds=startup_grace_seconds,
+        diagnostics_ttl_seconds=diagnostics_ttl_seconds,
+        warmup_seconds=warmup_seconds,
+    )
+
+
+class BotWatchdogSettings(NamedTuple):
+    """Effective external-watchdog knobs (call-time resolved)."""
+
+    enabled: bool
+    health_url: str
+    timeout_seconds: float
+    failure_threshold: int
+    max_restarts_per_hour: int
+    grace_seconds: float
+
+
+def get_bot_watchdog_settings(
+    enabled: bool | None = None,
+    health_url: str | None = None,
+    timeout_seconds: float | None = None,
+    failure_threshold: int | None = None,
+    max_restarts_per_hour: int | None = None,
+    grace_seconds: float | None = None,
+) -> BotWatchdogSettings:
+    """Resolve external-watchdog knobs at CALL TIME (Rule 1).
+
+    ``health_url`` defaults to the ACTIVE profile's health port resolved through
+    the module ``__getattr__`` (never a module-level constant — a profile swap
+    must move the watchdog's target with it).
+
+    Knobs:
+        BOT_WATCHDOG_ENABLED (true) — master switch; false makes every poll a
+            no-op report so the scheduled task can stay registered.
+        BOT_WATCHDOG_HEALTH_URL (http://127.0.0.1:{HEALTH_CHECK_PORT}/health)
+        BOT_WATCHDOG_TIMEOUT_SECONDS (10) — HTTP timeout. A /health that cannot
+            answer inside this window counts as UNREACHABLE (the pre-fix bot
+            blocked its own event loop for ~3.4s per request).
+        BOT_WATCHDOG_FAILURE_THRESHOLD (2) — consecutive bad polls before a
+            restart fires. Counted across ``--once`` runs via the state file.
+        BOT_WATCHDOG_MAX_RESTARTS_PER_HOUR (5) — rolling-hour restart budget;
+            exhausting it notifies the operator instead of looping.
+        BOT_WATCHDOG_GRACE_SECONDS (300) — post-restart quiet window, and the
+            uptime beyond which a still-"warming" bot counts as wedged.
+    """
+    if enabled is None:
+        enabled = os.getenv("BOT_WATCHDOG_ENABLED", "true").lower() == "true"
+    if health_url is None:
+        health_url = os.getenv("BOT_WATCHDOG_HEALTH_URL", "").strip()
+        if not health_url:
+            # Same resolver the module ``__getattr__`` uses for HEALTH_CHECK_PORT.
+            # Called directly (not via the bare global) because PEP 562 module
+            # __getattr__ does NOT fire for global-name lookup inside this module,
+            # and imported inside the body so a profile swap moves the target.
+            from personas.services import get_health_check_port
+
+            health_url = f"http://127.0.0.1:{get_health_check_port()}/health"
+    if timeout_seconds is None:
+        timeout_seconds = float(os.getenv("BOT_WATCHDOG_TIMEOUT_SECONDS", "10"))
+    if failure_threshold is None:
+        failure_threshold = int(os.getenv("BOT_WATCHDOG_FAILURE_THRESHOLD", "2"))
+    if max_restarts_per_hour is None:
+        max_restarts_per_hour = int(
+            os.getenv("BOT_WATCHDOG_MAX_RESTARTS_PER_HOUR", "5")
+        )
+    if grace_seconds is None:
+        grace_seconds = float(os.getenv("BOT_WATCHDOG_GRACE_SECONDS", "300"))
+    return BotWatchdogSettings(
+        enabled=enabled,
+        health_url=health_url,
+        timeout_seconds=timeout_seconds,
+        failure_threshold=failure_threshold,
+        max_restarts_per_hour=max_restarts_per_hour,
+        grace_seconds=grace_seconds,
+    )
+
+
+BOT_WATCHDOG_STATE_FILE = STATE_DIR / "bot-watchdog-state.json"
+
+
 class InferenceExtractionSettings(NamedTuple):
     """Effective operator-belief extraction + dedup knobs (call-time resolved)."""
 

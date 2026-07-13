@@ -436,3 +436,37 @@ Deliberately not in this scope:
 This is the architecture of an individuated self: it forms its own beliefs from
 its own experience, defends them against contradiction, thinks privately before
 it answers, and keeps only the convictions that survived a test.
+
+## Appendix: Evolve Replay Harness — Component Map
+
+The evolve test-and-keep engine (section 6) is backed by a replay harness under
+`.claude/scripts/evolve/`. Component-level map:
+
+| Component | Where | What it does |
+|-----------|-------|--------------|
+| **InferenceTracker** | `cognition/self_model.py` | Captures confirmed observations, decays old inferences, surfaces high-confidence beliefs |
+| **Skills conflict guard** | `skills.py` | Prevents duplicate skill registration during auto-generation |
+| **`evolve` subsystem** | `.claude/scripts/evolve/` | Replay engine for proposed identity / config deltas |
+| └─ `replay.py` | | Runs candidate overrides against `golden_queries.json` |
+| └─ `replay_tracing.py` | | Tags replay runs into a dedicated `evolve-replay` Langfuse namespace (opt-in via `--trace`, isolated from production cost data) |
+| └─ `regression.py` | | Bootstrap CIs + hard-veto on regression against `regression_queries.json` |
+| └─ `goldens.py` | | Stratified golden-query management |
+| └─ `veto.py` | | Configurable veto rules (schema in `veto_rules.schema.json`) |
+| └─ `compare.py` / `statistics.py` | | Side-by-side replay comparison with confidence intervals |
+
+Shipped state of the harness:
+
+- ✅ Skills conflict guard + InferenceTracker wired into the engine
+- ✅ WorkingMemory owns production chat prompt state; completed turns append back into WorkingMemory for before/after proof
+- ✅ Unified proactive brief feeds session bootstrap, heartbeat, reflection, weekly synthesis, and dream consolidation
+- ✅ Append-only amendment ledger + default-deny evidence/policy gate + rollback snapshots + bounded contradiction/drift findings
+- ✅ Opt-in Langfuse replay tracing (default off, `EVOLVE_TRACE_REPLAYS` env var), isolated from production cost data
+- ✅ Stratified goldens + bootstrap confidence intervals + regression hard-veto, plus a deterministic belief-regression floor
+- 🔄 Broader auto-apply scope for durable identity changes is still expanding behind the same gate
+
+**Two-phase ship rhythm:** every Evolve increment goes through ship →
+adversarial Codex review → harden → claim done. That review caught a recurring
+class of bug across five PRs (tunable config bound in default args,
+derived-cache trusted as source of truth, optional-provider calls bypassing the
+enabled-flag helper) that unit tests missed — the three anti-patterns are now
+written up as enforced review rules with grep checks.
