@@ -11,6 +11,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import datetime
 
+from adapters.base import ProgressCapabilities
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, User
 
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
@@ -95,6 +96,10 @@ def build_quiet_error_envelope(
 
 class CLIAdapter:
     """CLI adapter — stdin/stdout for single-query and interactive modes."""
+
+    # Preserve stdout and quiet-JSON as machine contracts. Interactive CLI
+    # progress can be designed separately without changing those contracts.
+    progress_capabilities = ProgressCapabilities()
 
     def __init__(
         self,

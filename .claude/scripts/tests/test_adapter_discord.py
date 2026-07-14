@@ -79,6 +79,62 @@ def test_discord_platform():
 
 
 @pytest.mark.asyncio
+async def test_discord_send_fails_when_channel_is_unavailable() -> None:
+    adapter = _make_adapter()
+    adapter._client.get_channel = MagicMock(return_value=None)
+
+    with pytest.raises(RuntimeError, match="Discord channel 67890 is unavailable"):
+        await adapter.send(
+            OutgoingMessage(
+                text="This must not be reported as delivered.",
+                channel=Channel(Platform.DISCORD, "67890"),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_discord_long_update_defers_before_any_edit() -> None:
+    adapter = _make_adapter()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock()
+    adapter._client.get_channel = MagicMock(return_value=channel)
+
+    result = await adapter.update(
+        OutgoingMessage(
+            text="x" * 4000,
+            channel=Channel(Platform.DISCORD, "67890"),
+            is_update=True,
+            update_message_id="55",
+        )
+    )
+
+    assert result is None
+    channel.fetch_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discord_marker_update_defers_before_any_file_or_text_write() -> None:
+    adapter = _make_adapter()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock()
+    channel.send = AsyncMock()
+    adapter._client.get_channel = MagicMock(return_value=channel)
+
+    result = await adapter.update(
+        OutgoingMessage(
+            text="Here it is [SEND_FILE:report.pdf]",
+            channel=Channel(Platform.DISCORD, "67890"),
+            is_update=True,
+            update_message_id="55",
+        )
+    )
+
+    assert result is None
+    channel.fetch_message.assert_not_awaited()
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_discord_voice_input_gets_voice_only_reply() -> None:
     adapter = _make_adapter()
     channel = MagicMock()

@@ -48,6 +48,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("model", "Select runtime lane/provider/model - /model claude, sonnet, opus, codex, codex:default, gpt5.5, codex 5.5, gemini, openrouter, openai, auto", "router", "admin"),
     ("reload", "Reload bot config without restarting", "router", "admin"),
     ("restart", "Restart myself — kill this process and start fresh", "router", "admin"),
+    ("autostart", "Bot autostart at logon — status | on | off", "router", "admin"),
     ("help", "Show all available commands", "router", "viewer"),
     ("commands", "Browse native Telegram commands or the full Homie command registry", "router", "viewer"),
     ("status", "Show session info — messages, cost, uptime", "router", "viewer"),
@@ -148,7 +149,8 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Session & Mode",
         ["plan", "go", "execute", "mode", "provider", "model", "reload", "restart",
-         "help", "commands", "status", "diagnostics", "cost", "clear", "new", "extensions"],
+         "autostart", "help", "commands", "status", "diagnostics", "cost", "clear", "new",
+         "extensions"],
     ),
     (
         "Integrations",
@@ -190,6 +192,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "provider",
     "model",
     "restart",
+    "autostart",
     "diagnostics",
     "working",
     "email",

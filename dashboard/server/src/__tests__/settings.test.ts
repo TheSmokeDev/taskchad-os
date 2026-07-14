@@ -23,4 +23,15 @@ describe('settings route', () => {
     expect(src).not.toMatch(/better-sqlite3|\bnew\s+Database\(|sqlite3/);
     expect(src).not.toMatch(/tailscale\s+serve|tailscale\s+up|tailscale\s+set/);
   });
+
+  it('registers autostart in the manifest', () => {
+    expect(ROUTE_MANIFEST).toContain('/api/autostart');
+  });
+
+  it('proxies autostart GET/POST to Python', () => {
+    const src = readFileSync(SETTINGS_ROUTE, 'utf-8');
+    expect(src).toContain("authedFetchJson('/api/autostart')");
+    expect(src).toContain("authedFetch('/api/autostart'");
+    expect(src).toContain("method: 'POST'");
+  });
 });

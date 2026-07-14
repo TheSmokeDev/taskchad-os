@@ -881,6 +881,10 @@ class PatchSettingsBody(BaseModel):
     settings: dict[str, Any] | None = None
 
 
+class AutostartBody(BaseModel):
+    enabled: bool
+
+
 # ── Constants and helpers ────────────────────────────────────────────────
 
 
@@ -4769,6 +4773,45 @@ def patch_settings(body: PatchSettingsBody) -> dict:
     else:
         raise HTTPException(status_code=400, detail="must pass key/value or settings dict")
     return get_settings()
+
+
+# ── /api/autostart (bot autostart at logon) ──────────────────────────────
+
+
+@router.get("/api/autostart")
+def get_autostart() -> dict:
+    import autostart  # noqa: PLC0415 — flat sys.path (scripts dir already on path)
+
+    return autostart.status()
+
+
+@router.post("/api/autostart")
+def set_autostart(body: AutostartBody) -> dict:
+    # Plain def (not async): FastAPI runs it in a threadpool so the 1-60s
+    # PowerShell schtasks call never blocks the event loop.
+    import autostart  # noqa: PLC0415
+    from security import kill_switches  # noqa: PLC0415
+
+    action = "enable" if body.enabled else "disable"
+    try:
+        result = (
+            autostart.enable(caller="api:/api/autostart")
+            if body.enabled
+            else autostart.disable(caller="api:/api/autostart")
+        )
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "autostart is disabled by operator", "switch": "autostart"},
+        )
+    if not result.get("supported"):
+        raise HTTPException(
+            status_code=501, detail="autostart is only supported on Windows"
+        )
+    if not result.get("ok"):
+        logger.error("autostart %s failed: %s", action, _redact(str(result.get("detail", ""))))
+        raise HTTPException(status_code=500, detail=str(result.get("detail", "")))
+    return result
 
 
 # ── /api/conversation/{persona_id}/stream (SSE) ──────────────────────────

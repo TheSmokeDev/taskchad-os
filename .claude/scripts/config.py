@@ -891,6 +891,37 @@ def get_bot_watchdog_settings(
 BOT_WATCHDOG_STATE_FILE = STATE_DIR / "bot-watchdog-state.json"
 
 
+class BotAutostartSettings(NamedTuple):
+    """Effective bot-autostart knobs (call-time resolved)."""
+
+    task_name: str
+    timeout_seconds: float
+
+
+def get_bot_autostart_settings(
+    task_name: str | None = None,
+    timeout_seconds: float | None = None,
+) -> BotAutostartSettings:
+    """Resolve bot-autostart knobs at CALL TIME (Rule 1).
+
+    Knobs:
+        BOT_AUTOSTART_TASK_NAME (SecondBrain-BotStart) — the Windows Task
+            Scheduler task name the toggle registers/unregisters. The
+            enabled/disabled state itself is NEVER stored here — it is read
+            from the physical OS task registry (Rule 2).
+        BOT_AUTOSTART_TIMEOUT_SECONDS (60) — subprocess timeout for the
+            schtasks/PowerShell calls.
+    """
+    if task_name is None:
+        task_name = os.getenv("BOT_AUTOSTART_TASK_NAME", "SecondBrain-BotStart").strip()
+    if timeout_seconds is None:
+        timeout_seconds = float(os.getenv("BOT_AUTOSTART_TIMEOUT_SECONDS", "60"))
+    return BotAutostartSettings(
+        task_name=task_name,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 class InferenceExtractionSettings(NamedTuple):
     """Effective operator-belief extraction + dedup knobs (call-time resolved)."""
 

@@ -233,13 +233,14 @@ def test_route_policy_count_is_134(tmp_path, monkeypatch):
     DEVICE takeover surface, P4.1 Phase B B2); 147 -> 151 on 2026-07-07
     (+4 ghost-viewer input routes — tap/text/swipe/key, P4.1 Phase B B3);
     151 -> 153 on 2026-07-07 (+2 ghost-viewer app routes — launch/install,
-    P4.1 Phase B B4).
+    P4.1 Phase B B4); 153 -> 155 on 2026-07-14 (+2 autostart routes —
+    GET/POST /api/autostart, bot-autostart toggle).
     """
     monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     api_mod = _reload_real_api(tmp_path / "count.db")
     try:
-        assert len(all_registered_routes(api_mod.app)) == 153
-        assert len(ROUTE_POLICY) == 153
+        assert len(all_registered_routes(api_mod.app)) == 155
+        assert len(ROUTE_POLICY) == 155
     finally:
         api_mod._db.close()
 

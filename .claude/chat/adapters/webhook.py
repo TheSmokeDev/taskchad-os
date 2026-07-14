@@ -51,6 +51,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from adapters.base import ProgressCapabilities
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, User
 from webhook_audit import append_webhook_audit_record
 
@@ -97,6 +98,10 @@ def _is_loopback_host(host: str) -> bool:
 
 class WebhookAdapter:
     """Webhook ingress adapter — queue/listen based (whatsapp.py shape)."""
+
+    # A webhook has no ephemeral/editable chat surface. Progress would become
+    # an extra outbound delivery, so it is disabled by contract.
+    progress_capabilities = ProgressCapabilities()
 
     def __init__(
         self,

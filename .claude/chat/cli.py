@@ -1401,6 +1401,67 @@ def tenant_revoke(token_id):
         sys.exit(1)
 
 
+# ── Autostart commands ─────────────────────────────────────────────────────
+
+
+@main.group()
+def autostart():
+    """Bot autostart at logon (Windows Task Scheduler toggle)."""
+    pass
+
+
+def _autostart_module():
+    import autostart as autostart_mod
+
+    return autostart_mod
+
+
+@autostart.command("status")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def autostart_status(json_mode):
+    """Report the physical autostart state (Task Scheduler)."""
+    result = _autostart_module().status()
+    if json_mode:
+        print(json_mod.dumps(result, indent=2))
+        return
+    if not result["supported"]:
+        click.echo(f"Autostart: unsupported on this platform ({result['platform']}).")
+        return
+    state = "ON" if result["enabled"] else "OFF"
+    click.echo(f"Autostart: {state} — task '{result['task_name']}' ({result['detail']})")
+
+
+def _autostart_mutate(action: str) -> None:
+    from security import kill_switches
+
+    mod = _autostart_module()
+    try:
+        result = mod.enable(caller=f"cli:autostart {action}") if action == "on" \
+            else mod.disable(caller=f"cli:autostart {action}")
+    except kill_switches.KillSwitchDisabled:
+        click.echo(
+            "Autostart is disabled by operator (HOMIE_KILLSWITCH_AUTOSTART).", err=True
+        )
+        sys.exit(1)
+    if not result["ok"]:
+        click.echo(f"Autostart {action} failed: {result['detail']}", err=True)
+        sys.exit(1)
+    state = "ON" if result["enabled"] else "OFF"
+    click.echo(f"Autostart: {state} — {result['detail']}")
+
+
+@autostart.command("on")
+def autostart_on():
+    """Register the at-logon task (idempotent — always overwrites)."""
+    _autostart_mutate("on")
+
+
+@autostart.command("off")
+def autostart_off():
+    """Unregister the at-logon task (idempotent)."""
+    _autostart_mutate("off")
+
+
 # ── Team commands ──────────────────────────────────────────────────────────
 
 

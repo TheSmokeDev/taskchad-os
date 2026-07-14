@@ -133,9 +133,12 @@ async def test_bound_channel_turn_uses_target_profile_context(
     db_path = tmp_path / "chat.db"
     store = get_session_store(db_path)
     captured = []
+    observed_progress: list[str] = []
+    progress: dict[str, object] = {}
 
     async def fake_run(req):
         captured.append(req)
+        observed_progress.append(str(progress.get("status") or ""))
         return RuntimeResult(
             text="sales answer",
             runtime_lane="claude_native",
@@ -161,6 +164,7 @@ async def test_bound_channel_turn_uses_target_profile_context(
             ),
             session_store=store,
             project_root=tmp_path,
+            progress=progress,
         )
 
     assert outgoing.text == "sales answer"
@@ -173,6 +177,12 @@ async def test_bound_channel_turn_uses_target_profile_context(
     assert "sales-skill" in request.system_prompt
     assert "marketing-skill" not in request.system_prompt
     assert "dedicated Discord channel `#sales`" in request.system_prompt
+    assert request.allowed_tools == []
+    assert request.disallowed_tools == ["*"]
+    assert observed_progress == ["Sales Homie is reasoning"]
+    assert progress["status"] == "Sales Homie is reasoning"
+    assert progress["tool_calls"] == 0
+    assert "current_tool" not in progress
     session = store.get("discord", "2", "2")
     assert session is not None
     assert session.runtime_profile_key == "test-profile"

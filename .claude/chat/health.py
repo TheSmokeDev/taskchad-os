@@ -32,7 +32,7 @@ class HealthStatus:
     adapters: dict[str, bool]
     sessions_active: int
     cognition_available: bool
-    version: str = "1.0.0"
+    version: str = "1.0.1"
     timestamp: str = ""
     # Phase 6 extensions
     runtime_providers: dict[str, str] = field(default_factory=dict)

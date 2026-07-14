@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 import engine as engine_module
+from adapters.base import ProgressCapabilities
 from engine import ConversationEngine
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, User
 from router import ChatRouter
@@ -277,8 +278,11 @@ async def test_engine_on_tool_event_updates_progress_and_emits(
         out async for out in convo.handle_message(_make_message(), progress=progress)
     ]
     assert outputs[-1].text == "ok"
-    # Live increments DURING the run — the 12s ticker sees real counts.
+    # Live increments DURING the run, so the progress ticker sees confirmed
+    # tool starts rather than inventing activity after the result arrives.
     assert live_counts == [1, 2]
+    assert progress["current_tool"] == "Bash"
+    assert "input_preview" not in progress
     assert [e["type"] for e in emitted] == ["tool_call", "tool_call"]
     assert emitted[0]["name"] == "Read"
     assert emitted[1]["name"] == "Bash"
@@ -314,6 +318,11 @@ class _HangingEngine:
 
 class _CockpitAdapter:
     platform = Platform.WEB
+    progress_capabilities = ProgressCapabilities(
+        enabled=True,
+        editable=True,
+        recover_failed_status=True,
+    )
 
     def __init__(self) -> None:
         self.sent: list[OutgoingMessage] = []

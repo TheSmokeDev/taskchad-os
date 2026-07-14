@@ -1,6 +1,7 @@
+import { useState } from 'preact/hooks';
 import { TopBar } from '@/components/TopBar';
 import { useFetch } from '@/lib/useFetch';
-import { apiPatch } from '@/lib/api';
+import { apiPatch, apiPost } from '@/lib/api';
 import { theme, themeMeta, setTheme, showCosts, setShowCosts, type ThemeName } from '@/lib/theme';
 import { pushToast } from '@/lib/toasts';
 
@@ -9,8 +10,16 @@ interface DashboardSettings {
   hotkey_mod?: 'meta' | 'ctrl' | 'auto';
 }
 
+interface AutostartStatus {
+  supported: boolean;
+  enabled: boolean;
+  detail: string;
+}
+
 export function Settings() {
   const settings = useFetch<DashboardSettings>('/api/dashboard/settings');
+  const autostart = useFetch<AutostartStatus>('/api/autostart');
+  const [savingAutostart, setSavingAutostart] = useState(false);
 
   async function updateSetting(key: string, value: string) {
     try {
@@ -19,6 +28,19 @@ export function Settings() {
       settings.refresh();
     } catch (err: any) {
       pushToast({ tone: 'error', title: 'Save failed', description: err?.message || String(err) });
+    }
+  }
+
+  async function toggleAutostart(enabled: boolean) {
+    setSavingAutostart(true);
+    try {
+      await apiPost('/api/autostart', { enabled });
+      pushToast({ tone: 'success', title: `Autostart ${enabled ? 'enabled' : 'disabled'}` });
+      autostart.refresh();
+    } catch (err: any) {
+      pushToast({ tone: 'error', title: 'Autostart change failed', description: err?.message || String(err) });
+    } finally {
+      setSavingAutostart(false);
     }
   }
 
@@ -74,6 +96,27 @@ export function Settings() {
               placeholder="The Homie"
               class="w-full bg-[var(--color-elevated)] border border-[var(--color-border)] rounded px-2.5 py-1.5 text-[12.5px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
             />
+          </Field>
+        </section>
+
+        <section>
+          <h3 class="text-[11px] uppercase tracking-wider text-[var(--color-text-faint)] mb-3">Startup</h3>
+          <Field label="Start bot at logon (autostart)">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autostart.data?.enabled ?? false}
+                disabled={!autostart.data?.supported || savingAutostart}
+                onChange={(e) => toggleAutostart((e.target as HTMLInputElement).checked)}
+                class="cursor-pointer"
+              />
+              <span class="text-[12px] text-[var(--color-text-muted)]">
+                Register a logon task so the bot starts automatically after reboot
+              </span>
+            </label>
+            {autostart.data?.supported === false && (
+              <p class="text-[11px] text-[var(--color-text-faint)] mt-1">{autostart.data.detail}</p>
+            )}
           </Field>
         </section>
       </div>

@@ -54,6 +54,7 @@ AUDITED_FILES: list[Path] = [
     _SCRIPTS_DIR / "cabinet" / "tool_policy.py",
     _SCRIPTS_DIR / "cabinet" / "title.py",
     _CHAT_DIR / "cabinet_text.py",
+    _SCRIPTS_DIR / "autostart.py",
 ]
 
 # Stable parametrize ids — relative to repo for legible failure output.
@@ -187,7 +188,11 @@ def test_rule2_no_module_level_file_reads(path: Path) -> None:
 
 
 def test_audit_covers_phase_2_six_files_plus_phase_5a_cabinet() -> None:
-    """Phase 2 locks 6 identity-reconciliation files; Phase 5a (B7) adds 6 cabinet files."""
+    """Phase 2 locks 6 identity-reconciliation files; Phase 5a (B7) adds 6 cabinet files.
+
+    Bot-autostart (2026-07-14) adds autostart.py — the schtasks/PowerShell
+    toggle behind /autostart, `thehomie autostart`, and the dashboard switch.
+    """
     expected_names = {
         # Phase 2 (6).
         "identity_payload.py",
@@ -203,6 +208,8 @@ def test_audit_covers_phase_2_six_files_plus_phase_5a_cabinet() -> None:
         "tool_policy.py",
         "title.py",
         "cabinet_text.py",
+        # Bot autostart (2026-07-14).
+        "autostart.py",
     }
     actual_names = {p.name for p in AUDITED_FILES}
     assert actual_names == expected_names, (

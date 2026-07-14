@@ -2,7 +2,7 @@
 
 Status: active baseline, continuity locally proven, adapter startup live-proven
 Owner: `.claude/chat/adapters/`
-Last updated: 2026-06-28
+Last updated: 2026-07-14
 
 ## What It Does
 
@@ -62,6 +62,47 @@ Short follow-ups such as "still cooking?" or "how we looking?" answer from that
 task status instead of generic recall. This is not yet a separate external job
 worker, but it prevents the bot from claiming "nothing finished" while a
 timeout handoff is still registered.
+
+## Progress Visibility
+
+Framework-native progress is capability-driven. Every adapter resolves a
+frozen `ProgressCapabilities` declaration with four flags: `enabled`, `typing`,
+`editable`, and `recover_failed_status`. All four default to `false`; missing,
+malformed, raising, unknown, and third-party declarations therefore fail quiet.
+
+When status progress is enabled, the shared router posts `Thinking...`
+immediately, refreshes expiring typing indicators, and edits the same status
+bubble every eight seconds. Each progress I/O operation has a two-second bound.
+A missing or failed recoverable status receives a quick retry after two seconds,
+then returns to the normal cadence. If the final edit fails, a
+recovery-capable adapter sends the final answer exactly once as a fresh message.
+Adapter `update()` implementations are pure, single-message edits: multi-chunk
+answers and media/file markers return `None` before any side effect so that the
+single fresh-send fallback owns full delivery without truncation or duplicate
+uploads.
+
+| Adapter | v1.0.1 progress behavior |
+|---|---|
+| Discord | Immediate status, typing, editable phase/tool status, recovery, final-send fallback |
+| Telegram | Typing plus one editable status bubble, recovery, final-send fallback |
+| Slack | One editable status bubble, recovery, final-send fallback; no typing |
+| Mission Control relay | Editable progress frames, recovery, final-send fallback; no typing |
+| CLI | Disabled; quiet JSON is unchanged |
+| WhatsApp | Disabled to avoid permanent-message spam |
+| Webhook | Disabled to avoid permanent-message spam |
+| Unknown/third-party | Disabled by default |
+
+Progress content is truthful and bounded. Persona-bound channels may report
+real phases such as memory loading, context preparation, and reasoning. Tool
+labels appear only after a runtime-confirmed tool start, are reduced to safe
+generic categories, and never include arguments, commands, results, client
+data, paths, or secrets. Tool-denied personas never invent tool activity.
+Voice-origin turns receive no text progress so the one-shot voice reply remains
+reserved for the final answer.
+
+Reactions, accumulated tool-history rows, `off`/`new`/`all`/`verbose` modes,
+progress cleanup, a separate 180-second heartbeat, and a normalized typed event
+controller are deferred to v1.1.
 
 Chat continuity is local-first for generic runtimes. Do not assume Codex,
 Gemini, or other generic lanes preserve server-side conversation state.

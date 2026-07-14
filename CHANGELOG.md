@@ -13,6 +13,56 @@ context. They are not public release tags unless a matching public tag exists.
 
 ---
 
+## The Homie v1.0.1
+
+**Release Date:** July 14, 2026
+
+> The no-silence release — truthful, framework-native progress plus the
+> reliability, memory, browser, creative, and control-plane work accumulated
+> on public `master` since v1.0.0.
+
+### Highlights
+
+- **Framework-Native Progress Visibility** — Discord, Telegram, Slack, and the
+  Mission Control relay now opt into one shared capability contract for
+  immediate status, eight-second refreshes, bounded I/O, recovery, and final
+  delivery fallback. CLI, WhatsApp, webhook, voice-origin turns, and unknown
+  adapters remain quiet by default.
+- **Truthful Tool and Persona Phases** — Persona channels can report real
+  memory/context/reasoning phases. Tool labels appear only after confirmed tool
+  starts and are reduced to generic categories; arguments, commands, results,
+  paths, client data, and secrets never enter progress text.
+- **Runtime and Channel Reliability** — Includes physical adapter liveness,
+  honest health reporting, external watchdog recovery, Windows startup and
+  notification fixes, and drift-resistant Telegram/Discord command surfaces.
+- **Personas and Memory** — Includes isolated persona recall, position-aware
+  reranking, memory link guardrails and delta lint, two-vault operation, and
+  consolidated vault workflows.
+- **Browser and Social Operations** — Includes detached Browser Homie writes,
+  cross-process claims and locks, social publishing infrastructure, and
+  LinkedIn/Primo workshop flows.
+- **Creative and Fulfillment Systems** — Includes persona brand media and image
+  cards, video/image-generation reliability, and the client-site factory and
+  templates.
+- **Framework Tooling and Control Surfaces** — Includes Ghost/ADB and dashboard
+  Browser/Ghost/Social surfaces, amendment rollback, skill learning, optional
+  skills, and sanitizer/security hardening.
+
+### Progress Safety Contract
+
+- Adapter capabilities default disabled and malformed third-party declarations
+  fail quiet.
+- Update paths are pure single-message edits. Multi-chunk answers and media
+  defer before any side effect to one fresh-send fallback, preventing silent
+  truncation and duplicate uploads.
+- Progress I/O is bounded to two seconds and ticker tasks are cancelled on
+  success, error, timeout, interruption, or shutdown.
+- Reactions, accumulated tool history, verbosity modes, cleanup, a separate
+  180-second heartbeat, and a normalized typed event controller remain deferred
+  to v1.1.
+
+---
+
 ## The Homie v0.1.0-alpha.1
 
 **Release Date:** June 5, 2026

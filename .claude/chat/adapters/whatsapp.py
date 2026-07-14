@@ -8,6 +8,7 @@ import tempfile
 from datetime import datetime
 from typing import Any
 
+from adapters.base import ProgressCapabilities
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, User
 
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
@@ -24,6 +25,10 @@ class WhatsAppAdapter:
     Runs a lightweight aiohttp webhook server to receive inbound messages.
     Sends responses via the WhatsApp Cloud API REST endpoint.
     """
+
+    # Cloud API messages cannot be edited; keep progress disabled to avoid
+    # leaving a trail of permanent status messages in the conversation.
+    progress_capabilities = ProgressCapabilities()
 
     GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
 

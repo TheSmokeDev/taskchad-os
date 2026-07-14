@@ -8,7 +8,7 @@ import pytest
 
 import adapters.telegram as telegram_adapter
 from adapters.telegram import TelegramAdapter, TelegramDeliveryError
-from models import Attachment, Channel, MessageComponent, OutgoingMessage, Platform
+from models import Attachment, Channel, MessageComponent, OutgoingMessage, Platform, Thread
 
 
 class FakeTelegramFile:
@@ -384,20 +384,27 @@ def test_document_turn_text_folds_caption_and_skips_missing_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_update_falls_back_to_plain_send_and_returns_message_id() -> None:
+async def test_update_failure_returns_none_before_fresh_send() -> None:
     bot = FakeTelegramBot()
     bot.fail_edit = True
     bot.fail_markdown_send = True
     adapter = _adapter_with_fake_bot(bot)
 
-    delivered_id = await adapter.update(
-        OutgoingMessage(
-            text="Final answer with *bad markdown",
-            channel=_channel(),
-            is_update=True,
-            update_message_id="55",
-        )
+    message = OutgoingMessage(
+        text="Final answer with *bad markdown",
+        channel=_channel(),
+        is_update=True,
+        update_message_id="55",
     )
+    delivered_id = await adapter.update(message)
+
+    assert delivered_id is None
+    assert [name for name, _ in bot.calls] == ["edit_message_text"]
+
+    # This is the single fresh send the router performs after the None receipt.
+    message.is_update = False
+    message.update_message_id = None
+    delivered_id = await adapter.send(message)
 
     assert delivered_id == "101"
     assert [name for name, _ in bot.calls] == [
@@ -410,22 +417,90 @@ async def test_update_falls_back_to_plain_send_and_returns_message_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_update_raises_when_markdown_and_plain_delivery_fail() -> None:
+async def test_successful_update_returns_original_message_id() -> None:
+    bot = FakeTelegramBot()
+    adapter = _adapter_with_fake_bot(bot)
+
+    delivered_id = await adapter.update(
+        OutgoingMessage(
+            text="Final answer",
+            channel=_channel(),
+            is_update=True,
+            update_message_id="55",
+        )
+    )
+
+    assert delivered_id == "55"
+    assert [name for name, _ in bot.calls] == ["edit_message_text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "x" * 5000,
+        "Here it is [SEND_FILE:report.pdf]",
+        "Here it is\nMEDIA:portrait.png",
+    ],
+)
+async def test_unsupported_telegram_update_is_side_effect_free(text: str) -> None:
+    bot = FakeTelegramBot()
+    adapter = _adapter_with_fake_bot(bot)
+
+    delivered_id = await adapter.update(
+        OutgoingMessage(
+            text=text,
+            channel=_channel(),
+            is_update=True,
+            update_message_id="55",
+        )
+    )
+
+    assert delivered_id is None
+    assert bot.calls == []
+
+
+@pytest.mark.asyncio
+async def test_voice_thread_final_works_without_a_text_progress_placeholder() -> None:
+    bot = FakeTelegramBot()
+    adapter = _adapter_with_fake_bot(bot)
+    adapter._send_voice_response = AsyncMock()
+    adapter._voice_reply_threads.add("voice-thread")
+
+    delivered_id = await adapter.send(
+        OutgoingMessage(
+            text="Yep, I can hear you.",
+            channel=_channel(),
+            thread=Thread(thread_id="voice-thread"),
+        )
+    )
+
+    assert delivered_id is None
+    adapter._send_voice_response.assert_awaited_once_with(123, "Yep, I can hear you.")
+    assert bot.calls == []
+    assert "voice-thread" not in adapter._voice_reply_threads
+
+
+@pytest.mark.asyncio
+async def test_fresh_send_raises_when_markdown_and_plain_delivery_fail() -> None:
     bot = FakeTelegramBot()
     bot.fail_edit = True
     bot.fail_markdown_send = True
     bot.fail_plain_send = True
     adapter = _adapter_with_fake_bot(bot)
 
+    message = OutgoingMessage(
+        text="Final answer with *bad markdown",
+        channel=_channel(),
+        is_update=True,
+        update_message_id="55",
+    )
+    assert await adapter.update(message) is None
+    message.is_update = False
+    message.update_message_id = None
+
     with pytest.raises(TelegramDeliveryError, match="failed to deliver"):
-        await adapter.update(
-            OutgoingMessage(
-                text="Final answer with *bad markdown",
-                channel=_channel(),
-                is_update=True,
-                update_message_id="55",
-            )
-        )
+        await adapter.send(message)
 
     assert [name for name, _ in bot.calls] == [
         "edit_message_text",

@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime
 from typing import Any
 
+from adapters.base import ProgressCapabilities
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, User
 
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
@@ -37,6 +38,12 @@ class SlackAdapter:
     @mentions in channels, direct messages, and thread replies to
     heartbeat notifications. Each Slack thread maps to a separate conversation.
     """
+
+    progress_capabilities = ProgressCapabilities(
+        enabled=True,
+        editable=True,
+        recover_failed_status=True,
+    )
 
     def __init__(
         self,
@@ -106,6 +113,11 @@ class SlackAdapter:
         channel_id = message.channel.platform_id
         thread_ts = message.thread.thread_id if message.thread else None
 
+        # An update must be a pure single-message edit. Deferring marker/file
+        # output to the router's one fresh-send fallback prevents duplicates.
+        if message.is_update and parse_send_markers(message.text):
+            return None
+
         # Phase 4: marker dispatch (before text)
         await self._dispatch_send_markers(channel_id, message.text, thread_ts)
 
@@ -115,21 +127,28 @@ class SlackAdapter:
 
         # Update an existing message
         if message.is_update and message.update_message_id:
-            for chunk in self._split_message(text):
-                try:
-                    await self.app.client.chat_update(
-                        channel=channel_id,
-                        ts=message.update_message_id,
-                        text=chunk,
-                    )
-                except Exception as e:
-                    print(f"[{datetime.now()}] Error updating message: {e}")
-            result_ts: str | None = message.update_message_id
-            return result_ts
+            chunks = self._split_message(text)
+            if len(chunks) != 1:
+                # Repeatedly editing the same Slack ts would leave only the
+                # last chunk visible. Signal edit failure before any write so
+                # the router can perform one fresh, fully chunked final send.
+                return None
+            try:
+                await self.app.client.chat_update(
+                    channel=channel_id,
+                    ts=message.update_message_id,
+                    text=chunks[0],
+                )
+            except Exception as e:
+                print(f"[{datetime.now()}] Error updating message: {e}")
+                return None
+            return message.update_message_id
 
         # Send new message(s)
         chunks = self._split_message(text)
         first_ts: str | None = None
+        failed_chunks = 0
+        last_send_error: Exception | None = None
         for chunk in chunks:
             try:
                 kwargs: dict[str, Any] = {"channel": channel_id, "text": chunk}
@@ -140,6 +159,12 @@ class SlackAdapter:
                     first_ts = result["ts"]
             except Exception as e:
                 print(f"[{datetime.now()}] Error sending message: {e}")
+                failed_chunks += 1
+                last_send_error = e
+        if failed_chunks:
+            raise RuntimeError(
+                f"Slack failed to deliver {failed_chunks} message chunk(s)"
+            ) from last_send_error
         return first_ts
 
     async def _dispatch_send_markers(

@@ -476,6 +476,49 @@ async def handle_restart(adapter: Any, incoming: Any, args: str, *, collect_only
     os._exit(0)
 
 
+async def handle_autostart(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Toggle the bot-at-logon scheduled task — status | on | off."""
+    action = (args or "").strip().lower() or "status"
+    if action in ("enable",):
+        action = "on"
+    if action in ("disable",):
+        action = "off"
+    if action not in ("status", "on", "off"):
+        return "Usage: /autostart [status | on | off]"
+
+    # The schtasks/PowerShell calls take 1-60s — off-loop so a slow Task
+    # Scheduler stalls only this command, not every chat user on this loop.
+    return await asyncio.to_thread(_autostart_sync, action)
+
+
+def _autostart_sync(action: str) -> str:
+    """Blocking tail of /autostart — runs in a worker thread."""
+    import autostart
+    from security import kill_switches
+
+    try:
+        if action == "on":
+            result = autostart.enable(caller="chat:/autostart")
+        elif action == "off":
+            result = autostart.disable(caller="chat:/autostart")
+        else:
+            result = autostart.status()
+    except kill_switches.KillSwitchDisabled:
+        return "Autostart is disabled by operator (HOMIE_KILLSWITCH_AUTOSTART). No changes made."
+    except Exception as exc:  # noqa: BLE001 — a broken toggle must not crash the router
+        return f"Autostart error: {type(exc).__name__}: {exc}"
+
+    if not result["supported"]:
+        return "Autostart is only supported on Windows right now."
+    state = "ON" if result["enabled"] else "OFF"
+    lines = [f"Autostart: {state} — task '{result['task_name']}' (at logon)"]
+    if action != "status" and not result.get("ok", True):
+        lines.append(f"FAILED: {result['detail']}")
+    elif result["detail"]:
+        lines.append(result["detail"])
+    return "\n".join(lines)
+
+
 async def handle_gsc(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Fetch Google Search Console data."""
     try:
@@ -7534,6 +7577,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "provider": handle_provider,
     "model": handle_model,
     "restart": handle_restart,
+    "autostart": handle_autostart,
     "gsc": handle_gsc,
     "email": handle_email,
     "personal-email": handle_personal_email,

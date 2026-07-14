@@ -304,6 +304,8 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     ("GET", "/api/dashboard/mobile-access"): "admin",
     ("GET", "/api/dashboard/settings"): "admin",
     ("PATCH", "/api/dashboard/settings"): "admin",
+    ("GET", "/api/autostart"): "admin",
+    ("POST", "/api/autostart"): "admin",
     # ── Dashboard: conversation (tenant_persona) ────────────────────────────
     ("GET", "/api/conversation/{persona_id}/history"): "tenant_persona",
     ("POST", "/api/conversation/{persona_id}/send"): "tenant_persona",

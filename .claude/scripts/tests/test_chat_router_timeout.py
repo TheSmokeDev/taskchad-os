@@ -8,8 +8,12 @@ import pytest
 
 import background_tasks
 import router as router_module
+from adapters.base import ProgressCapabilities
+from adapters.cli_adapter import CLIAdapter
+from adapters.webhook import WebhookAdapter
+from adapters.whatsapp import WhatsAppAdapter
 from models import Attachment, Channel, IncomingMessage, OutgoingMessage, Platform, User
-from router import ChatRouter
+from router import ChatRouter, _progress_tool_label, _render_progress_status
 from session import SQLiteSessionStore
 
 
@@ -27,10 +31,15 @@ class _CompletableEngine:
         self.session_store = session_store
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
 
     async def handle_message(self, incoming: IncomingMessage, progress: dict[str, Any]):
         self.started.set()
-        await self.release.wait()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
         yield OutgoingMessage(text="late", channel=incoming.channel, thread=incoming.thread)
 
 
@@ -41,6 +50,24 @@ class _MultiYieldEngine:
     async def handle_message(self, incoming: IncomingMessage, progress: dict[str, Any]):
         yield OutgoingMessage(text="real answer", channel=incoming.channel, thread=incoming.thread)
         yield OutgoingMessage(text="follow-up nudge", channel=incoming.channel, thread=incoming.thread)
+
+
+class _DelayedAnswerEngine:
+    def __init__(self, delay: float = 0.03, session_store=None) -> None:
+        self.delay = delay
+        self.session_store = session_store
+
+    async def handle_message(
+        self,
+        incoming: IncomingMessage,
+        progress: dict[str, Any],
+    ):
+        await asyncio.sleep(self.delay)
+        yield OutgoingMessage(
+            text="real answer",
+            channel=incoming.channel,
+            thread=incoming.thread,
+        )
 
 
 class _NoopManager:
@@ -61,11 +88,18 @@ class _NoopManager:
 
 class _CaptureAdapter:
     platform = Platform.CLI
+    progress_capabilities = ProgressCapabilities(
+        enabled=True,
+        typing=True,
+        editable=True,
+        recover_failed_status=True,
+    )
 
     def __init__(self) -> None:
         self.sent: list[OutgoingMessage] = []
         self.updates: list[OutgoingMessage] = []
         self.events: list[tuple[str, str]] = []
+        self.typing_calls = 0
 
     async def send(self, message: OutgoingMessage) -> str:
         self.sent.append(message)
@@ -77,12 +111,79 @@ class _CaptureAdapter:
         self.events.append(("update", message.text))
         return message.update_message_id or f"updated-{len(self.updates)}"
 
+    async def send_typing(self, channel: Channel) -> None:
+        self.typing_calls += 1
+
+
+class _TransientPlaceholderAdapter(_CaptureAdapter):
+    platform = Platform.DISCORD
+
+    def __init__(self, failures: int = 1) -> None:
+        super().__init__()
+        self.failures = failures
+
+    async def send(self, message: OutgoingMessage) -> str:
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("transient Discord 503")
+        return await super().send(message)
+
+
+class _NullFinalUpdateAdapter(_CaptureAdapter):
+    platform = Platform.DISCORD
+
+    async def update(self, message: OutgoingMessage) -> None:
+        self.updates.append(message)
+        self.events.append(("update", message.text))
+        return None
+
+
+class _NoIdAdapter(_CaptureAdapter):
+    """Successful non-editing adapter whose sends intentionally have no ID."""
+
+    progress_capabilities = ProgressCapabilities()
+
+    async def send(self, message: OutgoingMessage) -> None:
+        self.sent.append(message)
+        self.events.append(("send", message.text))
+        return None
+
+    async def update(self, message: OutgoingMessage) -> None:
+        raise AssertionError("a no-ID CLI turn must not start the edit ticker")
+
 
 class _FailingFinalUpdateAdapter(_CaptureAdapter):
     async def update(self, message: OutgoingMessage) -> str:
         self.updates.append(message)
         self.events.append(("update", message.text))
         raise RuntimeError("final delivery failed")
+
+
+class _FailingFinalUpdateAndSendAdapter(_FailingFinalUpdateAdapter):
+    async def send(self, message: OutgoingMessage) -> str:
+        if message.text == "real answer":
+            raise RuntimeError("fresh final delivery failed")
+        return await super().send(message)
+
+
+class _HangingInitialProgressAdapter(_CaptureAdapter):
+    async def send(self, message: OutgoingMessage) -> str:
+        if message.text == "Thinking...":
+            await asyncio.sleep(60)
+        return await super().send(message)
+
+
+class _HangingFinalUpdateAdapter(_CaptureAdapter):
+    async def update(self, message: OutgoingMessage) -> str:
+        if message.text == "real answer":
+            await asyncio.sleep(60)
+        return await super().update(message)
+
+
+class _FailingTypingAdapter(_CaptureAdapter):
+    async def send_typing(self, channel: Channel) -> None:
+        self.typing_calls += 1
+        raise RuntimeError("typing unavailable")
 
 
 async def _wait_for_event_text(adapter: _CaptureAdapter, text: str) -> None:
@@ -108,6 +209,7 @@ async def test_engine_timeout_updates_placeholder_and_persists_turn(
     tmp_path,
 ):
     monkeypatch.setattr(router_module, "ENGINE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(router_module, "PROGRESS_UPDATE_SECONDS", 0.005)
 
     store = SQLiteSessionStore(tmp_path / "chat.db")
     channel = Channel(platform=Platform.CLI, platform_id="test-channel")
@@ -133,6 +235,12 @@ async def test_engine_timeout_updates_placeholder_and_persists_turn(
     assert [msg.role for msg in messages] == ["user", "assistant"]
     assert messages[0].content == "please do a slow thing"
     assert "chat runtime timeout" in messages[1].content
+
+    event_count = len(adapter.events)
+    typing_count = adapter.typing_calls
+    await asyncio.sleep(0.02)
+    assert len(adapter.events) == event_count
+    assert adapter.typing_calls == typing_count
 
     engine.release.set()
     await _wait_for_event_text(adapter, "Background task finished")
@@ -292,6 +400,120 @@ async def test_multi_yield_engine_preserves_first_output_as_placeholder_update(t
 
 
 @pytest.mark.asyncio
+async def test_failed_placeholder_recovers_progress_and_keeps_typing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setattr(router_module, "PROGRESS_RECOVERY_RETRY_SECONDS", 0.005)
+    monkeypatch.setattr(router_module, "PROGRESS_UPDATE_SECONDS", 0.01)
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.DISCORD, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="take long enough to show progress",
+        user=User(platform=Platform.DISCORD, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.DISCORD,
+    )
+    adapter = _TransientPlaceholderAdapter()
+    router = ChatRouter(  # type: ignore[arg-type]
+        _DelayedAnswerEngine(session_store=store),
+        _NoopManager(),
+    )
+
+    await router._handle_inner(adapter, incoming)
+
+    progress_sends = [
+        text for event, text in adapter.events
+        if event == "send" and text.startswith("⏳ Homie is reasoning")
+    ]
+    assert progress_sends, "the ticker must replace a failed Thinking message"
+    assert adapter.typing_calls >= 2
+    assert adapter.updates[-1].text == "real answer"
+
+
+@pytest.mark.asyncio
+async def test_failed_placeholder_with_fast_answer_still_sends_final(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.DISCORD, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="answer fast",
+        user=User(platform=Platform.DISCORD, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.DISCORD,
+    )
+    adapter = _TransientPlaceholderAdapter()
+    router = ChatRouter(  # type: ignore[arg-type]
+        _DelayedAnswerEngine(delay=0, session_store=store),
+        _NoopManager(),
+    )
+
+    await router._handle_inner(adapter, incoming)
+
+    assert [message.text for message in adapter.sent] == ["real answer"]
+    assert adapter.updates == []
+
+
+@pytest.mark.asyncio
+async def test_null_final_edit_falls_back_to_fresh_final_send(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.DISCORD, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="give me the answer",
+        user=User(platform=Platform.DISCORD, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.DISCORD,
+    )
+    adapter = _NullFinalUpdateAdapter()
+    router = ChatRouter(  # type: ignore[arg-type]
+        _DelayedAnswerEngine(delay=0, session_store=store),
+        _NoopManager(),
+    )
+
+    await router._handle_inner(adapter, incoming)
+
+    assert [message.text for message in adapter.sent] == ["Thinking...", "real answer"]
+    assert adapter.updates[-1].text == "real answer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        pytest.param(CLIAdapter.progress_capabilities, id="cli"),
+        pytest.param(WhatsAppAdapter.progress_capabilities, id="whatsapp"),
+        pytest.param(WebhookAdapter.progress_capabilities, id="webhook"),
+        pytest.param(object(), id="unknown-adapter"),
+    ],
+)
+async def test_disabled_progress_adapter_emits_only_the_final_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capabilities: object,
+):
+    monkeypatch.setattr(router_module, "PROGRESS_RECOVERY_RETRY_SECONDS", 0.005)
+    monkeypatch.setattr(router_module, "PROGRESS_UPDATE_SECONDS", 0.005)
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="a normal CLI turn",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    adapter = _NoIdAdapter()
+    adapter.progress_capabilities = capabilities  # type: ignore[assignment]
+    router = ChatRouter(  # type: ignore[arg-type]
+        _DelayedAnswerEngine(session_store=store),
+        _NoopManager(),
+    )
+
+    await router._handle_inner(adapter, incoming)
+
+    assert [message.text for message in adapter.sent] == ["real answer"]
+    assert adapter.typing_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_voice_origin_turn_skips_placeholder_and_delivers_final_via_send(tmp_path):
     """Voice turns must NOT get a "Thinking..." placeholder send.
 
@@ -356,7 +578,7 @@ def test_merge_incoming_batch_preserves_voice_origin():
 
 
 @pytest.mark.asyncio
-async def test_multi_yield_engine_suppresses_followup_when_final_update_fails(tmp_path):
+async def test_final_edit_exception_falls_back_to_fresh_send_and_followup(tmp_path):
     store = SQLiteSessionStore(tmp_path / "chat.db")
     channel = Channel(platform=Platform.CLI, platform_id="test-channel")
     incoming = IncomingMessage(
@@ -372,9 +594,32 @@ async def test_multi_yield_engine_suppresses_followup_when_final_update_fails(tm
 
     assert adapter.sent[0].text == "Thinking..."
     assert adapter.updates[-1].text == "real answer"
+    assert adapter.events == [
+        ("send", "Thinking..."),
+        ("update", "real answer"),
+        ("send", "real answer"),
+        ("send", "follow-up nudge"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_final_edit_and_fallback_failure_suppresses_followup(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="tell me what you know",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    adapter = _FailingFinalUpdateAndSendAdapter()
+    router = ChatRouter(_MultiYieldEngine(store), _NoopManager())  # type: ignore[arg-type]
+
+    await router._handle_inner(adapter, incoming)
+
     assert all(msg.text != "follow-up nudge" for msg in adapter.sent)
-    assert adapter.sent[1].is_error is True
-    assert "delivery failed" in adapter.sent[1].text
+    assert adapter.sent[-1].is_error is True
+    assert "delivery failed" in adapter.sent[-1].text
     assert adapter.events == [
         ("send", "Thinking..."),
         ("update", "real answer"),
@@ -384,3 +629,161 @@ async def test_multi_yield_engine_suppresses_followup_when_final_update_fails(tm
             "could be shown. I suppressed follow-up nudges for this turn.",
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_initial_progress_io_is_bounded(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setattr(router_module, "PROGRESS_IO_TIMEOUT_SECONDS", 0.005)
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="answer even if progress hangs",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    adapter = _HangingInitialProgressAdapter()
+    router = ChatRouter(  # type: ignore[arg-type]
+        _DelayedAnswerEngine(delay=0, session_store=store),
+        _NoopManager(),
+    )
+
+    await asyncio.wait_for(router._handle_inner(adapter, incoming), timeout=0.2)
+
+    assert [message.text for message in adapter.sent] == ["real answer"]
+
+
+@pytest.mark.asyncio
+async def test_final_progress_edit_is_bounded_and_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setattr(router_module, "PROGRESS_IO_TIMEOUT_SECONDS", 0.005)
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="answer even if the final edit hangs",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    adapter = _HangingFinalUpdateAdapter()
+    router = ChatRouter(  # type: ignore[arg-type]
+        _DelayedAnswerEngine(delay=0, session_store=store),
+        _NoopManager(),
+    )
+
+    await asyncio.wait_for(router._handle_inner(adapter, incoming), timeout=0.2)
+
+    assert [message.text for message in adapter.sent] == ["Thinking...", "real answer"]
+
+
+@pytest.mark.asyncio
+async def test_typing_failure_does_not_disable_editable_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setattr(router_module, "PROGRESS_UPDATE_SECONDS", 0.005)
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="keep showing truthful status",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    adapter = _FailingTypingAdapter()
+    router = ChatRouter(  # type: ignore[arg-type]
+        _DelayedAnswerEngine(delay=0.02, session_store=store),
+        _NoopManager(),
+    )
+
+    await router._handle_inner(adapter, incoming)
+
+    assert adapter.typing_calls >= 2
+    assert any(
+        message.text.startswith("⏳ Homie is reasoning")
+        for message in adapter.updates
+    )
+    assert adapter.updates[-1].text == "real answer"
+
+
+@pytest.mark.asyncio
+async def test_progress_ticker_is_cancelled_after_final_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setattr(router_module, "PROGRESS_UPDATE_SECONDS", 0.005)
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="finish cleanly",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    adapter = _CaptureAdapter()
+    router = ChatRouter(  # type: ignore[arg-type]
+        _DelayedAnswerEngine(delay=0.015, session_store=store),
+        _NoopManager(),
+    )
+
+    await router._handle_inner(adapter, incoming)
+    event_count = len(adapter.events)
+    typing_count = adapter.typing_calls
+    await asyncio.sleep(0.02)
+
+    assert len(adapter.events) == event_count
+    assert adapter.typing_calls == typing_count
+
+
+@pytest.mark.asyncio
+async def test_external_shutdown_cancels_engine_and_progress_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setattr(router_module, "PROGRESS_UPDATE_SECONDS", 0.005)
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="stay busy until shutdown",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    engine = _CompletableEngine(store)
+    adapter = _CaptureAdapter()
+    router = ChatRouter(engine, _NoopManager())  # type: ignore[arg-type]
+
+    turn = asyncio.create_task(router._handle_inner(adapter, incoming))
+    await asyncio.wait_for(engine.started.wait(), timeout=0.2)
+    await _wait_for_event_text(adapter, "Homie is reasoning")
+    turn.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    await asyncio.wait_for(engine.cancelled.wait(), timeout=0.2)
+    event_count = len(adapter.events)
+    typing_count = adapter.typing_calls
+    await asyncio.sleep(0.02)
+
+    assert len(adapter.events) == event_count
+    assert adapter.typing_calls == typing_count
+
+
+def test_progress_tool_labels_never_echo_unknown_names_or_arguments() -> None:
+    secretish = "custom_tool_C_Users_YourUser_client-secret --token abc123"
+
+    assert _progress_tool_label(secretish) == "Using a tool"
+    assert _progress_tool_label("read_file") == "Reading files"
+    assert _progress_tool_label("mcp__crm__lookup") == "Using an integration"
+    rendered = _render_progress_status(
+        {
+            "started": 0,
+            "current_tool": secretish,
+            "tool_calls": 1,
+        }
+    )
+    assert "client" not in rendered.lower()
+    assert "token" not in rendered.lower()
+    assert "abc123" not in rendered

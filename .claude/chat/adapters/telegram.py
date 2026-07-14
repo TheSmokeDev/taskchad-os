@@ -12,6 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from adapters.base import ProgressCapabilities
 from models import (
     Attachment,
     Channel,
@@ -54,6 +55,13 @@ class TelegramAdapter:
     DMs and group messages. Each Telegram chat is a conversation;
     reply-to creates threaded sessions.
     """
+
+    progress_capabilities = ProgressCapabilities(
+        enabled=True,
+        typing=True,
+        editable=True,
+        recover_failed_status=True,
+    )
 
     def __init__(
         self,
@@ -283,6 +291,12 @@ class TelegramAdapter:
         thread_id = message.thread.thread_id if message.thread else message.channel.platform_id
         body_text = message.text
 
+        # Updates must be pure text edits. File/photo markers are delivered by
+        # the router's one fresh-send fallback so they cannot be dispatched
+        # once here and again after a failed edit receipt.
+        if message.is_update and parse_send_markers(body_text):
+            return None
+
         # Phase 4: parse [SEND_FILE]/[SEND_PHOTO] markers and dispatch via
         # bot.send_document / bot.send_photo (kind == 'document' | 'photo'
         # maps directly to Telegram's send method names — R1 M5).
@@ -299,10 +313,10 @@ class TelegramAdapter:
         # delete the "Thinking..." placeholder and send a voice bubble instead.
         # Skip progress ticks ("Thinking...", "Working...") — only trigger on the final response.
         _is_progress_tick = message.text.startswith(("Thinking...", "Working..."))
-        if message.is_update and thread_id in self._voice_reply_threads and not _is_progress_tick:
+        if thread_id in self._voice_reply_threads and not _is_progress_tick:
             self._voice_reply_threads.discard(thread_id)
             # Delete the placeholder message
-            if message.update_message_id:
+            if message.is_update and message.update_message_id:
                 try:
                     await self._app.bot.delete_message(
                         chat_id=chat_id,
@@ -607,8 +621,33 @@ class TelegramAdapter:
         return path.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"))
 
     async def update(self, message: OutgoingMessage) -> str | None:
-        """Edit an existing message."""
-        return await self.send(message)
+        """Perform one pure Telegram text edit and report receipt truthfully."""
+        if not message.update_message_id or parse_send_markers(message.text):
+            return None
+
+        body_text = message.text
+        footer = getattr(message, "footer", None)
+        if footer:
+            body_text = f"{body_text}\n\n{footer}" if body_text else footer
+        raw_text, directive_media = self._extract_media_directives(body_text)
+        media_refs = self._collect_media_refs(message.attachments, directive_media)
+        text = self._format_for_telegram(raw_text)
+        if not text or len(text) > 4096 or media_refs:
+            return None
+
+        try:
+            await self._app.bot.edit_message_text(
+                chat_id=int(message.channel.platform_id),
+                message_id=int(message.update_message_id),
+                text=text,
+                parse_mode="Markdown",
+            )
+            return message.update_message_id
+        except Exception as e:
+            if "is not modified" in str(e):
+                return message.update_message_id
+            print(f"[{datetime.now()}] Telegram edit failed: {e}", flush=True)
+            return None
 
     async def send_typing(self, channel: Channel) -> None:
         """Send typing indicator."""

@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from adapters.base import ProgressCapabilities
 from models import (
     Attachment,
     Channel,
@@ -81,6 +82,13 @@ class DiscordAdapter:
     Connects via WebSocket gateway (no public URL needed for receiving).
     Handles DMs, @mentions, and button interactions in allowed guilds.
     """
+
+    progress_capabilities = ProgressCapabilities(
+        enabled=True,
+        typing=True,
+        editable=True,
+        recover_failed_status=True,
+    )
 
     def __init__(
         self,
@@ -747,7 +755,9 @@ class DiscordAdapter:
         """
         channel = self._client.get_channel(int(message.channel.platform_id))
         if not channel:
-            return None
+            raise RuntimeError(
+                f"Discord channel {message.channel.platform_id} is unavailable"
+            )
 
         # Phase 4: marker dispatch BEFORE text send (so attachments arrive first).
         await self._dispatch_send_markers(channel, message.text)
@@ -797,9 +807,20 @@ class DiscordAdapter:
         channel = self._client.get_channel(int(message.channel.platform_id))
         if not channel:
             return
+        if parse_send_markers(message.text):
+            # Updates must remain a pure single-message edit. Let the router's
+            # fresh-send fallback own file dispatch exactly once.
+            return None
+        text = strip_send_markers(message.text)
+        chunks = self._split_message(text, max_length=1900)
+        if len(chunks) != 1:
+            # One Discord message cannot represent a multi-chunk final. Do not
+            # partially edit the progress bubble; returning None lets the
+            # router perform one fresh, fully chunked final send.
+            return None
         try:
             msg = await channel.fetch_message(int(message.update_message_id))
-            kwargs: dict[str, Any] = {"content": message.text[:2000]}
+            kwargs: dict[str, Any] = {"content": chunks[0]}
             if message.components:
                 kwargs["view"] = self._build_view(message.components)
             await msg.edit(**kwargs)

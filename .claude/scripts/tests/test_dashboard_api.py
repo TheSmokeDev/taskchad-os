@@ -1714,6 +1714,113 @@ def test_patch_dashboard_settings_partial_dict_merges(isolated_app):
     assert settings.get("b") == 2
 
 
+# ── /api/autostart (bot autostart at logon) ──────────────────────────────
+
+
+def test_get_autostart_returns_status_dict(isolated_app, monkeypatch):
+    import autostart
+
+    status = {
+        "supported": True,
+        "enabled": True,
+        "task_name": "SecondBrain-BotAutostart",
+        "platform": "Windows",
+        "detail": "task registered (at logon)",
+    }
+    monkeypatch.setattr(autostart, "status", lambda: status)
+    r = isolated_app.get("/api/autostart")
+    assert r.status_code == 200
+    assert r.json() == status
+
+
+def test_post_autostart_enable_calls_enable(isolated_app, monkeypatch):
+    import autostart
+
+    calls = []
+
+    def fake_enable(*, caller=""):
+        calls.append(("enable", caller))
+        return {"supported": True, "ok": True, "enabled": True, "detail": "task registered"}
+
+    def fake_disable(*, caller=""):
+        calls.append(("disable", caller))
+        return {"supported": True, "ok": True, "enabled": False, "detail": "task removed"}
+
+    monkeypatch.setattr(autostart, "enable", fake_enable)
+    monkeypatch.setattr(autostart, "disable", fake_disable)
+    r = isolated_app.post("/api/autostart", json={"enabled": True})
+    assert r.status_code == 200
+    assert r.json()["enabled"] is True
+    assert calls == [("enable", "api:/api/autostart")]
+
+
+def test_post_autostart_disable_calls_disable(isolated_app, monkeypatch):
+    import autostart
+
+    calls = []
+
+    def fake_enable(*, caller=""):
+        calls.append(("enable", caller))
+        return {"supported": True, "ok": True, "enabled": True, "detail": "task registered"}
+
+    def fake_disable(*, caller=""):
+        calls.append(("disable", caller))
+        return {"supported": True, "ok": True, "enabled": False, "detail": "task removed"}
+
+    monkeypatch.setattr(autostart, "enable", fake_enable)
+    monkeypatch.setattr(autostart, "disable", fake_disable)
+    r = isolated_app.post("/api/autostart", json={"enabled": False})
+    assert r.status_code == 200
+    assert r.json()["enabled"] is False
+    assert calls == [("disable", "api:/api/autostart")]
+
+
+def test_post_autostart_killswitch_disabled_returns_503(isolated_app, monkeypatch):
+    import autostart
+    from security import kill_switches
+
+    def fake_enable(*, caller=""):
+        raise kill_switches.KillSwitchDisabled("autostart")
+
+    monkeypatch.setattr(autostart, "enable", fake_enable)
+    r = isolated_app.post("/api/autostart", json={"enabled": True})
+    assert r.status_code == 503
+
+
+def test_post_autostart_unsupported_returns_501(isolated_app, monkeypatch):
+    import autostart
+
+    monkeypatch.setattr(
+        autostart,
+        "enable",
+        lambda *, caller="": {
+            "supported": False,
+            "ok": False,
+            "enabled": False,
+            "detail": "windows only",
+        },
+    )
+    r = isolated_app.post("/api/autostart", json={"enabled": True})
+    assert r.status_code == 501
+
+
+def test_post_autostart_not_ok_returns_500(isolated_app, monkeypatch):
+    import autostart
+
+    monkeypatch.setattr(
+        autostart,
+        "enable",
+        lambda *, caller="": {
+            "supported": True,
+            "ok": False,
+            "enabled": False,
+            "detail": "schtasks failed",
+        },
+    )
+    r = isolated_app.post("/api/autostart", json={"enabled": True})
+    assert r.status_code == 500
+
+
 def test_get_dashboard_mobile_access_returns_sanitized_tailnet_status(isolated_app, monkeypatch):
     import dashboard_api
 

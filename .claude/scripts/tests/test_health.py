@@ -27,7 +27,7 @@ def test_health_status_defaults():
     assert status.adapters == {"telegram": True}
     assert status.sessions_active == 5
     assert status.cognition_available is True
-    assert status.version == "1.0.0"
+    assert status.version == "1.0.1"
     assert status.timestamp == ""
 
 

@@ -199,6 +199,14 @@ async def run_discord_persona_channel_turn(
         or persona_section.get("name")
         or persona_id
     )
+
+    def _set_progress_status(status: str) -> None:
+        if progress is None:
+            return
+        progress["status"] = status
+        progress.pop("current_tool", None)
+
+    _set_progress_status(f"Loading {display_name} memory")
     role = persona_section.get("role") or ""
     persona_prompt = cabinet.get("voice_persona_prompt") or ""
     profile_context = build_session_start_context(
@@ -234,6 +242,7 @@ async def run_discord_persona_channel_turn(
             f"{persona_id}: recall failed (non-blocking): {exc}"
         )
 
+    _set_progress_status(f"Preparing {display_name} context")
     try:
         skill_index = build_skill_index(
             project_root / ".claude" / "skills",
@@ -269,6 +278,7 @@ async def run_discord_persona_channel_turn(
     prompt_parts.append("# Current User Message\n" + incoming.text.strip())
     prompt = "\n\n".join(prompt_parts)
 
+    _set_progress_status(f"{display_name} is reasoning")
     request = RuntimeRequest(
         prompt=prompt,
         cwd=project_root,

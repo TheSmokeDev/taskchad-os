@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 import background_tasks
+from adapters.base import resolve_progress_capabilities
 from commands import get_command_min_role, get_engine_command_description, get_piv_instruction
 from discord_channel_bindings import resolve_discord_channel_binding
 from discord_persona_runtime import run_discord_persona_channel_turn
@@ -101,6 +102,11 @@ DEFAULT_ENGINE_TIMEOUT_SECONDS = 900.0
 # Test/legacy override. Normal runtime reads config.CHAT_ENGINE_TIMEOUT_SECONDS
 # at call time so /reload can update the guard without restarting the process.
 ENGINE_TIMEOUT_SECONDS: float | None = None
+# Keep expiring typing indicators alive and recover one transient status-post
+# failure before returning to the normal progress cadence.
+PROGRESS_UPDATE_SECONDS = 8.0
+PROGRESS_RECOVERY_RETRY_SECONDS = 2.0
+PROGRESS_IO_TIMEOUT_SECONDS = 2.0
 PREFETCH_ONLY_INTENTS = {"browserops"}
 VAULT_COMMAND_NAMES = {"vault", "vaults", "vault-ops"}
 VAULT_NAME_ALIASES = {
@@ -126,6 +132,51 @@ VAULT_OPS_ROUTINES = {
     "status": "Light (~30 sec)",
     "think": "Heavy (~5-10 min)",
 }
+
+
+def _progress_tool_label(raw_name: Any) -> str:
+    """Turn a runtime tool name into a short, non-sensitive status label."""
+
+    name = re.sub(r"[^A-Za-z0-9_. -]+", "", str(raw_name or "")).strip()[:64]
+    folded = name.lower()
+    tokens = {token for token in re.split(r"[_. -]+", folded) if token}
+    if not tokens:
+        return "Using a tool"
+    if tokens & {"read", "readfile"}:
+        return "Reading files"
+    if tokens & {"grep", "glob", "search", "find", "searchfiles"}:
+        return "Searching"
+    if tokens & {"bash", "terminal", "command", "shell", "exec", "execute"}:
+        return "Running a command"
+    if tokens & {"write", "edit", "patch", "applypatch"}:
+        return "Updating files"
+    if tokens & {"browser", "navigate", "click"}:
+        return "Checking the browser"
+    if tokens & {"api", "http", "integration", "mcp", "request"}:
+        return "Using an integration"
+    # Unknown runtime names are intentionally not echoed. Tool registries are
+    # normally controlled, but a provider/plugin could surface a client name,
+    # local path, or command fragment in this field.
+    return "Using a tool"
+
+
+def _render_progress_status(progress: dict[str, Any]) -> str:
+    """Render truthful, bounded progress without exposing tool arguments."""
+
+    elapsed = max(0, int(time.time() - float(progress.get("started") or time.time())))
+    current_tool = progress.get("current_tool")
+    if current_tool:
+        label = _progress_tool_label(current_tool)
+        prefix = "🔧"
+    else:
+        raw_status = str(progress.get("status") or "Working")
+        label = " ".join(raw_status.split())[:120] or "Working"
+        prefix = "⏳"
+    status = f"{prefix} {label} — {elapsed}s"
+    calls = int(progress.get("tool_calls") or 0)
+    if calls:
+        status += f" | {calls} tool call{'s' if calls != 1 else ''}"
+    return status
 
 _LINKEDIN_PROFILE_MARKERS = (
     "linkedin profile",
@@ -1034,21 +1085,68 @@ class ChatRouter:
         # adapter's one-shot voice-reply flag and speak "Thinking..." instead
         # of the real answer. With no placeholder, the final delivery below
         # goes through adapter.send(), which carries the voice-reply branch.
+        #
+        # Progress has independent, redundant lanes: best-effort typing and an
+        # editable status message. A transient failure in either one must not
+        # disable the other for the remainder of the turn.
+        progress_capabilities = resolve_progress_capabilities(adapter)
+        progress_allowed = not getattr(incoming, "voice_origin", False)
+        status_progress_enabled = bool(
+            progress_allowed
+            and progress_capabilities.enabled
+            and progress_capabilities.editable
+        )
+        typing_progress_enabled = bool(
+            progress_allowed
+            and progress_capabilities.enabled
+            and progress_capabilities.typing
+        )
+        progress: dict[str, Any] = {
+            "tool_calls": 0,
+            "started": time.time(),
+            "status": "Homie is reasoning",
+        }
         placeholder_id: str | None = None
-        if not getattr(incoming, "voice_origin", False):
+
+        async def _refresh_typing() -> None:
+            if not typing_progress_enabled:
+                return
+            send_typing = getattr(adapter, "send_typing", None)
+            if not callable(send_typing):
+                return
             try:
-                placeholder_id = await adapter.send(
-                    OutgoingMessage(
-                        text="Thinking...",
-                        channel=incoming.channel,
-                        thread=incoming.thread,
-                    )
+                await asyncio.wait_for(
+                    send_typing(incoming.channel),
+                    timeout=PROGRESS_IO_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                # Typing is a redundant UX signal, never a turn-killing path.
+                pass
+
+        async def _send_progress_message(text: str) -> str | None:
+            try:
+                return await asyncio.wait_for(
+                    adapter.send(
+                        OutgoingMessage(
+                            text=text,
+                            channel=incoming.channel,
+                            thread=incoming.thread,
+                        )
+                    ),
+                    timeout=PROGRESS_IO_TIMEOUT_SECONDS,
                 )
             except Exception as e:
-                print(f"[{datetime.now()}] Failed to send placeholder: {e}")
+                print(f"[{datetime.now()}] Failed to send progress status: {e}")
+                return None
 
-        # Run engine with a progress ticker
-        progress: dict[str, Any] = {"tool_calls": 0, "started": time.time()}
+        if status_progress_enabled and typing_progress_enabled:
+            placeholder_id, _ = await asyncio.gather(
+                _send_progress_message("Thinking..."), _refresh_typing()
+            )
+        elif status_progress_enabled:
+            placeholder_id = await _send_progress_message("Thinking...")
+        elif typing_progress_enabled:
+            await _refresh_typing()
 
         # Homie Mobile M7 — cockpit adapters (dashboard SSE) expose
         # emit_turn_event; bind it with this turn's target so the engine's
@@ -1066,17 +1164,32 @@ class ChatRouter:
             progress["emit_turn_event"] = _emit_turn_event
 
         async def _tick_progress() -> None:
-            """Update placeholder with elapsed time every 12 seconds."""
+            """Refresh typing and maintain one recoverable progress bubble."""
+            nonlocal placeholder_id
+            quick_recovery_pending = bool(
+                status_progress_enabled
+                and progress_capabilities.recover_failed_status
+                and placeholder_id is None
+            )
             while True:
-                await asyncio.sleep(12)
-                elapsed = int(time.time() - progress["started"])
-                calls = progress.get("tool_calls", 0)
-                status = f"Working... ({elapsed}s)"
-                if calls:
-                    status += f" | {calls} tool calls"
+                delay = (
+                    PROGRESS_RECOVERY_RETRY_SECONDS
+                    if quick_recovery_pending
+                    else PROGRESS_UPDATE_SECONDS
+                )
+                await asyncio.sleep(delay)
+                quick_recovery_pending = False
+                await _refresh_typing()
+                if not status_progress_enabled:
+                    continue
+                status = _render_progress_status(progress)
+                if placeholder_id is None:
+                    if progress_capabilities.recover_failed_status:
+                        placeholder_id = await _send_progress_message(status)
+                    continue
                 try:
-                    if placeholder_id:
-                        await adapter.update(
+                    updated_id = await asyncio.wait_for(
+                        adapter.update(
                             OutgoingMessage(
                                 text=status,
                                 channel=incoming.channel,
@@ -1084,11 +1197,30 @@ class ChatRouter:
                                 is_update=True,
                                 update_message_id=placeholder_id,
                             )
-                        )
+                        ),
+                        timeout=PROGRESS_IO_TIMEOUT_SECONDS,
+                    )
                 except Exception:
-                    pass
+                    updated_id = None
+                if updated_id:
+                    placeholder_id = updated_id
+                    continue
+                if progress_capabilities.recover_failed_status:
+                    placeholder_id = None
+                    quick_recovery_pending = True
 
-        progress_task = asyncio.create_task(_tick_progress()) if placeholder_id else None
+        progress_task = (
+            asyncio.create_task(_tick_progress())
+            if typing_progress_enabled
+            or (
+                status_progress_enabled
+                and (
+                    placeholder_id is not None
+                    or progress_capabilities.recover_failed_status
+                )
+            )
+            else None
+        )
 
         final_text = ""
         final_is_error = False
@@ -1217,8 +1349,14 @@ class ChatRouter:
             # Homie Mobile M7 — operator stop: cancel_active_turn() killed the
             # engine task. Its persistence died with it (history correctly shows
             # no reply); deliver a stop marker instead. If the engine task is
-            # still alive, WE were cancelled from outside — propagate.
+            # still alive, WE were cancelled from outside: cancel the shielded
+            # engine task before propagating so shutdown cannot orphan work.
             if not engine_task.cancelled():
+                engine_task.cancel()
+                try:
+                    await engine_task
+                except asyncio.CancelledError:
+                    pass
                 raise
             final_text = "⏹️ Stopped."
             final_is_error = False
@@ -1250,6 +1388,10 @@ class ChatRouter:
                 self._active_turns.pop(_turn_key, None)
             if progress_task:
                 progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
 
         # Update the placeholder with the final response
         delivered_text = foreground_text if foreground_text is not None else final_text
@@ -1268,17 +1410,54 @@ class ChatRouter:
         final_delivery_id: str | None = None
         try:
             if placeholder_id:
-                final_delivery_id = await adapter.update(
-                    OutgoingMessage(
-                        text=delivered_text,
-                        channel=incoming.channel,
-                        thread=incoming.thread,
-                        is_update=True,
-                        update_message_id=placeholder_id,
-                        is_error=delivered_is_error,
-                        footer=final_footer if foreground_text is None else None,
+                try:
+                    final_delivery_id = await asyncio.wait_for(
+                        adapter.update(
+                            OutgoingMessage(
+                                text=delivered_text,
+                                channel=incoming.channel,
+                                thread=incoming.thread,
+                                is_update=True,
+                                update_message_id=placeholder_id,
+                                is_error=delivered_is_error,
+                                footer=(
+                                    final_footer if foreground_text is None else None
+                                ),
+                            )
+                        ),
+                        timeout=PROGRESS_IO_TIMEOUT_SECONDS,
                     )
-                )
+                except Exception as edit_exc:
+                    print(
+                        f"[{datetime.now()}] Failed to edit final progress status: "
+                        f"{edit_exc}",
+                        flush=True,
+                    )
+                    final_delivery_id = None
+                if (
+                    final_delivery_id is None
+                    and progress_capabilities.recover_failed_status
+                ):
+                    # A recovery-capable adapter promises message-ID truth.
+                    # One fresh send prevents a swallowed edit failure from
+                    # becoming a silently missing answer.
+                    final_delivery_id = await adapter.send(
+                        OutgoingMessage(
+                            text=delivered_text,
+                            channel=incoming.channel,
+                            thread=incoming.thread,
+                            is_error=delivered_is_error,
+                            footer=final_footer if foreground_text is None else None,
+                        )
+                    )
+                    if final_delivery_id is None:
+                        raise RuntimeError(
+                            "Final fallback send returned no delivery receipt"
+                        )
+                elif final_delivery_id is None:
+                    raise RuntimeError(
+                        "Final progress edit returned no delivery receipt"
+                    )
             else:
                 final_delivery_id = await adapter.send(
                     OutgoingMessage(
@@ -1290,6 +1469,8 @@ class ChatRouter:
                         footer=final_footer if foreground_text is None else None,
                     )
                 )
+                if status_progress_enabled and final_delivery_id is None:
+                    raise RuntimeError("Final send returned no delivery receipt")
             final_delivery_ok = True
             print(
                 f"[{datetime.now()}] Final response delivered "

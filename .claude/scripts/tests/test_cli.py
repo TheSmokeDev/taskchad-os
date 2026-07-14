@@ -164,7 +164,7 @@ class TestCLIHelp:
         runner = CliRunner()
         result = runner.invoke(cli_main, ["--version"])
         assert result.exit_code == 0
-        assert "1.0.0" in result.output
+        assert "1.0.1" in result.output
 
     def test_chat_model_option_uses_runtime_selection_helper(self, monkeypatch):
         from click.testing import CliRunner
@@ -787,4 +787,4 @@ class TestCLISubprocess:
             cwd=str(Path(__file__).parent.parent),
         )
         assert result.returncode == 0
-        assert "1.0.0" in result.stdout
+        assert "1.0.1" in result.stdout

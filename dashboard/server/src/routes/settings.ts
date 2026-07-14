@@ -36,3 +36,20 @@ settingsRoute.patch('/api/dashboard/settings', async (c) => {
     'Content-Type': result.headers.get('content-type') ?? 'application/json',
   });
 });
+
+settingsRoute.get('/api/autostart', async (c) => {
+  const result = await authedFetchJson('/api/autostart');
+  return c.json(result.json as Record<string, unknown>, result.status as 200);
+});
+
+settingsRoute.post('/api/autostart', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const result = await authedFetch('/api/autostart', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return c.body(result.body, result.status as 200, {
+    'Content-Type': result.headers.get('content-type') ?? 'application/json',
+  });
+});

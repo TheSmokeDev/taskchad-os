@@ -1446,13 +1446,19 @@ class ConversationEngine:
         imagegen_turn = active_skill_name == "imagegen"
 
         def _on_tool_event(ev: dict[str, Any]) -> None:
-            # Homie Mobile M7 — live tool telemetry: keeps the router's 12s
-            # ticker honest (progress["tool_calls"] was only written post-hoc
+            # Homie Mobile M7 — live tool telemetry: keeps the router's ticker
+            # honest (progress["tool_calls"] was only written post-hoc
             # from the result) and feeds cockpit adapters when the router
             # bound an emit_turn_event hook.
             if progress is None:
                 return
             progress["tool_calls"] = int(progress.get("tool_calls") or 0) + 1
+            tool_name = str(ev.get("name") or "").strip()
+            if tool_name:
+                # Tool arguments can contain local paths, client data, or
+                # secrets. The router only receives the bounded tool name for
+                # its user-visible progress label.
+                progress["current_tool"] = tool_name[:64]
             emit = progress.get("emit_turn_event")
             if callable(emit):
                 try:

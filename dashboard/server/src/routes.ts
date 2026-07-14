@@ -134,6 +134,7 @@ export const ROUTE_MANIFEST: readonly string[] = [
   // settings.ts
   '/api/dashboard/mobile-access',
   '/api/dashboard/settings',
+  '/api/autostart',
 
   // mission.ts — wildcard pass-throughs to the orchestration framework
   // surface (docs/mc-profile-contract.md § 3.2). Listed as both the

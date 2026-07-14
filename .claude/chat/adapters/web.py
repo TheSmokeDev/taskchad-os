@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from adapters.base import ProgressCapabilities
 from models import Channel, IncomingMessage, OutgoingMessage, Platform
 
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
@@ -32,6 +33,12 @@ class WebAdapter:
     the same WebSocket connection. The adapter's listen() queue is fed
     externally by the ws_client when it receives a chat_request.
     """
+
+    progress_capabilities = ProgressCapabilities(
+        enabled=True,
+        editable=True,
+        recover_failed_status=True,
+    )
 
     def __init__(self, ws_client: RelayWSClient) -> None:
         self.ws_client = ws_client
@@ -136,6 +143,11 @@ class WebAdapter:
         request_id = ""
         if message.thread:
             request_id = message.thread.parent_message_id or message.thread.thread_id or ""
+
+        # Binary/file markers are not editable frames. Returning before any
+        # side effect lets the router's fresh-send fallback dispatch them once.
+        if message.is_update and parse_send_markers(message.text):
+            return None
 
         # Phase 4: marker dispatch (before text)
         await self._dispatch_send_markers(request_id, message.text)
