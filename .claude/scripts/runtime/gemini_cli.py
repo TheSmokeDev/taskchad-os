@@ -84,8 +84,23 @@ class GeminiCliRuntime:
             args = [resolved, "--model", model]
 
             if is_tool_task:
-                # Prompt via stdin (dash arg) — no CLI arg length limit
-                args.extend(["--yolo", "--output-format", "text", "-"])
+                # Visual evidence analysis is deliberately read-only. Gemini
+                # receives exact paths in the prompt and may only use read_file.
+                if request.read_only_tools:
+                    args.extend([
+                        "--approval-mode", "default",
+                        "--allowed-tools", "read_file",
+                        "--output-format", "text", "-",
+                    ])
+                elif request.workspace_write_tools:
+                    args.extend([
+                        "--approval-mode", "auto_edit",
+                        "--allowed-tools", "read_file,write_file,replace,glob,grep_search,list_directory",
+                        "--output-format", "text", "-",
+                    ])
+                else:
+                    # Prompt via stdin (dash arg) — no CLI arg length limit
+                    args.extend(["--yolo", "--output-format", "text", "-"])
             else:
                 args.extend(["--output-format", "text", "-"])
 

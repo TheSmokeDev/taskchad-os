@@ -2,7 +2,7 @@
 
 Status: shipped, shared native command registry with Telegram menu
 Owner: `.claude/chat/` command registry and Telegram adapter
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
 ## What It Does
 
@@ -16,8 +16,8 @@ adds richer typed wrappers where the platform supports them, such as the
 `/vault` group. Whatever lands in `TELEGRAM_NATIVE_COMMANDS` shows up on both
 surfaces for free.
 
-The curated menu currently exposes 54 commands (`TELEGRAM_NATIVE_COMMANDS`);
-Discord renders 53 flat commands plus the typed `/vault` group.
+The curated menu currently exposes 57 commands (`TELEGRAM_NATIVE_COMMANDS`);
+Discord renders 56 flat commands plus the typed `/vault` group.
 
 ## Drift-Proofing — Every Command Makes An Explicit Menu Decision
 
@@ -61,6 +61,7 @@ coding-session workflow, and engine-only dev tools.
 - Chat command audit: `/commands native`, `/commands all`
 - Full help: `/help`
 - LinkedIn workshop: `/linkedin [cook <rough-idea>|run|cancel]`
+- Video learning: `/watch <video-url> [question] [--detail smart|transcript|deep]`
 - Shared vault surface: `/vault ...`
 
 ## Source Of Truth Files
@@ -81,6 +82,9 @@ coding-session workflow, and engine-only dev tools.
 - `/linkedin` creates and revises queue drafts locally. Only its authenticated
   **Approve & Post** button may publish the exact displayed row through the
   existing gated executor.
+- `/watch` keeps source media/transcripts in operational data and saves only a
+  sourced, paraphrased dossier. Its Apply button creates a proposal; only a
+  second exact-proposal approval may edit the local workspace.
 - Browser execution remains under `/browserops`, `/browser`, and
   `/linkedin_profile` policy gates.
 - Telegram's menu refreshes when the Telegram adapter reconnects and registers
@@ -113,6 +117,7 @@ Telegram examples:
 /linkedin
 /linkedin cook What I learned building multi-persona agents
 /linkedin run
+/watch https://youtu.be/example What should we apply? --detail smart
 ```
 
 ## How To Test It
@@ -127,15 +132,15 @@ uv run thehomie doctor
 
 ## Current Local Proof
 
-- Date: 2026-07-11
-- Result: the curated menu grew to 54 commands (+8: `pemail`, `cleanup`,
-  `accounts`, `gsc`, `analytics`, `team`, `teamtick`, `quote`). Menu math is
-  clean — 87 registry commands = 54 shown + 33 in `NATIVE_MENU_EXCLUDED`, no
+- Date: 2026-07-12
+- Result: the curated menu contains 57 commands, including the native `/watch`
+  video-learning lane. Menu math is clean — 90 registry commands = 57 shown +
+  33 in `NATIVE_MENU_EXCLUDED`, no
   overlap, no unclassified names, no zombies. New guards green:
   `test_every_command_makes_an_explicit_menu_decision` (completeness) and the
   Telegram adapter `set_my_commands` wiring assertion.
-- Expected after restart: the Telegram adapter will register 54 slash commands
-  and Discord 53 flat + `/vault` group. (`thehomie doctor` reports the live
+- Expected after restart: the Telegram adapter will register 57 slash commands
+  and Discord 56 flat + `/vault` group. (`thehomie doctor` reports the live
   Telegram count vs this expected — a mismatch means the bot hasn't restarted
   since the menu change.)
 - Scope: local test proof plus the doctor registration check. Platform clients
@@ -144,11 +149,10 @@ uv run thehomie doctor
 ## Latest Live Proof
 
 - Surface: Telegram `getMyCommands` (via `thehomie doctor`)
-- Honest state: before the bot restarts after this change, the live menu lags
-  the registry — doctor reports `Telegram live: 46 (mismatch — restart the bot
-  to re-register)` against the expected 54. The live 54 count is captured from
-  the bot log (`Registered 54 slash commands with Telegram`) on the next
-  restart.
+- Proof date: 2026-07-12
+- Result: `thehomie doctor` reported `Telegram live: 57 (in sync)` after the
+  bot refresh. Discord's 56-flat-plus-`/vault` registry math is locally proven;
+  this page does not claim a separate Discord API enumeration.
 - Delivery gate proof: a live Telegram answer rendered in Telegram Web and the
   bot log recorded final answer delivery before any follow-up delivery.
 

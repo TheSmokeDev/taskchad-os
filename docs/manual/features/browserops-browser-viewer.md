@@ -50,12 +50,12 @@ sanitized audit rows, and exposes a read-only dashboard Browser Viewer at
 - Heartbeat may propose LinkedIn work only after a dedicated queue/proposal
   slice; it must not publish, DM, edit, or connect without later explicit
   bounded-autopilot opt-in.
-- LinkedIn/Social Homie owns strategy, voice, drafts, queue review, and approval
-  prompts. Browser Homie owns visible Chrome execution, snapshot/ref loops,
+- LinkedIn workshop owns strategy, voice, drafts, copy/image revision, queue
+  review, and approval prompts. Browser Homie owns visible Chrome execution, snapshot/ref loops,
   redaction, and audit evidence.
-- `/linkedin` is draft-only. Actual posting/connecting goes through the
-  per-action gated `/linkedin_post`, `/linkedin_connect`, and `/reddit
-  comment|post` write commands.
+- `/linkedin` creates and revises drafts locally; its authenticated **Approve &
+  Post** button routes the exact queue row through the same gated executor.
+  Direct expert paths `/linkedin_post` and `/linkedin_connect` remain available.
 
 ## How To Run It
 

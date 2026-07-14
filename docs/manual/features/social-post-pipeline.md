@@ -71,7 +71,7 @@ shipped set:
 |---|---|---|---|
 | `linkedin` | browser | enabled (24h) | Drives the existing visible-Chrome `BrowserExecutor`. |
 | `facebook` | api | enabled (24h) | Drafts a caption; posting via Graph API (`FACEBOOK_PAGE_ACCESS_TOKEN` + `FACEBOOK_PAGE_ID`). |
-| `x` | manual | enabled (12h) | **Draft-only by policy** — `manual` method + the `post_x` capability is hard-disabled. Drafts are delivered, never auto-posted. |
+| `x` | browser | enabled (12h) | **Primo Agent** — operator-approved drafts post through the logged-in `@primo_agent` visible browser session. |
 | `reddit` | browser | off | Visible-Chrome `BrowserExecutor`. |
 | `instagram` | api | enabled (24h) | Drafts a caption **plus a best-effort generated scene image** (codex CLI image tool; saved under `<project>/.claude/data/social_images/`, caption-only fallback). Posting via Meta Graph API also needs a business account id + the image at a public URL. |
 | `discord` | manual | off | Placeholder; `manual` never auto-posts. |
@@ -92,15 +92,21 @@ load-bearing invariant. Verified in code:
 - **Dispatch only touches approved + scheduled posts.** `social/db.py`
   `list_due()` is `WHERE status='approved' AND scheduled_for IS NOT NULL AND
   scheduled_for <= now`. A post with no schedule is never auto-dispatched.
+- **Exactly one dispatcher per post.** Every ingress (approve tap, `/social
+  post`, cadence cron) must win the atomic `claimed_at` CAS
+  (`social/db.py claim_post`: `UPDATE … WHERE status='approved' AND
+  claimed_at IS NULL`) before driving. Double-taps and tap-vs-cron races lose
+  the CAS and no-op.
 - **Cadence never approves.** `social/cadence.py` `run_cadence_tick()` only
   *drafts* and then calls `dispatch_due_posts()` for already-approved posts. It
   never calls `approve()`. The autonomous loop cannot post anything the operator
   did not approve.
 - **Cadence is off by default.** `SOCIAL_CADENCE_ENABLED` defaults to `false`;
   the whole autonomous loop is opt-in.
-- **X is hard-disabled.** The `post_x` capability is declared
-  `default_enabled=False` ("X is draft-only per operator policy") and the channel
-  method is `manual`, so X can never auto-post on either path.
+- **X remains operator-confirmed.** The `post_x` capability is exposed only to
+  `operator_confirmed`, and the channel uses the visible-browser executor. The
+  authenticated Telegram approval button must move the exact queue row to
+  `approved` before dispatch.
 - **Capabilities are declared default-deny.** All five post actions
   (`post_linkedin`, `post_facebook`, `post_x`, `post_reddit`, `post_instagram`)
   are registered in `.claude/scripts/integrations/capabilities.py` with effect
@@ -123,6 +129,41 @@ set `SOCIAL_CADENCE_ENABLED=true`, then register the job once with
 `setup_social_cadence_scheduler.ps1` (it prints the task name plus the
 disable/remove commands). To stop it: set the flag `false`, or disable/unregister
 the task. A channel that fails to draft is skipped, never fatal.
+
+## Browser Homie Runner (2026-07-13)
+
+**The chat bot never drives a browser on its event loop.** Before this, an
+approve tap ran the whole 60–120s browser drive inline inside the async
+handler; a hung agent-browser child once froze Telegram, Discord, `/health`,
+and the liveness supervisor simultaneously (the 2026-07-13 wedge — py-spy
+proof in the daily log). Now the bot only does paperwork and hands the drive
+to a detached one-shot process:
+
+1. Approve tap / `/social post <id>` → the handler CAS-claims the row
+   (`claimed_at`) and spawns `social/browser_homie_runner.py --post-id <id>
+   --claimed` via `shared.spawn_detached` (DEVNULL stdin, detached process
+   group — the launcher pipe-hang trap is designed out). Reply is instant.
+2. The runner re-verifies `status='approved'` (`dispatch_post` refuses
+   anything else), executes the EXISTING stack — `post_executor` →
+   `BrowserExecutor` → `social_write_driver` → agent-browser — and sends a
+   ✅ posted / ❌ failed receipt to Telegram via `social/notify.py`
+   (cross-process, same path as the draft cards). Runner stdout appends to
+   `.claude/data/social_runner.log`.
+3. Serialization: the visible CDP browser is ONE logged-in session, so every
+   drive holds the cross-process `browser-write` file lock
+   (`shared.browser_write_lock`), acquired inside
+   `post_executor._dispatch_browser` — the chokepoint every ingress shares
+   (runner, cadence cron, per-action `/linkedin_post`-style writes).
+4. Backstop: the cadence tick sweeps stale claims
+   (`post_executor.sweep_stale_claims`, TTL `SOCIAL_RUNNER_CLAIM_TTL_MIN`,
+   default 15 min) — a runner that died mid-flight gets its post marked
+   `failed` and the operator a "verify on the site before re-drafting" note.
+
+The runner never approves: it can only execute rows an authenticated operator
+tap (or command) already moved to `approved`, and the default-deny
+`require_integration_action` gate still fires inside `_dispatch_browser` on
+every dispatch. The runner script contains no bot lifecycle verbs (Cron
+Lifecycle Guard compliant).
 
 ## Audit Trail
 
@@ -192,7 +233,7 @@ uv run pytest tests/test_social_queue.py tests/test_social_channels.py tests/tes
 ```
 
 92 tests: queue schema + transitions, channel registry, end-to-end channel loops
-(LinkedIn browser, Facebook API, X draft-only), the default-deny proofs (gate
+(LinkedIn/Primo X browser, Facebook API), the default-deny proofs (gate
 called before the external write on both legs, cadence creates drafts only,
 pre-send audit precedes the post, X disabled), the direct-API path, and audit
 JSONL shape.

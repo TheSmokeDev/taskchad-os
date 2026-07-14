@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 CHANNEL_CONSTRAINTS: dict[str, dict] = {
     "linkedin": {
         "max_chars": 3000,
-        "style": "Professional, thought-leadership tone. Include 3-5 relevant hashtags at the end. Use line breaks for readability.",
+        "style": "Professional but human and experience-led. Use short readable paragraphs. Do not require hashtags; use at most 3 only when genuinely useful.",
     },
     "facebook": {
         "max_chars": 500,
@@ -82,6 +82,17 @@ Return ONLY the post text. No preamble, no "Here's a draft:", no markdown code b
 def _read_voice_context(voice_profile: str = "") -> str:
     try:
         import config
+        if voice_profile:
+            base = Path(__file__).resolve().parent / "voice_profiles"
+            safe_name = Path(voice_profile).name
+            candidates = [
+                base / safe_name,
+                base / f"{safe_name}.md",
+            ]
+            for profile_path in candidates:
+                if profile_path.is_file():
+                    text = profile_path.read_text(encoding="utf-8")
+                    return text[:1500]
         soul_path = config.SOUL_FILE
         if soul_path.is_file():
             text = soul_path.read_text(encoding="utf-8")

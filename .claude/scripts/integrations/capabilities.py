@@ -283,9 +283,8 @@ _ACTIONS: tuple[IntegrationAction, ...] = (
         "post_x",
         "external_post",
         exposures=("operator_confirmed",),
-        default_enabled=False,
-        config_hints=("X_API_KEY", "X_API_SECRET"),
-        description="Post to X. DISABLED — X is draft-only per operator policy.",
+        config_hints=("HOMIE_BROWSER_CDP_PORT",),
+        description="Post as Primo on X via the operator-approved visible browser executor.",
     ),
     _action(
         "social",

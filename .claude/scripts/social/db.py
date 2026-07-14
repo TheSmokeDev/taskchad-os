@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS social_post_queue (
     audit_id TEXT,
     external_ref TEXT,
     media_path TEXT,
-    media_type TEXT
+    media_type TEXT,
+    claimed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_social_post_status ON social_post_queue(status);
 CREATE INDEX IF NOT EXISTS idx_social_post_channel ON social_post_queue(channel);
@@ -67,7 +68,7 @@ class SocialPostDB:
                 )
             except sqlite3.OperationalError:
                 pass  # column already exists
-            for _col in ("media_path", "media_type"):
+            for _col in ("media_path", "media_type", "claimed_at"):
                 try:
                     conn.execute(
                         f"ALTER TABLE social_post_queue ADD COLUMN {_col} TEXT"
@@ -153,6 +154,58 @@ class SocialPostDB:
                      AND scheduled_for <= ?
                    ORDER BY scheduled_for ASC""",
                 (now_iso,),
+            ).fetchall()
+            return [_row_to_post(r) for r in rows]
+        finally:
+            conn.close()
+
+    def claim_post(self, post_id: int, now_iso: str) -> bool:
+        """Atomically claim an approved post for dispatch (CAS).
+
+        Exactly one claimer wins: the UPDATE only fires while the row is
+        still 'approved' and unclaimed. Every dispatch ingress (approve tap,
+        /social post, cadence cron, runner) must claim before driving the
+        browser — this is what makes a double-tap or a tap racing the cron a
+        no-op instead of a double post.
+        """
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                """UPDATE social_post_queue SET claimed_at = ?
+                   WHERE id = ? AND status = 'approved' AND claimed_at IS NULL""",
+                (now_iso, post_id),
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        finally:
+            conn.close()
+
+    def clear_claim(self, post_id: int) -> bool:
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "UPDATE social_post_queue SET claimed_at = NULL WHERE id = ?",
+                (post_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def list_stale_claims(self, cutoff_iso: str) -> list[SocialPost]:
+        """Claimed rows still 'approved' past the cutoff — the runner died
+        mid-flight (or never started). Terminal rows (posted/failed) keep
+        their claim stamp as a receipt and are never considered stale.
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM social_post_queue
+                   WHERE status = 'approved'
+                     AND claimed_at IS NOT NULL
+                     AND claimed_at <= ?
+                   ORDER BY claimed_at ASC""",
+                (cutoff_iso,),
             ).fetchall()
             return [_row_to_post(r) for r in rows]
         finally:

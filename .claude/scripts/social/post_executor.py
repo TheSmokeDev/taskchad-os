@@ -2,7 +2,7 @@
 
 LinkedIn: existing BrowserExecutor
 Facebook: direct API (social_media.post_to_facebook)
-X: manual only (no dispatch — draft is delivered via Telegram)
+X: existing BrowserExecutor, using the logged-in Primo Agent session
 
 All external posts are gated via require_integration_action() with pre-send audit records.
 """
@@ -93,6 +93,10 @@ def dispatch_due_posts(
     summary: dict = {"dispatched": 0, "failed": 0, "blocked": 0, "errors": []}
 
     for post in due:
+        # CAS-claim before driving: an approve-tap runner (or another tick)
+        # may already own this row — losing the claim is a no-op, not an error.
+        if not svc.claim_post(post.id):
+            continue
         try:
             ok = dispatch_post(post.id, db_path=db_path)
             if ok:
@@ -107,6 +111,51 @@ def dispatch_due_posts(
         except Exception as exc:
             summary["failed"] += 1
             summary["errors"].append(f"Post {post.id}: {exc}")
+
+    return summary
+
+
+def sweep_stale_claims(
+    *,
+    db_path: str | Path | None = None,
+    ttl_minutes: int | None = None,
+) -> dict:
+    """Fail posts whose dispatch claim went stale (runner died mid-flight).
+
+    A claimed row still 'approved' after SOCIAL_RUNNER_CLAIM_TTL_MIN (default
+    15) means the claiming process never finished — mark it failed and tell
+    the operator to verify on the site before re-drafting (the drive may have
+    landed before the crash). Fail-open: a notify miss never blocks the sweep.
+    Returns {"swept": int, "errors": [...]}.
+    """
+    import os
+
+    if ttl_minutes is None:
+        raw = os.getenv("SOCIAL_RUNNER_CLAIM_TTL_MIN", "").strip()
+        try:
+            ttl_minutes = max(1, int(raw)) if raw else 15
+        except ValueError:
+            ttl_minutes = 15
+
+    svc = SocialPostService(db_path=db_path)
+    summary: dict = {"swept": 0, "errors": []}
+    for post in svc.list_stale_claims(ttl_minutes):
+        label = f"#{post.id} ({post.channel})"
+        try:
+            svc.mark_failed(post.id, error="runner died mid-flight (stale claim swept)")
+            summary["swept"] += 1
+        except Exception as exc:
+            summary["errors"].append(f"Post {post.id}: {exc}")
+            continue
+        try:
+            from social.notify import send_text_to_telegram
+
+            send_text_to_telegram(
+                f"⚠️ Post {label} was claimed {ttl_minutes}+ min ago but never "
+                f"finished — marked failed. Verify on the site before re-drafting."
+            )
+        except Exception as exc:
+            logger.warning("Stale-claim notify for %s failed: %s", label, exc)
 
     return summary
 
@@ -434,6 +483,7 @@ def _dispatch_browser(
             target_url="",
             payload_text=post.body,
             action="post",
+            media_path=post.media_path,
         )
 
         subtask = Subtask(
@@ -445,6 +495,7 @@ def _dispatch_browser(
                 "target_url": task.target_url,
                 "payload_text": task.payload_text,
                 "action": task.action,
+                "media_path": task.media_path,
             }),
         )
 
@@ -469,7 +520,13 @@ def _dispatch_browser(
 
         driver = make_social_write_driver()
         executor = BrowserExecutor(driver)
-        receipt = executor.dispatch(subtask)
+        # One visible-Chrome session — serialize drives across every ingress
+        # (runner, cadence cron, per-action chat writes). A lock timeout falls
+        # through to the generic handler below: mark failed + audit.
+        from shared import browser_write_lock
+
+        with browser_write_lock():
+            receipt = executor.dispatch(subtask)
 
         if receipt.status == "completed":
             post_url = ""

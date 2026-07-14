@@ -74,12 +74,21 @@ class OpenAICodexRuntime:
         resolved = shutil.which(command) or command
         is_tool_task = request.capability == TOOL_REASONING
 
-        # Tool tasks get full sandbox; text tasks stay read-only
-        sandbox_mode = "danger-full-access" if is_tool_task else "read-only"
+        # Read-only multimodal tool tasks stay contained; ordinary tool tasks
+        # retain the existing full-sandbox behavior.
+        sandbox_mode = "danger-full-access"
+        if not is_tool_task or request.read_only_tools:
+            sandbox_mode = "read-only"
+        elif request.workspace_write_tools:
+            sandbox_mode = "workspace-write"
 
         args = [
             resolved,
             "exec",
+        ]
+        for image_path in request.image_paths:
+            args.extend(["--image", str(Path(image_path).resolve(strict=False))])
+        args.extend([
             "-",
             "--json",
             "--cd",
@@ -92,7 +101,7 @@ class OpenAICodexRuntime:
             "never",
             "--output-last-message",
             str(last_message_path),
-        ]
+        ])
         args.extend(_codex_config_args(request))
         if model and model != "chatgpt-plan-default":
             args.extend(["--model", model])

@@ -114,7 +114,7 @@ def test_issue_39_router_engine_split_is_explicit() -> None:
         "browserops": "router",
         "linkedin_profile": "router",
         "teamroom": "router",
-        "linkedin": "engine",
+        "linkedin": "router",
     }
 
     for command, expected_type in expected_types.items():
@@ -144,23 +144,21 @@ async def test_issue_39_natural_language_check_uses_linkedin_status_router_path(
 
 
 @pytest.mark.asyncio
-async def test_issue_39_linkedin_draft_slash_command_reaches_engine_as_draft_only() -> None:
+async def test_issue_39_linkedin_slash_command_opens_router_workshop() -> None:
     engine = _RecordingEngine()
     router = ChatRouter(engine, _build_manager())
     adapter = _RecordingAdapter()
-    incoming = _incoming("/linkedin draft a post about AI operators. Do not post.")
+    incoming = _incoming("/linkedin")
 
     await router._handle_inner(adapter, incoming)
 
-    assert len(engine.messages) == 1
-    prompt = engine.messages[0]
-    assert "LinkedIn/Social Homie" in prompt
-    assert "draft a post about AI operators. Do not post." in prompt
-    assert "must not" in prompt
-    assert "publish, DM, edit a profile" in prompt
-    assert incoming.raw_event["display_text"] == (
-        "/linkedin draft a post about AI operators. Do not post."
-    )
+    assert engine.messages == []
+    assert "Cook Together" in adapter.sent[-1].text
+    custom_ids = [component.custom_id for component in adapter.sent[-1].components]
+    assert custom_ids[:2] == [
+        "linkedin_flow:mode:cook",
+        "linkedin_flow:mode:run",
+    ]
 
 
 @pytest.mark.asyncio

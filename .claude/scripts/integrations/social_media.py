@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -233,8 +234,30 @@ def post_to_instagram(text: str, image_url: str = "") -> PostResult:
             },
             timeout=30,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            return PostResult(
+                platform="Instagram",
+                success=False,
+                message=f"Meta media container create failed: {_safe_meta_error(resp)}",
+            )
         container_id = resp.json().get("id")
+        if not container_id:
+            return PostResult(
+                platform="Instagram",
+                success=False,
+                message="Meta media container create returned no container id.",
+            )
+
+        ready, detail = _wait_for_instagram_container(
+            container_id,
+            access_token,
+        )
+        if not ready:
+            return PostResult(
+                platform="Instagram",
+                success=False,
+                message=f"Meta media container was not ready: {detail}",
+            )
 
         # Step 2: Publish the container
         resp2 = requests.post(
@@ -245,7 +268,12 @@ def post_to_instagram(text: str, image_url: str = "") -> PostResult:
             },
             timeout=30,
         )
-        resp2.raise_for_status()
+        if not resp2.ok:
+            return PostResult(
+                platform="Instagram",
+                success=False,
+                message=f"Meta media publish failed: {_safe_meta_error(resp2)}",
+            )
         media_id = resp2.json().get("id", "")
 
         # Step 3: resolve the real permalink (media_id is NOT the /p/<shortcode>).
@@ -269,6 +297,59 @@ def post_to_instagram(text: str, image_url: str = "") -> PostResult:
         )
     except Exception as e:
         return PostResult(platform="Instagram", success=False, message=f"Error: {e}")
+
+
+def _safe_meta_error(resp: requests.Response) -> str:
+    """Return useful Meta error metadata without echoing credentials."""
+
+    try:
+        error = (resp.json() or {}).get("error") or {}
+    except Exception:
+        error = {}
+    if error:
+        message = str(error.get("message") or "Meta API request failed")
+        metadata: list[str] = []
+        if error.get("code") is not None:
+            metadata.append(f"code={error['code']}")
+        if error.get("error_subcode") is not None:
+            metadata.append(f"subcode={error['error_subcode']}")
+        return f"{message} ({', '.join(metadata)})" if metadata else message
+    return f"HTTP {getattr(resp, 'status_code', 'unknown')}"
+
+
+def _wait_for_instagram_container(
+    container_id: str,
+    access_token: str,
+    *,
+    timeout_seconds: float = 60.0,
+    poll_seconds: float = 2.0,
+) -> tuple[bool, str]:
+    """Wait until Meta finishes processing an Instagram media container."""
+
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+    last_status = "UNKNOWN"
+    while time.monotonic() < deadline:
+        try:
+            resp = requests.get(
+                f"https://graph.facebook.com/v20.0/{container_id}",
+                params={"fields": "status_code,status", "access_token": access_token},
+                timeout=15,
+            )
+        except requests.RequestException as exc:
+            return False, f"status request failed: {type(exc).__name__}"
+        if not resp.ok:
+            return False, _safe_meta_error(resp)
+
+        data = resp.json() or {}
+        last_status = str(data.get("status_code") or "UNKNOWN").upper()
+        if last_status in {"FINISHED", "PUBLISHED"}:
+            return True, last_status
+        if last_status in {"ERROR", "EXPIRED"}:
+            detail = str(data.get("status") or last_status)
+            return False, detail[:300]
+        time.sleep(max(0.0, poll_seconds))
+
+    return False, f"timed out waiting for processing (last status: {last_status})"
 
 
 def post_reel_to_instagram(text: str, video_url: str = "") -> PostResult:

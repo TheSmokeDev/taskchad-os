@@ -84,7 +84,7 @@ Deep dive: [Telegram Command Menu](telegram-command-menu.md) · [Runtime Status 
 
 ## Memory & Vault
 
-Deep dive: **[Memory And Recall System](memory-and-recall-system.md)** · [Native Vault Commands](native-vault-commands.md) · [Episodes](episodes.md) · [Session Opening Brief](session-opening-brief.md) · [Document Uploads And Ingest](document-uploads-and-ingest.md) · [Skill-From-Experience Loop](skill-from-experience-loop.md)
+Deep dive: **[Memory And Recall System](memory-and-recall-system.md)** · [Native Vault Commands](native-vault-commands.md) · [Video Learning](video-learning.md) · [Episodes](episodes.md) · [Session Opening Brief](session-opening-brief.md) · [Document Uploads And Ingest](document-uploads-and-ingest.md) · [Skill-From-Experience Loop](skill-from-experience-loop.md)
 
 | Command | What it does | Sub-commands |
 |---|---|---|
@@ -93,6 +93,8 @@ Deep dive: **[Memory And Recall System](memory-and-recall-system.md)** · [Nativ
 | `/file` | File the last answer as a vault note (entity compilation) | |
 | `/working` | Cross-session scratchpad — open threads, hypotheses, questions | `add "<text>"` / `resolve <N>` |
 | `/skills` | Review / promote / reject self-authored skill drafts | `review` / `promote <name>` / `reject <name>` |
+| `/learn` | Author a staged reusable skill from a URL, path, conversation, or notes | source plus optional focus |
+| `/watch` | Learn from one video, compare it with current context, and save a sourced note | `status` / `retry` / `cancel` / `apply` / `approve` |
 
 The `/vault-ops` skill chains the atomic vault operations and drives the recall
 stack (see [Memory And Recall System](memory-and-recall-system.md) → "How The
@@ -180,7 +182,7 @@ Deep dive: [Business Signal Engine](business-signal-engine.md)
 
 ## Content & Design
 
-Deep dive: [Video Generation](video-generation.md) · [Native Design](design-capability.md)
+Deep dive: [Video Generation](video-generation.md) · [Video Learning](video-learning.md) · [Native Design](design-capability.md)
 
 | Command | What it does | Layer |
 |---|---|---|

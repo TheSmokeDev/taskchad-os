@@ -80,9 +80,14 @@ def relaunch() -> int:
     #    Agent SDK launches) and HOMIE_HOME preserved (same profile). Logs append
     #    to the profile-aware bot.log; main.py writes its own pid on startup.
     log_path = _services.get_log_dir() / "bot.log"
+    child_env = scrub_nested_claude_state()
+    child_env["PYTHONUNBUFFERED"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    venv_python = _SCRIPTS_DIR / ".venv" / "Scripts" / "python.exe"
+    runtime_python = str(venv_python if venv_python.is_file() else Path(sys.executable))
     new_pid = spawn_detached(
-        [sys.executable, str(main_py)],
-        env=scrub_nested_claude_state(),
+        [runtime_python, str(main_py)],
+        env=child_env,
         log_path=log_path,
         cwd=str(_SCRIPTS_DIR),
     )

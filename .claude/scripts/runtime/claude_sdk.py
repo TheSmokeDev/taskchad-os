@@ -180,10 +180,13 @@ class ClaudeSdkRuntime:
             query,
         )
 
+        allowed_tools = ["Read"] if request.read_only_tools else request.allowed_tools
+        if request.workspace_write_tools:
+            allowed_tools = ["Read", "Write", "Edit", "Glob", "Grep"]
         options_kwargs: dict[str, Any] = {
             "cwd": str(request.cwd),
             "max_turns": request.max_turns,
-            "allowed_tools": request.allowed_tools,
+            "allowed_tools": allowed_tools,
         }
         if not request.allowed_tools and request.disallowed_tools == ["*"]:
             # Empty allowed_tools alone omits --allowedTools, and the CLI still

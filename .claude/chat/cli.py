@@ -821,6 +821,7 @@ def doctor():
     _print_browser_readiness(report.browser)
     _print_ghost_state(report.ghost)
     _print_live_execution(report.live_execution)
+    _print_video_learning_readiness()
     click.echo(f"Sessions: {report.sessions_active} active")
     if report.clear_lifecycle_recent_failures:
         click.echo(
@@ -848,6 +849,21 @@ def doctor():
         sys.exit(1)
     else:
         click.echo("\nAll checks passed.")
+
+
+def _print_video_learning_readiness() -> None:
+    """Report optional `/watch` system dependencies without exposing config."""
+    try:
+        from video_learning.extract import check_dependencies
+
+        missing = check_dependencies()
+    except Exception as exc:
+        click.echo(f"Video learning: unavailable ({exc})")
+        return
+    if missing:
+        click.echo("Video learning: missing " + ", ".join(missing))
+    else:
+        click.echo("Video learning: ready (yt-dlp, ffmpeg, ffprobe)")
 
 
 @main.command()

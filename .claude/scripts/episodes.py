@@ -36,13 +36,13 @@ from __future__ import annotations
 
 import enum
 import hashlib
-import os
 import re
 from dataclasses import dataclass
 from datetime import date as _date
 from datetime import datetime
 from pathlib import Path
 
+from shared import atomic_write_text as _atomic_write
 from shared import file_lock
 
 EPISODES_DIR_NAME = "episodes"
@@ -300,14 +300,8 @@ def _split_frontmatter(content: str) -> tuple[str, str]:
     return content[:end], content[end:]
 
 
-def _atomic_write(path: Path, content: str) -> int:
-    """Write ``content`` to ``path`` atomically via tmp + os.replace."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    data = content.encode("utf-8")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-    return len(data)
+# _atomic_write is the canonical shared.atomic_write_text (imported above) —
+# the local clone was consolidated in the 2026-07-07 framework refactor.
 
 
 # =============================================================================

@@ -584,7 +584,7 @@ async def handle_email(adapter: Any, incoming: Any, args: str, *, collect_only: 
 async def handle_personal_email(
     adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
 ) -> str:
-    """Fetch personal Gmail (owner6392lastname@gmail.com) — read-only."""
+    """Fetch personal Gmail (your-calendar@gmail.com) — read-only."""
     try:
         from integrations.personal_gmail import (
             format_personal_emails_for_context,
@@ -1401,7 +1401,9 @@ async def handle_linkedin_profile(
         )
         if not decision.allowed:
             return _format_browser_blocked(decision)
-        output = format_browser_status(browser_status(port=port), label="LinkedIn Browser")
+        output = format_browser_status(
+            await asyncio.to_thread(browser_status, port=port), label="LinkedIn Browser"
+        )
         _audit_browser_action(
             adapter=adapter,
             incoming=incoming,
@@ -1445,7 +1447,7 @@ async def handle_linkedin_profile(
         if not decision.allowed:
             return _format_browser_blocked(decision)
         try:
-            result = run_agent_browser(["open", url], port=port)
+            result = await asyncio.to_thread(run_agent_browser, ["open", url], port=port)
         except Exception as exc:
             _audit_browser_action(
                 adapter=adapter,
@@ -1701,6 +1703,22 @@ def _reddit_drive_post(port: int, subreddit: str, title: str, body: str) -> tupl
     return True, "post submitted"
 
 
+def _reddit_drive_comment_locked(port: int, thread_url: str, body: str) -> tuple[bool, str]:
+    """Comment drive under the cross-process browser-write lock (to_thread tail)."""
+    from shared import browser_write_lock
+
+    with browser_write_lock():
+        return _reddit_drive_comment(port, thread_url, body)
+
+
+def _reddit_drive_post_locked(port: int, subreddit: str, title: str, body: str) -> tuple[bool, str]:
+    """Post drive under the cross-process browser-write lock (to_thread tail)."""
+    from shared import browser_write_lock
+
+    with browser_write_lock():
+        return _reddit_drive_post(port, subreddit, title, body)
+
+
 async def handle_reddit(
     adapter: Any,
     incoming: Any,
@@ -1791,7 +1809,9 @@ async def handle_reddit(
         )
         if not decision.allowed:
             return _format_browser_blocked(decision)
-        output = format_browser_status(browser_status(port=port), label="Reddit Browser")
+        output = format_browser_status(
+            await asyncio.to_thread(browser_status, port=port), label="Reddit Browser"
+        )
         _audit_browser_action(
             adapter=adapter,
             incoming=incoming,
@@ -1821,11 +1841,15 @@ async def handle_reddit(
         )
         if not decision.allowed:
             return _format_browser_blocked(decision)
-        try:
+        def _research_drive() -> tuple[Any, Any]:
             open_res = run_agent_browser(["open", url], port=port)
             if open_res.ok:
                 run_agent_browser(["wait", "--load", "networkidle"], port=port)
             snap = run_agent_browser(["snapshot", "-i", "-c"], port=port)
+            return open_res, snap
+
+        try:
+            open_res, snap = await asyncio.to_thread(_research_drive)
         except Exception as exc:
             _audit_browser_action(
                 adapter=adapter,
@@ -1921,7 +1945,15 @@ async def handle_reddit(
             )
             return "Reddit comment failed: visible-chrome not ready."
         try:
-            ok, detail = _reddit_drive_comment(port, thread_url, body)
+            ok, detail = await asyncio.wait_for(
+                asyncio.to_thread(_reddit_drive_comment_locked, port, thread_url, body),
+                timeout=_BROWSER_WRITE_REPLY_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            return (
+                f"Reddit comment is still running after "
+                f"{int(_BROWSER_WRITE_REPLY_TIMEOUT_S)}s — verify on Reddit before re-firing."
+            )
         except Exception as exc:
             _audit_browser_action(
                 adapter=adapter,
@@ -2008,7 +2040,15 @@ async def handle_reddit(
             )
             return "Reddit post failed: visible-chrome not ready."
         try:
-            ok, detail = _reddit_drive_post(port, subreddit, title, body)
+            ok, detail = await asyncio.wait_for(
+                asyncio.to_thread(_reddit_drive_post_locked, port, subreddit, title, body),
+                timeout=_BROWSER_WRITE_REPLY_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            return (
+                f"Reddit post is still running after "
+                f"{int(_BROWSER_WRITE_REPLY_TIMEOUT_S)}s — verify on Reddit before re-firing."
+            )
         except Exception as exc:
             _audit_browser_action(
                 adapter=adapter,
@@ -2066,6 +2106,25 @@ def _build_social_write_subtask(task: Any) -> Any:
         title=f"social-write:{task.workflow_id}",
         metadata=_json.dumps(asdict(task)),
     )
+
+
+# Bound on how long a per-action browser write may hold up its CHAT REPLY.
+# The drive itself is not cancelled on timeout — threads can't be killed —
+# it finishes (or dies) in the background; the operator is told to verify.
+_BROWSER_WRITE_REPLY_TIMEOUT_S = 300.0
+
+
+def _dispatch_social_write_locked(executor: Any, subtask: Any) -> Any:
+    """Sync tail for per-action browser writes — run OFF the loop via to_thread.
+
+    Holds the cross-process browser_write_lock for the whole drive: the CDP
+    browser is one logged-in session, so the Browser Homie runner, the cadence
+    cron, and per-action writes must never drive it concurrently.
+    """
+    from shared import browser_write_lock
+
+    with browser_write_lock():
+        return executor.dispatch(subtask)
 
 
 async def _handle_social_write(
@@ -2163,7 +2222,18 @@ async def _handle_social_write(
     )
     subtask = _build_social_write_subtask(task)
     executor = BrowserExecutor(driver)
-    receipt = executor.dispatch(subtask)
+    # Off-loop: the drive is 20-120s of blocking subprocess work and a hung
+    # agent-browser child must never wedge the event loop (2026-07-13 class).
+    try:
+        receipt = await asyncio.wait_for(
+            asyncio.to_thread(_dispatch_social_write_locked, executor, subtask),
+            timeout=_BROWSER_WRITE_REPLY_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        return (
+            f"LinkedIn {action} is still running after "
+            f"{int(_BROWSER_WRITE_REPLY_TIMEOUT_S)}s — verify on LinkedIn before re-firing."
+        )
 
     if receipt.status == "completed":
         try:
@@ -3632,6 +3702,281 @@ async def handle_learn(adapter: Any, incoming: Any, args: str, *, collect_only: 
         return f"Learn failed: {exc}"
 
     return result.message
+
+
+_WATCH_USAGE = (
+    "*Watch* — learn strategy from one video and compare it with our current work.\n"
+    "Usage: `/watch <video-url> [question] [--detail smart|transcript|deep] [--no-save]`\n"
+    "       `/watch status [job_id]` · `/watch retry <job_id>` · `/watch cancel <job_id>`\n"
+    "       `/watch apply <job_id>` proposes local changes; the exact proposal needs a second approval.\n"
+    "`smart` reads captions first and inspects frames only when visual cues matter."
+)
+
+
+def _watch_service() -> Any:
+    from video_learning import get_video_learning_service
+
+    return get_video_learning_service()
+
+
+def _watch_conversation_context(incoming: Any, *, limit: int = 50) -> str:
+    """Best-effort recent context, isolated to the current canonical session."""
+    try:
+        store, existing, platform, channel_id, thread_id = _get_session(incoming)
+        session_id = getattr(existing, "session_id", "") or build_session_key(platform, channel_id, thread_id)
+        messages = store.list_messages(session_id, limit=limit)
+        return "\n".join(f"{row.role}: {row.content}" for row in messages)[-30_000:]
+    except Exception:
+        return ""
+
+
+def _parse_watch_request(args: str) -> tuple[str, str, str, bool]:
+    try:
+        tokens = shlex.split(args, posix=False)
+    except ValueError as exc:
+        raise ValueError(f"Could not parse /watch arguments: {exc}") from exc
+    if not tokens:
+        raise ValueError(_WATCH_USAGE)
+    source = tokens.pop(0).strip('"\'')
+    detail = "smart"
+    save_note = True
+    question_parts: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--no-save":
+            save_note = False
+        elif token == "--detail":
+            index += 1
+            if index >= len(tokens):
+                raise ValueError("`--detail` needs smart, transcript, or deep.")
+            detail = tokens[index].lower()
+        elif token.startswith("--detail="):
+            detail = token.split("=", 1)[1].lower()
+        else:
+            question_parts.append(token.strip('"\''))
+        index += 1
+    if detail not in {"smart", "transcript", "deep"}:
+        raise ValueError("Detail must be `smart`, `transcript`, or `deep`.")
+    return source, " ".join(question_parts).strip(), detail, save_note
+
+
+def _format_watch_status(row: dict[str, Any] | None) -> str:
+    if not row:
+        return "No video-learning jobs yet. Start one with `/watch <video-url>`."
+    result = row.get("result") or {}
+    lines = [
+        f"*Watch job `{row.get('job_id', '?')}`* — {row.get('status', 'unknown')}",
+        f"{row.get('stage_detail', '')}",
+        f"Source: {(row.get('request') or {}).get('source', '')}",
+    ]
+    if result.get("title"):
+        lines.append(f"Video: {result['title']}")
+    if result.get("note_path"):
+        lines.append(f"Note: `{result['note_path']}`")
+    if row.get("error"):
+        lines.append(f"Error: {row['error']}")
+    return "\n".join(line for line in lines if line)
+
+
+async def _deliver_watch_result(adapter: Any, incoming: Any, task: Any) -> None:
+    from models import MessageComponent, OutgoingMessage
+
+    try:
+        result = await task
+        if result.success:
+            summary = result.summary.strip()
+            if len(summary) > 3500:
+                summary = summary[:3500].rstrip() + "\n…(full dossier is in the sourced note)"
+            meta = [f"job `{result.job_id}`", f"via {result.provider}/{result.model}"]
+            if result.note_path:
+                meta.append(f"saved `{result.note_path}`")
+            text = summary + "\n\n" + " · ".join(meta)
+            components = [
+                MessageComponent(
+                    label="Apply to Current Work",
+                    custom_id=f"watch:apply:{result.job_id}",
+                    style="primary",
+                )
+            ]
+        else:
+            text = f"Watch job `{result.job_id}` {result.status}: {result.error}"
+            components = [
+                MessageComponent(
+                    label="Retry",
+                    custom_id=f"watch:retry:{result.job_id}",
+                    style="secondary",
+                )
+            ]
+        await adapter.send(
+            OutgoingMessage(
+                text=text,
+                channel=incoming.channel,
+                thread=incoming.thread,
+                is_error=not result.success,
+                components=components,
+            )
+        )
+    except Exception as exc:
+        await adapter.send(
+            OutgoingMessage(
+                text=f"Video-learning delivery failed: {exc}",
+                channel=incoming.channel,
+                thread=incoming.thread,
+                is_error=True,
+            )
+        )
+
+
+async def handle_watch(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str | None:
+    """Analyze one video through Homie's shared, model-agnostic learning lane."""
+    from video_learning import VideoLearningRequest
+
+    raw = (args or "").strip()
+    if not raw:
+        return _WATCH_USAGE
+    parts = raw.split()
+    sub = parts[0].lower()
+    service = _watch_service()
+
+    if sub == "status":
+        return _format_watch_status(service.status(parts[1] if len(parts) > 1 else ""))
+    if sub == "cancel":
+        if len(parts) != 2:
+            return "Usage: `/watch cancel <job_id>`"
+        return "Cancellation requested." if service.cancel(parts[1]) else "That job is not running."
+    if sub == "retry":
+        if len(parts) != 2:
+            return "Usage: `/watch retry <job_id>`"
+        row = service.retry(parts[1])
+        if not row:
+            return "Only failed, cancelled, or interrupted jobs can be retried."
+        task = service.start(row["job_id"])
+        if collect_only or getattr(incoming.platform, "value", "") == "cli":
+            return _format_watch_result(await task)
+        delivery = asyncio.create_task(_deliver_watch_result(adapter, incoming, task))
+        _BACKGROUND_TASKS.add(delivery)
+        delivery.add_done_callback(_BACKGROUND_TASKS.discard)
+        return f"Retry queued as watch job `{row['job_id']}`."
+    if sub == "apply":
+        if len(parts) != 2:
+            return "Usage: `/watch apply <job_id>`"
+        try:
+            proposal = await service.propose(parts[1])
+        except Exception as exc:
+            return f"Application proposal failed: {exc}"
+        return (
+            proposal["proposal"]
+            + f"\n\nApproval token: `{proposal['approval_token']}`\n"
+            + f"Approve this exact proposal with `/watch approve {parts[1]} {proposal['approval_token']}`. "
+              "No files have been changed."
+        )
+    if sub == "approve":
+        if len(parts) != 3:
+            return "Usage: `/watch approve <job_id> <exact-token>`"
+        try:
+            application = await service.apply(parts[1], parts[2])
+        except Exception as exc:
+            return f"Approved application failed: {exc}"
+        return application.get("report") or "The approved proposal was applied locally."
+
+    try:
+        source, question, detail, save_note = _parse_watch_request(raw)
+    except ValueError as exc:
+        return str(exc)
+    platform = getattr(incoming.platform, "value", str(incoming.platform)).lower()
+    if platform != "cli" and not source.lower().startswith(("http://", "https://")):
+        return "Remote chat channels accept public http(s) video URLs only. Local files are CLI-only."
+    missing = service.dependency_report()
+    if missing:
+        return "Video learning needs these local tools first: " + ", ".join(missing)
+
+    request = VideoLearningRequest(
+        source=source,
+        question=question,
+        detail=detail,
+        save_note=save_note,
+        conversation_context=_watch_conversation_context(incoming),
+        workspace=Path.cwd(),
+        origin={
+            "platform": platform,
+            "channel_id": getattr(incoming.channel, "platform_id", ""),
+            "thread_id": getattr(getattr(incoming, "thread", None), "thread_id", ""),
+        },
+    )
+    row = service.create_job(request)
+    task = service.start(row["job_id"])
+    if collect_only or platform == "cli":
+        return _format_watch_result(await task)
+    delivery = asyncio.create_task(_deliver_watch_result(adapter, incoming, task))
+    _BACKGROUND_TASKS.add(delivery)
+    delivery.add_done_callback(_BACKGROUND_TASKS.discard)
+    return (
+        f"Watch job `{row['job_id']}` queued. I’ll read the transcript, inspect visuals only if useful, "
+        "compare it with our current work, and send the sourced dossier back here."
+    )
+
+
+def _format_watch_result(result: Any) -> str:
+    if not result.success:
+        return f"Watch job `{result.job_id}` {result.status}: {result.error}"
+    suffix = f"\n\nJob: `{result.job_id}`"
+    if result.note_path:
+        suffix += f"\nSaved: `{result.note_path}`"
+    return result.summary + suffix
+
+
+async def handle_watch_button(adapter: Any, incoming: Any, custom_id: str) -> None:
+    """Interactive proposal/retry/approval flow; exact approval is default-deny."""
+    from models import MessageComponent, OutgoingMessage
+
+    pieces = custom_id.split(":")
+    if len(pieces) < 3:
+        return
+    _, action, job_id, *rest = pieces
+    service = _watch_service()
+    try:
+        if action == "retry":
+            row = service.retry(job_id)
+            if not row:
+                text, components = "That watch job cannot be retried.", []
+            else:
+                task = service.start(row["job_id"])
+                delivery = asyncio.create_task(_deliver_watch_result(adapter, incoming, task))
+                _BACKGROUND_TASKS.add(delivery)
+                delivery.add_done_callback(_BACKGROUND_TASKS.discard)
+                text, components = f"Retry queued as `{row['job_id']}`.", []
+        elif action == "apply":
+            proposal = await service.propose(job_id)
+            text = proposal["proposal"] + "\n\nNo files have been changed. Approve only this exact proposal:"
+            components = [MessageComponent(
+                label="Approve Exact Local Changes",
+                custom_id=f"watch:approve:{job_id}:{proposal['approval_token']}",
+                style="success",
+            )]
+        elif action == "approve":
+            raw_event = getattr(incoming, "raw_event", None) or {}
+            if raw_event.get("interaction_type") != "button":
+                raise ValueError("Application approval only runs from the authenticated approval button.")
+            token = rest[0] if rest else ""
+            application = await service.apply(job_id, token)
+            text = application.get("report") or "The approved proposal was applied locally."
+            components = []
+        else:
+            return
+        await adapter.send(OutgoingMessage(
+            text=text,
+            channel=incoming.channel,
+            thread=incoming.thread,
+            components=components,
+        ))
+    except Exception as exc:
+        await adapter.send(OutgoingMessage(
+            text=f"Watch action failed: {exc}",
+            channel=incoming.channel,
+            thread=incoming.thread,
+            is_error=True,
+        ))
 
 
 async def handle_extensions(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
@@ -5324,8 +5669,1154 @@ async def try_consume_video_message(adapter: Any, incoming: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# LinkedIn on-the-fly workshop
+# ---------------------------------------------------------------------------
+
+_LINKEDIN_PENDING: dict[str, dict[str, Any]] = {}
+_LINKEDIN_PENDING_TTL_S = 900
+_LINKEDIN_EXPIRED_TEXT = "That LinkedIn workshop expired (15 min). /linkedin to start fresh."
+
+
+def _linkedin_channel_key(incoming: Any) -> str:
+    channel = getattr(incoming, "channel", None)
+    user = getattr(incoming, "user", None)
+    platform = str(
+        getattr(channel, "platform", "") or getattr(incoming, "platform", "")
+    )
+    channel_id = str(getattr(channel, "platform_id", "") or "")
+    user_id = str(getattr(user, "platform_id", "") or "")
+    return f"{platform}:{channel_id}:{user_id}"
+
+
+def _linkedin_workshop_get(key: str) -> dict[str, Any] | None:
+    pending = _LINKEDIN_PENDING.get(key)
+    if not pending:
+        return None
+    if pending.get("v") != 1 or time.time() > pending.get("expires", 0):
+        _LINKEDIN_PENDING.pop(key, None)
+        return None
+    return pending
+
+
+def _linkedin_workshop_set(key: str, **updates: Any) -> dict[str, Any]:
+    pending = _LINKEDIN_PENDING.get(key)
+    if not pending or pending.get("v") != 1:
+        pending = {
+            "v": 1,
+            "stage": "await_mode",
+            "mode": None,
+            "post_id": None,
+            "expires": 0.0,
+        }
+        _LINKEDIN_PENDING[key] = pending
+    pending.update(updates)
+    pending["expires"] = time.time() + _LINKEDIN_PENDING_TTL_S
+    return pending
+
+
+async def _linkedin_send(
+    adapter: Any,
+    incoming: Any,
+    text: str,
+    *,
+    components: list | None = None,
+    attachments: list | None = None,
+    is_error: bool = False,
+) -> None:
+    from models import OutgoingMessage
+
+    await adapter.send(
+        OutgoingMessage(
+            text=text,
+            channel=incoming.channel,
+            thread=incoming.thread,
+            components=components or [],
+            attachments=attachments or [],
+            is_error=is_error,
+        )
+    )
+
+
+async def _send_linkedin_mode_picker(adapter: Any, incoming: Any) -> None:
+    from models import MessageComponent
+
+    key = _linkedin_channel_key(incoming)
+    _LINKEDIN_PENDING.pop(key, None)
+    globals().get("_PRIMO_PENDING", {}).pop(key, None)
+    _linkedin_workshop_set(key, stage="await_mode")
+    await _linkedin_send(
+        adapter,
+        incoming,
+        (
+            "Let's make a LinkedIn post. How do you want to do it?\n\n"
+            "1. Cook Together: bring me the rough idea and we'll shape the copy and image.\n"
+            "2. Run It for Me: I'll choose the angle and generate the full post plus image.\n\n"
+            "You can tap a button or reply with 1 or 2. Nothing posts until Approve & Post."
+        ),
+        components=[
+            MessageComponent(
+                label="Cook Together",
+                custom_id="linkedin_flow:mode:cook",
+                style="primary",
+            ),
+            MessageComponent(
+                label="Run It for Me",
+                custom_id="linkedin_flow:mode:run",
+                style="success",
+            ),
+            MessageComponent(
+                label="Cancel",
+                custom_id="linkedin_flow:cancel",
+                style="danger",
+            ),
+        ],
+    )
+
+
+async def _send_linkedin_topic_prompt(adapter: Any, incoming: Any) -> None:
+    await _linkedin_send(
+        adapter,
+        incoming,
+        (
+            "What do you want to post about? Send the messy version: an idea, lesson, "
+            "story, link, transcript, or a few bullets. I'll turn it into the first copy "
+            "and image pass."
+        ),
+    )
+
+
+async def _send_linkedin_preview(adapter: Any, incoming: Any, post: Any) -> None:
+    from models import Attachment, MessageComponent
+
+    media_path = str(getattr(post, "media_path", "") or "")
+    attachments = []
+    if media_path and Path(media_path).is_file():
+        suffix = Path(media_path).suffix.lower()
+        mimetype = "image/png"
+        if suffix in {".jpg", ".jpeg"}:
+            mimetype = "image/jpeg"
+        elif suffix == ".webp":
+            mimetype = "image/webp"
+        attachments.append(
+            Attachment(
+                filename=Path(media_path).name,
+                mimetype=mimetype,
+                url=media_path,
+                size_bytes=Path(media_path).stat().st_size,
+            )
+        )
+    media_note = "image ready" if attachments else "image unavailable (copy is still editable)"
+    await _linkedin_send(
+        adapter,
+        incoming,
+        (
+            f"LINKEDIN DRAFT #{post.id} ({media_note})\n\n{post.body}\n\n"
+            "Reply with edits to keep cooking, start with `image:` to direct the visual, "
+            "or use the buttons below."
+        ),
+        attachments=attachments,
+        components=[
+            MessageComponent(
+                label="Approve & Post",
+                custom_id=f"social:approve:{post.id}",
+                style="success",
+            ),
+            MessageComponent(
+                label="Cook the Copy",
+                custom_id=f"linkedin_flow:revise:{post.id}",
+                style="primary",
+            ),
+            MessageComponent(
+                label="Redo Image",
+                custom_id=f"linkedin_flow:image:{post.id}",
+                style="secondary",
+            ),
+            MessageComponent(
+                label="Reject",
+                custom_id=f"social:reject:{post.id}",
+                style="danger",
+            ),
+            MessageComponent(
+                label="Start Over",
+                custom_id="linkedin_flow:restart",
+                style="secondary",
+            ),
+        ],
+    )
+
+
+async def _generate_linkedin_workshop_draft(
+    adapter: Any,
+    incoming: Any,
+    *,
+    topic: str | None,
+    mode: str,
+) -> None:
+    key = _linkedin_channel_key(incoming)
+    _linkedin_workshop_set(key, stage="generating", mode=mode)
+    await _linkedin_send(
+        adapter,
+        incoming,
+        "Cooking the post and image now...",
+    )
+    try:
+        from social.linkedin_workshop import create_linkedin_draft
+
+        post = await asyncio.to_thread(
+            create_linkedin_draft,
+            topic=topic,
+            mode=mode,
+        )
+    except Exception as exc:
+        _linkedin_workshop_set(key, stage="await_topic" if mode == "cook" else "await_mode")
+        await _linkedin_send(
+            adapter,
+            incoming,
+            f"LinkedIn draft generation failed: {type(exc).__name__}: {exc}",
+            is_error=True,
+        )
+        return
+    _linkedin_workshop_set(
+        key,
+        stage="await_review",
+        mode=mode,
+        post_id=post.id,
+    )
+    await _send_linkedin_preview(adapter, incoming, post)
+
+
+async def _revise_linkedin_workshop_draft(
+    adapter: Any,
+    incoming: Any,
+    *,
+    post_id: int,
+    feedback: str,
+) -> None:
+    key = _linkedin_channel_key(incoming)
+    _linkedin_workshop_set(key, stage="generating", post_id=post_id)
+    await _linkedin_send(adapter, incoming, "Reworking the copy...")
+    try:
+        from social.linkedin_workshop import revise_linkedin_copy
+
+        post = await asyncio.to_thread(revise_linkedin_copy, post_id, feedback)
+    except Exception as exc:
+        _linkedin_workshop_set(key, stage="await_review", post_id=post_id)
+        await _linkedin_send(
+            adapter,
+            incoming,
+            f"Copy revision failed: {type(exc).__name__}: {exc}",
+            is_error=True,
+        )
+        return
+    _linkedin_workshop_set(key, stage="await_review", post_id=post.id)
+    await _send_linkedin_preview(adapter, incoming, post)
+
+
+async def _regenerate_linkedin_workshop_image(
+    adapter: Any,
+    incoming: Any,
+    *,
+    post_id: int,
+    direction: str,
+) -> None:
+    key = _linkedin_channel_key(incoming)
+    _linkedin_workshop_set(key, stage="generating", post_id=post_id)
+    await _linkedin_send(adapter, incoming, "Reworking the image...")
+    try:
+        from social.linkedin_workshop import regenerate_linkedin_image
+
+        post = await asyncio.to_thread(
+            regenerate_linkedin_image,
+            post_id,
+            direction,
+        )
+    except Exception as exc:
+        _linkedin_workshop_set(key, stage="await_review", post_id=post_id)
+        await _linkedin_send(
+            adapter,
+            incoming,
+            f"Image revision failed: {type(exc).__name__}: {exc}",
+            is_error=True,
+        )
+        return
+    _linkedin_workshop_set(key, stage="await_review", post_id=post.id)
+    await _send_linkedin_preview(adapter, incoming, post)
+
+
+async def handle_linkedin(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str | None:
+    """Guided LinkedIn post workshop backed by the real approval queue."""
+
+    text = (args or "").strip()
+    if not text:
+        await _send_linkedin_mode_picker(adapter, incoming)
+        return None
+    lowered = text.lower()
+    if lowered in {"cancel", "stop"}:
+        _LINKEDIN_PENDING.pop(_linkedin_channel_key(incoming), None)
+        return "LinkedIn workshop cancelled."
+    if lowered in {"run", "run it", "auto", "surprise me"}:
+        await _generate_linkedin_workshop_draft(
+            adapter,
+            incoming,
+            topic=None,
+            mode="run",
+        )
+        return None
+    if lowered == "cook":
+        _linkedin_workshop_set(
+            _linkedin_channel_key(incoming),
+            stage="await_topic",
+            mode="cook",
+        )
+        await _send_linkedin_topic_prompt(adapter, incoming)
+        return None
+    if lowered.startswith("cook "):
+        text = text[5:].strip()
+    await _generate_linkedin_workshop_draft(
+        adapter,
+        incoming,
+        topic=text,
+        mode="cook",
+    )
+    return None
+
+
+async def handle_linkedin_button(
+    adapter: Any,
+    incoming: Any,
+    custom_id: str,
+) -> None:
+    """Handle authenticated local-workshop buttons; publishing stays social:* owned."""
+
+    raw_event = getattr(incoming, "raw_event", None) or {}
+    if raw_event.get("interaction_type") != "button":
+        await _linkedin_send(
+            adapter,
+            incoming,
+            "LinkedIn workshop actions only run from the displayed buttons.",
+            is_error=True,
+        )
+        return
+    key = _linkedin_channel_key(incoming)
+
+    if custom_id == "linkedin_flow:mode:cook":
+        _linkedin_workshop_set(key, stage="await_topic", mode="cook")
+        await _send_linkedin_topic_prompt(adapter, incoming)
+        return
+    if custom_id == "linkedin_flow:mode:run":
+        await _generate_linkedin_workshop_draft(
+            adapter,
+            incoming,
+            topic=None,
+            mode="run",
+        )
+        return
+    if custom_id in {"linkedin_flow:restart", "linkedin_flow:cancel"}:
+        if custom_id.endswith("cancel"):
+            _LINKEDIN_PENDING.pop(key, None)
+            await _linkedin_send(adapter, incoming, "LinkedIn workshop cancelled.")
+        else:
+            await _send_linkedin_mode_picker(adapter, incoming)
+        return
+
+    parts = custom_id.split(":")
+    if len(parts) != 3 or not parts[2].isdigit():
+        await _linkedin_send(
+            adapter,
+            incoming,
+            f"Malformed LinkedIn workshop action: {custom_id}",
+            is_error=True,
+        )
+        return
+    action, post_id = parts[1], int(parts[2])
+    if action == "revise":
+        _linkedin_workshop_set(key, stage="await_revision", post_id=post_id)
+        await _linkedin_send(
+            adapter,
+            incoming,
+            "What should I change in the copy? Send it naturally, like: make the hook more direct and cut the last paragraph.",
+        )
+        return
+    if action == "image":
+        _linkedin_workshop_set(key, stage="await_image", post_id=post_id)
+        await _linkedin_send(
+            adapter,
+            incoming,
+            "What should change about the image? Describe the direction, or reply `surprise me`.",
+        )
+        return
+    await _linkedin_send(
+        adapter,
+        incoming,
+        f"Unknown LinkedIn workshop action: {action}",
+        is_error=True,
+    )
+
+
+async def try_consume_linkedin_message(adapter: Any, incoming: Any) -> bool:
+    """Consume typed input only while an explicit /linkedin workshop is active."""
+
+    key = _linkedin_channel_key(incoming)
+    pending = _linkedin_workshop_get(key)
+    if not pending:
+        return False
+    text = (getattr(incoming, "text", "") or "").strip()
+    if not text or text.startswith("/") or text.startswith("__"):
+        return False
+    lowered = text.lower()
+    if lowered in {"cancel", "stop"}:
+        _LINKEDIN_PENDING.pop(key, None)
+        await _linkedin_send(adapter, incoming, "LinkedIn workshop cancelled.")
+        return True
+
+    stage = pending.get("stage")
+    if stage == "await_mode":
+        if lowered in {"1", "cook", "cook together"}:
+            _linkedin_workshop_set(key, stage="await_topic", mode="cook")
+            await _send_linkedin_topic_prompt(adapter, incoming)
+            return True
+        if lowered in {"2", "run", "run it", "run it for me", "auto"}:
+            await _generate_linkedin_workshop_draft(
+                adapter,
+                incoming,
+                topic=None,
+                mode="run",
+            )
+            return True
+        return False
+
+    if stage == "await_topic":
+        await _generate_linkedin_workshop_draft(
+            adapter,
+            incoming,
+            topic=text,
+            mode="cook",
+        )
+        return True
+    if stage in {"await_revision", "await_review"}:
+        post_id = int(pending.get("post_id") or 0)
+        if post_id <= 0:
+            _LINKEDIN_PENDING.pop(key, None)
+            await _linkedin_send(adapter, incoming, _LINKEDIN_EXPIRED_TEXT)
+            return True
+        if lowered.startswith("image:"):
+            await _regenerate_linkedin_workshop_image(
+                adapter,
+                incoming,
+                post_id=post_id,
+                direction=text.split(":", 1)[1].strip() or "surprise me",
+            )
+        else:
+            await _revise_linkedin_workshop_draft(
+                adapter,
+                incoming,
+                post_id=post_id,
+                feedback=text,
+            )
+        return True
+    if stage == "await_image":
+        post_id = int(pending.get("post_id") or 0)
+        if post_id <= 0:
+            _LINKEDIN_PENDING.pop(key, None)
+            await _linkedin_send(adapter, incoming, _LINKEDIN_EXPIRED_TEXT)
+            return True
+        await _regenerate_linkedin_workshop_image(
+            adapter,
+            incoming,
+            post_id=post_id,
+            direction=text,
+        )
+        return True
+    if stage == "generating":
+        await _linkedin_send(adapter, incoming, "Still cooking it. Give me a moment.")
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Primo X on-the-fly workshop
+# ---------------------------------------------------------------------------
+
+_PRIMO_PENDING: dict[str, dict[str, Any]] = {}
+_PRIMO_PENDING_TTL_S = 900
+_PRIMO_EXPIRED_TEXT = "That Primo workshop expired (15 min). /primo to start fresh."
+
+
+def _primo_channel_key(incoming: Any) -> str:
+    return _linkedin_channel_key(incoming)
+
+
+def _primo_workshop_get(key: str) -> dict[str, Any] | None:
+    pending = _PRIMO_PENDING.get(key)
+    if not pending:
+        return None
+    if pending.get("v") != 1 or time.time() > pending.get("expires", 0):
+        _PRIMO_PENDING.pop(key, None)
+        return None
+    return pending
+
+
+def _primo_workshop_set(key: str, **updates: Any) -> dict[str, Any]:
+    pending = _PRIMO_PENDING.get(key)
+    if not pending or pending.get("v") != 1:
+        pending = {
+            "v": 1,
+            "stage": "await_mode",
+            "mode": None,
+            "media_mode": None,
+            "topic": None,
+            "post_id": None,
+            "expires": 0.0,
+        }
+        _PRIMO_PENDING[key] = pending
+    pending.update(updates)
+    pending["expires"] = time.time() + _PRIMO_PENDING_TTL_S
+    return pending
+
+
+async def _primo_send(
+    adapter: Any,
+    incoming: Any,
+    text: str,
+    *,
+    components: list | None = None,
+    attachments: list | None = None,
+    is_error: bool = False,
+) -> None:
+    await _linkedin_send(
+        adapter,
+        incoming,
+        text,
+        components=components,
+        attachments=attachments,
+        is_error=is_error,
+    )
+
+
+async def _send_primo_mode_picker(adapter: Any, incoming: Any) -> None:
+    from models import MessageComponent
+
+    key = _primo_channel_key(incoming)
+    _PRIMO_PENDING.pop(key, None)
+    _LINKEDIN_PENDING.pop(key, None)
+    _primo_workshop_set(key, stage="await_mode")
+    await _primo_send(
+        adapter,
+        incoming,
+        (
+            "Let's make a Primo X post. How do you want to cook it?\n\n"
+            "1. Cook Together: bring the rough idea and we'll shape the post and visual.\n"
+            "2. Run It for Me: Primo picks the angle and builds the full draft.\n\n"
+            "Nothing posts until you approve the exact card."
+        ),
+        components=[
+            MessageComponent(
+                label="Cook Together",
+                custom_id="primo_flow:mode:cook",
+                style="primary",
+            ),
+            MessageComponent(
+                label="Run It for Me",
+                custom_id="primo_flow:mode:run",
+                style="success",
+            ),
+            MessageComponent(
+                label="Cancel",
+                custom_id="primo_flow:cancel",
+                style="danger",
+            ),
+        ],
+    )
+
+
+async def _send_primo_topic_prompt(adapter: Any, incoming: Any) -> None:
+    await _primo_send(
+        adapter,
+        incoming,
+        (
+            "What should Primo post about? Send the rough idea, market observation, "
+            "build receipt, crypto/AI lesson, link, or a few bullets."
+        ),
+    )
+
+
+async def _send_primo_media_picker(
+    adapter: Any,
+    incoming: Any,
+    *,
+    mode: str,
+    topic: str | None,
+) -> None:
+    from models import MessageComponent
+
+    key = _primo_channel_key(incoming)
+    _primo_workshop_set(
+        key,
+        stage="await_media",
+        mode=mode,
+        topic=topic,
+    )
+    await _primo_send(
+        adapter,
+        incoming,
+        (
+            "What media should this Primo post use?\n\n"
+            "Text Only: fastest.\n"
+            "Add Image: requires a finished 16:9 Primo visual before approval.\n"
+            "Auto-Decide: tries the visual and safely falls back to text if rendering is unavailable."
+        ),
+        components=[
+            MessageComponent(
+                label="Text Only",
+                custom_id="primo_flow:media:none",
+                style="secondary",
+            ),
+            MessageComponent(
+                label="Add Image",
+                custom_id="primo_flow:media:image",
+                style="primary",
+            ),
+            MessageComponent(
+                label="Auto-Decide",
+                custom_id="primo_flow:media:auto",
+                style="success",
+            ),
+            MessageComponent(
+                label="Cancel",
+                custom_id="primo_flow:cancel",
+                style="danger",
+            ),
+        ],
+    )
+
+
+def _primo_attachment(post: Any) -> list:
+    from models import Attachment
+
+    media_path = str(getattr(post, "media_path", "") or "")
+    if not media_path or not Path(media_path).is_file():
+        return []
+    suffix = Path(media_path).suffix.lower()
+    mimetype = "image/png"
+    if suffix in {".jpg", ".jpeg"}:
+        mimetype = "image/jpeg"
+    elif suffix == ".webp":
+        mimetype = "image/webp"
+    elif suffix == ".gif":
+        mimetype = "image/gif"
+    return [
+        Attachment(
+            filename=Path(media_path).name,
+            mimetype=mimetype,
+            url=media_path,
+            size_bytes=Path(media_path).stat().st_size,
+        )
+    ]
+
+
+async def _send_primo_preview(adapter: Any, incoming: Any, post: Any) -> None:
+    from models import MessageComponent
+
+    attachments = _primo_attachment(post)
+    media_note = "16:9 image ready" if attachments else "text only"
+    components = [
+        MessageComponent(
+            label="Approve & Post",
+            custom_id=f"social:approve:{post.id}",
+            style="success",
+        ),
+        MessageComponent(
+            label="Cook the Copy",
+            custom_id=f"primo_flow:revise:{post.id}",
+            style="primary",
+        ),
+        MessageComponent(
+            label="Redo Image" if attachments else "Add Image",
+            custom_id=f"primo_flow:image:{post.id}",
+            style="secondary",
+        ),
+    ]
+    if attachments:
+        components.append(
+            MessageComponent(
+                label="Remove Image",
+                custom_id=f"primo_flow:remove:{post.id}",
+                style="secondary",
+            )
+        )
+    components.extend(
+        [
+            MessageComponent(
+                label="Reject",
+                custom_id=f"social:reject:{post.id}",
+                style="danger",
+            ),
+            MessageComponent(
+                label="Start Over",
+                custom_id="primo_flow:restart",
+                style="secondary",
+            ),
+        ]
+    )
+    await _primo_send(
+        adapter,
+        incoming,
+        (
+            f"PRIMO X DRAFT #{post.id} ({media_note})\n\n{post.body}\n\n"
+            "Reply with copy edits, start with `image:` to direct the visual, "
+            "or use the buttons below."
+        ),
+        attachments=attachments,
+        components=components,
+    )
+
+
+async def _send_primo_image_failure(
+    adapter: Any, incoming: Any, *, post_id: int
+) -> None:
+    from models import MessageComponent
+
+    await _primo_send(
+        adapter,
+        incoming,
+        (
+            f"The copy for Primo draft #{post_id} is ready, but the required image did not render. "
+            "Nothing can be approved from this message. Retry the image or explicitly switch to text only."
+        ),
+        components=[
+            MessageComponent(
+                label="Retry Image",
+                custom_id=f"primo_flow:retry:{post_id}",
+                style="primary",
+            ),
+            MessageComponent(
+                label="Use Text Only",
+                custom_id=f"primo_flow:textonly:{post_id}",
+                style="secondary",
+            ),
+            MessageComponent(
+                label="Reject",
+                custom_id=f"social:reject:{post_id}",
+                style="danger",
+            ),
+        ],
+        is_error=True,
+    )
+
+
+async def _generate_primo_workshop_draft(
+    adapter: Any,
+    incoming: Any,
+    *,
+    topic: str | None,
+    mode: str,
+    media_mode: str,
+) -> None:
+    key = _primo_channel_key(incoming)
+    _primo_workshop_set(
+        key,
+        stage="generating",
+        topic=topic,
+        mode=mode,
+        media_mode=media_mode,
+    )
+    media_label = "copy" if media_mode == "none" else "copy and Primo visual"
+    await _primo_send(adapter, incoming, f"Cooking the {media_label} now...")
+    from social.primo_workshop import PrimoImageRequiredError, create_primo_draft
+
+    try:
+        post = await asyncio.to_thread(
+            create_primo_draft,
+            topic=topic,
+            mode=mode,
+            media_mode=media_mode,
+        )
+    except PrimoImageRequiredError as exc:
+        _primo_workshop_set(
+            key,
+            stage="image_failed",
+            post_id=exc.post_id,
+            media_mode=media_mode,
+        )
+        await _send_primo_image_failure(adapter, incoming, post_id=exc.post_id)
+        return
+    except Exception as exc:
+        _primo_workshop_set(key, stage="await_media", mode=mode, topic=topic)
+        await _primo_send(
+            adapter,
+            incoming,
+            f"Primo draft generation failed: {type(exc).__name__}: {exc}",
+            is_error=True,
+        )
+        return
+    _primo_workshop_set(
+        key,
+        stage="await_review",
+        post_id=post.id,
+        mode=mode,
+        media_mode=media_mode,
+    )
+    await _send_primo_preview(adapter, incoming, post)
+
+
+async def _revise_primo_workshop_draft(
+    adapter: Any,
+    incoming: Any,
+    *,
+    post_id: int,
+    feedback: str,
+) -> None:
+    key = _primo_channel_key(incoming)
+    _primo_workshop_set(key, stage="generating", post_id=post_id)
+    await _primo_send(adapter, incoming, "Reworking Primo's copy...")
+    try:
+        from social.primo_workshop import revise_primo_copy
+
+        post = await asyncio.to_thread(revise_primo_copy, post_id, feedback)
+    except Exception as exc:
+        _primo_workshop_set(key, stage="await_review", post_id=post_id)
+        await _primo_send(
+            adapter,
+            incoming,
+            f"Copy revision failed: {type(exc).__name__}: {exc}",
+            is_error=True,
+        )
+        return
+    _primo_workshop_set(key, stage="await_review", post_id=post.id)
+    await _send_primo_preview(adapter, incoming, post)
+
+
+async def _regenerate_primo_workshop_image(
+    adapter: Any,
+    incoming: Any,
+    *,
+    post_id: int,
+    direction: str,
+) -> None:
+    key = _primo_channel_key(incoming)
+    _primo_workshop_set(key, stage="generating", post_id=post_id)
+    await _primo_send(adapter, incoming, "Rendering a fresh Primo image...")
+    from social.primo_workshop import PrimoImageRequiredError, regenerate_primo_image
+
+    try:
+        post = await asyncio.to_thread(regenerate_primo_image, post_id, direction)
+    except PrimoImageRequiredError:
+        _primo_workshop_set(key, stage="image_failed", post_id=post_id)
+        await _send_primo_image_failure(adapter, incoming, post_id=post_id)
+        return
+    except Exception as exc:
+        _primo_workshop_set(key, stage="await_review", post_id=post_id)
+        await _primo_send(
+            adapter,
+            incoming,
+            f"Image revision failed: {type(exc).__name__}: {exc}",
+            is_error=True,
+        )
+        return
+    _primo_workshop_set(key, stage="await_review", post_id=post.id)
+    await _send_primo_preview(adapter, incoming, post)
+
+
+async def _remove_primo_workshop_image(
+    adapter: Any, incoming: Any, *, post_id: int
+) -> None:
+    key = _primo_channel_key(incoming)
+    try:
+        from social.primo_workshop import remove_primo_image
+
+        post = await asyncio.to_thread(remove_primo_image, post_id)
+    except Exception as exc:
+        await _primo_send(
+            adapter,
+            incoming,
+            f"Image removal failed: {type(exc).__name__}: {exc}",
+            is_error=True,
+        )
+        return
+    _primo_workshop_set(key, stage="await_review", post_id=post.id, media_mode="none")
+    await _send_primo_preview(adapter, incoming, post)
+
+
+async def handle_primo(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str | None:
+    """Guided Primo X workshop backed by the real social approval queue."""
+
+    text = (args or "").strip()
+    if not text:
+        await _send_primo_mode_picker(adapter, incoming)
+        return None
+    lowered = text.lower()
+    key = _primo_channel_key(incoming)
+    if lowered in {"cancel", "stop"}:
+        _PRIMO_PENDING.pop(key, None)
+        return "Primo workshop cancelled."
+    if lowered in {"run", "run it", "auto", "surprise me"}:
+        await _send_primo_media_picker(
+            adapter, incoming, mode="run", topic=None
+        )
+        return None
+    if lowered == "cook":
+        _primo_workshop_set(key, stage="await_topic", mode="cook")
+        await _send_primo_topic_prompt(adapter, incoming)
+        return None
+    if lowered.startswith("cook "):
+        text = text[5:].strip()
+    await _send_primo_media_picker(adapter, incoming, mode="cook", topic=text)
+    return None
+
+
+async def handle_primo_button(
+    adapter: Any,
+    incoming: Any,
+    custom_id: str,
+) -> None:
+    """Handle authenticated workshop buttons; publishing remains social:* owned."""
+
+    raw_event = getattr(incoming, "raw_event", None) or {}
+    if raw_event.get("interaction_type") != "button":
+        await _primo_send(
+            adapter,
+            incoming,
+            "Primo workshop actions only run from the displayed buttons.",
+            is_error=True,
+        )
+        return
+    key = _primo_channel_key(incoming)
+
+    if custom_id == "primo_flow:mode:cook":
+        _primo_workshop_set(key, stage="await_topic", mode="cook")
+        await _send_primo_topic_prompt(adapter, incoming)
+        return
+    if custom_id == "primo_flow:mode:run":
+        await _send_primo_media_picker(adapter, incoming, mode="run", topic=None)
+        return
+    if custom_id in {"primo_flow:restart", "primo_flow:cancel"}:
+        if custom_id.endswith("cancel"):
+            _PRIMO_PENDING.pop(key, None)
+            await _primo_send(adapter, incoming, "Primo workshop cancelled.")
+        else:
+            await _send_primo_mode_picker(adapter, incoming)
+        return
+    if custom_id.startswith("primo_flow:media:"):
+        media_mode = custom_id.rsplit(":", 1)[-1]
+        if media_mode not in {"none", "image", "auto"}:
+            await _primo_send(adapter, incoming, "Unknown Primo media choice.", is_error=True)
+            return
+        pending = _primo_workshop_get(key)
+        if not pending or pending.get("stage") != "await_media":
+            await _primo_send(adapter, incoming, _PRIMO_EXPIRED_TEXT, is_error=True)
+            return
+        await _generate_primo_workshop_draft(
+            adapter,
+            incoming,
+            topic=pending.get("topic"),
+            mode=str(pending.get("mode") or "run"),
+            media_mode=media_mode,
+        )
+        return
+
+    parts = custom_id.split(":")
+    if len(parts) != 3 or not parts[2].isdigit():
+        await _primo_send(
+            adapter,
+            incoming,
+            f"Malformed Primo workshop action: {custom_id}",
+            is_error=True,
+        )
+        return
+    action, post_id = parts[1], int(parts[2])
+    if action == "revise":
+        _primo_workshop_set(key, stage="await_revision", post_id=post_id)
+        await _primo_send(
+            adapter,
+            incoming,
+            "What should change in Primo's copy? Send the direction naturally.",
+        )
+        return
+    if action == "image":
+        _primo_workshop_set(key, stage="await_image", post_id=post_id)
+        await _primo_send(
+            adapter,
+            incoming,
+            "Describe the new visual direction, or reply `surprise me`.",
+        )
+        return
+    if action == "remove" or action == "textonly":
+        await _remove_primo_workshop_image(
+            adapter, incoming, post_id=post_id
+        )
+        return
+    if action == "retry":
+        await _regenerate_primo_workshop_image(
+            adapter, incoming, post_id=post_id, direction="retry"
+        )
+        return
+    await _primo_send(
+        adapter,
+        incoming,
+        f"Unknown Primo workshop action: {action}",
+        is_error=True,
+    )
+
+
+async def try_consume_primo_message(adapter: Any, incoming: Any) -> bool:
+    """Consume typed input only while an explicit /primo workshop is active."""
+
+    key = _primo_channel_key(incoming)
+    pending = _primo_workshop_get(key)
+    if not pending:
+        return False
+    text = (getattr(incoming, "text", "") or "").strip()
+    if not text or text.startswith("/") or text.startswith("__"):
+        return False
+    lowered = text.lower()
+    if lowered in {"cancel", "stop"}:
+        _PRIMO_PENDING.pop(key, None)
+        await _primo_send(adapter, incoming, "Primo workshop cancelled.")
+        return True
+
+    stage = pending.get("stage")
+    if stage == "await_mode":
+        if lowered in {"1", "cook", "cook together"}:
+            _primo_workshop_set(key, stage="await_topic", mode="cook")
+            await _send_primo_topic_prompt(adapter, incoming)
+            return True
+        if lowered in {"2", "run", "run it", "run it for me", "auto"}:
+            await _send_primo_media_picker(adapter, incoming, mode="run", topic=None)
+            return True
+        return False
+    if stage == "await_topic":
+        await _send_primo_media_picker(adapter, incoming, mode="cook", topic=text)
+        return True
+    if stage == "await_media":
+        aliases = {
+            "1": "none",
+            "text": "none",
+            "text only": "none",
+            "none": "none",
+            "2": "image",
+            "image": "image",
+            "add image": "image",
+            "pic": "image",
+            "picture": "image",
+            "3": "auto",
+            "auto": "auto",
+            "auto decide": "auto",
+            "auto-decide": "auto",
+        }
+        media_mode = aliases.get(lowered)
+        if media_mode is None:
+            return False
+        await _generate_primo_workshop_draft(
+            adapter,
+            incoming,
+            topic=pending.get("topic"),
+            mode=str(pending.get("mode") or "run"),
+            media_mode=media_mode,
+        )
+        return True
+    if stage in {"await_revision", "await_review"}:
+        post_id = int(pending.get("post_id") or 0)
+        if post_id <= 0:
+            _PRIMO_PENDING.pop(key, None)
+            await _primo_send(adapter, incoming, _PRIMO_EXPIRED_TEXT)
+            return True
+        if lowered.startswith("image:"):
+            await _regenerate_primo_workshop_image(
+                adapter,
+                incoming,
+                post_id=post_id,
+                direction=text.split(":", 1)[1].strip() or "surprise me",
+            )
+        else:
+            await _revise_primo_workshop_draft(
+                adapter,
+                incoming,
+                post_id=post_id,
+                feedback=text,
+            )
+        return True
+    if stage == "await_image":
+        post_id = int(pending.get("post_id") or 0)
+        if post_id <= 0:
+            _PRIMO_PENDING.pop(key, None)
+            await _primo_send(adapter, incoming, _PRIMO_EXPIRED_TEXT)
+            return True
+        await _regenerate_primo_workshop_image(
+            adapter, incoming, post_id=post_id, direction=text
+        )
+        return True
+    if stage == "generating":
+        await _primo_send(adapter, incoming, "Still cooking it. Give me a moment.")
+        return True
+    if stage == "image_failed":
+        await _primo_send(
+            adapter,
+            incoming,
+            "Use the Retry Image or Use Text Only button on the latest message.",
+        )
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Social Post Queue (Issue #77)
 # ---------------------------------------------------------------------------
+
+
+def _spawn_social_post_runner(post_id: int) -> str:
+    """Claim + hand an approved post to the detached Browser Homie runner.
+
+    The bot never drives the browser on its event loop (the 2026-07-13 wedge:
+    a hung agent-browser child froze every adapter, /health, and the liveness
+    supervisor at once). This claims the row (CAS — a double-tap or a cron
+    race is a no-op) and spawns the one-shot runner; the posted/failed receipt
+    arrives cross-process via social.notify.
+    """
+    import sys
+
+    from social.service import SocialPostService
+
+    svc = SocialPostService()
+    post = svc.get_post(post_id)
+    if post is None:
+        return f"Error: Post {post_id} not found"
+    if post.status != "approved":
+        return f"Error: Post {post_id} has status '{post.status}', expected 'approved'"
+    if not svc.claim_post(post_id):
+        return f"Post #{post_id} is already being posted — receipt incoming."
+
+    import social
+
+    runner_script = Path(social.__file__).resolve().parent / "browser_homie_runner.py"
+    scripts_dir = runner_script.parent.parent
+    log_path = Path(__file__).resolve().parent.parent / "data" / "social_runner.log"
+    try:
+        from shared import spawn_detached
+
+        runner_pid = spawn_detached(
+            [sys.executable, str(runner_script), "--post-id", str(post_id), "--claimed"],
+            cwd=str(scripts_dir),
+            log_path=log_path,
+        )
+    except Exception as exc:  # noqa: BLE001 — release the claim so a retry can win it
+        svc.clear_claim(post_id)
+        return f"Error: could not start the Browser Homie runner: {exc}"
+    return (
+        f"Post #{post_id} ({post.channel}) queued — Browser Homie is on it "
+        f"(runner PID {runner_pid}). Receipt incoming."
+    )
 
 
 async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
@@ -5444,24 +6935,10 @@ async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only:
         except (ValueError, TypeError):
             return "Usage: `/social post <id>` (post must be approved first)"
         try:
-            from social.post_executor import dispatch_post
-            ok = dispatch_post(post_id)
-            if ok:
-                from social.service import SocialPostService
-                svc = SocialPostService()
-                post = svc.get_post(post_id)
-                url = post.post_url if post and post.post_url else "n/a"
-                return f"Post #{post_id} dispatched successfully. URL: {url}"
-            else:
-                from social.service import SocialPostService
-                svc = SocialPostService()
-                post = svc.get_post(post_id)
-                err = post.error if post else "Unknown"
-                return f"Post #{post_id} dispatch failed: {err}"
-        except ValueError as e:
-            return f"Error: {e}"
-        except PermissionError as e:
-            return f"Post #{post_id} blocked by default-deny gate: {e}"
+            # Never dispatch inline: the browser drive is 60-120s of blocking
+            # subprocess work and a hung agent-browser child wedges the whole
+            # event loop. Claim + spawn the detached Browser Homie runner.
+            return _spawn_social_post_runner(post_id)
         except Exception as e:
             return f"Error dispatching post: {e}"
 
@@ -6066,6 +7543,8 @@ CORE_HANDLERS: dict[str, Any] = {
     "browserops": handle_browserops,
     "ghost": handle_ghost,
     "linkedin_profile": handle_linkedin_profile,
+    "linkedin": handle_linkedin,
+    "primo": handle_primo,
     "linkedin_post": handle_linkedin_post,
     "linkedin_connect": handle_linkedin_connect,
     "reddit": handle_reddit,
@@ -6095,6 +7574,7 @@ CORE_HANDLERS: dict[str, Any] = {
     # Source-driven skill authoring (Hermes /learn port) — writes an inert
     # draft that graduates through the /skills gate above.
     "learn": handle_learn,
+    "watch": handle_watch,
     "extensions": handle_extensions,
     # Native design — Open Design power, no daemon (brief -> artifact -> critique).
     "design": handle_design,

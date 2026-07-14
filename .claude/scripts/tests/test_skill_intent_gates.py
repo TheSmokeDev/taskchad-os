@@ -398,22 +398,17 @@ async def test_linkedin_profile_open_language_routes_to_router_not_engine():
 
 
 @pytest.mark.asyncio
-async def test_linkedin_slash_command_uses_deterministic_operator_prompt():
+async def test_linkedin_slash_command_uses_deterministic_router_workshop():
     engine = _RecordingEngine()
     router = ChatRouter(engine, _build_manager())
     adapter = _RecordingAdapter()
-    incoming = _incoming("/linkedin draft a post about multi-persona AI operators")
+    incoming = _incoming("/linkedin")
 
     await router._handle_inner(adapter, incoming)
 
-    assert len(engine.messages) == 1
-    assert "LinkedIn/Social Homie" in engine.messages[0]
-    assert "draft a post about multi-persona AI operators" in engine.messages[0]
-    assert "must not" in engine.messages[0]
-    assert "publish, DM, edit a profile" in engine.messages[0]
-    assert incoming.raw_event["display_text"] == "/linkedin draft a post about multi-persona AI operators"
-    assert adapter.sent[0].text == "Thinking..."
-    assert adapter.updates[-1].text == "engine handled"
+    assert engine.messages == []
+    assert "Cook Together" in adapter.sent[-1].text
+    assert adapter.updates == []
 
 
 @pytest.mark.asyncio

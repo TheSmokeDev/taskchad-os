@@ -93,6 +93,7 @@ def test_metadata_round_trips_through_allowlist() -> None:
         target_url="https://www.linkedin.com/feed/",
         payload_text="hello world",
         action="post",
+        media_path="C:/approved/post.png",
     )
     # Smuggle an extra field — the allowlist must drop it.
     raw = dataclasses.asdict(task)
@@ -101,6 +102,7 @@ def test_metadata_round_trips_through_allowlist() -> None:
     parsed = parse_social_write_task(json.dumps(raw))
     assert parsed.workflow_id == "linkedin.post.create"
     assert parsed.payload_text == "hello world"
+    assert parsed.media_path == "C:/approved/post.png"
     assert not hasattr(parsed, "approval_token")
 
 

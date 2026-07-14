@@ -52,7 +52,7 @@ def yaml_path(tmp_path: Path) -> Path:
             },
             "x": {
                 "display_name": "X (Twitter)",
-                "execution_method": "manual",
+                "execution_method": "browser",
                 "cadence_enabled": False,
                 "cadence_interval_hours": 12,
 
@@ -174,30 +174,41 @@ class TestFullFacebookLoop:
         assert "not configured" in post.error
 
 
-class TestXDraftOnly:
-    """X channel: draft-only, never auto-posts."""
+class TestXBrowserPosting:
+    """X drafts dispatch only through the operator-confirmed browser lane."""
 
-    def test_x_manual_dispatch_fails(self, svc: SocialPostService):
+    def test_x_browser_dispatch_succeeds(self, svc: SocialPostService):
         pid = svc.create_draft(channel="x", title="Hot take", body="AI > everything")
         svc.approve_post(pid)
 
-        with patch("social.post_executor.get_channel") as mock_ch:
+        mock_receipt = MagicMock(status="completed", metadata={}, error=None)
+        mock_driver_mod = MagicMock()
+        mock_be_cls = MagicMock()
+        mock_be_cls.return_value.dispatch.return_value = mock_receipt
+
+        import sys
+        with patch("social.post_executor.get_channel") as mock_ch, \
+             patch.dict(sys.modules, {"chat": MagicMock(), "chat.social_write_driver": mock_driver_mod}), \
+             patch("orchestration.browser_executor.BrowserExecutor", mock_be_cls):
             mock_ch.return_value = SocialChannel(
                 channel_id="x",
                 display_name="X (Twitter)",
-                execution_method="manual",
+                execution_method="browser",
+                browser_workflow_id="x.post.create",
             )
             from social.post_executor import dispatch_post
             ok = dispatch_post(pid, db_path=svc._db._db_path)
 
-        assert ok is False
+        assert ok is True
         post = svc.get_post(pid)
-        assert post.status == "failed"
-        assert "manual" in post.error.lower()
+        assert post.status == "posted"
 
-    def test_x_capability_disabled(self):
+    def test_x_capability_is_operator_confirmed(self):
         from integrations.capabilities import is_integration_action_allowed
-        assert not is_integration_action_allowed("social", "post_x")
+        assert is_integration_action_allowed(
+            "social", "post_x", surface="operator_confirmed"
+        )
+        assert not is_integration_action_allowed("social", "post_x", surface="model")
 
 
 class TestRejectionFlow:
@@ -250,10 +261,15 @@ class TestDefaultDeny:
             "social", "post_linkedin", surface="model"
         )
 
-    def test_x_completely_disabled(self):
+    def test_x_requires_operator_confirmation(self):
         from integrations.capabilities import is_integration_action_allowed
-        assert not is_integration_action_allowed("social", "post_x")
         assert not is_integration_action_allowed(
+            "social", "post_x", surface="model"
+        )
+        assert not is_integration_action_allowed(
+            "social", "post_x", surface="internal"
+        )
+        assert is_integration_action_allowed(
             "social", "post_x", surface="operator_confirmed"
         )
 
@@ -868,10 +884,17 @@ class TestPreSendAuditRecord:
         assert post_idx > 0
 
     def test_browser_writes_pending_audit_before_dispatch(self, svc: SocialPostService):
-        pid = svc.create_draft(channel="linkedin", title="T", body="B")
+        pid = svc.create_draft(
+            channel="linkedin",
+            title="T",
+            body="B",
+            media_path="C:/approved/linkedin.png",
+            media_type="image",
+        )
         svc.approve_post(pid)
 
         call_order = []
+        dispatched_metadata = {}
 
         mock_receipt = MagicMock()
         mock_receipt.status = "completed"
@@ -880,6 +903,7 @@ class TestPreSendAuditRecord:
 
         def fake_executor_dispatch(subtask):
             call_order.append("browser_dispatch")
+            dispatched_metadata.update(json.loads(subtask.metadata))
             return mock_receipt
 
         def fake_audit(**kw):
@@ -909,6 +933,7 @@ class TestPreSendAuditRecord:
         assert "browser_dispatch" in call_order
         dispatch_idx = call_order.index("browser_dispatch")
         assert dispatch_idx > 0
+        assert dispatched_metadata["media_path"] == "C:/approved/linkedin.png"
 
 
 class TestDispatchDueBlockedCount:
@@ -996,18 +1021,93 @@ class TestDirectAPIPath:
         publish_resp.json.return_value = {"id": "media_789"}
         publish_resp.raise_for_status = MagicMock()
 
+        status_resp = MagicMock()
+        status_resp.ok = True
+        status_resp.status_code = 200
+        status_resp.json.return_value = {"status_code": "FINISHED"}
+
+        permalink_resp = MagicMock()
+        permalink_resp.ok = True
+        permalink_resp.status_code = 200
+        permalink_resp.json.return_value = {
+            "permalink": "https://www.instagram.com/p/test/"
+        }
+
         with patch(
             "integrations.social_media.requests.post",
             side_effect=[container_resp, publish_resp],
-        ) as mock_post:
+        ) as mock_post, patch(
+            "integrations.social_media.requests.get",
+            side_effect=[status_resp, permalink_resp],
+        ) as mock_get:
             result = post_to_instagram("Caption", image_url="https://example.com/img.jpg")
 
         assert result.success is True
         assert mock_post.call_count == 2
+        assert mock_get.call_count == 2
         create_url = mock_post.call_args_list[0][0][0]
         publish_url = mock_post.call_args_list[1][0][0]
         assert "media" in create_url
         assert "media_publish" in publish_url
+
+    def test_instagram_waits_for_processing_before_publish(self, monkeypatch):
+        from integrations.social_media import post_to_instagram
+
+        monkeypatch.setenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", "ig_123")
+        monkeypatch.setenv("FACEBOOK_PAGE_ACCESS_TOKEN", "tok_test")
+
+        container_resp = MagicMock(ok=True, status_code=200)
+        container_resp.json.return_value = {"id": "container_456"}
+        publish_resp = MagicMock(ok=True, status_code=200)
+        publish_resp.json.return_value = {"id": "media_789"}
+        in_progress = MagicMock(ok=True, status_code=200)
+        in_progress.json.return_value = {"status_code": "IN_PROGRESS"}
+        finished = MagicMock(ok=True, status_code=200)
+        finished.json.return_value = {"status_code": "FINISHED"}
+        permalink = MagicMock(ok=True, status_code=200)
+        permalink.json.return_value = {"permalink": "https://www.instagram.com/p/test/"}
+
+        with patch(
+            "integrations.social_media.requests.post",
+            side_effect=[container_resp, publish_resp],
+        ) as mock_post, patch(
+            "integrations.social_media.requests.get",
+            side_effect=[in_progress, finished, permalink],
+        ), patch("integrations.social_media.time.sleep") as mock_sleep:
+            result = post_to_instagram(
+                "Caption", image_url="https://example.com/img.jpg"
+            )
+
+        assert result.success is True
+        assert mock_post.call_count == 2
+        mock_sleep.assert_called_once()
+
+    def test_instagram_processing_error_does_not_publish(self, monkeypatch):
+        from integrations.social_media import post_to_instagram
+
+        monkeypatch.setenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", "ig_123")
+        monkeypatch.setenv("FACEBOOK_PAGE_ACCESS_TOKEN", "tok_test")
+
+        container_resp = MagicMock(ok=True, status_code=200)
+        container_resp.json.return_value = {"id": "container_456"}
+        failed = MagicMock(ok=True, status_code=200)
+        failed.json.return_value = {
+            "status_code": "ERROR",
+            "status": "Error: image processing failed",
+        }
+
+        with patch(
+            "integrations.social_media.requests.post", return_value=container_resp
+        ) as mock_post, patch(
+            "integrations.social_media.requests.get", return_value=failed
+        ):
+            result = post_to_instagram(
+                "Caption", image_url="https://example.com/img.jpg"
+            )
+
+        assert result.success is False
+        assert "processing failed" in result.message.lower()
+        assert mock_post.call_count == 1
 
     def test_post_to_platform_routes_to_facebook(self, monkeypatch):
         from integrations.social_media import post_to_platform

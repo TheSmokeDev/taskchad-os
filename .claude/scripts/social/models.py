@@ -38,6 +38,7 @@ class SocialPost:
     post_url: str | None = None
     rejection_reason: str | None = None
     error: str | None = None
+    claimed_at: str | None = None
     audit_id: str | None = None
     # Async-transport reference, e.g. "postiz:<postId>" — set on optimistic
     # accept so the reconcile pass can match platform outcomes back to rows.

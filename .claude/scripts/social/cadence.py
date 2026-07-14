@@ -172,6 +172,18 @@ def run_cadence_tick(
 
     # Dispatch all approved posts whose scheduled_for has passed
     if not dry_run:
+        # Backstop for the spawn-on-approve runner: fail any dispatch claim
+        # that went stale (runner died mid-flight) BEFORE claiming new work.
+        # Fail-open: a sweep error never blocks the tick's own dispatches.
+        try:
+            from social.post_executor import sweep_stale_claims
+
+            summary["stale_claims_swept"] = sweep_stale_claims(db_path=db_path).get(
+                "swept", 0
+            )
+        except Exception as exc:
+            logger.warning("Stale-claim sweep failed: %s", exc)
+
         dispatch_result = dispatch_due_posts(db_path=db_path)
         summary["posts_dispatched"] = dispatch_result.get("dispatched", 0)
 

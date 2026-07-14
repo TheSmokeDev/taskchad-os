@@ -19,6 +19,8 @@ import urllib.parse
 import urllib.request
 from typing import TYPE_CHECKING
 
+from social.channels import get_channel
+
 if TYPE_CHECKING:
     from social.models import SocialPost
 
@@ -65,7 +67,13 @@ def _build_card_text(post: "SocialPost", limit: int = _TG_TEXT_LIMIT) -> str:
 
     ``limit`` is the hard character ceiling: 4096 for a text message body,
     1024 for a photo caption (see ``_build_photo_caption``)."""
-    channel = (post.channel or "social").upper()
+    channel_id = post.channel or "social"
+    configured = get_channel(channel_id)
+    channel = (
+        configured.display_name
+        if configured is not None and configured.display_name
+        else channel_id.upper()
+    )
     source = post.topic_source or "manual"
     header = f"📝 New {channel} draft  ·  #{post.id}  ·  {source}"
     body = post.body or "(empty draft)"

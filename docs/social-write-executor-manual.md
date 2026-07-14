@@ -1,7 +1,7 @@
 # Social-Write Executor Manual
 
 This is the deep on-demand operating contract for the operator-approved
-LinkedIn and Reddit browser-write slice. Load this when work touches
+LinkedIn, Primo X, and Reddit browser-write slice. Load this when work touches
 `/linkedin_post`, `/linkedin_connect`, `/reddit comment`, `/reddit post`, the
 `BrowserExecutor`, the `SocialWriteDriver`, the `_split_social_args` approval
 split, or the `linkedin.*` / `reddit.*` write workflow gates.
@@ -108,8 +108,9 @@ Still stubbed or deferred:
   default-denied and not implemented. `/linkedin_profile edit` stays
   expected-blocked.
 - DMs, follows, likes, reposts, and any other social write action.
-- The X write workflow (`x.post.create`) stays default-denied — the X slice is a
-  separate read-only scout plus draft surface, not part of this write slice.
+- The X write workflow (`x.post.create`) is implemented through the same
+  queue-backed approval executor. It drives the logged-in `@primo_agent`
+  composer only after the authenticated Telegram button approves the exact row.
 - The agent-browser drive selectors are documented but not yet verified against
   the live UI (deferred to the supervised first run).
 

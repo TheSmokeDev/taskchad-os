@@ -24,9 +24,20 @@ class TestCardText:
     def test_contains_header_body_footer(self):
         card = notify._build_card_text(_post(body="My draft body."))
         assert "#5" in card
-        assert "LINKEDIN" in card
+        assert "YourProduct · LinkedIn" in card
         assert "My draft body." in card
         assert "Approve & Post" in card
+
+    def test_uses_configured_brand_label(self, monkeypatch):
+        from social.channels import SocialChannel
+
+        monkeypatch.setattr(
+            notify,
+            "get_channel",
+            lambda _channel: SocialChannel(display_name="Primo Agent · X"),
+        )
+        card = notify._build_card_text(_post(channel="x"))
+        assert "New Primo Agent · X draft" in card
 
     def test_truncates_long_body_under_limit(self):
         card = notify._build_card_text(_post(body="x" * 9000))

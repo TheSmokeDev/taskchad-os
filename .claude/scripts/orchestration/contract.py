@@ -177,7 +177,14 @@ SocialWriteAction = Literal["post", "connect"]  # Phase 1 LinkedIn scope (no "co
 # deliberately NO approval_token field — the chat HANDLER is the approval
 # authority and a task only exists AFTER decision.allowed (default-deny).
 SOCIAL_WRITE_FIELDS: frozenset[str] = frozenset(
-    ["workflow_id", "target_url", "payload_text", "action", "post_action_snapshot"]
+    [
+        "workflow_id",
+        "target_url",
+        "payload_text",
+        "action",
+        "post_action_snapshot",
+        "media_path",
+    ]
 )
 
 # ── Defaults ───────────────────────────────────────────────────────────────

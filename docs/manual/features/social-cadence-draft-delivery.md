@@ -114,7 +114,7 @@ time). The `execution_method` decides what an approved post does:
 | `reddit` | browser | off | Visible-Chrome `BrowserExecutor` (cadence off by default). |
 | `facebook` | api | enabled (24h) | Posts via the gated direct-API leg. |
 | `instagram` | api | enabled (24h) | Posts via the gated direct-API leg (draft may include a generated scene image). |
-| `x` | manual | enabled (12h) | **Draft-only by policy** — delivered and never auto-posted; use Edit to copy and post by hand. |
+| `x` | browser | enabled (12h) | **Primo Agent** — Telegram approval dispatches through the visible `@primo_agent` X session on CDP 18222. |
 | `discord` | manual | off | Placeholder; `manual` never auto-posts. |
 
 `manual` channels deliver a draft card like any other, but Approve cannot land a
@@ -191,7 +191,7 @@ uv run python -c "from social.service import SocialPostService; print(SocialPost
 With `SOCIAL_CADENCE_ENABLED=true`, a live tick drafts one post per due channel
 and delivers each as a Telegram card. Tap **Approve & Post** to land a
 browser/api channel, **Edit** to copy-and-post a manual channel, or **Reject** to
-discard. The visible-Chrome CDP session must be reachable for a LinkedIn/Reddit
+discard. The visible-Chrome CDP session must be reachable for a LinkedIn/X/Reddit
 auto-post (confirm with `agent-browser --cdp 9222 stream status`); if it is not
 ready the executor refuses and audits `failed` without driving.
 
@@ -202,14 +202,20 @@ ready the executor refuses and audits `failed` without driving.
   references) are documented in the drive docstrings but must be verified during
   the first SUPERVISED real auto-post. Until then, treat a LinkedIn Approve tap
   as a supervised, selector-verify run.
-- **No compare-and-swap on dispatch.** The approve → dispatch path has no
-  compare-and-swap, so two concurrent dispatches of the same post from different
-  ingresses are a theoretical double-post. In practice delivery is single-ingress
-  (one operator, one Telegram chat), so this is a theoretical edge, not an
-  observed one. A CAS guard on dispatch is the obvious hardening.
-- **Receipts are not yet delivered back to Telegram.** The post audit row and
-  screenshot receipt persist locally; surfacing the receipt back into the chat
-  card is a follow-up.
+- **CLOSED (2026-07-13): dispatch is CAS-guarded.** Every dispatch ingress
+  (approve tap, `/social post`, cadence cron) must win an atomic `claimed_at`
+  claim on the still-`approved` row before driving (`social/db.py
+  claim_post`). A double-tap or a tap racing the cron loses the CAS and is a
+  no-op — the operator sees "already being posted."
+- **CLOSED (2026-07-13): receipts are delivered back to Telegram.** The
+  Browser Homie runner (`social/browser_homie_runner.py`) sends a
+  posted/failed receipt cross-process via `social/notify.py
+  send_text_to_telegram` after every dispatch, and the cadence tick's
+  stale-claim sweep notifies when a claimed post never finished.
+- **Approve-tap dispatch now runs OUT OF PROCESS.** The bot claims the row and
+  spawns the detached Browser Homie runner (`spawn_detached`); the browser
+  drive can no longer block the chat event loop (the 2026-07-13 wedge class).
+  See `docs/manual/features/social-post-pipeline.md` → Browser Homie Runner.
 
 ## Public Export Status
 

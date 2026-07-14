@@ -35,6 +35,9 @@ class SocialChannel:
     # curated refs lock a face onto the hero + payoff beats of rendered video.
     # Empty == no persona (gradient/brand art as before).
     persona_pack: str = ""
+    # Preferred still-image aspect for social image generation. Channels that
+    # omit this keep the historical square default.
+    image_aspect: str = "1:1"
 
 
 _DEFAULT_YAML_PATH: Path | None = None
@@ -50,7 +53,7 @@ def _load_channels(yaml_path: Path | None = None) -> dict[str, SocialChannel]:
     path = _resolve_yaml_path(yaml_path)
     if not path.is_file():
         return {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     raw: dict[str, Any] = data.get("channels", {})
     result: dict[str, SocialChannel] = {}
@@ -70,6 +73,7 @@ def _load_channels(yaml_path: Path | None = None) -> dict[str, SocialChannel]:
             postiz_settings=cfg.get("postiz_settings", {}) or {},
             design_file=str(cfg.get("design_file", "") or ""),
             persona_pack=str(cfg.get("persona_pack", "") or ""),
+            image_aspect=str(cfg.get("image_aspect", "1:1") or "1:1"),
         )
     return result
 

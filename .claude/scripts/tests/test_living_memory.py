@@ -477,6 +477,27 @@ class TestFlushSubjectQuality:
         # Explicit arg wins over env
         assert len(_extract_thread_candidates(flush_md, max_threads=2)) == 2
 
+    def test_dedup_window_knob_resolves_at_call_time(self, monkeypatch):
+        """WORKING_MEMORY_DEDUP_DAYS resolves per call (Rule 1) — this failed
+        before the 2026-07-07 refactor because the window was bound as a
+        function default arg at def time (the PR #7/#21 bug class)."""
+        from living_memory import _dedup_match
+
+        five_days_ago = (date.today() - timedelta(days=5)).isoformat()
+        section = [f"- [{five_days_ago}] stale subject for the window test — open"]
+
+        # Default 3-day window: a 5-day-old bullet is NOT a duplicate.
+        monkeypatch.delenv("WORKING_MEMORY_DEDUP_DAYS", raising=False)
+        assert _dedup_match(section, "stale subject for the window test") is False
+        # Widen the window via env AFTER import — must take effect immediately.
+        monkeypatch.setenv("WORKING_MEMORY_DEDUP_DAYS", "7")
+        assert _dedup_match(section, "stale subject for the window test") is True
+        # Explicit arg wins over env
+        assert (
+            _dedup_match(section, "stale subject for the window test", window_days=2)
+            is False
+        )
+
 
 # =============================================================================
 # TestBriefingSection — behavior #12, #13

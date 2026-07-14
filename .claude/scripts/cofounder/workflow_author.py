@@ -29,7 +29,6 @@ logged warning — never an exception into the pass.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -207,7 +206,7 @@ def _dump(data: dict[str, Any]) -> str:
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    """Write atomically via tmp + os.replace (project_model pattern)."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    """Write atomically via shared.atomic_write_text (consolidated 2026-07-07)."""
+    from shared import atomic_write_text
+
+    atomic_write_text(path, text)

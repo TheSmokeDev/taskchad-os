@@ -104,6 +104,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("working", "Show cross-session scratchpad — open threads, hypotheses, questions", "router", "admin"),
     ("skills", "Review/promote/reject self-authored skill drafts", "router", "operator"),
     ("learn", "Author a reusable skill from a URL, local dir, this conversation, or pasted notes (staged for /skills)", "router", "operator"),
+    ("watch", "Learn from one video, save a sourced note, and compare it with the current work", "router", "operator"),
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
     ("image", "Generate or edit an image through Codex imagegen", "engine", "admin"),
@@ -111,6 +112,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("owner-image", "Generate a saved owner / YourBusiness rep persona image", "engine", "admin"),
     ("quote", "Generate an insurance quote via TurboRater using the turborater-quote skill", "engine", "admin"),
     ("linkedin", "LinkedIn workshop - Cook Together or Run It for Me, then approve the exact post and image", "router", "admin"),
+    ("primo", "Primo X workshop - cook copy plus an optional branded image, then approve the exact card", "router", "admin"),
     ("tweet", "Draft an X (Twitter) post or thread", "engine", "admin"),
     ("instagram", "Create Instagram content — carousel or caption", "engine", "admin"),
     ("yt_script", "Write a YouTube video script", "engine", "admin"),
@@ -162,10 +164,10 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     # Co-Founder (US-015) — autonomous project steering.
     ("Co-Founder", ["cofounder"]),
     ("Communication", ["send", "brief"]),
-    ("Memory", ["search", "vault", "file", "working", "skills", "learn"]),
+    ("Memory", ["search", "vault", "file", "working", "skills", "learn", "watch"]),
     (
         "Content Creation",
-        ["blog", "image", "generate-image", "owner-image", "quote", "linkedin", "tweet", "instagram", "yt_script", "shorts", "video"],
+        ["blog", "image", "generate-image", "owner-image", "quote", "linkedin", "primo", "tweet", "instagram", "yt_script", "shorts", "video"],
     ),
     ("Design", ["design"]),
     (
@@ -203,6 +205,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "browserops",
     "ghost",
     "linkedin",
+    "primo",
     "linkedin_profile",
     "linkedin_post",
     "linkedin_connect",
@@ -221,6 +224,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "file",
     "skills",
     "learn",
+    "watch",
     "blog",
     "image",
     "tweet",

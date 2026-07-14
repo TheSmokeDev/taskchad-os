@@ -63,6 +63,15 @@ class RuntimeRequest:
     # never forwarded into SDK options, and generic lanes emit no live events.
     effort: str | None = None
     on_tool_event: Any | None = None
+    # Read-only multimodal work (for example `/watch` frame inspection).
+    # Generic CLI adapters use these fields to attach images without granting
+    # write/shell authority; Claude keeps only its Read tool.  Additive defaults
+    # preserve every existing caller.
+    image_paths: list[Path | str] = field(default_factory=list)
+    read_only_tools: bool = False
+    # Approved local-file application lane. Adapters must contain this more
+    # tightly than ordinary TOOL_REASONING (workspace-write / edit tools only).
+    workspace_write_tools: bool = False
 
 
 @dataclass(slots=True)

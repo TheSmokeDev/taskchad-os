@@ -43,13 +43,14 @@ def yaml_path(tmp_path: Path) -> Path:
             },
             "x": {
                 "display_name": "X (Twitter)",
-                "execution_method": "manual",
+                "execution_method": "browser",
                 "cadence_enabled": False,
                 "cadence_interval_hours": 12,
 
                 "voice_profile": "",
                 "topic_pool": ["hot takes"],
                 "browser_workflow_id": "x.post.create",
+                "image_aspect": "16:9",
             },
         }
     }
@@ -82,10 +83,11 @@ class TestChannelRegistry:
         assert len(active) == 1
         assert active[0].channel_id == "linkedin"
 
-    def test_x_is_manual(self, yaml_path: Path):
+    def test_x_is_browser_driven(self, yaml_path: Path):
         ch = get_channel("x", yaml_path=yaml_path)
         assert ch is not None
-        assert ch.execution_method == "manual"
+        assert ch.execution_method == "browser"
+        assert ch.image_aspect == "16:9"
 
     def test_facebook_is_api(self, yaml_path: Path):
         ch = get_channel("facebook", yaml_path=yaml_path)
@@ -123,6 +125,7 @@ class TestChannelRegistry:
         reddit = get_channel("reddit", yaml_path=p)
         assert reddit is not None
         assert reddit.persona_pack == ""
+        assert reddit.image_aspect == "1:1"
 
     def test_missing_yaml_returns_empty(self, tmp_path: Path):
         missing = tmp_path / "nonexistent.yaml"
@@ -211,19 +214,25 @@ class TestSocialCapabilities:
         assert action is not None
         assert action.effect == "external_post"
 
-    def test_x_post_disabled_by_default(self):
+    def test_x_post_is_operator_confirmed(self):
         from integrations.capabilities import is_integration_action_allowed
 
-        assert not is_integration_action_allowed("social", "post_x")
-
-    def test_x_post_raises_on_require(self):
-        from integrations.capabilities import (
-            IntegrationPolicyError,
-            require_integration_action,
+        assert is_integration_action_allowed(
+            "social", "post_x", surface="operator_confirmed"
         )
+        assert not is_integration_action_allowed("social", "post_x", surface="model")
 
-        with pytest.raises(IntegrationPolicyError, match="disabled"):
-            require_integration_action("social", "post_x", caller="test")
+    def test_x_post_requires_operator_surface(self):
+        from integrations.capabilities import IntegrationPolicyError, require_integration_action
+
+        action = require_integration_action(
+            "social", "post_x", surface="operator_confirmed", caller="test"
+        )
+        assert action.effect == "external_post"
+        with pytest.raises(IntegrationPolicyError, match="not exposed"):
+            require_integration_action(
+                "social", "post_x", surface="model", caller="test"
+            )
 
     def test_draft_content_allowed_internally(self):
         from integrations.capabilities import is_integration_action_allowed

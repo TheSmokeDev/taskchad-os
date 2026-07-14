@@ -418,3 +418,7 @@ class SocialWriteTask:
     action: SocialWriteAction = "post"  # "post" | "connect"
     # literal default (Rule-1 safe) — capture a screenshot after the write
     post_action_snapshot: bool = True
+    # Optional operator-reviewed local asset attached to the exact queue row.
+    # This is content, not an approval claim; the handler/button remains the
+    # only approval authority.
+    media_path: str | None = None

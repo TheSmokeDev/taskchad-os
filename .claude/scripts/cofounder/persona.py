@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -345,9 +344,10 @@ def _may_write_identity(
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    """Write atomically via shared.atomic_write_text (consolidated 2026-07-07)."""
+    from shared import atomic_write_text
+
+    atomic_write_text(path, content)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

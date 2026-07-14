@@ -85,6 +85,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Social-Write Executor | Shipped, default-denied, operator-gated per action | [social-write-executor](features/social-write-executor.md) | `/linkedin_post`, `/linkedin_connect`, `/reddit comment\|post` |
 | LinkedIn On-The-Fly Workshop | Shipped, queue-backed, operator-gated | [linkedin-on-the-fly-workshop](features/linkedin-on-the-fly-workshop.md) | `/linkedin`, Cook Together, Run It for Me, copy/image revision |
 | Video Generation | Shipped, native command, model-agnostic | [video-generation](features/video-generation.md) | `/video`, `video_pipeline.py`, `video_styles.py` |
+| Video Learning | Shipped, single-video, sourced and approval-gated | [video-learning](features/video-learning.md) | `/watch`, `video_learning/`, Codex + Claude wrappers |
 | Persona Brand Media Generation | Shipped, provider-optional, default-deny posting | [persona-brand-media-generation](features/persona-brand-media-generation.md) | `content_factory`, `video_imagegen`, `.claude/image-personas/` |
 | Document Uploads And Ingest | Shipped, all 3 phases (truthfulness, full reads, /vault-ingest) | [document-uploads-and-ingest](features/document-uploads-and-ingest.md) | `attachment_context.py`, `router.py` `/vault-ingest` caption, Telegram + Discord |
 | Telegram Command Menu | Curated native menu | [telegram-command-menu](features/telegram-command-menu.md) | `/commands`, Telegram slash menu |
@@ -107,7 +108,6 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Social Post Pipeline | Shipped (#80), default-denied, operator-gated | [social-post-pipeline](features/social-post-pipeline.md) | `/social` (draft/approve/post/schedule/cadence) |
 | Skill-From-Experience Loop | Shipped, default-denied, operator-gated | [skill-from-experience-loop](features/skill-from-experience-loop.md) | `/skills` (review/promote/reject) |
 | Social Cadence Draft Delivery | Shipped, default-denied, operator-gated per tap | [social-cadence-draft-delivery](features/social-cadence-draft-delivery.md) | Telegram draft cards (Approve/Edit/Reject), `/social` |
-| LinkedIn Personal Brand Engine | First authority + network-growth slice implemented and locally scheduled | [linkedin-personal-brand-engine](features/linkedin-personal-brand-engine.md) | `social.linkedin_growth`, social cadence, Image Node Factory |
 | Social Integrations (Meta Graph + Postiz + Social Tab) | Shipped — FB/IG direct via Meta Graph, Postiz for the rest | [social-postiz-integration](features/social-postiz-integration.md) | dashboard `/social` tab, `social/channels.yaml`, `social/postiz_canary.py` |
 | Intent-PRD and Clutch Review | Shipped (#78), merged | [intent-prd-and-clutch](features/intent-prd-and-clutch.md) | `create-prd`, `archon workflow run archon-clutch` |
 | Context-Economy DX | Shipped (#66), merged | [context-economy-dx](features/context-economy-dx.md) | `/prime-*`, `brownfield-day-1`, `vertical-slice-audit` |

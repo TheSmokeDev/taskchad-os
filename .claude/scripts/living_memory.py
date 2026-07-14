@@ -51,10 +51,9 @@ ALL_SECTIONS = (
 # Caps (see plan: Open Threads 10, others 5, archive unbounded)
 OPEN_THREADS_CAP = int(os.getenv("WORKING_MEMORY_OPEN_THREADS_CAP", "10"))
 OTHER_ACTIVE_CAP = int(os.getenv("WORKING_MEMORY_OTHER_CAP", "5"))
-DEDUP_WINDOW_DAYS = int(os.getenv("WORKING_MEMORY_DEDUP_DAYS", "3"))
-# WORKING_MEMORY_MAX_FLUSH_THREADS (default 3) is resolved at CALL TIME inside
-# _extract_thread_candidates (Rule 1 — the flush path was rewritten by Living
-# Mind Act 1 and its knob moved off import-time binding with it).
+# WORKING_MEMORY_MAX_FLUSH_THREADS (default 3) and WORKING_MEMORY_DEDUP_DAYS
+# (default 3) are resolved at CALL TIME inside _extract_thread_candidates and
+# _dedup_match respectively (Rule 1 — no import-time binding for tunable knobs).
 
 # Regex — single-line bullet with leading date: `- [YYYY-MM-DD] content`
 _BULLET_RE = re.compile(r"^- \[(\d{4}-\d{2}-\d{2})\] (.+)$")
@@ -386,13 +385,15 @@ def _header_slice(content: str) -> str:
 
 
 def _atomic_write(path: Path, content: str) -> int:
-    """Write `content` to `path` atomically via tmp + os.replace. Returns bytes."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    data = content.encode("utf-8")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-    return len(data)
+    """Write `content` to `path` atomically via shared.atomic_write_text.
+
+    Thin lazy wrapper — the tmp + os.replace logic was consolidated into
+    shared.py (2026-07-07 framework refactor). Local import keeps test
+    collection side-effect free, matching the file_lock imports below.
+    """
+    from shared import atomic_write_text
+
+    return atomic_write_text(path, content)
 
 
 # =============================================================================
@@ -400,13 +401,19 @@ def _atomic_write(path: Path, content: str) -> int:
 # =============================================================================
 
 
-def _dedup_match(section: list[str], subject: str, window_days: int = DEDUP_WINDOW_DAYS) -> bool:
+def _dedup_match(section: list[str], subject: str, window_days: int | None = None) -> bool:
     """Return True if an existing bullet in `section` matches `subject` within window.
 
     The stored bullet body is `<subject> — <status>` or `<hypothesis> — evidence: <...>`
     (for hypotheses) so a prefix match on the subject alone catches re-appends with
     different status/evidence text.
+
+    ``window_days=None`` follows the ``_extract_thread_candidates`` sentinel
+    pattern (Rule 1): resolved from WORKING_MEMORY_DEDUP_DAYS at call time
+    (default 3).
     """
+    if window_days is None:
+        window_days = int(os.getenv("WORKING_MEMORY_DEDUP_DAYS", "3"))
     today = _date.today()
     needle = subject.strip().lower()[:40]
     if not needle:

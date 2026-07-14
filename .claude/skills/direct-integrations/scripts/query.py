@@ -628,7 +628,7 @@ def main() -> None:
     ga_parser.add_argument("--max", type=int, default=10)
 
     # Personal Gmail (read-only)
-    pg_parser = subparsers.add_parser("personal-gmail", help="Personal Gmail read-only (owner6392lastname@gmail.com)")
+    pg_parser = subparsers.add_parser("personal-gmail", help="Personal Gmail read-only (your-calendar@gmail.com)")
     pg_parser.add_argument("action", choices=["list", "unread", "read"])
     pg_parser.add_argument("message_id", nargs="?", default=None)
     pg_parser.add_argument("--max", type=int, default=10)

@@ -334,6 +334,42 @@ def file_lock(lock_path: Path, timeout: float = 30.0) -> Iterator[None]:
         f.close()
 
 
+@contextlib.contextmanager
+def browser_write_lock(timeout: float = 600.0) -> Iterator[None]:
+    """Serialize visible-Chrome WRITE drives across processes.
+
+    The CDP browser is ONE logged-in session — concurrent drives interleave
+    tabs and keystrokes. Every browser-write ingress (Browser Homie runner,
+    cadence cron dispatch, per-action chat writes) must hold this lock for
+    the whole drive. Raises TimeoutError when another write holds it past
+    *timeout* (default 10 min — longer than any sane drive).
+    """
+    import config
+
+    with file_lock(Path(config.DATA_DIR) / "browser-write", timeout=timeout):
+        yield
+
+
+def atomic_write_text(path: Path, content: str) -> int:
+    """Write ``content`` to ``path`` atomically via tmp + os.replace.
+
+    Canonical framework atomic-write primitive (same family as ``file_lock``
+    above). Consolidates the ``_atomic_write`` clones that grew independently
+    in episodes.py, living_memory.py, and the cofounder slice — the identity
+    payload precedent applied to filesystem primitives.
+
+    Writes bytes (UTF-8, no platform newline translation — LF everywhere, the
+    behavior episodes/living_memory always had) and creates parent dirs.
+    Returns bytes written.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    data = content.encode("utf-8")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+    return len(data)
+
+
 # =============================================================================
 # PID FILE MANAGEMENT
 # =============================================================================

@@ -376,6 +376,8 @@ class ChatRouter:
         text = (getattr(incoming, "text", "") or "").strip()
         return ChatRouter._is_turn_followup_button(incoming) or text.startswith(
             "__button:social:"
+        ) or text.startswith("__button:linkedin_flow:") or text.startswith(
+            "__button:primo_flow:"
         )
 
     def _retain_task(self, task: "asyncio.Task[Any]") -> None:
@@ -685,6 +687,12 @@ class ChatRouter:
             import core_handlers as _video_handlers
 
             if await _video_handlers.try_consume_video_message(adapter, incoming):
+                return
+
+            if await _video_handlers.try_consume_linkedin_message(adapter, incoming):
+                return
+
+            if await _video_handlers.try_consume_primo_message(adapter, incoming):
                 return
 
         # --- gap-4 URL ingest: /vault-ingest <url> short-circuits to deterministic
@@ -2182,6 +2190,18 @@ class ChatRouter:
             import core_handlers as _video_handlers
 
             await _video_handlers.handle_video_button(adapter, incoming, custom_id)
+        elif custom_id.startswith("watch:"):
+            import core_handlers as _watch_handlers
+
+            await _watch_handlers.handle_watch_button(adapter, incoming, custom_id)
+        elif custom_id.startswith("linkedin_flow:"):
+            import core_handlers as _linkedin_handlers
+
+            await _linkedin_handlers.handle_linkedin_button(adapter, incoming, custom_id)
+        elif custom_id.startswith("primo_flow:"):
+            import core_handlers as _primo_handlers
+
+            await _primo_handlers.handle_primo_button(adapter, incoming, custom_id)
         elif custom_id.startswith("social:"):
             await self._handle_social_button(adapter, incoming, custom_id)
         elif custom_id.startswith("cofounder:"):

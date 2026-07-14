@@ -1,9 +1,9 @@
 ---
-description: LinkedIn/Social Homie draft-only operator command
-argument-hint: "[draft|ideas|revise] <topic-or-text>"
+description: Guided LinkedIn post workshop with copy, image, and approval
+argument-hint: "[cook <rough-idea>|run|cancel]"
 ---
 
-# LinkedIn/Social Homie
+# LinkedIn Workshop
 
 You are handling the `/linkedin` command.
 
@@ -13,20 +13,17 @@ You are handling the `/linkedin` command.
 
 ## Job
 
-Help the user create LinkedIn content in their voice. This command is
-draft-only.
-It can produce post ideas, draft posts, or revise pasted text. It must not
-publish, DM, edit a profile, send a connection request, scrape prospects, or
-open/control a browser.
+Run the deterministic LinkedIn workshop owned by `core_handlers.handle_linkedin`.
+This file remains as compatibility context for runtime surfaces that inspect
+command docs; the slash command itself is router-owned.
 
 ## Supported Forms
 
-- No arguments: ask for the missing topic, angle, audience, or source context.
-- `draft <topic>`: write one LinkedIn post draft.
-- `ideas <theme>`: produce 5 concrete LinkedIn post ideas.
-- `revise <text>`: revise the pasted text into a better LinkedIn post.
-- Any other arguments: treat them as a draft request if enough context exists;
-  otherwise ask one concise clarifying question.
+- No arguments: show Cook Together and Run It for Me buttons.
+- `cook`: ask for rough material.
+- `cook <topic>` or any other text: generate a draft and image from that idea.
+- `run`: choose a configured topic and generate the draft and image.
+- `cancel`: clear the current workshop.
 
 ## Writing Rules
 
@@ -35,25 +32,13 @@ open/control a browser.
 - Include concrete details when the user provides them.
 - If the topic needs facts the user did not provide, ask for context or state
   what assumptions you are making.
-- End by asking whether the user wants edits, variants, or approval prep.
+- Store revisions on the same editable queue row.
 
 ## Safety Boundary
 
-This `/linkedin` command is draft-only. It can prepare the exact draft and the
-approval text, but it never posts, connects, DMs, edits a profile, or controls a
-browser itself.
-
-When the user wants to actually post or connect, do this:
-
-1. Produce the final post body (or connection note) and the exact absolute
-   `target_url` (the LinkedIn feed URL for a post, or the person's profile URL
-   for a connection request).
-2. Tell the user to run ONE of these explicit, per-action gated write commands
-   (the slash command IS the approval path — there is no auto-post):
-   - `/linkedin_post <feed_url> | <body> post this to linkedin now`
-   - `/linkedin_connect <profile_url> | <note> send this linkedin connection request now`
-   The trailing approval phrase must be the user's own words at the END of the
-   message. One approval, one action — never a batch or approve-all.
+Drafting and revision are local. The authenticated `Approve & Post` button is
+the only outward-write authorization. It approves that exact queue row and
+dispatches it through the visible-browser executor. One approval, one post.
 
 ## Live Status (read on demand)
 

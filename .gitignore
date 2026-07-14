@@ -22,6 +22,22 @@ __pycache__/
 # History before the untrack commit still contains it; rotation is the
 # mitigation until a coordinated history scrub.
 .claude/scripts/.env
+# .env BACKUPS are the same class of secrets — a checkpoint sweep tracked
+# `.env.bak-cofounder-20260707` on 2026-07-13 and the sanitizer's leak
+# validation caught it pre-push. Ignore every .env variant everywhere except
+# the shipped placeholders (.env.example / .env.test).
+**/.env.*
+!**/.env.example
+!**/.env.test
+# Backup-suffixed files are the same class (google_token.json.bak-2026-07-10
+# reached public staging the same day) — backups never belong in git.
+*.bak
+*.bak-*
+*.bak.*
+**/google_token.json*
+# Session debug dumps at scripts root (Codex stdout/stderr captures).
+.claude/scripts/stdout_*.txt
+.claude/scripts/stderr_*.txt
 .claude/scripts/.venv/
 .claude/scripts/heartbeat_runs.log
 .claude/scripts/monthly_finance_runs.log
@@ -147,3 +163,27 @@ clients/
 
 # Archived (retired) skills — consolidated into vault-ops 2026-07-11
 .claude/_archive/
+
+# Runtime state + scratch artifacts — UNTRACKED as of 2026-07-07 (framework
+# refactor). Derived state never belongs in git (CLAUDE.md: chat.db/memory.db
+# are caches; the vault is the source of truth). The scratch phase*/missing DBs
+# were audit leftovers from PRD phase work.
+.claude/chat/chat.db
+.claude/chat/bot.pid
+.claude/chat/*.lock
+.claude/chat/*.lock.lock
+.claude/scripts/*.db
+.claude/scripts/*.log
+.claude/scripts/out.json
+# orchestration_span appends here at runtime — a tracked copy dirties the tree
+# on every test run
+.omx/logs/
+
+# Teller mTLS bundle (private_key.pem + certificate.pem zipped, so the *.pem
+# rule above never caught it) — UNTRACKED as of 2026-07-07. History before the
+# untrack commit still carries it; ROTATE the Teller certificate (same
+# mitigation stance as the .env untrack above).
+teller.zip
+
+# Editor config
+mobile/.vscode/

@@ -103,6 +103,20 @@ class SocialPostService:
             error=error or "Unknown error",
         )
 
+    def claim_post(self, post_id: int) -> bool:
+        """CAS-claim an approved post for dispatch. True = this caller owns it."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return self._db.claim_post(post_id, now)
+
+    def clear_claim(self, post_id: int) -> bool:
+        return self._db.clear_claim(post_id)
+
+    def list_stale_claims(self, ttl_minutes: int) -> list[SocialPost]:
+        from datetime import timedelta
+
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=ttl_minutes)
+        return self._db.list_stale_claims(cutoff.isoformat(timespec="seconds"))
+
     def count_by_status(self, channel: str | None = None) -> dict[str, int]:
         return self._db.count_by_status(channel)
 

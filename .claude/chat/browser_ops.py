@@ -37,7 +37,7 @@ _CORE_RULES = (
 )
 
 _LINKEDIN_OPERATOR_RULES = (
-    "LinkedIn/Social Homie owns strategy, voice, content drafts, target criteria, "
+    "LinkedIn workshop owns strategy, voice, queue drafts, copy/image revision, target criteria, "
     "and approval prompts; Browser Homie owns visible-browser execution safety.",
     "Drafting LinkedIn content is allowed as planning/content work; posting is a "
     "separate write workflow.",
@@ -382,7 +382,7 @@ def build_browserops_prefetch_context(user_text: str = "") -> str:
             "- `/browser <cmd> ghost` to drive the ghost's browser (once booted).",
             "- `/ghost status | up | down` to check/boot/kill the ghost Android.",
             "- `/linkedin_profile status` for LinkedIn browser readiness.",
-            "- `/linkedin` for LinkedIn post drafting through the content engine.",
+            "- `/linkedin` for the Cook Together / Run It for Me queue-backed post workshop.",
             "- `/linkedin_profile edit` is write-capable and remains default-denied/not implemented.",
             "",
             "Registered workflow policy:",

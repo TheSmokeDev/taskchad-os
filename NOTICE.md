@@ -29,3 +29,12 @@ maintainers.
 ## License
 
 The Homie is released under the MIT License. See `LICENSE`.
+
+## Third-Party Technique References
+
+The `/watch` video-learning extraction design was adapted from Brad Cassey's
+MIT-licensed `bradautomates/claude-video` project
+(https://github.com/bradautomates/claude-video), inspected at commit
+`83da59fa78c3eee9e20f515fe75c438bb5166efd`. The Homie implementation is an
+independent integration over its own runtime, memory, channel, and approval
+architecture; no upstream runtime process is embedded.

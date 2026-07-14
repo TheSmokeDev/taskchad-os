@@ -199,6 +199,20 @@ def test_linkedin_writes_pass_with_trailing_approval() -> None:
     assert connect.allowed is True
 
 
+def test_x_write_requires_explicit_approval() -> None:
+    blocked = require_browser_workflow_permission(
+        "x.post.create", "a Primo crypto and AI post"
+    )
+    assert blocked.allowed is False
+    assert blocked.outcome == "blocked"
+
+    allowed = require_browser_workflow_permission(
+        "x.post.create", "a Primo crypto and AI post post this to x now"
+    )
+    assert allowed.allowed is True
+    assert allowed.outcome == "allowed"
+
+
 def test_approval_phrase_embedded_in_body_does_not_auto_approve() -> None:
     """NM1: the phrase only counts as a TRAILING confirmation token — a post body
     that contains it mid-text (with no trailing confirmation) stays BLOCKED."""

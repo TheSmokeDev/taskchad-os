@@ -26,7 +26,7 @@ The canonical direct-integration action contract is
 
 | Service | Method | Key Env Vars |
 |---------|--------|-------------|
-| Google (Gmail, Calendar, Sheets, Docs, Drive, GSC, GA4) | OAuth2 (`your-calendar@gmail.com`) | `google_token.json` (7 scopes) |
+| Google (Gmail, Calendar, Sheets, Docs, Drive, GSC, GA4) | OAuth2 (`your-calendar@gmail.com` — corrected by Smoke 2026-07-10; was claudiaa6392) | `google_token.json` (7 scopes) |
 | Asana | Personal Access Token | `ASANA_ACCESS_TOKEN` |
 | Slack | Bot Token | `SLACK_BOT_TOKEN` |
 | Circle | Admin V2 + Headless Auth | `CIRCLE_ADMIN_TOKEN`, `CIRCLE_HEADLESS_TOKEN` |

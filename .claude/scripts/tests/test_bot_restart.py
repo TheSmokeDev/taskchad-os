@@ -146,7 +146,9 @@ def test_relaunch_waits_cleans_then_spawns(monkeypatch, tmp_path):
     assert order == ["cleanup", "spawn"]  # kill old BEFORE spawning new
     assert captured["cmd"][0] == sys.executable
     assert captured["cmd"][1].endswith("main.py")
-    assert captured["kw"]["env"] == {"SCRUBBED": "1"}  # nesting markers scrubbed
+    assert captured["kw"]["env"]["SCRUBBED"] == "1"  # nesting markers scrubbed
+    assert captured["kw"]["env"]["PYTHONUNBUFFERED"] == "1"
+    assert captured["kw"]["env"]["PYTHONIOENCODING"] == "utf-8"
     assert str(captured["kw"]["log_path"]).endswith("bot.log")
 
 

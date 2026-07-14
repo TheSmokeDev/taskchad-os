@@ -33,6 +33,49 @@ logger = logging.getLogger(__name__)
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 
+_ASPECT_SIZES = {
+    "1:1": (1080, 1080),
+    "16:9": (1600, 900),
+    "4:5": (1080, 1350),
+    "9:16": (1080, 1920),
+}
+
+
+def _normalize_image_aspect(image_path: str | Path, aspect: str) -> str | None:
+    """Create a versioned, center-cropped asset at the requested social ratio.
+
+    Codex image generation can return a square bitmap even when the prompt asks
+    for a landscape composition. Keep that raw render and write a distinct
+    normalized file so the channel contract is enforced without overwriting the
+    generated original.
+    """
+
+    source = Path(image_path)
+    target_size = _ASPECT_SIZES.get((aspect or "1:1").strip())
+    if not source.is_file() or target_size is None:
+        return None
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(source) as image:
+            if image.size == target_size:
+                return str(source)
+            normalized = ImageOps.fit(
+                image.convert("RGB"),
+                target_size,
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            ratio_slug = (aspect or "1:1").replace(":", "x")
+            destination = source.with_name(
+                f"{source.stem}-{ratio_slug}{source.suffix.lower() or '.png'}"
+            )
+            normalized.save(destination)
+        return str(destination)
+    except Exception as exc:
+        logger.warning("image aspect normalization failed: %s", exc)
+        return None
+
 
 def _resolve_design_file(design_file: str) -> str | None:
     """Resolve a channel's design_file (relative to social/ or absolute) to an
@@ -131,6 +174,7 @@ def _render_image(
     *,
     design_file: str | None = None,
     persona_pack: str = "",
+    aspect: str = "1:1",
 ) -> str | None:
     """Generate a scene image via the codex CLI (free). Returns absolute path
     or None (never raises). A design_file (brand palette/fonts) identity-tunes
@@ -143,7 +187,9 @@ def _render_image(
 
         images_dir = config.DATA_DIR / "social_images"
         images_dir.mkdir(parents=True, exist_ok=True)
-        name = f"{channel_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        # Microseconds guarantee that regeneration creates a new asset instead
+        # of overwriting a same-second original.
+        name = f"{channel_id}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
         prompt = (
             f"A clean, modern social-media scene about: {topic}. Editorial and "
             "brand-friendly, single strong focal point, generous negative space."
@@ -160,10 +206,13 @@ def _render_image(
                 design = {}
         refs = _resolve_persona_refs(persona_pack) or None
         rel = video_imagegen.generate_image(
-            prompt=prompt, design=design, aspect="1:1",
+            prompt=prompt, design=design, aspect=aspect or "1:1",
             assets_dir=str(images_dir), name=name, refs=refs,
         )
-        return str(images_dir / Path(rel).name) if rel else None
+        if not rel:
+            return None
+        raw_path = images_dir / Path(rel).name
+        return _normalize_image_aspect(raw_path, aspect or "1:1")
     except Exception as exc:
         logger.warning("image gen failed: %s", exc)
     return None
@@ -252,6 +301,7 @@ def produce(
                 duration_s=settings.video_duration_s,
                 design_file=channel.design_file,
                 persona_pack=channel.persona_pack,
+                aspect=channel.image_aspect,
             )
             media_type = "video" if media_path else None
         elif kind == "image":

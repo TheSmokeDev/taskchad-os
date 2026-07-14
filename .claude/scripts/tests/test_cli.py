@@ -556,6 +556,14 @@ class TestDoctorRegression:
         has_failure = not active and report.runtime_providers
         assert has_failure, "Zero active providers should be flagged as a failure"
 
+    def test_video_learning_doctor_readiness(self, monkeypatch, capsys):
+        import cli as cli_module
+        import video_learning.extract as extraction
+
+        monkeypatch.setattr(extraction, "check_dependencies", lambda: [])
+        cli_module._print_video_learning_readiness()
+        assert "Video learning: ready" in capsys.readouterr().out
+
 
 class TestCognitiveLoopCLI:
     def test_status_json_includes_cognitive_loop(self, monkeypatch):

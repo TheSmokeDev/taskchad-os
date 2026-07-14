@@ -1,47 +1,58 @@
 channels:
   linkedin:
-    display_name: LinkedIn
+    display_name: YourProduct · LinkedIn
     execution_method: browser
     cadence_enabled: true
-    cadence_interval_hours: 24
-    voice_profile: ""
+    # Slightly under 48h so a few seconds of Task Scheduler jitter do not
+    # skip the intended every-other-day draft window.
+    cadence_interval_hours: 47
+    voice_profile: "owner-linkedin"
+    design_file: brand_designs/owner-linkedin.json
+    persona_pack: owner-YourBusiness-rep
     topic_pool:
-      - industry insights
-      - product updates
-      - team wins
-      - thought leadership
-      - customer stories
+      - Operator-builder lesson from something owner actually shipped, fixed, or verified
+      - Practical AI employee lesson for a small-business owner, focused on the business outcome
+      - Sales-system lesson about speed-to-lead, follow-up, qualification, or closing without fake metrics
+      - Concrete GEO or AI-search tactic a business can apply this week
+      - Entrepreneurship lesson about owning the pipeline, data, distribution, or automation
+      - Build-in-public receipt that demonstrates AI, sales, or GEO expertise without claiming expertise
     browser_workflow_id: linkedin.post.create
 
   facebook:
-    display_name: Facebook
+    display_name: YourBrand · Facebook
     execution_method: api
     cadence_enabled: true
     cadence_interval_hours: 24
-    voice_profile: ""
+    voice_profile: "YourBrand"
     design_file: brand_designs/YourBrand.json
     persona_pack: owner-YourBusiness-rep
     topic_pool:
-      - community updates
-      - product news
-      - tips and tricks
-      - behind the scenes
+      - California auto insurance renewal surprises
+      - SR-22 filing basics for California drivers
+      - DUI insurance rate recovery
+      - why rates jump without a new ticket
+      - comparing coverage before renewal
+      - cheap car insurance myths in California
     browser_workflow_id: null
     # Flip execution_method to "postiz" to publish through the Postiz lane.
     # Binding from the configured instance's channel list (dashboard Social tab).
     postiz_integration_id: ""
 
   x:
-    display_name: X (Twitter)
-    execution_method: manual
+    display_name: Primo Agent · X
+    execution_method: browser
     cadence_enabled: true
     cadence_interval_hours: 12
-    voice_profile: ""
+    voice_profile: "primo-x"
+    design_file: brand_designs/primo-x.json
+    image_aspect: "16:9"
     topic_pool:
-      - hot takes
-      - industry commentary
-      - product launches
-      - community engagement
+      - A sharp crypto market structure observation without price promises
+      - What autonomous AI agents can actually do onchain today
+      - Crypto security or wallet hygiene lesson explained plainly
+      - AI agent infrastructure lesson from building and operating real systems
+      - A contrarian crypto and AI take backed by a concrete mechanism
+      - Build-in-public proof from Primo's crypto or AI operator work
     browser_workflow_id: x.post.create
 
   reddit:
@@ -57,17 +68,20 @@ channels:
     browser_workflow_id: reddit.post.create
 
   instagram:
-    display_name: Instagram
+    display_name: YourBrand · Instagram
     execution_method: api
     cadence_enabled: true
     cadence_interval_hours: 24
-    voice_profile: ""
+    voice_profile: "YourBrand"
     design_file: brand_designs/YourBrand.json
     persona_pack: owner-YourBusiness-rep
     topic_pool:
-      - visual content
-      - stories
-      - reels ideas
+      - 3 quiet things that spike your California car insurance rate
+      - SR-22 mistakes that keep drivers overpaying
+      - what to check before your auto policy renews
+      - DUI insurance recovery steps after the first quote
+      - why the cheapest car insurance quote is not always the best
+      - how California drivers can compare coverage faster
     browser_workflow_id: null
     postiz_integration_id: ""
     postiz_settings:

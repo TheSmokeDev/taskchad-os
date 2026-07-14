@@ -168,6 +168,17 @@ approval and audit shape but drives directly in the handler):
    `SocialWriteTask` (carrying no approval claim), serializes it into a
    `Subtask.metadata` JSON envelope, and constructs a local `BrowserExecutor`
    wrapping an `AgentBrowserSocialWriteDriver`.
+   **Execution model (2026-07-13):** the dispatch runs OFF the chat event loop
+   — `asyncio.to_thread` around `_dispatch_social_write_locked`, which holds
+   the cross-process `shared.browser_write_lock` for the whole drive (one
+   visible-Chrome session; the Browser Homie runner, cadence cron, and
+   per-action writes must never drive it concurrently). The chat reply is
+   bounded (`_BROWSER_WRITE_REPLY_TIMEOUT_S`, 300s): on timeout the drive
+   finishes in the background and the operator is told to verify on the site
+   before re-firing. Reddit's comment/post drives use the same to_thread +
+   lock + bounded-reply shape. Queue-backed posts (`/social post`, approve
+   taps) go further: they execute in a separate detached process entirely —
+   see `docs/manual/features/social-post-pipeline.md` → Browser Homie Runner.
 5. `BrowserExecutor.dispatch` parses the task off `Subtask.metadata` through the
    `SOCIAL_WRITE_FIELDS` allowlist, then re-checks the physical readiness
    envelope. If not ready, it audits `failed` and returns a failed receipt

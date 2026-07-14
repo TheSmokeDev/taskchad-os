@@ -5,6 +5,16 @@ description: Digest founder, startup, YC, business, operator, sales, product, an
 
 # Founder Video Digester
 
+## Native intake
+
+Run video intake through The Homie's `/watch` engine so captions, speech-to-text fallback, bounded visual evidence, provenance, recall, and durable note indexing stay model-agnostic:
+
+```powershell
+uv run --project .claude/scripts thehomie chat -q "/watch <video-url> Compare the founder's strategy with our current systems --detail smart" -Q
+```
+
+Use this skill's rubric to interpret the resulting dossier. Do not duplicate extraction or claim transcript-only input is full visual understanding.
+
 Turn raw founder content into decisions and work. Do not summarize for its own
 sake. Extract the useful moves, compare them against the operator's current
 systems, and convert real gaps into concrete changes.

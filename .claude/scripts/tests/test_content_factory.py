@@ -235,9 +235,11 @@ def test_render_image_passes_design_and_refs_when_channel_has_them(monkeypatch):
     content_factory._render_image(
         "instagram", "rate tips",
         design_file="social/brand_designs/x.json", persona_pack="owner-rep",
+        aspect="16:9",
     )
     assert captured["design"] == {"palette": {"bg": "#FFF"}}
     assert captured["refs"] == ["/abs/ref-01.png", "/abs/ref-02.png"]
+    assert captured["aspect"] == "16:9"
 
 
 def test_render_image_neutral_when_channel_has_neither(monkeypatch):
@@ -249,3 +251,19 @@ def test_render_image_neutral_when_channel_has_neither(monkeypatch):
     content_factory._render_image("instagram", "rate tips")
     assert captured["design"] == {}
     assert captured["refs"] is None
+
+
+def test_normalize_image_aspect_versions_original(monkeypatch, tmp_path):
+    from PIL import Image
+
+    source = tmp_path / "primo.png"
+    Image.new("RGB", (1080, 1080), "#07070B").save(source)
+
+    normalized = content_factory._normalize_image_aspect(source, "16:9")
+
+    assert normalized is not None
+    normalized_path = Path(normalized)
+    assert normalized_path.name == "primo-16x9.png"
+    assert source.is_file()
+    with Image.open(normalized_path) as image:
+        assert image.size == (1600, 900)

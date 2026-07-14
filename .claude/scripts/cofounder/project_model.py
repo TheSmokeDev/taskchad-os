@@ -240,10 +240,15 @@ _KNOWN_FRONTMATTER_KEYS = frozenset(ProjectFrontmatter.__dataclass_fields__)
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    """Write atomically via tmp + os.replace (living_memory.py pattern)."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    """Write atomically via shared.atomic_write_text (consolidated 2026-07-07).
+
+    Lazy import keeps module import side-effect free. Note: the shared helper
+    writes bytes, so output is LF on every platform (previously write_text
+    produced CRLF on Windows) — consistent with episodes/living_memory.
+    """
+    from shared import atomic_write_text
+
+    atomic_write_text(path, text)
 
 
 def _split_raw(content: str) -> tuple[str, str]:

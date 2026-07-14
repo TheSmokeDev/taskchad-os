@@ -1,0 +1,7 @@
+interface:
+  display_name: "Watch And Learn"
+  short_description: "Learn and apply strategy from one video"
+  default_prompt: "Use $watch to learn from this video, remember the sourced lessons, and compare them with our current work."
+
+policy:
+  allow_implicit_invocation: true
