@@ -132,6 +132,14 @@ esac
 # That makes `--profile default` resolve sticky-sales paths while the actual
 # bot launch (which DOES see argv) correctly forces default. Forwarding argv
 # closes the asymmetry — both the resolver AND the bot see the same flag.
+# Resolver stderr goes to a receipts file, NOT /dev/null. On 2026-07-14 the
+# watchdog burned its whole restart budget against a resolver that was dying
+# silently under the Task Scheduler environment — 2>/dev/null here plus the
+# watchdog's DEVNULL meant a full morning of failed restarts with zero
+# evidence. The F4 branch below prints this file so the real import error
+# reaches the operator (and the watchdog's launcher log).
+_RESOLVER_ERR="$SCRIPTS_DIR/../data/state/resolver-stderr.log"
+mkdir -p "$(dirname "$_RESOLVER_ERR")" 2>/dev/null || _RESOLVER_ERR=/dev/null
 _PATHS=$("$VENV_PYTHON" -c "
 import sys
 sys.path.insert(0, r'$SCRIPTS_DIR_PY')
@@ -141,7 +149,7 @@ from personas.services import get_bot_pid_path, get_bot_lock_path, get_log_dir
 print(get_bot_pid_path())
 print(get_bot_lock_path())
 print(get_log_dir())
-" "$@" 2>/dev/null)
+" "$@" 2>"$_RESOLVER_ERR")
 
 # Issue #34 — explicit `tr -d '\r'` CR hardening. Windows venv python
 # prints CRLF; MSYS2 sed happens to strip the trailing CR but WSL/non-MSYS
@@ -162,6 +170,10 @@ if [ -z "$PID_FILE" ] || [ -z "$LOG_DIR" ]; then
   echo "  Could not resolve bot pid path / log dir via personas.services." >&2
   echo "  Check .claude/scripts/.venv (uv sync), PYTHONPATH, and that" >&2
   echo "  personas.services is importable. Re-run after fixing." >&2
+  if [ -s "$_RESOLVER_ERR" ]; then
+    echo "  --- resolver stderr ($_RESOLVER_ERR):" >&2
+    cat "$_RESOLVER_ERR" >&2
+  fi
   exit 1
 fi
 LOG_FILE="$LOG_DIR/bot.log"

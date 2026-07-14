@@ -264,16 +264,26 @@ def classify(payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
 
 
 def _find_bash() -> str | None:
-    """Locate bash, including when it is not on PATH (Task Scheduler)."""
-    found = shutil.which("bash")
-    if found:
-        return found
+    """Locate a USABLE bash — Git Bash first, never WSL's System32 bash.exe.
+
+    Under Task Scheduler, ``shutil.which("bash")`` resolves to
+    ``C:\\Windows\\System32\\bash.exe`` (WSL) when the feature is installed.
+    WSL bash treats backslashes in a Windows script path as escapes and dies
+    with ``/bin/bash: ~...run_chat.sh: No such file or directory``.
+    Captured live 2026-07-14: every watchdog restart of the morning outage
+    failed exactly here — invisibly, until the launcher log existed. Prefer
+    the known-good Git Bash installs; fall back to PATH only if it is not
+    the System32 WSL shim.
+    """
     for candidate in (
         r"C:\Program Files\Git\bin\bash.exe",
         r"C:\Program Files (x86)\Git\bin\bash.exe",
     ):
         if Path(candidate).exists():
             return candidate
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        return found
     return None
 
 
@@ -329,25 +339,33 @@ def restart_bot() -> tuple[bool, str]:
     cmd, label = restart_command()
     _log(f"restarting bot via {label}")
 
+    # A file handle, never PIPE. The launcher spawns the bot as a detached
+    # grandchild that inherits our handles; with capture_output=True the
+    # pipe never reaches EOF (the bot holds it open for its whole life) and
+    # subprocess.run blocks forever — even the timeout cannot save it,
+    # because the post-kill communicate() blocks on the same pipe. A
+    # watchdog that hangs inside its own restart is worse than no watchdog.
+    # Verified live: this call hung for >4 minutes before the fix.
+    #
+    # But DEVNULL swallowed the launcher's own errors: on 2026-07-14 every
+    # restart died at run_chat.sh's "Service resolver failed" exit and the
+    # watchdog had zero receipts — the whole morning was 5-restart budget
+    # exhaustion with nothing to read. A file has no EOF-wait problem and
+    # keeps the receipt.
+    launcher_log = _state_path().parent / "watchdog-launcher.log"
     try:
-        # DEVNULL, never PIPE. The launcher spawns the bot as a detached
-        # grandchild that inherits our handles; with capture_output=True the
-        # pipe never reaches EOF (the bot holds it open for its whole life) and
-        # subprocess.run blocks forever — even the timeout cannot save it,
-        # because the post-kill communicate() blocks on the same pipe. A
-        # watchdog that hangs inside its own restart is worse than no watchdog.
-        # Verified live: this call hung for >4 minutes before the fix.
-        subprocess.run(  # noqa: S603
-            cmd,
-            cwd=str(CHAT_DIR),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=120,
-            check=False,
-        )
+        with open(launcher_log, "w", encoding="utf-8", errors="replace") as log_fh:
+            subprocess.run(  # noqa: S603
+                cmd,
+                cwd=str(CHAT_DIR),
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=log_fh,
+                timeout=120,
+                check=False,
+            )
     except subprocess.TimeoutExpired:
-        return False, f"{label}: launcher timed out after 120s"
+        return False, f"{label}: launcher timed out after 120s (see {launcher_log})"
     except Exception as exc:  # noqa: BLE001
         return False, f"{label}: launcher failed: {type(exc).__name__}: {exc}"
 
