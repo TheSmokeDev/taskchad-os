@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 _TG_TEXT_LIMIT = 4096
 # A photo message's caption is capped far lower than a text message's body.
 _TG_CAPTION_LIMIT = 1024
+# Discord caps message content at 2000 characters.
+_DISCORD_TEXT_LIMIT = 2000
 # callback_data is capped at 64 bytes; "social:approve:<id>" is tiny, so the
 # bot's hashed-callback map is never engaged and the custom_id arrives intact.
 
@@ -158,6 +160,34 @@ def send_text_to_telegram(text: str) -> bool:
     except Exception as exc:
         safe = _redact(f"{type(exc).__name__}: {exc}", token)
         print(f"[social.notify] Telegram send failed: {safe}")
+        return False
+
+
+def send_text_to_discord(text: str, channel_id: str) -> bool:
+    """Post a plain text message to a Discord channel via the REST API.
+
+    Cross-process safe — the cron process has no gateway connection, so this
+    hits ``POST /channels/{id}/messages`` directly with the bot token.
+    Fail-open: returns False on any failure, never raises. The token is
+    redacted from every error path before printing."""
+    if not text or not channel_id:
+        return False
+    token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    if not token:
+        return False
+    try:
+        data = json.dumps({"content": text[:_DISCORD_TEXT_LIMIT]}).encode("utf-8")
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        req = urllib.request.Request(url, data=data)
+        req.add_header("Authorization", f"Bot {token}")
+        req.add_header("Content-Type", "application/json")
+        # Discord rejects UA-less requests.
+        req.add_header("User-Agent", "DiscordBot (thehomie, 1.0)")
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except Exception as exc:
+        safe = _redact(f"{type(exc).__name__}: {exc}", token)
+        print(f"[social.notify] Discord send failed: {safe}")
         return False
 
 

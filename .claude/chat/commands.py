@@ -84,6 +84,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("gsc", "Check Google Search Console — queries, pages, CTR", "router", "operator"),
     ("analytics", "Check Google Analytics — sessions, traffic, pages", "router", "operator"),
     ("signal", "Business signal digest — latest status or /signal refresh to run now", "router", "admin"),
+    ("stars", "GitHub star backlog — status, refresh, used <repo>, snooze <repo> [weeks], trending", "router", "admin"),
     # -- Personal Finance --
     ("budget", "Personal finances — status, bills, loans, transactions, spending, accounts", "router", "admin"),
     ("social", "Social post queue — status, queue, draft, approve, reject, post, cadence", "router", "admin"),
@@ -158,7 +159,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
          "browser", "browserops", "ghost", "linkedin_profile", "linkedin_post", "linkedin_connect",
          "x", "reddit", "slack", "sheets", "docs", "drive", "circle"],
     ),
-    ("Analytics & Monitoring", ["gsc", "analytics", "signal"]),
+    ("Analytics & Monitoring", ["gsc", "analytics", "signal", "stars"]),
     ("Personal Finance", ["budget"]),
     ("Social Media", ["social"]),
     # Cabinet (Phase 5b) — chat-routed cabinet operator surface.
@@ -237,6 +238,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "gsc",
     "analytics",
     "signal",
+    "stars",
     "social",
     "recap",
     "blueprints",

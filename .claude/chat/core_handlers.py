@@ -2687,6 +2687,133 @@ async def handle_signal(adapter: Any, incoming: Any, args: str, *, collect_only:
         return f"Signal status error: {e}"
 
 
+def _stars_unknown_repo(name: str) -> str:
+    """Error message for an unresolvable repo name, listing current picks."""
+    try:
+        import sys
+        from pathlib import Path
+
+        _scripts = Path(__file__).resolve().parent.parent / "scripts"
+        if str(_scripts) not in sys.path:
+            sys.path.insert(0, str(_scripts))
+        from github_signal import state as gh_state
+
+        picks = gh_state.load().get("last_picks", [])
+        if picks:
+            names = ", ".join(str(p.get("full_name", "?")) for p in picks)
+            return f"Couldn't match {name!r}. Current picks: {names}"
+    except Exception:
+        pass
+    return f"Couldn't match {name!r} — use the full owner/repo name."
+
+
+async def handle_stars(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """GitHub star backlog — status, refresh (detached), used/snooze, trending."""
+    import sys
+    from pathlib import Path
+
+    _scripts = Path(__file__).resolve().parent.parent / "scripts"
+    if str(_scripts) not in sys.path:
+        sys.path.insert(0, str(_scripts))
+
+    parts = args.strip().split()
+    subcmd = parts[0].lower() if parts else "status"
+
+    try:
+        if subcmd == "status":
+            from github_signal.engine import get_latest_status
+
+            return get_latest_status()
+
+        if subcmd == "refresh":
+            # The starred fetch is ~8s of sync urllib + an LLM call — never
+            # run that on the bot event loop (2026-07-13 wedge rule). Spawn
+            # detached; the engine delivers its own Telegram card when done.
+            from config import STATE_DIR
+            from shared import spawn_detached
+
+            pid = spawn_detached(
+                ["uv", "run", "python", "-m", "github_signal.engine"],
+                cwd=_scripts,
+                log_path=STATE_DIR / "github-signal-refresh.log",
+            )
+            return (
+                f"⭐ GitHub signal run started (pid {pid}) — the digest and "
+                f"Telegram card will land when it finishes (~1 min)."
+            )
+
+        if subcmd == "eval":
+            if len(parts) < 2:
+                return "Usage: /stars eval <owner/repo>"
+            from config import STATE_DIR
+            from github_signal import state as gh_state
+            from shared import spawn_detached
+
+            resolved = gh_state.resolve_name(parts[1])
+            if resolved is None:
+                return _stars_unknown_repo(parts[1])
+            log_name = f"github-signal-eval-{resolved.replace('/', '__')}.log"
+            pid = spawn_detached(
+                ["uv", "run", "python", "-m", "github_signal.eval_runner", resolved],
+                cwd=_scripts,
+                log_path=STATE_DIR / log_name,
+            )
+            return (
+                f"🔬 Eval started for {resolved} (pid {pid}) — read-only "
+                f"analysis; the verdict card lands in a few minutes."
+            )
+
+        if subcmd == "used":
+            if len(parts) < 2:
+                return "Usage: /stars used <repo>"
+            from github_signal import state as gh_state
+
+            resolved = gh_state.mark_used(parts[1])
+            if resolved is None:
+                return _stars_unknown_repo(parts[1])
+            return f"✅ Marked used: {resolved} — it won't be resurfaced again."
+
+        if subcmd == "snooze":
+            if len(parts) < 2:
+                return "Usage: /stars snooze <repo> [weeks]"
+            from github_signal import state as gh_state
+            from github_signal.config import get_github_signal_settings
+
+            weeks = get_github_signal_settings().snooze_weeks
+            if len(parts) >= 3:
+                try:
+                    weeks = max(1, int(parts[2]))
+                except ValueError:
+                    return f"weeks must be a number (got {parts[2]!r})"
+            resolved = gh_state.mark_snoozed(parts[1], weeks=weeks)
+            if resolved is None:
+                return _stars_unknown_repo(parts[1])
+            return f"💤 Snoozed {resolved} for {weeks} weeks."
+
+        if subcmd == "trending":
+            from github_signal import state as gh_state
+
+            trending = gh_state.load().get("last_trending", [])
+            if not trending:
+                return "No trending hits stored yet — /stars refresh to fetch."
+            lines = ["🔥 Trending (last run):"]
+            for t in trending[:10]:
+                desc = (t.get("description") or "").strip()[:80]
+                lines.append(
+                    f"- {t.get('full_name')} ★{t.get('stars', '?')} — {desc}"
+                )
+            return "\n".join(lines)
+
+        return (
+            "Unknown subcommand. Usage: /stars [status|refresh|eval <owner/repo>|"
+            "used <repo>|snooze <repo> [weeks]|trending]"
+        )
+    except TimeoutError:
+        return "A signal run is writing state right now — try again in a moment."
+    except Exception as e:
+        return f"Stars error: {e}"
+
+
 async def handle_budget(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Personal finance / budget commands — requires finance integration modules."""
     return "Finance module not configured. See docs for Teller/Plaid setup."
@@ -7598,6 +7725,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "cleanup": handle_cleanup,
     "analytics": handle_analytics,
     "signal": handle_signal,
+    "stars": handle_stars,
     "budget": handle_budget,
     # Cabinet (Phase 5b) — keys are slashless, matching all other entries
     # (Phase 5 R1 B3 + Codex M2 fix).

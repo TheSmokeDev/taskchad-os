@@ -208,3 +208,58 @@ class TestPhotoDelivery:
         assert ok is True  # text card still delivered
         assert any("sendPhoto" in u for u in calls)
         assert any("sendMessage" in u for u in calls)
+
+
+class TestDiscordSend:
+    """send_text_to_discord — cron-process REST lane (Repo Scout build)."""
+
+    def test_success_posts_to_channel_with_bot_auth_and_truncation(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "dsc_test_token")
+        seen = {}
+
+        class _Resp:
+            def read(self):
+                return b"{}"
+
+        def fake_urlopen(req, timeout=None):
+            seen["url"] = req.full_url
+            seen["auth"] = req.get_header("Authorization")
+            seen["ua"] = req.get_header("User-agent")
+            seen["body"] = req.data
+            return _Resp()
+
+        monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
+        long_text = "x" * 2500
+        assert notify.send_text_to_discord(long_text, "123456789") is True
+        assert "/channels/123456789/messages" in seen["url"]
+        assert seen["auth"] == "Bot dsc_test_token"
+        assert seen["ua"]  # Discord rejects UA-less requests
+        import json as _json
+
+        assert len(_json.loads(seen["body"])["content"]) == 2000
+
+    def test_missing_token_returns_false_without_network(self, monkeypatch):
+        monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+
+        def boom(req, timeout=None):
+            raise AssertionError("network must not be touched")
+
+        monkeypatch.setattr(notify.urllib.request, "urlopen", boom)
+        assert notify.send_text_to_discord("hello", "123") is False
+
+    def test_empty_text_or_channel_returns_false(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "dsc_test_token")
+        assert notify.send_text_to_discord("", "123") is False
+        assert notify.send_text_to_discord("hello", "") is False
+
+    def test_network_failure_fails_open_and_redacts_token(self, monkeypatch, capsys):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "dsc_secret_token")
+
+        def boom(req, timeout=None):
+            raise RuntimeError("boom with dsc_secret_token inside")
+
+        monkeypatch.setattr(notify.urllib.request, "urlopen", boom)
+        assert notify.send_text_to_discord("hello", "123") is False
+        out = capsys.readouterr().out
+        assert "dsc_secret_token" not in out
+        assert "Discord send failed" in out
