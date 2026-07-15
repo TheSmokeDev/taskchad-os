@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +20,11 @@ if _SCRIPTS_DIR not in sys.path:
 
 import cli as cli_module  # noqa: E402
 from cli import main as cli_main  # noqa: E402
+
+
+def _expected_package_version() -> str:
+    pyproject = Path(__file__).parent.parent / "pyproject.toml"
+    return tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
 
 
 def _fake_cognitive_loop() -> dict:
@@ -208,7 +214,7 @@ class TestCLIHelp:
         runner = CliRunner()
         result = runner.invoke(cli_main, ["--version"])
         assert result.exit_code == 0
-        assert "1.1.0" in result.output
+        assert _expected_package_version() in result.output
 
     def test_chat_model_option_uses_runtime_selection_helper(self, monkeypatch):
         from click.testing import CliRunner
@@ -831,4 +837,4 @@ class TestCLISubprocess:
             cwd=str(Path(__file__).parent.parent),
         )
         assert result.returncode == 0
-        assert "1.1.0" in result.stdout
+        assert _expected_package_version() in result.stdout

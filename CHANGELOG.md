@@ -13,6 +13,15 @@ context. They are not public release tags unless a matching public tag exists.
 
 ---
 
+## The Homie v1.1.2
+
+**Release Date:** July 15, 2026
+
+> Patch-release validation is now version-agnostic.
+
+- Reads the expected CLI version from `pyproject.toml` in validation tests
+  instead of hardcoding the preceding release number.
+
 ## The Homie v1.1.1
 
 **Release Date:** July 15, 2026
