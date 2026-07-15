@@ -14,6 +14,7 @@ sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from commands import CATEGORIES, COMMANDS, CORE_INTENTS  # noqa: E402
 from core_handlers import CORE_HANDLERS  # noqa: E402
+from adapters.base import ProgressCapabilities  # noqa: E402
 from extension_manager import ExtensionManager  # noqa: E402
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, User  # noqa: E402
 from router import ChatRouter  # noqa: E402
@@ -38,6 +39,8 @@ def _incoming(text: str, platform: Platform = Platform.CLI) -> IncomingMessage:
 
 
 class _RecordingAdapter:
+    progress_capabilities = ProgressCapabilities(enabled=True, editable=True)
+
     def __init__(self, platform: Platform = Platform.CLI) -> None:
         self.platform = platform
         self.sent: list[OutgoingMessage] = []

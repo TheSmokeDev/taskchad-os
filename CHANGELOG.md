@@ -13,6 +13,16 @@ context. They are not public release tags unless a matching public tag exists.
 
 ---
 
+## The Homie v1.1.1
+
+**Release Date:** July 15, 2026
+
+> Validation follow-up for the safe self-update release.
+
+- Declares editable progress support in the intent-gate recording adapter so
+  its placeholder assertions match the framework's default-deny progress
+  capability contract.
+
 ## The Homie v1.1.0
 
 **Release Date:** July 15, 2026
