@@ -519,6 +519,99 @@ def _autostart_sync(action: str) -> str:
     return "\n".join(lines)
 
 
+async def handle_update(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Safe stable-release update status, execution, schedule, and history."""
+    tokens = (args or "status").strip().lower().split()
+    action = tokens[0] if tokens else "status"
+    if action not in {"status", "now", "auto", "history"}:
+        return "Usage: /update [status | now | auto on|off|status | history]"
+    if collect_only and action in {"now", "auto"}:
+        return f"Cannot chain /update {action} — use it alone."
+    return await asyncio.to_thread(_update_sync, action, tokens[1:], incoming)
+
+
+def _update_sync(action: str, extra: list[str], incoming: Any) -> str:
+    """Blocking tail of /update; network, Git, and scheduler calls stay off-loop."""
+    import config
+    import update_scheduler
+    from framework_update import FrameworkUpdater
+
+    updater = FrameworkUpdater(config.PROJECT_ROOT)
+    if action == "status":
+        result = updater.status().to_dict()
+        schedule = result.get("schedule") or {}
+        schedule_state = "ON" if schedule.get("enabled") else "OFF"
+        lines = [
+            "*The Homie Update*",
+            f"  Current: v{result['current_version']} ({result['current_revision'][:8]})",
+            f"  Latest stable: {('v' + result['latest_version']) if result.get('latest_version') else 'unavailable'}",
+            f"  Deployment: {result['deployment_mode']}",
+            f"  Auto-update: {schedule_state} — {schedule.get('time', '04:00')} {schedule.get('timezone', 'America/Los_Angeles')}",
+        ]
+        if schedule.get("next_run"):
+            lines.append(f"  Next run: {schedule['next_run']}")
+        if result.get("blocker"):
+            lines.append(f"  Blocked: {result['blocker']}")
+        elif result.get("update_available"):
+            lines.append("  Update available — use `/update now`.")
+        else:
+            lines.append("  Already on the latest stable release.")
+        return "\n".join(lines)
+
+    if action == "history":
+        history = updater.history(limit=5)
+        if not history:
+            return "No framework update receipts yet."
+        lines = ["*Recent Homie Updates*"]
+        for item in history:
+            lines.append(
+                f"  {item.get('finished_at') or item.get('started_at')} — "
+                f"{item.get('status')} {item.get('target_tag') or ''} "
+                f"({item.get('receipt_id')})"
+            )
+        return "\n".join(lines)
+
+    if action == "auto":
+        sub = extra[0] if extra else "status"
+        if sub in {"enable"}:
+            sub = "on"
+        if sub in {"disable"}:
+            sub = "off"
+        if sub not in {"on", "off", "status"}:
+            return "Usage: /update auto [on | off | status]"
+        if sub == "on":
+            result = update_scheduler.enable(config.PROJECT_ROOT)
+        elif sub == "off":
+            result = update_scheduler.disable(config.PROJECT_ROOT)
+        else:
+            result = update_scheduler.status(config.PROJECT_ROOT)
+        state = "ON" if result.get("enabled") else "OFF"
+        lines = [
+            f"Auto-update: {state} — {result.get('time')} {result.get('timezone')}",
+            f"Scheduler: {result.get('platform')}",
+        ]
+        if result.get("next_run"):
+            lines.append(f"Next run: {result['next_run']}")
+        if result.get("detail") and (not result.get("enabled") or result.get("ok") is False):
+            lines.append(str(result["detail"]))
+        return "\n".join(lines)
+
+    platform_value = getattr(incoming.platform, "value", str(incoming.platform))
+    requester = {
+        "platform": str(platform_value),
+        "channel": str(incoming.channel.platform_id),
+        "thread": str(getattr(getattr(incoming, "thread", None), "thread_id", "") or ""),
+    }
+    launched = update_scheduler.launch_now(config.PROJECT_ROOT, requester=requester)
+    if not launched.get("ok"):
+        return f"Update not started: {launched.get('detail', 'unknown launcher error')}"
+    return (
+        "Update started safely in the background. I will stage and test the release, "
+        "preserve operator files, restart only after validation, and post the receipt here. "
+        f"Worker: {launched.get('worker_id', 'started')}"
+    )
+
+
 async def handle_gsc(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Fetch Google Search Console data."""
     try:
@@ -7705,6 +7798,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "model": handle_model,
     "restart": handle_restart,
     "autostart": handle_autostart,
+    "update": handle_update,
     "gsc": handle_gsc,
     "email": handle_email,
     "personal-email": handle_personal_email,

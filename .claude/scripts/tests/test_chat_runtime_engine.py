@@ -47,6 +47,23 @@ def _make_discord_message(
     )
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pull the lastest update on " + "task" + "chad os",
+        "update it",
+        "pull the repo abd ypdate yourslef",
+    ],
+)
+def test_discord_update_incident_messages_keep_execution_tools(text: str) -> None:
+    assert engine_module._should_use_text_only_fast_path(_make_discord_message(text)) is False
+
+
+def test_short_discord_smalltalk_still_uses_text_only_fast_path() -> None:
+    message = _make_discord_message("how are you?")
+    assert engine_module._should_use_text_only_fast_path(message) is True
+
+
 def _make_project_root(tmp_path: Path) -> Path:
     project_root = tmp_path / "project"
     (project_root / "TheHomie" / "Memory" / "daily").mkdir(parents=True)

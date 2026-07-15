@@ -867,63 +867,98 @@ def _print_video_learning_readiness() -> None:
 
 
 @main.command()
-def update():
-    """Check for and install the latest taskchad-os release."""
-    from update_check import _version_tuple, get_latest_release_version
-
-    current = get_current_version()
-    click.echo(f"Current version: v{current}")
-    click.echo("Checking for the latest release...")
-    latest = get_latest_release_version(timeout=5.0)
-    if latest is None:
-        click.echo("Could not reach GitHub to check for updates.")
-        sys.exit(1)
-
-    if _version_tuple(latest) <= _version_tuple(current):
-        click.echo(f"Already up to date (v{current}).")
-        return
-
-    if not click.confirm(f"Update available: v{current} -> v{latest}. Install now?"):
-        click.echo("Skipped.")
-        return
+@click.option("--check", is_flag=True, help="Check status only; never modify the checkout.")
+@click.option("-y", "--yes", is_flag=True, help="Apply non-interactively.")
+@click.option("--json", "json_mode", is_flag=True, help="Machine-readable JSON output.")
+@click.option("--scheduled", is_flag=True, help="Mark this as a scheduled run.")
+@click.option("--restart", is_flag=True, help="Restart the running bot and verify health.")
+def update(check, yes, json_mode, scheduled, restart):
+    """Safely stage and install the latest stable YourProduct OS release."""
+    from framework_update import FrameworkUpdater
 
     repo_root = _resolve_git_repo_for_runner()
     if not repo_root:
-        click.echo("Could not resolve the git repository root — are you in a git checkout?")
-        sys.exit(1)
+        payload = {"success": False, "blocker": "could not resolve Git repository root"}
+        click.echo(json_mod.dumps(payload, sort_keys=True) if json_mode else payload["blocker"])
+        raise SystemExit(1)
 
-    import shutil
-    import subprocess as _subprocess
+    updater = FrameworkUpdater(repo_root)
+    if check or not yes:
+        status_result = updater.status()
+        payload = status_result.to_dict()
+        if json_mode:
+            click.echo(json_mod.dumps(payload, sort_keys=True))
+        else:
+            click.echo(f"Current version: v{payload['current_version']}")
+            latest = payload.get("latest_version") or "unknown"
+            click.echo(f"Latest stable: v{latest}")
+            click.echo(f"Deployment: {payload['deployment_mode']}")
+            if payload.get("blocker"):
+                click.echo(f"Blocked: {payload['blocker']}")
+            elif not payload["update_available"]:
+                click.echo("Already up to date.")
+            elif not check and click.confirm(
+                f"Install {payload['target_tag']} through the staged updater?"
+            ):
+                yes = True
+        if check or not yes:
+            raise SystemExit(0 if payload["success"] else 1)
 
-    tag = f"v{latest}"
-    click.echo(f"Fetching {tag}...")
-    try:
-        _subprocess.run(["git", "fetch", "--tags"], cwd=repo_root, check=True)
-        _subprocess.run(["git", "checkout", tag], cwd=repo_root, check=True)
-    except _subprocess.CalledProcessError as e:
-        click.echo(f"git update failed: {e}")
-        sys.exit(1)
+    restart_callback = None
+    health_callback = None
+    if restart:
+        from update_worker import BotRestarter, HealthVerifier
 
-    click.echo("Reinstalling dependencies...")
-    scripts_dir = str(Path(repo_root) / ".claude" / "scripts")
-    npm_cmd = shutil.which("npm") or "npm"
-    uv_cmd = shutil.which("uv") or "uv"
-    try:
-        _subprocess.run([uv_cmd, "sync"], cwd=scripts_dir, check=True)
-        for sub in ("server", "web", "desktop"):
-            dash_dir = str(Path(repo_root) / "dashboard" / sub)
-            if Path(dash_dir).exists():
-                _subprocess.run([npm_cmd, "install"], cwd=dash_dir, check=True)
-        web_dir = str(Path(repo_root) / "dashboard" / "web")
-        if Path(web_dir).exists():
-            _subprocess.run([npm_cmd, "run", "build"], cwd=web_dir, check=True)
-    except _subprocess.CalledProcessError as e:
-        click.echo(f"Dependency reinstall failed: {e}")
-        click.echo(f"Code is updated to {tag} — finish manually: cd {scripts_dir} && uv sync")
-        sys.exit(1)
+        restart_callback = BotRestarter()
+        health_callback = HealthVerifier(restart_callback)
+    receipt = updater.apply(
+        scheduled=scheduled,
+        restart=restart_callback,
+        health_check=health_callback,
+    )
+    payload = receipt.to_dict()
+    if json_mode:
+        click.echo(json_mod.dumps(payload, sort_keys=True))
+    elif receipt.success:
+        click.echo(
+            f"Updated to {receipt.target_tag} at {(receipt.applied_revision or '')[:8]}. "
+            f"Receipt: {receipt.receipt_id}"
+        )
+    else:
+        click.echo(f"Update {receipt.status}: {receipt.blocker}. Receipt: {receipt.receipt_id}")
+    raise SystemExit(0 if receipt.success else 1)
 
-    click.echo(f"\nUpdated to {tag}. Restart the bot to run the new version:")
-    click.echo(f"  bash {repo_root}/.claude/chat/run_chat.sh")
+
+@main.command("auto-update")
+@click.argument("action", type=click.Choice(["status", "on", "off"]), default="status")
+@click.option("--json", "json_mode", is_flag=True, help="Machine-readable JSON output.")
+def auto_update(action, json_mode):
+    """Manage the native daily 4 a.m. stable-release schedule."""
+    import update_scheduler
+
+    repo_root = _resolve_git_repo_for_runner()
+    if not repo_root:
+        raise click.ClickException("could not resolve Git repository root")
+    if action == "on":
+        result = update_scheduler.enable(repo_root)
+    elif action == "off":
+        result = update_scheduler.disable(repo_root)
+    else:
+        result = update_scheduler.status(repo_root)
+    if json_mode:
+        click.echo(json_mod.dumps(result, sort_keys=True))
+    else:
+        state = "ON" if result.get("enabled") else "OFF"
+        click.echo(
+            f"Auto-update: {state} — {result.get('time')} {result.get('timezone')} "
+            f"({result.get('platform')})"
+        )
+        if result.get("next_run"):
+            click.echo(f"Next run: {result['next_run']}")
+        if result.get("detail") and not result.get("enabled"):
+            click.echo(result["detail"])
+    if action != "status" and not result.get("ok", True):
+        raise SystemExit(1)
 
 
 def _get_orchestration_services():

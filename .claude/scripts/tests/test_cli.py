@@ -17,6 +17,7 @@ if _CHAT_DIR not in sys.path:
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+import cli as cli_module  # noqa: E402
 from cli import main as cli_main  # noqa: E402
 
 
@@ -91,6 +92,49 @@ class TestCLIHelp:
         result = runner.invoke(cli_main, ["doctor", "--help"])
         assert result.exit_code == 0
 
+    def test_update_check_json_is_machine_readable(self, monkeypatch, tmp_path):
+        from click.testing import CliRunner
+
+        class Status:
+            def to_dict(self):
+                return {
+                    "success": True,
+                    "current_version": "1.0.1",
+                    "current_revision": "a" * 40,
+                    "latest_version": "1.1.0",
+                    "latest_revision": "b" * 40,
+                    "target_tag": "v1.1.0",
+                    "update_available": True,
+                    "deployment_mode": "clean",
+                    "branch": "master",
+                    "tracked_dirty": False,
+                    "untracked_count": 0,
+                    "blocker": None,
+                    "schedule": None,
+                    "checked_at": "2026-07-15T00:00:00Z",
+                }
+
+        class FakeUpdater:
+            def __init__(self, _root):
+                pass
+
+            def status(self):
+                return Status()
+
+        import framework_update
+
+        monkeypatch.setattr(cli_module, "check_for_update", lambda: None)
+        monkeypatch.setattr(cli_module, "_resolve_git_repo_for_runner", lambda: tmp_path)
+        monkeypatch.setattr(framework_update, "FrameworkUpdater", FakeUpdater)
+
+        result = CliRunner().invoke(cli_main, ["update", "--check", "--json"])
+        payload = json.loads(result.output)
+
+        assert result.exit_code == 0
+        assert payload["success"] is True
+        assert payload["target_tag"] == "v1.1.0"
+        assert payload["deployment_mode"] == "clean"
+
     def test_live_safety_proof_refuses_without_opt_in(self, monkeypatch):
         from click.testing import CliRunner
 
@@ -164,7 +208,7 @@ class TestCLIHelp:
         runner = CliRunner()
         result = runner.invoke(cli_main, ["--version"])
         assert result.exit_code == 0
-        assert "1.0.1" in result.output
+        assert "1.1.0" in result.output
 
     def test_chat_model_option_uses_runtime_selection_helper(self, monkeypatch):
         from click.testing import CliRunner
@@ -787,4 +831,4 @@ class TestCLISubprocess:
             cwd=str(Path(__file__).parent.parent),
         )
         assert result.returncode == 0
-        assert "1.0.1" in result.stdout
+        assert "1.1.0" in result.stdout

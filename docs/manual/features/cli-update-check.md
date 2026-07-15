@@ -1,135 +1,148 @@
-# CLI Update Check
+# Safe Framework Updates
 
-Status: Active baseline, live-proven
+Status: Active baseline
 Owner: runtime-chat
-Last updated: 2026-07-06
+Last updated: 2026-07-15
 
 ## What It Does
 
-Every `thehomie` CLI invocation silently checks (at most once per 24h, cached)
-whether a newer non-prerelease release exists on the public `taskchad-os`
-GitHub repo, and prints a one-line "Update available" banner if so — the same
-pattern `gh`, `npm`, and `brew` use. Nothing auto-installs. A separate
-`thehomie update` command does the actual install, gated behind an
-interactive yes/no confirm.
+The Homie polls the latest stable `taskchad-os` GitHub release and can apply it
+through one canonical staged updater. The updater supports clean installs and
+clean customized deployment branches without treating a live checkout like a
+disposable clone.
 
-This exists because installs previously had no way to learn they were behind
-— the version living in `pyproject.toml` was stale and unread by any code,
-and the only public release tag (`v0.1.0-alpha.1`) was marked pre-release, so
-GitHub's `/releases/latest` API (the endpoint any update-checker uses) had
-nothing to return. Both were fixed as part of shipping this feature.
+Every update uses this order:
+
+1. acquire the exclusive framework-update lock;
+2. refuse tracked dirt;
+3. fetch the exact stable release tag;
+4. compare untracked paths with the release and refuse collisions;
+5. hash deployment-only skills, extensions, and integration modules;
+6. build the fast-forward or merge in a disposable candidate worktree;
+7. reinstall candidate dependencies and run the updater/runtime regression set;
+8. create a rollback ref and pre-mutation receipt;
+9. move the live checkout to the already-validated candidate;
+10. reinstall live dependencies, restart, and verify health when requested;
+11. compare protected hashes and write the final receipt;
+12. restore the previous revision and dependencies if a post-apply check fails.
+
+The updater never follows arbitrary branch commits. Its only automatic target
+is GitHub's latest non-prerelease release.
 
 ## Operator Entry Points
 
-- Chat/Telegram: n/a
-- CLI: banner on every `thehomie <command>`; `thehomie update` to install;
-  `thehomie --version` to see the current version
-- Dashboard: n/a
-- API: n/a (talks directly to `api.github.com`, not the framework's own API)
+### Chat (admin only)
 
-## How It Works
+| Command | Behavior |
+|---|---|
+| `/update` or `/update status` | Current/latest version, deployment mode, schedule, next run, and blockers |
+| `/update now` | Acknowledge immediately and launch the detached updater worker |
+| `/update auto on` | Install and enable the native daily timer/task |
+| `/update auto off` | Disable and remove the native schedule |
+| `/update auto status` | Read physical scheduler state |
+| `/update history` | Show recent structured receipts |
 
-1. `get_current_version()` reads `[project].version` out of
-   `.claude/scripts/pyproject.toml` via stdlib `tomllib` — the one place the
-   version now lives.
-2. `check_for_update()` is TTL-cached (`UPDATE_CHECK_MIN_INTERVAL_HOURS`,
-   default 24h) using the same state-file pattern the dream/heartbeat
-   pipelines already use (`shared.load_state`/`save_state`, wrapped in
-   `shared.file_lock` with a short 1s timeout so a lock miss just skips that
-   run instead of blocking CLI startup). Within the TTL window it never
-   touches the network.
-3. When the cache is stale, `get_latest_release_version()` hits
-   `https://api.github.com/repos/<UPDATE_CHECK_REPO>/releases/latest` via
-   stdlib `urllib.request` (no new dependency) with a short timeout. Any
-   failure — network, timeout, bad JSON, 404 — resolves to `None` and the
-   whole check fails closed; it can never break a CLI command.
-4. `cli.py`'s `main()` Click group callback (the one hook that fires before
-   every subcommand) calls `check_for_update()` and prints the banner to
-   **stderr only** — this keeps `--json`/`-Q` machine-consumption paths
-   (`status --json`, `chat -Q`) byte-clean on stdout, matching how `gh`/`npm`
-   do it.
-5. `thehomie update` re-checks live (longer timeout, user is waiting on
-   purpose), shows an interactive `click.confirm()` prompt, and on yes: `git
-   fetch --tags && git checkout v<latest>` (a pinned tag checkout, not a
-   floating `git pull`), then re-runs the same install steps `install.sh`
-   already does (`uv sync`, `npm install` + `npm run build` in the dashboard
-   dirs). It never auto-restarts a running bot process — it prints a reminder
-   to run `run_chat.sh` again instead.
-6. `scripts/release.sh <version>` is the operator-side companion: bumps
-   `pyproject.toml`, commits, and — only when `origin` resolves to the public
-   `TheSmokeDev/taskchad-os` repo — tags, pushes, and runs `gh release create`
-   as a real (non-prerelease) release. Run from the private source repo it
-   only does the version-bump commit and tells you the next step.
+Mutating update commands refuse slash-command chaining. Status and history are
+safe to inspect. Explicit phrases such as “update yourself” and “pull the
+latest YourProduct OS” route to `/update now`; ordinary requests such as “update
+the manual” do not.
+
+`/watch` remains the video-learning command and is unrelated to updates.
+
+### CLI
+
+```powershell
+thehomie update --check
+thehomie update --check --json
+thehomie update
+thehomie update --yes --json
+thehomie update --yes --json --scheduled --restart
+thehomie auto-update status --json
+thehomie auto-update on
+thehomie auto-update off
+```
+
+`thehomie update` remains interactive by default. `--yes --json` is the quiet,
+non-interactive machine contract. The passive once-per-day update banner still
+prints to stderr, keeping JSON stdout clean.
+
+## Deployment Modes
+
+| Mode | Update behavior |
+|---|---|
+| Clean branch | Candidate fast-forwards to the release |
+| Customized branch | Candidate creates a merge whose first parent is the current deployment revision |
+| Customized branch with conflicts | Blocked; operator resolves the candidate conflict deliberately |
+| Tracked dirty checkout | Blocked before fetch/apply |
+| Detached checkout | Blocked from automatic mutation |
+| Docker | Check-only; container replacement belongs to the orchestrator |
+
+Untracked files are not deleted or committed. If the target release introduces
+the same path, the update blocks instead of overwriting it. Protected untracked
+files under `.claude/skills/`, `.claude/extensions/`,
+`.claude/chat/extensions/`, and `.claude/scripts/integrations/` are SHA-256
+compared before and after apply.
+
+## Scheduling
+
+Linux installs a native systemd oneshot service and timer. The timer uses:
+
+```ini
+OnCalendar=*-*-* 04:00:00 America/Los_Angeles
+Persistent=true
+```
+
+The IANA timezone keeps the run at 4 a.m. across Pacific daylight-saving
+changes. `Persistent=true` runs a missed update after the machine returns.
+System services can set `HOMIE_UPDATE_SYSTEMD_SCOPE=system` and
+`HOMIE_UPDATE_USER=<service-user>`; user installs default to a user timer.
+
+Windows installs `TheHomie-AutoUpdate` through Task Scheduler at local 04:00.
+Task Scheduler provides missed-start recovery according to the host's task
+policy. The host timezone should be Pacific when the configured framework
+timezone is `America/Los_Angeles`.
+
+The manual and scheduled paths share the same lock. A scheduled failure can
+notify an admin channel when `HOMIE_UPDATE_ADMIN_PLATFORM` and
+`HOMIE_UPDATE_ADMIN_CHANNEL` are configured.
+
+## Receipts And Rollback
+
+Receipts are JSONL records under the active profile's state directory. Each
+contains:
+
+- current and target versions/tags;
+- deployment mode and baseline/candidate/applied revisions;
+- blocker and validation command results;
+- rollback ref and rollback state;
+- protected hashes;
+- requester/scheduled metadata and timestamps.
+
+Rollback refs live under `refs/thehomie-update-backups/<receipt-id>`. A failure
+after live mutation resets to the exact baseline, reinstalls dependencies, and
+restarts/verifies the restored build when those callbacks are available.
 
 ## Source Of Truth Files
 
 | Layer | Files |
 |---|---|
-| Update-check logic | `.claude/chat/update_check.py` |
-| CLI wiring + `update` command | `.claude/chat/cli.py` (`main()` group callback, `update()` command) |
-| Config | `.claude/scripts/config.py` (`UPDATE_CHECK_STATE_FILE`, `UPDATE_CHECK_MIN_INTERVAL_HOURS`, `UPDATE_CHECK_REPO`) |
-| Version source of truth | `.claude/scripts/pyproject.toml` (`[project].version`) |
-| Release helper | `scripts/release.sh` |
-| Tests | `.claude/scripts/tests/test_update_check.py` |
+| Passive release banner | `.claude/chat/update_check.py` |
+| Canonical updater and receipts | `.claude/scripts/framework_update.py` |
+| Detached worker/restart/notification | `.claude/scripts/update_worker.py` |
+| Linux and Windows schedules | `.claude/scripts/update_scheduler.py` |
+| CLI | `.claude/chat/cli.py` |
+| Chat command and direct routing | `.claude/chat/commands.py`, `.claude/chat/core_handlers.py`, `.claude/chat/router.py` |
+| Execution-intent classifier | `.claude/chat/engine.py` |
+| Tests | `.claude/scripts/tests/test_framework_update.py`, `test_update_scheduler.py`, `test_update_chat_command.py` |
 
-## Safety Boundaries
-
-- Never auto-installs an update — the banner is passive; `thehomie update`
-  requires an explicit interactive yes.
-- Never auto-restarts a running bot process after updating — the operator
-  restarts manually.
-- The banner prints to stderr only, never stdout — machine/JSON consumers of
-  the CLI are unaffected.
-- Every failure mode (network, timeout, malformed JSON, missing/corrupt state
-  file, missing `pyproject.toml`) fails closed to "no update detected" —
-  a broken check can never crash or hang a CLI invocation.
-- `git fetch`/`checkout` in `thehomie update` only ever targets a tagged
-  release (`v<version>`), never a floating branch — reproducible, not
-  commit-following.
-
-## How To Run It
-
-```powershell
-thehomie --version
-thehomie update
-```
-
-```bash
-# cut a new release (operator-only, from either repo)
-bash scripts/release.sh 1.1.0
-```
-
-## How To Test It
+## Test It
 
 ```powershell
 cd .claude/scripts
-uv run pytest tests/test_update_check.py -q
+uv run pytest tests/test_framework_update.py tests/test_update_scheduler.py tests/test_update_chat_command.py -q
+uv run pytest tests/test_chat_runtime_engine.py tests/test_command_menu.py tests/test_cli.py -q
 ```
 
-15 tests cover version parsing, version-tuple comparison, TTL-cache gating
-(no second network call inside the interval), network-failure fail-closed
-behavior, and the stderr-only banner (Click `CliRunner`, asserting `result.stderr`
-vs `result.stdout` stay separate).
-
-## Latest Live Proof
-
-- Date: 2026-07-06
-- Surface: live check against the real `v1.0.0` GitHub release, cut as part
-  of shipping this feature
-- Result: `get_latest_release_version()` correctly resolved `"1.0.0"` from
-  the live API; `thehomie --version` reads `1.0.0` dynamically (no longer a
-  hardcoded literal); `gh release view v1.0.0 --json isPrerelease` confirmed
-  `false`; `https://api.github.com/repos/TheSmokeDev/taskchad-os/releases/latest`
-  returned the `v1.0.0` payload.
-
-## Public Export Status
-
-Public-exported (`github.com/TheSmokeDev/taskchad-os`, commit `47809e2`).
-
-## Next Slices
-
-- Surface current/latest version in `thehomie doctor`/`status --json` output.
-- CI automation for cutting releases (currently manual via `scripts/release.sh`
-  — no GitHub Actions exist in either repo yet).
-- Optional prompt to restart the bot automatically after `thehomie update`
-  completes, if one is currently running.
+The temporary-Git tests cover clean upgrades, customized merges, conflicts,
+tracked dirt, untracked collisions, skill preservation, locking, candidate and
+dependency failures, restart/health failures, rollback, and receipt history.

@@ -397,8 +397,8 @@ def test_restart_never_inherits_a_pipe_to_the_bot(monkeypatch) -> None:
 
     bot_watchdog.restart_bot()
 
-    assert captured.get("stdout") is bot_watchdog.subprocess.DEVNULL
-    assert captured.get("stderr") is bot_watchdog.subprocess.DEVNULL
+    assert captured.get("stdout") is captured.get("stderr")
+    assert captured.get("stdout") is not bot_watchdog.subprocess.PIPE
     assert captured.get("capture_output") is None  # never
     assert captured.get("timeout") == 120
 

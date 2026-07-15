@@ -13,6 +13,44 @@ context. They are not public release tags unless a matching public tag exists.
 
 ---
 
+## The Homie v1.1.0
+
+**Release Date:** July 15, 2026
+
+> The safe self-update release — stable releases can now be staged, tested,
+> rolled back, scheduled, and operated directly from chat.
+
+### Highlights
+
+- **Safe Candidate Updates** — `thehomie update` now fetches only the latest
+  stable GitHub release, rejects tracked dirt and untracked path collisions,
+  validates a temporary worktree, creates a rollback ref and receipt, then
+  applies the exact validated candidate to the live checkout.
+- **Customized Deployment Support** — clean installs fast-forward while clean
+  customized branches are merged in the candidate worktree. Conflicts are
+  reported for an operator and never guessed through.
+- **Preserved Operator Extensions** — deployment-only skills and extensions
+  are hashed before and after updates. Untracked state and credentials remain
+  in place and any release collision fails closed.
+- **Chat And Machine Surfaces** — admin-only `/update` supports status, now,
+  auto on/off/status, and history. `thehomie update --yes --json` provides the
+  non-interactive contract used by native schedulers.
+- **Daily Stable Updates** — Linux systemd timers use 4:00 a.m.
+  `America/Los_Angeles` with `Persistent=true`; Windows uses Task Scheduler at
+  local 4:00 a.m. Docker stays check-only.
+- **Discord Execution Intent Fix** — short `pull`, `update`, `upgrade`, and
+  `install` requests retain tool access. Explicit “update yourself” and
+  public-repository update phrases route directly to the update manager.
+
+### Safety Contract
+
+- Tracked dirt, concurrent runs, candidate test failures, merge conflicts, and
+  operator-path collisions all block before the live ref changes.
+- Dependency, restart, or health failures after apply restore the prior
+  revision and dependencies. Receipts retain validation and rollback state.
+- Manual chat updates acknowledge immediately and run outside the chat loop;
+  the worker reports the final receipt back to the originating channel.
+
 ## The Homie v1.0.1
 
 **Release Date:** July 14, 2026

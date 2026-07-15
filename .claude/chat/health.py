@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
+from update_check import get_current_version
+
 _START_TIME = time.monotonic()
 
 
@@ -32,7 +34,7 @@ class HealthStatus:
     adapters: dict[str, bool]
     sessions_active: int
     cognition_available: bool
-    version: str = "1.0.1"
+    version: str = field(default_factory=get_current_version)
     timestamp: str = ""
     # Phase 6 extensions
     runtime_providers: dict[str, str] = field(default_factory=dict)

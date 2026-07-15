@@ -725,7 +725,9 @@ def main() -> None:
                 state = status_fn() if status_fn else "online"
             except Exception:  # noqa: BLE001 — never let reporting kill the loop
                 state = "online"
-            payload = _json.dumps({"status": state, "version": "1.0.1"}).encode()
+            from update_check import get_current_version
+
+            payload = _json.dumps({"status": state, "version": get_current_version()}).encode()
             try:
                 req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
                 with urllib.request.urlopen(req, timeout=10) as resp:

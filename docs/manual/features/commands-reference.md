@@ -2,7 +2,7 @@
 
 Status: Active baseline
 Owner: `.claude/chat/` command registry (`commands.py`, `core_handlers.py`, `router.py`)
-Last updated: 2026-07-11
+Last updated: 2026-07-15
 
 ## What It Does
 
@@ -80,6 +80,7 @@ Deep dive: [Telegram Command Menu](telegram-command-menu.md) · [Runtime Status 
 | `/model` | Select lane/provider/model (claude, sonnet, opus, codex, gemini, openrouter, openai, auto) | admin |
 | `/reload` | Reload bot config without restarting | admin |
 | `/restart` | Restart the bot — kill this process and start fresh | admin |
+| `/update` | Safe stable framework update — `status`, `now`, `auto on|off|status`, `history` | admin |
 | `/extensions` | Extension diagnostics — list, doctor, enable/disable | admin |
 
 ## Memory & Vault

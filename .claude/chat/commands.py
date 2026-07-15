@@ -49,6 +49,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("reload", "Reload bot config without restarting", "router", "admin"),
     ("restart", "Restart myself — kill this process and start fresh", "router", "admin"),
     ("autostart", "Bot autostart at logon — status | on | off", "router", "admin"),
+    ("update", "Safe framework update — status | now | auto on/off/status | history", "router", "admin"),
     ("help", "Show all available commands", "router", "viewer"),
     ("commands", "Browse native Telegram commands or the full Homie command registry", "router", "viewer"),
     ("status", "Show session info — messages, cost, uptime", "router", "viewer"),
@@ -150,7 +151,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Session & Mode",
         ["plan", "go", "execute", "mode", "provider", "model", "reload", "restart",
-         "autostart", "help", "commands", "status", "diagnostics", "cost", "clear", "new",
+         "autostart", "update", "help", "commands", "status", "diagnostics", "cost", "clear", "new",
          "extensions"],
     ),
     (
@@ -194,6 +195,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "model",
     "restart",
     "autostart",
+    "update",
     "diagnostics",
     "working",
     "email",

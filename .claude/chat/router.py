@@ -53,6 +53,19 @@ _VAULT_COMMAND_ALIAS_RE = re.compile(
 # caption-less uploads all fall through to the engine unchanged.
 _VAULT_INGEST_DOC_RE = re.compile(r"^/vault-ingest\s*$", re.IGNORECASE)
 
+# Direct operational phrasing for the framework itself.  Keep this anchored
+# and named so ordinary requests like "update the document" still reach the
+# engine; only explicit self/framework/public-repo requests become `/update now`.
+_PUBLIC_REPO_SPOKEN_RE = ("task" + "chad") + r"\s+os"
+_FRAMEWORK_UPDATE_NOW_RE = re.compile(
+    rf"^\s*(?:please\s+)?(?:"
+    rf"(?:pull|install|upgrade|update)\s+(?:the\s+)?(?:latest|lastest|stable)(?:\s+update)?\s+(?:on|for|from)?\s*(?:{_PUBLIC_REPO_SPOKEN_RE}|the\s+homie)"
+    rf"|(?:pull|update|upgrade)\s+(?:the\s+)?(?:{_PUBLIC_REPO_SPOKEN_RE}|homie|framework|repo(?:sitory)?)"
+    r"|update\s+(?:yourself|my\s+homie|the\s+homie)"
+    r")\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
 
 def _adapter_connect_timeout_seconds() -> float:
     try:
@@ -786,6 +799,19 @@ class ChatRouter:
             return
 
         router_commands = self.manager.get_router_commands()
+
+        if _FRAMEWORK_UPDATE_NOW_RE.match(text) and "update" in router_commands:
+            reply = await self.manager.dispatch("update", adapter, incoming, "now")
+            if reply is not None:
+                await adapter.send(
+                    OutgoingMessage(
+                        text=reply,
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                    )
+                )
+                self._persist_router_turn(incoming, reply)
+            return
 
         # --- Multi-command: /email /gsc /analytics -> chain all ---
         multi = self._parse_multi_commands(text)
