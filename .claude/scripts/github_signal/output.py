@@ -15,7 +15,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from shared import append_to_daily_log  # noqa: E402
+from shared import append_to_daily_log, regenerate_lane_index  # noqa: E402
 
 from github_signal.config import (  # noqa: E402
     GITHUB_SIGNAL_DIR,
@@ -25,6 +25,45 @@ from github_signal.config import (  # noqa: E402
 
 def digest_path_for_week(week: str) -> Path:
     return GITHUB_SIGNAL_DIR / f"{week}.md"
+
+
+def regenerate_github_signal_index(lane_dir: Path | None = None) -> Path | None:
+    """Regenerate the lane index (digests + evals). Single config owner.
+
+    Called after every digest AND eval write so both note families keep an
+    inbound edge. Callers wrap in try/except — an index failure never blocks
+    the pipeline. ``lane_dir`` is a None sentinel resolved at call time so
+    test-monkeypatched module dirs thread through.
+    """
+    if lane_dir is None:
+        lane_dir = GITHUB_SIGNAL_DIR
+    return regenerate_lane_index(
+        lane_dir=lane_dir,
+        index_name="GITHUB-SIGNAL-INDEX.md",
+        title="GitHub Signal — Lane Index",
+        description="Auto-generated index of github-signal weekly digests and repo evals.",
+        sections=[
+            {
+                "heading": "Weekly digests",
+                "glob": "[0-9]*.md",
+                "columns": [
+                    ("New stars", "new_stars"),
+                    ("Picks", "picks"),
+                    ("Trending", "trending_hits"),
+                ],
+            },
+            {
+                "heading": "Repo evals",
+                "glob": "*.md",
+                "subdir": "evals",
+                "columns": [
+                    ("Repo", "repo"),
+                    ("Recommendation", "recommendation"),
+                    ("Disposition", "disposition"),
+                ],
+            },
+        ],
+    )
 
 
 def write_output(data: dict[str, Any]) -> Path:
@@ -94,6 +133,10 @@ def write_output(data: dict[str, Any]) -> Path:
     path = digest_path_for_week(week)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(frontmatter + body, encoding="utf-8")
+    try:
+        regenerate_github_signal_index()
+    except Exception:
+        pass
     return path
 
 

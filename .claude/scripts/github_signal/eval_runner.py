@@ -324,6 +324,12 @@ def _write_eval_note(
         f"## Repo facts\n\n{meta_block}\n"
     )
     path.write_text(body, encoding="utf-8")
+    try:
+        from github_signal.output import regenerate_github_signal_index
+
+        regenerate_github_signal_index(GITHUB_SIGNAL_DIR)
+    except Exception:
+        pass
     return path
 
 

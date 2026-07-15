@@ -174,6 +174,18 @@ async def test_success_path_card_note_state_and_both_lanes(harness):
 
 
 @pytest.mark.asyncio
+async def test_lane_index_written_with_eval_row(harness):
+    result = await eval_mod.run_eval("owner/repo")
+    assert result == "done"
+    index = harness["tmp"] / "github-signal" / "GITHUB-SIGNAL-INDEX.md"
+    assert index.exists()
+    text = index.read_text(encoding="utf-8")
+    note_stem = next((harness["tmp"] / "github-signal" / "evals").glob("*.md")).stem
+    assert f"[[{note_stem}]]" in text
+    assert "owner/repo" in text
+
+
+@pytest.mark.asyncio
 async def test_sandbox_deleted_by_default_even_with_readonly_files(
     harness, monkeypatch
 ):

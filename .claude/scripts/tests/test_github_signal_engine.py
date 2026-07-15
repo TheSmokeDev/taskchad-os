@@ -80,7 +80,8 @@ def _state(harness) -> dict:
 
 
 def _digest_text(harness) -> str:
-    files = list(harness["digest_dir"].glob("*.md"))
+    # [0-9]*.md: dated digests only — GITHUB-SIGNAL-INDEX.md lives alongside.
+    files = list(harness["digest_dir"].glob("[0-9]*.md"))
     assert len(files) == 1
     return files[0].read_text(encoding="utf-8")
 
@@ -221,6 +222,18 @@ async def test_test_mode_makes_no_writes(harness):
     assert harness["calls"]["picks"] == 0
     assert not harness["state_file"].exists()
     assert not harness["digest_dir"].exists()
+
+
+@pytest.mark.asyncio
+async def test_lane_index_written_alongside_digest(harness):
+    result = await engine_mod.run_github_signal()
+    assert result == "success"
+    index = harness["digest_dir"] / "GITHUB-SIGNAL-INDEX.md"
+    assert index.exists()
+    text = index.read_text(encoding="utf-8")
+    digest_stem = next(harness["digest_dir"].glob("[0-9]*.md")).stem
+    assert f"[[{digest_stem}]]" in text
+    assert "[[MOC-thehomie]]" in text
 
 
 # ── status display ─────────────────────────────────────────

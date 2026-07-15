@@ -80,8 +80,9 @@ thehomie recall "<query>" --vault thehomie --mode hybrid --max-results 6 --brief
 | `--vault` | `thehomie` | Which vault to search: `thehomie` or `coding-vault`. |
 | `--mode` | `hybrid` | `auto` (tier-classified), `hybrid` (force Tier 1 — reaches the re-rank), or `keyword` (FTS5 only, no model load). |
 | `--max-results` / `-n` | `5` | Cap on returned hits. |
-| `--brief` | off | Prepend the proactive "while you were out" brief. |
-| `--json` | off | Machine-readable output (`tier`, `reranked`, `results_returned`, `latency_ms`). |
+| `--brief` | off | Terse OUTPUT format: header line + one hit per line + ~200-char snippet (what shelling skills consume). |
+| `--with-proactive-brief` | off | Prepend the proactive "while you were out" brief (the pre-2026-07-15 `--brief` behavior, now explicitly named). |
+| `--json` | off | Machine-readable output (`tier`, `reranked`, `results_returned`, `latency_ms`). `brief` key is populated only under `--with-proactive-brief`. |
 | `--caller` | `vault-ops` | Observability tag (shows up in Langfuse spans). |
 
 Two behaviors are load-bearing:
@@ -232,7 +233,7 @@ walk), and skipped by lint, backfill, and index generation.
 
 ## Operator Entry Points
 
-- CLI: `thehomie recall "<query>" --vault <name> --mode hybrid [--brief] [--json]`
+- CLI: `thehomie recall "<query>" --vault <name> --mode hybrid [--brief] [--with-proactive-brief] [--json]` (`--brief` = terse output; `--mode keyword` = fast no-model path for probes)
 - Chat: `/search`, `/vault search <query>`, `/vault context <topic>`, `/file`, `/working`
 - Skill: `/vault-ops orient | debrief | weekly | context | think | research`
 - Re-index: `uv run python memory_index.py --vault <name>`
