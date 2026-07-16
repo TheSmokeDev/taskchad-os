@@ -195,6 +195,7 @@ def snapshot_config(keys: list[str]) -> dict[str, Any]:
 RECALL_CONFIG_KEYS: list[str] = [
     "RECALL_ENABLED",
     "RECALL_MIN_SCORE",
+    "RECALL_KEYWORD_MIN_SCORE",
     "RECALL_MAX_RESULTS",
     "RECALL_MIN_MSG_LEN",
     "RECALL_BACKGROUND_MAX_RESULTS",

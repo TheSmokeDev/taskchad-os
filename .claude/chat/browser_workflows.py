@@ -344,6 +344,17 @@ _WORKFLOWS: dict[str, BrowserWorkflow] = {
     ),
 }
 
+try:
+    from local_extension_loader import apply_local_extension_hook
+
+    apply_local_extension_hook(
+        "register_browser_workflows",
+        _WORKFLOWS,
+        workflow_type=BrowserWorkflow,
+    )
+except ImportError:
+    pass
+
 
 def list_browser_workflows() -> list[BrowserWorkflow]:
     return list(_WORKFLOWS.values())

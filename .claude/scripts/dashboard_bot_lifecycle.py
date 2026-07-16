@@ -49,9 +49,10 @@ What this module does NOT do:
   * Does NOT add new SDK calls or new optional-provider integrations.
   * Does NOT bypass ``apply_persona_override()`` — the dashboard process
     runs ``apply_persona_override()`` once at startup; per-persona
-    activate/deactivate uses an EXPLICIT ``persona_id`` argument that is
-    bound into the SUBPROCESS environment via ``env["HOMIE_HOME"]``, not
-    the dashboard's own ``HOMIE_HOME``.
+    activate/deactivate uses an EXPLICIT ``persona_id`` argument. Named
+    personas are bound through ``env["HOMIE_HOME"]``; the default persona
+    is forced with ``--profile default`` and an unset ``HOMIE_HOME`` so it
+    cannot be misclassified as a custom profile.
 """
 
 from __future__ import annotations
@@ -310,6 +311,17 @@ def activate(
             log_path = log_dir / "bot.log"
 
             scrubbed = _scrub_dashboard_env(profile_root=profile_root)
+            bot_command = [sys.executable, str(bot_main)]
+            if persona_id == "default":
+                # ``profile_root`` is the source checkout for the default
+                # install layout, not a named profile. Publishing that path
+                # as HOMIE_HOME makes get_active_profile_name() report
+                # ``custom`` and can make the token-collision guard compare
+                # the default bot against itself. The explicit sentinel also
+                # overrides any sticky active-profile selection in the child.
+                scrubbed.pop("HOMIE_HOME", None)
+                scrubbed.pop("HOMIE_NAME", None)
+                bot_command.extend(["--profile", "default"])
 
             # Launch detached so the dashboard process can return quickly.
             # On Windows: CREATE_NEW_PROCESS_GROUP so signal.SIGTERM
@@ -331,7 +343,7 @@ def activate(
                 popen_kwargs["start_new_session"] = True
 
             proc = subprocess.Popen(
-                [sys.executable, str(bot_main)],
+                bot_command,
                 **popen_kwargs,
             )
             new_pid = proc.pid

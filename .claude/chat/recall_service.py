@@ -282,11 +282,14 @@ def _keyword_only_recall(
     log = _make_log(tier="fallback", caller=caller, search_mode="keyword")
 
     try:
-        from config import RECALL_MIN_SCORE
+        # RECALL_KEYWORD_MIN_SCORE, not RECALL_MIN_SCORE: raw FTS5 scores are
+        # 1/(1+|bm25|) (~0.05-0.17 for real hits) — the hybrid merged-score
+        # floor (0.3) on this scale returned zero results on real queries.
+        from config import RECALL_KEYWORD_MIN_SCORE
         from memory_search import search_keyword
 
         raw_results = search_keyword(query, limit=max_results, memory_dir=memory_dir)
-        raw_results = [r for r in raw_results if r.score >= RECALL_MIN_SCORE]
+        raw_results = [r for r in raw_results if r.score >= RECALL_KEYWORD_MIN_SCORE]
 
         # Convert SearchResult → uniform result type
         if _COGNITION_AVAILABLE:

@@ -172,6 +172,54 @@ def test_activate_forces_homie_home_for_target_persona(fake_profile):
         assert env["HOMIE_HOME"] == str(fake_profile)
 
 
+def test_activate_default_forces_default_without_homie_home(tmp_path, monkeypatch):
+    """Default launch cannot be misclassified as a custom or sticky profile."""
+    from contextlib import contextmanager
+
+    import dashboard_bot_lifecycle as dbl
+
+    pid_file = tmp_path / "state" / "bot.pid"
+    lock_file = tmp_path / "chat" / "bot.lock"
+    log_dir = tmp_path / "data"
+    profile_root = tmp_path / "source-checkout"
+    for path in (pid_file.parent, lock_file.parent, log_dir, profile_root):
+        path.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def fake_paths(persona_id):
+        assert persona_id == "default"
+        yield pid_file, lock_file, log_dir, profile_root
+
+    # Reproduce the dashboard inheriting stale persona selectors. A default
+    # activation must strip both and force the explicit default sentinel.
+    monkeypatch.setenv("HOMIE_HOME", str(profile_root))
+    monkeypatch.setenv("HOMIE_NAME", "custom")
+
+    fake_proc = MagicMock(pid=1212)
+    with patch("dashboard_bot_lifecycle._persona_paths_context", fake_paths), \
+         patch("dashboard_bot_lifecycle.shared.read_pid", return_value=None), \
+         patch("dashboard_bot_lifecycle.shared.file_lock") as fake_lock, \
+         patch(
+             "dashboard_bot_lifecycle.subprocess.Popen",
+             return_value=fake_proc,
+         ) as mock_popen:
+        fake_lock.return_value.__enter__ = lambda *a, **k: None
+        fake_lock.return_value.__exit__ = lambda *a, **k: None
+
+        result = dbl.activate("default")
+
+    assert result == {
+        "persona_id": "default",
+        "pid": 1212,
+        "status": "running",
+    }
+    command = mock_popen.call_args.args[0]
+    assert command[-2:] == ["--profile", "default"]
+    env = mock_popen.call_args.kwargs["env"]
+    assert "HOMIE_HOME" not in env
+    assert "HOMIE_NAME" not in env
+
+
 # ── deactivate ───────────────────────────────────────────────────────────
 
 

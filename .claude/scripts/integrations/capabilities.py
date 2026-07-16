@@ -351,6 +351,19 @@ _ACTIONS: tuple[IntegrationAction, ...] = (
     ),
 )
 
+try:
+    from local_extension_loader import apply_local_extension_hook
+
+    _local_actions = list(_ACTIONS)
+    apply_local_extension_hook(
+        "register_integration_actions",
+        _local_actions,
+        action_factory=_action,
+    )
+    _ACTIONS = tuple(_local_actions)
+except ImportError:
+    pass
+
 _ACTION_INDEX: dict[tuple[str, str], IntegrationAction] = {
     (action.integration, action.action): action for action in _ACTIONS
 }

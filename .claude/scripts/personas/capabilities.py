@@ -464,6 +464,12 @@ def load_capability_matrix(path: str | Path | None = None) -> dict[str, Any]:
                 f"shape: {matrix_path}: top-level must be a mapping"
             )
         matrix = raw
+    try:
+        from local_extension_loader import apply_local_extension_hook
+
+        apply_local_extension_hook("register_persona_capabilities", matrix)
+    except ImportError:
+        pass
     validate_capability_matrix(matrix)
     return matrix
 

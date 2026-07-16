@@ -58,7 +58,8 @@ Configuration knobs (environment variables, resolved at call time):
 | Env var | Default | Meaning |
 |---|---|---|
 | `RECALL_ENABLED` | `true` | Master switch. `false` → recall returns empty. |
-| `RECALL_MIN_SCORE` | `0.3` | Minimum merged score to keep a hit. |
+| `RECALL_MIN_SCORE` | `0.3` | Minimum merged score to keep a hit (hybrid/vector scale). |
+| `RECALL_KEYWORD_MIN_SCORE` | `0.02` | Floor for keyword-only recall. Raw FTS5 scores are `1/(1+\|bm25\|)` (~0.05-0.17 for real hits) — a different scale than the hybrid floor; applying 0.3 here returned zero results (fixed 2026-07-15). |
 | `RECALL_MAX_RESULTS` | `3` | Default cap on injected results (chat hot path). |
 | `RECALL_RERANK_ENABLED` | `true` | Toggle the Stage-5 qmd re-rank. |
 | `RECALL_RERANK_TOP_N` | `10` | How many hits feed the re-ranker. |

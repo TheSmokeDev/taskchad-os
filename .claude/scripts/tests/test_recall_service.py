@@ -230,13 +230,26 @@ class TestKeywordOnlyFallback:
         assert "untrusted" in resp.formatted_text
 
     def test_keyword_fallback_respects_min_score(self):
-        """Low-score results are filtered out."""
-        fake = FakeSearchResult(score=0.1)  # Below 0.3 threshold
-        with patch("config.RECALL_MIN_SCORE", 0.3), \
+        """Sub-floor noise is filtered out (keyword-scale floor)."""
+        fake = FakeSearchResult(score=0.005)  # Below the 0.02 keyword floor
+        with patch("config.RECALL_KEYWORD_MIN_SCORE", 0.02), \
              patch("memory_search.search_keyword", return_value=[fake]):
             resp = _keyword_only_recall("leads", "chat", 5)
         assert resp.results == []
         assert resp.formatted_text == ""
+
+    def test_keyword_fallback_uses_keyword_scale_floor_not_hybrid(self):
+        """2026-07-15 regression: raw FTS5 scores are 1/(1+|bm25|) (~0.05-0.17
+        for real hits). The hybrid floor (RECALL_MIN_SCORE=0.3) applied to that
+        scale returned ZERO results on real queries. A realistic keyword hit
+        must survive even with the hybrid floor at 0.3."""
+        fake = FakeSearchResult(score=0.06)  # real-world FTS5 hit
+        with patch("config.RECALL_MIN_SCORE", 0.3), \
+             patch("config.RECALL_KEYWORD_MIN_SCORE", 0.02), \
+             patch("memory_search.search_keyword", return_value=[fake]):
+            resp = _keyword_only_recall("dead lead drip", "vault-ops", 5)
+        assert len(resp.results) == 1
+        assert resp.formatted_text  # injected, not filtered
 
     def test_keyword_fallback_handles_error(self):
         """Search failure returns empty, not crash."""

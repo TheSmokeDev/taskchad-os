@@ -21,6 +21,10 @@ from discord_channel_bindings import resolve_discord_channel_binding
 from discord_persona_runtime import run_discord_persona_channel_turn
 from engine import ConversationEngine
 from extension_manager import ExtensionManager
+from local_extension_loader import (
+    any_local_extension_hook,
+    dispatch_local_extension_hook,
+)
 from models import OutgoingMessage, Platform
 from session import Session
 from session_keys import build_session_key, resolve_thread_id
@@ -442,7 +446,7 @@ class ChatRouter:
             "__button:social:"
         ) or text.startswith("__button:linkedin_flow:") or text.startswith(
             "__button:primo_flow:"
-        )
+        ) or any_local_extension_hook("is_immediate_button", incoming)
 
     def _retain_task(self, task: "asyncio.Task[Any]") -> None:
         """Keep a strong reference to a fire-and-forget task.
@@ -2414,8 +2418,16 @@ class ChatRouter:
         elif custom_id.startswith("cofounder:"):
             await self._handle_cofounder_button(adapter, incoming, custom_id)
         else:
-            # Unknown button — log and ignore
-            print(f"[{datetime.now()}] Unknown button: {custom_id}")
+            handled = await dispatch_local_extension_hook(
+                "handle_button",
+                self,
+                adapter,
+                incoming,
+                custom_id,
+            )
+            if not handled:
+                # Unknown button — log and ignore
+                print(f"[{datetime.now()}] Unknown button: {custom_id}")
 
     async def _handle_social_button(
         self, adapter: Any, incoming: Any, custom_id: str

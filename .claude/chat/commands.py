@@ -247,6 +247,22 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "suggestions",
 )
 
+# Operator-local commands join the canonical registries only when the optional
+# local package exists. Public/fresh installs simply retain these core values.
+try:
+    from local_extension_loader import apply_local_extension_hook
+
+    _native_commands = list(TELEGRAM_NATIVE_COMMANDS)
+    apply_local_extension_hook(
+        "register_chat_commands",
+        COMMANDS,
+        CATEGORIES,
+        _native_commands,
+    )
+    TELEGRAM_NATIVE_COMMANDS = tuple(_native_commands)
+except ImportError:
+    pass
+
 # Every COMMANDS row that is deliberately NOT in the native menu must be listed
 # here with a reason. The completeness test in test_command_menu.py asserts
 #   set(COMMANDS names) == set(TELEGRAM_NATIVE_COMMANDS) | NATIVE_MENU_EXCLUDED

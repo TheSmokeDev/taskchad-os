@@ -66,10 +66,11 @@ cd .claude/scripts && uv run python memory_search.py "topic" --mode hybrid --pat
 When the Telegram bot receives a message (> 20 chars), `engine.py → _recall_memory()` runs FTS5 keyword search (~50ms) and injects top 3 results into the system prompt.
 
 ```env
-RECALL_ENABLED=true          # Toggle recall on/off
-RECALL_MIN_SCORE=0.3         # Minimum FTS5 score to include
-RECALL_MAX_RESULTS=3         # Max snippets injected
-RECALL_MIN_MSG_LEN=20        # Skip short messages ("hi", "thanks")
+RECALL_ENABLED=true              # Toggle recall on/off
+RECALL_MIN_SCORE=0.3             # Minimum merged score (hybrid/vector scale)
+RECALL_KEYWORD_MIN_SCORE=0.02    # Floor for keyword-only recall — raw FTS5 scores are 1/(1+|bm25|), a different scale
+RECALL_MAX_RESULTS=3             # Max snippets injected
+RECALL_MIN_MSG_LEN=20            # Skip short messages ("hi", "thanks")
 ```
 
 ### Unified Recall Service

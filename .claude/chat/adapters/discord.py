@@ -205,6 +205,15 @@ class DiscordAdapter:
                 except Exception:
                     pass
                 return
+            if self.allowed_guilds and interaction.guild_id is not None:
+                if str(interaction.guild_id) not in self.allowed_guilds:
+                    try:
+                        await interaction.response.send_message(
+                            "This server is not allowed.", ephemeral=True
+                        )
+                    except Exception:
+                        pass
+                    return
             custom_id = interaction.data.get("custom_id", "")
             if not custom_id:
                 return
@@ -236,6 +245,19 @@ class DiscordAdapter:
             ch_id = str(interaction.channel_id)
             is_dm = interaction.guild_id is None
             channel = Channel(Platform.DISCORD, ch_id, is_dm=is_dm)
+            source_message = getattr(interaction, "message", None)
+            source_message_id = str(getattr(source_message, "id", "") or "")
+            message_author = getattr(source_message, "author", None)
+            message_author_id = str(getattr(message_author, "id", "") or "")
+            application_id = str(getattr(interaction, "application_id", "") or "")
+            bot_user_id = str(self._bot_user_id or "")
+            source_message_is_own = bool(
+                message_author_id
+                and (
+                    (bot_user_id and message_author_id == bot_user_id)
+                    or (application_id and message_author_id == application_id)
+                )
+            )
 
             # Route as IncomingMessage with __button: prefix
             incoming = IncomingMessage(
@@ -253,6 +275,10 @@ class DiscordAdapter:
                     "interaction_type": "button",
                     "custom_id": custom_id,
                     "guild": str(interaction.guild_id or ""),
+                    "source_message_id": source_message_id,
+                    "message_author_id": message_author_id,
+                    "application_id": application_id,
+                    "source_message_is_own": source_message_is_own,
                 },
             )
             await self._enqueue(incoming)

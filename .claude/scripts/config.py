@@ -181,6 +181,10 @@ UPDATE_CHECK_REPO = os.getenv("UPDATE_CHECK_REPO", "TheSmokeDev/taskchad-os")
 # === Memory Recall Configuration ===
 RECALL_ENABLED = os.getenv("RECALL_ENABLED", "true").lower() == "true"
 RECALL_MIN_SCORE = float(os.getenv("RECALL_MIN_SCORE", "0.3"))
+# Keyword-only recall floor. Raw FTS5 scores are 1/(1+|bm25|) — real hits land
+# at ~0.05-0.17, so the hybrid-scale RECALL_MIN_SCORE (0.3) would filter nearly
+# everything (the 2026-07-15 zero-results bug). Two score scales, two floors.
+RECALL_KEYWORD_MIN_SCORE = float(os.getenv("RECALL_KEYWORD_MIN_SCORE", "0.02"))
 RECALL_MAX_RESULTS = int(os.getenv("RECALL_MAX_RESULTS", "3"))
 RECALL_MIN_MSG_LEN = int(os.getenv("RECALL_MIN_MSG_LEN", "20"))
 

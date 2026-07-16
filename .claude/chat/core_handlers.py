@@ -7322,7 +7322,6 @@ def _cofounder_project_line(project: Any) -> str:
         f"(iter {fm.iterations}/{fm.max_iterations})"
     )
 
-
 async def handle_cofounder(
     adapter: Any, incoming: Any, args: str, *, collect_only: bool = False
 ) -> str:
@@ -7853,3 +7852,10 @@ CORE_HANDLERS: dict[str, Any] = {
     "blueprints": handle_blueprints,
     "suggestions": handle_suggestions,
 }
+
+try:
+    from local_extension_loader import apply_local_extension_hook
+
+    apply_local_extension_hook("register_core_handlers", CORE_HANDLERS)
+except ImportError:
+    pass

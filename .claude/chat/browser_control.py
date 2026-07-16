@@ -173,13 +173,28 @@ def resolve_agent_browser_command(
     if override:
         return AgentBrowserResolution((override,), "env")
 
+    system = platform_name or platform.system()
     path_env = env.get("PATH")
     for executable in ("agent-browser", "agent-browser.cmd"):
         found = shutil.which(executable, path=path_env)
         if found:
+            # npm's Windows shim forwards ``%*`` through cmd.exe. That shell
+            # can reinterpret URL query separators such as ``&`` even though
+            # callers supplied a proper argv list. Prefer the package's native
+            # executable when available so URLs stay one literal argument.
+            found_path = Path(found)
+            if system == "Windows" and found_path.suffix.lower() == ".cmd":
+                native = (
+                    found_path.parent
+                    / "node_modules"
+                    / "agent-browser"
+                    / "bin"
+                    / "agent-browser-win32-x64.exe"
+                )
+                if native.exists():
+                    return AgentBrowserResolution((str(native),), "path-native")
             return AgentBrowserResolution((found,), "path")
 
-    system = platform_name or platform.system()
     if system == "Windows":
         appdata = env.get("APPDATA")
         userprofile = env.get("USERPROFILE")
@@ -642,9 +657,10 @@ def capture_browser_screenshot_png(
     *,
     port: int | None = None,
     target: str = "desktop",
+    session: str | None = None,
     runner: Any = None,
 ) -> bytes:
-    """Capture a transient PNG screenshot and remove the temporary file."""
+    """Capture a transient PNG from the requested visible browser session."""
 
     resolved_port = port if port is not None else resolve_target_port(target)
     if is_adb_target(target):
@@ -658,7 +674,7 @@ def capture_browser_screenshot_png(
         result = run_agent_browser(
             ["screenshot", str(tmp_path)],
             port=resolved_port,
-            session=_session_for_target(target),
+            session=session if session is not None else _session_for_target(target),
             # adb grabs ride a mobile renderer: cold-session + capture regularly
             # exceeds the desktop's 20s (measured 2026-07-06, phone).
             timeout=45 if is_adb_target(target) else 20,

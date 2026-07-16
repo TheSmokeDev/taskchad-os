@@ -70,6 +70,46 @@ def _mock_message(
     return msg
 
 
+def _mock_component_interaction(
+    *,
+    user_id: int = 12345,
+    guild_id: int | None = 11111,
+    channel_id: int = 67890,
+    interaction_id: int = 24680,
+    custom_id: str = "approval:preview:7",
+    message_id: int = 13579,
+    message_author_id: int | None = 999999,
+    application_id: int | None = 999999,
+) -> SimpleNamespace:
+    """Create a component interaction with observable ACK/edit calls."""
+    import discord
+
+    message = SimpleNamespace(
+        id=message_id,
+        author=(
+            SimpleNamespace(id=message_author_id)
+            if message_author_id is not None
+            else None
+        ),
+        components=[],
+        edit=AsyncMock(),
+    )
+    return SimpleNamespace(
+        id=interaction_id,
+        type=discord.InteractionType.component,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        application_id=application_id,
+        user=SimpleNamespace(id=user_id, display_name="Tester"),
+        data={"custom_id": custom_id},
+        message=message,
+        response=SimpleNamespace(
+            defer=AsyncMock(),
+            send_message=AsyncMock(),
+        ),
+    )
+
+
 # ── Platform property ──────────────────────────────────────
 
 
@@ -250,6 +290,67 @@ async def test_discord_native_vault_ingest_attachment_queues_internal_attachment
     assert queued.raw_event["interaction_type"] == "slash_command"
     download.assert_awaited_once_with(interaction, raw_attachment)
     interaction.response.defer.assert_awaited_once_with(thinking=True)
+
+
+@pytest.mark.asyncio
+async def test_discord_component_allowed_guild_queues_provenance_metadata() -> None:
+    adapter = _make_adapter(
+        allowed_guilds=["11111"],
+        allowed_users=["12345"],
+    )
+    interaction = _mock_component_interaction()
+
+    await adapter._client.on_interaction(interaction)
+
+    queued = adapter._queue.get_nowait()
+    assert queued.text == "__button:approval:preview:7"
+    assert queued.raw_event == {
+        "interaction_id": "24680",
+        "interaction_type": "button",
+        "custom_id": "approval:preview:7",
+        "guild": "11111",
+        "source_message_id": "13579",
+        "message_author_id": "999999",
+        "application_id": "999999",
+        "source_message_is_own": True,
+    }
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.response.send_message.assert_not_awaited()
+    interaction.message.edit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_discord_component_wrong_guild_rejected_before_ack_or_disable() -> None:
+    adapter = _make_adapter(
+        allowed_guilds=["99999"],
+        allowed_users=["12345"],
+    )
+    interaction = _mock_component_interaction(guild_id=11111)
+
+    await adapter._client.on_interaction(interaction)
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "This server is not allowed.", ephemeral=True
+    )
+    interaction.response.defer.assert_not_awaited()
+    interaction.message.edit.assert_not_awaited()
+    assert adapter._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_discord_component_missing_source_metadata_is_not_own_message() -> None:
+    adapter = _make_adapter(allowed_users=["12345"])
+    interaction = _mock_component_interaction(
+        message_author_id=None,
+        application_id=None,
+    )
+
+    await adapter._client.on_interaction(interaction)
+
+    queued = adapter._queue.get_nowait()
+    assert queued.raw_event["message_author_id"] == ""
+    assert queued.raw_event["application_id"] == ""
+    assert queued.raw_event["source_message_is_own"] is False
 
 
 # ── Message normalization ──────────────────────────────────
