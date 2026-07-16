@@ -11,8 +11,8 @@ import runtime.openai_codex as openai_codex
 from runtime.auth_profiles import AuthProfileStatus
 from runtime.base import RUNTIME_LANE_GENERIC, RuntimeRequest, RuntimeResult
 from runtime.capabilities import TOOL_REASONING
-from runtime.prompt_builder import render_cli_prompt
 from runtime.profiles import RuntimeProfile
+from runtime.prompt_builder import render_cli_prompt
 from video_learning.analyze import AnalysisResult, apply_approved_proposal
 from video_learning.extract import VideoSourceError, parse_vtt, validate_source
 from video_learning.models import (
@@ -279,6 +279,14 @@ async def test_service_saves_sourced_note_not_raw_transcript(
     assert 'source: "https://example.com/watch?v=abc"' in body
     assert service.status(row["job_id"])["status"] == "ready"
 
+    # Proves _save_note's real lane-index wiring fires, not just the primitive.
+    index_path = note.parent / "WATCH-DOSSIER-INDEX.md"
+    assert index_path.exists()
+    index_text = index_path.read_text(encoding="utf-8")
+    assert f"[[{note.stem}]]" in index_text
+    assert "Useful Strategy" in index_text  # title column resolved from real frontmatter
+    assert "Example Founder" in index_text  # channel column resolved from real frontmatter
+
 
 @pytest.mark.asyncio
 async def test_application_rejects_nonmatching_exact_token(tmp_path: Path) -> None:
@@ -288,3 +296,105 @@ async def test_application_rejects_nonmatching_exact_token(tmp_path: Path) -> No
             approval_token="wrongtoken",
             workspace=tmp_path,
         )
+
+
+class TestWatchDossierLaneIndex:
+    """The lane index gives every /watch dossier an inbound edge (orphan cure)."""
+
+    WATCH_SECTIONS = [
+        {
+            "heading": "Video dossiers",
+            "glob": "[0-9]*.md",
+            "columns": [
+                ("Title", "title"),
+                ("Channel", "channel"),
+                ("Source", "source_type"),
+            ],
+        }
+    ]
+
+    def _regenerate(self, lane_dir):
+        from shared import regenerate_lane_index
+
+        return regenerate_lane_index(
+            lane_dir=lane_dir,
+            index_name="WATCH-DOSSIER-INDEX.md",
+            title="Watch Dossiers — Lane Index",
+            description="test",
+            sections=self.WATCH_SECTIONS,
+        )
+
+    def _write_dossier(self, lane_dir, day, slug, title, channel, source_type="youtube"):
+        # Mirrors the real _save_note frontmatter (no `date` field — filenames
+        # are date-prefixed, so the index sorts newest-first by stem).
+        (lane_dir / f"{day}-{slug}.md").write_text(
+            f'---\ntype: "video-learning"\ntitle: "{title}"\nchannel: "{channel}"\n'
+            f'source_type: "{source_type}"\n---\n\n# {title}\n',
+            encoding="utf-8",
+        )
+
+    def test_row_per_dossier_newest_first(self, tmp_path: Path) -> None:
+        self._write_dossier(tmp_path, "2026-07-01", "alpha", "Alpha Talk", "Chan A")
+        self._write_dossier(tmp_path, "2026-07-08", "beta", "Beta Talk", "Chan B")
+        text = self._regenerate(tmp_path).read_text(encoding="utf-8")
+        assert "[[2026-07-08-beta]]" in text
+        assert "[[2026-07-01-alpha]]" in text
+        assert text.index("2026-07-08") < text.index("2026-07-01")
+        assert "Alpha Talk" in text and "Beta Talk" in text
+        assert "[[MOC-thehomie]]" in text
+
+    def test_tolerates_dossier_missing_fields(self, tmp_path: Path) -> None:
+        (tmp_path / "2026-06-01-old.md").write_text(
+            "---\ntype: video-learning\n---\n\n# old dossier, no fields\n", encoding="utf-8"
+        )
+        text = self._regenerate(tmp_path).read_text(encoding="utf-8")
+        assert "[[2026-06-01-old]]" in text
+
+    def test_index_excludes_itself_and_is_idempotent(self, tmp_path: Path) -> None:
+        self._write_dossier(tmp_path, "2026-07-01", "solo", "Solo Talk", "Chan")
+        first = self._regenerate(tmp_path).read_text(encoding="utf-8")
+        second = self._regenerate(tmp_path).read_text(encoding="utf-8")
+        assert first == second
+        assert "[[WATCH-DOSSIER-INDEX]]" not in first
+        assert "Video dossiers (1)" in first
+
+    def test_missing_lane_dir_returns_none(self, tmp_path: Path) -> None:
+        assert self._regenerate(tmp_path / "nope") is None
+
+    def test_index_failure_does_not_block_note_save(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import shared
+
+        monkeypatch.setattr(
+            shared,
+            "regenerate_lane_index",
+            lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        service = VideoLearningService(
+            data_dir=tmp_path / "data",
+            memory_dir=tmp_path / "vault",
+            workspace=tmp_path / "repo",
+        )
+        extraction = ExtractionResult(
+            metadata=VideoMetadata(
+                source="https://example.com/watch?v=xyz",
+                source_type="url",
+                video_id="xyz",
+                title="Fail Open Talk",
+                channel="Example Channel",
+                webpage_url="https://example.com/watch?v=xyz",
+            ),
+            segments=[],
+            transcript_source="creator captions",
+            artifact_dir=tmp_path / "artifact",
+        )
+        analysis = AnalysisResult(
+            "# Executive takeaway\nIndex failures never block the note.",
+            RuntimeResult(
+                text="", runtime_lane=RUNTIME_LANE_GENERIC, provider="openai-codex", model="gpt-test"
+            ),
+        )
+        note_path = service._save_note("job-fail-open", extraction, analysis)
+        assert note_path.exists()
+        assert "Index failures never block the note" in note_path.read_text(encoding="utf-8")

@@ -52,6 +52,19 @@ from entity_contradictions import (  # noqa: E402
 # Data types
 # ---------------------------------------------------------------------------
 
+# Known source-document extensions that can appear embedded in an entity name
+# (e.g. a heading that self-titles with its own filename, such as
+# "MASTER-AUDIT.md — The Homie Strategic Status"). Stripped from the END of the
+# name before slugging so the trailing "." isn't silently deleted by the
+# character-strip step in ExtractedEntity.slug and fused onto the preceding word
+# (AUDIT + md -> AUDITmd). Same bug class as the leading heading-number strip
+# (commit b15034a1), mirrored at the other anchor. Kept as an explicit allowlist
+# of this vault's actual ingest source types (.md notes, .txt raw, .pdf
+# statements) — NOT a generic \.\w+$ pattern, which would mangle entity names
+# that legitimately end in something extension-shaped.
+_KNOWN_SOURCE_EXTENSIONS_RE = re.compile(r"\.(?:md|txt|pdf)$", re.IGNORECASE)
+
+
 @dataclass
 class ExtractedEntity:
     """An entity/concept extracted from a source document."""
@@ -66,6 +79,7 @@ class ExtractedEntity:
     def slug(self) -> str:
         """UPPER-KEBAB-CASE filename slug."""
         s = re.sub(r"^[\d]+[\.\-\s]+", "", self.name.strip())
+        s = _KNOWN_SOURCE_EXTENSIONS_RE.sub("", s)
         s = re.sub(r"[^\w\s-]", "", s)
         s = re.sub(r"[\s_]+", "-", s)
         return s.upper()

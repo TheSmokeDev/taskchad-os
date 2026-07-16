@@ -59,6 +59,38 @@ class TestExtractedEntity:
         # No number prefix — unchanged
         assert ExtractedEntity(name="HERMES-AGENT").slug == "HERMES-AGENT"
 
+    def test_slug_strips_known_extension(self):
+        # The exact bug from issue #119 — a literal filename embedded in an
+        # entity name must not fuse its extension onto the preceding word
+        # (MASTER-AUDIT.md was producing MASTER-AUDITMD-...).
+        assert ExtractedEntity(name="MASTER-AUDIT.md").slug == "MASTER-AUDIT"
+        assert ExtractedEntity(name="master-audit.md").slug == "MASTER-AUDIT"
+        assert ExtractedEntity(name="Some Notes.txt").slug == "SOME-NOTES"
+        assert ExtractedEntity(name="Bank Statement.pdf").slug == "BANK-STATEMENT"
+        # Case-insensitive extension match.
+        assert ExtractedEntity(name="Readme.MD").slug == "README"
+
+    def test_slug_strips_only_last_extension_on_multidot_names(self):
+        # Only the recognized TRAILING extension is stripped. A naive
+        # split-on-first-dot approach would incorrectly drop "backup" too;
+        # here the inner "." is handled by the existing character-strip step,
+        # so "backup" survives (fused, not lost).
+        assert ExtractedEntity(name="foo.backup.md").slug == "FOOBACKUP"
+
+    def test_slug_extensionless_name_unchanged(self):
+        # Names without a recognized trailing extension are untouched by the
+        # new strip — including ones ending in non-source-type tokens.
+        assert ExtractedEntity(name="HERMES-AGENT").slug == "HERMES-AGENT"
+        assert ExtractedEntity(name="Claude's Agent SDK (v2)").slug == "CLAUDES-AGENT-SDK-V2"
+
+    def test_slug_strips_heading_numbers_still_passes(self):
+        # Regression: the new trailing-extension strip only matches at the END
+        # of the string, so the leading heading-number strip (commit b15034a1)
+        # is unaffected — disjoint anchors, no shared state.
+        assert ExtractedEntity(name="1. System Architecture").slug == "SYSTEM-ARCHITECTURE"
+        assert ExtractedEntity(name="10. Advanced Config").slug == "ADVANCED-CONFIG"
+        assert ExtractedEntity(name="1- Dash Separated").slug == "DASH-SEPARATED"
+
 
 # ---------------------------------------------------------------------------
 # Heuristic extraction

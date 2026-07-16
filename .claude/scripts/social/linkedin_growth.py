@@ -161,7 +161,15 @@ def build_growth_packet(plan: dict) -> str:
         "Founder-operator authority, technical depth, human and premium, generous "
         "negative space, no baked text, no logos, no invented claims."
     )
-    return f"""# LinkedIn growth packet - {plan['date']}
+    return f"""---
+type: linkedin-growth-packet
+date: {plan['date']}
+pillar: "{plan['pillar_name']}"
+lane: "{plan['lane']}"
+tags: [social, linkedin, draft]
+---
+
+# LinkedIn growth packet - {plan['date']}
 
 ## Authority pillar
 
@@ -223,7 +231,13 @@ def run_growth_packet(
     toast: bool = False,
 ) -> str:
     import config
-    from shared import append_to_daily_log, file_lock, load_state, save_state
+    from shared import (
+        append_to_daily_log,
+        file_lock,
+        load_state,
+        regenerate_lane_index,
+        save_state,
+    )
 
     state_path = config.STATE_DIR / "linkedin-growth-state.json"
     note_path = target_note or config.MEMORY_DIR / "docs" / "LINKEDIN-NETWORK-TARGETS.md"
@@ -247,6 +261,34 @@ def run_growth_packet(
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{today.isoformat()}.md"
         output_path.write_text(packet, encoding="utf-8")
+
+        # Lane index — the inbound edge that keeps daily packets out of the
+        # orphan pile. Fail-open: an index failure never blocks the packet run.
+        try:
+            regenerate_lane_index(
+                lane_dir=output_dir,
+                index_name="LINKEDIN-GROWTH-INDEX.md",
+                title="LinkedIn Growth — Lane Index",
+                description=(
+                    "Auto-generated index of draft-only LinkedIn growth packets; "
+                    "one row per day."
+                ),
+                sections=[
+                    {
+                        "heading": "Daily packets",
+                        "glob": "[0-9]*.md",
+                        "columns": [
+                            ("Pillar", "pillar"),
+                            ("Lane", "lane"),
+                        ],
+                    }
+                ],
+            )
+        except Exception as exc:
+            print(
+                f"[{config.now_local().isoformat()}] Lane index regen failed "
+                f"for LINKEDIN-GROWTH-INDEX.md: {exc}"
+            )
 
         state.update(
             {

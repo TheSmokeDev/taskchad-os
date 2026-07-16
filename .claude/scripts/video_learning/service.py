@@ -238,6 +238,38 @@ class VideoLearningService:
         yaml_lines = ["---"] + [f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in frontmatter.items()] + ["---", ""]
         body = "\n".join(yaml_lines) + analysis.markdown.strip() + "\n"
         note_path.write_text(body, encoding="utf-8")
+
+        # Lane index — the inbound edge that keeps /watch dossiers out of the
+        # orphan pile. Fail-open: an index failure never blocks the note write.
+        try:
+            from shared import regenerate_lane_index
+
+            regenerate_lane_index(
+                lane_dir=note_dir,
+                index_name="WATCH-DOSSIER-INDEX.md",
+                title="Watch Dossiers — Lane Index",
+                description=(
+                    "Auto-generated index of /watch video-learning dossiers; "
+                    "one row per ingested video."
+                ),
+                sections=[
+                    {
+                        "heading": "Video dossiers",
+                        "glob": "[0-9]*.md",
+                        "columns": [
+                            ("Title", "title"),
+                            ("Channel", "channel"),
+                            ("Source", "source_type"),
+                        ],
+                    }
+                ],
+            )
+        except Exception as exc:
+            print(
+                f"[{datetime.now(UTC).isoformat()}] Lane index regen failed "
+                f"for WATCH-DOSSIER-INDEX.md: {exc}"
+            )
+
         return note_path
 
     async def _index_note(self, note_path: Path) -> None:

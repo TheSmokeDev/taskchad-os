@@ -10,13 +10,71 @@ Factory function `get_memory_db()` picks the backend based on DATABASE_URL.
 
 from __future__ import annotations
 
+import random
 import sqlite3
+import time
+from functools import wraps
 from typing import Any, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
 from config import DATABASE_PATH, DATABASE_URL, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL
+
+# Bounded retry for SQLite "database is locked" — busy_timeout (set in
+# SQLiteMemoryDB._get_conn) covers ordinary lock waits, but cannot cover the
+# case where a write is rejected INSTANTLY because it tried to upgrade a stale
+# read snapshot (busy_timeout is never consulted for that failure class — see
+# https://berthub.eu/articles/posts/a-brief-post-on-sqlite3-database-locked-despite-timeout/).
+# A bounded Python-level retry gives the operation a fresh attempt (fresh
+# transaction/snapshot) instead of a single shot at the existing 30s wait.
+_LOCK_RETRY_MAX_ATTEMPTS = 5
+_LOCK_RETRY_BASE_DELAY_S = 0.05
+_LOCK_RETRY_MAX_DELAY_S = 2.0
+
+
+def _retry_on_locked(fn):
+    """Retry a SQLiteMemoryDB method with Full-Jitter backoff when SQLite
+    raises 'database is locked'. Any other OperationalError, or exhaustion of
+    all attempts, re-raises unchanged so existing fail-open handling upstream
+    (memory_index.py callers) still sees a real failure.
+
+    Full Jitter (not plain exponential backoff) avoids synchronized retry
+    collisions across multiple concurrent reindex processes. The rollback
+    before retry is required: a failed write leaves the connection's implicit
+    transaction in a state that would otherwise re-hit the SAME stale snapshot
+    on a naive same-transaction retry.
+
+    Invariant: only decorate leaf methods that don't call other decorated
+    methods. A decorated orchestrator calling decorated leaf methods lets a
+    leaf's exhausted-budget re-raise be mistaken for a fresh lock by the
+    orchestrator's own decorator, multiplying the bounded budget instead of
+    sharing it (see SQLiteMemoryDB.init_schema, deliberately undecorated).
+    """
+
+    @wraps(fn)
+    def _wrapped(self, *args: Any, **kwargs: Any) -> Any:
+        for attempt in range(_LOCK_RETRY_MAX_ATTEMPTS):
+            try:
+                return fn(self, *args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if (
+                    "database is locked" not in str(exc)
+                    or attempt == _LOCK_RETRY_MAX_ATTEMPTS - 1
+                ):
+                    raise
+                if self._conn is not None:
+                    try:
+                        self._conn.rollback()
+                    except sqlite3.OperationalError:
+                        pass
+                delay = random.uniform(
+                    0,
+                    min(_LOCK_RETRY_MAX_DELAY_S, _LOCK_RETRY_BASE_DELAY_S * (2**attempt)),
+                )
+                time.sleep(delay)
+
+    return _wrapped
 
 
 class MemoryDB(Protocol):
@@ -79,6 +137,7 @@ class SQLiteMemoryDB:
         self._db_path = Path(db_path) if db_path else DATABASE_PATH
         self._conn: sqlite3.Connection | None = None
 
+    @_retry_on_locked
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             import sqlite_vec
@@ -87,23 +146,34 @@ class SQLiteMemoryDB:
             # 30s lock wait — plenty for concurrent heartbeat/chat bot/recall
             # readers during a reindex. Default would be 5s which is not enough
             # when another process holds a rollback-journal exclusive lock.
-            self._conn = sqlite3.connect(str(self._db_path), timeout=30.0)
-            self._conn.enable_load_extension(True)
-            sqlite_vec.load(self._conn)
-            self._conn.enable_load_extension(False)
-            self._conn.row_factory = sqlite3.Row
-            # WAL mode allows concurrent readers + single writer (no mutual
-            # exclusion between them). journal_mode persists in the DB header
-            # once set — safe to re-assert on every connection. synchronous
-            # NORMAL is the sweet spot with WAL (no durability regression vs
-            # rollback journal, ~2-3x faster writes).
-            self._conn.execute("PRAGMA journal_mode = WAL")
-            self._conn.execute("PRAGMA synchronous = NORMAL")
-            self._conn.execute("PRAGMA busy_timeout = 30000")
+            conn = sqlite3.connect(str(self._db_path), timeout=30.0)
+            try:
+                conn.enable_load_extension(True)
+                sqlite_vec.load(conn)
+                conn.enable_load_extension(False)
+                conn.row_factory = sqlite3.Row
+                # WAL mode allows concurrent readers + single writer (no mutual
+                # exclusion between them). journal_mode persists in the DB header
+                # once set — safe to re-assert on every connection. synchronous
+                # NORMAL is the sweet spot with WAL (no durability regression vs
+                # rollback journal, ~2-3x faster writes).
+                conn.execute("PRAGMA journal_mode = WAL")
+                conn.execute("PRAGMA synchronous = NORMAL")
+                conn.execute("PRAGMA busy_timeout = 30000")
+            except Exception:
+                # Setup failed partway through (e.g. a PRAGMA hit a transient
+                # lock) -- close the connection we just opened instead of
+                # leaking it.
+                conn.close()
+                raise
+            # Assign only after full setup succeeds. If a PRAGMA fails mid-setup
+            # with a lock error, self._conn stays None so a retry reconnects
+            # cleanly instead of caching a half-configured connection.
+            self._conn = conn
         return self._conn
 
-    def init_schema(self) -> None:
-        conn = self._get_conn()
+    @_retry_on_locked
+    def _create_tables_raw(self, conn: sqlite3.Connection) -> None:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
@@ -157,20 +227,40 @@ class SQLiteMemoryDB:
                 embedding float[{EMBEDDING_DIMENSIONS}]
             )
         """)
+
+    def init_schema(self) -> None:
+        # Deliberately NOT @_retry_on_locked: every call this method makes
+        # (_get_conn, _create_tables_raw, upsert_meta) already retries itself
+        # on 'database is locked'. Decorating the orchestrator too would let
+        # an inner call's exhausted-budget re-raise be caught by this method's
+        # own decorator and mistaken for a fresh lock, restarting the whole
+        # method (and every already-succeeded step in it) from scratch --
+        # multiplying the advertised 5-attempt budget instead of bounding it.
+        conn = self._get_conn()
+        self._create_tables_raw(conn)
         self.upsert_meta("schema_version", "1")
         self.upsert_meta("embedding_model", EMBEDDING_MODEL)
         self.upsert_meta("embedding_dimensions", str(EMBEDDING_DIMENSIONS))
-        conn.commit()
 
     def close(self) -> None:
         if self._conn:
             self._conn.close()
             self._conn = None
 
+    @_retry_on_locked
     def upsert_meta(self, key: str, value: str) -> None:
-        self._get_conn().execute(
+        # Commits its own write (unlike most other mutators in this file,
+        # which defer to the caller's commit) so a retry triggered by a LATER
+        # sibling call in init_schema() can only ever roll back this call's
+        # own uncommitted insert -- never an earlier upsert_meta() call that
+        # already returned successfully. Without this, the decorator's
+        # connection-wide rollback-before-retry silently wipes prior sibling
+        # writes sharing the same open transaction (#122 follow-up).
+        conn = self._get_conn()
+        conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, value)
         )
+        conn.commit()
 
     def get_meta(self, key: str) -> str | None:
         row = self._get_conn().execute(
