@@ -242,76 +242,86 @@ def run_growth_packet(
     state_path = config.STATE_DIR / "linkedin-growth-state.json"
     note_path = target_note or config.MEMORY_DIR / "docs" / "LINKEDIN-NETWORK-TARGETS.md"
 
+    # Lock only the run_count read (and the increment below) — packet build,
+    # file write, and index regen don't touch the state file, and holding the
+    # 5s-timeout lock across them makes an overlapping manual+scheduled run
+    # fail with TimeoutError instead of proceeding.
     with file_lock(state_path, timeout=5.0):
         state = load_state(state_path)
         run_count = int(state.get("run_count", 0))
-        today = config.now_local().date()
-        plan = build_growth_plan(
-            run_count=run_count,
-            targets=load_network_targets(note_path),
-            today=today,
+
+    today = config.now_local().date()
+    plan = build_growth_plan(
+        run_count=run_count,
+        targets=load_network_targets(note_path),
+        today=today,
+    )
+    packet = build_growth_packet(plan)
+
+    if dry_run:
+        print(packet)
+        return packet
+
+    output_dir = config.DRAFTS_DIR / "linkedin-growth"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{today.isoformat()}.md"
+    output_path.write_text(packet, encoding="utf-8")
+
+    # Lane index — the inbound edge that keeps daily packets out of the
+    # orphan pile. Fail-open: an index failure never blocks the packet run.
+    try:
+        regenerate_lane_index(
+            lane_dir=output_dir,
+            index_name="LINKEDIN-GROWTH-INDEX.md",
+            title="LinkedIn Growth — Lane Index",
+            description=(
+                "Auto-generated index of draft-only LinkedIn growth packets; "
+                "one row per day."
+            ),
+            sections=[
+                {
+                    "heading": "Daily packets",
+                    "glob": "[0-9]*.md",
+                    "columns": [
+                        ("Pillar", "pillar"),
+                        ("Lane", "lane"),
+                    ],
+                }
+            ],
         )
-        packet = build_growth_packet(plan)
+    except Exception as exc:
+        print(
+            f"[{config.now_local().isoformat()}] Lane index regen failed "
+            f"for LINKEDIN-GROWTH-INDEX.md: {exc}"
+        )
 
-        if dry_run:
-            print(packet)
-            return packet
-
-        output_dir = config.DRAFTS_DIR / "linkedin-growth"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{today.isoformat()}.md"
-        output_path.write_text(packet, encoding="utf-8")
-
-        # Lane index — the inbound edge that keeps daily packets out of the
-        # orphan pile. Fail-open: an index failure never blocks the packet run.
-        try:
-            regenerate_lane_index(
-                lane_dir=output_dir,
-                index_name="LINKEDIN-GROWTH-INDEX.md",
-                title="LinkedIn Growth — Lane Index",
-                description=(
-                    "Auto-generated index of draft-only LinkedIn growth packets; "
-                    "one row per day."
-                ),
-                sections=[
-                    {
-                        "heading": "Daily packets",
-                        "glob": "[0-9]*.md",
-                        "columns": [
-                            ("Pillar", "pillar"),
-                            ("Lane", "lane"),
-                        ],
-                    }
-                ],
-            )
-        except Exception as exc:
-            print(
-                f"[{config.now_local().isoformat()}] Lane index regen failed "
-                f"for LINKEDIN-GROWTH-INDEX.md: {exc}"
-            )
-
+    # Second short lock window: re-read before increment so an overlapping
+    # run's bump is never lost (read-modify-write stays atomic per window).
+    with file_lock(state_path, timeout=5.0):
+        state = load_state(state_path)
         state.update(
             {
-                "run_count": run_count + 1,
+                "run_count": int(state.get("run_count", 0)) + 1,
                 "last_run": config.now_local().isoformat(),
                 "last_pillar": plan["pillar_key"],
                 "last_lane": plan["lane"],
             }
         )
         save_state(state, state_path)
-        if toast:
-            from notifications import send_toast_notification
 
-            send_toast_notification(
-                f"LinkedIn growth packet: {plan['pillar_name']}",
-                f"Comment targets, connection peers, and visual brief are ready at {output_path.name}.",
-                caller="linkedin_growth",
-            )
-        append_to_daily_log(
-            f"LinkedIn growth packet queued ({plan['pillar_name']} / {plan['lane']}) -> {output_path}",
-            "LinkedIn Growth",
+    if toast:
+        from notifications import send_toast_notification
+
+        send_toast_notification(
+            f"LinkedIn growth packet: {plan['pillar_name']}",
+            f"Comment targets, connection peers, and visual brief are ready at {output_path.name}.",
+            caller="linkedin_growth",
         )
-        return packet
+    append_to_daily_log(
+        f"LinkedIn growth packet queued ({plan['pillar_name']} / {plan['lane']}) -> {output_path}",
+        "LinkedIn Growth",
+    )
+    return packet
 
 
 def main() -> None:

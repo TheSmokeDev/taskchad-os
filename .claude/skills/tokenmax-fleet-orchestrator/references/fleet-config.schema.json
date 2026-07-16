@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/tokenmax-fleet-v1.json",
+  "title": "TokenMax fleet configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fleet", "stages", "sites"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "fleet": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "state_dir", "lock_file"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "state_dir": {"type": "string", "minLength": 1},
+        "lock_file": {"type": "string", "minLength": 1}
+      }
+    },
+    "variables": {
+      "type": "object",
+      "additionalProperties": {"type": ["string", "number", "boolean"]}
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": {"type": ["string", "number", "boolean"]}
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["name", "command"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "command": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "cwd": {"type": "string"},
+          "failure_policy": {
+            "enum": ["block_site", "freeze_fleet", "defer_site"]
+          },
+          "retries": {"type": "integer", "minimum": 0},
+          "retry_delay_seconds": {"type": "integer", "minimum": 0},
+          "timeout_seconds": {"type": "integer", "minimum": 1},
+          "env": {"type": "object"}
+        }
+      }
+    },
+    "sites": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "enabled": {"type": "boolean"},
+          "initial_status": {"enum": ["queued", "complete", "disabled"]},
+          "priority": {"type": "integer"},
+          "metadata": {"type": "object"},
+          "variables": {"type": "object"},
+          "env": {"type": "object"},
+          "skip_stages": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string"}
+          }
+        }
+      }
+    }
+  }
+}

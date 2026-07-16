@@ -31,6 +31,14 @@ from config import DATABASE_PATH, DATABASE_URL, EMBEDDING_DIMENSIONS, EMBEDDING_
 _LOCK_RETRY_MAX_ATTEMPTS = 5
 _LOCK_RETRY_BASE_DELAY_S = 0.05
 _LOCK_RETRY_MAX_DELAY_S = 2.0
+# Total wall-clock budget per decorated call. Without it, 5 attempts × the
+# 30s connect timeout could block ~150s — and keyword-recall runs these sync
+# calls on the chat engine's event loop, so an unbounded stall is the same
+# freeze class the Browser Homie runner exists to prevent. The deadline also
+# bounds nested decorated calls (an outer call's clock includes the inner
+# call's attempts), so the leaf-only invariant degrades safely instead of
+# multiplying budgets.
+_LOCK_RETRY_DEADLINE_S = 20.0
 
 
 def _retry_on_locked(fn):
@@ -54,6 +62,7 @@ def _retry_on_locked(fn):
 
     @wraps(fn)
     def _wrapped(self, *args: Any, **kwargs: Any) -> Any:
+        start = time.monotonic()
         for attempt in range(_LOCK_RETRY_MAX_ATTEMPTS):
             try:
                 return fn(self, *args, **kwargs)
@@ -61,6 +70,7 @@ def _retry_on_locked(fn):
                 if (
                     "database is locked" not in str(exc)
                     or attempt == _LOCK_RETRY_MAX_ATTEMPTS - 1
+                    or time.monotonic() - start >= _LOCK_RETRY_DEADLINE_S
                 ):
                     raise
                 if self._conn is not None:

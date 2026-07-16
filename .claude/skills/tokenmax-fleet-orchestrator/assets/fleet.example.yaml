@@ -1,0 +1,30 @@
+schema_version: 1
+
+fleet:
+  id: example-fleet
+  state_dir: /srv/tokenmax/fleet-orchestrator/state
+  lock_file: /srv/tokenmax/fleet-orchestrator/run.lock
+
+variables:
+  python: /usr/bin/python3
+  driver: /srv/example-site/scripts/site_job.py
+
+stages:
+  - name: audit
+    command: ["{python}", "{driver}", "audit", "--site", "{site_id}"]
+    failure_policy: block_site
+    timeout_seconds: 900
+  - name: generate
+    command: ["{python}", "{driver}", "generate", "--site", "{site_id}"]
+    failure_policy: block_site
+    timeout_seconds: 43200
+  - name: deploy
+    command: ["{python}", "{driver}", "deploy", "--site", "{site_id}"]
+    failure_policy: freeze_fleet
+    timeout_seconds: 3600
+
+sites:
+  - id: example-site
+    priority: 10
+    metadata:
+      domain: example.com

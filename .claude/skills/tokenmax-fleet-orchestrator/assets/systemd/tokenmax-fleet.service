@@ -1,0 +1,16 @@
+[Unit]
+Description=TokenMax sequential fleet runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/tokenmax/fleet-orchestrator
+EnvironmentFile=-/etc/tokenmax-fleet.env
+ExecStart=/usr/bin/python3 /srv/tokenmax/fleet-orchestrator/bin/fleet_controller.py --config /srv/tokenmax/fleet-orchestrator/config/fleet.yaml run-next --max-sites 1
+TimeoutStartSec=57600
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+MemoryHigh=24G
+MemoryMax=28G

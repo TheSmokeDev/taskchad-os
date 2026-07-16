@@ -1,0 +1,11 @@
+[Unit]
+Description=Run one TokenMax fleet site nightly
+
+[Timer]
+OnCalendar=*-*-* 21:00:00 America/Los_Angeles
+Persistent=true
+RandomizedDelaySec=300
+Unit=tokenmax-fleet.service
+
+[Install]
+WantedBy=timers.target

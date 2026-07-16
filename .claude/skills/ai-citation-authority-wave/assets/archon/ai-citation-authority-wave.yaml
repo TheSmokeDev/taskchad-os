@@ -1,0 +1,173 @@
+name: ai-citation-authority-wave
+description: |
+  Evidence-first, site-agnostic SEO/GEO/AIO authority-page workflow.
+  Scans a production-ready website contract, validates GSC/OpenSEO/live-SERP
+  receipts, creates one to three original English or Spanish pages with fresh
+  context per page, proves build/render/schema/canonical/internal-link/sitemap
+  integration, and emits a deploy handoff. It never deploys production,
+  requests indexing, or automates a Reddit account.
+provider: codex
+modelReasoningEffort: high
+webSearchMode: live
+interactive: true
+worktree:
+  enabled: true
+
+nodes:
+  - id: parse-controls
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py parse-input --arguments "$ARGUMENTS"
+    timeout: 30000
+
+  - id: scan-site
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py scan
+    depends_on: [parse-controls]
+    timeout: 120000
+
+  - id: gate-profile
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py gate-profile
+    depends_on: [scan-site]
+    timeout: 30000
+
+  - id: prepare-evidence
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py prepare-evidence
+    depends_on: [gate-profile]
+    timeout: 30000
+
+  - id: research-evidence
+    command: citation-authority-research
+    depends_on: [prepare-evidence]
+    context: fresh
+    idle_timeout: 900000
+
+  - id: validate-evidence
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py validate-evidence
+    depends_on: [research-evidence]
+    timeout: 30000
+
+  - id: no-evidence-report
+    command: citation-authority-report
+    depends_on: [validate-evidence]
+    when: "$validate-evidence.output.status == 'no_evidence'"
+    context: fresh
+
+  - id: select-targets
+    command: citation-authority-select
+    depends_on: [validate-evidence]
+    when: "$validate-evidence.output.status == 'eligible'"
+    context: fresh
+    idle_timeout: 600000
+
+  - id: validate-plan
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py validate-plan
+    depends_on: [select-targets]
+    timeout: 30000
+
+  - id: approve-targets
+    approval:
+      message: |
+        Review .citation-authority/candidate-plan.json and
+        .citation-authority/plan-validation.json.
+
+        Approve only when every query has a real receipt, the exact-query title
+        and slug are correct, modes and language are intentional, fleet
+        ownership does not collide, sources are real, structures differ, and
+        the one-to-three-page wave is worth publishing.
+      capture_response: true
+    depends_on: [validate-plan]
+
+  - id: record-target-approval
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py record-approval --stage targets
+    depends_on: [approve-targets]
+    timeout: 30000
+
+  - id: prepare-page-queue
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py prepare-queue
+    depends_on: [record-target-approval]
+    timeout: 30000
+
+  - id: write-pages
+    loop:
+      prompt: |
+        Read .archon/commands/citation-authority-write.md and follow it exactly.
+        Process exactly one pending queue item. All facts and paths come from
+        the approved .citation-authority artifacts. Do not deploy or use git.
+      until: COMPLETE
+      until_bash: |
+        python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py queue-status
+      max_iterations: 3
+      fresh_context: true
+    depends_on: [prepare-page-queue]
+    idle_timeout: 1200000
+
+  - id: integrate-discovery
+    command: citation-authority-integrate
+    depends_on: [write-pages]
+    context: fresh
+    idle_timeout: 600000
+
+  - id: validate-pages
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py validate-pages
+    depends_on: [integrate-discovery]
+    timeout: 120000
+
+  - id: build-site
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py run-build
+    depends_on: [validate-pages]
+    timeout: 1800000
+
+  - id: validate-rendered-site
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py validate-rendered
+    depends_on: [build-site]
+    timeout: 600000
+
+  - id: aggregate-gates
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py aggregate
+    depends_on: [validate-rendered-site]
+    timeout: 30000
+
+  - id: approve-deploy-handoff
+    approval:
+      message: |
+        Review .citation-authority/validation-report.json plus the local rendered
+        pages. Approval creates a deploy handoff only. It does not deploy.
+
+        Confirm the build, HTTP 200, language, canonical, Article/WebPage and
+        BreadcrumbList schema, minimum main text, text/HTML ratio, outbound
+        links, service-hub inbound links, and sitemap route checks all passed.
+      capture_response: true
+    depends_on: [aggregate-gates]
+
+  - id: record-handoff-approval
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py record-approval --stage deploy_handoff
+    depends_on: [approve-deploy-handoff]
+    timeout: 30000
+
+  - id: create-deploy-handoff
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py create-handoff
+    depends_on: [record-handoff-approval]
+    timeout: 30000
+
+  - id: create-measurement-queue
+    bash: |
+      python .claude/skills/ai-citation-authority-wave/scripts/citation_authority.py create-measurement
+    depends_on: [create-deploy-handoff]
+    timeout: 30000
+
+  - id: final-report
+    command: citation-authority-report
+    depends_on: [create-measurement-queue]
+    context: fresh

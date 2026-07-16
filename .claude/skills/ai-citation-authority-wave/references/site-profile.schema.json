@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thehomie.ai/schemas/ai-citation-authority/site-profile.schema.json",
+  "title": "AI Citation Authority Site Profile",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "canonical_host",
+    "locale",
+    "content_sink",
+    "route_family",
+    "build",
+    "render",
+    "sitemap",
+    "internal_links",
+    "brand",
+    "regulated",
+    "quality",
+    "confidence",
+    "open_questions"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "site_id": { "type": "string", "minLength": 1 },
+    "canonical_host": {
+      "type": "string",
+      "pattern": "^https://[^/]+$"
+    },
+    "locale": { "enum": ["en", "es"] },
+    "content_sink": {
+      "type": "object",
+      "required": ["path", "format"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "format": { "enum": ["markdown", "mdx"] }
+      },
+      "additionalProperties": true
+    },
+    "route_family": {
+      "type": "object",
+      "required": ["pattern"],
+      "properties": {
+        "pattern": { "type": "string", "pattern": "^/.*\\{slug\\}" }
+      },
+      "additionalProperties": true
+    },
+    "build": { "$ref": "#/$defs/commandContract" },
+    "render": {
+      "type": "object",
+      "required": ["base_url"],
+      "properties": {
+        "base_url": { "type": "string", "pattern": "^https?://" },
+        "start_command": { "type": ["string", "null"] },
+        "static_dir": { "type": ["string", "null"] },
+        "cwd": { "type": "string" },
+        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 1800 }
+      },
+      "anyOf": [
+        { "required": ["start_command"], "properties": { "start_command": { "type": "string", "minLength": 1 } } },
+        { "required": ["static_dir"], "properties": { "static_dir": { "type": "string", "minLength": 1 } } }
+      ],
+      "additionalProperties": true
+    },
+    "sitemap": {
+      "type": "object",
+      "anyOf": [
+        { "required": ["url"], "properties": { "url": { "type": "string", "format": "uri" } } },
+        { "required": ["path"], "properties": { "path": { "type": "string", "minLength": 1 } } }
+      ],
+      "additionalProperties": true
+    },
+    "internal_links": {
+      "type": "object",
+      "required": ["service_hubs"],
+      "properties": {
+        "service_hubs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^/" }
+        },
+        "contextual": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^/" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "brand": {
+      "type": "object",
+      "required": ["name", "role"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "voice_notes": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "regulated": {
+      "type": "object",
+      "required": ["is_regulated"],
+      "properties": {
+        "is_regulated": { "type": "boolean" },
+        "vertical": { "type": ["string", "null"] },
+        "claims_policy": { "type": ["string", "null"] },
+        "authoritative_source_domains": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": true
+    },
+    "quality": {
+      "type": "object",
+      "required": ["min_main_words", "min_text_html_ratio", "max_pairwise_overlap"],
+      "properties": {
+        "min_main_words": { "type": "integer", "minimum": 500 },
+        "min_text_html_ratio": { "type": "number", "minimum": 0.05, "maximum": 1 },
+        "max_pairwise_overlap": { "type": "number", "minimum": 0, "maximum": 0.5 }
+      },
+      "additionalProperties": true
+    },
+    "deploy": {
+      "type": "object",
+      "properties": {
+        "runbook": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["field", "question", "blocks_writes"],
+        "properties": {
+          "field": { "type": "string" },
+          "question": { "type": "string" },
+          "blocks_writes": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "commandContract": {
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "cwd": { "type": "string" },
+        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

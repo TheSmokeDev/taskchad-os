@@ -144,9 +144,9 @@ the next scheduled run.
 The live Telegram and Discord bots require a restart to load the new code:
 
 ```powershell
-# From the repo root
+# From the repo root (run_chat.sh is the only launcher; Git Bash on Windows)
 cd .claude\chat
-.\run_chat.bat
+bash run_chat.sh
 ```
 
 PDF extraction requires PyMuPDF (`fitz`). DOCX extraction uses only the

@@ -190,7 +190,7 @@ guild. DMs are always handled. The user allowlist applies before any of these.
 | Router, engine, task status | `.claude/chat/router.py`, `.claude/chat/engine.py`, `.claude/chat/background_tasks.py` |
 | Transcript persistence | `.claude/chat/session.py` |
 | Continuity state | `.claude/chat/cognition/continuity.py` |
-| Windows launcher | `.claude/chat/run_chat.bat` |
+| Launcher (all platforms, Git Bash on Windows) | `.claude/chat/run_chat.sh` |
 | Tests | `.claude/scripts/tests/test_adapter_telegram.py`, `.claude/scripts/tests/test_adapter_discord.py`, `.claude/scripts/tests/test_attachment_context.py`, `.claude/scripts/tests/test_chat_runtime_engine.py`, `.claude/scripts/tests/test_chat_router_timeout.py`, `.claude/scripts/tests/test_cognition_continuity.py` |
 | Public reference | `docs/adapters.md` |
 
@@ -231,8 +231,12 @@ guild. DMs are always handled. The user allowlist applies before any of these.
 
 ```powershell
 cd .claude\chat
-.\run_chat.bat
+bash run_chat.sh
 ```
+
+`run_chat.sh` is the only launcher (the old `run_chat.bat` was retired
+2026-07 — it hardcoded `--telegram` and silently dropped Discord/relay).
+Run it under Git Bash on Windows.
 
 Check live health through the configured profile port:
 

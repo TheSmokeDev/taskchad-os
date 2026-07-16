@@ -13,8 +13,9 @@ Covers:
     * Persisted assignment is sticky across calls.
     * ``_minimal_yaml_read/_write`` round-trip preserves unknown top-level
       keys.
-    * AST scan over ``personas/services.py``, ``shared.py``, ``service.py``,
-      and ``orchestration/api.py`` for forbidden ``pid_file=BOT_PID_FILE``
+    * AST scan over ``personas/services.py``, ``shared.py``,
+      ``bot_lifecycle_switch.py``, and ``orchestration/api.py`` for
+      forbidden ``pid_file=BOT_PID_FILE``
       / ``port=config.HEALTH_CHECK_PORT`` shapes (Rule 1 enforcement,
       M3 expanded scope).
     * Subprocess boot-order independence — explicit ``run_api.py`` startup
@@ -326,16 +327,17 @@ def _collect_ast_violations(pyfile: Path) -> list[str]:
 def test_no_default_arg_config_binding() -> None:
     """Rule 1 enforcement on the M3-expanded scope.
 
-    Walks ``personas/services.py``, ``shared.py``, ``service.py``,
+    Walks ``personas/services.py``, ``shared.py``, ``bot_lifecycle_switch.py``,
     ``orchestration/api.py`` — any ``def fn(arg=BOT_PID_FILE)`` /
     ``def fn(port=config.X)`` is a Rule 1 violation. The fix is the
-    None-sentinel pattern.
+    None-sentinel pattern. (``service.py`` was retired 2026-07 — archived to
+    ``.claude/_archive/lifecycle-2026-07/``.)
     """
     scripts_dir = Path(__file__).resolve().parent.parent
     targets = (
         scripts_dir / "personas" / "services.py",
         scripts_dir / "shared.py",
-        scripts_dir / "service.py",
+        scripts_dir / "bot_lifecycle_switch.py",
         scripts_dir / "orchestration" / "api.py",
     )
     violations: list[str] = []

@@ -140,8 +140,9 @@ def get_bot_pid_path() -> Path:
     R3 NB1 fix: Default profile returns ``<install>/.claude/data/state/bot.pid`` —
     the AUTHORITATIVE ``shared.py:329`` ``BOT_PID_FILE = STATE_DIR / "bot.pid"``
     path per PRD §8.2 line 923 / §8.5 line 994 ("the authoritative one per
-    ``shared.py:329``"). Bash scripts (``run_chat.sh``, ``run_chat.bat``,
-    ``bot-status.sh``) consolidate onto this path after the §8.5 refactor.
+    ``shared.py:329``"). Launcher scripts (``run_chat.sh``, ``bot-status.sh``;
+    ``run_chat.bat`` retired 2026-07) consolidate onto this path after the
+    §8.5 refactor.
 
     The historical ``<install>/.claude/chat/bot.pid`` location is preserved
     as a WRITE-ONLY compatibility shadow at ``_compat_shadow_pid_path()`` for

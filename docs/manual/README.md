@@ -67,6 +67,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Desktop Dev Launcher | Windows-first dev launcher | [desktop-dev-launcher](features/desktop-dev-launcher.md) | `thehomie desktop` |
 | Runtime Status And Model Control | Active baseline | [runtime-status-model-control](features/runtime-status-model-control.md) | `/provider`, `/model`, status/doctor |
 | Bot Self-Restart | Active baseline, live-proven | [bot-self-restart](features/bot-self-restart.md) | `/restart` |
+| Bot Lifecycle (One Switch, One Enforcer) | Active, Phase A (#117) — desired-state flag + watchdog gate + event-staleness | [bot-lifecycle](features/bot-lifecycle.md) | `thehomie on\|off`, `thehomie status` desired line, dashboard activate/deactivate (default) |
 | Bot Autostart | Active, Windows V1 — opt-in start-at-logon toggle | [bot-autostart](features/bot-autostart.md) | `/autostart`, `thehomie autostart`, Settings toggle, `GET/POST /api/autostart` |
 | GitHub Signal | Active, weekly — starred-backlog resurfacing matched to active work, plus trending | [github-signal](features/github-signal.md) | `/stars`, `SecondBrain-GitHubSignal` task, `github_signal.engine` CLI |
 | Live Lane Safety Contract | Active baseline | [live-lane-safety](features/live-lane-safety.md) | `live-safety proof`, status/doctor, orchestration live APIs |
@@ -111,6 +112,8 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Skill-From-Experience Loop | Shipped, default-denied, operator-gated | [skill-from-experience-loop](features/skill-from-experience-loop.md) | `/skills` (review/promote/reject) |
 | Social Cadence Draft Delivery | Shipped, default-denied, operator-gated per tap | [social-cadence-draft-delivery](features/social-cadence-draft-delivery.md) | Telegram draft cards (Approve/Edit/Reject), `/social` |
 | Social Integrations (Meta Graph + Postiz + Social Tab) | Shipped — FB/IG direct via Meta Graph, Postiz for the rest | [social-postiz-integration](features/social-postiz-integration.md) | dashboard `/social` tab, `social/channels.yaml`, `social/postiz_canary.py` |
+| TokenMax SEO Authority Stack | Public-safe integrated guide for site discovery, fleet sequencing, authority waves, deployment handoffs, indexing, and measurement | [tokenmax-seo-authority-stack](features/tokenmax-seo-authority-stack.md) | `tokenmax-site-factory`, `tokenmax-fleet-orchestrator`, `ai-citation-authority-wave` |
+| AI Citation Authority Wave | Implemented, local-canary proven — bounded post-factory authority pages with deploy handoff only | [ai-citation-authority-wave](features/ai-citation-authority-wave.md) | `archon workflow run ai-citation-authority-wave` |
 | Intent-PRD and Clutch Review | Shipped (#78), merged | [intent-prd-and-clutch](features/intent-prd-and-clutch.md) | `create-prd`, `archon workflow run archon-clutch` |
 | Context-Economy DX | Shipped (#66), merged | [context-economy-dx](features/context-economy-dx.md) | `/prime-*`, `brownfield-day-1`, `vertical-slice-audit` |
 | Repositories System | Shipped (#63), merged | [repositories-system](features/repositories-system.md) | `thehomie repositories status\|validate` |

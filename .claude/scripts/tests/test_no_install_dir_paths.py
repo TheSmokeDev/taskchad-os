@@ -87,12 +87,12 @@ _PRODUCTION_ROOTS: tuple[Path, ...] = (
 #     - templates      -> no production templates dir exists today; left
 #                         in the doc string for future contributors.
 #
-# IMPORTANT: ``service.py`` is NOT in this whitelist. Per post-build F2
-# review (PRP-7a §"Out-of-Scope" only defers the SPECIFIC ``STOP_FILE``
-# pattern, not the whole file), an entire-file whitelist is too broad —
-# it would let a NEW hardcoded ``.env``, ``data``, or ``state`` path slip
-# in and pass the gate silently. Instead, ``service.py`` is scanned and
-# its violations are matched against ``_DEFERRED_VIOLATIONS`` below.
+# IMPORTANT: whole-file whitelists are too broad. Per post-build F2 review
+# (PRP-7a §"Out-of-Scope" only defers SPECIFIC patterns, never whole files),
+# an entire-file whitelist would let a NEW hardcoded ``.env``, ``data``, or
+# ``state`` path slip in and pass the gate silently. Historical case:
+# ``service.py`` (retired 2026-07, archived) was scanned with its violations
+# matched against ``_DEFERRED_VIOLATIONS`` below rather than whitelisted.
 _WHITELIST_FILES: frozenset[str] = frozenset({
     "config.py",
 })

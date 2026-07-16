@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thehomie.ai/schemas/ai-citation-authority/evidence-packet.schema.json",
+  "title": "AI Citation Authority Evidence Packet",
+  "type": "object",
+  "required": ["schema_version", "status"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "status": { "enum": ["ready", "no_evidence"] },
+    "reason": { "type": "string" },
+    "receipts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/receipt" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "ready" } } },
+      "then": {
+        "required": ["receipts"],
+        "properties": { "receipts": { "minItems": 1 } }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "no_evidence" } } },
+      "then": { "required": ["reason"] }
+    }
+  ],
+  "$defs": {
+    "receipt": {
+      "type": "object",
+      "required": ["id", "type", "query", "observed_at"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+        "type": { "enum": ["gsc", "openseo", "serp_autopsy"] },
+        "query": { "type": "string", "minLength": 2 },
+        "locale": { "enum": ["en", "es"] },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "date_range": { "type": "string" },
+        "run_id": { "type": "string" },
+        "source_url": { "type": "string", "format": "uri" },
+        "search_engine": { "type": "string" },
+        "metrics": { "type": "object", "additionalProperties": { "type": ["number", "string", "null"] } },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["url"],
+            "properties": {
+              "url": { "type": "string", "format": "uri" },
+              "title": { "type": "string" },
+              "position": { "type": "integer", "minimum": 1 },
+              "result_type": { "type": "string" },
+              "notes": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "gap": { "type": "string" },
+        "intent": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

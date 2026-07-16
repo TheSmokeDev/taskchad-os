@@ -598,91 +598,6 @@ def test_two_bots_run_simultaneously_on_windows(
 
 
 # ---------------------------------------------------------------------------
-# F2 — run_chat.bat resolves canonical paths via delayed expansion (Windows)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="run_chat.bat is the Windows cmd.exe entry point. The delayed-"
-    "expansion bug (`!_LINE!` literal) only manifests when cmd.exe parses "
-    "the file. Bash on POSIX does not exercise this path.",
-)
-def test_run_chat_bat_resolves_canonical_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """F2 regression — ``run_chat.bat`` must echo the resolved PID path.
-
-    The previous implementation used ``!_LINE!`` inside a parenthesized
-    ``FOR`` block without ``setlocal EnableDelayedExpansion``, so cmd.exe
-    saw ``!_LINE!`` as a literal string and PID_FILE / LOG_DIR stayed
-    empty. This test runs the .bat under cmd.exe and parses the output
-    for the printed ``PID file:`` line — it must contain the canonical
-    path returned by ``personas.services.get_bot_pid_path()``, NOT the
-    install-dir fallback (which we removed) and NOT an empty string.
-
-    We invoke the .bat with an unknown subcommand so it doesn't actually
-    fork the bot — we only need to reach the early echo of PID_FILE
-    inside the ELSE branch. The ``start /b`` line will fire briefly but
-    we capture stdout before it gets a chance to do anything meaningful.
-    """
-    script_dir = Path(__file__).resolve().parent.parent.parent / "chat"
-    bat_path = script_dir / "run_chat.bat"
-    if not bat_path.exists():
-        pytest.skip(f"{bat_path} missing")
-
-    # Use a controlled HOMIE_HOME so the test doesn't depend on owner's
-    # real ~/.homie state. Build a fake sales profile under tmp_path.
-    sales_dir = tmp_path / ".homie" / "profiles" / "sales-bat-test"
-    sales_dir.mkdir(parents=True)
-    for sub in ("memory", "data", "state", "run", "logs", "credentials"):
-        (sales_dir / sub).mkdir(parents=True, exist_ok=True)
-    (sales_dir / ".env").write_text("# fake env\n", encoding="utf-8")
-
-    test_env = os.environ.copy()
-    test_env["HOMIE_HOME"] = str(sales_dir)
-    # Strip the real Telegram token so the bot doesn't actually connect
-    # if it gets that far before we kill it.
-    test_env["TELEGRAM_BOT_TOKEN"] = ""
-
-    # Run with a no-op subcommand. The .bat ignores extra args after
-    # %1=="--fg" check, so anything that's not "--fg" lands in the ELSE
-    # branch which is where the echo lines we care about live.
-    proc = subprocess.run(
-        ["cmd", "/c", str(bat_path), "--noop-test-arg"],
-        capture_output=True,
-        text=True,
-        env=test_env,
-        timeout=30,
-    )
-
-    output = (proc.stdout or "") + (proc.stderr or "")
-    # The .bat MUST NOT exit with the F4 "Service resolver failed" error
-    # under a valid HOMIE_HOME — that would mean delayed expansion didn't
-    # populate PID_FILE.
-    assert "Service resolver failed" not in output, (
-        f"run_chat.bat hit the F4 fail-loud path under a valid HOMIE_HOME — "
-        f"delayed expansion likely broken. Output: {output!r}"
-    )
-    # The "PID file:" echo must contain the resolved path under sales_dir
-    # NOT the install-dir fallback (\.claude\chat\bot.pid).
-    assert "PID file:" in output, (
-        f"run_chat.bat did not echo a PID file line — output: {output!r}"
-    )
-    pid_line = next(
-        (line for line in output.splitlines() if line.startswith("PID file:")),
-        "",
-    )
-    # The canonical path for a named profile is <HOMIE_HOME>/run/bot.pid.
-    expected_fragment = str(sales_dir / "run" / "bot.pid")
-    assert expected_fragment.lower() in pid_line.lower() or "run\\bot.pid" in pid_line.lower(), (
-        f"run_chat.bat echoed PID file={pid_line!r} but expected the "
-        f"resolved path under {sales_dir}. Delayed expansion likely "
-        f"broken — !PID_FILE! resolved to literal or empty string."
-    )
-
-
-# ---------------------------------------------------------------------------
 # F5 — `thehomie status` exposes per-profile lifecycle contract
 # ---------------------------------------------------------------------------
 
@@ -909,8 +824,7 @@ def _make_fake_profile(profiles_root: Path, name: str) -> Path:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="bot-status.sh is the bash entry point. Windows uses cmd.exe / "
-    "run_chat.bat exercised by test_run_chat_bat_forwards_profile_flag_to_resolver.",
+    reason="POSIX bash test — Windows run_chat.sh coverage lives in test_chat_wrappers.py (Git Bash dry-run; run_chat.bat retired 2026-07).",
 )
 def test_bot_status_sh_forwards_profile_flag_to_resolver(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -981,7 +895,7 @@ def test_bot_status_sh_forwards_profile_flag_to_resolver(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="bash test — Windows uses run_chat.bat (different test below).",
+    reason="POSIX bash test — Windows run_chat.sh coverage lives in test_chat_wrappers.py (Git Bash dry-run; run_chat.bat retired 2026-07).",
 )
 def test_run_chat_sh_forwards_profile_flag_to_resolver(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1047,72 +961,8 @@ def test_run_chat_sh_forwards_profile_flag_to_resolver(
 
 
 @pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="run_chat.bat is the cmd.exe entry point. Bash on POSIX exercises "
-    "test_bot_status_sh_forwards_profile_flag_to_resolver.",
-)
-def test_run_chat_bat_forwards_profile_flag_to_resolver(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """F1 (R2) — ``run_chat.bat --profile sales-test`` resolves sales paths.
-
-    cmd.exe parses .bat files line-by-line; the wrapper's parse loop runs
-    inside a CALL'd subroutine so ``shift`` doesn't consume the parent's
-    %1 / %* (which the rest of the script needs for the --fg arm and the
-    bot launch line). This test runs the .bat and asserts the printed
-    'PID file:' line points under the sales-test profile root.
-    """
-    script_dir = Path(__file__).resolve().parent.parent.parent / "chat"
-    bat_path = script_dir / "run_chat.bat"
-    if not bat_path.exists():
-        pytest.skip(f"{bat_path} missing")
-
-    # cmd.exe uses %USERPROFILE% (not %HOME%) to locate ~/.homie/profiles/, so
-    # we override USERPROFILE to a tmp dir and build the fake profile under it.
-    fake_userprofile = tmp_path / "fakeprofile"
-    fake_userprofile.mkdir()
-    profiles_root = fake_userprofile / ".homie" / "profiles"
-    sales_dir = _make_fake_profile(profiles_root, "sales-test")
-
-    test_env = os.environ.copy()
-    test_env["USERPROFILE"] = str(fake_userprofile)
-    test_env.pop("HOMIE_HOME", None)
-    test_env["TELEGRAM_BOT_TOKEN"] = ""
-
-    proc = subprocess.run(
-        ["cmd", "/c", str(bat_path), "--profile", "sales-test"],
-        capture_output=True,
-        text=True,
-        env=test_env,
-        timeout=60,
-    )
-    output = (proc.stdout or "") + (proc.stderr or "")
-
-    assert "Service resolver failed" not in output, (
-        f"F1 (R2): run_chat.bat hit the resolver-failure path under a valid "
-        f"--profile sales-test argument — wrapper parse layer didn't set "
-        f"HOMIE_HOME before the resolver ran. Output:\n{output}"
-    )
-
-    pid_line = next(
-        (line for line in output.splitlines() if line.strip().lower().startswith("pid file:")),
-        "",
-    )
-    assert pid_line, (
-        f"F1 (R2): run_chat.bat did not echo a 'PID file:' line — output:\n{output}"
-    )
-    expected_fragment = str(sales_dir)
-    # Case-insensitive match — Windows path separators may have mixed case.
-    assert expected_fragment.lower() in pid_line.lower(), (
-        f"F1 (R2): run_chat.bat echoed PID file={pid_line!r} but the "
-        f"requested profile is at {sales_dir}. Wrapper's --profile flag was "
-        f"NOT propagated to the resolver subprocess."
-    )
-
-
-@pytest.mark.skipif(
     sys.platform == "win32",
-    reason="bash test — Windows uses run_chat.bat.",
+    reason="POSIX bash test — Windows run_chat.sh coverage lives in test_chat_wrappers.py (Git Bash dry-run; run_chat.bat retired 2026-07).",
 )
 def test_run_chat_sh_unknown_profile_exits_with_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1429,8 +1279,7 @@ def test_apply_persona_override_default_sentinel_all_flag_forms(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="bot-status.sh is the bash entry point. Windows uses run_chat.bat "
-    "exercised by test_run_chat_bat_explicit_default_overrides_sticky.",
+    reason="POSIX bash test — Windows run_chat.sh coverage lives in test_chat_wrappers.py (Git Bash dry-run; run_chat.bat retired 2026-07).",
 )
 def test_bot_status_sh_explicit_default_overrides_sticky(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1508,7 +1357,7 @@ def test_bot_status_sh_explicit_default_overrides_sticky(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="bash test — Windows uses run_chat.bat.",
+    reason="POSIX bash test — Windows run_chat.sh coverage lives in test_chat_wrappers.py (Git Bash dry-run; run_chat.bat retired 2026-07).",
 )
 def test_run_chat_sh_explicit_default_overrides_sticky(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1573,80 +1422,5 @@ def test_run_chat_sh_explicit_default_overrides_sticky(
     )
     assert "data" in pid_line and "state" in pid_line and "bot.pid" in pid_line, (
         f"R3: run_chat.sh did not echo canonical default PID path. "
-        f"PID line={pid_line!r}."
-    )
-
-
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="run_chat.bat is the cmd.exe entry point.",
-)
-def test_run_chat_bat_explicit_default_overrides_sticky(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """R3 — ``run_chat.bat --profile default`` with sticky=sales: same matrix
-    on the Windows wrapper. Confirms ``%*`` forwarding to the python -c
-    subprocess works on cmd.exe and the boot shim's default-sentinel branch
-    fires correctly.
-    """
-    script_dir = Path(__file__).resolve().parent.parent.parent / "chat"
-    bat_path = script_dir / "run_chat.bat"
-    if not bat_path.exists():
-        pytest.skip(f"{bat_path} missing")
-
-    # cmd.exe uses %USERPROFILE% to locate ~/.homie/profiles/, so override.
-    fake_userprofile = tmp_path / "fakeprofile"
-    fake_userprofile.mkdir()
-    profiles_root = fake_userprofile / ".homie" / "profiles"
-    profiles_root.mkdir(parents=True)
-    # Sticky points at sales.
-    homie_dir = fake_userprofile / ".homie"
-    (homie_dir / "active_profile").write_text("sales", encoding="utf-8")
-
-    test_env = os.environ.copy()
-    test_env["USERPROFILE"] = str(fake_userprofile)
-    test_env["HOME"] = str(fake_userprofile)
-    test_env.pop("HOMIE_HOME", None)
-    test_env["TELEGRAM_BOT_TOKEN"] = ""
-
-    # Pass ``--test`` alongside ``--profile default`` so the bot exits
-    # quickly in test mode. Without this, ``--profile default`` resolves to
-    # owner's real install ``.env`` (which has a valid Telegram token), the
-    # bot enters polling, and the ``start /b`` background process holds the
-    # subprocess pipes open past our timeout. The boot shim strips
-    # ``--profile default`` from argv before ``main.py``'s argparse runs;
-    # ``--test`` survives and triggers test-mode exit.
-    proc = subprocess.run(
-        ["cmd", "/c", str(bat_path), "--profile", "default", "--test"],
-        capture_output=True,
-        text=True,
-        env=test_env,
-        timeout=60,
-    )
-    output = (proc.stdout or "") + (proc.stderr or "")
-
-    assert "Service resolver failed" not in output, (
-        f"R3: run_chat.bat --profile default hit the F4 resolver-failure "
-        f"path. Output:\n{output}"
-    )
-
-    pid_line = next(
-        (line for line in output.splitlines() if line.strip().lower().startswith("pid file:")),
-        "",
-    )
-    assert pid_line, (
-        f"R3: run_chat.bat did not echo a 'PID file:' line. Output:\n{output}"
-    )
-    sticky_fragment = str(profiles_root / "sales")
-    assert sticky_fragment.lower() not in pid_line.lower(), (
-        f"R3: run_chat.bat echoed sticky-sales PID path={pid_line!r} despite "
-        f"explicit --profile default override. %* forwarding to the python -c "
-        f"subprocess didn't propagate the rank-1 flag, OR the boot shim's "
-        f"force-default sentinel branch is missing."
-    )
-    # Canonical default fragment.
-    pid_lower = pid_line.lower()
-    assert "data" in pid_lower and "state" in pid_lower and "bot.pid" in pid_lower, (
-        f"R3: run_chat.bat did not echo canonical default PID path. "
         f"PID line={pid_line!r}."
     )

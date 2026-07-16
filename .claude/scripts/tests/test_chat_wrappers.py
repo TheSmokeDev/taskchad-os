@@ -4,9 +4,13 @@ INVARIANT — NEVER invoke a wrapper WITHOUT ``--dry-run`` from this module.
 The non-dry-run path of ``run_chat.sh`` kills existing bot processes
 (``_kill_existing`` → pid-file kill + ``cleanup_all_bot_processes()``),
 deletes the pid file, truncates the bot log at spawn, and forks a bot that
-acquires the GLOBAL Windows mutex. ``run_chat.bat`` spawns via ``start /b``.
+acquires the GLOBAL Windows mutex.
 The precedent tests in ``test_persona_bot_lifecycle.py`` deliberately fork
 the bot under a fake profile — do NOT copy that shape here.
+
+``run_chat.bat`` is retired (archived to ``.claude/_archive/lifecycle-2026-07/``
+— it hardcoded ``--telegram``); ``run_chat.sh`` under Git Bash is the ONLY
+launcher on every platform, so only the .sh wrappers are exercised here.
 
 Defense-in-depth: every test runs the wrapper under a fake ``HOMIE_HOME``
 (tmp_path) with an empty ``TELEGRAM_BOT_TOKEN``. Even if ``--dry-run``
@@ -16,8 +20,7 @@ parsing regresses and a wrapper falls through to the kill/spawn path,
 be killed and any pid/log writes land inside tmp_path.
 
 Accepted dry-run side effects (documented, benign):
-- ``run_chat.bat`` writes + deletes a resolver temp file in ``%TEMP%``.
-- Both wrappers would run ``uv sync`` if the checkout venv were missing;
+- The wrappers would run ``uv sync`` if the checkout venv were missing;
   it exists here because pytest itself runs from that venv.
 """
 
@@ -109,8 +112,8 @@ def _build_profile_env(home: Path) -> dict[str, str]:
     # bash wrappers resolve ``$HOME/.homie/profiles/<name>`` — forward
     # slashes so the bash-side ``[ -d ... ]`` existence check is unambiguous.
     env["HOME"] = str(home).replace("\\", "/")
-    # run_chat.bat resolves ``%USERPROFILE%\.homie\profiles\<name>``; the
-    # resolver subprocess's Path.home() lands in the same fake home.
+    # The python resolver subprocess uses Path.home() (USERPROFILE on
+    # Windows) — it must land in the same fake home.
     env["USERPROFILE"] = str(home)
     # The --profile flag must be the ONLY profile source in these tests.
     env.pop("HOMIE_HOME", None)
@@ -233,61 +236,6 @@ def test_bot_status_sh_dry_run(tmp_path: Path) -> None:
     assert not expected_pid.exists(), "dry run must NOT create the pid file"
 
 
-@pytest.mark.skipif(
-    sys.platform != "win32" or shutil.which("cmd") is None,
-    reason="run_chat.bat is the Windows cmd.exe entry point",
-)
-def test_run_chat_bat_dry_run(tmp_path: Path) -> None:
-    """``run_chat.bat --dry-run`` resolves paths and exits 0 BEFORE the
-    ``start /b`` spawn (the only side-effecting step in the .bat)."""
-    script = CHAT_DIR / "run_chat.bat"
-    if not script.exists():
-        pytest.skip(f"{script} missing")
-
-    profile_dir = _make_fake_profile(tmp_path)
-    proc = subprocess.run(
-        ["cmd", "/c", str(script), "--dry-run"],
-        capture_output=True,
-        text=True,
-        env=_build_env(profile_dir),
-        timeout=60,
-    )
-    output = (proc.stdout or "") + (proc.stderr or "")
-
-    assert proc.returncode == 0, f"dry-run exited {proc.returncode}: {output!r}"
-    assert "DRY RUN" in output, f"missing DRY RUN marker: {output!r}"
-    assert "Service resolver failed" not in output, (
-        f"resolver failed under a valid HOMIE_HOME: {output!r}"
-    )
-    _assert_no_wsl_path_leak(output)
-
-    python_path = _parse_labeled(output, "PYTHON")
-    main_py = _parse_labeled(output, "MAIN_PY")
-    pid_file = _parse_labeled(output, "PID_FILE")
-    log_file = _parse_labeled(output, "LOG_FILE")
-
-    assert python_path and Path(python_path).exists(), (
-        f"PYTHON does not point at an existing interpreter: {python_path!r}"
-    )
-    assert main_py and Path(main_py).exists(), (
-        f"MAIN_PY does not point at an existing file: {main_py!r}"
-    )
-    expected_pid = profile_dir / "run" / "bot.pid"
-    assert pid_file and os.path.normcase(os.path.normpath(pid_file)) == os.path.normcase(
-        os.path.normpath(str(expected_pid))
-    ), f"PID_FILE={pid_file!r} is not the canonical {expected_pid}"
-    assert log_file and Path(log_file).parent.exists(), (
-        f"LOG_FILE parent missing: {log_file!r}"
-    )
-
-    # Negative side-effect proof — must exit BEFORE `start /b`.
-    assert "Telegram bot started" not in output
-    assert not expected_pid.exists(), "dry run must NOT create the pid file"
-    assert not (profile_dir / "logs" / "bot.log").exists(), (
-        "dry run must NOT create/truncate the bot log"
-    )
-
-
 @pytest.mark.skipif(_git_bash() is None, reason="no usable (non-WSL) bash found")
 def test_run_chat_sh_dry_run_forwards_profile(tmp_path: Path) -> None:
     """``run_chat.sh --profile NAME --dry-run`` must resolve PROFILE-scoped
@@ -321,45 +269,5 @@ def test_run_chat_sh_dry_run_forwards_profile(tmp_path: Path) -> None:
 
     # Same zero-side-effect contract as the default-profile dry run.
     assert "Stopping old bot" not in output
-    assert "Telegram bot started" not in output
-    assert not expected_pid.exists(), "profile dry run must NOT create the pid file"
-
-
-@pytest.mark.skipif(
-    sys.platform != "win32" or shutil.which("cmd") is None,
-    reason="run_chat.bat is the Windows cmd.exe entry point",
-)
-def test_run_chat_bat_dry_run_forwards_profile(tmp_path: Path) -> None:
-    """``run_chat.bat --profile NAME --dry-run`` must resolve PROFILE-scoped
-    paths through :_homie_parse_profile + the resolver argv forward."""
-    script = CHAT_DIR / "run_chat.bat"
-    if not script.exists():
-        pytest.skip(f"{script} missing")
-
-    home, profile_dir = _make_fake_home(tmp_path, "dryrun-prof")
-    proc = subprocess.run(
-        ["cmd", "/c", str(script), "--profile", "dryrun-prof", "--dry-run"],
-        capture_output=True,
-        text=True,
-        env=_build_profile_env(home),
-        timeout=60,
-    )
-    output = (proc.stdout or "") + (proc.stderr or "")
-
-    assert proc.returncode == 0, f"profile dry-run exited {proc.returncode}: {output!r}"
-    assert "DRY RUN" in output, f"missing DRY RUN marker: {output!r}"
-    assert "ERROR: Profile" not in output, f"profile lookup failed: {output!r}"
-    assert "Service resolver failed" not in output, (
-        f"resolver failed under the fake profile home: {output!r}"
-    )
-    _assert_no_wsl_path_leak(output)
-
-    pid_file = _parse_labeled(output, "PID_FILE")
-    expected_pid = profile_dir / "run" / "bot.pid"
-    assert pid_file and os.path.normcase(os.path.normpath(pid_file)) == os.path.normcase(
-        os.path.normpath(str(expected_pid))
-    ), f"PID_FILE={pid_file!r} did not resolve to the NAMED profile {expected_pid}"
-
-    # Same zero-side-effect contract as the default-profile dry run.
     assert "Telegram bot started" not in output
     assert not expected_pid.exists(), "profile dry run must NOT create the pid file"

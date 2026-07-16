@@ -75,7 +75,8 @@ class TestReloadMechanics:
 
 
 class TestBackoffLogic:
-    """Test the exponential backoff calculation used by service.py."""
+    """Exponential backoff math (legacy service.py policy, retired 2026-07;
+    the external watchdog's restart budget is the live restart governor)."""
 
     def test_backoff_doubles(self) -> None:
         """Backoff should double on each crash."""

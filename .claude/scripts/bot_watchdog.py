@@ -5,8 +5,8 @@ Why this exists
 On 2026-07-12 the bot was found wedged for ~6 weeks. Nothing noticed, because
 nothing was looking:
 
-* ``service.py`` is crash-only — it waits on ``proc.wait()``, and a wedged
-  process never returns.
+* ``service.py`` (retired 2026-07, archived) was crash-only — it waited on
+  ``proc.wait()``, and a wedged process never returns.
 * The Windows scheduled task restarts on process *exit*, which likewise never
   came.
 * ``heartbeat.py`` checks calendar/email/Asana — never the bot.
@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import platform
 import shutil
 import subprocess
 import sys
@@ -90,6 +89,7 @@ DEGRADED = "degraded"  # a GATEWAY is dead — restart-worthy
 NONCRITICAL = "noncritical"  # something optional is down — report, never restart
 UNREACHABLE = "unreachable"
 DISABLED = "disabled"
+STANDING_DOWN = "standing_down"  # operator desired state is OFF — no guard
 
 # Only these two justify restarting the bot.
 _BAD = {DEGRADED, UNREACHABLE}
@@ -192,7 +192,31 @@ def poll_health(url: str, timeout: float) -> tuple[str, dict[str, Any], str]:
     return classify(payload)
 
 
-def classify(payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+def _parse_last_update(value: Any) -> datetime | None:
+    """Parse an adapter's ``last_update_at``. Unparseable => None (fail-safe).
+
+    Accepts ISO strings (aware values converted to naive local) and numeric
+    unix timestamps. Anything else is ignored — never a verdict input.
+    """
+    try:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value))
+        if isinstance(value, str) and value.strip():
+            parsed = datetime.fromisoformat(value.strip())
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed
+    except (ValueError, OverflowError, OSError, TypeError):
+        return None
+    return None
+
+
+def classify(
+    payload: dict[str, Any],
+    staleness_seconds: float | None = None,
+) -> tuple[str, dict[str, Any], str]:
     """Turn a /health payload into a verdict.
 
     Restart-worthiness is decided per-adapter by CRITICALITY, not by the summary
@@ -204,10 +228,18 @@ def classify(payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
       restarted over. The relay dials OUT to an external service and redials
       itself; restarting the bot every 5 minutes while MC is down would turn
       someone else's outage into a self-inflicted restart loop.
+    * An **event-stale gateway** (probes healthy, but ``last_update_at`` is
+      hours old WHILE another adapter is fresh) is degraded — the fresh peer
+      proves the bot and the operator are active, so the quiet one is broken,
+      not idle. Both-quiet is NOT stale: a quiet bot is not a dead bot.
+      (2026-07-15 Discord class: gateway task alive, event stream dead.)
 
     Fail-SAFE, not fail-fast: only a proven-bad reading is bad. A payload shape
     the watchdog does not understand resolves to OK, because restarting the bot
     on the watchdog's own confusion would be an outage we caused ourselves.
+
+    ``staleness_seconds`` is a Rule 1 None sentinel — resolved from
+    ``config.get_bot_watchdog_settings()`` at call time.
     """
     status = str(payload.get("status", "")).lower()
     adapters = payload.get("adapters")
@@ -226,6 +258,39 @@ def classify(payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
         )
         if dead_gateways:
             return DEGRADED, payload, f"gateway(s) proven dead: {', '.join(dead_gateways)}"
+
+        # --- event staleness. Only adapters with an EXPLICIT critical=true and
+        # a parseable last_update_at participate; missing/garbled timestamps
+        # keep the fail-safe posture (no verdict from confusion).
+        if staleness_seconds is None:
+            staleness_seconds = config.get_bot_watchdog_settings().staleness_seconds
+        now = _now()
+        ages: dict[str, float] = {}
+        for name, info in liveness.items():
+            if not isinstance(info, dict):
+                continue
+            parsed = _parse_last_update(info.get("last_update_at"))
+            if parsed is not None:
+                ages[name] = (now - parsed).total_seconds()
+        fresh = {name for name, age in ages.items() if age <= staleness_seconds}
+        stale_gateways = sorted(
+            name
+            for name, age in ages.items()
+            if age > staleness_seconds
+            and isinstance(liveness.get(name), dict)
+            and liveness[name].get("critical") is True
+            and (fresh - {name})  # at least one OTHER adapter is fresh
+        )
+        if stale_gateways:
+            stale_desc = ", ".join(
+                f"{name} {ages[name] / 3600:.1f}h stale" for name in stale_gateways
+            )
+            active_desc = ", ".join(sorted(fresh - set(stale_gateways))) or "peer"
+            return (
+                DEGRADED,
+                payload,
+                f"gateway event-stale: {stale_desc} while {active_desc} active",
+            )
 
         dead_optional = sorted(
             name
@@ -287,31 +352,24 @@ def _find_bash() -> str | None:
     return None
 
 
-def restart_command() -> tuple[list[str], str]:
-    """Pick the launcher. Returns ``(argv, label)``.
+def restart_command() -> tuple[list[str], str] | None:
+    """Pick the launcher. Returns ``(argv, label)``, or None when unlaunchable.
 
-    ``run_chat.sh`` is STRONGLY preferred, on Windows too, because
-    ``run_chat.bat`` hardcodes ``--telegram`` (see its launch line) — restarting
-    through it silently resurrects a Telegram-ONLY bot with no Discord and no
-    relay. A watchdog that "recovers" the bot into a quietly degraded state is
-    just a slower version of the bug it was built to fix. Verified live: a .bat
-    restart came back reporting ``adapters: {"telegram": true}`` and nothing else.
+    ``run_chat.sh`` is the ONLY launcher. The old ``run_chat.bat`` fallback is
+    retired (archived to ``.claude/_archive/lifecycle-2026-07/``): it hardcoded
+    ``--telegram``, so a bash-missing machine got "recovered" into a silently
+    Telegram-only bot with no Discord and no relay — a watchdog that restores
+    the bot into a quietly degraded state is a slower version of the bug it
+    exists to fix. No usable bash now means FAIL LOUD, never fall back.
 
-    Both launchers already kill the old profile-owned process, write the pid
-    file, and redirect logs, so we never re-implement spawn/kill/pid here.
+    The launcher already kills the old profile-owned process, writes the pid
+    file, and redirects logs, so we never re-implement spawn/kill/pid here.
     """
     bash = _find_bash()
     script = CHAT_DIR / "run_chat.sh"
     if bash and script.exists():
         return [bash, str(script)], "run_chat.sh (all adapters)"
-
-    bat = CHAT_DIR / "run_chat.bat"
-    if platform.system() == "Windows" and bat.exists():
-        return (
-            ["cmd", "/c", str(bat)],
-            "run_chat.bat (TELEGRAM ONLY — bash not found; Discord/relay will NOT come back)",
-        )
-    return ["bash", str(script)], "run_chat.sh"
+    return None
 
 
 def wait_for_healthy(url: str, timeout: float, deadline_seconds: float = 90.0) -> tuple[bool, str]:
@@ -334,9 +392,51 @@ def wait_for_healthy(url: str, timeout: float, deadline_seconds: float = 90.0) -
     return False, f"did not become healthy within {deadline_seconds:.0f}s (last: {last})"
 
 
+_LAUNCHER_LOG_MAX_BYTES = 200 * 1024
+_LAUNCHER_LOG_KEEP_BYTES = 100 * 1024
+
+
+def _launcher_log_path() -> Path:
+    """Resolve at call time (Rule 1) — follows the profile with the state file."""
+    return _state_path().parent / "watchdog-launcher.log"
+
+
+def _append_launcher_header(header: str) -> Path:
+    """Rotate the launcher log (cap ~200KB, keep the tail) + timestamped header.
+
+    Append-only: the old ``"w"`` open truncated the log on every restart,
+    destroying the forensics for every restart but the last one. Rotation
+    idiom mirrors ``shared.log_hook_execution`` (read, keep tail, rewrite).
+    """
+    path = _launcher_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > _LAUNCHER_LOG_MAX_BYTES:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            path.write_text(text[-_LAUNCHER_LOG_KEEP_BYTES:], encoding="utf-8")
+        with open(path, "a", encoding="utf-8", errors="replace") as fh:
+            fh.write(f"\n===== {_now().isoformat()} | {header} =====\n")
+    except Exception as exc:  # noqa: BLE001 — a broken receipt must not block a restart
+        _log(f"launcher log unavailable ({exc})")
+    return path
+
+
 def restart_bot() -> tuple[bool, str]:
     """Run the launcher, then PROVE the bot came back. Returns (ok, detail)."""
-    cmd, label = restart_command()
+    picked = restart_command()
+    if picked is None:
+        # Git Bash missing (or run_chat.sh gone): FAIL LOUD — toast, launcher-log
+        # receipt, no restart attempt. The retired run_chat.bat fallback used to
+        # "succeed" here into a Telegram-only bot; a loud stop is the fix.
+        detail = (
+            "Git Bash not found (or run_chat.sh missing) — cannot restart the bot. "
+            "Install Git for Windows; there is NO fallback launcher (run_chat.bat retired)."
+        )
+        _append_launcher_header(f"RESTART ABORTED: {detail}")
+        _notify("The Homie Bot restart BLOCKED", detail)
+        return False, detail
+
+    cmd, label = picked
     _log(f"restarting bot via {label}")
 
     # A file handle, never PIPE. The launcher spawns the bot as a detached
@@ -352,9 +452,9 @@ def restart_bot() -> tuple[bool, str]:
     # watchdog had zero receipts — the whole morning was 5-restart budget
     # exhaustion with nothing to read. A file has no EOF-wait problem and
     # keeps the receipt.
-    launcher_log = _state_path().parent / "watchdog-launcher.log"
+    launcher_log = _append_launcher_header(f"restart via {label}")
     try:
-        with open(launcher_log, "w", encoding="utf-8", errors="replace") as log_fh:
+        with open(launcher_log, "a", encoding="utf-8", errors="replace") as log_fh:
             subprocess.run(  # noqa: S603
                 cmd,
                 cwd=str(CHAT_DIR),
@@ -384,6 +484,29 @@ def run_once(*, dry_run: bool = False) -> dict[str, Any]:
 
     if not settings.enabled:
         return {"verdict": DISABLED, "detail": "BOT_WATCHDOG_ENABLED=false", "restarted": False}
+
+    # --- #117 ONE switch, ONE enforcer: desired=off => stand down. No health
+    # poll, no failure counting, no restart. Fail-OPEN to "on" on ANY error —
+    # a broken flag must never kill the guard.
+    desired = "on"
+    try:
+        import bot_lifecycle_switch  # local import — keeps the guard import-safe
+
+        desired = str(bot_lifecycle_switch.get_desired().get("desired", "on")).lower()
+    except Exception as exc:  # noqa: BLE001 — guard survives a broken switch
+        _log(f"desired-state read failed ({exc}) — guarding as if desired=on")
+    if desired == "off":
+        _log("standing down — operator desired state is OFF (`thehomie on` to resume)")
+        state["last_poll_at"] = _now().isoformat()
+        state["last_verdict"] = STANDING_DOWN
+        state["last_detail"] = "desired=off (bot-desired-state.json)"
+        state["consecutive_failures"] = 0
+        save_state(state)
+        return {
+            "verdict": STANDING_DOWN,
+            "detail": "desired=off — watchdog standing down",
+            "restarted": False,
+        }
 
     verdict, payload, detail = poll_health(settings.health_url, settings.timeout_seconds)
 
@@ -473,6 +596,7 @@ def run_once(*, dry_run: bool = False) -> dict[str, Any]:
     recent.append(_now().isoformat())
     state["restarts"] = recent
     state["last_restart_at"] = _now().isoformat()
+    state["last_restart_detail"] = restart_detail
     # Reset the counter either way: the next poll re-judges from scratch, and a
     # failed launcher must not instantly re-trip the threshold on the next tick.
     state["consecutive_failures"] = 0
@@ -540,7 +664,11 @@ def main() -> int:
     # NONCRITICAL exits 0: the BOT is fine (an optional link is down), and
     # flagging a Mission Control outage as a watchdog failure every 5 minutes is
     # alarm fatigue, not signal. It is still recorded in the state file + log.
-    if result["verdict"] in (OK, WARMING, DISABLED, NONCRITICAL) or result.get("restarted"):
+    # STANDING_DOWN exits 0: the operator turned the bot OFF on purpose.
+    if (
+        result["verdict"] in (OK, WARMING, DISABLED, NONCRITICAL, STANDING_DOWN)
+        or result.get("restarted")
+    ):
         return 0
     return 1
 

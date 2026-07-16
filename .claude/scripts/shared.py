@@ -916,7 +916,13 @@ def _parse_scalar_frontmatter(path: Path) -> dict[str, str]:
                 if line.startswith((" ", "\t", "-")) or ":" not in line:
                     continue
                 key, _, value = line.partition(":")
-                value = value.strip().strip("\"'")
+                value = value.strip()
+                if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+                    # json.dumps-style frontmatter (video dossiers): unescape
+                    # so index cells don't render literal backslash escapes.
+                    value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+                else:
+                    value = value.strip("\"'")
                 if value and not value.startswith("["):
                     fields[key.strip()] = value
     except OSError:

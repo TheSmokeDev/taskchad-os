@@ -60,10 +60,14 @@ All four surfaces call the same three functions in
 | Job | RECOVER a bot that died while running | START a bot after logon/reboot |
 | Trigger | `/health` polling every 5 min | Windows logon event |
 | Default | On (scheduled task) | Off (opt-in toggle) |
+| Desired-state gate (#117) | Stands down when `desired=off` (`standing_down` receipt, no restart); missing/corrupt flag = on | Not gated — registering the task is itself the operator's opt-in |
+| Launcher | `run_chat.sh` only; Git Bash missing = FAIL LOUD (no `.bat` fallback — retired 2026-07) | `run_bot_start.bat` → Git Bash `run_chat.sh` |
 
 Both are needed: a reboot with autostart off leaves the watchdog restarting a
 bot that was never started — its restart budget is not a substitute for a
-boot-time start.
+boot-time start. Operator ON/OFF intent itself lives in the desired-state
+switch — see [bot-lifecycle](bot-lifecycle.md) for the one-switch model, the
+4-rung liveness ladder, and the 2026-07 wedge-class catalog.
 
 ## Config
 

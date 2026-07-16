@@ -38,9 +38,11 @@ def settings(**overrides: object) -> BotWatchdogSettings:
 
 @pytest.fixture()
 def wd(monkeypatch, tmp_path):
-    """Isolate the watchdog: temp state file, no real restarts, no real toasts."""
+    """Isolate the watchdog: temp state file + STATE_DIR (so the desired-state
+    flag read is hermetic), no real restarts, no real toasts."""
     state_file = tmp_path / "bot-watchdog-state.json"
     monkeypatch.setattr(config, "BOT_WATCHDOG_STATE_FILE", state_file)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
 
     restarts: list[str] = []
 
@@ -54,7 +56,14 @@ def wd(monkeypatch, tmp_path):
     monkeypatch.setattr(bot_watchdog, "append_to_daily_log", lambda *a, **k: None)
 
     return type(
-        "WD", (), {"state_file": state_file, "restarts": restarts, "notices": notices}
+        "WD",
+        (),
+        {
+            "state_file": state_file,
+            "flag_file": tmp_path / "bot-desired-state.json",
+            "restarts": restarts,
+            "notices": notices,
+        },
     )()
 
 
@@ -430,3 +439,294 @@ def test_corrupt_state_file_does_not_crash_the_watchdog(wd, monkeypatch) -> None
     result = bot_watchdog.run_once()
 
     assert result["verdict"] == bot_watchdog.OK
+
+
+# ------------------------------------------------ desired-state gate (#117)
+# ONE switch, ONE enforcer: the watchdog is the enforcer, and desired=off is
+# the ONLY thing that stands it down. Anything less keeps the guard up.
+
+
+def _write_flag(wd, desired: str) -> None:
+    wd.flag_file.parent.mkdir(parents=True, exist_ok=True)
+    wd.flag_file.write_text(
+        json.dumps({"desired": desired, "changed_by": "test", "changed_at": "x"}),
+        encoding="utf-8",
+    )
+
+
+def test_desired_off_stands_down_without_polling_or_restarting(wd, monkeypatch) -> None:
+    """desired=off + unreachable bot => NO restart, exit-0 verdict, receipt."""
+    set_settings(monkeypatch, failure_threshold=1)
+    _write_flag(wd, "off")
+
+    def never(*a, **k):
+        raise AssertionError("/health must not be polled while standing down")
+
+    monkeypatch.setattr(bot_watchdog, "poll_health", never)
+
+    result = bot_watchdog.run_once()
+
+    assert result["verdict"] == bot_watchdog.STANDING_DOWN
+    assert result["restarted"] is False
+    assert wd.restarts == []
+
+    saved = json.loads(wd.state_file.read_text(encoding="utf-8"))
+    assert saved["last_verdict"] == "standing_down"
+    assert saved["consecutive_failures"] == 0
+
+
+def test_desired_on_keeps_the_guard_up(wd, monkeypatch) -> None:
+    set_settings(monkeypatch, failure_threshold=1)
+    _write_flag(wd, "on")
+    set_health(monkeypatch, bot_watchdog.UNREACHABLE, {}, "connection refused")
+
+    result = bot_watchdog.run_once()
+
+    assert result["restarted"] is True
+    assert wd.restarts == ["restart"]
+
+
+def test_missing_flag_file_guards_as_on(wd, monkeypatch) -> None:
+    """No flag file = the pre-switch always-guarded behavior."""
+    set_settings(monkeypatch, failure_threshold=1)
+    assert not wd.flag_file.exists()
+    set_health(monkeypatch, bot_watchdog.DEGRADED, {"status": "degraded"}, "dead")
+
+    result = bot_watchdog.run_once()
+
+    assert result["restarted"] is True
+
+
+def test_corrupt_flag_file_guards_as_on(wd, monkeypatch) -> None:
+    """A broken flag must never kill the guard (fail-OPEN to 'on')."""
+    set_settings(monkeypatch, failure_threshold=1)
+    wd.flag_file.parent.mkdir(parents=True, exist_ok=True)
+    wd.flag_file.write_text("{{{ not json", encoding="utf-8")
+    set_health(monkeypatch, bot_watchdog.DEGRADED, {"status": "degraded"}, "dead")
+
+    result = bot_watchdog.run_once()
+
+    assert result["restarted"] is True
+    assert wd.restarts == ["restart"]
+
+
+def test_broken_switch_module_guards_as_on(wd, monkeypatch) -> None:
+    """Even a crashing get_desired() leaves the guard up."""
+    import bot_lifecycle_switch
+
+    set_settings(monkeypatch, failure_threshold=1)
+    monkeypatch.setattr(
+        bot_lifecycle_switch,
+        "get_desired",
+        lambda: (_ for _ in ()).throw(RuntimeError("flag store exploded")),
+    )
+    set_health(monkeypatch, bot_watchdog.DEGRADED, {"status": "degraded"}, "dead")
+
+    result = bot_watchdog.run_once()
+
+    assert result["restarted"] is True
+
+
+# ------------------------------------------------- event staleness (07-15)
+# The Discord wedge class: gateway task alive, probe healthy, event stream
+# dead for hours while the operator is clearly active on another adapter.
+
+
+def _iso_ago(hours: float) -> str:
+    from datetime import datetime, timedelta
+
+    return (datetime.now() - timedelta(hours=hours)).isoformat()
+
+
+def test_stale_critical_adapter_with_fresh_peer_is_degraded() -> None:
+    verdict, _, detail = bot_watchdog.classify(
+        {
+            "status": "ok",
+            "adapters": {"telegram": True, "discord": True},
+            "adapter_liveness": {
+                "telegram": {
+                    "healthy": True,
+                    "critical": True,
+                    "last_update_at": _iso_ago(0.05),
+                },
+                "discord": {
+                    "healthy": True,
+                    "critical": True,
+                    "last_update_at": _iso_ago(3.0),
+                },
+            },
+        },
+        staleness_seconds=7200,
+    )
+    assert verdict == bot_watchdog.DEGRADED
+    assert "event-stale" in detail
+    assert "discord" in detail
+    assert "telegram" in detail
+
+
+def test_both_quiet_is_not_stale() -> None:
+    """Quiet bot != dead bot — with no fresh peer there is no staleness proof."""
+    verdict, _, _ = bot_watchdog.classify(
+        {
+            "status": "ok",
+            "adapters": {"telegram": True, "discord": True},
+            "adapter_liveness": {
+                "telegram": {
+                    "healthy": True,
+                    "critical": True,
+                    "last_update_at": _iso_ago(5.0),
+                },
+                "discord": {
+                    "healthy": True,
+                    "critical": True,
+                    "last_update_at": _iso_ago(4.0),
+                },
+            },
+        },
+        staleness_seconds=7200,
+    )
+    assert verdict == bot_watchdog.OK
+
+
+def test_missing_last_update_at_is_fail_safe_ok() -> None:
+    verdict, _, _ = bot_watchdog.classify(
+        {
+            "status": "ok",
+            "adapters": {"telegram": True, "discord": True},
+            "adapter_liveness": {
+                "telegram": {
+                    "healthy": True,
+                    "critical": True,
+                    "last_update_at": _iso_ago(0.05),
+                },
+                "discord": {"healthy": True, "critical": True},
+            },
+        },
+        staleness_seconds=7200,
+    )
+    assert verdict == bot_watchdog.OK
+
+
+def test_unparseable_last_update_at_is_fail_safe_ok() -> None:
+    verdict, _, _ = bot_watchdog.classify(
+        {
+            "status": "ok",
+            "adapters": {"telegram": True, "discord": True},
+            "adapter_liveness": {
+                "telegram": {
+                    "healthy": True,
+                    "critical": True,
+                    "last_update_at": _iso_ago(0.05),
+                },
+                "discord": {
+                    "healthy": True,
+                    "critical": True,
+                    "last_update_at": "not-a-timestamp",
+                },
+            },
+        },
+        staleness_seconds=7200,
+    )
+    assert verdict == bot_watchdog.OK
+
+
+def test_noncritical_stale_adapter_is_not_restart_worthy() -> None:
+    """A stale relay is someone else's outage — report class, never restart."""
+    verdict, _, _ = bot_watchdog.classify(
+        {
+            "status": "ok",
+            "adapters": {"telegram": True, "web": True},
+            "adapter_liveness": {
+                "telegram": {
+                    "healthy": True,
+                    "critical": True,
+                    "last_update_at": _iso_ago(0.05),
+                },
+                "web": {
+                    "healthy": True,
+                    "critical": False,
+                    "last_update_at": _iso_ago(9.0),
+                },
+            },
+        },
+        staleness_seconds=7200,
+    )
+    assert verdict == bot_watchdog.OK
+
+
+def test_dead_gateway_wins_over_staleness_detail() -> None:
+    """A proven-dead gateway must keep its existing (clearer) verdict."""
+    verdict, _, detail = bot_watchdog.classify(
+        {
+            "status": "ok",
+            "adapters": {"telegram": False, "discord": True},
+            "adapter_liveness": {
+                "telegram": {"healthy": False, "critical": True},
+                "discord": {
+                    "healthy": True,
+                    "critical": True,
+                    "last_update_at": _iso_ago(0.05),
+                },
+            },
+        },
+        staleness_seconds=7200,
+    )
+    assert verdict == bot_watchdog.DEGRADED
+    assert "proven dead" in detail
+
+
+# ------------------------------------------------- bash-missing loud fail
+
+
+def test_restart_command_never_returns_a_bat_fallback(monkeypatch) -> None:
+    """run_chat.bat is retired — no bash means NO launcher, never a fallback."""
+    monkeypatch.setattr(bot_watchdog, "_find_bash", lambda: None)
+    assert bot_watchdog.restart_command() is None
+
+
+def test_missing_bash_fails_loud_without_restart_attempt(monkeypatch, tmp_path) -> None:
+    # Deliberately NOT the ``wd`` fixture — it fakes restart_bot, and this
+    # test exercises the REAL restart_bot bash-missing branch.
+    monkeypatch.setattr(
+        config, "BOT_WATCHDOG_STATE_FILE", tmp_path / "bot-watchdog-state.json"
+    )
+    monkeypatch.setattr(bot_watchdog, "_find_bash", lambda: None)
+
+    notices: list[tuple[str, str]] = []
+    monkeypatch.setattr(bot_watchdog, "_notify", lambda t, m: notices.append((t, m)))
+
+    spawned: list[object] = []
+    monkeypatch.setattr(
+        bot_watchdog.subprocess,
+        "run",
+        lambda *a, **k: spawned.append(a) or type("P", (), {"returncode": 0})(),
+    )
+
+    ok, detail = bot_watchdog.restart_bot()
+
+    assert ok is False
+    assert "Git Bash not found" in detail
+    assert spawned == []  # no launcher, no .bat, nothing spawned
+    assert any("BLOCKED" in t for t, _ in notices)
+    launcher_log = tmp_path / "watchdog-launcher.log"
+    assert launcher_log.exists()
+    assert "RESTART ABORTED" in launcher_log.read_text(encoding="utf-8")
+
+
+def test_launcher_log_appends_and_rotates(wd, monkeypatch) -> None:
+    """Receipts accumulate (no truncate-per-restart) and the cap keeps the tail."""
+    launcher_log = wd.state_file.parent / "watchdog-launcher.log"
+    launcher_log.parent.mkdir(parents=True, exist_ok=True)
+    launcher_log.write_text("earlier receipt\n", encoding="utf-8")
+
+    bot_watchdog._append_launcher_header("first")
+    bot_watchdog._append_launcher_header("second")
+    text = launcher_log.read_text(encoding="utf-8")
+    assert "earlier receipt" in text  # append, not truncate
+    assert "first" in text and "second" in text
+
+    launcher_log.write_text("x" * (bot_watchdog._LAUNCHER_LOG_MAX_BYTES + 4096), encoding="utf-8")
+    bot_watchdog._append_launcher_header("post-rotation")
+    rotated = launcher_log.read_text(encoding="utf-8")
+    assert len(rotated) < bot_watchdog._LAUNCHER_LOG_MAX_BYTES
+    assert "post-rotation" in rotated

@@ -838,3 +838,87 @@ class TestCLISubprocess:
         )
         assert result.returncode == 0
         assert _expected_package_version() in result.stdout
+
+
+class TestBotLifecycleCommands:
+    """#117 — `thehomie on` / `thehomie off` are thin over bot_lifecycle_switch."""
+
+    def _fake_switch(self, monkeypatch, **behavior):
+        import sys as _sys
+        import types as _types
+
+        calls: dict = {"on": [], "off": []}
+        fake = _types.ModuleType("bot_lifecycle_switch")
+
+        def turn_on(changed_by=""):
+            calls["on"].append(changed_by)
+            result = behavior.get("on_result")
+            if isinstance(result, BaseException):
+                raise result
+            return result or {"ok": True, "desired": "on", "detail": "bot already running (pid 1)"}
+
+        def turn_off(changed_by=""):
+            calls["off"].append(changed_by)
+            result = behavior.get("off_result")
+            if isinstance(result, BaseException):
+                raise result
+            return result or {"ok": True, "desired": "off", "detail": "no running bot found"}
+
+        fake.turn_on = turn_on
+        fake.turn_off = turn_off
+        fake.get_desired = lambda: {"desired": behavior.get("desired", "on")}
+        monkeypatch.setitem(_sys.modules, "bot_lifecycle_switch", fake)
+        return calls
+
+    def test_on_help(self):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(cli_main, ["on", "--help"])
+        assert result.exit_code == 0
+
+    def test_off_help(self):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(cli_main, ["off", "--help"])
+        assert result.exit_code == 0
+
+    def test_on_invokes_turn_on_and_prints_detail(self, monkeypatch):
+        from click.testing import CliRunner
+
+        calls = self._fake_switch(monkeypatch)
+        result = CliRunner().invoke(cli_main, ["on"])
+        assert result.exit_code == 0
+        assert calls["on"] == ["cli:on"]
+        assert "Bot ON" in result.output
+
+    def test_off_invokes_turn_off_and_prints_detail(self, monkeypatch):
+        from click.testing import CliRunner
+
+        calls = self._fake_switch(monkeypatch)
+        result = CliRunner().invoke(cli_main, ["off"])
+        assert result.exit_code == 0
+        assert calls["off"] == ["cli:off"]
+        assert "Bot OFF" in result.output
+
+    def test_on_failure_exits_nonzero(self, monkeypatch):
+        from click.testing import CliRunner
+
+        self._fake_switch(
+            monkeypatch,
+            on_result={"ok": False, "desired": "on", "detail": "Git Bash not found"},
+        )
+        result = CliRunner().invoke(cli_main, ["on"])
+        assert result.exit_code == 1
+        assert "Git Bash not found" in result.output
+
+    def test_kill_switch_exits_nonzero(self, monkeypatch):
+        from click.testing import CliRunner
+        from security import kill_switches
+
+        self._fake_switch(
+            monkeypatch,
+            off_result=kill_switches.KillSwitchDisabled("bot_lifecycle"),
+        )
+        result = CliRunner().invoke(cli_main, ["off"])
+        assert result.exit_code == 1
+        assert "disabled by operator" in result.output

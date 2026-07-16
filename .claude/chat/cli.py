@@ -545,6 +545,16 @@ def _collect_profile_lifecycle_contract() -> dict:
     return contract
 
 
+def _bot_desired_state() -> str:
+    """Best-effort desired-state read (#117). Any failure reads as 'on'."""
+    try:
+        import bot_lifecycle_switch
+
+        return bot_lifecycle_switch.get_desired()["desired"]
+    except Exception:
+        return "on"
+
+
 @main.command()
 @click.option("--json", "json_mode", is_flag=True, help="JSON output")
 def status(json_mode):
@@ -560,6 +570,7 @@ def status(json_mode):
         try:
             report = collect_diagnostics()
             lifecycle = _collect_profile_lifecycle_contract()
+            desired = _bot_desired_state()
         finally:
             sys.stdout = real_stdout
 
@@ -570,6 +581,7 @@ def status(json_mode):
         # nested dict preserves backwards compatibility for any consumer
         # that already parses the diagnostics fields.
         payload["profile_lifecycle"] = lifecycle
+        payload["desired"] = desired
         print(json_mod.dumps(payload, indent=2))
     else:
         report = collect_diagnostics()
@@ -578,6 +590,7 @@ def status(json_mode):
         # need to see which paths/ports the active profile is using.
         lifecycle = _collect_profile_lifecycle_contract()
         _print_status_human(report)
+        click.echo(f"\ndesired: {_bot_desired_state()}")
         _print_profile_lifecycle_contract(lifecycle)
 
 
@@ -1545,6 +1558,51 @@ def autostart_on():
 def autostart_off():
     """Unregister the at-logon task (idempotent)."""
     _autostart_mutate("off")
+
+
+# ── Bot lifecycle switch (#117 — ONE switch, ONE enforcer) ─────────────────
+
+
+def _bot_lifecycle_module():
+    import bot_lifecycle_switch as bls_mod
+
+    return bls_mod
+
+
+@main.command("on")
+def bot_on():
+    """Turn the bot ON — desired=on; start it if not already running."""
+    from security import kill_switches
+
+    try:
+        result = _bot_lifecycle_module().turn_on(changed_by="cli:on")
+    except kill_switches.KillSwitchDisabled:
+        click.echo(
+            "Bot lifecycle is disabled by operator (HOMIE_KILLSWITCH_BOT_LIFECYCLE).",
+            err=True,
+        )
+        sys.exit(1)
+    click.echo(f"Bot ON — {result['detail']}")
+    if not result["ok"]:
+        sys.exit(1)
+
+
+@main.command("off")
+def bot_off():
+    """Turn the bot OFF — desired=off; stop it; the watchdog stands down."""
+    from security import kill_switches
+
+    try:
+        result = _bot_lifecycle_module().turn_off(changed_by="cli:off")
+    except kill_switches.KillSwitchDisabled:
+        click.echo(
+            "Bot lifecycle is disabled by operator (HOMIE_KILLSWITCH_BOT_LIFECYCLE).",
+            err=True,
+        )
+        sys.exit(1)
+    click.echo(f"Bot OFF — {result['detail']}")
+    if not result["ok"]:
+        sys.exit(1)
 
 
 # ── Team commands ──────────────────────────────────────────────────────────

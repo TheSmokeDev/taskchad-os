@@ -81,8 +81,8 @@ Windows local notes:
 - Keep the chat runtime on its configured health port. Do not leave Homie on a
   temporary alternate port when an extra local helper squats on the configured
   port.
-- Keep `.claude/chat/run_chat.bat` CRLF with no BOM so Windows `cmd.exe` can
-  restart Telegram cleanly.
+- Bot restarts go through `.claude/chat/run_chat.sh` under Git Bash
+  (`run_chat.bat` was retired 2026-07 — it resurrected a Telegram-only bot).
 
 ## How To Test It
 

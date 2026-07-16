@@ -1,0 +1,4 @@
+interface:
+  display_name: "TokenMax Site Factory"
+  short_description: "Scan sites for TokenMax SEO contracts"
+  default_prompt: "Use tokenmax-site-factory to scan this repo, produce a site profile, gate confidence, and validate rendered SEO/GEO pages before batch generation."

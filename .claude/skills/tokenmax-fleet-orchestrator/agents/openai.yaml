@@ -1,0 +1,4 @@
+interface:
+  display_name: "TokenMax Fleet Orchestrator"
+  short_description: "Run resumable, gated SEO/GEO fleets one site at a time"
+  default_prompt: "Audit this fleet, run the next eligible site through TokenMax generation and hard gates, deploy only after validation, and report exact state."

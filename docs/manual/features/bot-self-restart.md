@@ -51,6 +51,10 @@ opens its channel poller, so there is no double-poll conflict.
 
 ## Safety Boundaries
 
+- `/restart` leaves the desired-state switch untouched (a restart is not an
+  on/off statement of intent). To STOP the bot so the watchdog stands down,
+  or to start it with the guard armed, use `thehomie on|off` — see
+  [bot-lifecycle](bot-lifecycle.md).
 - Restarts ONLY the bot belonging to the active profile; the cleanup step is
   profile-scoped and never touches another profile's bot.
 - Preserves the running profile and credentials; it sheds only the host's

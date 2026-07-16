@@ -830,6 +830,7 @@ class BotWatchdogSettings(NamedTuple):
     failure_threshold: int
     max_restarts_per_hour: int
     grace_seconds: float
+    staleness_seconds: float = 7200.0
 
 
 def get_bot_watchdog_settings(
@@ -839,6 +840,7 @@ def get_bot_watchdog_settings(
     failure_threshold: int | None = None,
     max_restarts_per_hour: int | None = None,
     grace_seconds: float | None = None,
+    staleness_seconds: float | None = None,
 ) -> BotWatchdogSettings:
     """Resolve external-watchdog knobs at CALL TIME (Rule 1).
 
@@ -859,6 +861,9 @@ def get_bot_watchdog_settings(
             exhausting it notifies the operator instead of looping.
         BOT_WATCHDOG_GRACE_SECONDS (300) — post-restart quiet window, and the
             uptime beyond which a still-"warming" bot counts as wedged.
+        BOT_WATCHDOG_STALENESS_SECONDS (7200) — a critical adapter whose
+            last_update_at is older than this while ANOTHER adapter is fresh
+            counts as event-stale (degraded). Both-quiet is NOT stale.
     """
     if enabled is None:
         enabled = os.getenv("BOT_WATCHDOG_ENABLED", "true").lower() == "true"
@@ -882,6 +887,8 @@ def get_bot_watchdog_settings(
         )
     if grace_seconds is None:
         grace_seconds = float(os.getenv("BOT_WATCHDOG_GRACE_SECONDS", "300"))
+    if staleness_seconds is None:
+        staleness_seconds = float(os.getenv("BOT_WATCHDOG_STALENESS_SECONDS", "7200"))
     return BotWatchdogSettings(
         enabled=enabled,
         health_url=health_url,
@@ -889,6 +896,7 @@ def get_bot_watchdog_settings(
         failure_threshold=failure_threshold,
         max_restarts_per_hour=max_restarts_per_hour,
         grace_seconds=grace_seconds,
+        staleness_seconds=staleness_seconds,
     )
 
 

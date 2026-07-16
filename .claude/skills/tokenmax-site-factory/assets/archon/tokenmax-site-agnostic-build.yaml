@@ -1,0 +1,93 @@
+name: tokenmax-site-agnostic-build
+description: |
+  Site-agnostic TokenMax SEO/GEO page factory workflow.
+  Use when a repo needs to be scanned first, converted into a generated
+  .token-max/site-profile.json contract, sample-generated, locally rendered,
+  build-gated, and only then prepared for a target-site deploy runbook.
+  This workflow does not deploy production by itself.
+provider: codex
+modelReasoningEffort: medium
+webSearchMode: disabled
+interactive: true
+worktree:
+  enabled: true
+
+nodes:
+  - id: scan-site
+    bash: |
+      python .claude/skills/tokenmax-site-factory/scripts/tokenmax_scan.py . --output .token-max/site-profile.json --json
+    timeout: 120000
+
+  - id: gate-profile
+    bash: |
+      python .claude/skills/tokenmax-site-factory/scripts/tokenmax_profile.py .token-max/site-profile.json --min-confidence 0.75 --json
+    depends_on: [scan-site]
+    timeout: 30000
+
+  - id: stop-low-confidence
+    cancel: "TokenMax site profile is below confidence threshold or still has open questions. Review .token-max/site-profile.json before writes."
+    depends_on: [gate-profile]
+    when: "$gate-profile.output.ok != 'true'"
+
+  - id: approve-write-plan
+    approval:
+      message: |
+        TokenMax scan passed the write gate.
+
+        Review .token-max/site-profile.json and approve only if the detected
+        content sink, route family, build command, sitemap surface, and run mode
+        match this site.
+    depends_on: [gate-profile]
+    when: "$gate-profile.output.ok == 'true'"
+
+  - id: write-sample-plan
+    prompt: |
+      Read .token-max/site-profile.json.
+
+      Produce a sample-generation plan only. Do not edit files in this node.
+      The plan must name:
+      - run mode
+      - exact content sink
+      - exact route family
+      - exactly 10 representative pilot routes
+      - local build command
+      - rendered validation command using tokenmax_validate_rendered.py with
+        --min-words 2000, --min-main-words 2000,
+        --max-pairwise-overlap 0.10, and --shingle-size 8
+
+      The plan must keep generated routes out of the sitemap and mark them
+      noindex,follow until that exact rendered gate passes. Hidden Suspense/RSC
+      payload text does not count as visible server-rendered main content.
+
+      Write the plan to .token-max/sample-plan.md.
+    depends_on: [approve-write-plan]
+    context: fresh
+
+  - id: build-gate
+    bash: |
+      python - <<'PY'
+      import json, os, subprocess, sys
+      profile = json.load(open('.token-max/site-profile.json', encoding='utf-8'))
+      build = profile.get('build') or {}
+      command = build.get('command')
+      cwd = build.get('cwd') or '.'
+      if not command:
+          print('missing build command')
+          sys.exit(2)
+      print(f'Running build gate: cd {cwd} && {command}')
+      result = subprocess.run(command, cwd=cwd, shell=True)
+      sys.exit(result.returncode)
+      PY
+    depends_on: [write-sample-plan]
+    timeout: 900000
+
+  - id: final-report
+    prompt: |
+      Read .token-max/site-profile.json and .token-max/sample-plan.md.
+      Summarize the detected site contract, the passed build gate, and the
+      exact 10-route pilot and rendered validation command the operator should
+      run after starting the local server. Do not claim the rendered/indexing
+      gate passed until that command succeeds. Do not claim production
+      deployment.
+    depends_on: [build-gate]
+    context: fresh

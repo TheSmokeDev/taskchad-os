@@ -2465,6 +2465,22 @@ def delete_avatar(persona_id: str, request: Request) -> dict:
 # ── /api/agents/{id}/{activate,deactivate,restart} ───────────────────────
 
 
+def _write_bot_desired_state(desired: str, caller: str) -> None:
+    """#117 — best-effort desired-state flag write for the MAIN/default bot.
+
+    Default profile ONLY: personas run their own bots; the desired-state flag
+    governs the active-profile bot the external watchdog guards. Best-effort:
+    a flag write failure never breaks the lifecycle op. Restart deliberately
+    does NOT call this — restarting leaves operator intent untouched.
+    """
+    try:
+        import bot_lifecycle_switch
+
+        bot_lifecycle_switch.set_desired(desired, caller)
+    except Exception as exc:  # noqa: BLE001 — flag is advisory on this surface
+        logger.warning("bot desired-state write failed: %s", _redact(str(exc)))
+
+
 @router.post("/api/agents/{persona_id}/activate")
 def activate_agent(persona_id: str, request: Request) -> dict:
     _reject_main_translation(persona_id)
@@ -2486,7 +2502,7 @@ def activate_agent(persona_id: str, request: Request) -> dict:
         )
 
     try:
-        return dashboard_bot_lifecycle.activate(persona_id)
+        result = dashboard_bot_lifecycle.activate(persona_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -2498,6 +2514,9 @@ def activate_agent(persona_id: str, request: Request) -> dict:
             "activate failed for %s: %s", persona_id, _redact(str(exc))
         )
         raise HTTPException(status_code=500, detail=str(exc))
+    if persona_id == "default":
+        _write_bot_desired_state("on", "dashboard:activate")
+    return result
 
 
 @router.post("/api/agents/{persona_id}/deactivate")
@@ -2519,13 +2538,16 @@ def deactivate_agent(persona_id: str, request: Request) -> dict:
         )
 
     try:
-        return dashboard_bot_lifecycle.deactivate(persona_id)
+        result = dashboard_bot_lifecycle.deactivate(persona_id)
     except Exception as exc:
         # PRD-8 Phase 7b WS1 (iter2 F1) — see activate_agent for rationale.
         logger.error(
             "deactivate failed for %s: %s", persona_id, _redact(str(exc))
         )
         raise HTTPException(status_code=500, detail=str(exc))
+    if persona_id == "default":
+        _write_bot_desired_state("off", "dashboard:deactivate")
+    return result
 
 
 @router.post("/api/agents/{persona_id}/restart")

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/tokenmax-site-profile-v1.json",
+  "title": "TokenMax Site Profile",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "repoRoot",
+    "framework",
+    "appRoots",
+    "contentSinks",
+    "routeFamilies",
+    "seoSurfaces",
+    "build",
+    "validation",
+    "confidence",
+    "runMode",
+    "evidence",
+    "questions"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "repoRoot": { "type": "string" },
+    "generatedAt": { "type": "string" },
+    "framework": { "type": "string" },
+    "packageManager": { "type": "string" },
+    "appRoots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "framework", "confidence"],
+        "properties": {
+          "path": { "type": "string" },
+          "packageName": { "type": ["string", "null"] },
+          "framework": { "type": "string" },
+          "hasAppRouter": { "type": "boolean" },
+          "hasPagesRouter": { "type": "boolean" },
+          "confidence": { "type": "number" }
+        }
+      }
+    },
+    "contentSinks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "pathPattern", "count", "confidence"],
+        "properties": {
+          "type": { "type": "string" },
+          "pathPattern": { "type": "string" },
+          "sampleFiles": { "type": "array", "items": { "type": "string" } },
+          "count": { "type": "integer" },
+          "inferredBasePath": { "type": ["string", "null"] },
+          "matchedRenderer": { "type": ["string", "null"] },
+          "confidence": { "type": "number" }
+        }
+      }
+    },
+    "routeFamilies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["basePath", "source", "confidence"],
+        "properties": {
+          "basePath": { "type": "string" },
+          "source": { "type": "string" },
+          "renderer": { "type": ["string", "null"] },
+          "contentSink": { "type": ["string", "null"] },
+          "confidence": { "type": "number" }
+        }
+      }
+    },
+    "seoSurfaces": { "type": "object" },
+    "internalLinkSurfaces": { "type": "array" },
+    "build": { "type": "object" },
+    "deploy": { "type": "object" },
+    "validation": { "type": "object" },
+    "confidence": { "type": "number" },
+    "runMode": {
+      "type": "string",
+      "enum": ["augment-existing", "install-renderer", "homepage-geo", "external-url-only"]
+    },
+    "evidence": { "type": "array" },
+    "questions": { "type": "array" }
+  }
+}

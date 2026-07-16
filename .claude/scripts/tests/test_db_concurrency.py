@@ -193,6 +193,34 @@ def test_retry_exhausted_still_raises(tmp_path: Path):
         db.close()
 
 
+def test_retry_deadline_caps_wall_clock(tmp_path: Path, monkeypatch):
+    """The retry loop has a total wall-clock budget: with the deadline at 0,
+    the FIRST lock error must raise without any further attempts. Guards the
+    event-loop-stall class (5 attempts x 30s connect timeout ~= 150s of sync
+    blocking inside the chat engine's keyword-recall fallback) and bounds
+    nested decorated calls."""
+    import db as db_mod
+
+    monkeypatch.setattr(db_mod, "_LOCK_RETRY_DEADLINE_S", 0.0)
+    db = _make_sqlite_db(tmp_path / "deadline.db")
+    try:
+        calls = {"n": 0}
+
+        def _fault(sql, args):
+            if isinstance(sql, str) and sql.startswith("INSERT OR REPLACE INTO meta"):
+                calls["n"] += 1
+                return sqlite3.OperationalError("database is locked")
+            return None
+
+        _wrap_connection(db, _fault)
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            db.init_schema()
+
+        assert calls["n"] == 1  # deadline exceeded -> no retry attempts
+    finally:
+        db.close()
+
+
 # 4. Non-lock errors bypass retry ------------------------------------------
 
 def test_non_lock_operational_error_raises_immediately(tmp_path: Path):
