@@ -20,7 +20,7 @@ from cognition.working_memory import Memory, WorkingMemory
 _PROCESSOR_MODEL_HINTS: dict[str, str] = {
     "claude": None,  # Use default profile
     "fast": "claude-haiku-4-5",
-    "quality": "claude-sonnet-4-6",
+    "quality": "claude-sonnet-5",
 }
 
 

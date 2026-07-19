@@ -78,7 +78,7 @@ Deep dive: [Telegram Command Menu](telegram-command-menu.md) · [Runtime Status 
 | `/mode` | Show the current mode | |
 | `/voice` | Persist voice reply behavior across Telegram and Discord | `always` = voice + text, `auto` = reply in voice to voice messages, `off` = text only; `/voice on` aliases `always` |
 | `/provider` | Runtime lane status — selection, routes, health | admin |
-| `/model` | Select lane/provider/model (claude, sonnet, opus, codex, gemini, openrouter, openai, kimi, auto) | admin; Discord-native slash command; `kimi:k3` pins the Kimi lane model |
+| `/model` | Select lane/provider/model (claude, sonnet, opus, fable, codex, gemini, openrouter, openai, kimi, auto) | admin; Discord-native slash command; `kimi:k3` pins the Kimi lane model |
 | `/reload` | Reload bot config without restarting | admin |
 | `/restart` | Restart the bot — kill this process and start fresh | admin |
 | `/update` | Safe stable framework update — `status`, `now`, `auto on|off|status`, `history` | admin |

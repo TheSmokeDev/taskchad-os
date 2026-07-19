@@ -192,7 +192,7 @@ def _primary_model_for_provider(provider: str) -> str:
         return _model_from_env("SECOND_BRAIN_OPENROUTER_MODEL", "openrouter/auto")
     if provider == "kimi":
         return _model_from_env("SECOND_BRAIN_KIMI_MODEL", "k3")
-    return _model_from_env("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6")
+    return _model_from_env("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-5")
 
 
 def _resolve_api_key_from_env_vars(env_vars: tuple[str, ...]) -> str:

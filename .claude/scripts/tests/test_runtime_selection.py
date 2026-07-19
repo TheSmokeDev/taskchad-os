@@ -110,8 +110,30 @@ def test_resolve_runtime_model_choice_maps_bare_claude_alias() -> None:
 
     assert choice is not None
     assert choice.provider == "claude"
-    assert choice.model == "claude-sonnet-4-6"
-    assert choice.persist_model == "claude-sonnet-4-6"
+    assert choice.model == "claude-sonnet-5"
+    assert choice.persist_model == "claude-sonnet-5"
+
+
+def test_resolve_runtime_model_choice_maps_flagship_and_codex_tier_aliases() -> None:
+    """2026-07 catalog: flagship Claude alias + named GPT-5.6 tier aliases."""
+
+    fable = resolve_runtime_model_choice("fable")
+    assert fable is not None
+    assert fable.provider == "claude"
+    assert fable.model == "claude-fable-5"
+
+    sol = resolve_runtime_model_choice("codex:sol")
+    assert sol is not None
+    assert sol.provider == "openai-codex"
+    assert sol.model == "gpt-5.6-sol"
+
+    terra = resolve_runtime_model_choice("codex:terra")
+    assert terra is not None
+    assert terra.model == "gpt-5.6-terra"
+
+    luna = resolve_runtime_model_choice("codex:luna")
+    assert luna is not None
+    assert luna.model == "gpt-5.6-luna"
 
 
 def test_apply_runtime_model_choice_writes_explicit_codex_pin() -> None:

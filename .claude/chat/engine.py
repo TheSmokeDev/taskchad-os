@@ -1169,7 +1169,7 @@ class ConversationEngine:
         from config import DEFAULT_AGENT_TOOLSET  # canonical homie toolset (shared w/ cabinet parity)
         allowed_tools = list(DEFAULT_AGENT_TOOLSET)
 
-        requested_model = os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6")
+        requested_model = os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-5")
         piv_max_turns = self.max_turns
         piv_max_budget = self.max_budget_usd
         active_skill_name = ""

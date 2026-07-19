@@ -4439,8 +4439,9 @@ def _switch_provider(choice: str) -> str:
             f"{warning_block}\n"
             "Usage: /model <lane|provider|provider:model|model>\n"
             "  /model claude - Claude native lane\n"
-            "  /model sonnet - Claude Sonnet 4.6\n"
-            "  /model opus - Claude Opus 4.6\n"
+            "  /model sonnet - Claude Sonnet 5\n"
+            "  /model opus - Claude Opus 4.8\n"
+            "  /model fable - Claude Fable 5 (flagship)\n"
             "  /model codex - generic runtime lane via Codex\n"
             "  /model codex:default - Codex plan default (no --model passed)\n"
             "  /model gpt5.5 - Codex pinned model shortcut\n"
@@ -4492,7 +4493,7 @@ def _switch_provider(choice: str) -> str:
     except ValueError:
         return (
             "Unknown runtime selection: "
-            f"{choice}. Use: claude, sonnet, opus, codex, codex:default, "
+            f"{choice}. Use: claude, sonnet, opus, fable, codex, codex:default, "
             "codex:<model>, gpt5.5, gpt 5.5, codex 5.5, gemini, openrouter, openai, kimi, or auto"
         )
     except Exception as e:

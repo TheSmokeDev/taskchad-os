@@ -15,7 +15,7 @@ from .profiles import GENERIC_PROVIDER_REGISTRY, normalize_provider
 from .selection import RuntimeSelection, apply_runtime_selection_choice, provider_display_name
 
 CLAUDE_MODEL_ENV_KEY = "SECOND_BRAIN_CLAUDE_MODEL"
-CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6"
+CLAUDE_DEFAULT_MODEL = "claude-sonnet-5"
 CODEX_PLAN_DEFAULT_MODEL = GENERIC_PROVIDER_REGISTRY["openai-codex"].default_model
 
 
@@ -47,8 +47,21 @@ MODEL_CONFIGS: dict[str, RuntimeModelConfig] = {
         model_env_key=CLAUDE_MODEL_ENV_KEY,
         default_model=CLAUDE_DEFAULT_MODEL,
         aliases={
-            "sonnet": "claude-sonnet-4-6",
+            "sonnet": "claude-sonnet-5",
             "opus": "claude-opus-4-8",
+            "fable": "claude-fable-5",
+        },
+    ),
+    # Named GPT-5.6 tier shortcuts for the Codex lane (verified 2026-07-18:
+    # gpt-5.6-sol flagship, terra balanced, luna high-volume).
+    "openai-codex": RuntimeModelConfig(
+        provider="openai-codex",
+        model_env_key=GENERIC_PROVIDER_REGISTRY["openai-codex"].model_env_var,
+        default_model=GENERIC_PROVIDER_REGISTRY["openai-codex"].default_model,
+        aliases={
+            "sol": "gpt-5.6-sol",
+            "terra": "gpt-5.6-terra",
+            "luna": "gpt-5.6-luna",
         },
     ),
     **{
@@ -59,6 +72,7 @@ MODEL_CONFIGS: dict[str, RuntimeModelConfig] = {
             aliases={},
         )
         for provider, overlay in GENERIC_PROVIDER_REGISTRY.items()
+        if provider != "openai-codex"
     },
 }
 
