@@ -61,6 +61,7 @@ Configuration knobs (environment variables, resolved at call time):
 | `RECALL_MIN_SCORE` | `0.3` | Hybrid-leg merged-score floor to keep a hit (hybrid/vector scale). Applied inside the dual-search pipeline (`_search_with_fallback` → `search_hybrid(min_score=…)`); the keyword leg is floored separately by `RECALL_KEYWORD_MIN_SCORE`. |
 | `RECALL_KEYWORD_MIN_SCORE` | `0.02` | Floor for keyword-only recall. Raw FTS5 scores are `1/(1+\|bm25\|)` (~0.05-0.17 for real hits) — a different scale than the hybrid floor; applying 0.3 here returned zero results (fixed 2026-07-15). |
 | `RECALL_MAX_RESULTS` | `3` | Default cap on injected results (chat hot path). |
+| `RECALL_GRAPH_CACHE_ENABLED` | `true` | #129: cache the wiki-link graph per vault, invalidated by the search-index DB mtime (freshness inherits the index's staleness bound, ~30 min worst case via heartbeat sync). `false` = rebuild on every recall — still off-loop, just uncached. |
 | `RECALL_RERANK_ENABLED` | `true` | Toggle the Stage-5 qmd re-rank. |
 | `RECALL_RERANK_TOP_N` | `10` | How many hits feed the re-ranker. |
 | `RECALL_RERANK_TIMEOUT_S` | `3.0` | Hard timeout; on expiry fall back to score order. |

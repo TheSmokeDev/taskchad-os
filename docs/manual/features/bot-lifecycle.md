@@ -62,15 +62,39 @@ own failure class. A rung can be green while the one above it is dead.
 |---|---|---|
 | 1. Process exists | Is there a live PID? | `bot.pid` + `shared.is_pid_alive` (watchdog: `/health` unreachable = process-level failure) |
 | 2. Adapter probed | Does each adapter's physical state probe pass? | In-bot `LivenessSupervisor` (`chat/liveness.py`) → `/health` `adapter_liveness.healthy` |
-| 3. Events flowing | Has the adapter actually RECEIVED anything recently? | Watchdog event-staleness check: `adapter_liveness.last_update_at` vs `BOT_WATCHDOG_STALENESS_SECONDS`, judged against a fresh peer |
+| 3. Events flowing | Has the adapter actually RECEIVED anything recently? | Watchdog event-staleness check: `adapter_liveness.last_update_at` vs `BOT_WATCHDOG_STALENESS_SECONDS`, judged against a fresh **critical** peer (#135) |
 | 4. End-to-end reply | Does a real message get a real answer? | Operator / `telegram-bot-test` skill — no automated rung yet |
 
 The staleness rule (rung 3) is deliberately comparative: a critical adapter
 whose `last_update_at` is older than the threshold is DEGRADED only when at
-least one OTHER adapter is fresh — the fresh peer proves the bot and the
-world are active, so the quiet one is broken, not idle. Both-quiet is NOT
-stale (a quiet bot is not a dead bot), and a missing or unparseable
-timestamp never produces a verdict (fail-safe).
+least one OTHER **critical gateway** is fresh (#135 — the non-critical web
+relay bumps its timestamp on machine-adjacent traffic, so a fresh relay proves
+nothing about a quiet Telegram; counting it caused false restarts of a
+healthy-but-quiet bot). Both-quiet is NOT stale (a quiet bot is not a dead
+bot), and a missing or unparseable timestamp never produces a verdict
+(fail-safe).
+
+#134/#135 hardening the operator should know:
+
+- **Any fatal-task ending exits non-zero** (#134): a router/liveness task that
+  crashes with ANY exception — or returns alive-but-deaf — escalates through
+  `_supervise_tasks` to a non-zero exit, so the watchdog restarts it. The old
+  code exited 0 on most crashes, which every supervisor read as an operator
+  stop.
+- **`thehomie off` wins every race** (#135): the desired-state flag is re-read
+  at the last instant before a restart spawn, and if it flips OFF while the
+  launcher is mid-flight the just-spawned bot is swept (profile-aware,
+  PID-scoped). A failed or undone sweep reports HONESTLY (`restart_undo_failed`
+  + a loud toast telling you to run `thehomie off` again) — it never claims
+  "stopped" on faith.
+- **A failed restart never arms the grace window** (#135): grace protects a
+  BOOTING bot; a launcher that failed has nothing to protect, so failure
+  counting resumes immediately on the next tick (bounded by the
+  restarts-per-hour budget).
+- **The kill scan is repo-anchored** (#135): process sweeps match only THIS
+  repo's absolute `chat/main.py`/`service.py` paths — a foreign project's
+  python process can never be a kill candidate, even when both lack
+  `HOMIE_HOME`.
 
 ## The 2026-07 Wedge-Class Catalog
 

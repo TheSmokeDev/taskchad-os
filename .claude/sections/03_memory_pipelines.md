@@ -71,6 +71,7 @@ RECALL_MIN_SCORE=0.3             # Hybrid-leg merged-score floor (hybrid/vector 
 RECALL_KEYWORD_MIN_SCORE=0.02    # Floor for keyword-only recall — raw FTS5 scores are 1/(1+|bm25|), a different scale
 RECALL_MAX_RESULTS=3             # Max snippets injected
 RECALL_MIN_MSG_LEN=20            # Skip short messages ("hi", "thanks")
+RECALL_GRAPH_CACHE_ENABLED=true  # #129 wiki-link graph cache (invalidated by the index DB mtime); false = rebuild every recall (off-loop, uncached)
 ```
 
 ### Unified Recall Service

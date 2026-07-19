@@ -92,6 +92,28 @@ OpenAI-compatible adapter uses the chat-completions call shape for this lane
 because the coding endpoint does not serve the OpenAI Responses API
 (`/responses` returns 404; probed 2026-07-17).
 
+## Per-Adapter Runtime Deadlines (#133)
+
+Every `adapter.run()` at the lane chokepoint is bounded by `asyncio.wait_for`,
+so a wedged provider CLI (a Codex/Gemini child that never exits, a stalled SDK
+stream) can no longer hang scheduled pipelines (heartbeat, reflection, weekly,
+dream, cabinet, persona learning) that have no outer deadline of their own.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `SECOND_BRAIN_RUNTIME_TIMEOUT_TEXT_SECONDS` | `300` | Deadline per adapter attempt for TEXT_REASONING requests |
+| `SECOND_BRAIN_RUNTIME_TIMEOUT_TOOL_SECONDS` | `1800` | Deadline per adapter attempt for TOOL_REASONING requests |
+
+Semantics to know:
+- The deadline is **per adapter attempt, not per turn** — a fallback chain of N
+  providers can legitimately take up to N x timeout before the request fails.
+- `<= 0` disables the deadline entirely (escape hatch — nothing bounds the call).
+- On timeout the profile is marked retryable-failed and the chain **continues**
+  to the next provider; an operator cancel (`CancelledError`) propagates
+  untouched instead of being mislabeled a timeout.
+- On Windows the cancelled CLI child is **tree-killed** (`taskkill /T`) — the
+  npm `.CMD` wrapper trap left the real Node process alive under a plain kill.
+
 ## Latest Live Proof
 
 Use current CLI/status checks before making a new live claim. Tracker entries
