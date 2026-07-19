@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "chat"))
 
 from adapters.discord import DiscordAdapter, get_discord_native_command_menu
-from models import Attachment, Channel, OutgoingMessage, Platform
+from models import Attachment, Channel, MessageEmbed, OutgoingMessage, Platform
 
 
 def _make_adapter(
@@ -220,6 +221,73 @@ async def test_discord_medium_voice_reply_keeps_text_copy() -> None:
     channel.send.assert_awaited()
 
 
+@pytest.mark.asyncio
+async def test_discord_send_preserves_multiple_embeds() -> None:
+    adapter = _make_adapter()
+    channel = MagicMock()
+    sent = MagicMock(id=321)
+    channel.send = AsyncMock(return_value=sent)
+    adapter._client.get_channel = MagicMock(return_value=channel)
+
+    result = await adapter.send(
+        OutgoingMessage(
+            text="Daily Win Desk",
+            channel=Channel(Platform.DISCORD, "67890"),
+            embeds=[MessageEmbed(title="One"), MessageEmbed(title="Two")],
+        )
+    )
+
+    assert result == "321"
+    kwargs = channel.send.await_args.kwargs
+    assert "embed" not in kwargs
+    assert len(kwargs["embeds"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_discord_progress_edit_preserves_multiple_embeds() -> None:
+    adapter = _make_adapter()
+    message = SimpleNamespace(edit=AsyncMock())
+    channel = MagicMock(fetch_message=AsyncMock(return_value=message))
+    adapter._client.get_channel = MagicMock(return_value=channel)
+
+    result = await adapter.update(
+        OutgoingMessage(
+            text="Final answer",
+            channel=Channel(Platform.DISCORD, "67890"),
+            is_update=True,
+            update_message_id="55",
+            embeds=[MessageEmbed(title="One"), MessageEmbed(title="Two")],
+        )
+    )
+
+    assert result == "55"
+    assert len(message.edit.await_args.kwargs["embeds"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_discord_voice_summary_failure_is_short_and_does_not_touch_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import adapters.discord as discord_adapter_module
+
+    adapter = _make_adapter()
+    channel = MagicMock(send=AsyncMock())
+    adapter._client.get_channel = MagicMock(return_value=channel)
+    monkeypatch.setattr(
+        discord_adapter_module.voice_mod,
+        "synthesize",
+        AsyncMock(side_effect=RuntimeError("tts offline")),
+    )
+
+    sent = await adapter.send_voice_summary(
+        Channel(Platform.DISCORD, "67890"),
+        "Private deal summary",
+    )
+
+    assert sent is False
+    assert channel.send.await_args.kwargs["content"].startswith("Voice summary is unavailable")
+
+
 def test_discord_registers_native_vault_group_without_flat_duplicate():
     adapter = _make_adapter()
     commands = adapter._tree.get_commands()
@@ -316,6 +384,28 @@ async def test_discord_component_allowed_guild_queues_provenance_metadata() -> N
     }
     interaction.response.defer.assert_awaited_once_with()
     interaction.response.send_message.assert_not_awaited()
+    interaction.message.edit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_discord_component_is_queued_before_button_disable_failure() -> None:
+    adapter = _make_adapter(
+        allowed_guilds=["11111"],
+        allowed_users=["12345"],
+    )
+    interaction = _mock_component_interaction()
+
+    async def fail_after_queue(*_args, **_kwargs) -> None:
+        assert not adapter._queue.empty()
+        raise asyncio.TimeoutError
+
+    interaction.message.edit.side_effect = fail_after_queue
+
+    await adapter._client.on_interaction(interaction)
+
+    queued = adapter._queue.get_nowait()
+    assert queued.text == "__button:approval:preview:7"
+    interaction.response.defer.assert_awaited_once_with()
     interaction.message.edit.assert_awaited_once()
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -307,8 +308,30 @@ def _quote_fts_query(query: str) -> str:
     return " AND ".join(f'"{term}"' for term in terms)
 
 
+_persist_locks: dict[str, asyncio.Lock] = {}
+
+
+def get_persist_lock(session_key: str) -> asyncio.Lock:
+    """Per-conversation lock serialising off-loop session persists.
+
+    Keyed by the canonical ``build_session_key`` id and SHARED by the engine,
+    router, and persona persist paths — a router-only lock is insufficient
+    (issue #131 gate). Call only from the event-loop thread; hold it across the
+    awaited ``asyncio.to_thread`` so persists for one conversation serialise
+    while the loop stays free. Each process owns its own dict (cross-process
+    safety is WAL + busy_timeout, not this lock). Dict growth is bounded by the
+    live conversation count (same acceptance as ``router._active_turns``).
+    """
+    lock = _persist_locks.get(session_key)
+    if lock is None:
+        lock = _persist_locks[session_key] = asyncio.Lock()
+    return lock
+
+
 class SQLiteSessionStore:
     """Persistent session storage backed by SQLite."""
+
+    _wal_warned = False  # class attr — once-per-process WAL-fallback warning
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -316,12 +339,32 @@ class SQLiteSessionStore:
         self._init_db()
 
     def _open(self) -> sqlite3.Connection:
-        """Raw connection with no schema check.
+        """Raw connection with WAL + busy_timeout, no schema check.
 
         Used by ``_init_db`` (which would otherwise recurse through
         ``_connect``) and by ``_connect`` after the schema is ensured.
+
+        ``busy_timeout`` is per-connection and set FIRST so the one-time WAL
+        conversion below waits out a concurrent writer (e.g. the dashboard
+        process on the same ``chat.db``) instead of raising "database is
+        locked". ``journal_mode=WAL`` persists in the DB header once converted;
+        re-asserting it per connection is safe (mirrors
+        ``dashboard_db._apply_pragmas``). SQLite returns the RESULTING journal
+        mode from the pragma — under contention the conversion can silently
+        leave rollback-journal mode, so validate and warn (fail-open: degraded
+        concurrency is not a broken bot).
         """
-        return sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout=5000")
+        row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        mode = str(row[0]) if row else ""
+        if mode.lower() != "wal" and not SQLiteSessionStore._wal_warned:
+            SQLiteSessionStore._wal_warned = True
+            print(
+                f"[{datetime.now()}] [Sessions] WARNING: journal_mode=WAL not "
+                f"applied (got {mode!r}); continuing in {mode or 'unknown'} mode"
+            )
+        return conn
 
     def _connect(self) -> sqlite3.Connection:
         """Open a per-op connection, re-initialising the schema if the DB file

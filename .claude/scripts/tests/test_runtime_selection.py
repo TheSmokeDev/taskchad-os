@@ -435,3 +435,88 @@ async def test_handle_diagnostics_surfaces_runtime_and_lifecycle_attention(
     assert "*Lifecycle*:" in message
     assert "Clear lifecycle warnings/errors (recent): 2" in message
     assert "session-end-flush.py: exit 1" in message
+
+
+@pytest.mark.asyncio
+async def test_handle_provider_offloads_status_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/provider must not block the event loop on a slow codex CLI (#130).
+
+    ``_get_provider_status`` runs ``subprocess.run(['codex','login','status'],
+    timeout=15)`` twice (~30s worst case). ``handle_provider`` must offload it via
+    ``asyncio.to_thread``. Completion ORDER is the proof: if the status check ran
+    on the loop, its synchronous sleep would block the 0.05s ticker and "status"
+    would land before "ticked".
+    """
+    import asyncio
+
+    import core_handlers
+
+    order: list[str] = []
+
+    def _slow_status() -> str:
+        import time
+
+        time.sleep(0.2)  # the ~30s double codex-CLI probe, scaled down for the test
+        order.append("status")
+        return "provider-ok"
+
+    monkeypatch.setattr(core_handlers, "_get_provider_status", _slow_status)
+
+    async def _ticker() -> None:
+        await asyncio.sleep(0.05)
+        order.append("ticked")
+
+    result, _ = await asyncio.gather(
+        core_handlers.handle_provider(adapter=None, incoming=None, args=""),
+        _ticker(),
+    )
+
+    assert result == "provider-ok"
+    assert order == ["ticked", "status"]
+
+
+@pytest.mark.asyncio
+async def test_handle_diagnostics_offloads_collect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/diagnostics must not block the loop on collect_diagnostics() (#130).
+
+    collect_diagnostics() reaches a synchronous browser_readiness() CDP probe
+    (~9s worst case) plus blocking file/subprocess reads. handle_diagnostics must
+    offload it via asyncio.to_thread. Completion ORDER is the proof: if it ran on
+    the loop, its synchronous sleep would block the 0.05s ticker and "collected"
+    would land before "ticked".
+    """
+    import asyncio
+
+    import core_handlers
+    from diagnostics import DiagnosticsReport
+
+    order: list[str] = []
+
+    def _slow_collect() -> DiagnosticsReport:
+        import time
+
+        time.sleep(0.2)  # the ~9s worst-case CDP + probe chain, scaled down
+        order.append("collected")
+        return DiagnosticsReport(
+            timestamp="2026-07-17T00:00:00",
+            uptime_seconds=1.0,
+        )
+
+    # handle_diagnostics does `from diagnostics import collect_diagnostics` at
+    # call time, so patching the diagnostics-module attribute is what takes.
+    import diagnostics as _diag
+
+    monkeypatch.setattr(_diag, "collect_diagnostics", _slow_collect)
+    monkeypatch.setitem(core_handlers._ctx, "adapters", {})
+
+    async def _ticker() -> None:
+        await asyncio.sleep(0.05)
+        order.append("ticked")
+
+    result, _ = await asyncio.gather(
+        core_handlers.handle_diagnostics(adapter=None, incoming=None, args=""),
+        _ticker(),
+    )
+
+    assert isinstance(result, str)
+    assert order == ["ticked", "collected"]

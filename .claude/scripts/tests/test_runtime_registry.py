@@ -27,7 +27,7 @@ def test_resolve_runtime_profiles_adds_openai_fallback(monkeypatch: pytest.Monke
     # and SECOND_BRAIN_RUNTIME_LANE leak into os.environ even when not set in the shell.
     monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
     monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
-    monkeypatch.setattr(profiles, "OPENAI_API_KEY", "sk-test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
     monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
     monkeypatch.setenv("SECOND_BRAIN_RUNTIME_PROVIDER", "claude")
     monkeypatch.setenv("SECOND_BRAIN_ENABLE_OPENAI_FALLBACK", "true")
@@ -43,7 +43,7 @@ def test_resolve_runtime_profiles_chains_all_providers_for_tool_reasoning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hermes-style: all subscription providers available for tool tasks."""
-    monkeypatch.setattr(profiles, "OPENAI_API_KEY", "sk-test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
 
     request = RuntimeRequest(
         prompt="hi",

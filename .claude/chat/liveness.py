@@ -500,6 +500,7 @@ class DiagnosticsCache:
                 "memory_doc_count": report.memory_doc_count,
                 "memory_embedding_status": report.memory_embedding_status,
                 "cognition_available": report.cognition_available,
+                "sessions_active": report.sessions_active,
             }
 
         try:

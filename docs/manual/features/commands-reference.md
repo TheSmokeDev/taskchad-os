@@ -2,7 +2,7 @@
 
 Status: Active baseline
 Owner: `.claude/chat/` command registry (`commands.py`, `core_handlers.py`, `router.py`)
-Last updated: 2026-07-15
+Last updated: 2026-07-18
 
 ## What It Does
 
@@ -32,11 +32,11 @@ explicit, exact approval phrase (see [Approval-gated writes](#approval-gated-wri
 
 Every command in this catalog works when typed. A curated subset also shows up
 in the **native slash menu** (Telegram's `/` dropdown and Discord's slash
-picker) — 54 commands today. The rest are **text-only**: they dispatch fine but
+picker) — 55 commands today. The rest are **text-only**: they dispatch fine but
 are kept off the menu on purpose (`NATIVE_MENU_EXCLUDED` in `commands.py`).
 
 - **Menu-registered families:** system/session basics (`/help`, `/status`,
-  `/diagnostics`, `/clear`, `/provider`, `/model`, `/restart`), integrations
+  `/diagnostics`, `/clear`, `/provider`, `/model`, `/voice`, `/restart`), integrations
   (`/email`, `/pemail`, `/cleanup`, `/accounts`, `/inbox`, `/calendar`,
   `/tasks`), browser/social (`/browser`, `/browserops`, `/ghost`, `/x`,
   `/reddit`, the LinkedIn commands, `/video`), analytics (`/gsc`, `/analytics`,
@@ -76,8 +76,9 @@ Deep dive: [Telegram Command Menu](telegram-command-menu.md) · [Runtime Status 
 | `/plan` | Plan mode — research only, no changes | |
 | `/go` (`/execute`) | Execute mode — implement changes | |
 | `/mode` | Show the current mode | |
+| `/voice` | Persist voice reply behavior across Telegram and Discord | `always` = voice + text, `auto` = reply in voice to voice messages, `off` = text only; `/voice on` aliases `always` |
 | `/provider` | Runtime lane status — selection, routes, health | admin |
-| `/model` | Select lane/provider/model (claude, sonnet, opus, codex, gemini, openrouter, openai, auto) | admin |
+| `/model` | Select lane/provider/model (claude, sonnet, opus, codex, gemini, openrouter, openai, kimi, auto) | admin; Discord-native slash command; `kimi:k3` pins the Kimi lane model |
 | `/reload` | Reload bot config without restarting | admin |
 | `/restart` | Restart the bot — kill this process and start fresh | admin |
 | `/update` | Safe stable framework update — `status`, `now`, `auto on|off|status`, `history` | admin |

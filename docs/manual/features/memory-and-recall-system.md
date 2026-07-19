@@ -28,7 +28,7 @@ surface** (the compilation engine's link-economy guardrails and delta-lint).
 
 | Pipeline | Cadence | Job | Deep page |
 |---|---|---|---|
-| Heartbeat | every 30 min | proactive sense loop over calendar/email/tasks + ambient observations | [Heartbeat Runtime](heartbeat-runtime.md) |
+| Heartbeat | every 2 h at :02 (framework default 30 min; this box downshifted) | proactive sense loop over calendar/email/tasks + ambient observations | [Heartbeat Runtime](heartbeat-runtime.md) |
 | Daily reflection | 8 AM | promote yesterday's log into long-term memory; compile entities | [The Living Self Manual](../the-living-self-manual.md) |
 | Weekly synthesis | Sun 8 PM | write the weekly note; update goals; compile entities | [The Living Self Manual](../the-living-self-manual.md) |
 | Dream consolidation | post-weekly + manual | merge cross-session signal, resolve contradictions, prune stale entries | [Episodes](episodes.md) |
@@ -48,7 +48,7 @@ run first; the one model call (the re-rank) only fires for substantive queries.
 |---|---|---|
 | 1. Tier classify | AUTO mode only | Rules-only (no model): skip for greetings/very short messages (Tier 0), otherwise Tier 1. |
 | 2. Query expansion | Tier 1 | Split the query into 2-3 sub-queries (heuristic by default, sub-millisecond). |
-| 3. Dual search | every active tier | FTS5 keyword search **and** 768-dim BGE vector search run in parallel, then merge; results below the score floor are dropped. |
+| 3. Dual search | every active tier | FTS5 keyword search **and** 768-dim BGE vector search run in parallel; each leg is floored on its own scale first, then merged/deduped on raw scores (never renormalized — evolve replay/compare/veto consume absolute `top_scores`). When a `top_n` cap applies, each leg's best surviving hit is guaranteed a slot in the cap window so raw-scale differences alone can't bury an exact match (#136 leg-representation guarantee). |
 | 4. Graph hub-boost | Tier 1 | Build the wikilink graph, pull 1-hop neighbors of matched notes, and boost highly-connected hub notes (MOCs). |
 | 5. qmd re-rank | Tier 1 **and** more than 3 hits | A fast model (haiku tier) re-ranks the top hits for relevance — ported from Karpathy's `qmd` pattern. On timeout or error it returns the score-ranked order unchanged. |
 | 6. Sanitize + format | every active tier | Injection-defense scrub of recalled text, cap length, format with path + score + graph-hop metadata. |
@@ -58,7 +58,7 @@ Configuration knobs (environment variables, resolved at call time):
 | Env var | Default | Meaning |
 |---|---|---|
 | `RECALL_ENABLED` | `true` | Master switch. `false` → recall returns empty. |
-| `RECALL_MIN_SCORE` | `0.3` | Minimum merged score to keep a hit (hybrid/vector scale). |
+| `RECALL_MIN_SCORE` | `0.3` | Hybrid-leg merged-score floor to keep a hit (hybrid/vector scale). Applied inside the dual-search pipeline (`_search_with_fallback` → `search_hybrid(min_score=…)`); the keyword leg is floored separately by `RECALL_KEYWORD_MIN_SCORE`. |
 | `RECALL_KEYWORD_MIN_SCORE` | `0.02` | Floor for keyword-only recall. Raw FTS5 scores are `1/(1+\|bm25\|)` (~0.05-0.17 for real hits) — a different scale than the hybrid floor; applying 0.3 here returned zero results (fixed 2026-07-15). |
 | `RECALL_MAX_RESULTS` | `3` | Default cap on injected results (chat hot path). |
 | `RECALL_RERANK_ENABLED` | `true` | Toggle the Stage-5 qmd re-rank. |
@@ -255,6 +255,12 @@ walk), and skipped by lint, backfill, and index generation.
 | Vault lint + delta | `.claude/scripts/vault_lint.py`; knob in `config.py` (`get_lint_delta_enabled`) |
 | Skill integration | `.claude/skills/vault-ops/references/{routines,intelligence,pipelines}.md` |
 | Tests | `.claude/scripts/tests/test_recall_cli.py`, `test_recall_service.py`, `test_cognition_recall.py`, `test_entity_guardrails.py`, `test_vault_lint.py` |
+
+Both the index builder (`sync_index`) and the single-file entrypoint (`reindex_file`)
+guard embedding-model migrations the same way: read the *physical* vec-table
+dimension via `db.get_actual_embedding_dim()` before touching schema, and force
+a full rebuild on mismatch instead of trusting the `meta` table (Rule 2 — meta
+is derived state, not source of truth). See `tests/test_dim_drift_guard.py`.
 
 ## Safety Boundaries
 

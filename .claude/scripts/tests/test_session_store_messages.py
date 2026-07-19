@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import session as session_module
 from session import Session, SQLiteSessionStore
 from session_keys import (
     build_session_key,
@@ -108,3 +109,51 @@ def test_session_delete_cascades_chat_messages(tmp_path) -> None:
     assert store.delete("web", "channel-2", "thread-2") is True
     assert store.list_messages(session_id) == []
     assert store.search_messages("old", session_id=session_id) == []
+
+
+# =============================================================================
+# Issue #131 — WAL + busy_timeout pragmas on every connection, with a fail-open
+# warning when the WAL conversion cannot be applied.
+# =============================================================================
+
+
+def test_fresh_store_uses_wal_and_busy_timeout(tmp_path) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    with store._connect() as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_self_heal_reinit_keeps_wal(tmp_path) -> None:
+    import gc
+
+    db = tmp_path / "chat.db"
+    store = SQLiteSessionStore(db)
+    # Simulate a `git clean -x` wipe mid-run: it removes the DB and its WAL
+    # sidecars. gc.collect() drops the lingering _init_db connection so Windows
+    # releases the file handle (on the Linux box, open fds never block unlink).
+    gc.collect()
+    for name in ("chat.db", "chat.db-wal", "chat.db-shm"):
+        sidecar = tmp_path / name
+        if sidecar.exists():
+            sidecar.unlink()
+    with store._connect() as conn:  # re-init path (session.py _connect)
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_wal_fallback_warns_not_crashes(tmp_path, monkeypatch, capsys) -> None:
+    # An in-memory DB can never be WAL — journal_mode returns "memory", which
+    # exercises the validation branch without mocking sqlite internals. Capture
+    # the real connect FIRST so the replacement doesn't recurse into itself.
+    real_connect = session_module.sqlite3.connect
+
+    def fake_connect(*_args, **_kwargs):
+        return real_connect(":memory:", check_same_thread=False)
+
+    monkeypatch.setattr(session_module.sqlite3, "connect", fake_connect)
+    monkeypatch.setattr(SQLiteSessionStore, "_wal_warned", False)
+
+    SQLiteSessionStore(tmp_path / "chat.db")  # must not raise
+
+    assert "journal_mode=WAL not applied" in capsys.readouterr().out

@@ -357,12 +357,48 @@ def _keyword_only_recall(
 
 
 def reindex_file(file_path: Path, memory_dir: Path, generate_embeddings: bool = True) -> int:
-    """Reindex a single memory file. Returns chunk count."""
+    """Reindex a single memory file. Returns chunk count (the whole-index total
+    when a dim-drift rebuild is triggered)."""
     import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
     from db import get_memory_db
     from memory_index import index_file as _index_file
 
     db = get_memory_db(db_path=_cfg.resolve_db_path(memory_dir))
+    # Rule 2: read the PHYSICAL schema dim BEFORE init_schema — init_schema
+    # would create tables at current config (IF NOT EXISTS leaves an existing
+    # vec_chunks at the old dim) and mask the drift, mirroring the guard in
+    # memory_index.sync_index. Without this, an embedding-model migration makes
+    # the vec insert fail shape-mismatch; callers (e.g. memory_flush._reindex_
+    # episode) swallow it as "non-fatal" and the file silently drops out of
+    # recall. The generate_embeddings gate is load-bearing: a keyword-only
+    # reindex writes no vectors (no shape-mismatch), and a
+    # sync_index(generate_embeddings=False, force_rebuild=True) would bulk_clear
+    # and rebuild with NO vectors — destroying semantic search.
+    actual_dim = db.get_actual_embedding_dim()
+    if (
+        generate_embeddings
+        and actual_dim is not None
+        and actual_dim != _cfg.EMBEDDING_DIMENSIONS
+    ):
+        # Operator receipt: sync_index(force_rebuild=True) skips its OWN
+        # detection print, so without this the migration rebuild is invisible.
+        print(
+            f"reindex_file: embedding dim mismatch (vec schema={actual_dim} vs "
+            f"config={_cfg.EMBEDDING_DIMENSIONS}), forcing full rebuild...",
+            flush=True,
+        )
+        db.close()
+        from memory_index import sync_index
+
+        stats = sync_index(
+            memory_dir=memory_dir,
+            generate_embeddings=True,
+            force_rebuild=True,
+        )
+        chunks_total = int(stats.get("chunks_total", 0))
+        print(f"reindex_file: rebuild complete ({chunks_total} chunks)", flush=True)
+        return chunks_total
+
     db.init_schema()
     chunks = _index_file(db, file_path, memory_dir, generate_embeddings=generate_embeddings)
     db.close()

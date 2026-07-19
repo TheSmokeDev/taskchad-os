@@ -15,14 +15,22 @@ from .profiles import (
 )
 from .selection import resolve_runtime_selection
 
-# Compatibility/provider-status ordering kept for legacy shims and health checks
-# during the PR2 migration.
+# Provider ORDERING for fallback routes, task defaults, and provider-status
+# surfaces. #133 part B doctrine clarification: this tuple does NOT implement
+# cross-LANE auto-failover — lane_router resolves the claude_native lane to
+# Claude alone, and a pinned generic provider yields a one-element route before
+# fallback is consulted. "claude" leading this chain orders status displays and
+# the tool-capability fallback WITHIN whatever lane is executing; a Claude
+# failure never falls through to Codex/Gemini (and vice versa) via this chain.
+# The framework doctrine is request PORTABILITY across lanes (the assembled
+# RuntimeRequest must survive on any provider), not runtime auto-failover.
 DEFAULT_PROVIDER_CHAIN = (
     "claude",
     "openai_codex",
     "gemini",
     "openrouter",
     "openai",
+    "kimi",
 )
 
 DEFAULT_TEXT_ROUTE = (

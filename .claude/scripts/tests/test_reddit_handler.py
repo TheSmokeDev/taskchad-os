@@ -284,3 +284,46 @@ def test_reddit_post_rejects_subreddit_with_query_injection(monkeypatch) -> None
 
     assert "rejected" in reply.lower()
     assert drives == []
+
+
+# ── Event-loop-wedge regression (#130): browser_readiness runs off-loop ─────
+
+
+def test_reddit_status_offloads_browser_readiness(monkeypatch) -> None:
+    """Same event-loop-wedge regression as LinkedIn profile status — #130.
+
+    Completion ORDER is the proof: a slow browser_readiness on the loop would
+    block the ticker's timer and "readiness" would land first. Off-loop, the
+    0.05s ticker finishes before the 0.2s readiness probe returns.
+    """
+    order: list[str] = []
+
+    def _slow_readiness(*, port=None):
+        import time
+
+        time.sleep(0.2)  # the ~9s worst-case CDP chain, scaled down for the test
+        order.append("readiness")
+        return {"enabled": True, "cdp_port": port or 9222, "cdp_reachable": True}
+
+    monkeypatch.setattr(browser_control, "browser_readiness", _slow_readiness)
+    monkeypatch.setattr(
+        browser_control, "browser_status", lambda *, port=None: {"enabled": True, "cdp_port": port}
+    )
+    monkeypatch.setattr(
+        browser_control, "format_browser_status", lambda status, label=None: "status-ok"
+    )
+    monkeypatch.setattr(core_handlers, "_audit_browser_action", lambda **kw: None)
+
+    async def _run() -> None:
+        async def _ticker() -> None:
+            await asyncio.sleep(0.05)
+            order.append("ticked")
+
+        result, _ = await asyncio.gather(
+            core_handlers.handle_reddit(adapter=None, incoming=None, args="status"),
+            _ticker(),
+        )
+        assert order == ["ticked", "readiness"]
+        assert isinstance(result, str)
+
+    asyncio.run(_run())

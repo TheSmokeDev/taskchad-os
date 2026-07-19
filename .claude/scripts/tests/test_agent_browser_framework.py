@@ -1506,11 +1506,11 @@ def test_tree_kill_run_reaps_the_process_tree_on_timeout(
         returncode = None
         calls = 0
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             FakeProc.calls += 1
             if FakeProc.calls == 1:
                 raise sp.TimeoutExpired(["agent-browser"], timeout)
-            return ("", "")
+            return 0
 
     monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
     monkeypatch.setattr(browser_control.subprocess, "Popen", lambda *a, **k: FakeProc())
@@ -1524,7 +1524,46 @@ def test_tree_kill_run_reaps_the_process_tree_on_timeout(
         browser_control._tree_kill_run(["agent-browser", "open", "x"], timeout=20)
 
     assert kills == [["taskkill", "/T", "/F", "/PID", "4242"]]
-    assert FakeProc.calls == 2  # post-kill drain ran
+    assert FakeProc.calls == 2  # post-kill wait ran
+
+
+def test_desktop_session_timeout_kills_only_the_cli_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as sp
+
+    taskkills: list[list[str]] = []
+
+    class FakeProc:
+        pid = 5252
+        returncode = None
+        calls = 0
+        killed = False
+
+        def wait(self, timeout=None):
+            FakeProc.calls += 1
+            if FakeProc.calls == 1:
+                raise sp.TimeoutExpired(["agent-browser"], timeout)
+            return 0
+
+        def kill(self):
+            FakeProc.killed = True
+
+    monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(browser_control.subprocess, "Popen", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(
+        browser_control.subprocess,
+        "run",
+        lambda argv, **k: taskkills.append(list(argv)) or SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(sp.TimeoutExpired):
+        browser_control._desktop_session_run(
+            ["agent-browser", "snapshot"], timeout=20
+        )
+
+    assert FakeProc.killed is True
+    assert taskkills == []
 
 
 def test_adb_transport_guard_connect_timeout_maps_no_device() -> None:
@@ -1549,7 +1588,7 @@ def test_adb_transport_guard_connect_timeout_maps_no_device() -> None:
     )
 
 
-def test_default_runner_is_tree_kill_for_session_plain_for_desktop(
+def test_default_runner_is_tree_kill_for_adb_sessions_plain_for_desktop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Adversarial-review findings 2+3: tree-kill must ride EVERY phone
@@ -1562,16 +1601,24 @@ def test_default_runner_is_tree_kill_for_session_plain_for_desktop(
         used.append("tree-kill")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    def fake_desktop_session(argv, **_k):
+        used.append("desktop-session")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
     def fake_plain(argv, **_k):
         used.append("plain")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(browser_control, "_tree_kill_run", fake_tree_kill)
+    monkeypatch.setattr(browser_control, "_desktop_session_run", fake_desktop_session)
     monkeypatch.setattr(browser_control.subprocess, "run", fake_plain)
 
     browser_control.run_agent_browser(["snapshot"], port=18223, session="homie-phone")
+    browser_control.run_agent_browser(
+        ["snapshot"], port=18222, session="operator-desk"
+    )
     browser_control.run_agent_browser(["snapshot"], port=18222)
-    assert used == ["tree-kill", "plain"]
+    assert used == ["tree-kill", "desktop-session", "plain"]
 
 
 def test_phone_helpers_reach_tree_kill_without_explicit_runner(

@@ -254,6 +254,55 @@ def test_linkedin_connect_allows_with_isolated_confirmation_segment(monkeypatch)
     assert driven[0][0] == "linkedin.connection.request"
 
 
+# ── Event-loop-wedge regression (#130): browser_readiness runs off-loop ─────
+
+
+def test_linkedin_profile_status_offloads_browser_readiness(monkeypatch) -> None:
+    """browser_readiness must run OFF the event loop — a slow probe must not
+    block a concurrently-scheduled coroutine (event-loop wedge regression, #130).
+
+    Proof is completion ORDER, not merely "the ticker ran": if browser_readiness
+    ran on the loop, its synchronous 0.2s sleep would freeze the loop and the
+    0.05s ticker's timer could not fire until readiness returned — so "readiness"
+    would land before "ticked". Off-loop, the ticker finishes first.
+    """
+    import browser_control
+
+    order: list[str] = []
+
+    def _slow_readiness(*, port=None):
+        import time
+
+        time.sleep(0.2)  # the ~9s worst-case CDP chain, scaled down for the test
+        order.append("readiness")
+        return {"enabled": True, "cdp_port": port, "cdp_reachable": True}
+
+    # Patch the readiness probe (the target) plus the downstream status probe so
+    # the status subcommand never touches a real browser.
+    monkeypatch.setattr(browser_control, "browser_readiness", _slow_readiness)
+    monkeypatch.setattr(
+        browser_control, "browser_status", lambda *, port=None: {"enabled": True, "cdp_port": port}
+    )
+    monkeypatch.setattr(
+        browser_control, "format_browser_status", lambda status, label=None: "status-ok"
+    )
+    monkeypatch.setattr(core_handlers, "_audit_browser_action", lambda **kw: None)
+
+    async def _run() -> None:
+        async def _ticker() -> None:
+            await asyncio.sleep(0.05)
+            order.append("ticked")
+
+        result, _ = await asyncio.gather(
+            core_handlers.handle_linkedin_profile(adapter=None, incoming=None, args="status"),
+            _ticker(),
+        )
+        assert order == ["ticked", "readiness"]
+        assert isinstance(result, str)
+
+    asyncio.run(_run())
+
+
 def test_nl_post_to_linkedin_routes_to_browserops_not_a_write() -> None:
     """R1-M4: NL phrasing routes to the read-only browserops intent; the write
     path is reachable only via the explicit /linkedin_post slash command."""

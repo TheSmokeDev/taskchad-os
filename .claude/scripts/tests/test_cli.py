@@ -922,3 +922,11 @@ class TestBotLifecycleCommands:
         result = CliRunner().invoke(cli_main, ["off"])
         assert result.exit_code == 1
         assert "disabled by operator" in result.output
+
+
+def test_detect_providers_includes_kimi() -> None:
+    """Setup discovery must list kimi when KIMI_API_KEY is configured (#162 gate)."""
+
+    providers = cli_module._detect_providers({"KIMI_API_KEY": "sk-test"})
+    assert providers["kimi"] is True
+    assert cli_module._detect_providers({})["kimi"] is False

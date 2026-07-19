@@ -502,7 +502,7 @@ def check_environment() -> list[tuple[str, str, str]]:
 
     # Runtime provider available
     has_runtime = (
-        any(env.get(k) for k in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"])
+        any(env.get(k) for k in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "KIMI_API_KEY"])
         or shutil.which("claude")
         or shutil.which("codex")
     )

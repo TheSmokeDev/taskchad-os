@@ -26,6 +26,7 @@ from models import (
 import voice as voice_mod
 from attachment_context import is_supported_document_attachment
 from voice_markers import parse_send_markers, strip_send_markers
+from voice_preferences import get_voice_reply_mode
 
 # PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
 # Module-attribute lookup (Rule 3); adapter catches KillSwitchDisabled
@@ -218,28 +219,18 @@ class DiscordAdapter:
             if not custom_id:
                 return
 
-            # Acknowledge within 3 seconds
+            # Acknowledge within Discord's three-second deadline.  A slow ACK
+            # must not keep an already-authenticated gateway event off the
+            # router queue; the downstream approval store remains the CAS
+            # authority for duplicate taps.
             try:
-                await interaction.response.defer()
-            except Exception:
-                pass
-
-            # Disable buttons on original message (prevents double-click)
-            try:
-                if interaction.message:
-                    disabled_view = discord.ui.View(timeout=1)
-                    for comp in (interaction.message.components or []):
-                        for child in comp.children:
-                            btn = discord.ui.Button(
-                                label=child.label,
-                                style=child.style,
-                                custom_id=child.custom_id,
-                                disabled=True,
-                            )
-                            disabled_view.add_item(btn)
-                    await interaction.message.edit(view=disabled_view)
-            except Exception as e:
-                print(f"[{datetime.now()}] Discord disable buttons failed: {e}")
+                await asyncio.wait_for(interaction.response.defer(), timeout=2.0)
+            except Exception as exc:
+                print(
+                    f"[{datetime.now()}] Discord component ACK failed: "
+                    f"{type(exc).__name__}",
+                    flush=True,
+                )
 
             # Build channel info
             ch_id = str(interaction.channel_id)
@@ -282,6 +273,33 @@ class DiscordAdapter:
                 },
             )
             await self._enqueue(incoming)
+
+            # Disabling the source buttons is only UX.  Queue the authenticated
+            # event first so a slow Discord message edit can never suppress the
+            # approval.  The durable approval-card CAS still defeats a second
+            # tap even when this bounded best-effort edit fails.
+            try:
+                if interaction.message:
+                    disabled_view = discord.ui.View(timeout=1)
+                    for comp in (interaction.message.components or []):
+                        for child in comp.children:
+                            btn = discord.ui.Button(
+                                label=child.label,
+                                style=child.style,
+                                custom_id=child.custom_id,
+                                disabled=True,
+                            )
+                            disabled_view.add_item(btn)
+                    await asyncio.wait_for(
+                        interaction.message.edit(view=disabled_view),
+                        timeout=2.0,
+                    )
+            except Exception as exc:
+                print(
+                    f"[{datetime.now()}] Discord disable buttons failed: "
+                    f"{type(exc).__name__}",
+                    flush=True,
+                )
 
     # A gateway the operator talks THROUGH: a dead Discord gateway means the bot
     # is deaf there. discord.py cannot be revived in place, so recovery is a
@@ -791,16 +809,37 @@ class DiscordAdapter:
         # Build View from components if present
         view = self._build_view(message.components) if message.components else None
 
-        # Build embed if present
-        embed = self._build_embed(message.embed) if message.embed else None
+        # Preserve a full Discord-native card set while keeping the legacy
+        # singular embed contract backward compatible.
+        embed_data = list(getattr(message, "embeds", None) or [])
+        if not embed_data and message.embed is not None:
+            embed_data = [message.embed]
+        embeds = [self._build_embed(item) for item in embed_data[:10]]
 
         text = strip_send_markers(message.text)
-        if not text:
-            # All-marker reply — nothing left to send as text.
+        if not text and not embeds and view is None:
+            # All-marker reply — nothing left to send as a Discord message.
             return None
 
+        voice_mode = get_voice_reply_mode()
+        if voice_mode == "off":
+            self._voice_reply_channels.discard(message.channel.platform_id)
+
+        is_progress_tick = message.text.startswith(
+            ("Thinking...", "Working...", "\u23f3 ", "\U0001f527 ")
+        )
+        if (
+            voice_mode == "always"
+            and not message.is_update
+            and not message.is_error
+            and not is_progress_tick
+            and text.strip()
+        ):
+            await self._send_voice_response(channel, text, fallback_to_text=False)
+
         wants_voice_reply = (
-            not message.is_update
+            voice_mode == "auto"
+            and not message.is_update
             and not message.is_error
             and message.channel.platform_id in self._voice_reply_channels
         )
@@ -814,15 +853,17 @@ class DiscordAdapter:
                 await self._send_voice_response(channel, text)
 
         sent = None
-        chunks = self._split_message(text, max_length=1900)
+        chunks = self._split_message(text, max_length=1900) if text else [""]
         for i, chunk in enumerate(chunks):
-            kwargs: dict[str, Any] = {"content": chunk}
-            # Attach view + embed only to the last chunk
+            kwargs: dict[str, Any] = {}
+            if chunk:
+                kwargs["content"] = chunk
+            # Attach view + embeds only to the last chunk
             if i == len(chunks) - 1:
                 if view:
                     kwargs["view"] = view
-                if embed:
-                    kwargs["embed"] = embed
+                if embeds:
+                    kwargs["embeds"] = embeds
             sent = await channel.send(**kwargs)
         return str(sent.id) if sent else None
 
@@ -847,9 +888,23 @@ class DiscordAdapter:
         try:
             msg = await channel.fetch_message(int(message.update_message_id))
             kwargs: dict[str, Any] = {"content": chunks[0]}
-            if message.components:
-                kwargs["view"] = self._build_view(message.components)
+            kwargs["view"] = (
+                self._build_view(message.components) if message.components else None
+            )
+            embed_data = list(getattr(message, "embeds", None) or [])
+            if not embed_data and message.embed is not None:
+                embed_data = [message.embed]
+            kwargs["embeds"] = [self._build_embed(item) for item in embed_data[:10]]
             await msg.edit(**kwargs)
+            if (
+                get_voice_reply_mode() == "always"
+                and not message.is_error
+                and not message.text.startswith(("Thinking...", "Working...", "\u23f3 ", "\U0001f527 "))
+                and text.strip()
+            ):
+                await self._send_voice_response(
+                    channel, text, fallback_to_text=False
+                )
             return message.update_message_id
         except Exception as e:
             print(f"[{datetime.now()}] Discord edit failed: {e}")
@@ -918,6 +973,7 @@ class DiscordAdapter:
             title=embed_data.title or discord.utils.MISSING,
             description=embed_data.description or discord.utils.MISSING,
             color=embed_data.color,
+            url=embed_data.url or discord.utils.MISSING,
         )
         for f in embed_data.fields:
             embed.add_field(
@@ -929,6 +985,8 @@ class DiscordAdapter:
             embed.set_footer(text=embed_data.footer)
         if embed_data.image_url:
             embed.set_image(url=embed_data.image_url)
+        if getattr(embed_data, "thumbnail_url", ""):
+            embed.set_thumbnail(url=embed_data.thumbnail_url)
         return embed
 
     def _is_allowed(self, msg: Any) -> bool:
@@ -1065,7 +1123,33 @@ class DiscordAdapter:
             return "voice_and_text"
         return "text_only"
 
-    async def _send_voice_response(self, channel: Any, text: str) -> None:
+    async def send_voice_summary(self, channel: Channel, text: str) -> bool:
+        """Send an explicitly requested voice summary without changing reply mode."""
+
+        target = self._client.get_channel(int(channel.platform_id))
+        if target is None:
+            return False
+        try:
+            import discord  # type: ignore[import-not-found]
+            from io import BytesIO
+
+            audio = await voice_mod.synthesize(text)
+            await target.send(
+                file=discord.File(BytesIO(audio), filename="upwork-tldr.ogg")
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 - voice is a read-only convenience
+            print(f"[{datetime.now()}] Discord voice summary failed: {type(exc).__name__}")
+            await target.send(content="Voice summary is unavailable right now; the deal cards are unchanged.")
+            return False
+
+    async def _send_voice_response(
+        self,
+        channel: Any,
+        text: str,
+        *,
+        fallback_to_text: bool = True,
+    ) -> None:
         """Phase 4: synthesize text via voice cascade, send as audio attachment."""
         try:
             import discord  # type: ignore[import-not-found]
@@ -1079,21 +1163,23 @@ class DiscordAdapter:
         except _kill_switches.KillSwitchDisabled as ks_exc:
             # PRD-8 Phase 7b WS2 (codex post-build F2) — degraded text reply.
             print(f"[{datetime.now()}] Discord TTS refused by kill-switch: {ks_exc}")
-            try:
-                await channel.send(
-                    content=(
-                        f"[killswitch:{ks_exc.switch_name}] Voice synthesis disabled "
-                        f"by operator. Falling back to text.\n\n{text[:1850]}"
+            if fallback_to_text:
+                try:
+                    await channel.send(
+                        content=(
+                            f"[killswitch:{ks_exc.switch_name}] Voice synthesis disabled "
+                            f"by operator. Falling back to text.\n\n{text[:1850]}"
+                        )
                     )
-                )
-            except Exception as e2:
-                print(f"[{datetime.now()}] Discord killswitch text fallback failed: {e2}")
+                except Exception as e2:
+                    print(f"[{datetime.now()}] Discord killswitch text fallback failed: {e2}")
         except Exception as e:
             print(f"[{datetime.now()}] Discord TTS failed, falling back to text: {e}")
-            try:
-                await channel.send(content=text[:1900])
-            except Exception as e2:
-                print(f"[{datetime.now()}] Discord text fallback failed: {e2}")
+            if fallback_to_text:
+                try:
+                    await channel.send(content=text[:1900])
+                except Exception as e2:
+                    print(f"[{datetime.now()}] Discord text fallback failed: {e2}")
 
     async def _dispatch_send_markers(self, channel: Any, text: str) -> None:
         """Phase 4: parse [SEND_FILE]/[SEND_PHOTO] markers, send as files."""

@@ -197,6 +197,11 @@ RECALL_RERANK_ENABLED = os.getenv("RECALL_RERANK_ENABLED", "true").lower() == "t
 RECALL_RERANK_TOP_N = int(os.getenv("RECALL_RERANK_TOP_N", "10"))
 RECALL_RERANK_TIMEOUT_S = float(os.getenv("RECALL_RERANK_TIMEOUT_S", "3.0"))
 
+# Wiki-link graph cache (issue #129). When false, get_cached_memory_graph()
+# always rebuilds — still off-loop, just uncached (pre-fix behavior minus the
+# event-loop block). Operator rollback lever, no code change needed.
+RECALL_GRAPH_CACHE_ENABLED = os.getenv("RECALL_GRAPH_CACHE_ENABLED", "true").lower() == "true"
+
 # === Evolve (Self-Improvement Loop) ===
 # Phase 2.4: when true, `evolve run` and `evolve propose` default to emitting
 # Langfuse-tagged spans under user_id="evolve-replay" so experimental traces

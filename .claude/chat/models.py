@@ -123,6 +123,8 @@ class MessageEmbed:
     fields: list[dict[str, Any]] = field(default_factory=list)
     footer: str = ""
     image_url: str = ""
+    url: str = ""
+    thumbnail_url: str = ""
 
 
 @dataclass
@@ -138,6 +140,9 @@ class OutgoingMessage:
     attachments: list[Attachment] = field(default_factory=list)
     components: list[MessageComponent] = field(default_factory=list)
     embed: MessageEmbed | None = None
+    # Multiple rich cards. ``embed`` remains supported for older adapters and
+    # extensions; adapters prefer this collection when it is non-empty.
+    embeds: list[MessageEmbed] = field(default_factory=list)
     # Per-adapter rendered hint (e.g. concept-draft footer). Never persisted to
     # chat_history — adapters render it appropriate to the medium.
     footer: str | None = None

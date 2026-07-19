@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -25,6 +28,9 @@ from .errors import (
 )
 from .profiles import RuntimeProfile
 from .prompt_builder import render_cli_prompt
+from .subprocess_env import get_scrubbed_tool_sandbox_env
+
+_logger = logging.getLogger(__name__)
 
 
 class OpenAICodexRuntime:
@@ -106,6 +112,7 @@ class OpenAICodexRuntime:
         if model and model != "chatgpt-plan-default":
             args.extend(["--model", model])
 
+        process = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *args,
@@ -115,6 +122,22 @@ class OpenAICodexRuntime:
                 env=_build_exec_env(request),
             )
             stdout, stderr = await process.communicate(prompt_text.encode("utf-8"))
+        except asyncio.CancelledError:
+            # The lane-level wait_for (or an operator cancel) fired mid-run.
+            # Cancelling communicate() does NOT kill the child — on Windows the
+            # orphaned Codex CLI keeps running and its pipes keep the transport
+            # alive. Kill, reap (bounded), re-raise so the cancel still propagates.
+            _reap_process(process)
+            if process is not None:
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except Exception:
+                    _logger.warning(
+                        "failed to reap cancelled Codex subprocess pid=%s after kill()",
+                        getattr(process, "pid", "?"),
+                        exc_info=True,
+                    )
+            raise
         except FileNotFoundError as exc:
             raise RuntimeConfigError(f"Codex CLI not found: {command}") from exc
         except Exception as exc:
@@ -161,13 +184,59 @@ class OpenAICodexRuntime:
 
 
 
-def _build_exec_env(request: RuntimeRequest) -> dict[str, str]:
-    """Merge process environment with explicit runtime env overrides."""
+def _reap_process(process: asyncio.subprocess.Process | None) -> None:
+    """Best-effort kill of a cancelled adapter child. Never raises.
 
-    env = dict(os.environ)
+    Duplicated per CLI adapter on purpose — a shared module for two call sites
+    would be premature abstraction (Rule: no generic helper before a third use).
+    """
+    if process is None or process.returncode is not None:
+        return
+    if sys.platform == "win32":
+        # The CLI resolves to an npm `.CMD` wrapper: process.kill() terminates
+        # only the wrapper while its Node.js descendant — the actual wedged
+        # CLI — survives (#133 gate). taskkill /T tears down the whole tree.
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            _logger.warning(
+                "failed to tree-kill cancelled Codex subprocess pid=%s",
+                getattr(process, "pid", "?"),
+                exc_info=True,
+            )
+        return
+    try:
+        process.kill()
+    except (ProcessLookupError, OSError):
+        _logger.warning(
+            "failed to kill cancelled Codex subprocess pid=%s",
+            getattr(process, "pid", "?"),
+            exc_info=True,
+        )
+
+
+def _build_exec_env(request: RuntimeRequest) -> dict[str, str]:
+    """Build the scrubbed tool-sandbox environment for the Codex ``exec`` child.
+
+    Issue #128 — the base env is scrubbed for every request this adapter
+    handles (TEXT_REASONING included), never a raw ``os.environ`` copy; the
+    motivating risk is the TOOL_REASONING / ``danger-full-access`` child, but
+    the scrub is not conditioned on capability.
+
+    gate/#140 — ``request.env`` is merged into the parent env BEFORE the scrub
+    (not applied after), so non-secret overrides survive but a secret-shaped key
+    arriving via ``request.env`` (e.g. Cabinet passing persona secrets) cannot be
+    smuggled past the scrub into the untrusted child.
+    """
+
+    base = os.environ.copy()
     if request.env:
-        env.update(request.env)
-    return env
+        base.update(request.env)
+    return get_scrubbed_tool_sandbox_env(parent_env=base)
 
 
 def _reserve_output_path() -> Path:

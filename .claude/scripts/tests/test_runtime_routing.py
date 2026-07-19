@@ -120,6 +120,7 @@ def test_chat_turn_tool_mode_uses_full_chain(monkeypatch: pytest.MonkeyPatch) ->
         "gemini-cli",
         "openrouter",
         "openai-compatible",
+        "kimi",
     ]
 
 
@@ -145,6 +146,7 @@ def test_generic_text_route_prefers_api_profiles_before_cli(
         "openrouter",
         "openai-codex",
         "gemini-cli",
+        "kimi",
     ]
 
 
@@ -261,6 +263,7 @@ def test_generic_route_ignores_legacy_claude_pin(
         "openrouter",
         "openai-codex",
         "gemini-cli",
+        "kimi",
     ]
 
 
@@ -301,3 +304,132 @@ def test_runtime_health_cooldown_and_recovery(
 
     health.mark_profile_success(profile)
     assert health.is_profile_available(profile) is True
+
+
+# === 2026-07-16 WinError 32 regression: health bookkeeping is fail-open ===
+
+
+def test_mark_profile_success_swallows_state_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(health, "RUNTIME_HEALTH_FILE", tmp_path / "runtime-health.json")
+
+    def _sharing_violation(state, state_file):
+        raise OSError(
+            32,
+            "The process cannot access the file because it is being used "
+            "by another process",
+        )
+
+    monkeypatch.setattr(health, "save_state", _sharing_violation)
+
+    health.mark_profile_success(_profile("openai-codex"))
+
+
+def test_mark_profile_failure_swallows_state_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    # mark_profile_retryable_failure is called from inside lane_router's
+    # except handlers — if it raised, the whole router would crash mid-fallback.
+    monkeypatch.setattr(health, "RUNTIME_HEALTH_FILE", tmp_path / "runtime-health.json")
+
+    def _sharing_violation(state, state_file):
+        raise OSError(32, "sharing violation")
+
+    monkeypatch.setattr(health, "save_state", _sharing_violation)
+
+    health.mark_profile_retryable_failure(_profile("openai-codex"), "429")
+    health.mark_profile_unavailable(_profile("openai-codex"), "no key")
+
+
+def test_is_profile_available_fails_open_on_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(health, "RUNTIME_HEALTH_FILE", tmp_path / "runtime-health.json")
+
+    def _unreadable(state_file):
+        raise OSError(32, "sharing violation")
+
+    monkeypatch.setattr(health, "load_state", _unreadable)
+
+    assert health.is_profile_available(_profile("openai-codex")) is True
+
+
+_RACE_ITERATIONS = 15
+
+
+def _health_race_worker(health_file, provider, iterations, start_event, errors):
+    """Spawned worker for the cross-process race test.
+
+    Runs in a fresh interpreter (multiprocessing spawn — monkeypatched module
+    state does NOT propagate), so it repoints RUNTIME_HEALTH_FILE itself.
+    Each iteration writes a unique model key: any lost update (one process's
+    save clobbering another's) leaves that key permanently missing for the
+    parent to detect.
+    """
+    try:
+        from pathlib import Path as _Path
+
+        import runtime.health as health_mod
+        from runtime.profiles import RuntimeProfile as _RuntimeProfile
+
+        health_mod.RUNTIME_HEALTH_FILE = _Path(health_file)
+        start_event.wait(timeout=15)
+        for index in range(iterations):
+            profile = _RuntimeProfile(
+                key=f"primary-{provider}",
+                provider=provider,
+                model=f"m{index}",
+            )
+            health_mod.mark_profile_retryable_failure(profile, "race probe")
+            health_mod.mark_profile_success(profile)
+    except Exception as exc:  # pragma: no cover - surfaced via parent assert
+        errors.put(f"{provider}: {exc!r}")
+
+
+def test_concurrent_marks_do_not_collide_or_lose_updates(tmp_path) -> None:
+    """Cross-process WinError 32 regression (2026-07-16): concurrent
+    load-modify-save on runtime-health.json must neither raise nor lose
+    entries. Sequential calls cannot exercise the file_lock — only true
+    multi-process interleaving can."""
+    import json
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+    health_file = tmp_path / "runtime-health.json"
+    start_event = ctx.Event()
+    errors = ctx.Queue()
+    providers = ("race-a", "race-b", "race-c")
+
+    workers = [
+        ctx.Process(
+            target=_health_race_worker,
+            args=(str(health_file), provider, _RACE_ITERATIONS, start_event, errors),
+        )
+        for provider in providers
+    ]
+    for worker in workers:
+        worker.start()
+    start_event.set()
+    for worker in workers:
+        worker.join(timeout=120)
+        if worker.is_alive():  # pragma: no cover - hang guard
+            worker.terminate()
+            pytest.fail("race worker hung")
+
+    worker_errors = []
+    while not errors.empty():
+        worker_errors.append(errors.get())
+    assert worker_errors == []
+    assert [worker.exitcode for worker in workers] == [0, 0, 0]
+
+    state = json.loads(health_file.read_text(encoding="utf-8"))
+    entities = state["entities"]
+    for provider in providers:
+        for index in range(_RACE_ITERATIONS):
+            key = f"model:{provider}:m{index}"
+            assert key in entities, f"lost update: {key} missing"
+            assert "last_success_at" in entities[key]

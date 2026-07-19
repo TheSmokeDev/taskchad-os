@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from cognition.graph import MemoryGraph, build_memory_graph, get_hub_scores, get_neighbors, is_moc
+from cognition.graph import (
+    MemoryGraph,
+    get_cached_memory_graph,
+    get_hub_scores,
+    get_neighbors,
+    is_moc,
+)
 from cognition.injection import sanitize_recalled_content, wrap_recalled_memory
 from cognition.observability import RecallLog
 
@@ -79,7 +85,7 @@ class RecallResult:
     end_line: int
     text: str
     score: float
-    match_type: str  # keyword | semantic | hybrid
+    match_type: str  # keyword | hybrid
     section_title: str = ""
     graph_hops: int = 0
     source_query: str = ""
@@ -229,15 +235,25 @@ def _search_with_fallback(
     """Run keyword + hybrid search with graceful fallback.
 
     ``memory_dir`` selects the per-vault DB (None => thehomie, unchanged).
+
+    Each leg is floored on its OWN score scale before it reaches the merge: the
+    keyword leg is raw FTS5 (``1/(1+|bm25|)``, ~0.05-0.17 for real hits — see
+    38882d34) floored by ``RECALL_KEYWORD_MIN_SCORE``; the hybrid leg is a
+    weighted merge floored by ``RECALL_MIN_SCORE`` (the documented merged-score
+    knob). Wiring both floors here is what makes those two knobs real (#136).
     """
+    import config as _cfg  # noqa: PLC0415 — Rule 2 module-attr so evolve/monkeypatch overrides propagate.
+
     results: list[RecallResult] = []
 
     try:
         from memory_search import search_hybrid, search_keyword
 
-        # Keyword search (fast, no embeddings)
+        # Keyword search (fast, no embeddings). Floor on the FTS5 scale.
         keyword_results = search_keyword(query, limit=limit, memory_dir=memory_dir)
         for r in keyword_results:
+            if r.score < _cfg.RECALL_KEYWORD_MIN_SCORE:
+                continue
             results.append(
                 RecallResult(
                     path=r.path,
@@ -251,9 +267,13 @@ def _search_with_fallback(
                 )
             )
 
-        # Hybrid search (needs embeddings — may fail on first run)
+        # Hybrid search (needs embeddings — may fail on first run). RECALL_MIN_SCORE
+        # is the documented merged-score floor (hybrid/vector scale) — wire it
+        # instead of letting search_hybrid fall back to its own SEARCH_MIN_SCORE.
         try:
-            hybrid_results = search_hybrid(query, limit=limit, memory_dir=memory_dir)
+            hybrid_results = search_hybrid(
+                query, limit=limit, min_score=_cfg.RECALL_MIN_SCORE, memory_dir=memory_dir
+            )
             for r in hybrid_results:
                 results.append(
                     RecallResult(
@@ -270,8 +290,8 @@ def _search_with_fallback(
         except Exception:
             pass  # Hybrid search optional — keyword is sufficient
 
-    except Exception:
-        pass  # Total search failure — return empty
+    except Exception as e:
+        print(f"[Recall] _search_with_fallback failed (non-blocking): {e}")
 
     return results
 
@@ -405,8 +425,22 @@ async def _run_rerank_request(prompt: str) -> str:
 def _merge_and_rank(
     results: list[RecallResult],
     graph: MemoryGraph,
+    top_n: int | None = None,
 ) -> list[RecallResult]:
-    """Merge, deduplicate by path:line range, rank with graph hub boost."""
+    """Merge, deduplicate by path:line range, rank with graph hub boost.
+
+    Keyword-leg scores are raw FTS5 (``1/(1+|bm25|)``, ~0.05-0.17); hybrid-leg
+    scores are weighted merges (>= RECALL_MIN_SCORE). Scores are NEVER
+    rewritten: evolve replay/compare/veto consume ABSOLUTE top_scores, and a
+    per-leg max-normalization here flattened every leg's peak to 1.0 — blinding
+    the veto's avg_top_score_delta floor and letting a lone floor-passing
+    keyword hit outrank a strong hybrid (#136 gate, both vendors).
+
+    Cross-scale fairness is a REPRESENTATION guarantee instead: with ``top_n``,
+    each leg that survived dedup + the MOC filter keeps its best hit inside the
+    first ``top_n`` slots, so an exact keyword/ID match is never blindly cut by
+    the cap while ranking, display, and evolve fitness all stay on raw scores.
+    """
     # Dedup by path:start_line-end_line
     seen: dict[str, RecallResult] = {}
     for r in results:
@@ -432,6 +466,22 @@ def _merge_and_rank(
 
     # Sort by score descending
     merged.sort(key=lambda r: r.score, reverse=True)
+
+    # Leg representation (#136): the legs score on different raw scales, so the
+    # cap window can be starved of a whole leg by scale alone. AFTER the MOC
+    # filter (an ineligible peak must not hold a slot), promote each absent
+    # leg's best hit into the tail of the cap window — one slot per leg, never
+    # ahead of the in-window results, scores untouched.
+    if top_n is not None and top_n > 0 and len(merged) > top_n:
+        slot = top_n - 1
+        head_legs = {r.match_type for r in merged[:top_n]}
+        for leg in sorted({r.match_type for r in merged} - head_legs):
+            if slot < 0:
+                break
+            best = next(r for r in merged if r.match_type == leg)
+            merged.remove(best)
+            merged.insert(slot, best)
+            slot -= 1
     return merged
 
 
@@ -495,31 +545,48 @@ async def run_recall_pipeline(
         loop.run_in_executor(None, _search_with_fallback, q, 5, memory_dir)
         for q in queries
     ]
-    search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+    # The graph lookup depends only on memory_dir, not on the searches above,
+    # so it rides the SAME gather — a cold rebuild overlaps with search latency
+    # instead of stacking after it. Cached in cognition.graph (issue #129).
+    graph_task = loop.run_in_executor(None, get_cached_memory_graph, memory_dir)
+
+    gathered = await asyncio.gather(*search_tasks, graph_task, return_exceptions=True)
+    *search_results, graph_result = gathered
     all_results: list[RecallResult] = []
     for result in search_results:
         if isinstance(result, list):
             all_results.extend(result)
 
     # Step 3: Graph neighbors (1-hop from matched notes)
-    graph = build_memory_graph(memory_dir)
+    if isinstance(graph_result, MemoryGraph):
+        graph = graph_result
+    else:
+        print(f"[cognition.recall] graph build failed (non-fatal): {graph_result!r}", flush=True)
+        graph = MemoryGraph()
     matched_stems = list(
         {Path(r.path).stem.lower() for r in all_results}
     )
     neighbor_paths = get_neighbors(graph, matched_stems, max_hops=1)
 
-    # Search neighbor content too
-    for rel_path in neighbor_paths:
-        neighbor_results = _search_with_fallback(message_text, limit=2, memory_dir=memory_dir)
+    # Search neighbor content ONCE, not once per neighbor. The old loop re-ran
+    # an identical message_text query per neighbor_path with no per-iteration
+    # variation; _merge_and_rank() dedups those identical results by
+    # path:line-range anyway, so one call yields the same merged output.
+    if neighbor_paths:
+        neighbor_stems = {Path(p).stem.lower() for p in neighbor_paths}
+        neighbor_results = await loop.run_in_executor(
+            None, _search_with_fallback, message_text, 2, memory_dir
+        )
         for r in neighbor_results:
-            if Path(r.path).stem.lower() in {Path(p).stem.lower() for p in neighbor_paths}:
+            if Path(r.path).stem.lower() in neighbor_stems:
                 r.graph_hops = 1
                 all_results.append(r)
     log.graph_neighbors_found = len(neighbor_paths)
     log.graph_hops_traversed = 1 if neighbor_paths else 0
 
-    # Step 4: Merge, dedup, rank
-    merged = _merge_and_rank(all_results, graph)
+    # Step 4: Merge, dedup, rank. top_n=max_results arms the leg-representation
+    # guarantee at exactly the cap the caller will slice to (#136).
+    merged = _merge_and_rank(all_results, graph, top_n=max_results)
 
     # Step 4.5: Optional LLM re-ranking for Tier 1 queries
     from config import RECALL_RERANK_ENABLED, RECALL_RERANK_TOP_N

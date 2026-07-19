@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
+import subprocess
+import sys
 
 from .auth_profiles import GeminiAuthProfile, gemini_auth_status
 from .base import RUNTIME_LANE_GENERIC, RuntimeRequest, RuntimeResult
@@ -23,6 +26,9 @@ from .errors import (
 )
 from .profiles import RuntimeProfile
 from .prompt_builder import GEMINI_GUIDANCE, render_cli_prompt
+from .subprocess_env import get_scrubbed_tool_sandbox_env
+
+_logger = logging.getLogger(__name__)
 
 
 class GeminiCliRuntime:
@@ -72,13 +78,23 @@ class GeminiCliRuntime:
 
         is_tool_task = request.capability == TOOL_REASONING
 
-        # Build env with correct GCP project + integration-relevant vars
-        env = dict(os.environ)
-        gcp_project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+        # Build env with correct GCP project + integration-relevant vars.
+        # Issue #128 — scrubbed base env, never a raw os.environ copy.
+        # gate/#140 — merge request.env into the parent env BEFORE the single
+        # scrub, so a secret-shaped key arriving via request.env is dropped
+        # instead of surviving; non-secret overrides (HOMIE_HOME, GOOGLE_CLOUD_
+        # PROJECT) still pass through. The GOOGLE_CLOUD_PROJECT auto-injection
+        # runs LAST (non-secret, must still win / be injected).
+        base = os.environ.copy()
+        if request.env:
+            base.update(request.env)
+        env = get_scrubbed_tool_sandbox_env(parent_env=base)
+        gcp_project = (
+            base.get("GOOGLE_CLOUD_PROJECT")
+            or os.getenv("GOOGLE_CLOUD_PROJECT", "")
+        ).strip()
         if gcp_project:
             env["GOOGLE_CLOUD_PROJECT"] = gcp_project
-        if request.env:
-            env.update(request.env)
 
         for model in candidate_models:
             args = [resolved, "--model", model]
@@ -104,6 +120,7 @@ class GeminiCliRuntime:
             else:
                 args.extend(["--output-format", "text", "-"])
 
+            process = None
             try:
                 process = await asyncio.create_subprocess_exec(
                     *args,
@@ -114,6 +131,23 @@ class GeminiCliRuntime:
                     env=env,
                 )
                 stdout, stderr = await process.communicate(prompt_text.encode("utf-8"))
+            except asyncio.CancelledError:
+                # The lane-level wait_for (or an operator cancel) fired mid-run.
+                # Cancelling communicate() does NOT kill the child — the orphaned
+                # Gemini CLI keeps running and its pipes keep the transport alive.
+                # Kill, reap (bounded), re-raise. Do NOT advance the model ladder
+                # on cancel — the deadline is per-adapter, not per-model.
+                _reap_process(process)
+                if process is not None:
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5)
+                    except Exception:
+                        _logger.warning(
+                            "failed to reap cancelled Gemini subprocess pid=%s after kill()",
+                            getattr(process, "pid", "?"),
+                            exc_info=True,
+                        )
+                raise
             except FileNotFoundError as exc:
                 raise RuntimeConfigError(f"Gemini CLI not found: {command}") from exc
             except Exception as exc:
@@ -148,6 +182,41 @@ class GeminiCliRuntime:
             raise RuntimeRetryableError("; ".join(errors))
         raise RuntimeExecutionError("Gemini CLI execution failed with no candidate models")
 
+
+
+def _reap_process(process: asyncio.subprocess.Process | None) -> None:
+    """Best-effort kill of a cancelled adapter child. Never raises.
+
+    Duplicated per CLI adapter on purpose — a shared module for two call sites
+    would be premature abstraction (Rule: no generic helper before a third use).
+    """
+    if process is None or process.returncode is not None:
+        return
+    if sys.platform == "win32":
+        # The CLI resolves to an npm `.CMD` wrapper: process.kill() terminates
+        # only the wrapper while its Node.js descendant — the actual wedged
+        # CLI — survives (#133 gate). taskkill /T tears down the whole tree.
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            _logger.warning(
+                "failed to tree-kill cancelled Gemini subprocess pid=%s",
+                getattr(process, "pid", "?"),
+                exc_info=True,
+            )
+        return
+    try:
+        process.kill()
+    except (ProcessLookupError, OSError):
+        _logger.warning(
+            "failed to kill cancelled Gemini subprocess pid=%s",
+            getattr(process, "pid", "?"),
+            exc_info=True,
+        )
 
 
 def _candidate_models(profile: RuntimeProfile, request: RuntimeRequest) -> tuple[str, ...]:

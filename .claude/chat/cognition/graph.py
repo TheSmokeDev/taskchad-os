@@ -14,6 +14,7 @@ Pattern: Adapted from vault.py extract_links(), build_backlinks(), cmd_graph() B
 from __future__ import annotations
 
 import re
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,6 +118,94 @@ def build_memory_graph(memory_dir: Path) -> MemoryGraph:
         graph.link_counts[rel_path] = outgoing + incoming
 
     return graph
+
+
+_GRAPH_CACHE: dict[str, tuple[MemoryGraph, int]] = {}
+_GRAPH_CACHE_LOCK = threading.Lock()
+
+
+def _graph_cache_key(memory_dir: Path) -> str:
+    return str(Path(memory_dir).resolve())
+
+
+def _current_index_signal(memory_dir: Path) -> int:
+    """Cheap freshness probe: the per-vault index DB's mtime_ns.
+
+    ONE os.stat(). Not a directory-mtime check — directory mtime does not
+    propagate from nested subdirectories (daily/, concepts/, episodes/), so
+    it would silently never invalidate for the writes that actually change
+    the link graph. Not a per-file walk either — that is the O(n) cost this
+    cache exists to avoid.
+
+    Every vault-write path here (entity_extractor compile, memory_flush,
+    memory_reflect, memory_weekly, memory_dream) reindexes right after
+    writing, which touches this same DB; heartbeat's 30-minute sync_index()
+    sweep catches out-of-band edits. Graph freshness therefore inherits the
+    search index's existing staleness bound rather than inventing a new one.
+
+    Returns 0 when the DB is missing or unreadable; callers treat 0 as
+    "no signal, never cache", so a pre-index vault always rebuilds.
+    """
+    try:
+        from config import resolve_db_path
+
+        return resolve_db_path(memory_dir).stat().st_mtime_ns
+    except Exception as exc:
+        print(f"[cognition.graph] index signal unavailable (non-fatal): {exc!r}", flush=True)
+        return 0
+
+
+def get_cached_memory_graph(memory_dir: Path) -> MemoryGraph:
+    """Cached build_memory_graph(); rebuilds only when the vault's index DB changed.
+
+    MUST be called off the event loop (run_in_executor / to_thread): a cache
+    MISS still performs the full vault rglob + per-file read.
+
+    The lock spans the whole check-and-maybe-rebuild section so concurrent
+    callers (Telegram/Discord/relay can all recall at once) coalesce onto one
+    rebuild instead of each rescanning the vault on its own worker thread.
+    NOTE: the lock is process-global, not per-vault — a cold rebuild for one
+    memory_dir will block a concurrent cache-hit check for a different one.
+    With today's two vaults this window is narrow; revisit if that changes.
+
+    Callers must treat the returned graph as read-only — it is shared across
+    every subsequent cache hit.
+    """
+    try:
+        from config import RECALL_GRAPH_CACHE_ENABLED
+
+        cache_enabled = RECALL_GRAPH_CACHE_ENABLED
+    except Exception:
+        cache_enabled = True  # fail open: caching stays on if config import breaks
+
+    if not cache_enabled:
+        return build_memory_graph(memory_dir)
+
+    key = _graph_cache_key(memory_dir)
+    signal = _current_index_signal(memory_dir)
+
+    with _GRAPH_CACHE_LOCK:
+        cached = _GRAPH_CACHE.get(key)
+        if signal != 0 and cached is not None and cached[1] == signal:
+            return cached[0]
+        graph = build_memory_graph(memory_dir)
+        if signal != 0:
+            _GRAPH_CACHE[key] = (graph, signal)
+        return graph
+
+
+def invalidate_graph_cache(memory_dir: Path | None = None) -> None:
+    """Drop one vault's cached graph, or all vaults when memory_dir is None.
+
+    No write path calls this — the DB-mtime probe already invalidates on the
+    next call after any tracked write. Exists for test isolation and as a
+    future explicit-push seam.
+    """
+    with _GRAPH_CACHE_LOCK:
+        if memory_dir is None:
+            _GRAPH_CACHE.clear()
+            return
+        _GRAPH_CACHE.pop(_graph_cache_key(memory_dir), None)
 
 
 def get_neighbors(

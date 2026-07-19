@@ -723,6 +723,7 @@ async def test_diagnostics_cache_populates_off_the_request_path(monkeypatch) -> 
         memory_doc_count = 7272
         memory_embedding_status = "ready"
         cognition_available = True
+        sessions_active = 4
 
     fake_mod = type("M", (), {"collect_diagnostics": staticmethod(lambda: FakeReport())})
     monkeypatch.setitem(sys.modules, "diagnostics", fake_mod)
@@ -735,6 +736,7 @@ async def test_diagnostics_cache_populates_off_the_request_path(monkeypatch) -> 
         "memory_doc_count": 7272,
         "memory_embedding_status": "ready",
         "cognition_available": True,
+        "sessions_active": 4,
     }
     assert cache.age_seconds() is not None
 
@@ -750,6 +752,7 @@ async def test_diagnostics_refresh_failure_keeps_the_previous_snapshot(monkeypat
         memory_doc_count = 1
         memory_embedding_status = "ready"
         cognition_available = True
+        sessions_active = 1
 
     calls = {"n": 0}
 

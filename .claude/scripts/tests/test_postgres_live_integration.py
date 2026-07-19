@@ -276,24 +276,32 @@ def test_get_actual_embedding_dim_tracks_recreate_at_768(pg_db, monkeypatch):
 
 
 def test_get_actual_embedding_dim_returns_none_when_table_missing(pg_db):
-    """Fresh database, init_schema never called: None, not an exception."""
+    """Fresh database, init_schema never called: None, not an exception —
+    AND the connection stays usable afterwards.
+
+    The failed 'chunks'::regclass probe used to leave the autocommit=False
+    transaction aborted (InFailedSqlTransaction poisoned every later
+    statement — the latent bug this test previously documented). #136 moved
+    the probe in front of init_schema() on the reindex_file path, so db.py
+    now rolls back inside the except; the probe must be side-effect-free."""
+    assert pg_db.get_actual_embedding_dim() is None
     assert pg_db.get_actual_embedding_dim() is None
 
-    # LATENT BUG DOCUMENTATION (upstream candidate — intentionally NOT fixed
-    # in this test slice): 'chunks'::regclass raises UndefinedTable inside
-    # the autocommit=False transaction and db.py's bare `except Exception:
-    # return None` swallows it WITHOUT rollback, leaving the connection in
-    # InFailedSqlTransaction. A second call only returns None because the
-    # poisoned-transaction error is ALSO swallowed by the same except.
-    assert pg_db.get_actual_embedding_dim() is None
+    # The transaction must NOT be poisoned: the dim-drift guards call this
+    # before init_schema(), which must then run on a clean transaction.
+    cur = pg_db._get_conn().execute("SELECT 1")
+    assert cur.fetchone()[0] == 1
 
-    # Prove the transaction really is poisoned: any non-swallowing statement
-    # on this connection now fails. A dim-drift guard calling
-    # get_actual_embedding_dim() before init_schema() on Postgres would
-    # abort the transaction and break the subsequent init_schema().
-    with pytest.raises(psycopg.errors.InFailedSqlTransaction):
-        pg_db._get_conn().execute("SELECT 1")
+    # The EXACT pre-init sequence sync_index() performs on a fresh database:
+    # dim probe -> get_meta("embedding_model") -> init_schema(). get_meta's
+    # missing-table failure must also roll back (#136 gate round 2) or
+    # init_schema still runs in InFailedSqlTransaction.
+    assert pg_db.get_meta("embedding_model") is None
+    pg_db.init_schema()
+    assert pg_db.get_actual_embedding_dim() is not None
+    # init_schema() seeds this meta key itself (db.py upsert) — the healthy
+    # post-init read returns the configured model, proving the connection
+    # survived both pre-init probes.
+    from config import EMBEDDING_MODEL
 
-    # Clear the aborted txn so fixture teardown (close + DROP DATABASE WITH
-    # (FORCE)) doesn't race an aborted session.
-    pg_db._conn.rollback()
+    assert pg_db.get_meta("embedding_model") == EMBEDDING_MODEL

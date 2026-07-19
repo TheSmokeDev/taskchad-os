@@ -1903,8 +1903,8 @@ def compile_entities(
                 if p.exists():
                     reindex_file(p, memory_dir)
                     report.files_reindexed += 1
-        except Exception:
-            pass  # Reindex is best-effort
+        except Exception as e:
+            print(f"Reindex failed (best-effort): {e}")
 
     # Append to build log
     if report.pages_created or report.pages_updated or report.connections_created:

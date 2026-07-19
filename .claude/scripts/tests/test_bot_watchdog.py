@@ -730,3 +730,183 @@ def test_launcher_log_appends_and_rotates(wd, monkeypatch) -> None:
     rotated = launcher_log.read_text(encoding="utf-8")
     assert len(rotated) < bot_watchdog._LAUNCHER_LOG_MAX_BYTES
     assert "post-rotation" in rotated
+
+
+# --- #135 defect 1: staleness fresh-peer criticality
+
+
+def test_stale_gateway_with_only_noncritical_fresh_peer_is_ok() -> None:
+    """#135: a fresh relay is machine traffic, not proof telegram is broken."""
+    verdict, _, _ = bot_watchdog.classify(
+        {
+            "status": "ok",
+            "adapters": {"telegram": True, "web": True},
+            "adapter_liveness": {
+                "telegram": {"healthy": True, "critical": True, "last_update_at": _iso_ago(3.0)},
+                "web": {"healthy": True, "critical": False, "last_update_at": _iso_ago(0.05)},
+            },
+        },
+        staleness_seconds=7200,
+    )
+    assert verdict == bot_watchdog.OK
+
+
+def test_stale_gateway_with_fresh_critical_peer_among_noncritical_is_degraded() -> None:
+    """The rung still fires when a CRITICAL peer is fresh (2026-07-15 Discord class)."""
+    verdict, _, detail = bot_watchdog.classify(
+        {
+            "status": "ok",
+            "adapters": {"telegram": True, "discord": True, "web": True},
+            "adapter_liveness": {
+                "telegram": {"healthy": True, "critical": True, "last_update_at": _iso_ago(3.0)},
+                "discord": {"healthy": True, "critical": True, "last_update_at": _iso_ago(0.05)},
+                "web": {"healthy": True, "critical": False, "last_update_at": _iso_ago(0.05)},
+            },
+        },
+        staleness_seconds=7200,
+    )
+    assert verdict == bot_watchdog.DEGRADED
+    assert "telegram" in detail
+
+
+# --- #135 defect 2: desired-state race
+
+
+def test_off_flipped_during_the_poll_blocks_the_restart(wd, monkeypatch) -> None:
+    set_settings(monkeypatch)
+    _write_flag(wd, "on")
+
+    def poll_and_flip(*_a, **_k):
+        _write_flag(wd, "off")  # operator races the tick
+        return bot_watchdog.UNREACHABLE, {}, "connection refused"
+
+    monkeypatch.setattr(bot_watchdog, "poll_health", poll_and_flip)
+    wd.state_file.write_text(json.dumps({"consecutive_failures": 1}))
+    result = bot_watchdog.run_once()
+    assert wd.restarts == []
+    assert result["restart_blocked"] == "desired_off"
+
+
+def test_off_mid_restart_undoes_the_resurrection(wd, monkeypatch) -> None:
+    set_settings(monkeypatch)
+    set_health(monkeypatch, bot_watchdog.UNREACHABLE, detail="refused")
+    _write_flag(wd, "on")
+    killed: list[list[int]] = []
+
+    def restart_and_race() -> tuple[bool, str]:
+        _write_flag(wd, "off")  # `thehomie off` lands while the launcher runs
+        return True, "spawned"
+
+    monkeypatch.setattr(bot_watchdog, "restart_bot", restart_and_race)
+    import shared
+
+    monkeypatch.setattr(
+        shared, "cleanup_all_bot_processes", lambda: killed.append([4242]) or [4242]
+    )
+    wd.state_file.write_text(json.dumps({"consecutive_failures": 1}))
+    result = bot_watchdog.run_once()
+    assert killed, "the just-spawned bot must be killed"
+    assert result["restarted"] is False
+    assert result["restart_undone"] == "desired_off"
+    state = json.loads(wd.state_file.read_text())
+    assert "last_restart_at" not in state  # an undone restart never arms grace
+
+
+# --- #135 defect 3: failed restart must not arm grace
+
+
+def test_failed_restart_does_not_arm_the_grace_window(wd, monkeypatch) -> None:
+    set_settings(monkeypatch)
+    set_health(monkeypatch, bot_watchdog.UNREACHABLE, detail="refused")
+    monkeypatch.setattr(bot_watchdog, "restart_bot", lambda: (False, "launcher exploded"))
+    wd.state_file.write_text(json.dumps({"consecutive_failures": 1}))
+    first = bot_watchdog.run_once()
+    assert first["restarted"] is False
+    assert "last_restart_at" not in json.loads(wd.state_file.read_text())
+    # Next tick: the still-down bot counts failures immediately — no grace suppression.
+    second = bot_watchdog.run_once()
+    assert second["in_grace"] is False
+    assert second["consecutive_failures"] == 1
+
+
+def test_successful_restart_still_arms_the_grace_window(wd, monkeypatch) -> None:
+    set_settings(monkeypatch)
+    set_health(monkeypatch, bot_watchdog.UNREACHABLE, detail="refused")
+    wd.state_file.write_text(json.dumps({"consecutive_failures": 1}))
+    result = bot_watchdog.run_once()  # wd fixture's fake restart returns ok=True
+    assert result["restarted"] is True
+    assert "last_restart_at" in json.loads(wd.state_file.read_text())
+
+
+def test_off_mid_restart_sweeps_even_when_spawn_unverified(wd, monkeypatch) -> None:
+    """#135 gate: restart_bot spawns DETACHED then verifies — ok=False can still
+    mean a live bot was spawned. The off-flip sweep must run regardless of ok."""
+    set_settings(monkeypatch)
+    set_health(monkeypatch, bot_watchdog.UNREACHABLE, detail="refused")
+    _write_flag(wd, "on")
+    killed: list[list[int]] = []
+
+    def spawn_unverified_and_race() -> tuple[bool, str]:
+        _write_flag(wd, "off")
+        return False, "spawned but health proof timed out"
+
+    monkeypatch.setattr(bot_watchdog, "restart_bot", spawn_unverified_and_race)
+    import shared
+
+    monkeypatch.setattr(
+        shared, "cleanup_all_bot_processes", lambda: killed.append([777]) or [777]
+    )
+    wd.state_file.write_text(json.dumps({"consecutive_failures": 1}))
+    result = bot_watchdog.run_once()
+    assert killed, "sweep must run even though restart_bot returned ok=False"
+    assert result["restart_undone"] == "desired_off"
+    assert "last_restart_at" not in json.loads(wd.state_file.read_text())
+
+
+def test_failed_undo_reports_honestly(wd, monkeypatch) -> None:
+    """#135 gate: a sweep that RAISES must not claim the bot 'was stopped' —
+    restart_undone stays unset, restart_undo_failed carries the error."""
+    set_settings(monkeypatch)
+    set_health(monkeypatch, bot_watchdog.UNREACHABLE, detail="refused")
+    _write_flag(wd, "on")
+
+    def restart_and_race() -> tuple[bool, str]:
+        _write_flag(wd, "off")
+        return True, "spawned"
+
+    monkeypatch.setattr(bot_watchdog, "restart_bot", restart_and_race)
+    import shared
+
+    def _broken_sweep():
+        raise OSError("wmic unavailable")
+
+    monkeypatch.setattr(shared, "cleanup_all_bot_processes", _broken_sweep)
+    wd.state_file.write_text(json.dumps({"consecutive_failures": 1}))
+    result = bot_watchdog.run_once()
+    assert result["restarted"] is False
+    assert "restart_undone" not in result
+    assert "OSError" in result["restart_undo_failed"]
+    assert "UNDO FAILED" in result["restart_detail"]
+
+
+# --- #135 gate: kill-scan must be repo-anchored, never generic substrings
+
+
+def test_kill_scan_line_match_is_repo_anchored() -> None:
+    """A foreign project's service.py/main.py cmdline must never be a kill
+    candidate; this repo's bot (either slash flavor) must be."""
+    import shared
+    from pathlib import Path as _P
+
+    chat_dir = (_P(shared.__file__).resolve().parent.parent / "chat").resolve()
+    ours_bs = f'python.exe  "{chat_dir / "main.py"}"  1234'
+    ours_fs = f"python {str(chat_dir / 'main.py').replace(chr(92), '/')} 1234"
+    foreign = [
+        r"python.exe C:\other-project\service.py 999",
+        r"python.exe C:\somewhere\chat\main.py 998",
+        "python /opt/foreign/app/service.py 997",
+    ]
+    assert shared._line_is_this_repos_bot(ours_bs)
+    assert shared._line_is_this_repos_bot(ours_fs)
+    for line in foreign:
+        assert not shared._line_is_this_repos_bot(line), line

@@ -118,25 +118,15 @@ def test_discuss_intent_keywords() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 disjointness — NO /voice claim today (defensive against future
-# voice slash command in Phase 4)
+# Phase 4 disjointness — /voice now owns the previously reserved namespace.
 # ---------------------------------------------------------------------------
 
 
-def test_phase_5b_does_not_introduce_voice_command() -> None:
-    """R1 M2 framing fix: Phase 5b proactively avoids the `/voice` namespace.
-
-    Phase 4 ships voice via inline markers (`voice.py` + `voice_markers.py`),
-    NOT a /voice slash command. Phase 5b must NOT introduce /voice — so a
-    future Phase 4 enhancement can claim it without collision.
-    """
+def test_voice_command_claims_reserved_namespace_outside_cabinet() -> None:
+    """The cross-adapter voice preference owns `/voice`, not Cabinet."""
     cmd_names = {row[0] for row in commands.COMMANDS}
-    assert "voice" not in cmd_names, (
-        "Phase 5b must NOT register /voice (R1 M2 / defensive disjointness)"
-    )
-    assert "voice" not in core_handlers.CORE_HANDLERS, (
-        "core_handlers must NOT have a 'voice' handler (R1 M2)"
-    )
+    assert "voice" in cmd_names
+    assert core_handlers.CORE_HANDLERS["voice"] is core_handlers.handle_voice
 
 
 def test_cabinet_keywords_disjoint_with_voice() -> None:

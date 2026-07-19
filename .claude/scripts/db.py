@@ -504,6 +504,20 @@ class PostgresMemoryDB:
 
         register_vector(self._get_conn())
 
+    def _rollback_silently(self) -> None:
+        """Clear an aborted transaction after a swallowed probe failure.
+
+        Psycopg's autocommit=False leaves a failed statement's transaction
+        ABORTED until rolled back — every later statement on the connection
+        raises InFailedSqlTransaction otherwise. Callers use this after
+        catching a probe error (e.g. UndefinedTable on a fresh DB) so the
+        connection is clean for whatever runs next.
+        """
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
+
     def init_schema(self) -> None:
         conn = self._get_conn()
         cur = conn.cursor()
@@ -575,10 +589,23 @@ class PostgresMemoryDB:
         )
 
     def get_meta(self, key: str) -> str | None:
-        cur = self._get_conn().cursor()
-        cur.execute("SELECT value FROM meta WHERE key = %s", (key,))
-        row = cur.fetchone()
-        return row[0] if row else None
+        """Meta value, or None when the meta table doesn't exist yet.
+
+        sync_index() reads ``embedding_model`` BEFORE init_schema() (the same
+        pre-init sequence as get_actual_embedding_dim); on a fresh database the
+        missing table aborts the autocommit=False transaction, and a caller
+        swallowing that without rollback leaves init_schema() running in
+        InFailedSqlTransaction (#136 gate). Roll back here so the probe is
+        side-effect-free — it runs before any caller writes.
+        """
+        try:
+            cur = self._get_conn().cursor()
+            cur.execute("SELECT value FROM meta WHERE key = %s", (key,))
+            row = cur.fetchone()
+            return row[0] if row else None
+        except Exception:
+            self._rollback_silently()
+            return None
 
     def get_actual_embedding_dim(self) -> int | None:
         """Read the vector dimension from chunks.embedding column type.
@@ -601,6 +628,13 @@ class PostgresMemoryDB:
                 return None  # -1 = typmod-less (unconstrained vector) column
             return int(row[0])  # pgvector typmod IS the dimension
         except Exception:
+            # 'chunks'::regclass raises UndefinedTable on a fresh DB, and with
+            # autocommit=False that ABORTS the open transaction. The probe runs
+            # BEFORE any caller writes (sync_index / reindex_file dim guards),
+            # so there is never pending work to lose — roll back so it stays
+            # side-effect-free (InFailedSqlTransaction — documented live in
+            # test_postgres_live_integration).
+            self._rollback_silently()
             return None  # Table doesn't exist yet
 
     def upsert_file(

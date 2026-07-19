@@ -26,7 +26,7 @@ from local_extension_loader import (
     dispatch_local_extension_hook,
 )
 from models import OutgoingMessage, Platform
-from session import Session
+from session import Session, get_persist_lock
 from session_keys import build_session_key, resolve_thread_id
 
 try:
@@ -787,7 +787,7 @@ class ChatRouter:
                         thread=incoming.thread,
                     )
                 )
-                self._persist_router_turn(incoming, reply)
+                await self._persist_router_turn_off_loop(incoming, reply)
                 return
 
         # --- Phase 3 document ingest: an upload captioned EXACTLY
@@ -814,7 +814,7 @@ class ChatRouter:
                         thread=incoming.thread,
                     )
                 )
-                self._persist_router_turn(incoming, reply)
+                await self._persist_router_turn_off_loop(incoming, reply)
             return
 
         # --- Multi-command: /email /gsc /analytics -> chain all ---
@@ -845,7 +845,7 @@ class ChatRouter:
                         )
                     )
                     if not any(cmd in self._transcript_reset_commands for cmd, _ in router_cmds):
-                        self._persist_router_turn(incoming, combined)
+                        await self._persist_router_turn_off_loop(incoming, combined)
                     return
 
         # --- /file accept|diff <id> — gap-6 conversational compounding ---
@@ -866,7 +866,7 @@ class ChatRouter:
                         thread=incoming.thread,
                     )
                 )
-                self._persist_router_turn(incoming, reply)
+                await self._persist_router_turn_off_loop(incoming, reply)
                 return
 
         # --- Single command: /email -> handle directly ---
@@ -902,7 +902,7 @@ class ChatRouter:
                         )
                     )
                     if command not in self._transcript_reset_commands:
-                        self._persist_router_turn(incoming, reply)
+                        await self._persist_router_turn_off_loop(incoming, reply)
                 return
 
             if not skip_intent_detection:
@@ -958,7 +958,7 @@ class ChatRouter:
                                 thread=incoming.thread,
                             )
                         )
-                        self._persist_router_turn(incoming, reply)
+                        await self._persist_router_turn_off_loop(incoming, reply)
                         return
                     if isinstance(getattr(incoming, "raw_event", None), dict):
                         incoming.raw_event.setdefault("display_text", text)
@@ -1012,7 +1012,7 @@ class ChatRouter:
                         thread=incoming.thread,
                     )
                 )
-                self._persist_router_turn(incoming, reply)
+                await self._persist_router_turn_off_loop(incoming, reply)
                 return
 
             linkedin_profile_action = _linkedin_profile_natural_action(text)
@@ -1047,7 +1047,7 @@ class ChatRouter:
                             thread=incoming.thread,
                         )
                     )
-                    self._persist_router_turn(incoming, reply)
+                    await self._persist_router_turn_off_loop(incoming, reply)
                     return
 
             intents = self.manager.detect_intents(text)
@@ -1089,7 +1089,7 @@ class ChatRouter:
                                 thread=incoming.thread,
                             )
                         )
-                        self._persist_router_turn(incoming, reply)
+                        await self._persist_router_turn_off_loop(incoming, reply)
                         return
 
         discord_persona_binding = (
@@ -1256,6 +1256,8 @@ class ChatRouter:
         final_is_error = False
         final_footer: str | None = None
         final_components: list[Any] = []
+        final_embed: Any | None = None
+        final_embeds: list[Any] = []
         followup_messages: list[OutgoingMessage] = []
         engine_result_started = False
         foreground_text: str | None = None
@@ -1264,6 +1266,7 @@ class ChatRouter:
 
         async def _run_engine() -> None:
             nonlocal final_text, final_is_error, final_footer, final_components
+            nonlocal final_embed, final_embeds
             nonlocal engine_result_started
             if discord_persona_binding is not None:
                 outgoing = await run_discord_persona_channel_turn(
@@ -1280,6 +1283,8 @@ class ChatRouter:
                 yielded_components = getattr(outgoing, "components", None) or []
                 if yielded_components:
                     final_components = list(yielded_components)
+                final_embed = getattr(outgoing, "embed", None)
+                final_embeds = list(getattr(outgoing, "embeds", None) or [])
                 return
 
             async for outgoing in self.engine.handle_message(incoming, progress=progress):
@@ -1296,9 +1301,12 @@ class ChatRouter:
                 yielded_components = getattr(outgoing, "components", None) or []
                 if yielded_components:
                     final_components = list(yielded_components)
+                final_embed = getattr(outgoing, "embed", None)
+                final_embeds = list(getattr(outgoing, "embeds", None) or [])
 
         async def _deliver_background_engine_result(task: asyncio.Task[Any]) -> None:
             nonlocal final_text, final_is_error, final_footer, final_components
+            nonlocal final_embed, final_embeds
             try:
                 await task
             except asyncio.CancelledError:
@@ -1309,6 +1317,8 @@ class ChatRouter:
                 final_is_error = True
                 final_footer = None
                 final_components = []
+                final_embed = None
+                final_embeds = []
 
             if not final_text.strip():
                 final_text = "Background task finished, but it had no text response."
@@ -1329,6 +1339,8 @@ class ChatRouter:
                         thread=incoming.thread,
                         is_error=final_is_error,
                         components=components,
+                        embed=final_embed,
+                        embeds=final_embeds,
                         footer=final_footer,
                     )
                 )
@@ -1450,6 +1462,9 @@ class ChatRouter:
                                 is_update=True,
                                 update_message_id=placeholder_id,
                                 is_error=delivered_is_error,
+                                components=(components if foreground_text is None else []),
+                                embed=(final_embed if foreground_text is None else None),
+                                embeds=(final_embeds if foreground_text is None else []),
                                 footer=(
                                     final_footer if foreground_text is None else None
                                 ),
@@ -1477,6 +1492,9 @@ class ChatRouter:
                             channel=incoming.channel,
                             thread=incoming.thread,
                             is_error=delivered_is_error,
+                            components=(components if foreground_text is None else []),
+                            embed=(final_embed if foreground_text is None else None),
+                            embeds=(final_embeds if foreground_text is None else []),
                             footer=final_footer if foreground_text is None else None,
                         )
                     )
@@ -1496,6 +1514,8 @@ class ChatRouter:
                         thread=incoming.thread,
                         is_error=delivered_is_error,
                         components=components,
+                        embed=(final_embed if foreground_text is None else None),
+                        embeds=(final_embeds if foreground_text is None else []),
                         footer=final_footer if foreground_text is None else None,
                     )
                 )
@@ -1531,24 +1551,13 @@ class ChatRouter:
 
         if final_delivery_ok and foreground_text is None:
             try:
-                # Buttons can't be added to edits — send as follow-up
-                if components:
-                    await adapter.send(
-                        OutgoingMessage(
-                            text="Ready to publish?" if not final_components else "",
-                            channel=incoming.channel,
-                            thread=incoming.thread,
-                            components=components,
-                            footer=final_footer if final_components else None,
-                        )
-                    )
                 for followup in followup_messages:
                     await adapter.send(followup)
             except Exception as e:
                 print(f"[{datetime.now()}] Failed to send follow-up response: {e}", flush=True)
 
         if delivered_is_error:
-            self._persist_router_turn(incoming, delivered_text)
+            await self._persist_router_turn_off_loop(incoming, delivered_text)
 
     async def _handle_vault_command(
         self,
@@ -1708,7 +1717,7 @@ class ChatRouter:
                 is_error=is_error,
             )
         )
-        self._persist_router_turn(incoming, text)
+        await self._persist_router_turn_off_loop(incoming, text)
 
     def _parse_vault_args(
         self,
@@ -2060,7 +2069,7 @@ class ChatRouter:
                 thread=incoming.thread,
             )
         )
-        self._persist_router_turn(incoming, reply)
+        await self._persist_router_turn_off_loop(incoming, reply)
 
     @staticmethod
     def _url_ingest_pipeline(url: str, memory_dir: Path | None = None):
@@ -2197,7 +2206,7 @@ class ChatRouter:
                 is_error=had_error,
             )
         )
-        self._persist_router_turn(incoming, reply)
+        await self._persist_router_turn_off_loop(incoming, reply)
 
     @staticmethod
     def _document_ingest_pipeline(
@@ -2586,6 +2595,30 @@ class ChatRouter:
             )
         except Exception as e:  # noqa: BLE001
             return f"Error loading draft #{pid}: {type(e).__name__}: {e}"
+
+    async def _persist_router_turn_off_loop(self, incoming: Any, reply: str) -> None:
+        """Serialize + offload the sync router persist off the event loop (#131).
+
+        Shares the per-conversation lock with the engine + persona persist paths
+        (keyed by the canonical ``build_session_key`` id) so a router persist can
+        never interleave with an engine persist for the same conversation. The
+        whole sync ``_persist_router_turn`` body (marker seam → get → write →
+        2× add_message) runs in one thread hop, preserving its internal ordering.
+        Whole-body fail-open: a persistence failure never breaks a turn that
+        already replied.
+        """
+        try:
+            platform_str = incoming.platform.value
+            channel_id = incoming.channel.platform_id
+            thread_id = resolve_thread_id(
+                channel_id,
+                incoming.thread.thread_id if incoming.thread else None,
+            )
+            key = build_session_key(platform_str, channel_id, thread_id)
+            async with get_persist_lock(key):
+                await asyncio.to_thread(self._persist_router_turn, incoming, reply)
+        except Exception as e:
+            print(f"[{datetime.now()}] [Router] Persist failed (non-blocking): {e}")
 
     def _persist_router_turn(self, incoming: Any, reply: str) -> None:
         """Persist direct router-path turns into the transcript store."""

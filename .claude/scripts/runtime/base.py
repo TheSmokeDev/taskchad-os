@@ -100,3 +100,4 @@ class RuntimeResult:
     tool_call_count: int = 0
     tool_names_used: list[str] = field(default_factory=list)
     tool_calls: list[RuntimeToolCall] = field(default_factory=list)
+    usage: dict[str, int] | None = None

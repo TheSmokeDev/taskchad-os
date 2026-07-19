@@ -113,6 +113,17 @@ def test_discord_native_menu_reuses_curated_slash_registry() -> None:
     assert all(1 <= len(desc) <= 100 for _name, desc in menu)
 
 
+def test_discord_native_model_command_mentions_kimi() -> None:
+    """The Discord-native /model description must fit the 100-char cap AND name
+    the kimi lane — the compact form keeps every lane visible in the Discord
+    slash menu (longer text gets truncated with '...')."""
+
+    menu = dict(get_discord_native_command_menu())
+    assert "model" in menu
+    assert "kimi" in menu["model"]
+    assert len(menu["model"]) <= 100
+
+
 def test_diagnostics_and_commands_are_categorized() -> None:
     categorized = {name for _category, names in commands.CATEGORIES for name in names}
 

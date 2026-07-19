@@ -2636,6 +2636,7 @@ def _detect_providers(env_values: dict[str, str]) -> dict[str, bool]:
         "gemini": shutil.which("gemini") is not None,
         "openrouter": bool(env_values.get("OPENROUTER_API_KEY", "")),
         "openai": bool(env_values.get("OPENAI_API_KEY", "")),
+        "kimi": bool(env_values.get("KIMI_API_KEY", "")),
     }
 
 

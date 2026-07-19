@@ -20,8 +20,9 @@ The cognitive system shipped as two programs:
 Three Living Mind subfeatures have their own deep feature pages — this manual
 links them rather than repeating them:
 
-- [Heartbeat Runtime](manual/features/heartbeat-runtime.md) — the 30-minute
-  sense loop, ambient observations, and blocker escalation.
+- [Heartbeat Runtime](manual/features/heartbeat-runtime.md) — the scheduled
+  sense loop (framework default 30 min; this box runs it every 2 h), ambient
+  observations, and blocker escalation.
 - [Episodes](manual/features/episodes.md) — the session-end autobiography layer.
 - [Session Opening Brief](manual/features/session-opening-brief.md) — the
   "while you were out" block on the first interactive turn after an absence.
@@ -283,7 +284,7 @@ Full details: [Persona Learning Loop](manual/features/persona-learning-loop.md).
 | Morning reflection (`memory_reflect.py`) | Daily, scheduled | Operator-belief extraction (Act 1), the contradiction pass (Act 2), inference decay, and staging the next session brief. `--test` dry-runs it with no writes. |
 | Weekly synthesis (`memory_weekly.py`) | Weekly, scheduled | Seven-day synthesis; applies pending amendments (capped per run). |
 | Dream cycle (`memory_dream.py`) | Interval + signal threshold | Four-phase consolidation; exits silently with no model call when no signal is found. |
-| Evolve `propose` (`evolve/evolve_loop.py propose`) | Scheduled (via `run_evolve` + the scheduler setup script) | The safe recall-tuning rail — replay, compare, regression corpus, decision artifact. No identity mutation. |
+| Evolve `propose` (`evolve/evolve_loop.py propose`) | Scheduled daily 12:30 PM (moved from 6:00 AM 2026-07-16 — box asleep at 6, wake catch-ups were refused and the rail ran silent 7/13–7/16) | The safe recall-tuning rail — replay, compare, regression corpus, decision artifact. No identity mutation. **Known issue (2026-07-16):** all five `evolve/regression_queries.json` entries expect `expected_top_path: MEMORY.md`, but entity-compilation concept pages now outrank MEMORY.md for those queries, so every propose run fails the floor with `wrong_top_path` and exits 1 (fail-closed — no candidate can be accepted). Recalibration is an operator decision: point the entries at the new canonical concept pages, or move the floor to a top-N containment check. Two observed tops smell like real ranking issues: an `_archive/` page tops "convoy mailbox orchestration phases" and a 2026-04-25 daily log tops "evolve replay harness phase 2". |
 | Evolve `propose-belief` (`evolve/evolve_loop.py propose-belief`) | Archon-driven, on-demand | The identity rail — evidence-read + floor + judge, then the audited amendment gate. |
 | Corpus migration (`self_model.py migrate-corpus`) | One-time, manual | Quarantines keyword-captured self-model records to a reversible backup. |
 | Persona learning tick (`persona_learning_tick.py`) | Scheduled | Enumerates learning-enabled personas, spawns per-persona reflection on background tiers. See [Persona Learning Loop](manual/features/persona-learning-loop.md). |

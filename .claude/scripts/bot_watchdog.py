@@ -272,14 +272,24 @@ def classify(
             parsed = _parse_last_update(info.get("last_update_at"))
             if parsed is not None:
                 ages[name] = (now - parsed).total_seconds()
-        fresh = {name for name, age in ages.items() if age <= staleness_seconds}
+        # Only a fresh CRITICAL gateway is evidence the operator is active on a
+        # gateway surface. The relay bumps last_update_at on machine-adjacent
+        # traffic (web.py:_enqueue), so a fresh non-critical peer proves nothing
+        # about a quiet Telegram/Discord — a quiet bot is not a dead bot (#135).
+        fresh = {
+            name
+            for name, age in ages.items()
+            if age <= staleness_seconds
+            and isinstance(liveness.get(name), dict)
+            and liveness[name].get("critical") is True
+        }
         stale_gateways = sorted(
             name
             for name, age in ages.items()
             if age > staleness_seconds
             and isinstance(liveness.get(name), dict)
             and liveness[name].get("critical") is True
-            and (fresh - {name})  # at least one OTHER adapter is fresh
+            and (fresh - {name})  # at least one OTHER critical gateway is fresh
         )
         if stale_gateways:
             stale_desc = ", ".join(
@@ -477,6 +487,17 @@ def restart_bot() -> tuple[bool, str]:
 # ---------------------------------------------------------------- the check
 
 
+def _read_desired_state() -> str:
+    """Operator desired state. Fail-OPEN to "on" — a broken flag never kills the guard."""
+    try:
+        import bot_lifecycle_switch  # local import — keeps the guard import-safe
+
+        return str(bot_lifecycle_switch.get_desired().get("desired", "on")).lower()
+    except Exception as exc:  # noqa: BLE001 — guard survives a broken switch
+        _log(f"desired-state read failed ({exc}) — guarding as if desired=on")
+        return "on"
+
+
 def run_once(*, dry_run: bool = False) -> dict[str, Any]:
     """One poll → classify → (maybe) restart. Returns a machine-readable verdict."""
     settings = config.get_bot_watchdog_settings()
@@ -488,13 +509,7 @@ def run_once(*, dry_run: bool = False) -> dict[str, Any]:
     # --- #117 ONE switch, ONE enforcer: desired=off => stand down. No health
     # poll, no failure counting, no restart. Fail-OPEN to "on" on ANY error —
     # a broken flag must never kill the guard.
-    desired = "on"
-    try:
-        import bot_lifecycle_switch  # local import — keeps the guard import-safe
-
-        desired = str(bot_lifecycle_switch.get_desired().get("desired", "on")).lower()
-    except Exception as exc:  # noqa: BLE001 — guard survives a broken switch
-        _log(f"desired-state read failed ({exc}) — guarding as if desired=on")
+    desired = _read_desired_state()
     if desired == "off":
         _log("standing down — operator desired state is OFF (`thehomie on` to resume)")
         state["last_poll_at"] = _now().isoformat()
@@ -589,20 +604,79 @@ def run_once(*, dry_run: bool = False) -> dict[str, Any]:
         save_state(state)
         return result
 
+    # #135: the flag was read at the top of this tick, but the poll takes time
+    # and `thehomie off` must win. Re-read at the last instant before spawning.
+    if _read_desired_state() == "off":
+        result["restart_blocked"] = "desired_off"
+        _log("NOT restarting — desired flipped OFF since this tick began")
+        save_state(state)
+        return result
+
     ok, restart_detail = restart_bot()
+
+    undone = False
+    undo_note = ""
+    if _read_desired_state() == "off":
+        # Operator ran `thehomie off` while the restart was in flight. #117:
+        # off => NEVER resurrect — sweep regardless of `ok`: restart_bot()
+        # spawns a DETACHED process and then verifies, so ok=False can still
+        # mean a live bot was spawned (launcher ran, health proof failed).
+        try:
+            import shared as _shared  # module-attr call (Rule 3) — tests monkeypatch
+
+            killed = _shared.cleanup_all_bot_processes()
+            if killed:
+                undo_note = f"UNDONE: desired=off during restart; killed {killed}"
+            else:
+                # Honest: nothing matched the sweep. Either the spawn already
+                # exited (fine) or enumeration failed closed (bot may live —
+                # `thehomie off` re-runs the same sweep).
+                undo_note = (
+                    "UNDONE: desired=off during restart; no surviving process "
+                    "found by the sweep"
+                )
+            result["restart_undone"] = "desired_off"
+        except Exception as exc:  # noqa: BLE001 — report loudly; nothing retries this
+            undo_note = (
+                f"UNDO FAILED: {type(exc).__name__}: {exc} — a resurrected bot "
+                "may still be running; run `thehomie off` again"
+            )
+            result["restart_undo_failed"] = f"{type(exc).__name__}: {exc}"
+        restart_detail = f"{restart_detail} — {undo_note}"
+        undone = True
+        ok = False
+
     result["restarted"] = ok
     result["restart_detail"] = restart_detail
 
     recent.append(_now().isoformat())
     state["restarts"] = recent
-    state["last_restart_at"] = _now().isoformat()
+    if ok:
+        # #135: grace protects a BOOTING bot. A failed (or undone) restart has
+        # nothing to protect — arming grace would suppress the very failure
+        # counting that drives the next recovery attempt.
+        state["last_restart_at"] = _now().isoformat()
     state["last_restart_detail"] = restart_detail
     # Reset the counter either way: the next poll re-judges from scratch, and a
     # failed launcher must not instantly re-trip the threshold on the next tick.
     state["consecutive_failures"] = 0
     save_state(state)
 
-    if ok:
+    if undone:
+        _log(f"restart undone ({restart_detail})")
+        # The toast tells the truth about what the sweep achieved — a failed
+        # undo must never read as "stopped" (#135 gate finding).
+        _notify(
+            "The Homie Bot restart undone"
+            if "UNDO FAILED" not in undo_note
+            else "The Homie Bot restart undo FAILED",
+            f"`thehomie off` landed during an in-flight watchdog restart. {undo_note}",
+        )
+        append_to_daily_log(
+            f"Watchdog undo — desired=off won mid-flight: {restart_detail}",
+            "Bot Lifecycle",
+        )
+    elif ok:
         _log(f"bot restarted ({restart_detail})")
         _notify(
             "The Homie Bot was restarted",

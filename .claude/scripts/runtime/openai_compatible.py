@@ -42,20 +42,59 @@ class OpenAICompatibleRuntime:
         client = AsyncOpenAI(api_key=self.profile.api_key, base_url=self.profile.base_url)
         model = request.fallback_model or request.model or self.profile.model
         instructions: str | None = None
+        usage: dict[str, int] = {}
         if isinstance(request.system_prompt, str):
             instructions = request.system_prompt
         elif isinstance(request.system_prompt, dict):
             instructions = str(request.system_prompt.get("append", "")).strip() or None
 
+        # Deferred import (no cycle): profiles never imports this module.
+        from .profiles import GENERIC_PROVIDER_REGISTRY
+
+        overlay = GENERIC_PROVIDER_REGISTRY.get(self.profile.provider)
+        wire_api = overlay.wire_api if overlay is not None else "responses"
+
         try:
-            response = await client.responses.create(
-                model=model,
-                input=request.prompt,
-                instructions=instructions,
-            )
-            text = getattr(response, "output_text", "").strip()
-            if not text:
-                text = _extract_response_text(response)
+            if wire_api == "chat_completions":
+                # request.model/fallback_model carry the Claude-lane value
+                # (engine.py builds it from SECOND_BRAIN_CLAUDE_MODEL). Generic
+                # providers use their own pinned model — the profiles contract
+                # ("model names are provider-specific").
+                model = self.profile.model
+                messages: list[dict[str, str]] = []
+                if instructions:
+                    messages.append({"role": "system", "content": instructions})
+                messages.append({"role": "user", "content": request.prompt})
+                completion = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                )
+                choice = (getattr(completion, "choices", None) or [None])[0]
+                message = getattr(choice, "message", None)
+                text = str(getattr(message, "content", "") or "").strip()
+                # Usage telemetry rides the result (token counts only — no
+                # price table is configured, so cost stays unset rather than
+                # invented).
+                usage_raw = getattr(completion, "usage", None)
+                if usage_raw is not None:
+                    for field_name in (
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "total_tokens",
+                        "cached_tokens",
+                    ):
+                        value = getattr(usage_raw, field_name, None)
+                        if isinstance(value, int):
+                            usage[field_name] = value
+            else:
+                response = await client.responses.create(
+                    model=model,
+                    input=request.prompt,
+                    instructions=instructions,
+                )
+                text = getattr(response, "output_text", "").strip()
+                if not text:
+                    text = _extract_response_text(response)
         except Exception as exc:
             error_text = str(exc).lower()
             if any(
@@ -73,6 +112,7 @@ class OpenAICompatibleRuntime:
             provider=self.profile.provider,
             model=model,
             profile_key=self.profile.key,
+            usage=usage or None,
         )
 
 

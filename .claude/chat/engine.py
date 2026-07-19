@@ -14,7 +14,13 @@ from typing import Any
 
 from attachment_context import build_attachment_context
 from models import IncomingMessage, OutgoingMessage, Platform
-from session import HeartbeatThread, PostgresSessionStore, Session, SQLiteSessionStore
+from session import (
+    HeartbeatThread,
+    PostgresSessionStore,
+    Session,
+    SQLiteSessionStore,
+    get_persist_lock,
+)
 from session_keys import build_session_key, resolve_thread_id
 from speaker_context import (
     render_speaker_context,
@@ -280,6 +286,18 @@ class ConversationEngine:
         # session-opening brief. A process restart inside the gap can at
         # worst produce one extra brief — accepted and documented.
         self._session_brief_fired_at: datetime | None = None
+        # #138 commit-on-success: when a brief FIRES, its consumed state
+        # (owed-marker clear + the fired_at guard above) is deferred into a
+        # pending token OWNED BY THE FIRING TURN. This attr only tracks
+        # which token is current so foreign turns' commit/rollback are
+        # structural no-ops (identity guard) - one engine hosts many
+        # concurrent conversations. The token also lives in a per-turn holder
+        # passed from handle_message, whose finally rolls it back on every
+        # exception-delivering exit (cancel/close/GC). A consumer that breaks
+        # while RETAINING the generator leaves the slot HELD - briefs defer
+        # with the marker intact, never lost - until close or process restart
+        # releases it. No time-based steal anywhere.
+        self._session_brief_pending: dict[str, Any] | None = None
         # Skill-from-experience loop (WS4): draft names already announced as
         # promotion-eligible this process lifetime, so the post-response hook
         # emits the `promotion_eligible` event once per draft (not every turn).
@@ -573,11 +591,16 @@ class ConversationEngine:
         self,
         message: IncomingMessage,
         trace_decisions: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> tuple[str, dict[str, Any] | None]:
         """Session-opening brief decision for this turn (Living Mind Act 4).
 
-        Whole-body fail-open: any exception -> "" + a non-blocking print —
-        a brief failure must never break a chat turn. Writes
+        Returns ``(prompt_block, token)``. A non-None ``token`` means a brief
+        FIRED and its consumed state is pending on THIS turn — the caller
+        must pass it to :meth:`_commit_session_brief` after delivery or
+        :meth:`_rollback_session_brief` on any failure path (#138).
+
+        Whole-body fail-open: any exception -> ("", None) + a non-blocking
+        print — a brief failure must never break a chat turn. Writes
         ``trace_decisions["session_brief"]`` on EVERY turn (R1 M1), negative
         decisions included. Stdout receipts only when fired or
         boredom-silent (printing not_away every turn would be log spam).
@@ -590,16 +613,34 @@ class ConversationEngine:
             "fresh_items": 0,
             "suppressed": "",
         }
+        # Declared OUTSIDE the try so the except can self-rollback: an
+        # exception AFTER the pending assignment (e.g. the fired-log print)
+        # would otherwise orphan the token - the caller receives None and can
+        # never commit or roll it back, wedging every later brief on
+        # brief_in_flight for the process lifetime (#138 gate: the check/set is
+        # asyncio-atomic but was not EXCEPTION-atomic).
+        token: dict[str, Any] | None = None
         try:
             if getattr(message, "is_piv", False):
                 decision["suppressed"] = "is_piv"
-                return ""
+                return "", None
             # RAW exact equality (R1 M5): normalize_source() is fail-OPEN and
             # must never be the eligibility gate for a proactive surface —
             # "cron "/"TOOL"/"" all fail closed here.
             if getattr(message, "source", "interactive") != "interactive":
                 decision["suppressed"] = "non_interactive"
-                return ""
+                return "", None
+            if self._session_brief_pending is not None:
+                # A fired brief from another turn on this shared engine is
+                # still in flight — or its generator is RETAINED by a
+                # consumer that stopped iterating (its reply was already
+                # YIELDED to that consumer). Defer. The slot frees when that
+                # holder resumes to exhaustion (commit), is closed/cancelled/
+                # finalized (rollback via handle_message's finally), or the
+                # process restarts (process-local state simply discarded —
+                # no finally runs on restart). Never from a clock.
+                decision["suppressed"] = "brief_in_flight"
+                return "", None
             from cognition.proactive_brief import (  # lazy — re-binds per call
                 build_session_opening_brief,
                 clear_brief_owed,
@@ -631,7 +672,13 @@ class ConversationEngine:
                 ),
             )
             if brief.fired:
+                # #138: the marker clear is DEFERRED into the token (consumed
+                # only once the reply reaches the operator). The fired_at set
+                # stays eager so the double-fire fold covers turns landing
+                # while this one is in flight; rollback restores prev_fired_at.
+                token = {"prev_fired_at": self._session_brief_fired_at}
                 self._session_brief_fired_at = now
+                self._session_brief_pending = token
                 print(
                     f"[{datetime.now()}] [SessionBrief] fired: away "
                     f"{brief.away_hours:.1f}h, {brief.fresh_items} fresh item(s)",
@@ -644,20 +691,65 @@ class ConversationEngine:
                     f"{brief.away_hours:.1f}h, nothing fresh",
                     flush=True,
                 )
-            if owed is not None or brief.fired:
-                # A COMPLETED decision consumes the debt — fired OR silent
+            if not brief.fired and owed is not None:
+                # A COMPLETED SILENT decision consumes the debt immediately —
+                # nothing rides the turn, so a runtime error loses nothing
                 # (only-on-fire would defer a quiet morning's marker into an
                 # off-window afternoon fire). Never reached on exception, so
                 # the marker survives for retry.
                 clear_brief_owed()
-            return brief.prompt_block
+            return brief.prompt_block, token
         except Exception as e:
+            # Self-rollback: if we already claimed the pending slot before
+            # failing, release it here or no later turn can ever acquire.
+            self._rollback_session_brief(token)
             decision["suppressed"] = "error"
             print(f"[{datetime.now()}] [SessionBrief] non-blocking failure: {e}")
-            return ""
+            return "", None
         finally:
             if trace_decisions is not None:
                 trace_decisions["session_brief"] = decision
+
+    def _commit_session_brief(self, token: dict[str, Any] | None) -> None:
+        """Consume the owed marker for THIS turn's delivered brief (#138).
+
+        Structural no-op unless ``token`` is the engine's current pending
+        (identity, not equality) — a foreign turn (cron, sibling
+        conversation) can never eat a brief it did not carry. Fail-open: a
+        clear failure leaves the marker; the fired_at fold suppresses a
+        double-fire meanwhile.
+        """
+        if token is None or self._session_brief_pending is not token:
+            return
+        self._session_brief_pending = None
+        try:
+            from cognition.proactive_brief import clear_brief_owed  # lazy — re-binds per call
+
+            clear_brief_owed()
+        except Exception as e:
+            print(
+                f"[{datetime.now()}] [SessionBrief] commit failed (non-blocking): {e}",
+                flush=True,
+            )
+
+    def _rollback_session_brief(self, token: dict[str, Any] | None) -> None:
+        """THIS turn's brief never reached the operator (#138).
+
+        Restores the double-fire guard; the owed marker was never cleared
+        (commit-on-success), so the next turn re-fires with the original
+        pre-absence boundary. Identity-guarded like commit; fail-open so a
+        rollback failure never shadows the caller's own error report.
+        """
+        try:
+            if token is None or self._session_brief_pending is not token:
+                return
+            self._session_brief_pending = None
+            self._session_brief_fired_at = token.get("prev_fired_at")
+        except Exception as e:
+            print(
+                f"[{datetime.now()}] [SessionBrief] rollback failed (non-blocking): {e}",
+                flush=True,
+            )
 
     async def _maybe_cognitive_pass(
         self,
@@ -879,11 +971,23 @@ class ConversationEngine:
                 _root_span = None
 
         _handler_exc_info: tuple[Any, ...] = (None, None, None)
+        # #138: per-turn holder carrying the session-brief token across the
+        # inner/outer generator boundary. The finally below rolls the token
+        # back whenever this generator is RESUMED past its yield, CLOSED
+        # (cancel/close delivers the exception here), or FINALIZED by GC —
+        # every production consumer path (the router drains to exhaustion).
+        # A consumer that breaks out while RETAINING the generator delivers
+        # nothing, so the slot HOLDS: briefs defer with the marker intact
+        # (refire on release/restart) — defer, never lose. No timed steal:
+        # the only bound on break-and-retain would be a clock, and that is
+        # the mechanism this design replaces. Identity-guarded, so it no-ops
+        # after commit and after any inner seam that already ran.
+        _brief_holder: dict[str, Any] = {}
         try:
             async for msg in self._handle_message_inner(
                 message, progress, _tracing, _lf,
                 thread_id, platform_str, channel_id, session_key,
-                _final_output, _trace_decisions,
+                _final_output, _trace_decisions, _brief_holder,
             ):
                 yield msg
         except BaseException:
@@ -891,6 +995,9 @@ class ConversationEngine:
             _handler_exc_info = sys.exc_info()
             raise
         finally:
+            # Roll back FIRST (before span I/O): free the pending slot even if
+            # the tracing cleanup below were to throw.
+            self._rollback_session_brief(_brief_holder.get("token"))
             if _root_ctx:
                 try:
                     root_output: dict[str, Any] = {}
@@ -910,6 +1017,89 @@ class ConversationEngine:
                 except Exception:
                     pass
 
+    def _persist_engine_turn(
+        self,
+        *,
+        session_key: str,
+        platform_str: str,
+        channel_id: str,
+        thread_id: str,
+        message: IncomingMessage,
+        response_text: str,
+        persisted_runtime_session_id: str,
+        normalized_tool_calls: list[dict],
+        result: Any,
+        cost_usd: float | None,
+        mode: str,
+        now: datetime,
+    ) -> str:
+        """Sync persist body — runs on a worker thread UNDER the persist lock.
+
+        Re-reads the session row here (not the turn-start snapshot from
+        ``_handle_message_inner``): a router persist may have bumped or even
+        created the row while the LLM ran (engine-timeout-shield path, #131),
+        and merging into a stale snapshot loses that increment. The fresh
+        re-read makes the merge correct against ANY interleaved persist and
+        removes the latent UNIQUE-IntegrityError in the create path.
+        """
+        current = self.session_store.get(platform_str, channel_id, thread_id)
+        if current:
+            current.runtime_session_id = persisted_runtime_session_id
+            current.runtime_lane = result.runtime_lane
+            current.runtime_provider = result.provider
+            current.runtime_model = result.model or ""
+            current.runtime_profile_key = result.profile_key or ""
+            current.runtime_tool_calls = normalized_tool_calls
+            current.message_count += 1
+            current.total_cost_usd += cost_usd or 0.0
+            current.tool_call_count += result.tool_call_count or 0
+            current.updated_at = now
+            self.session_store.update(current)
+            action = "update"
+        else:
+            # PRP-7d R1 B2: read source from incoming message; set-once on create
+            # (the `if current:` UPDATE branch above MUST NOT touch source).
+            message_source = getattr(message, "source", "interactive")
+            self.session_store.create(Session(
+                session_id=session_key,
+                agent_session_id=persisted_runtime_session_id,
+                platform=platform_str,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                user_id=message.user.platform_id,
+                created_at=now,
+                updated_at=now,
+                message_count=1,
+                total_cost_usd=cost_usd or 0.0,
+                tool_call_count=result.tool_call_count or 0,
+                mode=mode,
+                runtime_lane=result.runtime_lane,
+                runtime_provider=result.provider,
+                runtime_model=result.model or "",
+                runtime_profile_key=result.profile_key or "",
+                runtime_tool_calls=normalized_tool_calls,
+                source=message_source,
+            ))
+            action = "create"
+
+        try:
+            self.session_store.add_message(
+                session_key,
+                "user",
+                _incoming_display_text(message),
+                message.timestamp,
+            )
+            self.session_store.add_message(
+                session_key,
+                "assistant",
+                response_text,
+                now,
+                tool_calls=normalized_tool_calls,
+            )
+        except Exception as e:
+            print(f"[{datetime.now()}] [Messages] Persist failed (non-blocking): {e}")
+        return action
+
     async def _handle_message_inner(
         self,
         message: IncomingMessage,
@@ -922,6 +1112,7 @@ class ConversationEngine:
         session_key: str,
         _final_output: list | None = None,
         _trace_decisions: dict[str, Any] | None = None,
+        _brief_holder: dict[str, Any] | None = None,
     ) -> AsyncIterator[OutgoingMessage]:
         """Core message handling — split out so propagate_attributes wraps the full flow."""
 
@@ -1237,13 +1428,14 @@ class ConversationEngine:
             }
         try:
             if _RECALL_SERVICE_AVAILABLE:
+                import config as _cfg  # Rule 2 — call-time read, test-patchable
                 from config import MEMORY_DIR  # noqa: F811 (re-import guards ImportError path)
 
                 recall_response = await recall_memory_service(
                     query=message.text,
                     memory_dir=MEMORY_DIR,
                     caller="chat",
-                    max_results=5,
+                    max_results=_cfg.RECALL_MAX_RESULTS,
                     has_prefetched=bool(message.prefetched_context),
                 )
                 if _trace_decisions is not None:
@@ -1441,9 +1633,16 @@ class ConversationEngine:
         # LAST so the open-with-the-brief instruction holds the recency
         # position. message.text is NEVER mutated; persistence and working
         # memory see the bare message (history purity).
-        session_brief_text = self._maybe_session_brief(
+        session_brief_text, brief_token = self._maybe_session_brief(
             message, trace_decisions=_trace_decisions,
         )
+        # #138: hand the token to the outer generator too — handle_message's
+        # finally is the abandonment backstop for every path that RESUMES,
+        # CLOSES, or FINALIZES that generator. A consumer that merely stops
+        # iterating while retaining it triggers none of those; the slot then
+        # defers until one occurs or restart discards the state.
+        if _brief_holder is not None:
+            _brief_holder["token"] = brief_token
         if session_brief_text:
             prompt_text = prompt_text + "\n\n" + session_brief_text
 
@@ -1500,7 +1699,14 @@ class ConversationEngine:
         # Run through runtime (propagate_attributes is at the outer scope)
         try:
             result = await run_with_runtime_lanes(runtime_request)
+        except asyncio.CancelledError:
+            # /stop or task cancel mid-runtime: CancelledError is a
+            # BaseException — it bypasses both handlers below. The brief was
+            # not delivered; re-arm it, then let the cancel propagate. (#138)
+            self._rollback_session_brief(brief_token)
+            raise
         except RuntimeExecutionError as e:
+            self._rollback_session_brief(brief_token)  # #138 — brief never delivered
             print(f"[{datetime.now()}] Runtime execution error: {e}")
             capability_hint = ""
             if runtime_request.capability == TOOL_REASONING:
@@ -1516,6 +1722,7 @@ class ConversationEngine:
             )
             return
         except Exception as e:
+            self._rollback_session_brief(brief_token)  # #138 — covers kill-switch branch too
             # PRD-8 Phase 7a WS4 R2 NM2 — explicit KillSwitchDisabled handling.
             # Late-bind import so engine.py doesn't hard-depend on the security/
             # slice (defensive — empty-tuple fallback makes isinstance False on
@@ -1617,13 +1824,31 @@ class ConversationEngine:
         except Exception as e:
             print(f"[{datetime.now()}] [Drafter] Failed (non-blocking): {e}", flush=True)
 
-        yield OutgoingMessage(
-            text=response_text,                 # answer ONLY — no footer fusion
-            channel=message.channel,
-            thread=message.thread,
-            footer=draft_footer or None,
-            components=draft_components or [],
-        )
+        try:
+            yield OutgoingMessage(
+                text=response_text,             # answer ONLY - no footer fusion
+                channel=message.channel,
+                thread=message.thread,
+                footer=draft_footer or None,
+                components=draft_components or [],
+            )
+            self._commit_session_brief(brief_token)
+        finally:
+            # #138 gate - abandonment safety net. If this generator is
+            # CLOSED or FINALIZED while suspended at the yield above,
+            # GeneratorExit lands here and none of the except seams run; the
+            # acquisition guard would then wedge later briefs. Re-arm instead.
+            # (Merely stopping iteration while RETAINING the generator throws
+            # nothing — the slot stays held until close/finalize/resume; see
+            # the handle_message backstop.) Safe on the success path because
+            # _commit_session_brief clears the pending slot FIRST, so this
+            # identity-guarded rollback is then a structural no-op.
+            self._rollback_session_brief(brief_token)
+        # Commit ran above, inside the try, immediately after the yield
+        # resumed. Scope note (honest): "resumed" means the router TOOK the
+        # reply off this generator - NOT that the operator received it. The
+        # router calls adapter.send after draining, so a send failure still
+        # consumes an unseen brief; that residue is tracked as #157.
 
         # Langfuse: post-response span (capture + continuity + session persist)
         _post_span = None
@@ -1750,66 +1975,39 @@ class ConversationEngine:
             persisted_runtime_session_id = session_id_from_sdk or ""
         normalized_tool_calls = [asdict(tool_call) for tool_call in (result.tool_calls or [])]
         now = datetime.now()
-        if existing:
-            existing.runtime_session_id = persisted_runtime_session_id
-            existing.runtime_lane = result.runtime_lane
-            existing.runtime_provider = result.provider
-            existing.runtime_model = result.model or ""
-            existing.runtime_profile_key = result.profile_key or ""
-            existing.runtime_tool_calls = normalized_tool_calls
-            existing.message_count += 1
-            existing.total_cost_usd += cost_usd or 0.0
-            existing.tool_call_count += result.tool_call_count or 0
-            existing.updated_at = now
-            self.session_store.update(existing)
-        else:
-            # PRP-7d R1 B2: read source from incoming message; set-once on create
-            # (the `if existing:` UPDATE branch above MUST NOT touch source).
-            message_source = getattr(message, "source", "interactive")
-            session = Session(
-                session_id=session_key,
-                agent_session_id=persisted_runtime_session_id,
-                platform=platform_str,
-                channel_id=channel_id,
-                thread_id=thread_id,
-                user_id=message.user.platform_id,
-                created_at=now,
-                updated_at=now,
-                message_count=1,
-                total_cost_usd=cost_usd or 0.0,
-                tool_call_count=result.tool_call_count or 0,
-                mode=mode,
-                runtime_lane=result.runtime_lane,
-                runtime_provider=result.provider,
-                runtime_model=result.model or "",
-                runtime_profile_key=result.profile_key or "",
-                runtime_tool_calls=normalized_tool_calls,
-                source=message_source,
-            )
-            self.session_store.create(session)
-
+        # Serialize + offload the whole read-modify-write persist off the event
+        # loop (#131). The lock is SHARED with the router/persona persist paths
+        # so a router bump can never interleave with this engine persist for the
+        # same conversation; `_persist_engine_turn` re-reads the row inside the
+        # worker thread so the merge is correct even under the timeout-shield
+        # race. Whole-body fail-open: a turn that already produced a reply must
+        # not error because persistence failed.
         try:
-            self.session_store.add_message(
-                session_key,
-                "user",
-                _incoming_display_text(message),
-                message.timestamp,
-            )
-            self.session_store.add_message(
-                session_key,
-                "assistant",
-                response_text,
-                now,
-                tool_calls=normalized_tool_calls,
-            )
+            async with get_persist_lock(session_key):
+                session_action = await asyncio.to_thread(
+                    self._persist_engine_turn,
+                    session_key=session_key,
+                    platform_str=platform_str,
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                    message=message,
+                    response_text=response_text,
+                    persisted_runtime_session_id=persisted_runtime_session_id,
+                    normalized_tool_calls=normalized_tool_calls,
+                    result=result,
+                    cost_usd=cost_usd,
+                    mode=mode,
+                    now=now,
+                )
         except Exception as e:
-            print(f"[{datetime.now()}] [Messages] Persist failed (non-blocking): {e}")
+            print(f"[{datetime.now()}] [Sessions] Persist failed (non-blocking): {e}")
+            session_action = "update" if existing else "create"
 
         # Close post_response span
         if _post_span:
             try:
                 _post_span.update(output={
-                    "session_action": "reset" if should_reset else ("update" if existing else "create"),
+                    "session_action": "reset" if should_reset else session_action,
                 })
                 _post_span.__exit__(None, None, None)
             except Exception:

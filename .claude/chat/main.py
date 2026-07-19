@@ -301,6 +301,113 @@ def _make_webhook_adapter_resolver(router: object):
     return _resolve
 
 
+async def _mc_heartbeat_loop(
+    url: str,
+    api_key: str,
+    status_fn: Callable[[], str] | None = None,
+    interval: int = 300,
+) -> None:
+    """POST to the MC heartbeat endpoint every `interval` seconds.
+
+    The payload is rebuilt EVERY iteration from live liveness state. It used
+    to be a constant ``{"status": "online"}`` encoded once before the loop —
+    which is why Mission Control cheerfully reported the bot "online" for the
+    entire six weeks it was wedged. A heartbeat that cannot say "I am sick"
+    is not a health signal, it is a liveness signal for the loop itself.
+
+    The blocking POST runs OFF the event loop via ``asyncio.to_thread`` and the
+    per-tick version read + POST share ONE try/except, so a slow/half-open
+    endpoint can no longer freeze the shared loop and a transient
+    ``get_current_version`` failure can no longer permanently kill this task
+    (event-loop-wedge class, #130). Module-level so it is importable in tests.
+    """
+    import urllib.request
+    import json as _json
+
+    headers = {"x-api-key": api_key, "Content-Type": "application/json"}
+
+    def _post_heartbeat(payload: bytes) -> None:
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+
+    while True:
+        try:
+            state = status_fn() if status_fn else "online"
+        except Exception:  # noqa: BLE001 — never let reporting kill the loop
+            state = "online"
+        try:
+            from update_check import get_current_version
+
+            payload = _json.dumps(
+                {"status": state, "version": get_current_version()}
+            ).encode()
+            await asyncio.to_thread(_post_heartbeat, payload)
+        except Exception as e:
+            print(f"[heartbeat] POST failed: {e}")
+        await asyncio.sleep(interval)
+
+
+class FatalTaskExit(RuntimeError):
+    """A fatal task stopped serving WITHOUT crashing.
+
+    Raised by _supervise_tasks when a task in fatal_tasks returns normally
+    (e.g. the router after every listener gave up). Escapes asyncio.run into
+    main()'s catch-all so the process exits non-zero with a flushed Langfuse
+    trace — a bot that cannot serve must never exit 0 (#134).
+    """
+
+
+async def _supervise_tasks(
+    tasks: dict[str, asyncio.Task],
+    fatal_tasks: set[str],
+) -> None:
+    """Monitor bot tasks; non-fatal deaths are logged, fatal endings escalate.
+
+    Promoted from a closure inside main() so tests exercise the real code
+    (same move as _mc_heartbeat_loop, #130). Contract:
+    - Non-fatal task crash/return: log and keep serving.
+    - Fatal task crash: cancel the rest and re-raise — ANY exception, not
+      just AdapterWedgedError. `return` here exits 0 and every external
+      restarter reads that as a clean shutdown (#134).
+    - Fatal task normal return: cancel the rest and raise FatalTaskExit —
+      a router that gave up on all adapters is alive-but-deaf (#134).
+    - Fatal task cancelled: benign — cancellation is an external stop
+      (shutdown paths), not a failure.
+    """
+    while tasks:
+        done, _ = await asyncio.wait(
+            tasks.values(), return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            name = next((k for k, v in tasks.items() if v is task), "unknown")
+            tasks.pop(name, None)
+            exc = task.exception() if not task.cancelled() else None
+            if exc:
+                print(f"[{datetime.now()}] FATAL: Task '{name}' crashed: {type(exc).__name__}: {exc}", flush=True)
+                append_to_daily_log(f"Bot task '{name}' crashed: {exc}", "Bot Lifecycle")
+                if name in fatal_tasks:
+                    print(f"[{datetime.now()}] '{name}' died — shutting down bot", flush=True)
+                    for remaining in tasks.values():
+                        remaining.cancel()
+                    # ANY exception from a fatal task must exit NON-ZERO so the
+                    # watchdog / service supervisor restarts a clean process.
+                    # `return` here exits 0 and every external restarter reads
+                    # that as a clean shutdown (#134).
+                    raise exc
+            elif name in fatal_tasks and not task.cancelled():
+                # A fatal task that RETURNED (no exception, not cancelled) is
+                # alive-but-deaf: the router gave up on every adapter yet the
+                # process keeps serving /health. Escalate so it exits 1 (#134).
+                print(f"[{datetime.now()}] FATAL: Task '{name}' stopped serving (returned) — shutting down bot", flush=True)
+                append_to_daily_log(f"Bot task '{name}' stopped serving (returned)", "Bot Lifecycle")
+                for remaining in tasks.values():
+                    remaining.cancel()
+                raise FatalTaskExit(f"fatal task '{name}' returned — bot cannot serve")
+            else:
+                print(f"[{datetime.now()}] Task '{name}' completed normally", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="The Homie Chat Interface")
     parser.add_argument("--test", action="store_true", help="Dry run — print config and exit")
@@ -702,40 +809,6 @@ def main() -> None:
     print(f"[{datetime.now()}] Starting chat interface...")
     append_to_daily_log(f"Bot started (PID {os.getpid()})", "Bot Lifecycle")
 
-    async def _mc_heartbeat_loop(
-        url: str,
-        api_key: str,
-        status_fn: Callable[[], str] | None = None,
-        interval: int = 300,
-    ) -> None:
-        """POST to the MC heartbeat endpoint every `interval` seconds.
-
-        The payload is rebuilt EVERY iteration from live liveness state. It used
-        to be a constant ``{"status": "online"}`` encoded once before the loop —
-        which is why Mission Control cheerfully reported the bot "online" for the
-        entire six weeks it was wedged. A heartbeat that cannot say "I am sick"
-        is not a health signal, it is a liveness signal for the loop itself.
-        """
-        import urllib.request
-        import json as _json
-
-        headers = {"x-api-key": api_key, "Content-Type": "application/json"}
-        while True:
-            try:
-                state = status_fn() if status_fn else "online"
-            except Exception:  # noqa: BLE001 — never let reporting kill the loop
-                state = "online"
-            from update_check import get_current_version
-
-            payload = _json.dumps({"status": state, "version": get_current_version()}).encode()
-            try:
-                req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    resp.read()
-            except Exception as e:
-                print(f"[heartbeat] POST failed: {e}")
-            await asyncio.sleep(interval)
-
     async def _run_all() -> None:
         """Run router and relay client concurrently.
 
@@ -747,7 +820,6 @@ def main() -> None:
         from config import get_bot_liveness_settings
         from health import HealthServer, HealthStatus
         from liveness import (
-            AdapterWedgedError,
             DiagnosticsCache,
             LivenessSupervisor,
             resolve_health_status,
@@ -801,7 +873,7 @@ def main() -> None:
                 status=status,
                 uptime_seconds=0.0,  # filled by HealthServer
                 adapters=adapters_status,
-                sessions_active=len(store.list_active()),
+                sessions_active=int(diag.get("sessions_active", 0)),
                 cognition_available=bool(diag.get("cognition_available", False)),
                 runtime_providers=diag.get("runtime_providers", {}),
                 memory_doc_count=diag.get("memory_doc_count", 0),
@@ -843,33 +915,7 @@ def main() -> None:
 
         # Tasks whose death means the bot cannot serve messages. Everything else
         # (relay, heartbeat, diagnostics) is best-effort and may die quietly.
-        fatal_tasks = {"router", "liveness"}
-
-        # Monitor all tasks — if any crashes, log it and keep the rest alive
-        while tasks:
-            done, _ = await asyncio.wait(
-                tasks.values(), return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in done:
-                name = next((k for k, v in tasks.items() if v is task), "unknown")
-                tasks.pop(name, None)
-                exc = task.exception() if not task.cancelled() else None
-                if exc:
-                    print(f"[{datetime.now()}] FATAL: Task '{name}' crashed: {type(exc).__name__}: {exc}", flush=True)
-                    append_to_daily_log(f"Bot task '{name}' crashed: {exc}", "Bot Lifecycle")
-                    if name in fatal_tasks:
-                        print(f"[{datetime.now()}] '{name}' died — shutting down bot", flush=True)
-                        for remaining in tasks.values():
-                            remaining.cancel()
-                        # A wedged adapter must exit NON-ZERO so the watchdog /
-                        # service supervisor restarts a clean process. Re-raise
-                        # instead of returning: `return` here exits 0 and every
-                        # external restarter reads that as a clean shutdown.
-                        if isinstance(exc, AdapterWedgedError):
-                            raise exc
-                        return
-                else:
-                    print(f"[{datetime.now()}] Task '{name}' completed normally", flush=True)
+        await _supervise_tasks(tasks, fatal_tasks={"router", "liveness"})
 
     try:
         asyncio.run(_run_all())

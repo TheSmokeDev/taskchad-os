@@ -683,6 +683,26 @@ def list_bot_pids_in_active_profile() -> list[int]:
     return matching
 
 
+def _line_is_this_repos_bot(line: str) -> bool:
+    """True iff a process cmdline belongs to THIS repo's bot.
+
+    Generic substrings ("service.py", "chat/main.py") can match an UNRELATED
+    project's python process, and when both processes lack HOMIE_HOME the
+    profile check treats them as same-profile default — a concrete
+    foreign-process kill path (#135 gate finding). Anchor on this repo's
+    resolved absolute paths instead, both slash flavors (wmic prints
+    backslashes; Git Bash / ps print forward slashes). service.py is retired
+    (archived 2026-07) but a stale pre-retirement instance still carries the
+    repo-anchored path, so it stays killable by full path only.
+    """
+    chat_dir = (Path(__file__).resolve().parent.parent / "chat").resolve()
+    for rel in ("main.py", "service.py"):
+        p = str(chat_dir / rel)
+        if p in line or p.replace("\\", "/") in line:
+            return True
+    return False
+
+
 def _enumerate_bot_candidate_pids() -> list[int]:
     """Return PIDs of every python process running this repo's ``chat/main.py``.
 
@@ -782,10 +802,9 @@ def _scan_and_kill_windows(
             line = line.strip()
             if not line:
                 continue
-            # Match bot processes: chat/main.py or chat\main.py
-            is_bot = "chat/main.py" in line or "chat\\main.py" in line
-            is_service = "service.py" in line
-            if not (is_bot or is_service):
+            # Repo-anchored match only — a foreign project's service.py/main.py
+            # must never be a kill candidate (#135 gate finding).
+            if not _line_is_this_repos_bot(line):
                 continue
             # Extract PID (last number on the line)
             parts = line.split()
@@ -844,9 +863,9 @@ def _scan_and_kill_unix(
             ["ps", "aux"], capture_output=True, text=True, timeout=10,
         )
         for line in result.stdout.splitlines():
-            is_bot = "chat/main.py" in line or "chat\\main.py" in line
-            is_service = "service.py" in line
-            if not (is_bot or is_service):
+            # Repo-anchored match only — a foreign project's service.py/main.py
+            # must never be a kill candidate (#135 gate finding).
+            if not _line_is_this_repos_bot(line):
                 continue
             parts = line.split()
             try:

@@ -49,7 +49,8 @@ co-founder answers from live state without running anything.
 
 ## 2. The Daily Rhythm (five loops, one heartbeat)
 
-All five loops ride the existing 30-minute heartbeat as independent, guarded,
+All five loops ride the existing scheduled heartbeat (framework default
+30 min; this box runs it every 2 h) as independent, guarded,
 fail-open seams. Each has its own enable flag; two kill switches cover the
 family. Everything ships OFF except what the operator flips.
 

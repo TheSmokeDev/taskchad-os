@@ -27,6 +27,7 @@ from models import (
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
 import voice as voice_mod
 from voice_markers import parse_send_markers, strip_send_markers
+from voice_preferences import get_voice_reply_mode
 
 # PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
 # Module-attribute lookup so monkeypatch propagates (Rule 3). Adapter catches
@@ -309,11 +310,34 @@ class TelegramAdapter:
         raw_text, directive_media = self._extract_media_directives(body_text)
         media_refs = self._collect_media_refs(message.attachments, directive_media)
 
+        voice_mode = get_voice_reply_mode()
+        if voice_mode == "off":
+            self._voice_reply_threads.discard(thread_id)
+
+        # Always mode is intentionally voice + text, including long replies.
+        # Progress/status messages are excluded so a long-running turn does not
+        # speak every periodic "Working" update.
+        _is_progress_tick = message.text.startswith(
+            ("Thinking...", "Working...", "\u23f3 ", "\U0001f527 ")
+        )
+        if (
+            voice_mode == "always"
+            and not message.is_error
+            and not _is_progress_tick
+            and body_text.strip()
+        ):
+            await self._send_voice_response(
+                chat_id, body_text, fallback_to_text=False
+            )
+
         # Voice reply: when the engine's final response arrives for a voice thread,
         # delete the "Thinking..." placeholder and send a voice bubble instead.
         # Skip progress ticks ("Thinking...", "Working...") — only trigger on the final response.
-        _is_progress_tick = message.text.startswith(("Thinking...", "Working..."))
-        if thread_id in self._voice_reply_threads and not _is_progress_tick:
+        if (
+            voice_mode == "auto"
+            and thread_id in self._voice_reply_threads
+            and not _is_progress_tick
+        ):
             self._voice_reply_threads.discard(thread_id)
             # Delete the placeholder message
             if message.is_update and message.update_message_id:
@@ -642,6 +666,16 @@ class TelegramAdapter:
                 text=text,
                 parse_mode="Markdown",
             )
+            if (
+                get_voice_reply_mode() == "always"
+                and not message.is_error
+                and not message.text.startswith(("Thinking...", "Working...", "\u23f3 ", "\U0001f527 "))
+            ):
+                await self._send_voice_response(
+                    int(message.channel.platform_id),
+                    raw_text,
+                    fallback_to_text=False,
+                )
             return message.update_message_id
         except Exception as e:
             if "is not modified" in str(e):
@@ -1285,7 +1319,13 @@ class TelegramAdapter:
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
-    async def _send_voice_response(self, chat_id: int, text: str) -> None:
+    async def _send_voice_response(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        fallback_to_text: bool = True,
+    ) -> None:
         """Synthesize text to speech and send as a voice bubble.
 
         R-runtime-chat F2: uses voice_mod.synthesize() cascade — full 9-provider
@@ -1310,17 +1350,19 @@ class TelegramAdapter:
                 f"[killswitch:{ks_exc.switch_name}] Voice synthesis is "
                 f"disabled by the operator. Falling back to text.\n\n{text}"
             )
-            try:
-                await self._app.bot.send_message(chat_id=chat_id, text=degraded_text)
-            except Exception as e2:
-                print(f"[{datetime.now()}] TTS killswitch text fallback failed: {e2}")
+            if fallback_to_text:
+                try:
+                    await self._app.bot.send_message(chat_id=chat_id, text=degraded_text)
+                except Exception as e2:
+                    print(f"[{datetime.now()}] TTS killswitch text fallback failed: {e2}")
         except Exception as e:
             print(f"[{datetime.now()}] TTS failed, falling back to text: {e}")
             # Fallback to text if TTS fails
-            try:
-                await self._app.bot.send_message(chat_id=chat_id, text=text)
-            except Exception as e2:
-                print(f"[{datetime.now()}] Text fallback also failed: {e2}")
+            if fallback_to_text:
+                try:
+                    await self._app.bot.send_message(chat_id=chat_id, text=text)
+                except Exception as e2:
+                    print(f"[{datetime.now()}] Text fallback also failed: {e2}")
 
     async def _dispatch_send_markers(self, chat_id: int, text: str) -> None:
         """Phase 4 (PRD-8): parse [SEND_FILE]/[SEND_PHOTO] markers, dispatch as media.

@@ -34,6 +34,21 @@ def _make_sqlite_db(db_path: Path):
     return SQLiteMemoryDB(db_path=str(db_path))
 
 
+def _stage_vec_chunks_at_dim(db_path: Path, dim: int) -> None:
+    """Create a vec_chunks virtual table at a specific dim with NO other tables
+    — stages the pre-migration physical state the guard must detect (bypasses
+    init_schema(), so meta stays empty too)."""
+    import sqlite_vec
+
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.execute(f"CREATE VIRTUAL TABLE vec_chunks USING vec0(embedding float[{dim}])")
+    conn.commit()
+    conn.close()
+
+
 # -----------------------------------------------------------------------------
 # Test 1: get_actual_embedding_dim reads the physical schema correctly
 # -----------------------------------------------------------------------------
@@ -118,18 +133,11 @@ def test_sync_index_rebuilds_when_meta_missing_but_schema_stale(
     assert mi.EMBEDDING_MODEL == "new-model-v2"
 
     # Manually create a DB with vec_chunks at dim=512 and NO meta rows.
-    # We bypass init_schema() so meta stays empty.
-    import sqlite_vec
-    conn = sqlite3.connect(str(db_path))
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
-    conn.execute("CREATE VIRTUAL TABLE vec_chunks USING vec0(embedding float[512])")
-    # Intentionally do NOT create meta table or insert any meta rows.
-    conn.commit()
-    conn.close()
+    _stage_vec_chunks_at_dim(db_path, 512)
 
     # Confirm the staging worked: vec_chunks at 512, no meta table.
+    import sqlite_vec
+
     conn = sqlite3.connect(str(db_path))
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -216,3 +224,167 @@ def test_sync_index_skips_rebuild_when_schema_matches(
     assert "Model changed" not in output, (
         f"model-change message fired unexpectedly on matching meta: {output!r}"
     )
+
+
+# -----------------------------------------------------------------------------
+# Test 5-7 (#136): reindex_file (the single-file entrypoint) must port the same
+# physical-schema dim-drift guard as sync_index. Without it, an embedding-model
+# migration makes reindex_file's vec insert fail shape-mismatch, callers
+# (memory_flush._reindex_episode, entity_extractor, video_learning) swallow it
+# as "non-fatal", and the file silently drops out of recall.
+# -----------------------------------------------------------------------------
+
+
+def _vault_paths(tmp_path: Path):
+    """<root>/memory + sibling <root>/data — the profile layout resolve_db_path
+    maps to <root>/data/memory.db (no config override needed for the path)."""
+    root = tmp_path / "vault"
+    mem = root / "memory"
+    data = root / "data"
+    mem.mkdir(parents=True)
+    data.mkdir(parents=True)
+    return mem, data / "memory.db"
+
+
+def test_reindex_file_detects_drift_and_rebuilds(tmp_path: Path, isolated_db_modules):
+    """DB staged at dim=512, config flipped to 1024 → reindex_file must detect
+    the drift via physical schema and delegate to sync_index(force_rebuild=True),
+    leaving vec_chunks at the new dim. 1024 is deliberately NOT the real default
+    (768) so a broken isolation fixture fails loudly instead of passing by luck."""
+    from recall_service import reindex_file
+
+    mem, db_path = _vault_paths(tmp_path)
+    _stage_vec_chunks_at_dim(db_path, 512)
+
+    iso = isolated_db_modules(
+        DATABASE_URL="",  # force SQLite
+        EMBEDDING_DIMENSIONS=1024,
+        EMBEDDING_MODEL="new-model-v2",
+    )
+    # Liveness: the patched value must reach the fresh modules.
+    assert iso.memory_index.EMBEDDING_DIMENSIONS == 1024
+
+    # file_path is intentionally never created — the drift branch returns before
+    # _index_file is reached, proving it rebuilds the WHOLE index, not one file.
+    stdout_buf = io.StringIO()
+    with redirect_stdout(stdout_buf):
+        chunks = reindex_file(mem / "episode.md", mem, generate_embeddings=True)
+    output = stdout_buf.getvalue()
+
+    # Operator receipt fired (the migration rebuild is not silent).
+    assert "reindex_file: embedding dim mismatch" in output, (
+        f"expected drift receipt in stdout, got: {output!r}"
+    )
+    assert "vec schema=512" in output
+    assert "config=1024" in output
+    assert chunks == 0, "empty vault (file never created) must reindex to zero chunks"
+
+    # The real acceptance criterion: vec_chunks recreated at the migrated dim.
+    db_after = iso.db.SQLiteMemoryDB(db_path=str(db_path))
+    try:
+        assert db_after.get_actual_embedding_dim() == 1024, (
+            "reindex_file must rebuild vec_chunks at the new dim on drift"
+        )
+    finally:
+        db_after.close()
+
+
+def test_reindex_file_no_embeddings_skips_rebuild(
+    tmp_path: Path, isolated_db_modules, monkeypatch
+):
+    """generate_embeddings=False must NEVER trigger a rebuild, even under drift:
+    a keyword-only reindex writes no vectors (no shape-mismatch), and a
+    sync_index(generate_embeddings=False, force_rebuild=True) would bulk_clear
+    and rebuild with NO vectors — destroying semantic search. vec schema stays
+    at 512."""
+    from recall_service import reindex_file
+
+    mem, db_path = _vault_paths(tmp_path)
+    (mem / "note.md").write_text("# Note\n\nSome recallable content.\n", encoding="utf-8")
+    _stage_vec_chunks_at_dim(db_path, 512)
+
+    iso = isolated_db_modules(
+        DATABASE_URL="",
+        EMBEDDING_DIMENSIONS=1024,  # drift is present, but MUST be ignored
+        EMBEDDING_MODEL="new-model-v2",
+    )
+
+    # Guard: the drift branch (which imports + calls sync_index) must NOT run.
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "sync_index rebuild must not fire for generate_embeddings=False"
+        )
+
+    monkeypatch.setattr(iso.memory_index, "sync_index", _boom)
+
+    chunks = reindex_file(mem / "note.md", mem, generate_embeddings=False)
+    assert chunks >= 1  # the single file was indexed keyword-only
+
+    db_after = iso.db.SQLiteMemoryDB(db_path=str(db_path))
+    try:
+        assert db_after.get_actual_embedding_dim() == 512, (
+            "vec schema must stay at 512 — no rebuild without embeddings"
+        )
+    finally:
+        db_after.close()
+
+
+def test_reindex_file_fresh_db_no_rebuild(
+    tmp_path: Path, isolated_db_modules, monkeypatch
+):
+    """No vec_chunks table yet → get_actual_embedding_dim() is None → the guard
+    is skipped (actual_dim is None) and the normal single-file path runs, never
+    delegating to sync_index."""
+    from recall_service import reindex_file
+
+    mem, db_path = _vault_paths(tmp_path)
+    (mem / "note.md").write_text("# Note\n\nFresh vault content.\n", encoding="utf-8")
+
+    iso = isolated_db_modules(DATABASE_URL="")
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("fresh DB (actual_dim None) must not trigger a rebuild")
+
+    monkeypatch.setattr(iso.memory_index, "sync_index", _boom)
+
+    chunks = reindex_file(mem / "note.md", mem, generate_embeddings=False)
+    assert chunks >= 1
+
+    db_after = iso.db.SQLiteMemoryDB(db_path=str(db_path))
+    try:
+        # Fresh init at current config dim — created by the normal path, not None.
+        assert db_after.get_actual_embedding_dim() is not None
+    finally:
+        db_after.close()
+
+
+def test_reindex_episode_drift_does_not_swallow_as_nonfatal(
+    tmp_path: Path, isolated_db_modules, monkeypatch
+):
+    """The exact caller named in #136: memory_flush._reindex_episode must
+    reach the guard's rebuild path, not its own except-Exception fallback.
+
+    The episode file is intentionally never created (same reasoning as
+    test_reindex_file_detects_drift_and_rebuilds): the drift branch delegates
+    to a whole-vault sync_index() that would otherwise try to generate real
+    embeddings via the fake EMBEDDING_MODEL used to stage drift."""
+    import memory_flush
+
+    mem, db_path = _vault_paths(tmp_path)
+    episode = mem / "episode.md"
+    _stage_vec_chunks_at_dim(db_path, 512)
+
+    iso = isolated_db_modules(
+        DATABASE_URL="", EMBEDDING_DIMENSIONS=1024, EMBEDDING_MODEL="new-model-v2"
+    )
+    monkeypatch.setattr(memory_flush, "MEMORY_DIR", mem)
+
+    stdout_buf = io.StringIO()
+    with redirect_stdout(stdout_buf):
+        memory_flush._reindex_episode(episode)
+    output = stdout_buf.getvalue()
+
+    assert "Episode reindex failed (non-fatal)" not in output, (
+        f"the caller must not fall into its except-Exception path on drift: {output!r}"
+    )
+    assert "Episode reindexed" in output

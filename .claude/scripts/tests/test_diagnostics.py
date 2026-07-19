@@ -669,3 +669,42 @@ class TestProfileInventoryCheck:
         issues = check_environment()  # must not raise
         assert isinstance(issues, list)
         assert not [i for i in issues if "'sales'" in i[1]]
+
+
+def test_check_environment_accepts_kimi_only_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A kimi-only installation must pass runtime prerequisite detection —
+    KIMI_API_KEY alone counts as a configured runtime provider (#162 gate).
+
+    shutil.which is neutralized and the env carries ONLY KIMI_API_KEY, so
+    this genuinely simulates a kimi-only box: it fails on the pre-fix code
+    (no claude/codex binary to accidentally satisfy the check)."""
+
+    import diagnostics as diagnostics_module
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("KIMI_API_KEY=sk-test\n", encoding="utf-8")
+    monkeypatch.setattr(diagnostics_module, "ENV_FILE", env_path)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    messages = [message for _level, message, _hint in check_environment()]
+    assert "No runtime provider available" not in messages
+
+
+def test_check_environment_still_errors_with_no_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Guard the guard: with NO provider keys and no CLI binaries, the
+    prerequisite check must still fire — the kimi entry widens detection,
+    it must not weaken it."""
+
+    import diagnostics as diagnostics_module
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(diagnostics_module, "ENV_FILE", env_path)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    messages = [message for _level, message, _hint in check_environment()]
+    assert "No runtime provider available" in messages

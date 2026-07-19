@@ -629,7 +629,9 @@ async def test_large_document_reaches_prompt_fully_and_never_persists(
     store = SQLiteSessionStore(tmp_path / "chat.db")
     project_root = _make_project_root(tmp_path)
     convo = ConversationEngine(store, project_root)
-    monkeypatch.setattr(convo, "_maybe_session_brief", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        convo, "_maybe_session_brief", lambda *args, **kwargs: ("", None)
+    )
     document_path = tmp_path / "transcript.txt"
     body = ("lorem ipsum " * 7_082).strip() + "\nTAIL-SENTINEL-END"  # ~85K chars
     document_path.write_text(body, encoding="utf-8")
@@ -1450,11 +1452,15 @@ def test_grounding_survives_win32_truncation() -> None:
 # trace decisions, double-fire guard, marker consumption, fail-open.)
 # =============================================================================
 
+import asyncio  # noqa: E402
 from datetime import datetime as _dt_cls  # noqa: E402
 from datetime import timedelta as _td  # noqa: E402
 
 import cognition.proactive_brief as _pb  # noqa: E402
 from cognition.proactive_brief import SessionOpeningBrief  # noqa: E402
+
+from runtime.errors import RuntimeExecutionError  # noqa: E402
+from security.kill_switches import KillSwitchDisabled  # noqa: E402
 
 _FIRED_BLOCK = (
     "# Session Opening Brief (deliver first)\n\n"
@@ -1646,7 +1652,7 @@ def test_session_brief_gate_skips_piv_and_non_interactive(
     piv_message = _make_message("run the workflow")
     piv_message.is_piv = True
     trace: dict[str, object] = {}
-    assert convo._maybe_session_brief(piv_message, trace_decisions=trace) == ""
+    assert convo._maybe_session_brief(piv_message, trace_decisions=trace) == ("", None)
     assert trace["session_brief"]["suppressed"] == "is_piv"
     assert trace["session_brief"]["fired"] is False
 
@@ -1656,7 +1662,7 @@ def test_session_brief_gate_skips_piv_and_non_interactive(
         message = _make_message("hello")
         message.source = source
         trace = {}
-        assert convo._maybe_session_brief(message, trace_decisions=trace) == ""
+        assert convo._maybe_session_brief(message, trace_decisions=trace) == ("", None)
         assert trace["session_brief"]["suppressed"] == "non_interactive", source
 
 
@@ -1780,10 +1786,11 @@ def test_session_brief_negative_decisions_reach_trace(
             physical=_dt_cls.now() - _td(hours=1),
         )
         trace: dict[str, object] = {}
-        out = convo._maybe_session_brief(
+        out, token = convo._maybe_session_brief(
             _make_message("hello"), trace_decisions=trace
         )
         assert out == ""
+        assert token is None
         decision = trace["session_brief"]
         assert decision["suppressed"] == reason
         assert decision["fired"] is False
@@ -1832,10 +1839,16 @@ def test_session_brief_marker_min_defuses_post_bump_physical(
         physical=bumped_physical,
     )
 
-    out = convo._maybe_session_brief(_make_message("hello"), trace_decisions={})
+    out, token = convo._maybe_session_brief(_make_message("hello"), trace_decisions={})
     assert out == _FIRED_BLOCK
     assert calls["build"][0]["last_activity"] == marker_boundary
-    assert calls["clear"] == [True]  # consumed by the completed decision
+    # #138: a FIRED decision defers consumption onto its turn-owned token —
+    # the marker is only cleared once the reply reaches the operator.
+    assert calls["clear"] == []
+    assert convo._session_brief_pending is token
+    convo._commit_session_brief(token)
+    assert calls["clear"] == [True]
+    assert convo._session_brief_pending is None
 
 
 def test_session_brief_silent_decision_consumes_marker(
@@ -1853,8 +1866,9 @@ def test_session_brief_silent_decision_consumes_marker(
         physical=_dt_cls(2026, 6, 12, 6, 29),
     )
 
-    out = convo._maybe_session_brief(_make_message("hello"), trace_decisions={})
+    out, token = convo._maybe_session_brief(_make_message("hello"), trace_decisions={})
     assert out == ""
+    assert token is None  # silent decisions carry no pending state
     assert calls["clear"] == [True]
 
 
@@ -1899,8 +1913,9 @@ async def test_session_brief_builder_exception_fail_open_marker_intact(
     )
 
     trace: dict[str, object] = {}
-    out = convo._maybe_session_brief(_make_message("hello"), trace_decisions=trace)
+    out, token = convo._maybe_session_brief(_make_message("hello"), trace_decisions=trace)
     assert out == ""
+    assert token is None
     assert trace["session_brief"]["suppressed"] == "error"
     assert cleared == []  # marker survives for retry
 
@@ -1908,3 +1923,475 @@ async def test_session_brief_builder_exception_fail_open_marker_intact(
     outputs = [out async for out in convo.handle_message(_make_message("hello"))]
     assert outputs[-1].text == "still works"
     assert captured["request"].prompt == "hello"
+
+
+# =============================================================================
+# #138 — commit-on-success: the brief is consumed at DELIVERY, not at decision.
+# Every test below fails on the pre-#138 eager-clear code; tests 6-8 also fail
+# on the (rejected) PR #155 shared-pending design.
+# =============================================================================
+
+_MARKER_BOUNDARY = _dt_cls(2026, 6, 11, 22, 0)
+_BUMPED_PHYSICAL = _dt_cls(2026, 6, 12, 6, 29)
+
+
+def _wake_up_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
+    """Fired-brief seams with a marker owed — the wake-up-morning setup."""
+    return _patch_brief_seams(
+        monkeypatch,
+        brief=_fired_brief(),
+        owed=_MARKER_BOUNDARY,
+        physical=_BUMPED_PHYSICAL,
+    )
+
+
+def _raising_runtime(
+    monkeypatch: pytest.MonkeyPatch, exc: BaseException, captured: dict
+) -> None:
+    async def _boom(request):
+        captured["prompt"] = request.prompt
+        raise exc
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", _boom)
+
+
+def _ok_runtime(
+    monkeypatch: pytest.MonkeyPatch, captured: dict, text: str = "ok"
+) -> None:
+    async def _ok(request):
+        captured["prompt"] = request.prompt
+        return RuntimeResult(
+            text=text,
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", _ok)
+
+
+def _assert_brief_re_armed(convo: ConversationEngine, calls: dict) -> None:
+    """The brief rode a turn that failed → nothing consumed, guard restored."""
+    assert calls["clear"] == []                     # marker survives on disk
+    assert convo._session_brief_fired_at is None    # rolled back to prev value
+    assert convo._session_brief_pending is None     # pending released
+
+
+@pytest.mark.asyncio
+async def test_session_brief_survives_runtime_execution_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138: a RuntimeExecutionError (quota/auth — the documented morning
+    failure) must NOT eat the brief; the next successful turn re-fires it
+    exactly once."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _wake_up_seams(monkeypatch)
+    captured: dict[str, object] = {}
+    _raising_runtime(monkeypatch, RuntimeExecutionError("quota exhausted"), captured)
+
+    outputs = [o async for o in convo.handle_message(_make_message("good morning"))]
+
+    assert outputs[-1].is_error is True
+    assert captured["prompt"].endswith(_FIRED_BLOCK)  # the brief DID ride it
+    _assert_brief_re_armed(convo, calls)
+
+    # Retry turn succeeds → the brief rides again and is consumed exactly once.
+    _ok_runtime(monkeypatch, captured, text="Morning rundown.")
+    outputs = [o async for o in convo.handle_message(_make_message("still there?"))]
+
+    assert outputs[-1].text == "Morning rundown."
+    assert captured["prompt"].endswith(_FIRED_BLOCK)
+    assert calls["clear"] == [True]
+    assert convo._session_brief_pending is None
+
+
+@pytest.mark.asyncio
+async def test_session_brief_survives_generic_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138: the generic `except Exception` path rolls back too."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _wake_up_seams(monkeypatch)
+    captured: dict[str, object] = {}
+    _raising_runtime(monkeypatch, ValueError("provider blew up"), captured)
+
+    outputs = [o async for o in convo.handle_message(_make_message("good morning"))]
+
+    assert outputs[-1].is_error is True
+    assert captured["prompt"].endswith(_FIRED_BLOCK)
+    _assert_brief_re_armed(convo, calls)
+
+
+@pytest.mark.asyncio
+async def test_session_brief_survives_killswitch_disabled_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138: the kill-switch branch returns is_error=False (operator-intended
+    state) but is still a non-delivery — the brief must survive it."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _wake_up_seams(monkeypatch)
+    captured: dict[str, object] = {}
+    _raising_runtime(monkeypatch, KillSwitchDisabled("chat"), captured)
+
+    outputs = [o async for o in convo.handle_message(_make_message("good morning"))]
+
+    assert outputs[-1].is_error is False        # operator-intended, not an error
+    assert "[killswitch:chat]" in outputs[-1].text
+    _assert_brief_re_armed(convo, calls)
+
+
+@pytest.mark.asyncio
+async def test_session_brief_happy_path_no_double_fire(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138: delivery consumes the debt EXACTLY once — an immediate second
+    turn neither re-fires nor re-clears (the fold + a real marker clear)."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    builds: list[dict] = []
+
+    def _fold_aware_builder(memory_dir, **kwargs):
+        builds.append(kwargs)
+        last_activity = kwargs.get("last_activity")
+        if last_activity is not None and last_activity <= _MARKER_BOUNDARY:
+            return _fired_brief()
+        return _suppressed_brief("not_away", 0.1)
+
+    calls = _patch_brief_seams(
+        monkeypatch,
+        builder=_fold_aware_builder,
+        owed=_MARKER_BOUNDARY,
+        physical=_BUMPED_PHYSICAL,
+    )
+    # Stateful marker: a clear must actually remove the debt, so the second
+    # turn sees the world the first turn left behind.
+    marker: dict[str, _dt_cls | None] = {"owed": _MARKER_BOUNDARY}
+    monkeypatch.setattr(_pb, "read_brief_owed", lambda **kwargs: marker["owed"])
+
+    def _clear(**kwargs):
+        marker["owed"] = None
+        calls["clear"].append(True)
+
+    monkeypatch.setattr(_pb, "clear_brief_owed", _clear)
+    captured: dict[str, object] = {}
+    _ok_runtime(monkeypatch, captured, text="Morning rundown.")
+
+    outputs = [o async for o in convo.handle_message(_make_message("good morning"))]
+    assert outputs[-1].text == "Morning rundown."
+    assert captured["prompt"].endswith(_FIRED_BLOCK)
+    assert calls["clear"] == [True]
+    assert convo._session_brief_pending is None
+
+    outputs = [o async for o in convo.handle_message(_make_message("and one more"))]
+    assert outputs[-1].text == "Morning rundown."
+    # Turn 2 carries the recent-conversation prefix (unrelated engine feature)
+    # but NO brief — and consumes nothing further.
+    assert "# Session Opening Brief" not in captured["prompt"]
+    assert captured["prompt"].endswith("and one more")
+    assert calls["clear"] == [True]                  # still exactly once
+    assert len(builds) == 2
+
+
+@pytest.mark.asyncio
+async def test_session_brief_rollback_is_noop_without_pending_brief(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138: an ordinary error turn that carried NO brief leaves the guard
+    untouched — rollback(None) can never clobber engine state."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _patch_brief_seams(
+        monkeypatch,
+        brief=_suppressed_brief("not_away", 0.1),
+        physical=_dt_cls.now() - _td(minutes=5),
+    )
+    live_fired_at = _dt_cls(2026, 6, 12, 6, 30)
+    convo._session_brief_fired_at = live_fired_at
+    captured: dict[str, object] = {}
+    _raising_runtime(monkeypatch, RuntimeExecutionError("boom"), captured)
+
+    outputs = [o async for o in convo.handle_message(_make_message("hello"))]
+
+    assert outputs[-1].is_error is True
+    assert convo._session_brief_fired_at == live_fired_at   # untouched
+    assert convo._session_brief_pending is None
+    assert calls["clear"] == []
+
+    # Direct seam proof: a None token never touches a live pending.
+    sentinel: dict[str, object] = {"prev_fired_at": None}
+    convo._session_brief_pending = sentinel
+    convo._rollback_session_brief(None)
+    convo._commit_session_brief(None)
+    assert convo._session_brief_pending is sentinel
+    assert calls["clear"] == []
+
+
+@pytest.mark.asyncio
+async def test_session_brief_cancelled_error_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138 gate req 2: CancelledError is a BaseException — it bypasses both
+    `except Exception` handlers. The dedicated handler must roll back AND
+    re-raise (swallowing a cancel would be a worse bug than the one fixed)."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _wake_up_seams(monkeypatch)
+    captured: dict[str, object] = {}
+    _raising_runtime(monkeypatch, asyncio.CancelledError(), captured)
+
+    with pytest.raises(asyncio.CancelledError):        # PROPAGATED, not eaten
+        async for _ in convo.handle_message(_make_message("good morning")):
+            pass
+
+    assert captured["prompt"].endswith(_FIRED_BLOCK)
+    _assert_brief_re_armed(convo, calls)
+
+
+@pytest.mark.asyncio
+async def test_session_brief_cron_turn_after_cancelled_interactive_does_not_consume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138 gate req 1: a cron turn carries no token, so its successful
+    delivery must be a structural no-op — it cannot eat the debt a cancelled
+    interactive turn left owed."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _wake_up_seams(monkeypatch)
+    captured: dict[str, object] = {}
+    _raising_runtime(monkeypatch, asyncio.CancelledError(), captured)
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in convo.handle_message(_make_message("good morning")):
+            pass
+    _assert_brief_re_armed(convo, calls)
+
+    _ok_runtime(monkeypatch, captured, text="heartbeat ok")
+    cron_message = _make_message("scheduled check")
+    cron_message.source = "cron"
+    outputs = [o async for o in convo.handle_message(cron_message)]
+
+    assert outputs[-1].text == "heartbeat ok"
+    assert calls["clear"] == []                     # debt still owed
+    assert convo._session_brief_pending is None
+
+
+@pytest.mark.asyncio
+async def test_session_brief_foreign_pending_untouched_by_sibling_success_and_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138 gate req 1: one engine hosts many concurrent conversations. A
+    sibling turn — success OR failure — must not commit, roll back, or
+    clobber a pending brief it never carried (identity guard, not equality:
+    the tokens are structurally equal dicts)."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _wake_up_seams(monkeypatch)
+    # In-flight brief owned by another turn. Structurally identical to what a
+    # fresh token looks like — only identity distinguishes them.
+    sentinel: dict[str, object] = {"prev_fired_at": None}
+    live_fired_at = _dt_cls(2026, 6, 12, 6, 30)
+    convo._session_brief_pending = sentinel
+    convo._session_brief_fired_at = live_fired_at
+
+    # The sibling's own decision defers before ever reaching the builder.
+    trace: dict[str, object] = {}
+    assert convo._maybe_session_brief(
+        _make_discord_message("what's up?"), trace_decisions=trace
+    ) == ("", None)
+    assert trace["session_brief"]["suppressed"] == "brief_in_flight"
+    assert calls["build"] == []
+
+    captured: dict[str, object] = {}
+    _ok_runtime(monkeypatch, captured, text="sibling reply")
+    outputs = [o async for o in convo.handle_message(_make_discord_message("hey"))]
+    assert outputs[-1].text == "sibling reply"
+    assert convo._session_brief_pending is sentinel   # identity preserved
+    assert calls["clear"] == []                       # nothing consumed
+
+    _raising_runtime(monkeypatch, RuntimeExecutionError("sibling boom"), captured)
+    outputs = [o async for o in convo.handle_message(_make_discord_message("again"))]
+    assert outputs[-1].is_error is True
+    assert convo._session_brief_pending is sentinel
+    assert convo._session_brief_fired_at == live_fired_at  # guard not clobbered
+    assert calls["clear"] == []
+    assert calls["build"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_recall_honors_recall_max_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The chat hot path must pass config.RECALL_MAX_RESULTS to the recall
+    service, not a hardcoded 5 (#136). Patch the knob and assert it propagates."""
+    import config
+
+    monkeypatch.setattr(config, "RECALL_MAX_RESULTS", 2)
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    project_root = _make_project_root(tmp_path)
+    convo = ConversationEngine(store, project_root)
+    captured: dict[str, object] = {}
+
+    async def fake_recall(**kwargs):
+        captured["max_results"] = kwargs.get("max_results")
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [
+        out
+        async for out in convo.handle_message(
+            _make_message("give me a real recall query please")
+        )
+    ]
+
+    assert outputs[-1].text == "ok"
+    assert captured["max_results"] == 2, (
+        f"engine must honor RECALL_MAX_RESULTS (got {captured.get('max_results')!r}, "
+        "was hardcoded 5 before #136)"
+    )
+
+
+def test_session_brief_decision_exception_releases_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138 gate (exception atomicity): an exception AFTER the pending slot is
+    claimed must self-rollback. Otherwise the caller gets token=None, nobody can
+    ever commit/rollback it, and EVERY later brief wedges on brief_in_flight."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    boundary = _dt_cls.now() - _td(hours=10)
+    _patch_brief_seams(monkeypatch, brief=_fired_brief(), owed=boundary, physical=boundary)
+
+    real_print = print
+
+    def _boom(*a, **k):
+        if a and "SessionBrief] fired" in str(a[0]):
+            raise RuntimeError("log sink exploded")
+        real_print(*a, **k)
+
+    monkeypatch.setattr("builtins.print", _boom)
+    out, token = convo._maybe_session_brief(_make_message("gm"), trace_decisions={})
+    monkeypatch.undo()
+
+    assert out == ""
+    assert token is None
+    assert convo._session_brief_pending is None, (
+        "decision-path failure must release the pending slot, not wedge it"
+    )
+
+
+# =============================================================================
+# #138 — abandonment coverage: handle_message's holder + finally re-arms the
+# token on every exception-delivering exit (cancel/close/GC). The contract is
+# defer-never-lose: a consumer that breaks while RETAINING the generator holds
+# the slot (marker intact) until resume-to-exhaustion (commit), close/
+# finalize (rollback), or restart (state discarded) — pinned below.
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_session_brief_aclose_after_first_yield_releases_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138: the consumer closes the generator after receiving the reply chunk
+    but BEFORE resuming it (the inner commit has not run). async-for never
+    acloses the inner generator, so without handle_message's holder/finally the
+    inner's own seams never run and the slot wedges for the process lifetime.
+    The outer finally must free it SYNCHRONOUSLY at aclose."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _wake_up_seams(monkeypatch)
+    captured: dict[str, object] = {}
+    _ok_runtime(monkeypatch, captured, text="Morning rundown.")
+
+    gen = convo.handle_message(_make_message("good morning"))
+    first = await gen.__anext__()  # reply delivered to the consumer...
+    assert first.text == "Morning rundown."
+    assert convo._session_brief_pending is not None  # ...but not yet committed
+
+    await gen.aclose()  # abandoned right at the delivery yield
+
+    _assert_brief_re_armed(convo, calls)  # slot freed, marker intact, guard restored
+
+    # The next turn re-fires the brief and consumes it exactly once.
+    _ok_runtime(monkeypatch, captured, text="here you go")
+    outputs = [o async for o in convo.handle_message(_make_message("still there?"))]
+    assert outputs[-1].text == "here you go"
+    assert captured["prompt"].endswith(_FIRED_BLOCK)
+    assert calls["clear"] == [True]
+    assert convo._session_brief_pending is None
+
+
+@pytest.mark.asyncio
+async def test_session_brief_break_and_retain_defers_then_close_releases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#138 contract test: the hole Codex named. A consumer that BREAKS out
+    of the iteration while RETAINING the generator delivers no exception —
+    no finally runs anywhere, so the slot HOLDS. That is defer-never-lose:
+    the marker is intact, briefs are deferred, nothing is consumed. Only
+    resume-to-exhaustion (which commits and frees it), close/cancel/GC
+    (rollback), or restart (state discarded) releases it.
+
+    Note: the defer half of this test also passes on pre-holder code (a
+    held slot defers on any build). The load-bearing half is the
+    aclose-release — the same mechanism the money test proves against the
+    pre-holder code."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    calls = _wake_up_seams(monkeypatch)
+    captured: dict[str, object] = {}
+    _ok_runtime(monkeypatch, captured, text="Morning rundown.")
+
+    gen = convo.handle_message(_make_message("good morning"))
+    first = await gen.__anext__()
+    assert first.text == "Morning rundown."
+    # BREAK — stop iterating, retain the generator, do NOT aclose.
+    assert convo._session_brief_pending is not None
+
+    # Defer semantics: the next decision is suppressed, the marker intact.
+    out, token = convo._maybe_session_brief(
+        _make_message("anyone home?"), trace_decisions={},
+    )
+    assert (out, token) == ("", None)
+    assert calls["clear"] == []
+
+    # Close releases the slot deterministically.
+    await gen.aclose()
+    _assert_brief_re_armed(convo, calls)
+
+    # And the next real turn refires and consumes exactly once.
+    _ok_runtime(monkeypatch, captured, text="here you go")
+    outputs = [o async for o in convo.handle_message(_make_message("still there?"))]
+    assert outputs[-1].text == "here you go"
+    assert captured["prompt"].endswith(_FIRED_BLOCK)
+    assert calls["clear"] == [True]
+    assert convo._session_brief_pending is None

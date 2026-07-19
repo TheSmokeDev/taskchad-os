@@ -121,6 +121,8 @@ def runtime_selection_choice(selection: RuntimeSelection) -> str:
         return "openrouter"
     if selection.generic_provider == "openai-compatible":
         return "openai"
+    if selection.generic_provider == "kimi":
+        return "kimi"
     return "auto"
 
 

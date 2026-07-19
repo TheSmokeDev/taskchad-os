@@ -13,8 +13,6 @@ from .auth_profiles import (
 )
 from .base import RuntimeRequest
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-
 
 @dataclass(slots=True)
 class RuntimeProfile:
@@ -52,6 +50,9 @@ class GenericProviderOverlay:
     api_key_env_vars: tuple[str, ...] = ()
     base_url: str | None = None
     base_url_env_var: str | None = None
+    # Call shape for the shared OpenAICompatibleRuntime adapter:
+    # "responses" (OpenAI Responses API) | "chat_completions".
+    wire_api: str = "responses"
 
 
 GENERIC_PROVIDER_REGISTRY: dict[str, GenericProviderOverlay] = {
@@ -103,6 +104,23 @@ GENERIC_PROVIDER_REGISTRY: dict[str, GenericProviderOverlay] = {
         tool_route_priority=1,
         aliases=("gemini", "gemini-cli", "google"),
         legacy_write_key="gemini",
+    ),
+    # Kimi Code endpoint probed 2026-07-17: /responses = 404, /chat/completions
+    # = 200 — hence wire_api="chat_completions" on the shared adapter.
+    "kimi": GenericProviderOverlay(
+        transport="openai_responses",
+        auth_type="api_key",
+        display_name="Kimi",
+        model_env_var="SECOND_BRAIN_KIMI_MODEL",
+        default_model="k3",
+        text_route_priority=4,
+        tool_route_priority=-1,
+        aliases=("kimi", "k3", "moonshot"),
+        legacy_write_key="kimi",
+        api_key_env_vars=("KIMI_API_KEY",),
+        base_url="https://api.kimi.com/coding/v1",
+        base_url_env_var="SECOND_BRAIN_KIMI_BASE_URL",
+        wire_api="chat_completions",
     ),
 }
 
@@ -172,23 +190,21 @@ def _primary_model_for_provider(provider: str) -> str:
         return _model_from_env("SECOND_BRAIN_OPENAI_MODEL", "gpt-4.1-mini")
     if provider == "openrouter":
         return _model_from_env("SECOND_BRAIN_OPENROUTER_MODEL", "openrouter/auto")
+    if provider == "kimi":
+        return _model_from_env("SECOND_BRAIN_KIMI_MODEL", "k3")
     return _model_from_env("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-4-6")
 
 
 def _resolve_api_key_from_env_vars(env_vars: tuple[str, ...]) -> str:
     """Resolve an API key from a tuple of candidate env var names.
 
-    Module-level string constants take precedence over os.getenv — the only
-    current example is OPENAI_API_KEY, which tests monkeypatch via
-    ``setattr(profiles, "OPENAI_API_KEY", "")``. First non-empty value wins.
+    Call-time os.getenv only (Rule 1) — reload_config() re-runs
+    load_dotenv(override=True), so a rotated key + /reload is honored here
+    without a restart. First non-empty value wins.
     """
 
     for env_var in env_vars:
-        module_value = globals().get(env_var)
-        if isinstance(module_value, str):
-            value = module_value.strip()
-        else:
-            value = os.getenv(env_var, "").strip()
+        value = os.getenv(env_var, "").strip()
         if value:
             return value
     return ""
@@ -311,6 +327,14 @@ def _openrouter_profile(*, key_prefix: str, model: str | None = None) -> Runtime
     )
 
 
+def _kimi_profile(*, key_prefix: str, model: str | None = None) -> RuntimeProfile | None:
+    return _http_profile(
+        key_prefix=key_prefix,
+        provider="kimi",
+        overlay=GENERIC_PROVIDER_REGISTRY["kimi"],
+    )
+
+
 def normalize_provider(provider: str) -> str:
     """Normalize provider aliases into canonical runtime provider ids."""
 
@@ -358,6 +382,8 @@ def build_profile_for_provider(
         return _openai_profile(key_prefix=key_prefix)
     if provider == "openrouter":
         return _openrouter_profile(key_prefix=key_prefix)
+    if provider == "kimi":
+        return _kimi_profile(key_prefix=key_prefix)
     return None
 
 

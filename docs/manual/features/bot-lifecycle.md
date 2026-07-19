@@ -94,6 +94,19 @@ Retired with this slice (archived to `.claude/_archive/lifecycle-2026-07/`):
   resurrected a Telegram-only bot with no Discord and no relay.
   `run_chat.sh` (Git Bash on Windows) is the only launcher.
 
+## Hidden Task Launcher (2026-07-16)
+
+All bat-based `SecondBrain-*` Task Scheduler jobs (watchdog included) launch
+through `wscript.exe .claude/scripts/run_hidden.vbs <bat> <log>` — window
+style 0, so no cmd window pops (the 5-min watchdog alone was 288 visible
+windows/day). The wrapper keeps the job in the interactive session (toasts
+and the CDP-18222 visible Chrome stay reachable), appends stdout/stderr to
+`.claude/data/logs/scheduled/<bat>.log`, and propagates the exit code so
+`LastTaskResult` stays truthful. To watch a job live, tail its wrapper log
+(e.g. `Get-Content .claude\data\logs\scheduled\run_heartbeat.log -Tail 50
+-Wait`) — do not expect console windows. Existing receipts
+(`watchdog_runs.log`, `watchdog-launcher.log`) are unchanged.
+
 ## Source Of Truth Files
 
 | Layer | Files |

@@ -21,6 +21,33 @@ collect_ignore_glob = ["_holders/*"]
 
 
 @pytest.fixture(autouse=True)
+def _isolate_runtime_health_file(monkeypatch, tmp_path):
+    """Keep runtime health bookkeeping off the OPERATIONAL state file.
+
+    Any test that drives lane_router/registry (with real or fake adapters)
+    triggers mark_profile_success/_failure, which load-modify-saves
+    RUNTIME_HEALTH_FILE. Without this redirect those tests write success
+    rows — or worse, cooldowns — into the live
+    .claude/data/state/runtime-health.json and change live provider routing
+    (found 2026-07-16 while verifying the WinError 32 collision fix). Tests
+    that need a specific health file still override with their own
+    monkeypatch; spawn-based children set the module attribute themselves.
+    """
+    try:
+        import runtime.health as _health
+
+        monkeypatch.setattr(
+            _health,
+            "RUNTIME_HEALTH_FILE",
+            tmp_path / "runtime-health.json",
+            raising=False,
+        )
+    except Exception:
+        # Fail-safe: never let this fixture error the whole suite.
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _intent_autodispatch_default(monkeypatch):
     """Pin natural-language intent auto-dispatch to its framework code default.
 
@@ -38,6 +65,20 @@ def _intent_autodispatch_default(monkeypatch):
     except Exception:
         # Fail-safe: never let this fixture error the whole suite.
         pass
+
+
+@pytest.fixture(autouse=True)
+def _voice_reply_mode_default(monkeypatch):
+    """Keep adapter tests independent from the operator's live voice setting."""
+
+    for module_name in ("adapters.telegram", "adapters.discord"):
+        try:
+            module = __import__(module_name, fromlist=["get_voice_reply_mode"])
+            monkeypatch.setattr(
+                module, "get_voice_reply_mode", lambda: "auto", raising=False
+            )
+        except Exception:
+            pass
 
 
 @pytest.fixture(autouse=True)

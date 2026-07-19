@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -215,8 +216,24 @@ class ClaudeSdkRuntime:
             options_kwargs["thinking"] = request.thinking
         if request.effort is not None:
             options_kwargs["effort"] = request.effort
-        if request.env is not None:
-            options_kwargs["env"] = request.env
+        # Issue #137 — the SDK transport merges the FULL parent os.environ into
+        # the child CLI env, and options.env can only override a key, never
+        # remove one. An inherited ANTHROPIC_API_KEY would silently bypass the
+        # Max-plan OAuth path, so it is stripped from the caller dict and, when
+        # present in the parent env, neutralized with "" (falsy to the CLI —
+        # same idiom as the CLAUDECODE override in engine.py). The strip is
+        # case-INSENSITIVE: Windows env keys are case-insensitive, so a
+        # lowercase `anthropic_api_key` would otherwise survive the filter and
+        # still become THE key for the child (#137 gate).
+        sdk_env = {
+            k: v
+            for k, v in (request.env or {}).items()
+            if k.upper() != "ANTHROPIC_API_KEY"
+        }
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            sdk_env["ANTHROPIC_API_KEY"] = ""
+        if sdk_env or request.env is not None:
+            options_kwargs["env"] = sdk_env
         if request.resume is not None:
             options_kwargs["resume"] = request.resume
         if request.stderr is not None:

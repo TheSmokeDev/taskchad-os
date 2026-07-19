@@ -14,12 +14,14 @@ persistence and recent-context helpers are shared imports from that module.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from discord_persona_runtime import _persist_turn, _recent_conversation_block
 from models import IncomingMessage
+from session import get_persist_lock
 from session_keys import build_session_key, resolve_thread_id
 
 
@@ -178,17 +180,22 @@ async def run_web_persona_turn(
     result = await run_with_runtime_lanes(request)
     response_text = (result.text or "").strip() or "No response returned."
 
-    _persist_turn(
-        session_store=session_store,
-        incoming=incoming,
-        response_text=response_text,
-        result=result,
-        session_key=session_key,
-        platform_str=platform_str,
-        channel_id=channel_id,
-        thread_id=thread_id,
-        persona_id=persona_id,
-    )
+    # Serialize + offload the sync persist off the DASHBOARD process loop under
+    # this process's own per-conversation lock (#131) — same correctness class
+    # as the Discord path, zero dashboard_api edits.
+    async with get_persist_lock(session_key):
+        await asyncio.to_thread(
+            _persist_turn,
+            session_store=session_store,
+            incoming=incoming,
+            response_text=response_text,
+            result=result,
+            session_key=session_key,
+            platform_str=platform_str,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            persona_id=persona_id,
+        )
     return response_text
 
 

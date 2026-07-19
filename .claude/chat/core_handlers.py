@@ -168,7 +168,11 @@ async def handle_diagnostics(adapter: Any, incoming: Any, args: str, *, collect_
     """Show system diagnostics."""
     from diagnostics import collect_diagnostics
 
-    report = collect_diagnostics()
+    # collect_diagnostics() reaches a synchronous browser_readiness() CDP probe
+    # (diagnostics._check_browser) plus other blocking file/subprocess reads, so
+    # it must run OFF the event loop — a dead CDP socket here would otherwise
+    # freeze Telegram/Discord/liveness for the whole ~9s chain (#130).
+    report = await asyncio.to_thread(collect_diagnostics)
     adapters = _ctx.get("adapters", {})
     report.adapters_connected = {p.value: True for p in adapters.keys()}
 
@@ -385,6 +389,26 @@ async def handle_mode(adapter: Any, incoming: Any, args: str, *, collect_only: b
     return f"Current mode: *{mode}*"
 
 
+async def handle_voice(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Show or persist the shared Telegram/Discord voice reply mode."""
+    from voice_preferences import get_voice_reply_mode, set_voice_reply_mode
+
+    requested = (args or "").strip().lower()
+    if requested in {"", "status"}:
+        mode = get_voice_reply_mode()
+    elif requested in {"always", "auto", "off", "on"}:
+        mode = set_voice_reply_mode(requested)
+    else:
+        return "Usage: /voice [always | auto | off]"
+
+    descriptions = {
+        "always": "every Telegram and Discord reply includes voice + text",
+        "auto": "voice replies follow incoming voice messages; normal replies stay text",
+        "off": "all replies are text only",
+    }
+    return f"Voice mode: *{mode}* — {descriptions[mode]}. This survives restarts."
+
+
 async def handle_reload(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Reload config, soul context, and clear session."""
     from config import reload_config
@@ -438,7 +462,7 @@ async def handle_reload(adapter: Any, incoming: Any, args: str, *, collect_only:
 
 async def handle_provider(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Show runtime provider status."""
-    return _get_provider_status()
+    return await asyncio.to_thread(_get_provider_status)
 
 
 async def handle_model(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
@@ -1521,7 +1545,7 @@ async def handle_linkedin_profile(
         )
         return f"LinkedIn browser config error: {exc}"
 
-    readiness = browser_readiness(port=port)
+    readiness = await asyncio.to_thread(browser_readiness, port=port)
 
     if subcommand in {"", "status"}:
         workflow_id = "browser.status"
@@ -1929,7 +1953,7 @@ async def handle_reddit(
         )
         return f"Reddit browser config error: {exc}"
 
-    readiness = browser_readiness(port=port)
+    readiness = await asyncio.to_thread(browser_readiness, port=port)
 
     if subcommand == "status":
         workflow_id = "browser.status"
@@ -2317,7 +2341,7 @@ async def _handle_social_write(
         )
         return f"LinkedIn browser config error: {exc}"
 
-    readiness = browser_readiness(port=port)
+    readiness = await asyncio.to_thread(browser_readiness, port=port)
 
     # GATE on an EMPTY user_text + the structurally-isolated approved flag — the
     # gate's own .endswith scan can NEVER see the body (R1-B3 / NM1 close-out).
@@ -2549,7 +2573,7 @@ async def handle_x(adapter: Any, incoming: Any, args: str, *, collect_only: bool
         )
         return f"X browser config error: {exc}"
 
-    readiness = browser_readiness(port=port)
+    readiness = await asyncio.to_thread(browser_readiness, port=port)
 
     # Default-deny gate (read-classification workflows pass without approval).
     decision = require_browser_workflow_permission(workflow_id, raw)
@@ -4346,6 +4370,11 @@ def _get_provider_status() -> str:
                 "API key",
                 bool(os.getenv("OPENAI_API_KEY", "").strip()),
             ),
+            "kimi": lambda: (
+                "Kimi API",
+                "API key",
+                bool(os.getenv("KIMI_API_KEY", "").strip()),
+            ),
         }
 
         for provider in DEFAULT_PROVIDER_CHAIN:
@@ -4419,6 +4448,8 @@ def _switch_provider(choice: str) -> str:
             "  /model gemini - generic runtime lane via Gemini\n"
             "  /model openrouter - generic runtime lane via OpenRouter\n"
             "  /model openai - generic runtime lane via OpenAI-compatible\n"
+            "  /model kimi - generic runtime lane via Kimi\n"
+            "  /model kimi:k3 - Kimi pinned model (default k3)\n"
             "  /model auto - automatic lane/provider routing"
         )
 
@@ -4462,7 +4493,7 @@ def _switch_provider(choice: str) -> str:
         return (
             "Unknown runtime selection: "
             f"{choice}. Use: claude, sonnet, opus, codex, codex:default, "
-            "codex:<model>, gpt5.5, gpt 5.5, codex 5.5, gemini, openrouter, openai, or auto"
+            "codex:<model>, gpt5.5, gpt 5.5, codex 5.5, gemini, openrouter, openai, kimi, or auto"
         )
     except Exception as e:
         return f"Failed to switch provider: {e}"
@@ -7780,7 +7811,99 @@ async def handle_suggestions(adapter: Any, incoming: Any, args: str, *, collect_
 # Handler lookup — maps command name to handler function
 # ---------------------------------------------------------------------------
 
+async def _persona_channel_turn(incoming: Any, instruction: str) -> str:
+    """Route a mode-shaped instruction through the channel's bound persona.
+
+    The closer commands (/draft /spar /checkin /debrief) are thin wrappers:
+    they reshape the operator's args into a mode instruction and run it as a
+    normal persona turn, so the reply carries the persona's identity, memory,
+    and skill index — and the turn lands in that persona's learning corpus.
+    """
+    from dataclasses import replace as dc_replace
+
+    import config
+    from discord_channel_bindings import resolve_discord_channel_binding
+    from discord_persona_runtime import run_discord_persona_channel_turn
+    from session import get_session_store
+
+    binding = resolve_discord_channel_binding(incoming)
+    if binding is None:
+        return (
+            "Run this inside a persona channel (like #YourProduct-salesguy) so the "
+            "right homie answers."
+        )
+    shaped = dc_replace(incoming, text=instruction)
+    outgoing = await run_discord_persona_channel_turn(
+        incoming=shaped,
+        binding=binding,
+        session_store=get_session_store(),
+        project_root=config.PROJECT_ROOT,
+    )
+    return getattr(outgoing, "text", "") or "(no reply)"
+
+
+async def handle_draft(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Draft a client message in the closer voice via the channel's persona."""
+    request = args.strip()
+    if not request:
+        return 'Usage: `/draft <client + goal>` — e.g. `/draft rebecca, nudge the deposit`'
+    instruction = (
+        "[DRAFT MODE] Draft a client-facing message in our premium client voice "
+        f"(closer-playbook doctrine). Request: {request}. Output a copy-paste-ready, "
+        "text-length draft with exactly one decision-shaped ask and no em-dashes, "
+        "then a one-line [Why it works], and at most one [Alternate]."
+    )
+    return await _persona_channel_turn(incoming, instruction)
+
+
+async def handle_spar(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Rebuttal sparring: objection in, ranked in-voice responses out."""
+    objection = args.strip()
+    if not objection:
+        return 'Usage: `/spar <what the prospect said>` — e.g. `/spar she said the price is too high`'
+    instruction = (
+        f'[SPAR MODE] The prospect said: "{objection}". Give the BEST response in our '
+        "client voice, then two ranked alternates. One line each on why it wins. Hold "
+        "the premium frame — a response that wins the argument but reads needy or "
+        "punitive loses. Every option ends with one decision-shaped ask."
+    )
+    return await _persona_channel_turn(incoming, instruction)
+
+
+async def handle_checkin(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Follow-up/courtesy note with an escalation-ladder position check."""
+    deal_state = args.strip()
+    if not deal_state:
+        return 'Usage: `/checkin <client + deal state>` — e.g. `/checkin rebecca, missed her deadline yesterday`'
+    instruction = (
+        f"[CHECK-IN MODE] Deal state: {deal_state}. First determine the escalation-ladder "
+        "position: rung 1 = no courtesy note sent yet, rung 2 = courtesy-note deadline "
+        "passed in silence, past rung 2 = already closed out. Then draft the correct next "
+        "touch (rung 1 = courtesy note with a real deadline; rung 2 = the cold close-out; "
+        "past rung 2 = say that no touch is correct and why). Name the rung you chose."
+    )
+    return await _persona_channel_turn(incoming, instruction)
+
+
+async def handle_debrief(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Debrief a won/lost/stalled deal into lessons the persona keeps."""
+    outcome = args.strip()
+    if not outcome:
+        return 'Usage: `/debrief <what happened>` — e.g. `/debrief rebecca paid the full package deposit after the courtesy note`'
+    instruction = (
+        f"[DEBRIEF MODE] Deal outcome: {outcome}. Extract the lessons: what worked "
+        "(1-2 specific bullets), what to do differently (1-2 specific bullets), and "
+        "whether the voice doctrine needs an update (propose the exact change, or say "
+        "the doctrine held). Keep it tight — this is your sharpening steel."
+    )
+    return await _persona_channel_turn(incoming, instruction)
+
+
 CORE_HANDLERS: dict[str, Any] = {
+    "draft": handle_draft,
+    "spar": handle_spar,
+    "checkin": handle_checkin,
+    "debrief": handle_debrief,
     "help": handle_help,
     "commands": handle_commands,
     "status": handle_status,
@@ -7792,6 +7915,7 @@ CORE_HANDLERS: dict[str, Any] = {
     "go": handle_go,
     "execute": handle_go,
     "mode": handle_mode,
+    "voice": handle_voice,
     "reload": handle_reload,
     "provider": handle_provider,
     "model": handle_model,

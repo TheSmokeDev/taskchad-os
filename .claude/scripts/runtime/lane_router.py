@@ -15,6 +15,10 @@ monkeypatch propagation in tests.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import math
+import os
 from dataclasses import replace
 
 from security import kill_switches
@@ -25,6 +29,7 @@ from .base import (
     RuntimeRequest,
     RuntimeResult,
 )
+from .capabilities import TEXT_REASONING
 from .claude_sdk import ClaudeSdkRuntime
 from .errors import (
     RuntimeConfigError,
@@ -43,6 +48,37 @@ from .profiles import (
 )
 from .routing import resolve_generic_runtime_profiles
 from .selection import resolve_runtime_selection
+
+_logger = logging.getLogger(__name__)
+
+# Per-adapter deadlines resolved at CALL time (Rule 1) — never bound as
+# defaults. A wedged provider CLI (a Codex/Gemini child that never exits) or a
+# stalled Claude SDK stream otherwise hangs every scheduled pipeline forever
+# (heartbeat, reflection, weekly, dream, cabinet, persona learning — 25+ call
+# sites with no outer deadline). `asyncio.wait_for` at this one lane chokepoint
+# bounds all of them; `<=0` disables the deadline (escape hatch). Issue #133.
+_DEFAULT_TIMEOUT_TEXT_S = 300.0
+_DEFAULT_TIMEOUT_TOOL_S = 1800.0
+
+
+def _adapter_timeout_seconds(request: RuntimeRequest) -> float | None:
+    """Per-adapter deadline in seconds. ``<=0`` disables (escape hatch)."""
+    if request.capability == TEXT_REASONING:
+        raw = os.getenv("SECOND_BRAIN_RUNTIME_TIMEOUT_TEXT_SECONDS", "")
+        default = _DEFAULT_TIMEOUT_TEXT_S
+    else:
+        raw = os.getenv("SECOND_BRAIN_RUNTIME_TIMEOUT_TOOL_SECONDS", "")
+        default = _DEFAULT_TIMEOUT_TOOL_S
+    try:
+        value = float(raw) if raw.strip() else default
+    except ValueError:
+        value = default
+    if not math.isfinite(value):
+        # float("nan") parses cleanly (no ValueError) but every comparison
+        # against NaN is False, so `value > 0` below would silently take the
+        # <=0 disable branch instead of falling back to `default`.
+        value = default
+    return value if value > 0 else None
 
 
 def resolve_runtime_lane(request: RuntimeRequest) -> str:
@@ -109,13 +145,15 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
             )
             continue
 
+        # `wait_for` covers `adapter.run(...)` ONLY — never the health
+        # bookkeeping below. On timeout the adapter is cancelled; the CLI
+        # adapters reap their child on the way out.
+        timeout_s = _adapter_timeout_seconds(effective_request)
         try:
-            result = await adapter.run(effective_request)
-            mark_profile_success(profile)
-            result.runtime_lane = lane
-            return result
+            result = await asyncio.wait_for(adapter.run(effective_request), timeout=timeout_s)
         except RuntimeUnsupportedCapabilityError as exc:
             errors.append(f"{profile.key}: {exc}")
+            continue
         except RuntimeRetryableError as exc:
             mark_profile_retryable_failure(profile, str(exc))
             errors.append(f"{profile.key}: retryable error {exc}")
@@ -124,10 +162,33 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
             mark_profile_unavailable(profile, str(exc))
             errors.append(f"{profile.key}: unavailable {exc}")
             continue
+        except TimeoutError:
+            # asyncio.TimeoutError IS builtins.TimeoutError on 3.11+. Must
+            # precede `except Exception` (TimeoutError ⊂ OSError ⊂ Exception),
+            # else the generic arm mislabels the message. `asyncio.CancelledError`
+            # is BaseException, so an external operator/shutdown cancel still
+            # propagates untouched past every arm here.
+            mark_profile_retryable_failure(profile, f"timed out after {timeout_s}s")
+            errors.append(f"{profile.key}: timed out after {timeout_s}s")
+            continue
         except Exception as exc:
             mark_profile_retryable_failure(profile, str(exc))
             errors.append(f"{profile.key}: {exc}")
             continue
+
+        # Success bookkeeping stays OUTSIDE the provider try/except: an
+        # exception here must never convert a successful run into a provider
+        # failure or discard the result (2026-07-16 WinError 32 incident).
+        try:
+            mark_profile_success(profile)
+        except Exception:
+            _logger.warning(
+                "health bookkeeping failed after successful run for %s",
+                profile.key,
+                exc_info=True,
+            )
+        result.runtime_lane = lane
+        return result
 
     joined = "; ".join(errors) if errors else "no runtime profiles resolved"
     message = (

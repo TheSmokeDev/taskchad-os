@@ -2,7 +2,7 @@
 
 Status: active baseline
 Owner: lane-first runtime selection
-Last updated: 2026-05-31
+Last updated: 2026-07-17
 
 ## What It Does
 
@@ -58,9 +58,9 @@ uv run pytest tests/test_runtime_selection.py tests/test_diagnostics.py tests/te
 ## Model Pinning And Codex Aliases
 
 Runtime selection is lane-first: `/model claude`, `/model codex`, `/model
-gemini`, `/model openrouter`, `/model openai`, and `/model auto` choose where
-the next request runs. Provider-specific model pins use `provider:model`, but
-Codex also accepts short GPT-style aliases:
+gemini`, `/model openrouter`, `/model openai`, `/model kimi`, and `/model auto`
+choose where the next request runs. Provider-specific model pins use
+`provider:model`, but Codex also accepts short GPT-style aliases:
 
 ```bash
 uv run thehomie chat -q "/model codex:default" -Q   # Codex plan default; no --model flag passed
@@ -79,6 +79,18 @@ and `codec 5.5` are normalized to `gpt-5.5`.
 model. When Codex is set to `chatgpt-plan-default`, the CLI/ChatGPT plan
 chooses the concrete backend model and The Homie reports that backend as
 unobserved.
+
+## Kimi Lane
+
+`/model kimi` selects the Kimi lane: the Kimi Code coding endpoint
+(`https://api.kimi.com/coding/v1`) with a plan-quota API key from
+`KIMI_API_KEY` (Kimi Code Console; usage counts against the membership quota,
+not separate pay-as-you-go billing). Default model is `k3`; pin with
+`/model kimi:k3` or `SECOND_BRAIN_KIMI_MODEL`. The lane is text-route only
+(last in `GENERIC_TEXT_ROUTE`, excluded from the tool route). The shared
+OpenAI-compatible adapter uses the chat-completions call shape for this lane
+because the coding endpoint does not serve the OpenAI Responses API
+(`/responses` returns 404; probed 2026-07-17).
 
 ## Latest Live Proof
 

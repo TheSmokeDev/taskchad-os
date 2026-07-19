@@ -11,6 +11,9 @@ from typing import Any
 from update_check import get_current_version
 
 _START_TIME = time.monotonic()
+# Read once at import: the running process's version cannot change without a
+# restart, and /health must never touch disk on the request path (#132).
+_VERSION = get_current_version()
 
 
 @dataclass
@@ -34,7 +37,7 @@ class HealthStatus:
     adapters: dict[str, bool]
     sessions_active: int
     cognition_available: bool
-    version: str = field(default_factory=get_current_version)
+    version: str = _VERSION
     timestamp: str = ""
     # Phase 6 extensions
     runtime_providers: dict[str, str] = field(default_factory=dict)

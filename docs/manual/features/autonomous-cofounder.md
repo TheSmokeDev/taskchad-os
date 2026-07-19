@@ -7,7 +7,7 @@ Last updated: 2026-07-04
 ## What It Does
 
 The autonomous co-founder is a project orchestrator layered on the existing
-30-minute heartbeat. The operator drops one markdown spec per project into the
+scheduled heartbeat (framework default 30 min; this box runs it every 2 h). The operator drops one markdown spec per project into the
 watched vault folder (`vault/memory/cofounder/`); a pass riding the
 heartbeat carries each project forward between check-ins by dispatching
 detached Archon workflow runs into isolated worktrees, polling the Archon

@@ -1,6 +1,6 @@
 Five automated pipelines keep memory current. All run through the runtime layer and live in `.claude/scripts/`.
 
-### Heartbeat (Every 30 min)
+### Heartbeat (scheduled; framework default 30 min — this box runs every 2 h at :02)
 
 Proactively checks calendar, email, Asana, and content deadlines. Sends desktop notifications when something needs attention.
 
@@ -67,7 +67,7 @@ When the Telegram bot receives a message (> 20 chars), `engine.py → _recall_me
 
 ```env
 RECALL_ENABLED=true              # Toggle recall on/off
-RECALL_MIN_SCORE=0.3             # Minimum merged score (hybrid/vector scale)
+RECALL_MIN_SCORE=0.3             # Hybrid-leg merged-score floor (hybrid/vector scale), applied inside the dual-search pipeline; keyword leg uses RECALL_KEYWORD_MIN_SCORE
 RECALL_KEYWORD_MIN_SCORE=0.02    # Floor for keyword-only recall — raw FTS5 scores are 1/(1+|bm25|), a different scale
 RECALL_MAX_RESULTS=3             # Max snippets injected
 RECALL_MIN_MSG_LEN=20            # Skip short messages ("hi", "thanks")
@@ -348,6 +348,7 @@ The 6:30am moment — the composed first-person brief. The operator's first inte
 - Gate: raw `source == "interactive"` EXACT equality (fail-open `normalize_source` deliberately not trusted), non-PIV, away ≥ threshold (inclusive), fresh items ≥ min. Prefetched-context turns DO fire
 - Render priority: instruction reserved → one item per fired source reserved → deep-fill What changed → Self updates → Mid-flight (context drops first); newline-boundary `[TRUNCATED]`
 - Double-fire bound: in-memory `_session_brief_fired_at` fold; process restart inside a gap = at worst one extra brief (accepted)
+- #138 commit-on-success: a FIRED brief's marker clear + `_session_brief_fired_at` guard live in a pending token OWNED by the firing turn; commit runs only after the response yield (true delivery), rollback runs on `RuntimeExecutionError`, generic exceptions (incl. kill-switch), and `asyncio.CancelledError` — all identity-guarded, so cron/sibling-conversation turns are structural no-ops. Silent decisions still consume immediately. `handle_message` carries the token in a per-turn holder whose `finally` rolls it back on every exception-delivering exit (cancel/close/GC); a consumer that breaks while retaining the generator holds the slot — briefs defer with the marker intact, never lost, until the generator is resumed to exhaustion (commit), closed/finalized (rollback), or the process restarts (state discarded). Note the response yield is 'router took the reply', not operator receipt (#157). No time-based reclaim
 - Fail-open at every seam: builder/resolver/marker failures → bare turn, decision `error`, marker preserved for retry
 - Knobs: `SESSION_BRIEF_ENABLED` (true), `SESSION_BRIEF_AWAY_HOURS` (8), `SESSION_BRIEF_MIN_FRESH_ITEMS` (1), `SESSION_BRIEF_MAX_PER_SECTION` (5), `SESSION_BRIEF_MAX_CHARS` (2400)
 - Act 2 deferred pickup closed: `living_memory_read` span metadata now carries `observations_count` in both branches

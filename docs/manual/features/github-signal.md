@@ -23,8 +23,8 @@ commands (`/stars used`, `/stars snooze`) keep the same repo from nagging twice.
   `/stars used <repo>`, `/stars snooze <repo> [weeks]`, `/stars trending`
 - CLI: `cd .claude/scripts && uv run python -m github_signal.engine [--test]`;
   one-off eval: `uv run python -m github_signal.eval_runner <owner/repo>`
-- Scheduler: `SecondBrain-GitHubSignal` task, Monday 09:00 weekly
-  (register once via `setup_github_signal_scheduler.ps1`)
+- Scheduler: `SecondBrain-GitHubSignal` task, daily 09:00 (weekly Monday until
+  2026-07-16; register once via `setup_github_signal_scheduler.ps1`)
 - Output: digest `Memory/github-signal/YYYY-WNN.md` + eval notes
   `Memory/github-signal/evals/` + Telegram card + optional Discord channel
   card + daily-log receipt

@@ -44,8 +44,9 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("go", "Switch to execute mode — implement changes", "router", "viewer"),
     ("execute", "Alias for /go — enable execute mode", "router", "viewer"),
     ("mode", "Show current mode (plan or execute)", "router", "viewer"),
+    ("voice", "Voice replies across Telegram and Discord - always | auto | off", "router", "admin"),
     ("provider", "Show runtime lane status - selection, routes, provider health", "router", "admin"),
-    ("model", "Select runtime lane/provider/model - /model claude, sonnet, opus, codex, codex:default, gpt5.5, codex 5.5, gemini, openrouter, openai, auto", "router", "admin"),
+    ("model", "Select lane/model: claude, sonnet, opus, codex, gemini, openrouter, openai, kimi(:k3), auto", "router", "admin"),
     ("reload", "Reload bot config without restarting", "router", "admin"),
     ("restart", "Restart myself — kill this process and start fresh", "router", "admin"),
     ("autostart", "Bot autostart at logon — status | on | off", "router", "admin"),
@@ -144,6 +145,11 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("recap", "Session recap — turns, tools, files, last exchange (zero-LLM)", "router", "admin"),
     ("blueprints", "Automation blueprints — list | <key> | <key> slot=val (proposes)", "router", "admin"),
     ("suggestions", "Automation proposals — list | accept <n> | dismiss <n>", "router", "admin"),
+    # -- Closer (persona-channel sales commands) --
+    ("draft", "Draft a client message in the closer voice (persona channels)", "router", "admin"),
+    ("spar", "Rebuttal sparring — objection in, ranked responses out", "router", "admin"),
+    ("checkin", "Client follow-up note with escalation-ladder check", "router", "admin"),
+    ("debrief", "Debrief a deal into lessons (persona channels)", "router", "admin"),
 ]
 
 # Category groupings for help text
@@ -151,7 +157,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Session & Mode",
         ["plan", "go", "execute", "mode", "provider", "model", "reload", "restart",
-         "autostart", "update", "help", "commands", "status", "diagnostics", "cost", "clear", "new",
+         "voice", "autostart", "update", "help", "commands", "status", "diagnostics", "cost", "clear", "new",
          "extensions"],
     ),
     (
@@ -182,6 +188,8 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ("Dev Tools", ["diagram", "pdf", "slides", "sop"]),
     # Operator Automation UX (Phase 2) — blueprints/suggestions + zero-LLM recap.
     ("Automation", ["blueprints", "suggestions", "recap"]),
+    # Closer — persona-channel sales commands (route through the channel's persona).
+    ("Closer", ["draft", "spar", "checkin", "debrief"]),
 ]
 
 TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
@@ -193,6 +201,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "new",
     "provider",
     "model",
+    "voice",
     "restart",
     "autostart",
     "update",
@@ -245,6 +254,10 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "recap",
     "blueprints",
     "suggestions",
+    "draft",
+    "spar",
+    "checkin",
+    "debrief",
 )
 
 # Operator-local commands join the canonical registries only when the optional

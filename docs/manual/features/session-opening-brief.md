@@ -169,3 +169,6 @@ negative, is still recorded in the turn's trace metadata.
 | Corrupt marker file | Reads as absent. |
 | Process restart inside a gap | At worst one extra brief (bounded, accepted). |
 | Model buries the brief mid-reply | Cosmetic degradation only — no data loss. |
+| Runtime error on the brief-carrying turn (quota/auth/kill-switch) | Brief NOT consumed — marker intact, `fired_at` rolled back; next successful turn re-fires it once (#138). |
+| `/stop` / cancellation mid-runtime on the brief-carrying turn | `CancelledError` handler rolls back and re-raises — same re-fire guarantee. |
+| Second conversation's turn lands while a fired brief is in flight (e.g. Telegram + Discord at wake-up) | Deferred (`suppressed: "brief_in_flight"`); commit/rollback are identity-guarded no-ops for foreign turns. `handle_message` carries the token in a per-turn holder whose `finally` rolls it back on every exception-delivering exit (cancel/close/GC). A retained generator that is later *resumed to exhaustion* commits and frees the slot instead. A consumer that breaks while *retaining* the generator holds the slot — briefs defer with the marker intact, never lost, until close or process restart releases it. Defer, never lose; no time-based reclaim. |

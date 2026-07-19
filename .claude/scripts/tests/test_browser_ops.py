@@ -94,7 +94,7 @@ def test_prefetch_context_loads_browser_best_practices(monkeypatch) -> None:
     assert "agent-browser skills get core" in context
     assert "snapshot -i -c" in context
     assert "LinkedIn operator model" in context
-    assert "`/linkedin` for LinkedIn post drafting" in context
+    assert "`/linkedin` for the Cook Together / Run It for Me" in context
     assert "explicit approval" in context
     assert "headless" in context
 

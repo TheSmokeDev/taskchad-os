@@ -425,36 +425,88 @@ def build_agent_browser_global_argv(
     return [*resolution.command, *args], resolution
 
 
+def _captured_agent_browser_run(
+    argv: list[str], *, kill_tree_on_timeout: bool, **kwargs: Any
+) -> Any:
+    """Bound a Windows client without waiting on daemon-owned pipe handles."""
+
+    timeout = kwargs.pop("timeout", None)
+    if timeout is None or platform.system() != "Windows":
+        return subprocess.run(argv, timeout=timeout, **kwargs)
+    kwargs.pop("capture_output", None)
+    text_mode = bool(kwargs.pop("text", False) or kwargs.pop("universal_newlines", False))
+    encoding = str(kwargs.pop("encoding", None) or "utf-8")
+    errors = str(kwargs.pop("errors", None) or "strict")
+
+    def read_capture(handle: Any) -> str | bytes:
+        handle.flush()
+        handle.seek(0)
+        raw = handle.read()
+        if text_mode:
+            return raw.decode(encoding, errors=errors)
+        return raw
+
+    with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
+        mode="w+b"
+    ) as stderr_file:
+        proc = subprocess.Popen(
+            argv,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            **kwargs,
+        )
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if kill_tree_on_timeout:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    timeout=10,
+                )
+            else:
+                # A desktop named session attaches to the operator-owned Chrome.
+                # Kill only the timed-out CLI client; never its daemon/browser
+                # descendants or the shared visible CDP session.
+                proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            stdout = read_capture(stdout_file)
+            stderr = read_capture(stderr_file)
+            raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr)
+        stdout = read_capture(stdout_file)
+        stderr = read_capture(stderr_file)
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+
 def _tree_kill_run(argv: list[str], **kwargs: Any) -> Any:
-    """subprocess.run drop-in that kills the whole PROCESS TREE on timeout.
+    """Phone/ghost runner that reaps the full client tree on timeout.
 
     Live E2E finding (2026-07-06, phone navigate): agent-browser resolves to a
     .CMD wrapper on Windows; subprocess.run's timeout kills cmd.exe but the
     node child underneath survives holding the inherited stdout/stderr pipes,
     so the post-kill communicate() blocks until node exits on its own — a 20s
     timeout became a 2-minute API stall while the phone's renderer crawled.
-    taskkill /T reaps the tree so TimeoutExpired surfaces ON TIME.
+    The native v0.32 binary has the same pipe-inheritance shape when it starts
+    its background daemon: the one-shot client exits successfully, but the
+    daemon keeps PIPE handles open and ``communicate()`` waits forever for EOF.
+    Capture through temporary files and wait on the client PID instead. A real
+    timeout still taskkills the complete client tree and surfaces on time.
     """
 
-    timeout = kwargs.pop("timeout", None)
-    if timeout is None or platform.system() != "Windows":
-        return subprocess.run(argv, timeout=timeout, **kwargs)
-    kwargs.pop("capture_output", None)
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        subprocess.run(
-            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-            capture_output=True,
-            timeout=10,
-        )
-        try:
-            stdout, stderr = proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
-        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr)
-    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+    return _captured_agent_browser_run(
+        argv, kill_tree_on_timeout=True, **kwargs
+    )
+
+
+def _desktop_session_run(argv: list[str], **kwargs: Any) -> Any:
+    """Named desktop-session runner that never reaps shared Chrome."""
+
+    return _captured_agent_browser_run(
+        argv, kill_tree_on_timeout=False, **kwargs
+    )
 
 
 def run_agent_browser(
@@ -467,12 +519,17 @@ def run_agent_browser(
     runner: Any = None,
 ) -> CommandResult:
     if runner is None:
-        # Tree-kill ONLY on isolated-session (phone) commands: the phone's
-        # slow/freezable renderer is what makes node outlive the .CMD timeout
-        # kill. Desktop (default-session) callers keep plain subprocess.run —
-        # byte-identical M12 behavior, including the node child surviving a
-        # timeout to finish an in-flight action (social writes rely on it).
-        runner = _tree_kill_run if session is not None else subprocess.run
+        # Tree-kill ONLY on adb-target sessions: their slow/freezable renderers
+        # are what make the client outlive a timeout. A named desktop workflow
+        # session (for example Upwork on shared CDP 18222) must keep plain
+        # desktop timeout semantics so cleanup can never reap the visible
+        # desktop browser/daemon tree.
+        if session in {PHONE_AGENT_BROWSER_SESSION, GHOST_AGENT_BROWSER_SESSION}:
+            runner = _tree_kill_run
+        elif session is not None:
+            runner = _desktop_session_run
+        else:
+            runner = subprocess.run
     argv, resolution = build_agent_browser_argv(
         args, port=port, session=session, environ=environ
     )
