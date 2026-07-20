@@ -24,7 +24,7 @@ that outlives the dying bot.
 
 1. `/restart` replies "Restarting myself... back in a few seconds," then spawns
    the relauncher **detached** (Windows `CREATE_NEW_PROCESS_GROUP |
-   DETACHED_PROCESS`, POSIX `start_new_session`) so it survives the bot's exit,
+   CREATE_NO_WINDOW`, POSIX `start_new_session`) so it survives the bot's exit,
    and the old bot exits.
 2. The relauncher waits for the old bot to disappear (polling the active
    profile's bot PIDs, with a timeout), force-cleans any straggler, then spawns

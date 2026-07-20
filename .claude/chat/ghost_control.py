@@ -31,8 +31,10 @@ from typing import Any
 import adb_control
 import browser_control
 
-# Windows: detach the emulator so it outlives this process.
-_DETACHED_PROCESS = 0x00000008
+# Windows: detach the emulator so it outlives this process. CREATE_NO_WINDOW
+# (hidden console) not DETACHED_PROCESS (no console) — console descendants of
+# a no-console child each allocate a fresh VISIBLE window.
+_CREATE_NO_WINDOW = 0x08000000
 
 DEFAULT_EMULATOR_FALLBACK = r"C:\Android\Sdk\emulator\emulator.exe"
 DEFAULT_BOOT_TIMEOUT_SECONDS = 180
@@ -128,7 +130,7 @@ def _spawn_emulator(emulator: str, avd: str) -> None:
         "stdin": subprocess.DEVNULL,
     }
     if sys.platform == "win32":
-        kwargs["creationflags"] = _DETACHED_PROCESS
+        kwargs["creationflags"] = _CREATE_NO_WINDOW
     else:
         kwargs["start_new_session"] = True
     subprocess.Popen(argv, **kwargs)  # noqa: S603 — argv is module-controlled

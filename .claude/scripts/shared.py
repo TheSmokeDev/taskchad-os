@@ -544,8 +544,12 @@ def spawn_detached(
     """Spawn *cmd* as a fully detached child that survives this process's exit.
 
     Cross-platform detachment (mirrors the proven dashboard_bot_lifecycle
-    pattern): Windows ``CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS``; POSIX
-    ``start_new_session=True``. When *log_path* is given, stdout+stderr append to
+    pattern): Windows ``CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW``; POSIX
+    ``start_new_session=True``. CREATE_NO_WINDOW (not DETACHED_PROCESS): the
+    child gets a hidden console that its console descendants inherit —
+    DETACHED_PROCESS gives NO console, so every console grandchild (e.g. each
+    ``cmd.exe /c codex`` an Archon workflow spawns) allocates a fresh VISIBLE
+    window (the 2026-07-19 popup storm). When *log_path* is given, stdout+stderr append to
     it (merged); otherwise both go to ``DEVNULL``. stdin is always ``DEVNULL``.
     Returns the child PID.
 
@@ -570,7 +574,7 @@ def spawn_detached(
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = (
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
     else:
         popen_kwargs["start_new_session"] = True

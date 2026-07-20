@@ -21,13 +21,7 @@ sanitized audit rows, and exposes a read-only dashboard Browser Viewer at
 - Dashboard: `/browser`
 - API: `/api/browser-viewer/status`, `/api/browser-viewer/screenshot`,
   `/api/browser-viewer/stream/enable`, `/api/browser-viewer/stream/disable`
-- Direct tool: `agent-browser --cdp 18222` for authorized visible-browser work
-
-Current Windows deployment: `SecondBrain-LinkedInChrome` is the sole launcher
-and keeper for the shared visible Chrome on CDP `18222`. The profile directory
-name `chrome-cdp-9222` is retained for compatibility; its suffix is not the
-active port. Upwork attaches to this same browser as `operator-desk` and
-must not create another browser, profile, keeper, or native window.
+- Direct tool: `agent-browser --cdp 9222` for authorized visible-browser work
 
 ## Source Of Truth Files
 
@@ -80,8 +74,8 @@ http://127.0.0.1:5173/browser
 
 Windows local notes:
 
-- Chrome 136+ requires a non-default local profile for CDP. If `18222` is
-  unreachable despite the Chrome process showing `--remote-debugging-port=18222`,
+- Chrome 136+ requires a non-default local profile for CDP. If `9222` is
+  unreachable despite the Chrome process showing `--remote-debugging-port=9222`,
   relaunch with a dedicated profile such as
   `%USERPROFILE%\.codex\browser-profiles\chrome-cdp-9222`.
 - Keep the chat runtime on its configured health port. Do not leave Homie on a
@@ -112,14 +106,14 @@ npm run typecheck
 ## Latest Live Proof
 
 - Date: 2026-06-02
-- Surface: the then-current visible Chrome CDP session, dashboard `/browser`, and Telegram
+- Surface: visible Chrome CDP `9222`, dashboard `/browser`, and Telegram
   health process ownership.
 - Result: Browser Viewer readiness `ready`, controls remained read-only,
   chat health stayed on the configured port, and a temporary alternate port was
   cleared.
 
 - Date: 2026-05-31
-- Surface: dashboard `/browser` observing the same then-current visible Chrome CDP session
+- Surface: dashboard `/browser` observing the same visible Chrome CDP `9222`
   Telegram Web session used for Team Room V3 proof.
 - Result: readiness `ready`, mode `read_only`, controls
   `browser_input=false`, `navigation=false`.
