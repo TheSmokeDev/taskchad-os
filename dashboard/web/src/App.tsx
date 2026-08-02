@@ -10,6 +10,7 @@ import { Placeholder } from '@/pages/Placeholder';
 import { MissionControl } from '@/pages/MissionControl';
 import { WorkQueue } from '@/pages/WorkQueue';
 import { Convoy } from '@/pages/Convoy';
+import { Runs } from '@/pages/Runs';
 import { Memories } from '@/pages/Memories';
 import { HiveMind } from '@/pages/HiveMind';
 import { Agents } from '@/pages/Agents';
@@ -19,6 +20,7 @@ import { Audit } from '@/pages/Audit';
 import { Usage } from '@/pages/Usage';
 import { Settings } from '@/pages/Settings';
 import { Voices } from '@/pages/Voices';
+import { Talk } from '@/pages/Talk';
 import { Chat } from '@/pages/Chat';
 import { Cabinet } from '@/pages/Cabinet';
 import { Teams } from '@/pages/Teams';
@@ -61,6 +63,7 @@ export function App() {
           <Route path="/mission"><MissionControl /></Route>
           <Route path="/work"><WorkQueue /></Route>
           <Route path="/convoy"><Convoy /></Route>
+          <Route path="/runs"><Runs /></Route>
           <Route path="/scheduled"><Scheduled /></Route>
           <Route path="/agents"><Agents /></Route>
           <Route path="/agents/:id" component={AgentDetail} />
@@ -73,6 +76,7 @@ export function App() {
           <Route path="/cabinet"><Cabinet /></Route>
           <Route path="/teams"><Teams /></Route>
           <Route path="/voices"><Voices /></Route>
+          <Route path="/talk"><Talk /></Route>
           <Route path="/standup"><StandupConfig /></Route>
           <Route path="/capabilities"><CapabilityGateway /></Route>
           <Route path="/browser"><BrowserViewer /></Route>

@@ -38,3 +38,12 @@ MIT-licensed `bradautomates/claude-video` project
 `83da59fa78c3eee9e20f515fe75c438bb5166efd`. The Homie implementation is an
 independent integration over its own runtime, memory, channel, and approval
 architecture; no upstream runtime process is embedded.
+
+The `plan-architecture` and `piv-slice-epic` epic-workflow skills adapt the
+PIV epic-slicing technique from Cole Medin's Dynamous Community workshop material
+(https://github.com/coleam00/orbit-support-agent, branch `workshop/github-piv`,
+inspected at commit `8838f510e8ad824636455be8eaaaf4f38186158b`). The Homie
+versions are independent re-implementations rewritten for this repo's
+conventions (private issue tracker, PRDs/ layout, local PIV command surfaces).
+The upstream repository publishes no license, so these skills are excluded
+from the public framework export until that changes.

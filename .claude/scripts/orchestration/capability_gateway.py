@@ -13,6 +13,17 @@ def collect_capability_gateway_status() -> dict[str, Any]:
     integrations = _collect_integrations()
     runtime = _collect_runtime()
     browserops = _collect_browserops()
+    try:
+        from buzz_status import read_buzz_status
+
+        buzz = read_buzz_status()
+    except Exception as exc:  # noqa: BLE001 - read-only gateway degrades.
+        buzz = {
+            "enabled": False,
+            "state": "failed",
+            "active_transport": "none",
+            "last_error": _short_error(exc),
+        }
     outbound_actions = [
         action
         for item in integrations["items"]
@@ -28,6 +39,11 @@ def collect_capability_gateway_status() -> dict[str, Any]:
         "toolsets": toolsets,
         "integrations": integrations,
         "browserops": browserops,
+        "collaboration": {
+            "buzz": buzz,
+            "buzz_approval_authority": False,
+            "approval_surface": "homie_only",
+        },
         "outbound_messaging": {
             "status": "policy_gated" if outbound_actions else "none_declared",
             "actions": outbound_actions,

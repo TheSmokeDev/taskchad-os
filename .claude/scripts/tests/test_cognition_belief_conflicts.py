@@ -133,6 +133,66 @@ def test_judge_filters_self_conflict_a_equals_b():
     assert out[0]["a_id"] == "x" and out[0]["b_id"] == "y"
 
 
+def test_judge_filters_fabricated_cross_pair_verdict():
+    """A judge verdict combining ids from two DIFFERENT submitted pairs is dropped.
+
+    Regression for #173 Finding 3: each id individually being 'valid' (mentioned
+    somewhere in the batch) must not be enough — the (a_id, b_id) TUPLE itself
+    must have been one of the actually-submitted candidate pairs. A legitimate
+    in-pair verdict in the same batch must still apply.
+    """
+    a1, b1 = _rec("a1", "alpha one"), _rec("b1", "beta one")
+    a2, b2 = _rec("a2", "alpha two"), _rec("b2", "beta two")
+    parsed = [
+        # fabricated: a1 comes from pair 1, b2 comes from pair 2 — never submitted together
+        {"a_id": "a1", "b_id": "b2", "reason": "cross-pair"},
+        # legitimate: an actual submitted pair
+        {"a_id": "a2", "b_id": "b2", "reason": "real"},
+    ]
+
+    async def reasoning(*_a, **_k):
+        return SimpleNamespace(parsed=parsed, model="x")
+
+    out = _run(bc.judge_contradictions(
+        [(a1, b1), (a2, b2)], cwd=Path("."), settings=_settings(), reasoning=reasoning,
+    ))
+    assert out == [{"a_id": "a2", "b_id": "b2", "reason": "real"}]
+
+
+def test_judge_filters_fabricated_cross_pair_verdict_order_insensitive():
+    """The pair-membership check is order-insensitive (b_id, a_id swapped is still valid)."""
+    a1, b1 = _rec("a1", "alpha one"), _rec("b1", "beta one")
+    parsed = [{"a_id": "b1", "b_id": "a1", "reason": "swapped-but-real"}]
+
+    async def reasoning(*_a, **_k):
+        return SimpleNamespace(parsed=parsed, model="x")
+
+    out = _run(bc.judge_contradictions(
+        [(a1, b1)], cwd=Path("."), settings=_settings(), reasoning=reasoning,
+    ))
+    assert out == [{"a_id": "b1", "b_id": "a1", "reason": "swapped-but-real"}]
+
+
+def test_judge_filters_fabricated_verdict_with_shared_id_pairs():
+    """Overlapping-id candidate pairs (a common belief pairs with 2 others) still
+    reject a fabricated cross-pair combination of the two non-shared ids.
+
+    find_candidate_pairs commonly produces pairs sharing one id (a's belief is
+    topically close to both b's and c's) — the disjoint-id regression tests
+    above don't exercise this more realistic shape.
+    """
+    a, b, c = _rec("a", "alpha"), _rec("b", "beta"), _rec("c", "gamma")
+    parsed = [{"a_id": "b", "b_id": "c", "reason": "fabricated-shared-id"}]
+
+    async def reasoning(*_a, **_k):
+        return SimpleNamespace(parsed=parsed, model="x")
+
+    out = _run(bc.judge_contradictions(
+        [(a, b), (a, c)], cwd=Path("."), settings=_settings(), reasoning=reasoning,
+    ))
+    assert out == []
+
+
 def test_judge_drops_non_dict_conflict_items():
     """Junk (non-dict) items in the judge array never reach the conflict list."""
     a = _rec("x", "alpha")

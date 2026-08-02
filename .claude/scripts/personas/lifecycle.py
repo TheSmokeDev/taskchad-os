@@ -384,6 +384,23 @@ def _seed_missing_identity_files(profile_dir: Path, profile_name: str) -> None:
             )
 
 
+def initialize_staged_profile_inventory(
+    profile_dir: Path,
+    profile_name: str,
+) -> None:
+    """Initialize a provisioner-owned staging directory without aliases.
+
+    This is deliberately narrower than :func:`create_profile`: it never
+    creates wrappers, services, schedulers, bot state, or external resources.
+    The atomic provisioner validates and confines ``profile_dir`` before
+    calling this lifecycle-owned inventory primitive.
+    """
+
+    validate_persona_name(profile_name)
+    _ensure_inventory_dirs(profile_dir)
+    _seed_missing_identity_files(profile_dir, profile_name)
+
+
 # =============================================================================
 # DATACLASSES
 # =============================================================================

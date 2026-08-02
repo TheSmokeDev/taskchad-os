@@ -97,6 +97,9 @@ class _ProfileExecutionContext:
     system_prompt: str | None = None
     tools: list[str] | None = None
     error: str | None = None
+    # Epic #236 — the LIVE profile config, so per-persona tool scope can be
+    # resolved from the profile rather than the roster snapshot.
+    config: dict | None = None
 
 
 _MAIN_AGENT: Final[RosterAgent] = RosterAgent(
@@ -310,6 +313,7 @@ def _profile_execution_context(persona_id: str) -> _ProfileExecutionContext:
         env=env,
         system_prompt=system_prompt or None,
         tools=tools,
+        config=cfg,
     )
 
 
@@ -858,14 +862,65 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
     # text-only/brief regardless. NOTE: this is a trusted-operator escape hatch —
     # bypassPermissions + Bash/Write/Edit + unfiltered MCP can act OUTSIDE the
     # named integration mutation gates (see config.cabinet_persona_full_tools_enabled).
+    # Epic #236 — per-persona scoped tools. Resolved from the LIVE profile
+    # config (`toolsets:` / `tools:`), not from the roster snapshot: the
+    # snapshot owns membership/order/display, the profile owns capability.
+    #
+    # This replaces the all-or-nothing CABINET_PERSONA_FULL_TOOLS hatch for any
+    # persona that declares a scope. That flag gave EVERY cabinet persona the
+    # main homie's entire toolset plus bypassPermissions — its own comment
+    # admits it "can act OUTSIDE the named integration mutation gates" — which
+    # is the opposite of "crypto's set is not Browser Homie's set". It stays as
+    # a fallback ONLY for personas that declare nothing, so the escape hatch
+    # does not silently vanish from an operator's running setup.
+    #
+    # Voice turns stay text-only regardless: a spoken turn has no surface for a
+    # tool result, and a persona narrating tool calls aloud is worse than one
+    # that simply answers.
+    scoped_tools = None
+    persona_scope_version = None
+    if not args.is_voice:
+        try:
+            from runtime.persona_tools import (
+                build_persona_tool_payload,
+                persona_tool_scope_version,
+            )
+
+            scoped_tools = build_persona_tool_payload(
+                args.persona_id, profile_context.config or {}
+            )
+            if scoped_tools is not None:
+                persona_scope_version = persona_tool_scope_version(
+                    args.persona_id, scoped_tools[0]
+                )
+        except Exception:  # noqa: BLE001 — a tool-assembly failure must not kill the turn
+            _logger.warning(
+                "scoped tool assembly failed for cabinet persona %s; continuing tool-less",
+                args.persona_id,
+                exc_info=True,
+            )
+            scoped_tools = None
+
     _full_tools = config.cabinet_persona_full_tools_enabled() and not args.is_voice
-    if _full_tools:
+    if scoped_tools is not None:
+        turn_tool_defs, turn_tool_dispatch = scoped_tools
+        turn_capability = TOOL_REASONING
+        # allowed_tools stays EMPTY and the deny floor stays intact: caller
+        # tools ride `tool_defs`, never the provider's own built-in surface.
+        # Granting a persona `crypto` must not also hand it Bash.
+        turn_allowed_tools = []
+        turn_disallowed_tools = list(policy.disallowed_tools)
+        turn_mcp_names = mcp_names
+        turn_max_turns = config.cabinet_persona_max_tool_turns()
+    elif _full_tools:
+        turn_tool_defs, turn_tool_dispatch = None, None
         turn_capability = TOOL_REASONING
         turn_allowed_tools = list(config.DEFAULT_AGENT_TOOLSET)
         turn_disallowed_tools: list[str] | None = None
         turn_mcp_names = list(args.persona.mcp_servers.keys())
         turn_max_turns = config.cabinet_persona_max_tool_turns()
     else:
+        turn_tool_defs, turn_tool_dispatch = None, None
         turn_capability = TEXT_REASONING
         turn_allowed_tools = list(policy.allowed_tools)
         turn_disallowed_tools = list(policy.disallowed_tools)
@@ -926,6 +981,11 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
         allowed_tools=turn_allowed_tools,
         disallowed_tools=turn_disallowed_tools,
         mcp_servers=turn_mcp_names,
+        # Epic #236 — caller-supplied scoped tools. None on every legacy path,
+        # so the pre-epic request is byte-identical.
+        tool_defs=turn_tool_defs,
+        tool_dispatch=turn_tool_dispatch,
+        tool_scope_version=persona_scope_version,
         permission_mode="bypassPermissions",
         allow_fallback=True,
         metadata={
@@ -933,6 +993,11 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
             "turn_id": args.turn_id,
             "persona_id": args.persona_id,
             "caller": "cabinet_orchestrator",
+            **(
+                {"tool_scope_version": persona_scope_version}
+                if persona_scope_version is not None
+                else {}
+            ),
             "tool_policy": {
                 "allowed_count": len(turn_allowed_tools),
                 "disallowed_count": len(turn_disallowed_tools or []),

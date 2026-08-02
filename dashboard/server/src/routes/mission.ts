@@ -1,5 +1,5 @@
 /**
- * Mission control passthrough — /api/convoy*, /api/mailbox*, /api/team*,
+ * Homie orchestration passthrough — /api/convoy*, /api/mailbox*, /api/team*,
  * /api/capabilities*.
  *
  * These endpoints belong to the orchestration slice (orchestration-owner).

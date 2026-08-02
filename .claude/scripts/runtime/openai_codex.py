@@ -18,7 +18,13 @@ import tempfile
 from pathlib import Path
 
 from .auth_profiles import CodexAuthProfile, codex_auth_status
-from .base import RUNTIME_LANE_GENERIC, RuntimeRequest, RuntimeResult, RuntimeToolCall
+from . import base as _base
+from .base import (
+    RUNTIME_LANE_GENERIC,
+    RuntimeRequest,
+    RuntimeResult,
+    RuntimeToolCall,
+)
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .errors import (
     RuntimeConfigError,
@@ -44,12 +50,70 @@ class OpenAICodexRuntime:
     def __init__(self, profile: RuntimeProfile) -> None:
         self.profile = profile
 
+    def supports_caller_tool_defs(self) -> bool:
+        """False — MEASURED 2026-07-27 against codex-cli 0.145.0.
+
+        A request carrying a trivial OpenAI-format ``get_weather`` definition
+        returned ``tool_call_count=0`` with no tool call of any kind; the model
+        replied *"I can't call get_weather because that tool is not actually
+        available in this session."*
+
+        Corroborated three ways: ``codex exec --help`` exposes no
+        ``--tools``/``--functions`` key (``--output-schema`` constrains the
+        final RESPONSE shape, not the tool list); Codex's own enumeration of
+        its live registry returns only its built-ins (``functions.exec``,
+        ``functions.apply_patch``, ``web.run``, ...) with no slot for
+        caller-supplied schemas; and MCP servers are the only tool-extension
+        path for ``codex exec``.
+
+        Codex's own review of this file (2026-07-27) confirmed the exclusion by
+        reading the 0.145.0 Rust source: the `exec` thread starts with empty
+        dynamic tools and explicitly REJECTS dynamic-tool callbacks in exec
+        mode. No hidden caller-schema carrier was missed.
+
+        SCOPE OF THIS FALSE — transport, not vendor. The same review corrected
+        an earlier over-broad claim here that Codex could "never" carry caller
+        tools. Two other transports on the SAME 0.145.0 binary could:
+
+          * ``codex exec`` accepts MCP servers, including one-run ``-c
+            mcp_servers...`` config. An ephemeral MCP bridge could translate
+            ``tool_defs`` and route calls back to ``tool_dispatch``.
+          * ``codex app-server`` exposes experimental ``dynamicTools`` plus an
+            ``item/tool/call`` flow — a first-party caller-tool surface that
+            needs no MCP at all.
+
+        Neither is what THIS adapter invokes, so False is correct today. But
+        capability belongs to the transport, not the provider name: a future
+        Codex adapter on a different transport may legitimately return True,
+        and the router asks each adapter rather than consulting a vendor
+        blocklist precisely so that can happen without touching routing.
+
+        The failure mode is a POLITE DROP rather than an error, which is why
+        the router must exclude this lane for tool-carrying turns: an ignored
+        tool definition is indistinguishable from a persona that refuses to act.
+
+        Codex remains fully eligible for text turns and for TOOL_REASONING
+        turns that use its OWN shell/edit tools. Only caller-supplied
+        definitions are unsupported.
+        """
+        return False
+
+    def supports_model_only(self) -> bool:
+        """False: `codex exec` always owns a built-in command surface."""
+        return False
+
     def supports(self, request: RuntimeRequest) -> bool:
         if request.capability not in {TEXT_REASONING, TOOL_REASONING}:
             return False
         # Session resume is Claude-specific. Hooks are allowed but ignored
         # (the Codex CLI handles its own sandbox/safety).
         if request.resume is not None:
+            return False
+        # Defense in depth. The lane router already excludes non-carrying
+        # adapters for tool-carrying requests with a better diagnostic, but a
+        # direct caller must not be able to hand this adapter tool definitions
+        # it will silently discard.
+        if _base.request_carries_tools(request) and not self.supports_caller_tool_defs():
             return False
         return True
 

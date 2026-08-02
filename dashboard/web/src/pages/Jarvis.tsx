@@ -113,7 +113,8 @@ export function Jarvis() {
   const capabilities = asRecord(data.capabilities);
   const channels = asRecord(data.channels);
   const telegram = asRecord(channels.telegram);
-  const relay = asRecord(channels.mission_control_relay);
+  const dashboard = asRecord(channels.homie_dashboard);
+  const buzz = asRecord(channels.buzz);
   const alignment = asRecord(telegram.metadata_alignment);
   const observability = asRecord(data.observability);
   const providers = Object.entries(asRecord(runtime.providers));
@@ -168,8 +169,10 @@ export function Jarvis() {
               <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
                 <Field label="Telegram" value={telegram.connected ? 'connected' : telegram.status} />
                 <Field label="Telegram Sessions" value={numberText(telegram.sessions_active)} />
-                <Field label="Health Port" value={relay.health_check_port} />
-                <Field label="Orchestration Port" value={relay.orchestration_api_port} />
+                <Field label="Dashboard Health Port" value={dashboard.health_check_port} />
+                <Field label="Orchestration Port" value={dashboard.orchestration_api_port} />
+                <Field label="Buzz" value={buzz.state} />
+                <Field label="Buzz Transport" value={buzz.active_transport} />
               </div>
               <div class="mt-4 grid gap-2">
                 <div class="flex items-center justify-between gap-3 rounded bg-[var(--color-elevated)] px-3 py-2">

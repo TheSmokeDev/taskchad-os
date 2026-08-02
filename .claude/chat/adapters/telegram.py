@@ -1183,6 +1183,10 @@ class TelegramAdapter:
                 "interaction_type": "button",
                 "custom_id": custom_id,
                 "callback_data": raw,
+                # Callback queries can only target a message emitted by this
+                # bot instance.  Stamp the common provenance bit used by the
+                # capability-approval router gate.
+                "source_message_is_own": True,
             },
         )
         await self._enqueue(incoming)

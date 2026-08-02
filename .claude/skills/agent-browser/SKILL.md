@@ -93,9 +93,27 @@ a test pass. Upwork uses the named attach-only session `operator-desk`
 inside this same Chrome process/profile.
 
 If raw `http://127.0.0.1:18222/json/version` health succeeds but Agent Browser
-attach hangs, stop the worker. Foreground and reload the exact existing tab,
-retry one read-only attachment, then keep the workflow paused if it still
-fails. Never kill, relaunch, or duplicate Chrome as recovery.
+attach hangs or fails with `Failed to read ... (os error 10060)`, stop the
+worker. Foreground and reload the exact existing tab, retry one read-only
+attachment, then keep the workflow paused if it still fails. Do not spawn a
+fresh/duplicate browser, a headless fallback, or a second keeper as recovery.
+
+**Chrome-150 Origin exception (proven 2026-07-19).** That exact "raw CDP healthy
+but every Agent Browser command 10060s" signature after a Chrome update is
+Chrome 150+ returning `403` on any CDP WebSocket handshake carrying an `Origin`
+header — Agent Browser sends one. It is NOT a port, daemon, IPv6, or version
+problem (downgrade, portproxy, and fresh-profile are all proven dead ends). The
+fix is the Chrome launch flag `--remote-allow-origins=*`, which the sole keeper
+`ensure-linkedin-chrome.ps1` now includes. Sanctioned recovery here is a
+*controlled keeper relaunch* (not an ad-hoc Chrome kill): kill only the
+CDP-profile Chrome by `--user-data-dir`, clear stale `~/.agent-browser/default.*`,
+re-run the keeper (or reboot — logon trigger), verify with
+`agent-browser --cdp 18222 tab list`, then resume the desk via
+`resume_supervised_preview_after_repair`. Isolate the cause in one test: a raw
+WebSocket to the `webSocketDebuggerUrl` returns `Browser.getVersion` OK with the
+Origin header suppressed and `403` with it present. Full writeup:
+`docs/manual/features/operator-desk.md` → Browser Recovery, and memory
+`agent-browser-broken-cdp-read-timeout`.
 
 ## Linux / VPS Backend
 

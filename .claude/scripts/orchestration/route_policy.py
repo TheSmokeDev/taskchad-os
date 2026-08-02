@@ -256,6 +256,10 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     ("POST", "/api/agents/{persona_id}/deactivate"): "tenant_persona",
     ("POST", "/api/agents/{persona_id}/restart"): "tenant_persona",
     ("POST", "/api/agents/validate-id"): "tenant_persona",
+    # Shipped unclassified by the blueprint-unification commit (72a381c0) —
+    # repaired here. No-write preview, but it takes a persona_id and gates it
+    # via _require_persona_in_scope, so it scopes like validate-id above.
+    ("POST", "/api/agents/preview"): "tenant_persona",
     ("POST", "/api/agents/validate-token"): "admin",
     ("GET", "/api/agents/suggestions"): "admin",
     ("POST", "/api/agents/suggestions/refresh"): "admin",
@@ -325,6 +329,41 @@ ROUTE_POLICY: dict[tuple[str, str], Policy] = {
     # no persona/workspace dimension on these STT/TTS helpers ──
     ("POST", "/api/voice/stt"): "admin",
     ("POST", "/api/voice/tts"): "admin",
+    # ── Talk mode + Discord voice ───────────────────────────────────────────
+    # Repair of an inherited gap, not a new lane: Talk Mode shipped these seven
+    # routes without registering them, so the CI invariant that proves every
+    # route is classified had been failing since. They are classified `admin`
+    # to match the /api/voice/stt precedent directly above — an operator-global
+    # surface with no persona or workspace dimension to scope by.
+    #
+    # This is behaviour-neutral in the default single-tenant configuration
+    # (enforcement is off, and an unregistered route already 403s a bound
+    # tenant token). If Talk Mode later grows a persona dimension, these should
+    # be revisited by that slice's owner rather than left at admin by default.
+    ("GET", "/api/talk/status"): "admin",
+    ("POST", "/api/talk/session"): "admin",
+    ("POST", "/api/talk/tool"): "admin",
+    ("GET", "/api/talk/skill-runs/{run_id}"): "admin",
+    ("GET", "/api/talk/runs"): "admin",
+    ("GET", "/api/talk/runs/{run_id}"): "admin",
+    ("POST", "/api/talk/flush"): "admin",
+    ("GET", "/api/discord/voice/status"): "admin",
+    ("POST", "/api/discord/voice/join"): "admin",
+    ("POST", "/api/discord/voice/leave"): "admin",
+    # ── Dashboard: Archon live telemetry (epic #252 / #254) ─────────────────
+    # Read-only bridge over Archon's own run ledger (`remote_agent_workflow_events`).
+    # Classified `admin` on the talk-mode precedent directly above: the Archon
+    # ledger is an operator-global surface with no persona or workspace column
+    # to scope by. When #256 lands the work-item -> conversation-id mapping,
+    # this pair should be revisited by that slice rather than left at admin.
+    ("GET", "/api/archon/events"): "admin",
+    ("GET", "/api/archon/stream"): "admin",
+    # The convoy-row enrichment (#258) is the exception the note above predicted:
+    # it is entered through a CONVOY id, which does have a workspace column, so
+    # it is classified on the convoy grain rather than left global. The handler
+    # threads `request.state.workspace_id` into `ConvoyService.get_convoy` and a
+    # cross-workspace id 404s before any Archon row is read.
+    ("GET", "/api/archon/convoy/{convoy_id}"): "tenant_workspace",
     # ── Dashboard: cabinet (admin — no workspace column, B6 v0) ─────────────
     ("GET", "/api/cabinet/list"): "admin",
     ("POST", "/api/cabinet/new"): "admin",

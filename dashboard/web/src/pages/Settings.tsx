@@ -16,9 +16,17 @@ interface AutostartStatus {
   detail: string;
 }
 
+interface CapabilityStatus {
+  collaboration?: {
+    buzz?: Record<string, unknown>;
+    approval_surface?: string;
+  };
+}
+
 export function Settings() {
   const settings = useFetch<DashboardSettings>('/api/dashboard/settings');
   const autostart = useFetch<AutostartStatus>('/api/autostart');
+  const capabilities = useFetch<CapabilityStatus>('/api/capabilities/status', 30_000);
   const [savingAutostart, setSavingAutostart] = useState(false);
 
   async function updateSetting(key: string, value: string) {
@@ -43,6 +51,21 @@ export function Settings() {
       setSavingAutostart(false);
     }
   }
+
+  async function openBuzz() {
+    const bridge = typeof window !== 'undefined' ? window.homieDesktop : undefined;
+    if (!bridge?.openBuzz) {
+      pushToast({ tone: 'error', title: 'Open Buzz is available in The Homie Desktop app' });
+      return;
+    }
+    try {
+      await bridge.openBuzz();
+    } catch (err: any) {
+      pushToast({ tone: 'error', title: 'Could not open Buzz Desktop', description: err?.message || String(err) });
+    }
+  }
+
+  const buzz = capabilities.data?.collaboration?.buzz ?? {};
 
   return (
     <div class="flex flex-col h-full">
@@ -83,6 +106,29 @@ export function Settings() {
                 </span>
               </label>
             </Field>
+          </div>
+        </section>
+
+        <section>
+          <h3 class="text-[11px] uppercase tracking-wider text-[var(--color-text-faint)] mb-3">Buzz collaboration</h3>
+          <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4 space-y-3">
+            <div class="grid grid-cols-2 gap-3 text-[12px]">
+              <Field label="State"><span class="text-[var(--color-text)]">{String(buzz.state ?? 'disabled')}</span></Field>
+              <Field label="Transport"><span class="text-[var(--color-text)]">{String(buzz.active_transport ?? 'none')}</span></Field>
+              <Field label="Relay"><span class="text-[var(--color-text)]">{String(buzz.relay_host ?? 'not configured')}</span></Field>
+              <Field label="Identity"><span class="text-[var(--color-text)]">{String(buzz.identity ?? 'not available')}</span></Field>
+              <Field label="Watched channels"><span class="text-[var(--color-text)]">{String(buzz.watched_channel_count ?? 0)}</span></Field>
+              <Field label="CLI"><span class="text-[var(--color-text)]">{String(buzz.cli_version ?? 'unknown')}</span></Field>
+            </div>
+            {buzz.last_error ? <p class="text-[11px] text-[var(--color-status-warn)]">{String(buzz.last_error)}</p> : null}
+            <button
+              type="button"
+              onClick={openBuzz}
+              class="rounded border border-[var(--color-border)] bg-[var(--color-elevated)] px-3 py-1.5 text-[12px] text-[var(--color-text)] hover:border-[var(--color-accent)]"
+            >
+              Open Buzz
+            </button>
+            <p class="text-[11px] text-[var(--color-text-faint)]">Buzz carries signed chat and redacted receipts. Approvals remain Homie-only.</p>
           </div>
         </section>
 

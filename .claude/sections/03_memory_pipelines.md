@@ -232,23 +232,24 @@ uv run python memory_weekly.py --days 14    # Two-week lookback
 
 **State:** `.claude/data/state/weekly-state.json`
 
-### Dream Consolidation (Post-Weekly + Manual)
+### Dream Consolidation (Nightly + Post-Weekly + Manual)
 
-Deep memory consolidation — merges cross-session signal, prunes stale entries, normalizes dates, resolves contradictions. Runs as a post-step of weekly synthesis and is also callable standalone. Provider-agnostic via `run_with_fallback()`.
+Deep memory consolidation — merges cross-session signal, prunes stale entries, normalizes dates, resolves contradictions, and (Phase 5) evolves durable self/operator beliefs. Runs nightly (~3 AM, `SecondBrain-Dream` scheduled task), as a post-step of weekly synthesis, and is also callable standalone. Provider-agnostic via `run_with_fallback()`.
 
-**4 Phases:**
+**5 Phases:**
 
 | Phase | Type | What It Does |
 |-------|------|-------------|
 | 1. Orient | Pure Python | Reads MEMORY.md stats, lists recent logs, counts concepts |
 | 2. Gather Signal | Pure Python | Regex grep over daily logs, raw flush leftovers (STATE_DIR), and open episodes (`episodes/` — Living Mind Act 3) for corrections, saves, stalls, repeated entities. Weighted scoring (threshold=4). If no signal → `DREAM_SILENT`, exits without LLM call |
-| 3. Consolidate | LLM | Merges signal into MEMORY.md/SELF.md via the amendment ledger, normalizes dates, resolves contradictions. Prompt carries a capped `## Recent Episodes (open)` digest when open episodes exist; after a successful return, reviewed episodes flip to `status: consolidated` + `consolidated_at:` (pure Python, own try/except — flip failure never fails the dream; consolidate failure leaves episodes open for retry) |
+| 3. Consolidate | LLM | Merges signal into MEMORY.md/SELF.md via the amendment ledger, normalizes dates, resolves contradictions. Prompt carries a capped `## Recent Episodes (open)` digest when open episodes exist; after a successful return, reviewed episodes flip to `status: consolidated` + `consolidated_at:` (pure Python, own try/except — flip failure never fails the dream; consolidate failure leaves episodes open for retry). Also asks for optional `belief_candidate` JSON blocks (Phase 5 input — zero extra LLM call) |
 | 4. Prune | LLM | Enforces 200-line limit, removes stale entries, verifies wikilink pointers. Never touches `episodes/` (insert-only autobiography) |
+| 5. Belief Evolution | LLM (identity rail) | Harvests belief candidates from the Phase-3 response + a persistent retry queue, routes each through the evidence-gate/floor/judge/amendment chain via `propose_belief()`. Gated by `HOMIE_KILLSWITCH_BELIEF_AUTONOMY` (ships ON), throttled to `max_adoptions_per_night`, retry-budgeted by `max_attempts`. `EVOLVE_SILENT` when nothing qualifies. Never fails the dream cycle — own try/except. See `docs/the-living-self-manual.md` § Act 4 |
 
 | File | Purpose |
 |------|---------|
-| `memory_dream.py` | Main script — 4-phase pipeline |
-| `config.py` | `DREAM_STATE_FILE`, `DREAM_MIN_INTERVAL_HOURS`, `DREAM_SIGNAL_THRESHOLD` |
+| `memory_dream.py` | Main script — 5-phase pipeline |
+| `config.py` | `DREAM_STATE_FILE`, `DREAM_MIN_INTERVAL_HOURS`, `DREAM_SIGNAL_THRESHOLD`, `get_belief_evolve_settings()` |
 
 ```bash
 uv run python memory_dream.py              # Run dream cycle
@@ -267,7 +268,7 @@ uv run python memory_dream.py --days 14    # Scan 14 days of logs
 - 18 tests (12 Phase 1-2 + 6 adversarial: happy path, failure retry, partial completion, post-weekly, threshold)
 
 **State:** `.claude/data/state/dream-state.json`
-**Trigger:** Post-step of weekly synthesis (Sunday 8 PM) + standalone CLI + `/vault-dream` skill (planned)
+**Trigger:** Nightly ~3 AM (`SecondBrain-Dream`, `setup_dream_scheduler.ps1` / `run_dream.sh`) + post-step of weekly synthesis (Sunday 8 PM) + standalone CLI + `/vault-dream` skill (planned)
 
 ### Working Memory (Living Mind Phase 1)
 
@@ -366,7 +367,7 @@ Where Living Mind gave the assistant a substrate (sense → remember → brief),
 | 1 — self-model source | `cognition/operator_beliefs.py`, `self_model.py`, `capture.py` | Models the OPERATOR from verbatim `role==user` chat.db turns (not the bot's own replies); embedding cosine dedup (`INFERENCE_DEDUP_THRESHOLD=0.72`); `explicit`/`reflection` provenance sources wired; reversible `migrate-corpus` CLI quarantines keyword-capture poison; renderer source-filtered | Reflection (8 AM) extracts; per-turn capture stages |
 | 2 — contradiction engine | `cognition/belief_conflicts.py` | A belief can be HELD AGAINST CONFLICT — nightly embedding pre-filter + LLM judge; explicit beliefs SACROSANCT (an LLM can never lower an operator-stated belief; loser is always a `reflection` by construction); once-only via the `contradicted_by` audit key (drops once, never flaps); held-under-tension render | Reflection (8 AM), after extraction |
 | 3 — gated cognitive pass | `cognition/cognitive_pass.py`, `processes.py`, `proactive_actions.py` | The Homie THINKS BEFORE IT SPEAKS — gated inner monologue on substantive turns (the `*_process` functions refactored to return `(wm, thought, actions)` not BE the reply); haiku tier, `asyncio.wait_for` timeout, history-pure (never enters the transcript), win32-capped via the canonical `regions.truncate_for_win32_argv`; proactive action proposes through the default-deny integration gate | Per-turn, gated (`COGNITIVE_PASS_FIRE_PROCESSES=planning`, `MIN_CHARS=40`) |
-| 4 — evolve → identity | `scripts/evolve/evolve_loop.py`, `judge.py`, `belief_regression.py`, `cognition/evidence_gate.py`, the `amendments.py` seam | Belief is EARNED not asserted — three layers: evidence-READ gate (`evidence_gate` opens+CONFINES to the vault+BOUNDS each cited path), the deterministic `belief_regression` floor (reuses the never-softenable `evolve/veto` floor; seeded with the system's own failure modes), and a circularity-guarded scheduled LLM judge (fails CLOSED). The `amendments.py` default-deny gate is ADDITIVE-unchanged (`evidence_check=None` = byte parity). Archon drives candidate search; `evolve/` is the fitness oracle | `evolve propose` scheduled (recall-safe); `propose-belief` Archon-driven (identity) |
+| 4 — evolve → identity | `scripts/evolve/evolve_loop.py`, `judge.py`, `belief_regression.py`, `cognition/evidence_gate.py`, the `amendments.py` seam | Belief is EARNED not asserted — three layers: evidence-READ gate (`evidence_gate` opens+CONFINES to the vault+BOUNDS each cited path), the deterministic `belief_regression` floor (reuses the never-softenable `evolve/veto` floor; seeded with the system's own failure modes), and a circularity-guarded scheduled LLM judge (fails CLOSED). The `amendments.py` default-deny gate is ADDITIVE-unchanged (`evidence_check=None` = byte parity). Archon drives manual candidate search; the nightly dream cycle (Phase 5) drives autonomous candidate search | `evolve propose` scheduled (recall-safe); `propose-belief` nightly via dream-cycle Phase 5 (identity, gated by `HOMIE_KILLSWITCH_BELIEF_AUTONOMY`) + Archon-driven (manual candidate search) |
 | 5 — persona learning | `persona_learning_tick.py`, `memory_reflect.py` (persona corpus path), `session.py` (`persona_id` column), `personas/services.py` (`set_persona_learning`) | The Living Self pointed at every named persona profile — persona-attributed experience trail, scheduled learning fan-out (subprocess spawn via `-p`), reflection-only provenance (forced `source="reflection"`), injection gate (`is_injection_attempt` rejection-only). Also fixes the live bug where persona Discord turns contaminated the main corpus | Persona learning tick (scheduled, background tiers) |
 
 **Key invariants:** the belief judge has ZERO chat-hot-path calls (scheduled/Archon only); the amendment ledger + rollback + audit are untouched (Act 4 inserts before them); the evidence gate confines reads to the vault (no `.env`/secret leakage to the judge prompt); every faculty fails open. The crux acceptance test (form → hold → persist-only-if-earned → act) passes: an empty-evidence high-confidence "I read the doc" belief is REJECTED on a real falsifiable check, SELF.md byte-unchanged.

@@ -33,6 +33,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 # Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
 from personas import apply_persona_override  # noqa: E402
@@ -529,6 +530,53 @@ async def consolidate(
         else ""
     )
 
+    # Living Self Act 4 (#170) — the nightly belief-candidate harvest. This is
+    # ADDITIVE to the prompt the model already receives (zero new LLM calls): the
+    # SAME consolidation call may ALSO emit 0-N fenced `belief_candidate` JSON
+    # blocks, parsed downstream by Phase 5's extract_belief_candidates(). Spliced
+    # in as an unnumbered section (the numbered list ends at #4/#5-episodes) so it
+    # never renumbers the byte-parity-tested identity/instruction blocks.
+    from config import get_belief_evolve_settings  # Rule 1 — call-time resolve
+
+    _bs = get_belief_evolve_settings()
+    # Kimi gate MINOR on PR #181: don't ask the model for belief candidates the
+    # rail will never consume. When autonomy is off (EVOLVE_ENABLED=false OR the
+    # kill switch disabled), emit NO section — a true no-op, not dead prompt
+    # weight that contradicts the "disablement is a true no-op" contract.
+    _belief_rail_on = _bs.enabled
+    try:
+        from security import kill_switches
+        _belief_rail_on = _belief_rail_on and not kill_switches.is_disabled("belief_autonomy")
+    except Exception:
+        pass
+    if not _belief_rail_on:
+        belief_candidate_section = ""
+    else:
+        belief_candidate_section = f"""
+## Belief Candidates (optional, identity-grade only)
+
+If — and ONLY if — the signal above reveals a genuinely NEW, EVIDENCE-BACKED
+belief about the operator or about how The Homie itself works (NOT a routine
+MEMORY.md lesson — those go through the numbered amendments above), emit up to
+{_bs.max_candidates_per_night} belief-candidate JSON block(s), each in its own
+fenced ```json block, shaped EXACTLY:
+{{
+  "kind": "belief_candidate",
+  "target_file": "SELF.md" or "USER.md",
+  "summary": "<short review title>",
+  "rationale": "<why this belief is justified>",
+  "evidence_paths": ["<vault-relative paths to REAL files with real, non-empty content>"],
+  "proposed_content": "<the belief text, under 1200 chars>",
+  "confidence_score": 0.0-1.0
+}}
+
+This is a SEPARATE, STRICTER pathway from the amendments above — every block runs
+through an independent evidence-read + LLM judge before anything is written to
+disk (aim for confidence >= {_bs.candidate_min_confidence:.2f}). Do NOT emit a
+block for routine lessons; only for identity-grade claims. If none qualify, emit
+nothing here.
+"""
+
     prompt = f"""Memory dream consolidation. Merge recent signal into long-term memory.
 {dry_run_note}
 ## Signal Digest (from last {len(signal.corrections) + len(signal.saves) + len(signal.stalls)} items)
@@ -562,7 +610,7 @@ Today is {today_str}. Consolidate the signal above into memory:
    propose the replacement or deletion through the amendment ledger. Include source evidence.
 
 4. Log a brief summary of changes to today's daily log ({get_today_log_path()}).
-{episodes_instruction}
+{episodes_instruction}{belief_candidate_section}
 If nothing in the signal warrants changes, respond with exactly: CONSOLIDATION_OK
 """
 
@@ -606,6 +654,11 @@ If nothing in the signal warrants changes, respond with exactly: CONSOLIDATION_O
                 default_source="memory_dream",
                 apply_limit=AMENDMENT_APPLY_LIMIT,
                 section_cap=AMENDMENT_SECTION_CAP,
+                # Phase 5 owns `belief_candidate` blocks exclusively (evidence-gate
+                # + regression floor + LLM judge + kill-switch + retry-budget). They
+                # must never also be coerced into a regular AmendmentProposal here
+                # and auto-applied through this module's weaker default policy.
+                exclude_kinds=frozenset({"belief_candidate"}),
             )
         applied = [item for item in apply_results if item.status == "applied"]
         if applied:
@@ -711,11 +764,164 @@ If MEMORY.md is already clean and under 200 lines, respond with exactly: PRUNE_O
                 default_source="memory_dream_prune",
                 apply_limit=AMENDMENT_APPLY_LIMIT,
                 section_cap=AMENDMENT_SECTION_CAP,
+                # Security symmetry with consolidate (Kimi/independent gate F1
+                # on PR #181): a belief_candidate block must NEVER be coerced
+                # into a regular amendment and applied via the WEAK policy
+                # (evidence_check=None -> no evidence gate/judge). Belief
+                # candidates flow ONLY through propose_belief in Phase 5.
+                exclude_kinds=frozenset({"belief_candidate"}),
             )
         applied = [item for item in apply_results if item.status == "applied"]
         if applied:
             print(f"[{now_local()}] Auto-applied {len(applied)} dream prune amendment(s)")
     return result.text
+
+
+# =============================================================================
+# PHASE 5: BELIEF EVOLUTION (identity rail — gated + throttled + retry-budgeted)
+# =============================================================================
+
+
+def _render_belief_receipt_line(receipt: dict[str, Any], *, lowercase: bool = False) -> str:
+    """Render the Phase-5 receipt as one daily-log / vault-log line (#170).
+
+    Returns "" for ``not_run`` (an early-return path that never reaches the
+    success block anyway) so callers can skip appending. ``lowercase=True`` yields
+    the vault-log bullet style ("beliefs: ...") vs the daily-log style ("Beliefs:").
+    """
+    result = receipt.get("result", "not_run")
+    label = "beliefs" if lowercase else "Beliefs"
+    skipped_corrupt = receipt.get("skipped_corrupt", 0)
+    corrupt_suffix = f", {skipped_corrupt} corrupt-skipped" if skipped_corrupt else ""
+    if result == "not_run":
+        return ""
+    if result == "EVOLVE_SILENT":
+        return f"{label}: EVOLVE_SILENT (no new/retryable candidates){corrupt_suffix}"
+    if result == "skipped_killswitch":
+        return f"{label}: skipped (kill-switch disabled)"
+    if result == "skipped_evolve_disabled":
+        return f"{label}: skipped (EVOLVE_ENABLED=false)"
+    if result == "failed":
+        return f"{label}: phase failed (non-fatal): {receipt.get('error', '')}"
+    if result == "ran":
+        return (
+            f"{label}: {receipt.get('proposed', 0)} proposed, "
+            f"{receipt.get('adopted', 0)} adopted, "
+            f"{receipt.get('rejected', 0)} rejected, "
+            f"{receipt.get('error_retryable', 0)} retryable-error, "
+            f"{receipt.get('error_terminal', 0)} terminal-error"
+            f"{corrupt_suffix}"
+        )
+    return f"{label}: {result}"
+
+
+async def _run_belief_evolution_phase(
+    consolidation_result: str,
+    test_mode: bool = False,
+) -> dict[str, Any]:
+    """Phase 5 (#170) — the identity rail, gated + throttled + retry-budgeted.
+
+    Runs AFTER Phase 4, sourcing candidates from (a) the SAME Phase-3 consolidation
+    LLM response (zero new LLM calls) and (b) the persistent retry queue of prior
+    ``retryable`` decision artifacts. Each candidate routes through the UNCHANGED
+    ``propose_belief`` chain (evidence-gate -> deterministic floor -> LLM judge ->
+    amendment policy). Adoptions throttle to ``max_adoptions_per_night``.
+
+    NEVER raises: a belief-evolution failure must not fail a dream cycle that
+    already succeeded through Phase 4 (the ``receipt`` dict is built BEFORE the try
+    body, so even a crash before any mutation returns a valid receipt). Gated by
+    ``HOMIE_KILLSWITCH_BELIEF_AUTONOMY`` (ships enabled — unset != disabled); a
+    disabled switch skips ONLY this phase, leaving the overall dream ``result``
+    untouched (distinct from the Phase-3/4 ``llm`` kill-switch, which aborts the
+    whole dream). Returns a receipt dict for the daily log / vault log / state file.
+    """
+    receipt: dict[str, Any] = {
+        "result": "not_run",
+        "candidates_seen": 0,
+        "retried": 0,
+        "proposed": 0,
+        "adopted": 0,
+        "rejected": 0,
+        "error_retryable": 0,
+        "error_terminal": 0,
+        "skipped_corrupt": 0,
+    }
+    try:
+        # Rule 3 — module-attribute lookup so tests can monkeypatch the switch.
+        from security import kill_switches
+
+        try:
+            kill_switches.requireEnabled(
+                "belief_autonomy", caller="memory_dream_belief_evolve"
+            )
+        except kill_switches.KillSwitchDisabled:
+            # Operator intent — skip ONLY Phase 5; the dream itself still succeeds.
+            receipt["result"] = "skipped_killswitch"
+            return receipt
+
+        from config import get_belief_evolve_settings
+        from evolve.evolve_loop import (
+            extract_belief_candidates,
+            load_retryable_belief_candidates,
+            propose_belief,
+        )
+
+        s = get_belief_evolve_settings()
+        if not s.enabled:
+            # A separate, independent gate from the kill switch — EVOLVE_ENABLED
+            # covers the whole evolve rail (propose + propose-belief). Checked
+            # before touching the retry queue/candidates so disablement is a
+            # true no-op, not just an unreconciled zero-adds receipt.
+            receipt["result"] = "skipped_evolve_disabled"
+            return receipt
+        retry_queue, skipped_corrupt = load_retryable_belief_candidates()
+        receipt["skipped_corrupt"] = skipped_corrupt
+        # Only FRESH LLM-authored candidates are capped; the retry queue is bounded
+        # by max_attempts instead (a backlog must never be silently dropped).
+        fresh = extract_belief_candidates(consolidation_result)[: s.max_candidates_per_night]
+        # Retry candidates go FIRST — self-healing a stuck candidate outranks a
+        # brand-new proposal for the adoption-throttle budget.
+        combined = retry_queue + fresh
+        receipt["candidates_seen"] = len(combined)
+        receipt["retried"] = len(retry_queue)
+
+        if not combined:
+            # EVOLVE_SILENT — mirrors DREAM_SILENT: zero extra LLM calls, one line.
+            receipt["result"] = "EVOLVE_SILENT"
+            return receipt
+
+        adopted = 0
+        for cand in combined:
+            if adopted >= s.max_adoptions_per_night:
+                # Throttle: remaining candidates wait for tomorrow (never judged
+                # this run, so no attempts penalty — NOT counted as reject/error).
+                break
+            attempts = int(cand.pop("_attempts", 0))
+            result = await propose_belief(
+                cand, dry_run=test_mode, attempts=attempts
+            )
+            receipt["proposed"] += 1
+            outcome = result.get("outcome", "")
+            if outcome == "adopt":
+                receipt["adopted"] += 1
+                adopted += 1
+            elif outcome == "reject":
+                receipt["rejected"] += 1
+            elif outcome == "error":
+                if result.get("retryable"):
+                    receipt["error_retryable"] += 1
+                else:
+                    receipt["error_terminal"] += 1
+        receipt["result"] = "ran"
+        return receipt
+    except Exception as exc:  # noqa: BLE001 — Phase 5 never fails the dream cycle
+        print(
+            f"[{now_local()}]   WARNING: belief evolution phase failed "
+            f"(non-fatal): {exc}"
+        )
+        receipt["result"] = "failed"
+        receipt["error"] = str(exc)[:200]
+        return receipt
 
 
 # =============================================================================
@@ -913,6 +1119,7 @@ async def _run_dream_inner(
     consolidation_result = ""
     prune_result = ""
     episodes_marked = 0
+    belief_receipt = {"result": "not_run"}
 
     try:
         # === PHASE 3: Consolidate (LLM) ===
@@ -966,6 +1173,18 @@ async def _run_dream_inner(
         else:
             print(f"[{now_local()}] Phase 4: Skipped (MEMORY.md under 150 lines in test mode)")
 
+        # === PHASE 5: Belief Evolution (identity rail — #170) ===
+        # Runs inside the outer try (so it's reached only on a successful Phase 3),
+        # but its OWN internal try/except means it NEVER propagates to the outer
+        # except below — a belief-evolution failure must not flip the dream to
+        # "failed" after Phases 3/4 already succeeded.
+        print(f"[{now_local()}] Phase 5: Belief evolution...")
+        belief_receipt = await _run_belief_evolution_phase(
+            consolidation_result, test_mode=test_mode
+        )
+        phases_completed.append("belief_evolve")
+        print(f"[{now_local()}]   {belief_receipt}")
+
     except Exception as exc:
         # PRD-8 Phase 7a WS4 R2 NM2 — kill-switch is operator intent, not a
         # failure. Save state with result="skipped_killswitch" (NOT "failed")
@@ -1000,6 +1219,7 @@ async def _run_dream_inner(
     # Final state update — success
     state["phases_completed"] = phases_completed
     state["result"] = "consolidated"
+    state["belief_evolve"] = belief_receipt  # #170 — machine-readable Phase-5 receipt
     state.pop("error", None)  # Clear any previous error
     save_state(state, DREAM_STATE_FILE)
 
@@ -1023,6 +1243,12 @@ async def _run_dream_inner(
     elif prune_result:
         summary_parts.append("Pruning: cleaned MEMORY.md")
 
+    # #170 — belief-evolution (Phase 5) receipt line. Rendered for every result
+    # except "not_run" (an early-return path that never reaches here anyway).
+    belief_line = _render_belief_receipt_line(belief_receipt)
+    if belief_line:
+        summary_parts.append(belief_line)
+
     append_to_daily_log("\n".join(summary_parts), "Dream Cycle")
     print(f"[{now_local()}] Dream cycle finished.")
 
@@ -1045,6 +1271,9 @@ async def _run_dream_inner(
                 bullets.append("consolidation: merged signal into memory")
             if "PRUNE_OK" not in (prune_result or ""):
                 bullets.append("pruning: cleaned MEMORY.md")
+            _belief_bullet = _render_belief_receipt_line(belief_receipt, lowercase=True)
+            if _belief_bullet:
+                bullets.append(_belief_bullet)
 
             append_vault_log(
                 MEMORY_DIR,

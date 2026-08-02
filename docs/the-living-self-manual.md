@@ -1,5 +1,11 @@
 # The Living Self Manual
 
+Approved external domain study is handled by the
+[Persona Curriculum Engine](manual/features/persona-curriculum-engine.md).
+Curriculum evidence cannot mint explicit identity beliefs; only operator
+grades and observed outcomes enter the Living Self staging pipeline, forced to
+reflection provenance and confined to the graded persona.
+
 This is the on-demand context manual for The Homie's cognitive system — the
 "living self." Load this when you need to understand how the assistant senses
 the world while you are away, forms its own model of you, holds a belief against
@@ -87,9 +93,9 @@ The cognitive system runs on three clocks: per-turn (the hot path), scheduled
 | **Per turn** | Proactive recall (gated on message length); the gated cognitive pass (substantive/planning turns only); the session-opening brief (first turn after an absence) | The assistant retrieves relevant memory, optionally thinks before replying, and may open with "while you were out" |
 | **Daily (morning reflection)** | Operator-belief extraction (Act 1); the contradiction pass (Act 2); inference decay; the next session brief is staged | New beliefs are formed from the day's operator turns, conflicts are judged, stale beliefs age out |
 | **Weekly synthesis** | Seven-day log synthesis; durable-memory amendments applied (capped per run) | The week is summarized; approved amendments land through the audited ledger |
-| **Dream cycle** | A four-phase consolidation (orient → gather signal → consolidate → prune) that fires only when a signal threshold is met | Cross-session signal is merged; stale entries pruned; the index rebuilt |
+| **Dream cycle** | A five-phase consolidation (orient → gather signal → consolidate → prune → belief-evolve) that fires nightly (~3 AM) or when a signal threshold is met | Cross-session signal is merged; stale entries pruned; the index rebuilt; identity-grade beliefs may be proposed |
 | **Evolve loop (scheduled)** | The safe recall-tuning `propose` — replay over a candidate config, compare, evaluate the regression corpus, write a decision artifact | Proves the test-and-keep machinery on safe candidates; no identity mutation |
-| **Evolve identity rail (on-demand)** | The Archon-driven `propose-belief` — evidence-read + regression floor + LLM judge, then the audited amendment gate | A candidate self-belief is adopted ONLY if it earned it |
+| **Evolve identity rail (nightly + on-demand)** | Nightly via dream-cycle Phase 5 (harvests candidates from the same consolidation call, zero extra model calls) + the Archon-driven `propose-belief` for manual candidate search — both: evidence-read + regression floor + LLM judge, then the audited amendment gate | A candidate self-belief is adopted ONLY if it earned it |
 
 The key integration point is the morning reflection: it is where the assistant
 reads the day's verbatim operator turns, extracts beliefs, and then runs the
@@ -283,9 +289,9 @@ Full details: [Persona Learning Loop](manual/features/persona-learning-loop.md).
 |---|---|---|
 | Morning reflection (`memory_reflect.py`) | Daily, scheduled | Operator-belief extraction (Act 1), the contradiction pass (Act 2), inference decay, and staging the next session brief. `--test` dry-runs it with no writes. |
 | Weekly synthesis (`memory_weekly.py`) | Weekly, scheduled | Seven-day synthesis; applies pending amendments (capped per run). |
-| Dream cycle (`memory_dream.py`) | Interval + signal threshold | Four-phase consolidation; exits silently with no model call when no signal is found. |
+| Dream cycle (`memory_dream.py`) | Nightly ~3 AM (`SecondBrain-Dream`) + interval/signal threshold + post-weekly chain | Five-phase consolidation (Orient/Gather/Consolidate/Prune/**Belief-Evolve**); exits silently with no model call when no signal is found. Phase 5 (#170) is the nightly identity rail — see the `propose-belief` row. |
 | Evolve `propose` (`evolve/evolve_loop.py propose`) | Scheduled daily 12:30 PM (moved from 6:00 AM 2026-07-16 — box asleep at 6, wake catch-ups were refused and the rail ran silent 7/13–7/16) | The safe recall-tuning rail — replay, compare, regression corpus, decision artifact. No identity mutation. **Known issue (2026-07-16):** all five `evolve/regression_queries.json` entries expect `expected_top_path: MEMORY.md`, but entity-compilation concept pages now outrank MEMORY.md for those queries, so every propose run fails the floor with `wrong_top_path` and exits 1 (fail-closed — no candidate can be accepted). Recalibration is an operator decision: point the entries at the new canonical concept pages, or move the floor to a top-N containment check. Two observed tops smell like real ranking issues: an `_archive/` page tops "convoy mailbox orchestration phases" and a 2026-04-25 daily log tops "evolve replay harness phase 2". |
-| Evolve `propose-belief` (`evolve/evolve_loop.py propose-belief`) | Archon-driven, on-demand | The identity rail — evidence-read + floor + judge, then the audited amendment gate. |
+| Evolve `propose-belief` (`evolve/evolve_loop.py propose-belief`) | Dream-cycle Phase 5 nightly (identity) + Archon-driven (manual candidate search) | The identity rail — evidence-read + floor + judge, then the audited amendment gate. Nightly (#170) it harvests candidates from the SAME Phase-3 consolidation call (zero extra model calls) plus a persistent retry queue, gated by `HOMIE_KILLSWITCH_BELIEF_AUTONOMY` (ships **ON**), throttled to `BELIEF_MAX_ADOPTIONS_PER_NIGHT` (2), and retry-budgeted by `BELIEF_MAX_ATTEMPTS` (3) — a candidate whose attempts reach the cap goes terminal (`retry_budget_exhausted`) instead of being re-judged forever. `EVOLVE_SILENT` when no new/retryable candidates. Receipts land in the daily log's `Dream Cycle` section, the vault log, and `state["belief_evolve"]`; `/diagnostics` shows a `belief_evolve_nightly` subsystem. |
 | Corpus migration (`self_model.py migrate-corpus`) | One-time, manual | Quarantines keyword-captured self-model records to a reversible backup. |
 | Persona learning tick (`persona_learning_tick.py`) | Scheduled | Enumerates learning-enabled personas, spawns per-persona reflection on background tiers. See [Persona Learning Loop](manual/features/persona-learning-loop.md). |
 | `thehomie profile learning enable\|disable <name>` | On-demand | Opt a persona into/out of learning (strict-read RMW + audit row). |
@@ -342,6 +348,11 @@ change). Defaults below are the shipped values.
 | `BELIEF_EVIDENCE_MAX_BYTES` | `524288` | Read bound (512 KiB) — larger files are treated as non-supporting. |
 | `BELIEF_JUDGE_MIN_CORRECTNESS` | `0.6` | Judge correctness floor for adoption. |
 | `BELIEF_JUDGE_MIN_FIDELITY` | `0.6` | Judge evidence-fidelity floor for adoption. |
+| `HOMIE_KILLSWITCH_BELIEF_AUTONOMY` | unset (= **enabled**) | Set to `disabled` to stop the nightly Phase-5 belief evolution without touching the scheduler (#170). Skips ONLY Phase 5 — the dream itself still runs. |
+| `BELIEF_MAX_ATTEMPTS` | `3` | Retry-budget cap per candidate. A retryable candidate whose attempts reach this goes terminal (`retry_budget_exhausted`) instead of being re-judged forever. |
+| `BELIEF_MAX_ADOPTIONS_PER_NIGHT` | `2` | Adoption throttle per nightly Phase-5 run; remaining candidates wait for the next night. |
+| `BELIEF_MAX_CANDIDATES_PER_NIGHT` | `3` | Cap on FRESH LLM-authored candidates parsed from the consolidation response (the retry queue is bounded by `BELIEF_MAX_ATTEMPTS` instead). |
+| `BELIEF_CANDIDATE_MIN_CONFIDENCE` | `0.75` | Advisory confidence hint surfaced in the nightly consolidation prompt (the apply-time 0.75 policy gate is the real floor). |
 
 The Living Mind subfeatures (heartbeat blocker escalation, ambient observations,
 episodes, the session brief) have their own knob tables on their feature pages.

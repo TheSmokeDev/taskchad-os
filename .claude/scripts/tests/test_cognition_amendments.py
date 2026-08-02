@@ -220,6 +220,97 @@ def test_policy_rejects_secret_like_content(tmp_path: Path) -> None:
     assert "sk-testsecret" not in (memory_dir / "MEMORY.md").read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "Use this: <REDACTED-github>",
+        "AWS key is <REDACTED-aws> for the pipeline.",
+    ],
+)
+def test_policy_rejects_real_vendor_key_shapes(tmp_path: Path, payload: str) -> None:
+    """Finding 3 (#169) — real vendor key shapes (GitHub PAT, AWS key) that
+    _SECRET_RE misses must still be rejected via security.patterns."""
+    memory_dir = tmp_path / "Memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text("# MEMORY\n", encoding="utf-8")
+    ledger = ProposalLedger(tmp_path / "amendments.jsonl")
+    proposal = AmendmentProposal(
+        source="test",
+        target_file="MEMORY.md",
+        summary="Bad vendor key",
+        rationale="Nope.",
+        evidence_paths=["daily/2026-05-23.md"],
+        proposed_content=payload,
+        confidence_score=0.99,
+    )
+    ledger.append(proposal)
+
+    results = apply_policy_approved_amendments(ledger, memory_dir)
+
+    assert results[0].status == "policy_rejected"
+    assert results[0].policy_reason == "secret_like_content"
+    assert payload.split()[-1] not in (memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+
+
+def test_apply_result_status_reflects_ledger_update_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 4a (#169) — when the final ledger flip to 'applied' fails, the
+    returned AmendmentApplyResult.status must reflect that (not lie 'applied')."""
+    memory_dir = tmp_path / "Memory"
+    memory_dir.mkdir()
+    target = memory_dir / "SELF.md"
+    target.write_text("# SELF\n\n- original\n", encoding="utf-8")
+    ledger = ProposalLedger(tmp_path / "state" / "amendments.jsonl")
+    proposal = AmendmentProposal(
+        source="test",
+        target_file="SELF.md",
+        summary="Ledger flip failure",
+        rationale="Repeated evidence.",
+        evidence_paths=["daily/2026-06-09.md"],
+        proposed_content="Prove status mirrors the real ledger row.",
+        confidence_score=0.92,
+    )
+    assert ledger.append(proposal) is True
+
+    monkeypatch.setattr(ProposalLedger, "_update_record", lambda self, pid, updates: False)
+
+    result = apply_amendment_if_allowed(proposal, ledger, memory_dir)
+
+    assert result.status == "apply_pending"  # NOT "applied" — the ledger row never flipped
+    assert "Prove status mirrors" in target.read_text(encoding="utf-8")  # target DID write
+    rows = ledger.read_all()
+    assert rows[0].status == "apply_pending"  # the ledger row itself is the reconciled truth
+
+
+def test_active_dedupe_keys_includes_apply_pending(tmp_path: Path) -> None:
+    """Finding 4b (#169) — a parked apply_pending row must still block a
+    duplicate-content re-append."""
+    ledger = ProposalLedger(tmp_path / "amendments.jsonl")
+    proposal = AmendmentProposal(
+        source="test",
+        target_file="MEMORY.md",
+        summary="Parked mid-flight",
+        rationale="Repeated evidence.",
+        evidence_paths=["daily/2026-06-09.md"],
+        proposed_content="Duplicate-content guard for a parked apply.",
+        confidence_score=0.9,
+        status="apply_pending",
+    )
+    assert ledger.append(proposal) is True
+
+    dup = AmendmentProposal(
+        source="test",
+        target_file="MEMORY.md",
+        summary="Duplicate of parked",
+        rationale="Repeated evidence.",
+        evidence_paths=["daily/2026-06-10.md"],
+        proposed_content="Duplicate-content guard for a parked apply.",
+        confidence_score=0.9,
+    )
+    assert ledger.append(dup) is False  # blocked by the apply_pending dedupe key
+
+
 def test_parse_and_process_amendment_output(tmp_path: Path) -> None:
     memory_dir = tmp_path / "Memory"
     memory_dir.mkdir()
@@ -245,6 +336,72 @@ def test_parse_and_process_amendment_output(tmp_path: Path) -> None:
     assert "Prefers explicit model control" in (memory_dir / "USER.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_exclude_kinds_drops_tagged_records_from_parse_and_process(
+    tmp_path: Path,
+) -> None:
+    """A `kind`-tagged record (e.g. `belief_candidate`) owned by a stricter,
+    separate pipeline must never leak into the regular auto-apply path even
+    though its fields otherwise coerce cleanly into an AmendmentProposal.
+    """
+    memory_dir = tmp_path / "Memory"
+    memory_dir.mkdir()
+    (memory_dir / "SELF.md").write_text("# SELF\n", encoding="utf-8")
+    ledger = ProposalLedger(tmp_path / "amendments.jsonl")
+    output = json.dumps(
+        {
+            "kind": "belief_candidate",
+            "target_file": "SELF.md",
+            "summary": "lane-first",
+            "rationale": "evidence shows lane routing",
+            "evidence_paths": ["daily/x.md"],
+            "proposed_content": "The Homie routes by lane first.",
+            "confidence_score": 0.9,
+        }
+    )
+
+    parsed = parse_amendment_records(
+        output, default_source="memory_dream", exclude_kinds=frozenset({"belief_candidate"})
+    )
+    results = process_amendment_output(
+        output,
+        ledger,
+        memory_dir,
+        default_source="memory_dream",
+        exclude_kinds=frozenset({"belief_candidate"}),
+    )
+
+    assert parsed == []
+    assert results == []
+    assert "routes by lane first" not in (memory_dir / "SELF.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_exclude_kinds_default_preserves_prior_behavior(tmp_path: Path) -> None:
+    """Byte-identical behavior for every existing caller that omits `exclude_kinds`."""
+    memory_dir = tmp_path / "Memory"
+    memory_dir.mkdir()
+    (memory_dir / "USER.md").write_text("# USER\n", encoding="utf-8")
+    ledger = ProposalLedger(tmp_path / "amendments.jsonl")
+    output = json.dumps(
+        {
+            "target_file": "USER.md",
+            "summary": "Preference",
+            "rationale": "Explicit ask",
+            "evidence_paths": ["daily/2026-05-23.md"],
+            "proposed_content": "Prefers explicit model control.",
+            "confidence_score": 0.95,
+            "status": "pending",
+        }
+    )
+
+    parsed = parse_amendment_records(output, default_source="memory_reflect")
+    results = process_amendment_output(output, ledger, memory_dir, default_source="memory_reflect")
+
+    assert len(parsed) == 1
+    assert results[0].status == "applied"
 
 
 def test_read_all_heals_idless_records_with_stable_ids(tmp_path: Path) -> None:
@@ -351,6 +508,45 @@ def test_apply_skips_when_content_already_present(tmp_path: Path) -> None:
     reconciled = ledger.read_all()[0]
     assert reconciled.status == "applied"
     assert reconciled.policy_reason == "already_present_reconciled"
+
+
+def test_reconcile_with_missing_ledger_row_does_not_report_applied(
+    tmp_path: Path,
+) -> None:
+    """Codex gate BLOCKER on PR #175: the already-present reconcile branch must
+    honor _update_record's return like the final-flip branch does. A proposal
+    whose row was never appended (new UUID, dedupe-blocked by a parked twin)
+    must NOT come back status="applied" while zero applied ledger rows exist —
+    that is the exact lying-adopt this PR set out to kill.
+    """
+    memory_dir = tmp_path / "Memory"
+    memory_dir.mkdir()
+    target = memory_dir / "MEMORY.md"
+    content = "Prefer explicit provider pinning for cron lanes."
+    seeded = (
+        "# MEMORY\n\n## Autonomous Amendments\n\n"
+        f"<!-- HOMIE_AUTO_AMENDMENT:{uuid.uuid4()} -->\n- {content}\n"
+    )
+    target.write_text(seeded, encoding="utf-8")
+    ledger = ProposalLedger(tmp_path / "amendments.jsonl")
+    proposal = AmendmentProposal(
+        source="test",
+        target_file="MEMORY.md",
+        summary="Content already merged, row never appended",
+        rationale="Dedupe-blocked twin scenario.",
+        evidence_paths=["daily/2026-06-09.md"],
+        proposed_content=content,
+        confidence_score=0.9,
+    )
+    # Deliberately NO ledger.append(proposal) — the row does not exist.
+
+    result = apply_amendment_if_allowed(proposal, ledger, memory_dir)
+
+    assert result.status == "apply_pending"
+    assert result.policy_decision == "reconcile"
+    assert result.policy_reason == "already_present_but_ledger_update_failed"
+    assert target.read_text(encoding="utf-8") == seeded
+    assert all(p.status != "applied" for p in ledger.read_all())
 
 
 def test_dedupe_ignores_summary_and_stored_key(tmp_path: Path) -> None:

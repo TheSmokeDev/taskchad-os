@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from contextlib import suppress as contextlib_suppress
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1530,6 +1531,9 @@ def test_tree_kill_run_reaps_the_process_tree_on_timeout(
 def test_desktop_session_timeout_kills_only_the_cli_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Write callers (Upwork, X) keep the frozen M12 semantics: kill only the
+    # timed-out CLI client so an in-flight action its child is finishing is
+    # never severed mid-write.
     import subprocess as sp
 
     taskkills: list[list[str]] = []
@@ -1550,6 +1554,7 @@ def test_desktop_session_timeout_kills_only_the_cli_client(
             FakeProc.killed = True
 
     monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(browser_control, "_open_kill_scope", lambda: None)
     monkeypatch.setattr(browser_control.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(
         browser_control.subprocess,
@@ -1564,6 +1569,322 @@ def test_desktop_session_timeout_kills_only_the_cli_client(
 
     assert FakeProc.killed is True
     assert taskkills == []
+
+
+def test_a_write_session_never_opens_a_kill_scope_or_starts_suspended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reaping machinery is scoped to the callers that actually reap.
+
+    Wave 2 opened a Job Object, started the client SUSPENDED, enumerated its
+    threads, and resumed them on EVERY Windows invocation — including the
+    desktop WRITE sessions behind Upwork and the social X poster, whose scope
+    is never terminated. They got three new pre-browser failure modes (a
+    job-assignment refusal, a thread-enumeration miss, and the `could not
+    resume the suspended agent-browser client` OSError) for zero benefit.
+
+    Starts at the PRODUCTION entrypoint (`run_agent_browser` with a named
+    desktop session and no `reap_on_timeout`). Fails without the narrowing:
+    `_open_kill_scope` is called and CREATE_SUSPENDED is set.
+    """
+
+    scopes: list[str] = []
+    resumes: list[int] = []
+    flags: list[int] = []
+
+    class FakeProc:
+        pid = 3131
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _popen(argv, **kwargs):  # noqa: ANN001
+        flags.append(int(kwargs.get("creationflags", 0)))
+        return FakeProc()
+
+    monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        browser_control,
+        "_open_kill_scope",
+        lambda: scopes.append("opened") or None,
+    )
+    monkeypatch.setattr(
+        browser_control,
+        "_resume_process",
+        lambda pid: resumes.append(pid) or (1, 1),
+    )
+    monkeypatch.setattr(browser_control.subprocess, "Popen", _popen)
+
+    browser_control.run_agent_browser(
+        ["snapshot"], port=18222, session="operator-desk", timeout=20
+    )
+
+    assert scopes == [], "a write session must not open a kill scope"
+    assert resumes == [], "a write session must not be started suspended"
+    assert flags == [0], "CREATE_SUSPENDED must not be set for a write session"
+
+
+def test_a_read_only_session_still_opens_the_scope_and_starts_suspended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The narrowing must not disarm the reaping path it was scoped out of.
+
+    Suspend-before-assign closed a REPRODUCED race (a `.cmd` shim spawning its
+    node child before job assignment landed). Fails if the scoping accidentally
+    turns the read-only path off too.
+    """
+
+    scopes: list[str] = []
+    resumes: list[int] = []
+    flags: list[int] = []
+
+    class FakeScope:
+        def assign(self, pid):  # noqa: ANN001
+            return True
+
+        def close(self):
+            return None
+
+    class FakeProc:
+        pid = 4141
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _popen(argv, **kwargs):  # noqa: ANN001
+        flags.append(int(kwargs.get("creationflags", 0)))
+        return FakeProc()
+
+    monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        browser_control,
+        "_open_kill_scope",
+        lambda: scopes.append("opened") or FakeScope(),
+    )
+    monkeypatch.setattr(
+        browser_control,
+        "_resume_process",
+        lambda pid: resumes.append(pid) or (1, 1),
+    )
+    monkeypatch.setattr(browser_control.subprocess, "Popen", _popen)
+
+    browser_control.run_agent_browser(
+        ["get", "url"],
+        port=18222,
+        session="crypto-persona-look",
+        timeout=20,
+        reap_on_timeout=True,
+    )
+
+    assert scopes == ["opened"]
+    assert resumes == [4141]
+    assert flags == [browser_control._CREATE_SUSPENDED]
+
+
+def test_reaping_runner_terminates_the_scope_and_verifies_it_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B2: a read-only caller's hung client is reaped WITH its descendants.
+
+    Fails without the fix: the timeout path called `proc.kill()` only, so the
+    npm `.cmd` shim died while its Node child kept the named session alive.
+    """
+
+    import subprocess as sp
+
+    events: list[str] = []
+
+    class FakeScope:
+        alive = [4242, 9999]
+
+        def assign(self, pid):  # noqa: ANN001
+            events.append(f"assign:{pid}")
+            return True
+
+        def terminate(self):
+            events.append("terminate")
+            FakeScope.alive = []
+
+        def live_pids(self):
+            return list(FakeScope.alive)
+
+        def close(self):
+            events.append("close")
+
+    class FakeProc:
+        pid = 4242
+        returncode = None
+        calls = 0
+        killed = False
+
+        def wait(self, timeout=None):
+            FakeProc.calls += 1
+            if FakeProc.calls == 1:
+                raise sp.TimeoutExpired(["agent-browser"], timeout)
+            return 0
+
+        def kill(self):
+            FakeProc.killed = True
+
+    monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(browser_control, "_open_kill_scope", FakeScope)
+    monkeypatch.setattr(browser_control.subprocess, "Popen", lambda *a, **k: FakeProc())
+    taskkills: list[list[str]] = []
+    monkeypatch.setattr(
+        browser_control.subprocess,
+        "run",
+        lambda argv, **k: taskkills.append(list(argv)) or SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(sp.TimeoutExpired):
+        browser_control._reaping_session_run(
+            ["agent-browser", "snapshot"], timeout=20
+        )
+
+    assert events[0] == "assign:4242"
+    assert "terminate" in events
+    assert FakeScope.alive == [], "the scope was not verified empty"
+    assert FakeProc.killed is False, "the scope termination replaces the bare kill"
+    assert taskkills == [], "a job scope must not fall back to a tree walk"
+
+
+def test_reaping_runner_falls_back_to_a_scoped_tree_kill_without_a_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as sp
+
+    taskkills: list[list[str]] = []
+
+    class FakeProc:
+        pid = 7373
+        returncode = None
+        calls = 0
+
+        def wait(self, timeout=None):
+            FakeProc.calls += 1
+            if FakeProc.calls == 1:
+                raise sp.TimeoutExpired(["agent-browser"], timeout)
+            return 0
+
+    monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(browser_control, "_open_kill_scope", lambda: None)
+    monkeypatch.setattr(browser_control.subprocess, "Popen", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(
+        browser_control.subprocess,
+        "run",
+        lambda argv, **k: taskkills.append(list(argv)) or SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(sp.TimeoutExpired):
+        browser_control._reaping_session_run(["agent-browser", "open", "x"], timeout=5)
+
+    assert taskkills == [["taskkill", "/T", "/F", "/PID", "7373"]]
+
+
+def test_successful_command_never_terminates_the_kill_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon started by a SUCCESSFUL client owns the named session."""
+
+    events: list[str] = []
+
+    class FakeScope:
+        def assign(self, pid):  # noqa: ANN001
+            events.append("assign")
+            return True
+
+        def terminate(self):  # pragma: no cover - must never run here
+            events.append("terminate")
+
+        def live_pids(self):  # pragma: no cover - must never run here
+            return []
+
+        def close(self):
+            events.append("close")
+
+    class FakeProc:
+        pid = 1111
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(browser_control.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(browser_control, "_open_kill_scope", FakeScope)
+    monkeypatch.setattr(browser_control.subprocess, "Popen", lambda *a, **k: FakeProc())
+
+    result = browser_control._reaping_session_run(["agent-browser", "get", "url"], timeout=5)
+    assert result.returncode == 0
+    assert events == ["assign", "close"], "the scope must not be terminated on success"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows job-object reaping")
+def test_real_hung_client_tree_is_actually_reaped() -> None:
+    """B2, proven by EXECUTION rather than by a sleeping fake.
+
+    Spawns a real client that spawns a real grandchild (the npm `.cmd` ->
+    node shape), lets the runner time out, and asserts BOTH pids are gone. The
+    pre-fix runner kills only the immediate client, so the grandchild survives
+    and this test fails.
+    """
+
+    import os
+    import subprocess as sp
+    import tempfile
+    import time as _time
+
+    script = Path(tempfile.gettempdir()) / "homie_reap_probe_parent.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(120)'])\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+
+    def _alive(pid: int) -> bool:
+        probe = sp.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        return str(pid) in (probe.stdout or "")
+
+    grandchild = 0
+    try:
+        with pytest.raises(sp.TimeoutExpired) as excinfo:
+            browser_control._reaping_session_run(
+                [sys.executable, str(script)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=4,
+            )
+        printed = (excinfo.value.output or "").strip().splitlines()
+        assert printed, "the probe never reported its grandchild pid"
+        grandchild = int(printed[0])
+
+        deadline = _time.monotonic() + 15
+        while _time.monotonic() < deadline and _alive(grandchild):
+            _time.sleep(0.2)
+        assert not _alive(grandchild), (
+            f"grandchild {grandchild} survived the client timeout — "
+            "the hung child was not reaped"
+        )
+    finally:
+        if grandchild:
+            sp.run(
+                ["taskkill", "/F", "/PID", str(grandchild)],
+                capture_output=True,
+                timeout=20,
+            )
+        with contextlib_suppress(OSError):
+            os.unlink(script)
 
 
 def test_adb_transport_guard_connect_timeout_maps_no_device() -> None:
@@ -1619,6 +1940,73 @@ def test_default_runner_is_tree_kill_for_adb_sessions_plain_for_desktop(
     )
     browser_control.run_agent_browser(["snapshot"], port=18222)
     assert used == ["tree-kill", "desktop-session", "plain"]
+
+
+def test_reap_on_timeout_selects_the_reaping_session_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A READ-ONLY named session must be able to opt into scoped reaping.
+
+    The X networking desk shares CDP 18222 with the operator's own Chrome under
+    a named session, so without this it landed on `_desktop_session_run` — plain
+    `proc.kill()`, which reaps npm's `.cmd` shim and leaves the Node client
+    alive holding the session while the collector issues its next scroll.
+    """
+
+    used: list[str] = []
+
+    def fake_reaping(argv, **_k):
+        used.append("reaping-session")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_desktop_session(argv, **_k):
+        used.append("desktop-session")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(browser_control, "_reaping_session_run", fake_reaping)
+    monkeypatch.setattr(browser_control, "_desktop_session_run", fake_desktop_session)
+
+    browser_control.run_agent_browser(
+        ["get", "url"], port=18222, session="x-networking-desk", reap_on_timeout=True
+    )
+    # ...and the opt-out (write) path is unchanged.
+    browser_control.run_agent_browser(
+        ["get", "url"], port=18222, session="operator-desk"
+    )
+    assert used == ["reaping-session", "desktop-session"]
+
+
+def test_run_agent_browser_forwards_a_child_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`env` exists so a caller can bound the CLI's OWN timeout.
+
+    agent-browser 0.33.0 has no per-command timeout flag, so
+    `AGENT_BROWSER_DEFAULT_TIMEOUT` is the only way to make the client give up
+    before our subprocess ceiling does — the ordering that stops us severing a
+    live client and orphaning its descendants.
+
+    Omitting `env` must stay byte-identical to the pre-existing call shape:
+    every other caller in the tree passes exactly five kwargs.
+    """
+
+    seen: list[dict] = []
+
+    def fake_runner(argv, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    browser_control.run_agent_browser(
+        ["get", "url"],
+        port=18222,
+        runner=fake_runner,
+        env={"AGENT_BROWSER_DEFAULT_TIMEOUT": "8000"},
+    )
+    browser_control.run_agent_browser(["get", "url"], port=18222, runner=fake_runner)
+
+    assert seen[0]["env"] == {"AGENT_BROWSER_DEFAULT_TIMEOUT": "8000"}
+    assert "env" not in seen[1]
+    assert set(seen[1]) == {"capture_output", "text", "encoding", "errors", "timeout"}
 
 
 def test_phone_helpers_reach_tree_kill_without_explicit_runner(
@@ -2067,3 +2455,174 @@ def test_get_ghost_settings_default_off_and_call_time(
     monkeypatch.setenv("HOMIE_GHOST_ENABLED", "true")
     assert config.get_ghost_settings().enabled is True  # Rule 1: no reload needed
     assert config.get_ghost_settings(enabled=False).enabled is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows job-object reaping")
+def test_a_descendant_spawned_during_job_assignment_is_still_reaped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R3: the Job Object used to be assigned AFTER `Popen` returned.
+
+    Job membership is decided at CREATION, so anything the client spawns before
+    the assignment lands is born OUTSIDE the scope. The re-gate reproduced it
+    by delaying the assignment 0.8s: a real `.cmd` shim spawned its child,
+    `TerminateJobObject` reported success, and the descendant stayed alive.
+
+    The client is now created SUSPENDED and resumed only after it is a member,
+    so the delay cannot be exploited — with the SAME 0.8s delay injected, the
+    descendant cannot exist yet.
+
+    Fails without the fix: the descendant survives the reap.
+    """
+
+    import os
+    import subprocess as sp
+    import time as _time
+
+    pidfile = tmp_path / "descendant.pid"
+    child = tmp_path / "race_child.py"
+    child.write_text(
+        "import os, time\n"
+        f"open(r'{pidfile}', 'w').write(str(os.getpid()))\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    parent = tmp_path / "race_parent.py"
+    parent.write_text(
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, r'{child}'])\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    launcher = tmp_path / "race_probe.cmd"
+    launcher.write_text(
+        f'@echo off\r\n"{sys.executable}" "{parent}"\r\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("HOMIE_AGENT_BROWSER_BIN", str(launcher))
+
+    original_assign = browser_control._WindowsKillScope.assign
+
+    def _slow_assign(self, pid):  # noqa: ANN001
+        # The window the re-gate exploited, held open on purpose.
+        _time.sleep(0.8)
+        return original_assign(self, pid)
+
+    monkeypatch.setattr(browser_control._WindowsKillScope, "assign", _slow_assign)
+
+    def _alive(pid: int) -> bool:
+        probe = sp.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        return str(pid) in (probe.stdout or "")
+
+    descendant = 0
+    try:
+        with pytest.raises(sp.TimeoutExpired):
+            browser_control.run_agent_browser(
+                ["get", "url"],
+                port=18222,
+                session="crypto-persona-look",
+                timeout=4,
+                reap_on_timeout=True,
+            )
+
+        deadline = _time.monotonic() + 15
+        while _time.monotonic() < deadline and not pidfile.exists():
+            _time.sleep(0.2)
+        assert pidfile.exists(), "the probe never reported its descendant pid"
+        descendant = int(pidfile.read_text(encoding="utf-8").strip())
+
+        deadline = _time.monotonic() + 20
+        while _time.monotonic() < deadline and _alive(descendant):
+            _time.sleep(0.2)
+        assert not _alive(descendant), (
+            f"descendant {descendant} escaped the job scope — it was spawned "
+            "before the assignment landed"
+        )
+    finally:
+        if descendant:
+            sp.run(
+                ["taskkill", "/F", "/PID", str(descendant)],
+                capture_output=True,
+                timeout=20,
+            )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows job-object reaping")
+def test_the_scoped_reap_never_reaches_a_pre_existing_operator_process() -> None:
+    """The load-bearing safety property, proven rather than reasoned about.
+
+    owner's Chrome carries unsaved work and sessions that take 5-10 minutes to
+    restore. It is launched independently and reached over CDP, so it is never
+    a descendant of an agent-browser client — and a Job Object cannot reach a
+    process that was not created inside it. This spawns a stand-in "operator"
+    process BEFORE the client run and asserts the reap leaves it alone.
+    """
+
+    import subprocess as sp
+    import time as _time
+
+    import tempfile
+
+    bystander = sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        script = Path(tempfile.gettempdir()) / "homie_bystander_probe.py"
+        script.write_text("import time\ntime.sleep(120)\n", encoding="utf-8")
+        with pytest.raises(sp.TimeoutExpired):
+            browser_control._reaping_session_run(
+                [sys.executable, str(script)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3,
+            )
+        _time.sleep(1.0)
+        assert bystander.poll() is None, (
+            "the reap killed a process it never created — the scope leaked"
+        )
+    finally:
+        bystander.kill()
+        with contextlib_suppress(Exception):
+            bystander.wait(timeout=10)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows client reaping")
+def test_a_write_session_timeout_also_leaves_a_pre_existing_process_alive() -> None:
+    """The same safety property on the path the reaping was scoped OUT of.
+
+    owner's Chrome carries unsaved work and sessions that take 5-10 minutes to
+    restore, and the desktop WRITE sessions (Upwork, the social X poster) run
+    against the same visible CDP 18222 browser it serves. Their timeout path
+    kills exactly one pid — the CLI client we spawned — and never walks a tree
+    or terminates a scope, so a process it did not create is unreachable.
+    """
+
+    import subprocess as sp
+    import tempfile
+    import time as _time
+
+    bystander = sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        script = Path(tempfile.gettempdir()) / "homie_write_bystander_probe.py"
+        script.write_text("import time\ntime.sleep(120)\n", encoding="utf-8")
+        with pytest.raises(sp.TimeoutExpired):
+            browser_control._desktop_session_run(
+                [sys.executable, str(script)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3,
+            )
+        _time.sleep(1.0)
+        assert bystander.poll() is None, (
+            "a write-session timeout killed a process it never created"
+        )
+    finally:
+        bystander.kill()
+        with contextlib_suppress(Exception):
+            bystander.wait(timeout=10)

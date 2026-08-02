@@ -141,6 +141,40 @@ class TestCLIHelp:
         assert payload["target_tag"] == "v1.1.0"
         assert payload["deployment_mode"] == "clean"
 
+    def test_toolchain_check_json_is_machine_readable(self, monkeypatch, tmp_path):
+        from click.testing import CliRunner
+
+        class FakeManager:
+            def __init__(self, _root):
+                pass
+
+            def check(self):
+                class Report:
+                    def to_dict(self):
+                        return {
+                            "success": True,
+                            "checked_at": "2026-07-31T00:00:00Z",
+                            "items": [],
+                            "current_count": 6,
+                            "actionable_count": 0,
+                            "migration_count": 0,
+                        }
+
+                return Report()
+
+        import toolchain_currency
+
+        monkeypatch.setattr(cli_module, "check_for_update", lambda: None)
+        monkeypatch.setattr(cli_module, "_resolve_git_repo_for_runner", lambda: tmp_path)
+        monkeypatch.setattr(toolchain_currency, "ToolchainCurrency", FakeManager)
+
+        result = CliRunner().invoke(cli_main, ["toolchain", "--json"])
+        payload = json.loads(result.output)
+
+        assert result.exit_code == 0
+        assert payload["success"] is True
+        assert payload["current_count"] == 6
+
     def test_live_safety_proof_refuses_without_opt_in(self, monkeypatch):
         from click.testing import CliRunner
 
@@ -185,8 +219,7 @@ class TestCLIHelp:
         names = {command["name"] for command in payload["commands"]}
         assert names == {"python-api", "hono-dashboard", "vite-web"}
         assert any(
-            command["env"]["ORCHESTRATION_API_PORT"] == "4322"
-            for command in payload["commands"]
+            command["env"]["ORCHESTRATION_API_PORT"] == "4322" for command in payload["commands"]
         )
         assert any(
             command["env"]["FRAMEWORK_API_URL"] == "http://127.0.0.1:4322"
@@ -217,11 +250,10 @@ class TestCLIHelp:
         assert _expected_package_version() in result.output
 
     def test_chat_model_option_uses_runtime_selection_helper(self, monkeypatch):
-        from click.testing import CliRunner
-
         import cli as cli_module
         import core_handlers
         import extension_manager
+        from click.testing import CliRunner
 
         captured: dict[str, str] = {}
 
@@ -288,6 +320,7 @@ class TestCLIHelp:
 
     def test_setup_wizard_uses_runtime_selection_helper(self, monkeypatch, tmp_path):
         import cli as cli_module
+
         import config
 
         captured: dict[str, str] = {}
@@ -303,13 +336,17 @@ class TestCLIHelp:
         # ENV_FILE re-export so the wizard writes into tmp.
         monkeypatch.setattr(cli_module, "ENV_FILE", env_path)
         monkeypatch.setattr(config, "ENV_FILE", env_path)
-        monkeypatch.setattr(cli_module, "_detect_providers", lambda _env: {
-            "claude": True,
-            "codex": True,
-            "gemini": False,
-            "openrouter": False,
-            "openai": False,
-        })
+        monkeypatch.setattr(
+            cli_module,
+            "_detect_providers",
+            lambda _env: {
+                "claude": True,
+                "codex": True,
+                "gemini": False,
+                "openrouter": False,
+                "openai": False,
+            },
+        )
         monkeypatch.setattr(
             cli_module,
             "apply_runtime_selection_choice",
@@ -353,7 +390,13 @@ class TestCLIAdapter:
         adapter = CLIAdapter(query="test", quiet=True)
         output = adapter.format_final_output(
             "sess123",
-            {"lane": "claude_native", "provider": "claude", "model": "opus", "cost_usd": 0.01, "tool_calls": 2},
+            {
+                "lane": "claude_native",
+                "provider": "claude",
+                "model": "opus",
+                "cost_usd": 0.01,
+                "tool_calls": 2,
+            },
         )
         data = json.loads(output)
         assert data["success"] is True
@@ -449,10 +492,11 @@ class TestCLIAdapter:
         assert "hello world" in captured.out
 
     def test_get_session_info_returns_runtime_model(self, monkeypatch, tmp_path):
-        import config
         from adapters.cli_adapter import CLIAdapter
         from session import Session, SQLiteSessionStore
         from session_keys import build_session_key
+
+        import config
 
         db_path = tmp_path / "chat.db"
         monkeypatch.setattr(config, "CHAT_DB_PATH", db_path)
@@ -517,6 +561,7 @@ class TestQuietModeRegression:
 
         class FakeEngine:
             """Engine that yields an error OutgoingMessage."""
+
             session_store = None
 
             async def handle_message(self, message, progress=None):
@@ -529,6 +574,7 @@ class TestQuietModeRegression:
 
         adapter = CLIAdapter(query="test", quiet=True)
         from extension_manager import ExtensionManager
+
         router = ChatRouter(FakeEngine(), ExtensionManager())
         router.register(adapter)
 
@@ -559,6 +605,7 @@ class TestQuietModeRegression:
             session_store = None
 
         from extension_manager import ExtensionManager
+
         router = ChatRouter(FakeEngine(), ExtensionManager())
         # The adapters dict must exist and be accessible
         assert hasattr(router, "adapters")
@@ -574,6 +621,7 @@ class TestQuietModeRegression:
             session_store = None
 
         from extension_manager import ExtensionManager
+
         router = ChatRouter(FakeEngine(), ExtensionManager())
         # Replicate the health callback pattern from main.py
         adapters_status = {p.value: True for p in router.adapters.keys()}
@@ -608,19 +656,164 @@ class TestDoctorRegression:
 
     def test_video_learning_doctor_readiness(self, monkeypatch, capsys):
         import cli as cli_module
+
         import video_learning.extract as extraction
 
         monkeypatch.setattr(extraction, "check_dependencies", lambda: [])
         cli_module._print_video_learning_readiness()
         assert "Video learning: ready" in capsys.readouterr().out
 
-
-class TestCognitiveLoopCLI:
-    def test_status_json_includes_cognitive_loop(self, monkeypatch):
+    def test_doctor_prints_curriculum_once(self, monkeypatch):
+        import diagnostics as diagnostics_module
         from click.testing import CliRunner
         from diagnostics import DiagnosticsReport
+
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            runtime_providers={"claude": "ON"},
+            curriculum={
+                "available": True,
+                "configured_personas": 2,
+                "enabled_personas": 1,
+                "kill_switch_disabled": False,
+                "config_errors": [],
+            },
+        )
+        monkeypatch.setattr(diagnostics_module, "check_environment", lambda: [])
+        monkeypatch.setattr(
+            diagnostics_module,
+            "collect_diagnostics",
+            lambda: report,
+        )
+        monkeypatch.setattr(cli_module, "_print_video_learning_readiness", lambda: None)
+        monkeypatch.setattr(cli_module, "_print_native_commands", lambda: None)
+
+        result = CliRunner().invoke(cli_main, ["doctor"])
+
+        assert result.exit_code == 0
+        assert result.output.count("Persona curriculum:") == 1
+
+    def test_doctor_renders_persona_vector_and_refuses_false_green(
+        self, monkeypatch
+    ):
         import cli as cli_module
         import diagnostics as diagnostics_module
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
+
+        axes = {
+            name: {
+                "status": "PARTIAL" if name == "callable" else "READY",
+                "reasons": (
+                    ["declared tool 'firecrawl_scrape' has no registered handler"]
+                    if name == "callable"
+                    else []
+                ),
+                "evidence": {},
+            }
+            for name in (
+                "declared",
+                "transportable",
+                "callable",
+                "configured",
+                "channel-bound",
+                "scheduler-safe",
+            )
+        }
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            runtime_providers={"claude": "ON"},
+            persona_readiness={
+                "ai-engineer": {
+                    "schema_version": 1,
+                    "persona_id": "ai-engineer",
+                    "status": "PARTIAL",
+                    "selected_lane": "claude_native",
+                    "selected_providers": ["claude"],
+                    "axes": axes,
+                    "surfaces": {
+                        "discord": {
+                            "status": "PARTIAL",
+                            "reasons": [],
+                            "caller_tools": True,
+                        }
+                    },
+                    "capabilities": [],
+                }
+            },
+        )
+        monkeypatch.setattr(diagnostics_module, "check_environment", lambda: [])
+        monkeypatch.setattr(diagnostics_module, "collect_diagnostics", lambda: report)
+        monkeypatch.setattr(cli_module, "_print_video_learning_readiness", lambda: None)
+        monkeypatch.setattr(cli_module, "_print_native_commands", lambda: None)
+
+        result = CliRunner().invoke(cli_main, ["doctor"])
+
+        assert result.exit_code == 1
+        assert "Persona readiness:" in result.output
+        assert "callable: PARTIAL" in result.output
+        assert "All checks passed." not in result.output
+
+
+class TestCognitiveLoopCLI:
+    def test_status_json_keeps_persona_readiness_vector(self, monkeypatch):
+        import cli as cli_module
+        import diagnostics as diagnostics_module
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
+
+        readiness = {
+            "ai-engineer": {
+                "schema_version": 1,
+                "persona_id": "ai-engineer",
+                "status": "PARTIAL",
+                "selected_lane": "claude_native",
+                "selected_providers": ["claude"],
+                "axes": {
+                    axis: {
+                        "status": "PARTIAL" if axis == "callable" else "READY",
+                        "reasons": [],
+                        "evidence": {},
+                    }
+                    for axis in (
+                        "declared",
+                        "transportable",
+                        "callable",
+                        "configured",
+                        "channel-bound",
+                        "scheduler-safe",
+                    )
+                },
+                "surfaces": {},
+                "capabilities": [],
+            }
+        }
+        report = DiagnosticsReport(
+            timestamp="now",
+            uptime_seconds=0.0,
+            persona_readiness=readiness,
+        )
+        monkeypatch.setattr(diagnostics_module, "collect_diagnostics", lambda: report)
+        monkeypatch.setattr(
+            cli_module,
+            "_collect_profile_lifecycle_contract",
+            lambda: {"active_profile": "default"},
+        )
+
+        result = CliRunner().invoke(cli_main, ["status", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["persona_readiness"] == readiness
+        assert data["persona_readiness"]["ai-engineer"]["status"] == "PARTIAL"
+
+    def test_status_json_includes_cognitive_loop(self, monkeypatch):
+        import cli as cli_module
+        import diagnostics as diagnostics_module
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
 
         report = DiagnosticsReport(
             timestamp="now",
@@ -643,10 +836,10 @@ class TestCognitiveLoopCLI:
         assert data["cognitive_loop"]["subsystems"]["heartbeat_identity"]["state"] == "live"
 
     def test_status_json_includes_runtime_model_warning(self, monkeypatch):
-        from click.testing import CliRunner
-        from diagnostics import DiagnosticsReport
         import cli as cli_module
         import diagnostics as diagnostics_module
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
 
         report = DiagnosticsReport(
             timestamp="now",
@@ -673,10 +866,10 @@ class TestCognitiveLoopCLI:
         assert data["runtime_model_warnings"] == ["Codex hidden model warning"]
 
     def test_status_json_stdout_stays_machine_clean(self, monkeypatch):
-        from click.testing import CliRunner
-        from diagnostics import DiagnosticsReport
         import cli as cli_module
         import diagnostics as diagnostics_module
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
 
         report = DiagnosticsReport(
             timestamp="now",
@@ -705,9 +898,9 @@ class TestCognitiveLoopCLI:
         json.loads(stdout)
 
     def test_doctor_prints_cognitive_loop_section(self, monkeypatch):
+        import diagnostics as diagnostics_module
         from click.testing import CliRunner
         from diagnostics import DiagnosticsReport
-        import diagnostics as diagnostics_module
 
         report = DiagnosticsReport(
             timestamp="now",
@@ -727,11 +920,11 @@ class TestCognitiveLoopCLI:
         assert "Keep WorkingMemory shadow-only until production cutover." in result.output
 
     def test_doctor_prints_native_commands_section_in_sync(self, monkeypatch):
-        from click.testing import CliRunner
-        from diagnostics import DiagnosticsReport
         import cli as cli_module
         import commands as commands_module
         import diagnostics as diagnostics_module
+        from click.testing import CliRunner
+        from diagnostics import DiagnosticsReport
 
         report = DiagnosticsReport(
             timestamp="now",
@@ -765,9 +958,9 @@ class TestCognitiveLoopCLI:
         assert "123:FAKE" not in result.output
 
     def test_doctor_native_commands_no_token_branch(self, monkeypatch):
+        import diagnostics as diagnostics_module
         from click.testing import CliRunner
         from diagnostics import DiagnosticsReport
-        import diagnostics as diagnostics_module
 
         report = DiagnosticsReport(
             timestamp="now",
@@ -788,9 +981,9 @@ class TestCognitiveLoopCLI:
 
     @pytest.mark.asyncio
     async def test_router_diagnostics_prints_cognitive_loop_section(self, monkeypatch):
-        from diagnostics import DiagnosticsReport
         import core_handlers
         import diagnostics as diagnostics_module
+        from diagnostics import DiagnosticsReport
 
         report = DiagnosticsReport(
             timestamp="now",
@@ -913,6 +1106,7 @@ class TestBotLifecycleCommands:
 
     def test_kill_switch_exits_nonzero(self, monkeypatch):
         from click.testing import CliRunner
+
         from security import kill_switches
 
         self._fake_switch(

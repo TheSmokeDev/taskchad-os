@@ -57,7 +57,7 @@ _RESERVED = frozenset({
 _HOMIE_SUBCOMMANDS_SEED = frozenset({
     "chat", "model", "status", "diagnostics", "doctor", "setup",
     "heartbeat", "reflect", "weekly", "dream", "search", "ingest",
-    "evolve", "convoy", "mailbox", "team",
+    "evolve", "convoy", "mailbox", "team", "curriculum",
     "profile", "archon", "session", "config",
 })
 

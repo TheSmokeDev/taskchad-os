@@ -77,16 +77,31 @@ def _candidate_roots(memory_dir: Path) -> list[Path]:
 
 
 def _vault_tail(raw: str) -> str | None:
-    """Reduce a vault path to its memory-relative tail (after the last ``Memory/``).
+    """Reduce a vault path to its memory-relative tail (after the last ``memory/``).
 
     Mirrors ``evolve.regression._normalize_path``: a curated ``vault/memory/
     MEMORY.md`` or ``MEMORY.md`` both resolve to ``MEMORY.md`` so they can be
-    re-rooted under the actual ``memory_dir``.
+    re-rooted under the actual ``memory_dir``. The match is case-INSENSITIVE
+    (``thehomie/memory/...`` also re-roots) because ``evidence_paths`` is
+    LLM-authored free text that cannot be trusted to reproduce exact vault
+    casing; the returned tail preserves the ORIGINAL casing of the input past
+    the match point. This only widens which candidate paths ``_read_confined_
+    bounded`` TRIES — confinement (resolve + ``is_relative_to`` against the
+    resolved ``memory_dir``) is applied unchanged by the caller, so a
+    case-insensitive match cannot escape the vault jail.
     """
     p = str(raw).replace("\\", "/")
-    if "Memory/" in p:
-        return p.split("Memory/")[-1]
-    return None
+    lower = p.lower()
+    # Anchor the match to a PATH-COMPONENT boundary (start-of-string or a
+    # preceding "/") — a bare substring rfind would match inside components
+    # like "notmemory/", letting a crafted/typo'd citation get silently
+    # SUBSTITUTED with unrelated in-vault evidence instead of being rejected.
+    idx = lower.rfind("memory/")
+    while idx > 0 and lower[idx - 1] != "/":
+        idx = lower.rfind("memory/", 0, idx)
+    if idx < 0:
+        return None
+    return p[idx + len("memory/"):]
 
 
 def _confined_candidate_paths(raw: str, memory_dir: Path) -> list[Path]:

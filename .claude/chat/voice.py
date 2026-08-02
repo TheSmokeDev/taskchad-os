@@ -713,7 +713,11 @@ def _filter_whisper_hallucination(text: str) -> str:
     return "" if _is_whisper_hallucination(text) else text
 
 
-async def transcribe_audio_file(file_path: str | Path) -> str:
+async def transcribe_audio_file(
+    file_path: str | Path,
+    *,
+    allowed_providers: tuple[str, ...] | None = None,
+) -> str:
     """STT cascade: Groq → faster-whisper local → whisper-cpp local → Mistral.
 
     NEW canonical cascade entrypoint per R1 B6 (avoids signature collision with
@@ -744,7 +748,15 @@ async def transcribe_audio_file(file_path: str | Path) -> str:
     kill_switches.requireEnabled("voice", caller="voice_cascade_transcribe")
 
     path_str = str(file_path)
-    selected = _selected_stt_providers()
+    selected = (
+        tuple(allowed_providers)
+        if allowed_providers is not None
+        else _selected_stt_providers()
+    )
+    if allowed_providers is not None and any(
+        provider not in _STT_LOCAL_PROVIDER_GROUP for provider in selected
+    ):
+        raise ValueError("Restricted STT policy accepts local providers only.")
     attempts: list[VoiceProviderAttempt] = []
 
     for provider in selected:

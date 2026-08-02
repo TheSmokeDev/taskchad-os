@@ -1,9 +1,9 @@
 # Architecture
 
-The Homie follows a **vertical slice architecture** with two implementation surfaces:
+The Homie follows a **vertical slice architecture** with one product and thin surfaces:
 
 - `thehomie` (this repo) — runtime, memory, CLI, adapters, hooks, cognition
-- `mission-control` (optional) — GUI / control-plane dashboard
+- `dashboard/` — the Homie Dashboard and Electron control plane
 
 See `.claude/sections/01_architecture.md` for the full architectural guide.
 

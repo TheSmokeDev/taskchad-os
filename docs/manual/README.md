@@ -19,15 +19,18 @@ machine-specific proof artifacts stay outside the public manual.
    [Capability Gateway](features/capability-gateway.md), and
    [Desktop v0](features/desktop-v0.md) to understand the current dashboard
    and desktop operator loop.
-4. Read [Multi-Channel Adapters](features/multi-channel-adapters.md) for
+4. Read [Buzz Native Collaboration](features/buzz-native-collaboration.md) for
+   the signed collaboration transport, local relay/Desktop setup, security
+   boundary, operating runbook, and phased activation gates.
+5. Read [Multi-Channel Adapters](features/multi-channel-adapters.md) for
    Telegram attachments, attachment groups, quick-turn batching, and
    Queue/Steer follow-up controls.
-5. Read [Runtime Status And Model Control](features/runtime-status-model-control.md)
+6. Read [Runtime Status And Model Control](features/runtime-status-model-control.md)
    before changing provider, lane, or quiet JSON behavior.
-6. Read [Heartbeat Runtime](features/heartbeat-runtime.md) before changing
+7. Read [Heartbeat Runtime](features/heartbeat-runtime.md) before changing
    proactive background reasoning, heartbeat model overrides, or scheduler
    behavior.
-7. Maintainers implementing architecture work should read
+8. Maintainers implementing architecture work should read
    [Polish Architecture And Execution Program](features/polish-architecture-execution-program.md)
    for the normative-spec/evidence distinction and bounded PRP gates. Then read
    [Amendment-Aware Rollback](features/amendment-aware-rollback.md) for the
@@ -60,6 +63,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 
 | Feature | Status | Manual Page | Primary Operator Surface |
 |---|---|---|---|
+| Buzz Native Collaboration | Implemented; official v0.5.3 local relay/Desktop foundation installed, signed Homie identity and channel activation pending | [buzz-native-collaboration](features/buzz-native-collaboration.md) | Buzz Desktop, `thehomie chat --buzz`, Settings, Capability Gateway |
 | Homie Dashboard Framework | Canonical operator shell | [homie-dashboard-framework](features/homie-dashboard-framework.md) | `dashboard/`, `/mission`, `/teams`, `/browser`, `/mobile` |
 | Operating Room | Product slice implemented | [operating-room](features/operating-room.md) | `/teams`, `/api/team/operating-room/run` |
 | Capability Gateway | Read-only v1 implemented | [capability-gateway](features/capability-gateway.md) | `/capabilities`, `/api/capabilities/status` |
@@ -69,17 +73,22 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Bot Self-Restart | Active baseline, live-proven | [bot-self-restart](features/bot-self-restart.md) | `/restart` |
 | Bot Lifecycle (One Switch, One Enforcer) | Active, Phase A (#117) — desired-state flag + watchdog gate + event-staleness | [bot-lifecycle](features/bot-lifecycle.md) | `thehomie on\|off`, `thehomie status` desired line, dashboard activate/deactivate (default) |
 | Bot Autostart | Active, Windows V1 — opt-in start-at-logon toggle | [bot-autostart](features/bot-autostart.md) | `/autostart`, `thehomie autostart`, Settings toggle, `GET/POST /api/autostart` |
-| GitHub Signal | Active, weekly — starred-backlog resurfacing matched to active work, plus trending | [github-signal](features/github-signal.md) | `/stars`, `SecondBrain-GitHubSignal` task, `github_signal.engine` CLI |
+| GitHub Signal | Active, daily — starred-backlog resurfacing matched to active work, plus trending | [github-signal](features/github-signal.md) | `/stars`, `SecondBrain-GitHubSignal` task, `github_signal.engine` CLI |
 | Live Lane Safety Contract | Active baseline | [live-lane-safety](features/live-lane-safety.md) | `live-safety proof`, status/doctor, orchestration live APIs |
 | Persona Lifecycle And Files | Active baseline | [persona-lifecycle-files](features/persona-lifecycle-files.md) | `/agents`, `/agents/:id/files` |
 | Persona Capability Matrix | Active baseline | [persona-capability-matrix](features/persona-capability-matrix.md) | `thehomie profile env-sync`, Discord persona channels, Cabinet personas |
+| Persona Blueprints And Capability Provisioning | Compiler, atomic create/reconcile, creation parity, and six-axis readiness implemented; live channel proof remains gated | [persona-blueprints-capability-provisioning](features/persona-blueprints-capability-provisioning.md) | `profile blueprint list\|show\|plan\|apply\|reconcile-plan\|reconcile\|readiness` |
+| Persona Capability Elevation | One exact out-of-scope tool call after authenticated operator approval | [persona-capability-elevation](features/persona-capability-elevation.md) | Discord/Telegram Approve once, `approve capability <code>` |
+| Persona Tool Calling | Codex/Claude/Kimi scoped caller-tool parity, locally proven | [persona-tool-calling](features/persona-tool-calling.md) | Chat, Cabinet, Discord persona turns |
 | Persona Team (AI Employee Company) | Active baseline — the operating model tying the persona layers together | [persona-team](features/persona-team.md) | `thehomie profile create\|env-sync\|learning`, `/agents`, persona channels |
 | Persona Learning Loop | Shipped, opt-in per profile, no-logs first-run fixed | [persona-learning-loop](features/persona-learning-loop.md) | `thehomie profile learning`, scheduled belief extraction |
+| Persona Curriculum Engine | Implemented — persona-private source feeds, OKF doctrine, proposal-only applications | [persona-curriculum-engine](features/persona-curriculum-engine.md) | `thehomie curriculum`, `/curriculum`, `curriculum_tick.py` |
 | Persona Memory Isolation And Inventory Repair | Shipped 2026-07-07 — guaranteed per-persona memory vault, repair + doctor + boot guards, plus inference-time recall over each persona's own index (#110) | [persona-memory-isolation](features/persona-memory-isolation.md) | `thehomie profile repair`, `thehomie doctor`, boot self-heal, Discord + web persona recall, `memory_index.py -p <name>` |
 | Convoy, Work Queue, And Mailbox | Active baseline | [convoy-work-mailbox](features/convoy-work-mailbox.md) | `/convoy`, `/work`, mailbox APIs |
 | Team Operations And Executor | Active baseline | [team-operations-executor](features/team-operations-executor.md) | `/teams`, team APIs |
 | Tenant Isolation v0 | Phase A+B shipped, enforcement default-OFF | [tenant-isolation-v0](features/tenant-isolation-v0.md) | `thehomie tenant`, `HOMIE_TENANT_ENFORCEMENT`, orchestration/dashboard API |
 | Archon Repo Dispatch | Public-safe pattern and templates | [archon-repo-dispatch](features/archon-repo-dispatch.md) | `thehomie profile init-archon`, `thehomie archon ...`, `templates/repository-dispatch/` |
+| Archon Execution Client | Shipped — typed HTTP client + loopback posture probe | [archon-execution-client](features/archon-execution-client.md) | `integrations.archon_client`, `python -m integrations.archon_client posture` |
 | Dashboard Mobile Access | Shipped, live-proven | [dashboard-mobile-access](features/dashboard-mobile-access.md) | `/mobile` |
 | Homie Mobile App | Shipped (v2 native, M0–M12 + PhoneOps P3.0, device-proven) | [homie-mobile-app](features/homie-mobile-app.md) | `mobile/` Expo app over the Hono proxy |
 | Team Room | V3 shipped, live-proven | [team-room](features/team-room.md) | `/teamroom`, `/teams` |
@@ -97,6 +106,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Multi-Channel Adapters | Active baseline, long-lived chat continuity + timeout handoff status locally proven | [multi-channel-adapters](features/multi-channel-adapters.md) | Telegram, Slack, Discord, WhatsApp, web, CLI |
 | Cabinet Rooms | Shipped baseline, manual exists | [cabinet-rooms](features/cabinet-rooms.md) | `/cabinet`, `/standup`, `/discuss`, `/cabinet` dashboard |
 | Cabinet Voice | Single-session lifecycle controls shipped | [cabinet-voice](features/cabinet-voice.md) | `/cabinet voice`, `/voices`, `/api/cabinet/voice/*` |
+| Talk Mode (Realtime Voice) | ROADMAP COMPLETE — voice + full tool calling + real execution + computer use + the memory loop on BOTH surfaces (session-start identity; session-end vault debrief from the dashboard AND Discord voice via the rolling-transcript lifecycle sweep) + the `/runs` page with restart-surviving history + quick-agent steering; every slice Codex+K3 gated and live-canary proven; Discord receive has one open audio bug | [talk-mode](features/talk-mode.md) | `/talk`, `/runs`, `/api/talk/*`, Discord `/talk join` |
 | Cognitive Loop | Shipped/live-runtime proven; dashboard route hidden from public nav | [jarvis-cognitive-loop](features/jarvis-cognitive-loop.md) | status/doctor, scheduled loops |
 | Heartbeat Runtime | Active baseline, runtime contract corrected | [heartbeat-runtime](features/heartbeat-runtime.md) | `heartbeat.py`, `HEARTBEAT.md`, scheduled loop |
 | Direct Integration Capability Contract | Shipped, policy-enforced | [direct-integration-capability-contract](features/direct-integration-capability-contract.md) | direct integration wrapper, `/send`, status/doctor |
@@ -115,12 +125,13 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | TokenMax SEO Authority Stack | Public-safe integrated guide for site discovery, fleet sequencing, authority waves, deployment handoffs, indexing, and measurement | [tokenmax-seo-authority-stack](features/tokenmax-seo-authority-stack.md) | `tokenmax-site-factory`, `tokenmax-fleet-orchestrator`, `ai-citation-authority-wave` |
 | AI Citation Authority Wave | Implemented, local-canary proven — bounded post-factory authority pages with deploy handoff only | [ai-citation-authority-wave](features/ai-citation-authority-wave.md) | `archon workflow run ai-citation-authority-wave` |
 | Intent-PRD and Clutch Review | Shipped (#78), merged | [intent-prd-and-clutch](features/intent-prd-and-clutch.md) | `create-prd`, `archon workflow run archon-clutch` |
+| Epic PIV Workflow | Private (unlicensed upstream; skills denied) | [epic-piv-workflow](features/epic-piv-workflow.md) | /plan-architecture, /piv-slice-epic |
 | Context-Economy DX | Shipped (#66), merged | [context-economy-dx](features/context-economy-dx.md) | `/prime-*`, `brownfield-day-1`, `vertical-slice-audit` |
 | Repositories System | Shipped (#63), merged | [repositories-system](features/repositories-system.md) | `thehomie repositories status\|validate` |
 | Archon Workflows | Active baseline, autonomous pipeline live-proven | [archon-workflows](features/archon-workflows.md) | `archon workflow list\|run\|status` |
 | Skill to Workflow Port | Shipped 2026-07-09, image-node-factory grounded | [skill-to-workflow-port](features/skill-to-workflow-port.md) | `uv run .archon/scripts/style-corpus.py prime\|verify\|select` |
 | Image Node Factory | Active, DAG live-proven 2026-07-09 | [image-node-factory](features/image-node-factory.md) | `archon workflow run image-node-factory "<brief>"` |
-| CLI Update Check | Active baseline, live-proven | [cli-update-check](features/cli-update-check.md) | `thehomie update`, `thehomie --version`, `scripts/release.sh` |
+| Framework + Toolchain Updates | Active baseline, live-proven | [cli-update-check](features/cli-update-check.md) | `thehomie update`, `thehomie toolchain`, `thehomie auto-update` |
 
 ### Existing Deep Public Manuals
 
@@ -128,6 +139,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 |---|---|
 | [The Co-Founder Manual](../cofounder-manual.md) | The org chart end to end — the Homie as the co-founder on every surface, the five heartbeat loops (agenda → approval → execution → reporting → checkout), delegation grants, safety model, the turn-it-on runbook, failure modes, architecture map. |
 | [The Living Self Manual](../the-living-self-manual.md) | The cognitive system end to end — sense, form beliefs, hold against conflict, think before speaking, earn convictions. Operator runbook + architecture + knobs + verification. Ties together Heartbeat Runtime, Episodes, and Session Opening Brief. |
+| [The Talk Mode Manual](../talk-mode-manual.md) | The voice co-founder end to end — session contract, the memory loop (session-start identity, session-end vault debrief), the execution spine (delegation lanes, Archon dispatch, steering, the runs registry + durable history), computer use, safety doctrine, extension/removal recipes, validation map. |
 | [The Homie Mobile Manual](../homie-mobile-manual.md) | The phone app end to end — architecture, pairing, the chat cockpit (tools/model/effort/stop/steer), personas and War Room, sessions/library/gauges, desktop browser drive, PhoneOps (driving the phone's own Chrome: adb transport, freezer physics, act policy), safety model, failure modes, validation map. |
 | [BrowserOps Agent Browser Manual](../browserops-agent-browser-manual.md) | Deep BrowserOps operating contract, safety policy, validation, and failure modes. |
 | [Social-Write Executor Manual](../social-write-executor-manual.md) | Deep operating contract for operator-approved LinkedIn and Reddit writes: the isolated-approval gate, the executor/driver split, audit policy, platform notes, and validation. |
@@ -167,9 +179,9 @@ When a feature ships or materially changes:
 ## Feature Coverage Map
 
 This first manual pass intentionally seeds the highest-churn Homie features.
-Remaining features should be folded in during follow-up passes:
-
-- Mission Control relay surfaces
+The retired Mission Control relay remains deprecated compatibility code. Its
+physical deletion is a separate audited retirement change, not a current
+product surface or a missing manual.
 
 Use the template, tracker, handoffs, recent commits, and targeted vault context
 when adding those pages.

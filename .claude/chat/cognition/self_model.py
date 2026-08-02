@@ -63,6 +63,13 @@ class SelfModelState:
     evidence: dict[str, list[str]] = field(default_factory=dict)
 
 
+# Provenance rank — EXPLICIT outranks REFLECTION outranks AUTO_CAPTURE.
+# CANONICAL definition: cognition.belief_conflicts imports this along its
+# existing dependency edge on self_model. Do not re-literalize it there —
+# B1's sacrosanct ranking must have exactly one owner.
+_SOURCE_RANK = {"explicit": 2, "reflection": 1, "auto_capture": 0}
+
+
 def _normalize_text(text: str) -> str:
     """Lowercase + whitespace-collapse for the exact-match fallback path."""
     return re.sub(r"\s+", " ", text.strip().lower())
@@ -152,7 +159,19 @@ class InferenceTracker:
         confidence: float,
         source: str = "auto_capture",
     ) -> InferenceRecord:
-        """Add new inference or strengthen existing one if similar."""
+        """Add new inference, or strengthen + merge into an existing similar one.
+
+        On merge, ``source`` can only RAISE the existing record's provenance
+        rank (auto_capture < reflection < explicit), never lower it — see the
+        one-way ratchet below. The ratchet fires on the DEDUP-MERGE path only:
+        an explicit restatement that misses the similarity threshold creates a
+        second (already-protected) explicit record rather than upgrading the
+        old one — there is no global reconciliation pass.
+        """
+        # Normalize provenance here, not just in operator_beliefs: the ratchet
+        # compares against _SOURCE_RANK by exact string, so a case-variant
+        # source from any future caller must not rank as 0.
+        source = str(source).strip().lower()
         confirm_boost = 0.1
         try:
             from config import INFERENCE_CONFIRM_BOOST
@@ -178,6 +197,19 @@ class InferenceTracker:
             hit.last_updated = now_iso
             if hit.evidence_count >= 3:
                 hit.status = "confirmed"
+            # One-way source ratchet (B1): a merge can only RAISE provenance rank
+            # (auto_capture < reflection < explicit), never lower it. An explicit
+            # record stays explicit forever; a reflection record that later
+            # dedup-merges with an explicit restatement is upgraded so B1
+            # protection actually reaches it.
+            if source not in _SOURCE_RANK or hit.source not in _SOURCE_RANK:
+                print(
+                    f"[self_model] unexpected source in ratchet: "
+                    f"incoming={source!r} existing={hit.source!r}",
+                    flush=True,
+                )
+            if _SOURCE_RANK.get(source, 0) > _SOURCE_RANK.get(hit.source, 0):
+                hit.source = source
             self.save(records)
             return hit
 

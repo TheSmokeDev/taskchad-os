@@ -78,10 +78,10 @@ Deep dive: [Telegram Command Menu](telegram-command-menu.md) · [Runtime Status 
 | `/mode` | Show the current mode | |
 | `/voice` | Persist voice reply behavior across Telegram and Discord | `always` = voice + text, `auto` = reply in voice to voice messages, `off` = text only; `/voice on` aliases `always` |
 | `/provider` | Runtime lane status — selection, routes, health | admin |
-| `/model` | Select lane/provider/model (claude, sonnet, opus, fable, codex, gemini, openrouter, openai, kimi, auto) | admin; Discord-native slash command; `kimi:k3` pins the Kimi lane model |
+| `/model` | Select lane/provider/model (claude, sonnet, opus, fable, codex, sol, terra, luna, gemini, openrouter, openai, kimi, auto) | admin; Discord-native slash command; `sol` pins Codex GPT-5.6 Sol with xhigh reasoning; `kimi:k3` pins the Kimi lane model |
 | `/reload` | Reload bot config without restarting | admin |
 | `/restart` | Restart the bot — kill this process and start fresh | admin |
-| `/update` | Safe stable framework update — `status`, `now`, `auto on|off|status`, `history` | admin |
+| `/update` | Safe framework + toolchain update — `status`, `now`, `auto on|off|status`, `history` | admin |
 | `/extensions` | Extension diagnostics — list, doctor, enable/disable | admin |
 
 ## Memory & Vault
@@ -97,6 +97,7 @@ Deep dive: **[Memory And Recall System](memory-and-recall-system.md)** · [Nativ
 | `/skills` | Review / promote / reject self-authored skill drafts | `review` / `promote <name>` / `reject <name>` |
 | `/learn` | Author a staged reusable skill from a URL, path, conversation, or notes | source plus optional focus |
 | `/watch` | Learn from one video, compare it with current context, and save a sourced note | `status` / `retry` / `cancel` / `apply` / `approve` |
+| `/curriculum` | Operate one persona's approved source curriculum | `status` / `sources` / `run` / `review` / `route` / `grade` / `enable` / `disable` |
 
 The `/vault-ops` skill chains the atomic vault operations and drives the recall
 stack (see [Memory And Recall System](memory-and-recall-system.md) → "How The

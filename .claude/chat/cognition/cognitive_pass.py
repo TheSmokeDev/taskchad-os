@@ -160,6 +160,7 @@ async def run_cognitive_monologue(
     *,
     process_fn=None,
     settings=None,
+    challenge_directive=None,
 ):
     """Run ONE monologue via the refactored *_process; enrich WM; surface failure.
 
@@ -204,6 +205,20 @@ async def run_cognitive_monologue(
     # F1: budget + win32-cap the context the monologue thinks over. The thinking
     # WM is SEPARATE from the enrichment WM the engine renders for the reply.
     thinking_wm = _bounded_monologue_wm(wm, max_chars=WIN32_APPEND_MAX_CHARS)
+
+    # T2 #188: an optional challenge directive rides THIS SAME monologue call
+    # (zero extra LLM calls — the ticket's hard bound). Appended as its own
+    # system memory AFTER the bounded identity block; unknown regions sort
+    # last, so the directive holds the recency position in the rendered
+    # thinking prompt. The engine parses the CHALLENGE_VERDICT block back out
+    # of the returned thought (cognition/challenge.py owns that contract).
+    if challenge_directive and str(challenge_directive).strip():
+        thinking_wm = thinking_wm.with_memory(Memory(
+            role="system",
+            content=str(challenge_directive),
+            region="challenge_check",
+            source="cognition",
+        ))
 
     # Decide the call shape ONCE from the signature (deterministic — never a
     # call-it-and-catch-TypeError dance that would double-invoke on a real error

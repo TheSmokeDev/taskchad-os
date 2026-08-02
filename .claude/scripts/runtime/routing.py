@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+from . import base as _base
 from .base import RuntimeRequest
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .health import is_profile_available
@@ -83,11 +84,41 @@ GENERIC_TASK_ROUTE_DEFAULTS = {
     "memory_weekly": GENERIC_TOOL_ROUTE,
 }
 
+# Caller-supplied tool definitions are a DIFFERENT AXIS from provider-owned
+# tools, and the two answers INVERT.
+#
+# `tool_route_priority` answers "can this provider run its OWN agentic tools"
+# — the Codex and Gemini CLIs can (shell, apply_patch, web), the API-backed
+# providers cannot, which is why kimi/openrouter/openai-compatible sit at -1
+# and GENERIC_TOOL_ROUTE is just ('openai-codex', 'gemini-cli').
+#
+# For CALLER-supplied OpenAI-format schemas the answer flips: kimi carries them
+# natively (measured 2026-07-27: `finish_reason: tool_calls`), while both CLIs
+# ignore them outright (no --tools flag; MCP is their only extension path).
+# Routing a caller-tools request through GENERIC_TOOL_ROUTE therefore offers
+# EXACTLY the two lanes that cannot serve it and withholds the one that can —
+# a starvation upstream of, and invisible to, the capability gate in
+# lane_router.
+#
+# The fix is deliberately NOT a second, inverted priority table. Two tables
+# encoding "who can run tools" would drift the moment a provider is added, and
+# the drift would be silent. Instead a caller-tools request draws from the FULL
+# generic pool and `lane_router._adapter_carries_tool_defs` does the filtering
+# — one source of truth, asked of the adapter itself.
+#
+# Same membership as GENERIC_TEXT_ROUTE by construction (every registry entry
+# participates in the text route); aliased rather than re-derived so the two
+# cannot diverge.
+GENERIC_CALLER_TOOLS_ROUTE: tuple[str, ...] = GENERIC_TEXT_ROUTE
+
 _GENERIC_TEXT_PROVIDER_SET = {
     normalize_provider(provider) for provider in GENERIC_TEXT_ROUTE
 }
 _GENERIC_TOOL_PROVIDER_SET = {
     normalize_provider(provider) for provider in GENERIC_TOOL_ROUTE
+}
+_GENERIC_CALLER_TOOLS_PROVIDER_SET = {
+    normalize_provider(provider) for provider in GENERIC_CALLER_TOOLS_ROUTE
 }
 
 
@@ -106,6 +137,21 @@ def resolve_generic_runtime_profiles(request: RuntimeRequest) -> list[RuntimePro
     """Resolve profiles for the generic runtime lane only."""
 
     provider_order = _generic_provider_order_for_request(request)
+    if request.model_only:
+        # Health selection happens before the lane router can ask adapters for
+        # the zero-tool capability. If the only healthy profile is Codex, the
+        # resolver would return early with that unsafe adapter and never expose
+        # a cooling-down-but-now-repaired Gemini/OpenAI profile for the
+        # fail-closed adapter gate to evaluate. Model-only jobs are sparse and
+        # already bounded, so return the complete configured route here; the
+        # lane router still skips every adapter without a literal guarantee and
+        # records fresh health from the actual attempt.
+        return _build_profiles(
+            provider_order,
+            request,
+            respect_health=False,
+            ignore_primary_health=False,
+        )
     return _resolve_profiles(
         provider_order,
         request,
@@ -158,10 +204,14 @@ def _generic_provider_order_for_request(request: RuntimeRequest) -> tuple[str, .
     if preferred_provider:
         return (preferred_provider,)
 
+    carries_caller_tools = _base.request_carries_tools(request)
     override = _generic_route_override_for_task(
         request.task_name,
         capability=request.capability,
-    ) or _generic_route_override_for_capability(request.capability)
+        carries_caller_tools=carries_caller_tools,
+    ) or _generic_route_override_for_capability(
+        request.capability, carries_caller_tools=carries_caller_tools
+    )
     base_order = list(
         override or _generic_default_route(request)
     )
@@ -204,9 +254,15 @@ def _route_override_for_task(task_name: str) -> tuple[str, ...]:
     return _parse_provider_list(os.getenv(env_var, ""))
 
 
-def _generic_route_override_for_task(task_name: str, *, capability: str) -> tuple[str, ...]:
+def _generic_route_override_for_task(
+    task_name: str, *, capability: str, carries_caller_tools: bool = False
+) -> tuple[str, ...]:
     env_var = f"SECOND_BRAIN_ROUTE_{task_name.upper()}"
-    return _filter_generic_provider_list(os.getenv(env_var, ""), capability=capability)
+    return _filter_generic_provider_list(
+        os.getenv(env_var, ""),
+        capability=capability,
+        carries_caller_tools=carries_caller_tools,
+    )
 
 
 def _route_override_for_capability(capability: str) -> tuple[str, ...]:
@@ -218,13 +274,19 @@ def _route_override_for_capability(capability: str) -> tuple[str, ...]:
     return _parse_provider_list(os.getenv(env_var, ""))
 
 
-def _generic_route_override_for_capability(capability: str) -> tuple[str, ...]:
+def _generic_route_override_for_capability(
+    capability: str, *, carries_caller_tools: bool = False
+) -> tuple[str, ...]:
     env_var = (
         "SECOND_BRAIN_ROUTE_TEXT"
         if capability == TEXT_REASONING
         else "SECOND_BRAIN_ROUTE_TOOL"
     )
-    return _filter_generic_provider_list(os.getenv(env_var, ""), capability=capability)
+    return _filter_generic_provider_list(
+        os.getenv(env_var, ""),
+        capability=capability,
+        carries_caller_tools=carries_caller_tools,
+    )
 
 
 def _pinned_primary_provider() -> str | None:
@@ -257,6 +319,15 @@ def _default_route(request: RuntimeRequest) -> tuple[str, ...]:
 
 
 def _generic_default_route(request: RuntimeRequest) -> tuple[str, ...]:
+    # Caller-supplied tool defs are checked FIRST, ahead of the task-name and
+    # capability branches. Those branches encode provider ECONOMY (which lane
+    # is cheapest/best for this kind of work); this one encodes CORRECTNESS
+    # (which lanes can execute the request at all). A task default that
+    # resolved to GENERIC_TOOL_ROUTE would hand a caller-tools request the two
+    # lanes guaranteed to drop it — heartbeat/memory_reflect/memory_weekly all
+    # do exactly that today. Correctness wins over economy.
+    if _base.request_carries_tools(request):
+        return _dedupe_order(list(GENERIC_CALLER_TOOLS_ROUTE))
     if request.task_name == "chat_turn":
         route = GENERIC_TOOL_ROUTE if request.capability == TOOL_REASONING else GENERIC_TEXT_ROUTE
         return _dedupe_order(list(route))
@@ -292,6 +363,7 @@ def _generic_fallback_route_for_request(
     explicit = _filter_generic_provider_list(
         os.getenv("SECOND_BRAIN_FALLBACK_PROVIDER", ""),
         capability=request.capability,
+        carries_caller_tools=_base.request_carries_tools(request),
     )
     if explicit:
         return explicit
@@ -314,10 +386,14 @@ def _parse_provider_list(raw: str) -> tuple[str, ...]:
     return _dedupe_order([normalize_provider(part) for part in raw.split(",") if part.strip()])
 
 
-def _filter_generic_provider_list(raw: str, *, capability: str) -> tuple[str, ...]:
+def _filter_generic_provider_list(
+    raw: str, *, capability: str, carries_caller_tools: bool = False
+) -> tuple[str, ...]:
     if not raw.strip():
         return ()
-    allowed = _allowed_generic_providers_for_capability(capability)
+    allowed = _allowed_generic_providers_for_capability(
+        capability, carries_caller_tools=carries_caller_tools
+    )
     return _dedupe_order([
         provider
         for provider in (normalize_provider(part) for part in raw.split(",") if part.strip())
@@ -325,7 +401,18 @@ def _filter_generic_provider_list(raw: str, *, capability: str) -> tuple[str, ..
     ])
 
 
-def _allowed_generic_providers_for_capability(capability: str) -> set[str]:
+def _allowed_generic_providers_for_capability(
+    capability: str, *, carries_caller_tools: bool = False
+) -> set[str]:
+    # A caller-tools request is allowed the full generic pool regardless of
+    # capability tier. Without this, an operator who explicitly names a carrying
+    # provider (SECOND_BRAIN_ROUTE_TOOL=kimi, or an explicit fallback list) has
+    # that choice SILENTLY discarded on a TOOL_REASONING turn, because kimi is
+    # not in _GENERIC_TOOL_PROVIDER_SET. Silently dropping an operator's
+    # explicit routing instruction is the same class of failure as silently
+    # dropping a tool call.
+    if carries_caller_tools:
+        return set(_GENERIC_CALLER_TOOLS_PROVIDER_SET)
     if capability == TOOL_REASONING:
         return set(_GENERIC_TOOL_PROVIDER_SET)
     return set(_GENERIC_TEXT_PROVIDER_SET)

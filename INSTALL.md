@@ -64,6 +64,39 @@ cd .claude/chat && bash run_chat.sh
 4. Set `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, and `WHATSAPP_VERIFY_TOKEN` in `.env`
 5. Configure your webhook URL to point to `https://your-domain:8443/webhook`
 
+### Buzz collaboration
+
+Buzz is an external signed room client and relay; the Homie Dashboard remains
+the operator/control plane. Install the stock Buzz Desktop and official `buzz`
+CLI from the upstream Buzz `0.5.x` release, then run the upstream local stack.
+Do not copy keys into Dashboard settings.
+
+Configure one identity per Homie profile:
+
+```bash
+BUZZ_RELAY_URL=
+BUZZ_PRIVATE_KEY=
+<REDACTED-buzz-private-key>
+BUZZ_PUBKEY_ROLES=
+
+BUZZ_HOME_CHANNEL=
+
+BUZZ_CLI_PATH=buzz
+BUZZ_TRANSPORT=auto
+BUZZ_REQUIRE_MENTION=true
+```
+
+Every allowlisted sender defaults to Homie's `viewer` role. Use comma-separated
+`pubkey=viewer|operator|admin` entries in `BUZZ_PUBKEY_ROLES` only for explicit
+per-profile elevation; for example, map the operator's own public key to
+`admin`. A Buzz room membership or reaction never grants a Homie role.
+
+Run only the Buzz adapter with `uv run thehomie chat --buzz`. Verify the active
+transport and CLI compatibility with `uv run thehomie status --json` and
+`uv run thehomie doctor`. See
+[`docs/manual/features/buzz-native-collaboration.md`](docs/manual/features/buzz-native-collaboration.md)
+for security, receipts, desktop, and local-pilot details.
+
 ## Docker Deployment
 
 ```bash

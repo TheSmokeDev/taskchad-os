@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from framework_update import FrameworkUpdater, resolve_repo_root
+from toolchain_currency import ToolchainCurrency
 
 
 class BotRestarter:
@@ -92,16 +93,23 @@ class HealthVerifier:
 
 def _receipt_message(receipt: dict[str, Any]) -> str:
     target = receipt.get("target_tag") or receipt.get("target_version") or "latest stable"
+    toolchain = receipt.get("toolchain") or {}
+    toolchain_note = ""
+    if toolchain:
+        toolchain_note = (
+            f" Toolchain: {'ok' if toolchain.get('success') else 'attention required'}, "
+            f"{len(toolchain.get('attempted') or [])} safe CLI change(s)."
+        )
     if receipt.get("success"):
         revision = str(receipt.get("applied_revision") or "")[:8]
         return (
             f"The Homie update complete: {target} ({revision}). "
-            f"Receipt {receipt.get('receipt_id')}."
+            f"Receipt {receipt.get('receipt_id')}.{toolchain_note}"
         )
     return (
         f"The Homie update {receipt.get('status')}: "
         f"{receipt.get('blocker') or 'unknown error'}. "
-        f"Receipt {receipt.get('receipt_id')}."
+        f"Receipt {receipt.get('receipt_id')}.{toolchain_note}"
     )
 
 
@@ -162,6 +170,9 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             request_file.unlink(missing_ok=True)
     root = resolve_repo_root(args.repo)
+    toolchain_receipt = ToolchainCurrency(root).apply_safe_cli_updates(
+        scheduled=args.scheduled and requester is None
+    )
     updater = FrameworkUpdater(root)
     restarter = BotRestarter() if args.restart else None
     verifier = HealthVerifier(restarter) if restarter else None
@@ -173,7 +184,9 @@ def main(argv: list[str] | None = None) -> int:
         lock_timeout=0.1,
     )
     payload = receipt.to_dict()
-    if args.scheduled and not receipt.success and requester is None:
+    payload["toolchain"] = toolchain_receipt.to_dict()
+    payload["overall_success"] = receipt.success and toolchain_receipt.success
+    if args.scheduled and not payload["overall_success"] and requester is None:
         admin_platform = os.getenv("HOMIE_UPDATE_ADMIN_PLATFORM", "").strip()
         admin_channel = os.getenv("HOMIE_UPDATE_ADMIN_CHANNEL", "").strip()
         if admin_platform and admin_channel:
@@ -183,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, sort_keys=True))
     else:
         print(_receipt_message(payload))
-    return 0 if receipt.success else 1
+    return 0 if payload["overall_success"] else 1
 
 
 if __name__ == "__main__":

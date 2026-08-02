@@ -13,6 +13,11 @@ Discord conversations develops its own beliefs about prospects, objection
 patterns, and deal flow — stored in its own vault, never contaminating the
 main Homie's identity.
 
+This loop learns from persona-attributed experience. The complementary
+[Persona Curriculum Engine](persona-curriculum-engine.md) learns cited domain
+doctrine from explicitly approved external feeds, then sends accepted operator
+grades back through this same reflection-sourced staging boundary.
+
 The feature ships as three workstreams that build on the existing Acts 1-4:
 
 1. **Persona-attributed experience trail** — a nullable `persona_id` on the

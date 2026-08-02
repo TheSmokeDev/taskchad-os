@@ -556,6 +556,11 @@ def test_api_thin_no_business_logic():
         # Same router-mount-only pattern for the persona pairing API —
         # api.py includes the router, owns none of its logic.
         "from pairing_api import router",
+        # Same again for the Talk mode + Discord voice routers (shipped
+        # 2026-07-24 in f39ab80c / ace75b35 without allowlist entries, which
+        # left this test red on master until 2026-07-27).
+        "from talk_api import router",
+        "from discord_voice_api import router",
     )
     for line in import_lines:
         assert any(line.startswith(p) for p in allowed_prefixes), (

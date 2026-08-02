@@ -128,14 +128,29 @@ async def test_discussion_only_skill_mentions_reach_engine_without_intent_dispat
 
 
 @pytest.mark.asyncio
-async def test_potential_external_action_requires_confirmation_before_engine():
+async def test_buzz_slash_command_uses_canonical_router_without_engine_dispatch():
+    engine = _RecordingEngine()
+    router = ChatRouter(engine, _SlashOnlyManager())  # type: ignore[arg-type]
+    adapter = _RecordingAdapter(Platform.BUZZ)
+
+    await router._handle_inner(adapter, _incoming("/send now", Platform.BUZZ))
+
+    assert engine.messages == []
+    assert [message.text for message in adapter.sent] == ["slash command handled"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [Platform.CLI, Platform.BUZZ])
+async def test_potential_external_action_requires_confirmation_before_engine(
+    platform: Platform,
+):
     engine = _RecordingEngine()
     router = ChatRouter(engine, _build_manager())
-    adapter = _RecordingAdapter()
+    adapter = _RecordingAdapter(platform)
 
     await router._handle_inner(
         adapter,
-        _incoming("we should send an outreach email to customers today"),
+        _incoming("we should send an outreach email to customers today", platform),
     )
 
     assert engine.messages == []
@@ -153,6 +168,7 @@ async def test_potential_external_action_requires_confirmation_before_engine():
         Platform.SLACK,
         Platform.WEB,
         Platform.WHATSAPP,
+        Platform.BUZZ,
     ],
 )
 @pytest.mark.asyncio

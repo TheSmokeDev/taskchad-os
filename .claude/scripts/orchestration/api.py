@@ -1499,3 +1499,36 @@ try:
     app.include_router(_pairing_router)
 except Exception as _exc:  # noqa: BLE001
     logger.warning("pairing_api router not mounted: %s", _exc)
+
+# Talk mode (OpenAI Realtime voice, Codex-OAuth fallback) — same two-touch
+# mount pattern. No auth-middleware exemption: the dashboard Hono proxy
+# always calls these routes with the Bearer token. Logic lives in talk_api.py.
+try:
+    from talk_api import router as _talk_router
+    app.include_router(_talk_router)
+except Exception as _exc:  # noqa: BLE001
+    logger.warning("talk_api router not mounted: %s", _exc)
+
+# Discord voice sidecar (py-cord + DAVE realtime bridge) — same two-touch
+# mount pattern as talk_api above. Logic lives in discord_voice_api.py.
+try:
+    from discord_voice_api import router as _discord_voice_router
+    app.include_router(_discord_voice_router)
+
+    @app.on_event("startup")
+    async def _sweep_discord_voice_transcripts() -> None:
+        """Vault-debrief orphan sweep: a Discord voice transcript stranded
+        by a crash/kick/WS-drop with no later lifecycle touch gets flushed
+        at the next API boot instead of never. Startup hook, NOT import
+        time — tests import this module without owning STATE_DIR."""
+
+        try:
+            import discord_voice_lifecycle  # noqa: PLC0415
+
+            receipts = discord_voice_lifecycle.sweep_orphan_transcripts()
+            if receipts:
+                logger.info("discord voice transcript sweep: %s", receipts)
+        except Exception as exc:  # noqa: BLE001 — never block API boot
+            logger.warning("discord voice transcript sweep failed: %s", exc)
+except Exception as _exc:  # noqa: BLE001
+    logger.warning("discord_voice_api router not mounted: %s", _exc)

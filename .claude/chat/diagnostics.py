@@ -30,6 +30,9 @@ class DiagnosticsReport:
     cognition_moves: dict[str, bool] = field(default_factory=dict)
     cognitive_loop: dict[str, object] = field(default_factory=dict)
 
+    # Called-shots ledger (epic #186 T1) — on/off must be PROVABLE, not guessed
+    called_shots: dict[str, object] = field(default_factory=dict)
+
     # Recall
     recall_last_query: str | None = None
     recall_last_tier: str | None = None
@@ -63,6 +66,15 @@ class DiagnosticsReport:
     # Ghost Phone (the Homie's own background Android — P4.1 A2)
     ghost: dict[str, object] = field(default_factory=dict)
 
+    # Persona curriculum (config-only; never creates ledgers or calls models)
+    curriculum: dict[str, object] = field(default_factory=dict)
+
+    # Crypto Homie scheduled round (sanitized profile + ledger health only)
+    crypto_round: dict[str, object] = field(default_factory=dict)
+
+    # Compiled persona readiness (six independent physical-state axes)
+    persona_readiness: dict[str, dict[str, object]] = field(default_factory=dict)
+
     # Sessions
     sessions_active: int = 0
     sessions_total_messages: int = 0
@@ -75,6 +87,7 @@ class DiagnosticsReport:
 
     # Adapters (only populated when called from inside the bot)
     adapters_connected: dict[str, bool] = field(default_factory=dict)
+    buzz: dict[str, object] = field(default_factory=dict)
 
     # Capability/toolset registry (PRP-1b)
     capabilities: list[dict] = field(default_factory=list)
@@ -92,17 +105,141 @@ def collect_diagnostics() -> DiagnosticsReport:
 
     _check_cognition(report)
     _check_cognitive_loop(report)
+    _check_called_shots(report)
     _check_recall(report)
     _check_memory_db(report)
     _check_runtime(report)
     _check_live_execution(report)
     _check_browser(report)
     _check_ghost(report)
+    _check_curriculum(report)
+    _check_crypto_round(report)
+    _check_persona_readiness(report)
     _check_sessions(report)
     _check_clear_lifecycle(report)
+    _check_buzz(report)
     _check_capabilities(report)
 
     return report
+
+
+def _check_buzz(report: DiagnosticsReport) -> None:
+    """Read the profile-owned, secret-free Buzz runtime snapshot."""
+    try:
+        from buzz_status import read_buzz_status
+
+        report.buzz = read_buzz_status()
+    except Exception as exc:
+        report.buzz = {
+            "enabled": False,
+            "state": "failed",
+            "active_transport": "none",
+            "last_error": _short_detail(str(exc)),
+        }
+
+
+def _check_curriculum(report: DiagnosticsReport) -> None:
+    """Collect curriculum readiness without touching profile runtime state."""
+    try:
+        from curriculum.config import get_curriculum_settings
+        from personas.lifecycle import list_profiles
+        from security import kill_switches
+
+        configured = 0
+        enabled = 0
+        errors: list[str] = []
+        for profile in list_profiles():
+            if profile.is_default:
+                continue
+            try:
+                settings = get_curriculum_settings(profile.name)
+            except Exception as exc:
+                errors.append(f"{profile.name}: {exc}")
+                continue
+            if settings.sources or settings.domain != "general":
+                configured += 1
+            if settings.enabled:
+                enabled += 1
+        report.curriculum = {
+            "available": True,
+            "configured_personas": configured,
+            "enabled_personas": enabled,
+            "kill_switch_disabled": kill_switches.is_disabled(
+                "persona_curriculum"
+            ),
+            "config_errors": errors[:10],
+        }
+    except Exception as exc:
+        report.curriculum = {
+            "available": False,
+            "configured_personas": 0,
+            "enabled_personas": 0,
+            "kill_switch_disabled": False,
+            "config_errors": [str(exc)],
+        }
+
+
+def _check_crypto_round(report: DiagnosticsReport) -> None:
+    """Collect fail-open, source-ID-free scheduled round health."""
+    try:
+        from crypto_round.config import load_market_round_settings
+        from crypto_round.db import CryptoRoundDB
+        from crypto_round.provenance import status as provenance_status
+
+        settings = load_market_round_settings()
+        ledger = CryptoRoundDB(initialize=False).status()
+        latest = ledger.get("latest")
+        if isinstance(latest, dict):
+            latest = {
+                key: value
+                for key, value in latest.items()
+                if key not in {"output_json", "error"}
+            }
+        report.crypto_round = {
+            "available": True,
+            "enabled": settings.enabled,
+            "cadence_hours": settings.every_hours,
+            "scheduled_tool_max_turns": settings.max_turns,
+            "source_tier_counts": settings.as_public_dict()["discord_channel_counts"],
+            "latest": latest,
+            "state_counts": ledger.get("state_counts", {}),
+            "open_paper_calls": ledger.get("open_paper_calls", 0),
+            "dependency_provenance": provenance_status(),
+        }
+    except Exception as exc:
+        report.crypto_round = {
+            "available": False,
+            "enabled": False,
+            "error": _short_detail(str(exc)),
+        }
+
+
+def _check_persona_readiness(report: DiagnosticsReport) -> None:
+    """Collect compiled profiles without trusting provisioner receipts."""
+
+    try:
+        from personas import readiness
+    except Exception as exc:
+        report.persona_readiness = {
+            "_collector": {
+                "persona_id": "_collector",
+                "status": "ERROR",
+                "reasons": [_short_detail(str(exc))],
+            }
+        }
+        return
+
+    try:
+        report.persona_readiness = (
+            readiness.collect_persona_readiness_inventory()
+        )
+    except Exception as exc:
+        report.persona_readiness = {
+            "_collector": readiness.build_persona_readiness_error_snapshot(
+                "_collector",
+                str(exc),
+            ).as_dict()
+        }
 
 
 def _check_cognition(report: DiagnosticsReport) -> None:
@@ -176,6 +313,53 @@ def _check_cognitive_loop(report: DiagnosticsReport) -> None:
                 }
             },
             "next_actions": ["Fix cognitive-loop status collector import/runtime failure."],
+        }
+
+
+def _check_called_shots(report: DiagnosticsReport) -> None:
+    """Physical on/off + ledger state for the called-shots feature (T1 #187).
+
+    ``enabled`` is the EFFECTIVE state: the CALLED_SHOTS_ENABLED soft-toggle
+    AND the operator kill-switch, both resolved live (Rule 2 — never cached).
+    """
+    try:
+        from security import kill_switches  # Rule 3: module-attribute lookup
+
+        from config import get_called_shots_settings
+
+        settings = get_called_shots_settings()
+        ks_disabled = kill_switches.is_disabled("called_shots")
+        db_path = Path(settings.db_path)
+        info: dict[str, object] = {
+            "enabled": bool(settings.enabled) and not ks_disabled,
+            "kill_switch_disabled": ks_disabled,
+            "db_present": db_path.exists(),
+            "open_count": 0,
+        }
+        if db_path.exists():
+            try:
+                # Read-only URI connect: mode=ro can never CREATE a DB (the
+                # plain-connect TOCTOU would materialize an empty file if the
+                # DB vanished between exists() and connect), and the short
+                # busy_timeout keeps a locked DB from stalling diagnostics.
+                conn = sqlite3.connect(
+                    f"file:{db_path.as_posix()}?mode=ro", uri=True
+                )
+                try:
+                    conn.execute("PRAGMA busy_timeout=250")
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM called_shots WHERE status = 'open'"
+                    ).fetchone()
+                    info["open_count"] = int(row[0])
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                pass
+        report.called_shots = info
+    except Exception as exc:
+        report.called_shots = {
+            "enabled": None,
+            "error": _short_detail(str(exc)),
         }
 
 
@@ -495,10 +679,44 @@ def check_environment() -> list[tuple[str, str, str]]:
             "DISCORD_BOT_TOKEN",
             "WHATSAPP_ACCESS_TOKEN",
             "RELAY_AUTH_TOKEN",
+            "BUZZ_RELAY_URL",
         ]
     )
     if not has_adapter:
         issues.append(("warn", "No chat adapter configured", "Set TELEGRAM_BOT_TOKEN in .env"))
+
+    buzz_values = {
+        key: str(env.get(key) or "").strip()
+        for key in ("BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY", "BUZZ_ALLOWED_PUBKEYS")
+    }
+    if any(buzz_values.values()) and not all(buzz_values.values()):
+        missing = ", ".join(key for key, value in buzz_values.items() if not value)
+        issues.append(("error", f"Buzz configuration incomplete: {missing}", "Complete the active profile .env"))
+    if all(buzz_values.values()):
+        import re
+
+        cli = str(env.get("BUZZ_CLI_PATH") or "buzz")
+        resolved = cli if Path(cli).is_file() else shutil.which(cli)
+        if not resolved:
+            issues.append(("error", "Buzz CLI not found", "Install Buzz 0.5.x or set BUZZ_CLI_PATH"))
+        else:
+            try:
+                import subprocess
+
+                version = subprocess.run(
+                    [resolved, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                match = re.search(r"(?<!\d)(\d+\.\d+(?:\.\d+)?)", version.stdout)
+                if version.returncode or not match:
+                    issues.append(("warn", "Buzz CLI version unknown", "Pilot contract is Buzz 0.5.x"))
+                elif not match.group(1).startswith("0.5."):
+                    issues.append(("warn", f"Buzz CLI {match.group(1)} is unverified", "Use Buzz 0.5.x for the pilot"))
+            except (OSError, subprocess.SubprocessError):
+                issues.append(("warn", "Buzz CLI compatibility check failed", "Pilot contract is Buzz 0.5.x"))
 
     # Runtime provider available
     has_runtime = (

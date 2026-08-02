@@ -61,6 +61,18 @@ test('electron smoke matrix covers browser and teams dashboard routes', () => {
   assert.match(source, /hasRawFetchError/);
 });
 
+test('Buzz Desktop launch uses a fixed scheme or validated configured executable', () => {
+  const mainSource = readFileSync(new URL('../main.cjs', import.meta.url), 'utf8');
+  const preloadSource = readFileSync(new URL('../preload.cjs', import.meta.url), 'utf8');
+
+  assert.match(mainSource, /ipcMain\.handle\('buzz:open'/);
+  assert.match(mainSource, /const target = 'buzz:\/\/'/);
+  assert.match(mainSource, /path\.isAbsolute\(configuredPath\)/);
+  assert.match(mainSource, /shell\.openPath\(executable\)/);
+  assert.doesNotMatch(mainSource, /buzz:open'.*?_event.*?target/s);
+  assert.match(preloadSource, /openBuzz: \(\) => ipcRenderer\.invoke\('buzz:open'\)/);
+});
+
 test('electron-builder config uses asInvoker packaging and bundled web assets', () => {
   const source = readFileSync(new URL('../electron-builder.cjs', import.meta.url), 'utf8');
   const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));

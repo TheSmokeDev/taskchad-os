@@ -552,60 +552,41 @@ class TestKeystoneExplicitVsConfigResolved:
 
     def test_explicit_install_db_finds_rows(self, tmp_path: Path) -> None:
         """When using get_default_paths()['data'] / 'chat.db', rows are found."""
-        from session import SQLiteSessionStore, Session
         from persona_learning_tick import _count_attributed_rows_since
+        from tests.test_persona_learning_tick import _make_db_with_session
 
         install_db = tmp_path / "chat.db"
-        store = SQLiteSessionStore(install_db)
+        # Recent (not a fixed past date) — since_iso=None exercises the
+        # cold-start path, which is now bounded to silent_skip_window_hours;
+        # a stale hardcoded date would fall outside that window and undercount.
+        _make_db_with_session(install_db, persona_id="sales")
 
-        now = datetime(2026, 7, 3, 12, 0, 0)
-        sess = Session(
-            session_id="test:sales:1",
-            agent_session_id="agent",
-            platform="test",
-            channel_id="sales",
-            thread_id="1",
-            user_id="user",
-            created_at=now,
-            updated_at=now,
-            source="interactive",
-            persona_id="sales",
+        count = _count_attributed_rows_since(
+            "sales", None, install_db, silent_skip_window_hours=24.0
         )
-        store.create(sess)
-
-        count = _count_attributed_rows_since("sales", None, install_db)
         assert count == 1, "Explicit install DB must find the seeded row"
 
     def test_profile_resolved_db_finds_zero_rows(self, tmp_path: Path) -> None:
         """A profile-resolved DB is empty — the silent-failure class."""
         from session import SQLiteSessionStore
         from persona_learning_tick import _count_attributed_rows_since
+        from tests.test_persona_learning_tick import _make_db_with_session
 
         install_db = tmp_path / "install" / "chat.db"
         install_db.parent.mkdir(parents=True)
-        from session import Session
-        store = SQLiteSessionStore(install_db)
-        now = datetime(2026, 7, 3, 12, 0, 0)
-        sess = Session(
-            session_id="test:sales:1",
-            agent_session_id="agent",
-            platform="test",
-            channel_id="sales",
-            thread_id="1",
-            user_id="user",
-            created_at=now,
-            updated_at=now,
-            source="interactive",
-            persona_id="sales",
-        )
-        store.create(sess)
+        # Recent (not a fixed past date) — see test_explicit_install_db_finds_rows.
+        _make_db_with_session(install_db, persona_id="sales")
 
         profile_db = tmp_path / "profiles" / "sales" / "data" / "chat.db"
         profile_db.parent.mkdir(parents=True)
         SQLiteSessionStore(profile_db)
 
-        count_install = _count_attributed_rows_since("sales", None, install_db)
-        count_profile = _count_attributed_rows_since("sales", None, profile_db)
+        count_install = _count_attributed_rows_since(
+            "sales", None, install_db, silent_skip_window_hours=24.0
+        )
+        count_profile = _count_attributed_rows_since(
+            "sales", None, profile_db, silent_skip_window_hours=24.0
+        )
 
         assert count_install == 1, "Install DB must have the row"
         assert count_profile == 0, (

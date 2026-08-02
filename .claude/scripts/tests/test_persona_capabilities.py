@@ -100,6 +100,7 @@ profiles:
     assert "openai_dummy_value" not in rendered
     assert "OPENAI_API_KEY" in summary["present_keys"]
     assert plan.values["OPENAI_API_KEY"] == "openai_dummy_value"
+    assert "openai_dummy_value" not in repr(plan)
 
 
 def test_write_profile_env_uses_derived_values(
@@ -201,3 +202,52 @@ profiles:
     assert resolve_skill_allowlist("socials", matrix_path=matrix) == frozenset(
         {"imagegen", "linkedin-post", "x-post"}
     )
+
+
+def test_compiled_profile_overlay_wins_without_mutating_shared_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    homie_root = tmp_path / ".homie"
+    profile = homie_root / "profiles" / "founder-operator"
+    profile.mkdir(parents=True)
+    monkeypatch.setenv("HOMIE_HOME", str(homie_root))
+    (profile / "config.yaml").write_text(
+        """
+capability_blueprint:
+  schema_version: 1
+  template: founder-operator
+  domain: founder-operations
+  domain_packs: [founder_operations]
+  operator_exec: false
+  env_groups: [business_profile]
+  skill_groups: [founder]
+  skills: [direct-skill]
+  scheduled_authorities: []
+""",
+        encoding="utf-8",
+    )
+    matrix = _write_matrix(
+        tmp_path / "matrix.yaml",
+        """
+env_groups:
+  runtime_core: [OPENAI_API_KEY]
+  business_profile: [BUSINESS_EMAIL]
+skill_groups:
+  founder: [market-research]
+profile_defaults:
+  env_groups: [runtime_core]
+  skill_groups: []
+  skills: []
+profiles: {}
+""",
+    )
+
+    assert resolve_env_keys(
+        "founder-operator",
+        matrix_path=matrix,
+    ) == ["BUSINESS_EMAIL"]
+    assert resolve_skill_allowlist(
+        "founder-operator",
+        matrix_path=matrix,
+    ) == frozenset({"direct-skill", "market-research"})

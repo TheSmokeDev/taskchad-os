@@ -64,6 +64,31 @@ interface DependencyEdge {
   to_subtask_id: number;
 }
 
+/**
+ * Archon-side truth for one subtask (epic #252 / #258). The convoy row is the
+ * LEDGER; this is what the worker is actually doing, joined through the #256
+ * correlation key on `paperclip_issue_id`.
+ *
+ * A subtask with no Archon run has NO entry here — never a placeholder — so a
+ * non-Archon row renders exactly as it did before this shipped.
+ */
+interface ArchonWorker {
+  subtaskId: number;
+  archonRunId: string;
+  workflowName?: string | null;
+  runStatus?: string | null;
+  currentNode?: string | null;
+  nodeStatus?: string | null;
+}
+
+interface ArchonConvoyEnrichment {
+  ok: boolean;
+  status: string;
+  convoyId: number;
+  tasks: ArchonWorker[];
+  truncated: boolean;
+}
+
 interface ConvoyDetail {
   convoy: ConvoySummary;
   subtasks: ConvoySubtask[];
@@ -132,13 +157,35 @@ function statusTone(status: string): string {
   return STATUS_TONE[status] ?? 'bg-[var(--color-elevated)] text-[var(--color-text-muted)]';
 }
 
+/**
+ * The worker line for a subtask row.
+ *
+ * With an Archon join we name the real worker (the workflow) and the node it is
+ * on — the epic's acceptance criterion, and the end of the `running`/
+ * `Unassigned` row. Without one we return exactly the string the page rendered
+ * before #258, so non-Archon work is untouched.
+ */
+function workerLabel(task: ConvoySubtask, worker?: ArchonWorker): string {
+  const fallback = task.assigned_agent_name || task.assigned_agent_id || 'Unassigned';
+  if (!worker) return fallback;
+  return worker.workflowName || fallback;
+}
+
+/** `implement · running`, or null when the run has not entered a node yet. */
+function nodeLabel(worker?: ArchonWorker): string | null {
+  if (!worker?.currentNode) return null;
+  return worker.nodeStatus ? `${worker.currentNode} · ${worker.nodeStatus}` : worker.currentNode;
+}
+
 function DependencyGraph({
   subtasks,
   edges,
+  workers,
   onOpen,
 }: {
   subtasks: ConvoySubtask[];
   edges: DependencyEdge[];
+  workers: Map<number, ArchonWorker>;
   onOpen: (task: ConvoySubtask) => void;
 }) {
   const ordered = useMemo(
@@ -196,28 +243,37 @@ function DependencyGraph({
           );
         })}
       </svg>
-      {positions.map(({ task, x, y }) => (
-        <button
-          key={task.id}
-          type="button"
-          onClick={() => onOpen(task)}
-          class="absolute w-[158px] rounded-md border border-[var(--color-border)] bg-[var(--color-elevated)] p-2 text-left shadow-sm hover:border-[var(--color-accent)] transition-colors"
-          style={{ left: `${x}%`, top: `${y}px`, transform: 'translateX(-50%)' }}
-        >
-          <div class="flex items-center justify-between gap-2">
-            <span class="truncate text-[12px] font-medium text-[var(--color-text)]">{task.title}</span>
-            <Badge className={statusTone(task.status)}>{task.status}</Badge>
-          </div>
-          <div class="mt-1 truncate text-[11px] text-[var(--color-text-muted)]">
-            {task.assigned_agent_name || task.assigned_agent_id || 'Unassigned'}
-          </div>
-          {task.remaining_dependencies > 0 && (
-            <div class="mt-1 text-[11px] text-amber-300">
-              {task.remaining_dependencies} blocked
+      {positions.map(({ task, x, y }) => {
+        const worker = workers.get(task.id);
+        const node = nodeLabel(worker);
+        return (
+          <button
+            key={task.id}
+            type="button"
+            onClick={() => onOpen(task)}
+            class="absolute w-[158px] rounded-md border border-[var(--color-border)] bg-[var(--color-elevated)] p-2 text-left shadow-sm hover:border-[var(--color-accent)] transition-colors"
+            style={{ left: `${x}%`, top: `${y}px`, transform: 'translateX(-50%)' }}
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="truncate text-[12px] font-medium text-[var(--color-text)]">{task.title}</span>
+              <Badge className={statusTone(task.status)}>{task.status}</Badge>
             </div>
-          )}
-        </button>
-      ))}
+            <div class="mt-1 truncate text-[11px] text-[var(--color-text-muted)]">
+              {workerLabel(task, worker)}
+            </div>
+            {node && (
+              <div class="mt-1 truncate text-[11px] text-sky-300" title={`Archon run ${worker?.archonRunId}`}>
+                {node}
+              </div>
+            )}
+            {task.remaining_dependencies > 0 && (
+              <div class="mt-1 text-[11px] text-amber-300">
+                {task.remaining_dependencies} blocked
+              </div>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -271,15 +327,42 @@ export function Convoy() {
 
   const activeId = selectedId ?? convoys[0]?.id ?? null;
   const detailFetch = useFetch<ConvoyDetail>(activeId ? `/api/convoy/${activeId}` : null, 10_000);
+  // #258 — the Archon join, polled FASTER than the ledger: the convoy row only
+  // changes on a status transition, but the node under it moves every few
+  // seconds. Its failure is inert by construction (`workers` stays empty and
+  // every row falls back to its pre-#258 render), so this fetch never gates the
+  // page and its error is deliberately not surfaced as a page-level error.
+  const workersFetch = useFetch<ArchonConvoyEnrichment>(
+    activeId ? `/api/archon/convoy/${activeId}` : null,
+    5_000,
+  );
   const detail = detailFetch.data;
   const convoy = detail?.convoy ?? convoys.find((c) => c.id === activeId) ?? null;
   const subtasks = detail?.subtasks ?? [];
   const edges = detail?.edges ?? [];
   const readyCount = subtasks.filter((task) => task.status === 'ready').length;
+  const workers = useMemo(() => {
+    const map = new Map<number, ArchonWorker>();
+    // A failed poll must NOT keep rendering the last good answer: useFetch
+    // leaves `data` untouched on rejection, so a killed switch or a dropped
+    // proxy would freeze "implement · running" on screen indefinitely while
+    // the run had long since moved or died. Stale execution truth is worse
+    // than no execution truth — drop back to the pre-#258 render instead.
+    if (workersFetch.error) return map;
+    for (const worker of workersFetch.data?.tasks ?? []) {
+      map.set(worker.subtaskId, worker);
+    }
+    return map;
+  }, [workersFetch.data, workersFetch.error]);
+  // The enrichment endpoint caps how many correlated rows it resolves. Past
+  // that cap the row renders exactly the `running / Unassigned` this ticket
+  // exists to kill — so say so rather than letting it look like truth.
+  const workersTruncated = !workersFetch.error && Boolean(workersFetch.data?.truncated);
 
   async function refreshAll() {
     convoysFetch.refresh();
     detailFetch.refresh();
+    workersFetch.refresh();
   }
 
   async function createConvoy(event: Event) {
@@ -523,25 +606,54 @@ export function Convoy() {
               </div>
 
               {activeTab === 'graph' && (
-                <DependencyGraph subtasks={subtasks} edges={edges} onOpen={() => setActiveTab('subtasks')} />
+                <DependencyGraph
+                  subtasks={subtasks}
+                  edges={edges}
+                  workers={workers}
+                  onOpen={() => setActiveTab('subtasks')}
+                />
               )}
 
               {activeTab === 'subtasks' && (
                 <div class="grid gap-3">
+                  {workersTruncated && (
+                    <div class="rounded border border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-muted)]">
+                      This convoy has more correlated subtasks than the worker
+                      lookup resolves in one pass, so rows past the cap still
+                      show their raw status without a worker or node. Narrow
+                      the convoy to see them named.
+                    </div>
+                  )}
                   {subtasks.length === 0 && <Empty title="No subtasks" description="Add subtasks through the orchestration API or create a convoy with initial lines." />}
-                  {subtasks.map((task) => (
+                  {subtasks.map((task) => {
+                    const worker = workers.get(task.id);
+                    const node = nodeLabel(worker);
+                    return (
                     <div key={task.id} class="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-3">
                       <div class="flex flex-wrap items-start justify-between gap-3">
                         <div class="min-w-0">
                           <div class="flex flex-wrap items-center gap-2">
                             <span class="text-[13px] font-medium text-[var(--color-text)]">{task.title}</span>
                             <Badge className={statusTone(task.status)}>{task.status}</Badge>
+                            {worker?.runStatus && (
+                              <Badge className={statusTone(worker.runStatus)}>archon {worker.runStatus}</Badge>
+                            )}
                           </div>
                           {task.description && (
                             <p class="mt-2 text-[12px] leading-5 text-[var(--color-text-muted)]">{task.description}</p>
                           )}
                           <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-[var(--color-text-muted)]">
-                            <span>Agent {task.assigned_agent_name || task.assigned_agent_id || 'unassigned'}</span>
+                            {worker ? (
+                              <span class="text-[var(--color-text)]">Worker {workerLabel(task, worker)}</span>
+                            ) : (
+                              <span>Agent {task.assigned_agent_name || task.assigned_agent_id || 'unassigned'}</span>
+                            )}
+                            {node && <span class="text-sky-300">Node {node}</span>}
+                            {worker && (
+                              <span class="font-mono" title="Archon run id">
+                                {worker.archonRunId.slice(0, 12)}
+                              </span>
+                            )}
                             <span>Dependencies {task.remaining_dependencies}</span>
                             <span>Updated {formatTime(task.updated_at)}</span>
                           </div>
@@ -581,7 +693,8 @@ export function Convoy() {
                         </div>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 

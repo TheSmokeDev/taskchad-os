@@ -26,6 +26,25 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# amendments.py lives at .claude/chat/cognition/amendments.py; security/ lives
+# at .claude/scripts/security/. Bootstrap .claude/scripts/ onto sys.path here
+# (mirrors identity_payload.py / self_model.py / scheduled_payload.py / skills.py
+# in this same package) so this module resolves `security.patterns` regardless
+# of whether the caller already added .claude/scripts/ to sys.path — amendments.py
+# is imported unconditionally at cognition package-init time, so it cannot rely
+# on caller ordering the way a guarded try/except import could.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+# Canonical vendor-key-prefix catalog (27+ prefixes, length-sorted). The
+# amendment secret gate routes through this single source of truth so real
+# vendor key shapes (ghp_/AKIA/AIza/sk_live_/…) that the hand-rolled
+# ``_SECRET_RE`` word heuristic misses are still rejected. Mirrors the existing
+# cross-slice import in ``runtime/subprocess_env.py`` (``security`` is on the
+# flat sys.path in this slice).
+from security.patterns import contains_leak_pattern
+
 AMENDMENT_TARGETS = frozenset({"SELF.md", "SOUL.md", "USER.md", "MEMORY.md"})
 PROPOSAL_STATUSES = frozenset({
     "pending",
@@ -519,7 +538,12 @@ class ProposalLedger:
         return {
             _dedupe_key(proposal.target_file, proposal.proposed_content)
             for proposal in self.read_all()
-            if proposal.status in {"pending", "approved", "applied"}
+            # F4b (#169) — a proposal parked mid-apply ("apply_pending") is as
+            # active as one still pending review; this set is a SUPERSET of the
+            # apply-candidate set in apply_policy_approved_amendments (which
+            # excludes "applied" — an already-applied change is not re-applied,
+            # but its content must still block a duplicate re-proposal).
+            if proposal.status in {"pending", "approved", "applied", "apply_pending"}
         }
 
 
@@ -631,12 +655,22 @@ def parse_amendment_records(
     text: str,
     *,
     default_source: str = "scheduled_cognition",
+    exclude_kinds: frozenset[str] = frozenset(),
 ) -> list[AmendmentProposal]:
-    """Parse JSON object or JSON-array amendment records from model output."""
+    """Parse JSON object or JSON-array amendment records from model output.
+
+    ``exclude_kinds`` drops any record whose ``kind`` field matches — e.g. a
+    ``belief_candidate`` block that another, stricter pipeline (evidence-gate +
+    judge + kill-switch) is exclusively responsible for consuming must never
+    also be coerced into a regular ``AmendmentProposal`` here and auto-applied
+    through this module's weaker default policy.
+    """
 
     proposals: list[AmendmentProposal] = []
     for record in _iter_json_records(text):
         if not isinstance(record, dict):
+            continue
+        if record.get("kind") in exclude_kinds:
             continue
         data = dict(record)
         data.setdefault("source", default_source)
@@ -657,10 +691,13 @@ def process_amendment_output(
     policy: AmendmentPolicy | None = None,
     apply_limit: int | None = None,
     section_cap: int = 20,
+    exclude_kinds: frozenset[str] = frozenset(),
 ) -> list[AmendmentApplyResult]:
     """Capture structured amendments from output and optionally apply them."""
 
-    for proposal in parse_amendment_records(text, default_source=default_source):
+    for proposal in parse_amendment_records(
+        text, default_source=default_source, exclude_kinds=exclude_kinds
+    ):
         ledger.append(proposal)
     if not auto_apply:
         return []
@@ -878,7 +915,12 @@ def apply_amendment_if_allowed(
                 )
             if _amendment_already_present(before, proposal):
                 now = datetime.now(UTC).isoformat()
-                ledger._update_record(proposal.id, {
+                # Rule 2: the returned status must reflect the PHYSICAL ledger
+                # flip, same as the final-flip branch below — a missing row
+                # (e.g. a new-UUID proposal whose append was dedupe-blocked by
+                # a parked apply_pending twin) must not report "applied" while
+                # zero applied ledger rows exist.
+                reconciled = ledger._update_record(proposal.id, {
                     "status": "applied", "policy_decision": "apply",
                     "policy_reason": "already_present_reconciled",
                     "reviewer": "machine_policy", "reviewed_at": now,
@@ -889,8 +931,10 @@ def apply_amendment_if_allowed(
                     "rollback_snapshot_path": proposal.rollback_snapshot_path,
                 })
                 return AmendmentApplyResult(
-                    proposal.id, proposal.target_file, "applied", "reconcile",
-                    "already_present_in_target"
+                    proposal.id, proposal.target_file,
+                    "applied" if reconciled else "apply_pending", "reconcile",
+                    "already_present_in_target" if reconciled
+                    else "already_present_but_ledger_update_failed",
                 )
             before_hash = hashlib.sha256(before_bytes).hexdigest()
             rollback = _write_rollback_snapshot(
@@ -943,7 +987,11 @@ def apply_amendment_if_allowed(
     return AmendmentApplyResult(
         proposal_id=proposal.id,
         target_file=proposal.target_file,
-        status="applied",
+        # F4a (#169) — the target bytes are on disk, but if the FINAL ledger flip
+        # to "applied" failed the row is still "apply_pending" (the crash-recovery
+        # intermediate state the module reconciles on the next pass). Report the
+        # physical truth (Rule 2), not a hardcoded "applied" the ledger never saw.
+        status="applied" if ledger_updated else "apply_pending",
         policy_decision="apply",
         policy_reason=reason if ledger_updated else "applied_but_ledger_update_failed",
         before_hash=before_hash,
@@ -1071,7 +1119,7 @@ def evaluate_amendment_policy(
         return False, "low_confidence"
     if len(proposal.evidence_paths) < active_policy.min_evidence_paths:
         return False, "insufficient_evidence"
-    if _SECRET_RE.search(content):
+    if _SECRET_RE.search(content) or contains_leak_pattern(content):
         return False, "secret_like_content"
     if not active_policy.allow_destructive and _DESTRUCTIVE_RE.search(content):
         return False, "destructive_change_requires_manual_review"

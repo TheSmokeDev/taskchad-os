@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
+from . import base as _base
 from .base import (
     RUNTIME_LANE_CLAUDE_NATIVE,
     RuntimeRequest,
@@ -17,6 +19,8 @@ from .base import (
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .errors import RuntimeConfigError, RuntimeRetryableError, RuntimeUnsupportedCapabilityError
 from .profiles import RuntimeProfile
+
+_logger = logging.getLogger(__name__)
 
 
 def _system_cli_path() -> str | None:
@@ -161,8 +165,33 @@ class ClaudeSdkRuntime:
     def __init__(self, profile: RuntimeProfile) -> None:
         self.profile = profile
 
+    def supports_caller_tool_defs(self) -> bool:
+        """True — caller tool defs execute via an in-process SDK MCP server.
+
+        `runtime/claude_tool_bridge.py` translates the OpenAI-format
+        definitions into `create_sdk_mcp_server` tools whose handlers call back
+        into the SAME `request.tool_dispatch` the generic lane uses. The SDK
+        server runs in THIS process — no subprocess, no IPC — so a tool call is
+        a plain Python call through the one chokepoint, and guardrails / the
+        kill switch / the audit row (#242) fire identically on both lanes.
+
+        This is a translation, not a second implementation. A persona whose
+        tool behaves differently depending on which lane happened to be healthy
+        is not lane-agnostic; it is two products.
+        """
+        return True
+
+    def supports_model_only(self) -> bool:
+        """True: Claude receives `tools=[]` plus the deny-all marker."""
+        return True
+
     def supports(self, request: RuntimeRequest) -> bool:
         if request.capability not in {TEXT_REASONING, TOOL_REASONING}:
+            return False
+        # Defense in depth — the lane router excludes non-carrying adapters for
+        # tool-carrying requests, but a direct caller must not be able to hand
+        # this adapter definitions it would ignore.
+        if _base.request_carries_tools(request) and not self.supports_caller_tool_defs():
             return False
         return True
 
@@ -184,15 +213,37 @@ class ClaudeSdkRuntime:
         allowed_tools = ["Read"] if request.read_only_tools else request.allowed_tools
         if request.workspace_write_tools:
             allowed_tools = ["Read", "Write", "Edit", "Glob", "Grep"]
+        # Epic #236 — caller-supplied tools. Translate the OpenAI-format defs
+        # into an in-process SDK MCP server whose handlers call back into the
+        # SAME request.tool_dispatch the generic lane uses (one chokepoint
+        # across lanes). Built BEFORE options so the namespaced names can join
+        # allowed_tools — the SDK will not offer a tool the turn has not
+        # allowed, and a visible-but-uncallable tool reads exactly like a tool
+        # that does not work.
+        caller_tool_server = None
+        caller_tool_names: list[str] = []
+        if _base.request_carries_tools(request):
+            from . import claude_tool_bridge
+
+            caller_tool_server, caller_tool_names = claude_tool_bridge.build_tool_server(request)
+            allowed_tools = [*allowed_tools, *caller_tool_names]
+
         options_kwargs: dict[str, Any] = {
             "cwd": str(request.cwd),
             "max_turns": request.max_turns,
             "allowed_tools": allowed_tools,
         }
-        if not request.allowed_tools and request.disallowed_tools == ["*"]:
+        if not request.allowed_tools and request.disallowed_tools == ["*"] and not caller_tool_names:
             # Empty allowed_tools alone omits --allowedTools, and the CLI still
             # exposes its default tool surface. Pair the default-deny marker
             # with --tools "" so no built-ins are advertised for the turn.
+            #
+            # Skipped when the turn carries caller tools: `tools: []` advertises
+            # NOTHING, which would strip the very MCP tools this request exists
+            # to offer. A cabinet persona (disallowed_tools=["*"]) that gains a
+            # toolset would otherwise get a server it can see and never call —
+            # the default-deny floor still holds because allowed_tools lists
+            # ONLY the caller's namespaced tools, no built-ins.
             options_kwargs["tools"] = []
 
         # Redirect SDK to system CLI instead of bundled CLI.
@@ -247,6 +298,24 @@ class ClaudeSdkRuntime:
             options_kwargs["disallowed_tools"] = request.disallowed_tools
         if request.mcp_servers is not None:
             options_kwargs["mcp_servers"] = request.mcp_servers
+        if caller_tool_server is not None:
+            from . import claude_tool_bridge
+
+            if request.mcp_servers:
+                # `request.mcp_servers` is list[str] (server NAMES, the cabinet
+                # path); SDK servers need a name->config MAPPING. The two shapes
+                # cannot be merged here. Say so loudly rather than silently
+                # dropping either one — a persona quietly losing its named MCP
+                # servers, or its tools, is the failure mode this epic is about.
+                _logger.warning(
+                    "request carries BOTH named mcp_servers %s and caller tool "
+                    "defs; the in-process tool server wins for this turn and the "
+                    "named servers are not attached",
+                    request.mcp_servers,
+                )
+            options_kwargs["mcp_servers"] = {
+                claude_tool_bridge.TOOL_SERVER_NAME: caller_tool_server
+            }
 
         response_text = ""
         session_id: str | None = None

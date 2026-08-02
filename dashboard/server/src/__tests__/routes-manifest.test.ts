@@ -64,6 +64,7 @@ describe('ROUTE_MANIFEST contract', () => {
     expect(ROUTE_MANIFEST).toContain('/api/health');
     expect(ROUTE_MANIFEST).toContain('/api/info');
     expect(ROUTE_MANIFEST).toContain('/api/agents');
+    expect(ROUTE_MANIFEST).toContain('/api/agents/preview');
     expect(ROUTE_MANIFEST).toContain('/api/agents/:id');
     expect(ROUTE_MANIFEST).toContain('/api/agents/:id/full');
     expect(ROUTE_MANIFEST).toContain('/api/agents/validate-id');

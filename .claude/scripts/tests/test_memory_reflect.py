@@ -231,13 +231,18 @@ class TestPromptParityWithShim:
 # (the suite NEVER touches real vault/memory/ or live state files).
 
 
-def _drive_reflection_for_print(monkeypatch, tmp_path, apply_return):
+def _drive_reflection_for_print(
+    monkeypatch,
+    tmp_path,
+    apply_return,
+    *,
+    crypto_post_step=None,
+):
     """Run the REAL _run_reflection_inner with collaborators stubbed + state
     redirected to tmp; return captured stdout. ``apply_return`` is the
     ``(written, write_time_applied)`` tuple the patched apply_operator_beliefs
     yields — the ONLY input that should drive the write-time print."""
     import asyncio
-    from types import SimpleNamespace
 
     # Hermetic: no Langfuse export attempt (the local server is intentionally
     # dead; tracing fails open but emits a noisy connection traceback otherwise).
@@ -246,6 +251,7 @@ def _drive_reflection_for_print(monkeypatch, tmp_path, apply_return):
     import memory_reflect as mr
     from cognition import belief_conflicts as bc_mod
     from cognition import operator_beliefs as ob_mod
+    from runtime.base import RUNTIME_LANE_CLAUDE_NATIVE, RuntimeResult
 
     # Redirect every dir/state constant the function touches to tmp_path.
     mem_dir = tmp_path / "TheHomie" / "Memory"
@@ -267,8 +273,12 @@ def _drive_reflection_for_print(monkeypatch, tmp_path, apply_return):
 
     # The reflection LLM call -> REFLECTION_OK (skips amendment/promotion writes).
     async def _fake_lanes(_req):
-        return SimpleNamespace(
-            text="REFLECTION_OK", provider="test", model="m", cost_usd=0.0
+        return RuntimeResult(
+            text="REFLECTION_OK",
+            runtime_lane=RUNTIME_LANE_CLAUDE_NATIVE,
+            provider="test",
+            model="m",
+            cost_usd=0.0,
         )
 
     monkeypatch.setattr(mr, "run_with_runtime_lanes", _fake_lanes)
@@ -291,6 +301,13 @@ def _drive_reflection_for_print(monkeypatch, tmp_path, apply_return):
         return []
 
     monkeypatch.setattr(bc_mod, "judge_contradictions", _no_judge)
+
+    if crypto_post_step is None:
+        async def _silent_crypto_post_step():
+            return "CRYPTO_PLAYS_SWEEP_SILENT"
+
+        crypto_post_step = _silent_crypto_post_step
+    monkeypatch.setattr(mr, "_run_crypto_plays_post_step", crypto_post_step)
 
     import io
     from contextlib import redirect_stdout

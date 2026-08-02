@@ -19,10 +19,11 @@ import asyncio
 import logging
 import math
 import os
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from security import kill_switches
 
+from . import base as _base
 from .base import (
     RUNTIME_LANE_CLAUDE_NATIVE,
     RUNTIME_LANE_GENERIC,
@@ -32,6 +33,7 @@ from .base import (
 from .capabilities import TEXT_REASONING
 from .claude_sdk import ClaudeSdkRuntime
 from .errors import (
+    RuntimeCallerToolTransportError,
     RuntimeConfigError,
     RuntimeExecutionError,
     RuntimeRetryableError,
@@ -39,7 +41,7 @@ from .errors import (
 )
 from .gemini_cli import GeminiCliRuntime
 from .health import mark_profile_retryable_failure, mark_profile_success, mark_profile_unavailable
-from .openai_codex import OpenAICodexRuntime
+from .openai_codex_app_server import OpenAICodexAppServerRuntime
 from .openai_compatible import OpenAICompatibleRuntime
 from .profiles import (
     GENERIC_PROVIDER_REGISTRY,
@@ -59,6 +61,23 @@ _logger = logging.getLogger(__name__)
 # bounds all of them; `<=0` disables the deadline (escape hatch). Issue #133.
 _DEFAULT_TIMEOUT_TEXT_S = 300.0
 _DEFAULT_TIMEOUT_TOOL_S = 1800.0
+
+
+@dataclass(frozen=True)
+class CallerToolTransportCandidate:
+    """One configured runtime profile's caller-tool carriage result."""
+
+    provider: str
+    carries_caller_tools: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class CallerToolTransportProbe:
+    """Read-only selected-lane transport facts for diagnostics consumers."""
+
+    lane: str
+    candidates: tuple[CallerToolTransportCandidate, ...]
 
 
 def _adapter_timeout_seconds(request: RuntimeRequest) -> float | None:
@@ -103,13 +122,105 @@ def _adapter_for(profile: RuntimeProfile):
             # subprocess_cli still dispatches by provider key because
             # OpenAICodexRuntime and GeminiCliRuntime are distinct classes.
             if profile.provider == "openai-codex":
-                return OpenAICodexRuntime(profile)
+                # Composite selection is request-sensitive inside the adapter:
+                # exec for ordinary/native-tool turns, isolated app-server for
+                # caller-supplied definitions. The exec-only adapter's own
+                # supports_caller_tool_defs() remains truthfully False.
+                return OpenAICodexAppServerRuntime(profile)
             if profile.provider == "gemini-cli":
                 return GeminiCliRuntime(profile)
         if overlay.transport == "openai_responses":
             # openai_responses providers share one adapter class.
             return OpenAICompatibleRuntime(profile)
     raise RuntimeExecutionError(f"Unsupported runtime provider: {profile.provider}")
+
+
+def _adapter_carries_tool_defs(adapter: object) -> bool:
+    """Whether ``adapter`` will EXECUTE caller-supplied tool definitions.
+
+    Fail-closed on two axes, both deliberate:
+
+    * An adapter that does not declare the method at all is treated as NOT
+      carrying. Adapters here are duck-typed with no shared base class, so a
+      future adapter added without thinking about tools must default to safe.
+      The dangerous default is the silent one.
+    * A declaration that raises is treated as NOT carrying rather than
+      propagating. A broken probe must not take down the whole fallback chain,
+      and "skip this lane" is the conservative reading.
+
+    This is a CAPABILITY question asked of the adapter, never a provider-name
+    check. Hardcoding ``profile.provider == "openai-codex"`` here would
+    reproduce the exact bug this epic already rejected in ``allowed_tools``:
+    capability that is not encoded in routing degrades silently the moment
+    quota pressure reshuffles the chain.
+    """
+    try:
+        probe = getattr(adapter, "supports_caller_tool_defs", None)
+    except Exception:
+        # `getattr` is INSIDE the try because attribute access can execute code
+        # — a property or a custom __getattr__ that raises would otherwise
+        # abort the whole fallback chain instead of skipping one adapter.
+        return False
+    if probe is None:
+        return False
+    try:
+        verdict = probe()
+    except Exception:
+        return False
+
+    # STRICT identity, not truthiness. `bool()` coercion turned this gate from
+    # fail-closed into fail-OPEN in two plausible ways (adversarial review,
+    # Codex):
+    #   * a probe returning the STRING "false" -> bool("false") is True
+    #   * an `async def` probe -> returns a coroutine -> bool(coroutine) is
+    #     True, the adapter is admitted, and the coroutine is never awaited
+    # Only a literal `True` grants carriage; anything else is refused.
+    if verdict is True:
+        return True
+    if verdict is not False:
+        # An `async def` probe hands back a coroutine we are never going to
+        # await. Close it explicitly: otherwise every routing decision against
+        # such an adapter leaks a coroutine and emits a RuntimeWarning far from
+        # the actual mistake.
+        close = getattr(verdict, "close", None)
+        if callable(close) and hasattr(verdict, "send"):
+            try:
+                close()
+            except Exception:
+                pass
+        _logger.warning(
+            "adapter %s.supports_caller_tool_defs() returned %r (%s), not a "
+            "bool — refusing carriage. An `async def` probe returns a "
+            "coroutine and is a likely cause.",
+            type(adapter).__name__,
+            verdict,
+            type(verdict).__name__,
+        )
+    return False
+
+
+def _adapter_supports_model_only(adapter: object) -> bool:
+    """True only for a literal synchronous adapter zero-tool guarantee."""
+    try:
+        probe = getattr(adapter, "supports_model_only", None)
+    except Exception:
+        return False
+    if probe is None:
+        return False
+    try:
+        verdict = probe()
+    except Exception:
+        return False
+    if verdict is True:
+        return True
+    if verdict is not False:
+        close = getattr(verdict, "close", None)
+        if callable(close) and hasattr(verdict, "send"):
+            try:
+                close()
+            except Exception:
+                pass
+    return False
 
 
 def _resolve_lane_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
@@ -121,6 +232,38 @@ def _resolve_lane_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
     return resolve_generic_runtime_profiles(request)
 
 
+def probe_caller_tool_transport(request: RuntimeRequest) -> CallerToolTransportProbe:
+    """Inspect selected profiles without invoking a provider.
+
+    This is the public diagnostics contract for caller-supplied tool carriage.
+    It deliberately keeps adapter construction and capability probing inside
+    the lane owner so readiness collectors do not depend on private router
+    helpers.
+    """
+
+    lane = resolve_runtime_lane(request)
+    candidates: list[CallerToolTransportCandidate] = []
+    for profile in _resolve_lane_profiles(request):
+        try:
+            adapter = _adapter_for(profile)
+        except Exception as exc:
+            candidates.append(
+                CallerToolTransportCandidate(
+                    provider=str(profile.provider),
+                    carries_caller_tools=False,
+                    error=str(exc),
+                )
+            )
+            continue
+        candidates.append(
+            CallerToolTransportCandidate(
+                provider=str(profile.provider),
+                carries_caller_tools=_adapter_carries_tool_defs(adapter),
+            )
+        )
+    return CallerToolTransportProbe(lane=lane, candidates=tuple(candidates))
+
+
 async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
     """Run a request through the lane-first runtime facade."""
 
@@ -128,6 +271,15 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
     # when HOMIE_KILLSWITCH_LLM=disabled. Callers (engine.py, memory_reflect,
     # memory_weekly, memory_dream) catch this explicitly and degrade cleanly.
     kill_switches.requireEnabled("llm", caller="lane_router")
+
+    # Epic #236 — registry provenance. Every lane crosses this boundary, so it
+    # is the one place a hand-assembled `tool_defs` array can be caught before
+    # it reaches a provider. Without it the tool registry's "all tools must be
+    # part of a toolset to be accessible" invariant is enforceable only by
+    # convention at each call site (adversarial review, Codex — BLOCKER).
+    # Raises ValueError, deliberately BEFORE any profile resolution or spend.
+    _base.assert_tool_defs_are_registered(request)
+    _base.assert_model_only_contract(request)
 
     lane = resolve_runtime_lane(request)
     effective_request = request
@@ -139,6 +291,24 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
 
     for profile in _resolve_lane_profiles(effective_request):
         adapter = _adapter_for(profile)
+        if effective_request.model_only and not _adapter_supports_model_only(adapter):
+            errors.append(
+                f"{profile.key}: cannot prove a zero-tool model-only runtime "
+                "(skipped rather than weakening authority)"
+            )
+            continue
+        # Epic #236 — tool-turn lane exclusion. Checked BEFORE supports() so the
+        # error names the real reason; supports() also refuses these, but its
+        # message would blame the capability tier and send the next reader
+        # chasing the wrong thing.
+        if _base.request_carries_tools(
+            effective_request
+        ) and not _adapter_carries_tool_defs(adapter):
+            errors.append(
+                f"{profile.key}: cannot execute caller-supplied tool definitions "
+                f"(skipped for this tool turn; still eligible for text turns)"
+            )
+            continue
         if not adapter.supports(effective_request):
             errors.append(
                 f"{profile.key}: unsupported capability {effective_request.capability}"
@@ -195,6 +365,9 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
         f"No runtime could satisfy task '{request.task_name}' "
         f"({request.capability}) on lane '{lane}': {joined}"
     )
-    raise RuntimeExecutionError(
-        message
+    error_type = (
+        RuntimeCallerToolTransportError
+        if _base.request_carries_tools(request)
+        else RuntimeExecutionError
     )
+    raise error_type(message)

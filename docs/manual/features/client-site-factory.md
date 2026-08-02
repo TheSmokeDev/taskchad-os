@@ -8,9 +8,9 @@ site validation, zero manual edits). P4 (the deploy gate + this chapter) ships
 per the frozen contract in `PRPs/active/PRP-client-site-factory-phase-4.md`.
 Owner: `.archon/workflows/{client-site-factory,client-site-deploy}.yaml`,
 `.archon/commands/site-{factory,deploy}-*.md`, `.archon/scripts/*.py`,
-`site-templates/v1/`, `clients/` (private, gitignored)
-Last updated: 2026-07-10
-**Public Export Status: Private only**
+`site-templates/v1/`, `clients/` (private, gitignored and sanitizer-denied)
+Last updated: 2026-07-31
+**Public Export Status: Public-safe manual; client runtime data stays private**
 
 ## What It Does
 
@@ -380,8 +380,8 @@ scope`) -- the guard never skips silently.
 - `deploy-audit.jsonl` is append-only; `"rejected"` is operator-manual-only
   (see Trap 8) -- the workflow itself can never write it.
 - `git ls-files clients/` prints nothing and `git check-ignore` is positive
-  for any path under `clients/` -- the compensating control for the deferred
-  sanitizer entry (see Trap 5).
+  for any path under `clients/`. This is workspace hygiene in addition to the
+  explicit sanitizer deny (see Trap 5).
 
 ## Operator Runbook: Onboarding A New Client
 
@@ -505,18 +505,15 @@ skip-if-VALID (re-gate an existing output before trusting it), never
 skip-if-exists: a cached defective render that merely exists on disk must
 never ship via a bare existence check.
 
-### 5. The sanitizer boundary is a gitignore, not a deny-list, for now
+### 5. `clients/` is an explicit sanitizer deny; gitignore is workspace hygiene
 
-`clients/` is denied only via `.gitignore:143-146` -- it is NOT yet an entry
-in `scripts/sanitize.py`'s `DENY_DIRS` (that file is owned by a parallel
-session; the entry is WS3-deferred in the P4 PRP). The compensating control:
-the sanitizer sources its file list from `git ls-files`
-(`.gitignore:86-88`), and an untracked directory can never appear there, so a
-client's data cannot ship publicly even though the deny-list entry is
-pending. `.claude/scripts/tests/test_deploy_gate.py::
-test_clients_dir_untracked_and_ignored` locks this and is DESIGNED to go red
-the moment WS3 lands (its docstring names the successor test) -- upgrade the
-control then, do not delete the red test.
+`scripts/sanitize.py` explicitly lists `clients/` in `DENY_DIRS`. Path
+classification is case-insensitive for denied directory segments and rejects
+absolute, drive-qualified, traversal, empty-segment, and UNC aliases before
+allowlist lookup. The physical source classifier also rejects missing files,
+paths outside the repository, symlinks, and Windows reparse points/junctions.
+Dry-run and real export invoke the same classifier. `git ls-files clients/`
+remaining empty is defense in depth, not the export security boundary.
 
 ### 6. `copy-build`'s `rm -rf` is bounded, not trusted
 
@@ -577,16 +574,16 @@ Two facts, engine-verified against the live Archon v0.5.0 binary:
   before the copy -- an unlinked dir named `YourProduct-client` would otherwise
   auto-link to the real production project under `--yes`.
 
-### 10. Do not launch either workflow from inside a Claude Code session
+### 10. In-session launches work now (hang doctrine RETIRED 2026-07-22)
 
-With `CLAUDECODE` set, the Archon daemon hangs while `archon workflow status`
-still reports "running" -- the same failure mode documented for every other
-Archon workflow in this repo (`video-production.yaml:10-14`,
-[image-node-factory](image-node-factory.md) trap 4). Launch
-`client-site-factory` and `client-site-deploy` from a plain shell, background
-the run, and poll the log or `archon workflow status` -- never from inside a
-Claude Code CLI session. Verify by inspecting the run directory, not by
-trusting the status line.
+The old rule -- "never launch from inside a Claude Code session, the daemon
+hangs with `CLAUDECODE` set" -- is OUTDATED. The upstream defect was fixed
+months ago; operator-confirmed and retired repo-wide on 2026-07-22. Launching
+from inside a Claude Code session is fine. What SURVIVES from the old trap is
+the verification discipline: never trust the `archon workflow status` line
+alone -- verify by inspecting the run directory / logs (Rule 2, physical
+state). Historical context for the retired rule: the 2026-04-27 hang
+(coleam00/Archon#1067) and the workarounds built around it.
 
 ### 11. An og/feature slot inherits renderability when it reuses the hero's filename
 
@@ -623,7 +620,7 @@ uv run --project .claude/scripts python .archon/scripts/deploy-verify.py --pre \
   --mode live --client clients/<slug>/client.yaml
 echo "exit=$? (expect 1, refusal line mentions approval)"
 
-# compensating control (Trap 5)
+# workspace hygiene plus explicit sanitizer deny (Trap 5)
 git ls-files clients/                    # MUST print nothing
 git check-ignore clients/anything && echo ignored-ok
 

@@ -2395,3 +2395,326 @@ async def test_session_brief_break_and_retain_defers_then_close_releases(
     assert captured["prompt"].endswith(_FIRED_BLOCK)
     assert calls["clear"] == [True]
     assert convo._session_brief_pending is None
+
+
+# ---------------------------------------------------------------------------
+# #172: cognitive-pass "internal" monologue rides the uncapped prompt suffix
+# (not system_prompt["append"], where the win32 head-keep cap silently drops
+# it on heavy-context turns), plus a win32 truncation receipt.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_internal_monologue_rides_prompt_suffix_not_system_append(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#172: the cognitive-pass monologue is a prompt SUFFIX — it reaches
+    request.prompt, is absent from system_prompt["append"], and never leaks
+    into persisted history."""
+    from cognition.working_memory import Memory
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+    _patch_brief_seams(monkeypatch)  # session brief suppressed (empty suffix)
+
+    async def fake_cognitive_pass(
+        turn_wm, message, active_process, *, trace_decisions=None
+    ):
+        if trace_decisions is not None:
+            trace_decisions["cognitive_pass"] = {
+                "fired": True,
+                "ran": True,
+                "reason": "fired_content",
+                "monologue_chars": len("PRIVATE THOUGHT CONTENT"),
+                "actions_queued": 0,
+            }
+        return turn_wm.with_memory(Memory(
+            role="system",
+            content="PRIVATE THOUGHT CONTENT",
+            region="internal",
+            source="cognition",
+        ))
+
+    monkeypatch.setattr(convo, "_maybe_cognitive_pass", fake_cognitive_pass)
+
+    message = _make_message("let's plan the migration end to end")
+    outputs = [out async for out in convo.handle_message(message)]
+
+    request = captured["request"]
+    assert "PRIVATE THOUGHT CONTENT" in request.prompt
+    assert "# Internal Monologue" in request.prompt
+    assert "PRIVATE THOUGHT CONTENT" not in request.system_prompt["append"]
+    assert "# Internal Monologue" not in request.system_prompt["append"]
+    assert outputs[-1].text == "ok"
+    # History purity — persisted rows never saw the private thought.
+    messages = store.list_messages("telegram:chat-1:thread-1")
+    assert all("PRIVATE THOUGHT CONTENT" not in m.content for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_internal_monologue_capped_at_region_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#172 follow-up: extracting the monologue off the region-render path
+    must not orphan REGION_BUDGETS["internal"] (the runaway-monologue cap).
+    A monologue over budget is truncated with a visible `[TRUNCATED` marker
+    before it ever reaches request.prompt, matching regions.py's own
+    "truncation is always explicit — never silently drops content" rule."""
+    import config as config_module
+    from cognition.working_memory import Memory
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+    budget_tokens = config_module.REGION_BUDGETS["internal"]
+    over_budget_chars = budget_tokens * 4 + 500
+    runaway_thought = "X" * over_budget_chars
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+    _patch_brief_seams(monkeypatch)  # session brief suppressed (empty suffix)
+
+    async def fake_cognitive_pass(
+        turn_wm, message, active_process, *, trace_decisions=None
+    ):
+        return turn_wm.with_memory(Memory(
+            role="system",
+            content=runaway_thought,
+            region="internal",
+            source="cognition",
+        ))
+
+    monkeypatch.setattr(convo, "_maybe_cognitive_pass", fake_cognitive_pass)
+
+    outputs = [
+        out async for out in convo.handle_message(_make_message("plan the migration"))
+    ]
+
+    assert outputs[-1].text == "ok"
+    prompt = captured["request"].prompt
+    assert "# Internal Monologue" in prompt
+    # Capped — the full runaway thought never reaches the prompt.
+    assert runaway_thought not in prompt
+    assert "[TRUNCATED" in prompt
+
+
+@pytest.mark.asyncio
+async def test_internal_monologue_survives_win32_truncation_with_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#172 heavy-context acceptance: when the assembled system append blows
+    past the 27K win32 cap, the monologue STILL reaches request.prompt (its
+    only channel now), the append is truncated, and
+    trace_decisions["win32_append_truncated"] fires with before/after chars."""
+    from cognition.working_memory import Memory
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    # Drive the win32-only cap branch on any CI platform — the local
+    # `import sys as _sys` inside _handle_message_inner re-binds this same
+    # singleton module object (monkeypatch reverts it after the test).
+    monkeypatch.setattr(engine_module.sys, "platform", "win32")
+    captured: dict[str, object] = {}
+    captured_trace: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+    _patch_brief_seams(monkeypatch)  # session brief suppressed (empty suffix)
+
+    async def fake_cognitive_pass(
+        turn_wm, message, active_process, *, trace_decisions=None
+    ):
+        # Capture the SAME _trace_decisions dict the engine threads through —
+        # the win32 receipt is written into it later in the pipeline.
+        if trace_decisions is not None:
+            captured_trace["ref"] = trace_decisions
+            trace_decisions["cognitive_pass"] = {
+                "fired": True,
+                "ran": True,
+                "reason": "fired_content",
+                "monologue_chars": len("PRIVATE THOUGHT CONTENT"),
+                "actions_queued": 0,
+            }
+        # Fill several high-budget system regions past their combined ~27K cap
+        # so the head-keep truncation actually fires downstream. Each region is
+        # budget-capped (config.REGION_BUDGETS, chars = tokens * 4) BEFORE the
+        # win32 cap, so a single 40K region would be trimmed to its own budget;
+        # spreading across regions is what clears 27K.
+        enriched = turn_wm
+        for region, size in (
+            ("identity", 8000),
+            ("durable_memory", 10000),
+            ("user_model", 5000),
+            ("prefetched_context", 12000),
+        ):
+            enriched = enriched.with_memory(Memory(
+                role="system",
+                content=region[0].upper() * size,
+                region=region,
+                source="vault",
+            ))
+        return enriched.with_memory(Memory(
+            role="system",
+            content="PRIVATE THOUGHT CONTENT",
+            region="internal",
+            source="cognition",
+        ))
+
+    monkeypatch.setattr(convo, "_maybe_cognitive_pass", fake_cognitive_pass)
+
+    message = _make_message("let's plan the migration end to end")
+    outputs = [out async for out in convo.handle_message(message)]
+
+    request = captured["request"]
+    assert outputs[-1].text == "ok"
+    # The monologue survived on the uncapped prompt channel.
+    assert "PRIVATE THOUGHT CONTENT" in request.prompt
+    assert "# Internal Monologue" in request.prompt
+    # The system append was actually truncated by the win32 head-keep cap.
+    assert len(request.system_prompt["append"]) <= 27000 + len("\n[TRUNCATED]")
+    assert request.system_prompt["append"].endswith("[TRUNCATED]")
+    # ...and the loss is now visible in the trace (before > after chars).
+    trace = captured_trace["ref"]
+    receipt = trace["win32_append_truncated"]
+    assert receipt["before_chars"] > 27000
+    assert receipt["after_chars"] < receipt["before_chars"]
+
+
+def test_win32_truncation_receipt_absent_on_light_turn() -> None:
+    """Light-turn parity: a sub-cap append is returned unchanged by
+    `_truncate_win32_append`, so its caller's
+    `if len(append_text) > max_append:` branch never runs. That branch is
+    also the only place `_trace_decisions["win32_append_truncated"]` gets
+    written, so on a light turn the key never appears at all (not merely
+    `False`) — though this test only exercises the helper in isolation, not
+    the trace-dict absence through the full `handle_message` pipeline (see
+    `test_win32_truncation_receipt_absent_through_full_pipeline_light_turn`
+    for that)."""
+    small_append = engine_module.GROUNDING_RULES + "short content"
+    result = engine_module._truncate_win32_append(small_append)
+    assert result == small_append  # unchanged, well under the 27K cap
+
+
+@pytest.mark.asyncio
+async def test_win32_truncation_receipt_absent_through_full_pipeline_light_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#172: on win32, a turn whose assembled append stays under the 27K cap
+    must leave `win32_append_truncated` fully ABSENT from trace_decisions —
+    not False, not present-with-null — proven through the real pipeline
+    (with the win32 branch actually open), not the isolated
+    `_truncate_win32_append` helper."""
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    monkeypatch.setattr(engine_module.sys, "platform", "win32")
+    captured_trace: dict[str, object] = {}
+
+    async def fake_run(request):
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+    _patch_brief_seams(monkeypatch)  # brief suppressed
+
+    async def fake_cognitive_pass(
+        turn_wm, message, active_process, *, trace_decisions=None
+    ):
+        if trace_decisions is not None:
+            captured_trace["ref"] = trace_decisions
+        return turn_wm  # no internal-region memory, light content
+
+    monkeypatch.setattr(convo, "_maybe_cognitive_pass", fake_cognitive_pass)
+
+    outputs = [out async for out in convo.handle_message(_make_message("hi"))]
+    assert outputs[-1].text == "ok"
+    trace = captured_trace["ref"]
+    assert "win32_append_truncated" not in trace
+
+
+@pytest.mark.asyncio
+async def test_session_brief_coexists_with_internal_monologue_brief_last(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#172: internal monologue rides the prompt suffix BEFORE the session
+    brief — the brief must stay LAST so its recency position holds."""
+    from cognition.working_memory import Memory
+
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def fake_run(request):
+        captured["request"] = request
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+        )
+
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+    _patch_brief_seams(
+        monkeypatch,
+        brief=_fired_brief(),
+        physical=_dt_cls.now() - _td(hours=10),
+    )
+
+    async def fake_cognitive_pass(
+        turn_wm, message, active_process, *, trace_decisions=None
+    ):
+        return turn_wm.with_memory(Memory(
+            role="system", content="PRIVATE THOUGHT", region="internal",
+            source="cognition",
+        ))
+
+    monkeypatch.setattr(convo, "_maybe_cognitive_pass", fake_cognitive_pass)
+
+    outputs = [out async for out in convo.handle_message(_make_message("plan this"))]
+    assert outputs[-1].text == "ok"
+    prompt = captured["request"].prompt
+    assert prompt.endswith(_FIRED_BLOCK)  # brief stays LAST
+    monologue_idx = prompt.index("# Internal Monologue")
+    brief_idx = prompt.index("# Session Opening Brief")
+    assert monologue_idx < brief_idx

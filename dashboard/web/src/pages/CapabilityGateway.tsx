@@ -28,6 +28,11 @@ interface CapabilityGatewayStatus {
   browserops?: JsonRecord;
   outbound_messaging?: JsonRecord;
   approval_policy?: JsonRecord;
+  collaboration?: {
+    buzz?: JsonRecord;
+    buzz_approval_authority?: boolean;
+    approval_surface?: string;
+  };
 }
 
 function asRecord(value: unknown): JsonRecord {
@@ -125,6 +130,8 @@ export function CapabilityGateway() {
   const toolsets = asArray<Record<string, unknown>>(data.toolsets);
   const integrationItems = asArray<Record<string, unknown>>(integrations.items);
   const mutatingActions = asArray<Record<string, unknown>>(approval.model_exposed_mutating_actions);
+  const collaboration = data.collaboration ?? {};
+  const buzz = asRecord(collaboration.buzz);
 
   return (
     <div class="flex h-full flex-col">
@@ -171,6 +178,24 @@ export function CapabilityGateway() {
               </div>
             </Panel>
           </div>
+
+          <Panel title="Buzz Collaboration" status={buzz.state ?? 'disabled'}>
+            <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <Field label="Transport" value={buzz.active_transport} />
+              <Field label="Relay" value={buzz.relay_host} />
+              <Field label="Signed identity" value={buzz.identity} />
+              <Field label="Watched channels" value={buzz.watched_channel_count} />
+              <Field label="Last event" value={buzz.last_event_time} />
+              <Field label="CLI version" value={buzz.cli_version} />
+              <Field label="Identity lock conflict" value={buzz.lock_conflict} />
+              <Field label="Approval authority" value={collaboration.approval_surface} />
+            </div>
+            {buzz.last_error ? (
+              <div class="mt-3 rounded bg-[var(--color-elevated)] px-3 py-2 text-[11px] text-[var(--color-status-warn)]">
+                {text(buzz.last_error)}
+              </div>
+            ) : null}
+          </Panel>
 
           <div class="grid gap-4 xl:grid-cols-2">
             <Panel title="Toolsets" status={`${toolsets.length} available`}>

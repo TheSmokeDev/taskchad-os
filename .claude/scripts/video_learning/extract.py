@@ -6,7 +6,6 @@ import asyncio
 import html
 import ipaddress
 import json
-import math
 import re
 import shutil
 import socket
@@ -23,8 +22,18 @@ _TIMING_RE = re.compile(
 )
 _TAG_RE = re.compile(r"<[^>]+>")
 _VISUAL_CUES = (
-    "slide", "chart", "graph", "diagram", "screen", "demo", "dashboard",
-    "look at", "as you can see", "shown here", "whiteboard", "visual",
+    "slide",
+    "chart",
+    "graph",
+    "diagram",
+    "screen",
+    "demo",
+    "dashboard",
+    "look at",
+    "as you can see",
+    "shown here",
+    "whiteboard",
+    "visual",
 )
 
 
@@ -63,7 +72,9 @@ def validate_source(source: str, *, allow_local: bool) -> tuple[str, str]:
             raise VideoSourceError(f"Could not resolve the video host: {host}") from exc
         for address in addresses:
             ip = ipaddress.ip_address(address)
-            if any((ip.is_private, ip.is_loopback, ip.is_link_local, ip.is_reserved, ip.is_multicast)):
+            if any(
+                (ip.is_private, ip.is_loopback, ip.is_link_local, ip.is_reserved, ip.is_multicast)
+            ):
                 raise VideoSourceError("Local and private network URLs are not allowed.")
         return "url", value
     if parsed.scheme:
@@ -88,20 +99,35 @@ async def extract_video(
     *,
     detail: str = "smart",
     allow_local: bool = False,
+    local_stt_only: bool = False,
+    transcript_override: str | None = None,
+    transcript_source_override: str = "",
 ) -> ExtractionResult:
-    source_type, normalized = await asyncio.to_thread(validate_source, source, allow_local=allow_local)
+    source_type, normalized = await asyncio.to_thread(
+        validate_source, source, allow_local=allow_local
+    )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     if source_type == "url":
         metadata, raw = await asyncio.to_thread(_remote_metadata, normalized)
         if raw.get("is_live"):
-            raise VideoSourceError("Active livestreams are not supported; use the archived video after it ends.")
-        segments, transcript_source = await asyncio.to_thread(
-            _remote_captions, normalized, artifact_dir, raw
-        )
+            raise VideoSourceError(
+                "Active livestreams are not supported; use the archived video after it ends."
+            )
+        if transcript_override is not None:
+            segments = [TranscriptSegment(None, None, transcript_override.strip())]
+            transcript_source = transcript_source_override or "immutable-curriculum-raw"
+        else:
+            segments, transcript_source = await asyncio.to_thread(
+                _remote_captions, normalized, artifact_dir, raw
+            )
     else:
         metadata = await asyncio.to_thread(_local_metadata, Path(normalized))
         raw = {}
-        segments, transcript_source = [], ""
+        if transcript_override is not None:
+            segments = [TranscriptSegment(None, None, transcript_override.strip())]
+            transcript_source = transcript_source_override or "immutable-curriculum-raw"
+        else:
+            segments, transcript_source = [], ""
 
     if extraction_duration := metadata.duration_s:
         if extraction_duration > 14_400:
@@ -110,10 +136,12 @@ async def extract_video(
     media_path = Path(normalized) if source_type == "local" else None
     if not segments:
         audio_path = await asyncio.to_thread(_extract_audio, normalized, source_type, artifact_dir)
-        transcript = await _transcribe(audio_path)
+        transcript = await _transcribe(audio_path, local_only=local_stt_only)
         segments = [TranscriptSegment(None, None, transcript.strip())] if transcript.strip() else []
         transcript_source = "speech-to-text"
-        warnings.append("No usable captions were available; speech-to-text fallback has no source timestamps.")
+        warnings.append(
+            "No usable captions were available; speech-to-text fallback has no source timestamps."
+        )
     if not segments:
         raise VideoSourceError("No transcript could be extracted from this video.")
 
@@ -183,7 +211,9 @@ def parse_vtt(text: str) -> list[TranscriptSegment]:
     return rows
 
 
-def _run(args: list[str], *, cwd: Path | None = None, timeout: int = 900) -> subprocess.CompletedProcess[str]:
+def _run(
+    args: list[str], *, cwd: Path | None = None, timeout: int = 900
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         cwd=str(cwd) if cwd else None,
@@ -217,10 +247,18 @@ def _remote_metadata(url: str) -> tuple[VideoMetadata, dict]:
 
 
 def _local_metadata(path: Path) -> VideoMetadata:
-    result = _run([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "json", str(path),
-    ])
+    result = _run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            str(path),
+        ]
+    )
     duration = None
     if result.returncode == 0:
         try:
@@ -228,7 +266,9 @@ def _local_metadata(path: Path) -> VideoMetadata:
         except json.JSONDecodeError:
             pass
     return VideoMetadata(
-        source=str(path), source_type="local", video_id=path.stem,
+        source=str(path),
+        source_type="local",
+        video_id=path.stem,
         title=path.stem.replace("_", " ").replace("-", " ").strip() or path.name,
         duration_s=duration,
     )
@@ -240,16 +280,34 @@ def _remote_captions(
     metadata: dict | None = None,
 ) -> tuple[list[TranscriptSegment], str]:
     template = str(artifact_dir / "captions.%(ext)s")
-    result = _run([
-        "yt-dlp", "--skip-download", "--no-playlist", "--write-subs", "--write-auto-subs",
-        "--sub-langs", "en.*,en", "--sub-format", "vtt", "-o", template, "--", url,
-    ], timeout=300)
-    candidates = sorted(artifact_dir.glob("captions*.vtt"), key=lambda p: ("orig" not in p.name, p.name))
+    _run(
+        [
+            "yt-dlp",
+            "--skip-download",
+            "--no-playlist",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            "en.*,en",
+            "--sub-format",
+            "vtt",
+            "-o",
+            template,
+            "--",
+            url,
+        ],
+        timeout=300,
+    )
+    candidates = sorted(
+        artifact_dir.glob("captions*.vtt"), key=lambda p: ("orig" not in p.name, p.name)
+    )
     for candidate in candidates:
         segments = parse_vtt(candidate.read_text(encoding="utf-8", errors="replace"))
         if segments:
             subtitles = (metadata or {}).get("subtitles") or {}
-            has_creator_english = any(str(language).lower().startswith("en") for language in subtitles)
+            has_creator_english = any(
+                str(language).lower().startswith("en") for language in subtitles
+            )
             kind = "creator captions" if has_creator_english else "automatic captions"
             return segments, kind
     return [], ""
@@ -258,10 +316,21 @@ def _remote_captions(
 def _extract_audio(source: str, source_type: str, artifact_dir: Path) -> Path:
     output = artifact_dir / "audio.mp3"
     if source_type == "url":
-        result = _run([
-            "yt-dlp", "--no-playlist", "--max-filesize", "1G", "-x", "--audio-format", "mp3",
-            "-o", str(output), "--", source,
-        ])
+        result = _run(
+            [
+                "yt-dlp",
+                "--no-playlist",
+                "--max-filesize",
+                "1G",
+                "-x",
+                "--audio-format",
+                "mp3",
+                "-o",
+                str(output),
+                "--",
+                source,
+            ]
+        )
         candidates = sorted(artifact_dir.glob("audio.*"))
         if result.returncode != 0 or not candidates:
             raise VideoSourceError(_tool_error("yt-dlp audio", result.stderr))
@@ -272,36 +341,59 @@ def _extract_audio(source: str, source_type: str, artifact_dir: Path) -> Path:
     return output
 
 
-async def _transcribe(audio_path: Path) -> str:
+async def _transcribe(audio_path: Path, *, local_only: bool = False) -> str:
     chat_dir = Path(__file__).resolve().parents[2] / "chat"
     if str(chat_dir) not in sys.path:
         sys.path.insert(0, str(chat_dir))
     from voice import transcribe_audio_file
 
-    return await transcribe_audio_file(audio_path)
+    return await transcribe_audio_file(
+        audio_path,
+        allowed_providers=("faster_whisper", "whisper_cpp") if local_only else None,
+    )
 
 
 def _download_video(url: str, artifact_dir: Path) -> Path:
     output = artifact_dir / "video.%(ext)s"
-    result = _run([
-        "yt-dlp", "--no-playlist", "--max-filesize", "1G",
-        "-f", "best[height<=720]/best", "-o", str(output), "--", url,
-    ])
+    result = _run(
+        [
+            "yt-dlp",
+            "--no-playlist",
+            "--max-filesize",
+            "1G",
+            "-f",
+            "best[height<=720]/best",
+            "-o",
+            str(output),
+            "--",
+            url,
+        ]
+    )
     candidates = [p for p in artifact_dir.glob("video.*") if p.is_file()]
     if result.returncode != 0 or not candidates:
         raise VideoSourceError(_tool_error("yt-dlp video", result.stderr))
     return candidates[0]
 
 
-def _extract_frames(video: Path, frame_dir: Path, duration_s: float | None, limit: int) -> list[Path]:
+def _extract_frames(
+    video: Path, frame_dir: Path, duration_s: float | None, limit: int
+) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
     duration = duration_s or 600.0
     interval = max(5.0, duration / max(1, limit))
-    result = _run([
-        "ffmpeg", "-y", "-i", str(video), "-vf",
-        f"fps=1/{interval:.3f},scale=768:-2", "-frames:v", str(limit),
-        str(frame_dir / "frame-%03d.jpg"),
-    ])
+    result = _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video),
+            "-vf",
+            f"fps=1/{interval:.3f},scale=768:-2",
+            "-frames:v",
+            str(limit),
+            str(frame_dir / "frame-%03d.jpg"),
+        ]
+    )
     if result.returncode != 0:
         return []
     return sorted(frame_dir.glob("frame-*.jpg"))[:limit]

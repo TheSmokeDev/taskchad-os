@@ -26,6 +26,7 @@ from runtime.selection import (  # noqa: E402
 )
 from runtime.model_control import (  # noqa: E402
     CODEX_PLAN_DEFAULT_MODEL,
+    CODEX_REASONING_EFFORT_ENV_KEY,
     apply_runtime_model_choice,
     configured_model_for_provider,
     model_observability_warning,
@@ -126,14 +127,54 @@ def test_resolve_runtime_model_choice_maps_flagship_and_codex_tier_aliases() -> 
     assert sol is not None
     assert sol.provider == "openai-codex"
     assert sol.model == "gpt-5.6-sol"
+    assert sol.reasoning_effort == "xhigh"
 
-    terra = resolve_runtime_model_choice("codex:terra")
+    bare_sol = resolve_runtime_model_choice("sol")
+    assert bare_sol == sol
+
+    terra = resolve_runtime_model_choice("terra")
     assert terra is not None
     assert terra.model == "gpt-5.6-terra"
 
-    luna = resolve_runtime_model_choice("codex:luna")
+    luna = resolve_runtime_model_choice("luna")
     assert luna is not None
     assert luna.model == "gpt-5.6-luna"
+
+
+def test_apply_sol_persists_model_and_xhigh_reasoning_effort() -> None:
+    writes: list[tuple[str, str]] = []
+    env: dict[str, str] = {}
+
+    choice = apply_runtime_model_choice(
+        "sol",
+        environ=env,
+        write_key=lambda key, value: writes.append((key, value)),
+    )
+
+    assert choice.model == "gpt-5.6-sol"
+    assert choice.reasoning_effort == "xhigh"
+    assert env["SECOND_BRAIN_CODEX_MODEL"] == "gpt-5.6-sol"
+    assert env[CODEX_REASONING_EFFORT_ENV_KEY] == "xhigh"
+    assert ("SECOND_BRAIN_CODEX_MODEL", "gpt-5.6-sol") in writes
+    assert (CODEX_REASONING_EFFORT_ENV_KEY, "xhigh") in writes
+
+
+@pytest.mark.parametrize("next_choice", ["terra", "luna", "codex:default"])
+def test_non_sol_codex_choice_clears_sol_reasoning_effort(next_choice: str) -> None:
+    removals: list[str] = []
+    env: dict[str, str] = {}
+
+    apply_runtime_model_choice("sol", environ=env)
+    choice = apply_runtime_model_choice(
+        next_choice,
+        environ=env,
+        delete_key=removals.append,
+    )
+
+    assert choice.provider == "openai-codex"
+    assert choice.reasoning_effort is None
+    assert CODEX_REASONING_EFFORT_ENV_KEY not in env
+    assert CODEX_REASONING_EFFORT_ENV_KEY in removals
 
 
 def test_apply_runtime_model_choice_writes_explicit_codex_pin() -> None:
@@ -155,7 +196,7 @@ def test_apply_runtime_model_choice_writes_explicit_codex_pin() -> None:
     assert env[LEGACY_RUNTIME_PROVIDER_KEY] == "openai_codex"
     assert env["SECOND_BRAIN_CODEX_MODEL"] == "gpt-5.5"
     assert ("SECOND_BRAIN_CODEX_MODEL", "gpt-5.5") in writes
-    assert removals == []
+    assert removals == [CODEX_REASONING_EFFORT_ENV_KEY]
 
 
 @pytest.mark.parametrize(

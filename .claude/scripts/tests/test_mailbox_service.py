@@ -36,6 +36,42 @@ def test_send_message(svc):
     assert msg.message_type == "command"
 
 
+def test_approval_request_projects_redacted_buzz_receipt_after_mailbox_write(svc, monkeypatch):
+    import buzz_signals
+
+    projected = []
+    monkeypatch.setattr(
+        buzz_signals,
+        "enqueue_work_receipt",
+        lambda receipt_type, **payload: projected.append((receipt_type, payload)) or True,
+    )
+    msg = svc.send_message(
+        SendMessageInput(
+            from_agent="sb",
+            recipients=["operator"],
+            subject="Approve deployment",
+            body="private prompt with API_KEY=never-project-this",
+            message_type="approval_request",
+        )
+    )
+
+    assert msg.id > 0
+    assert projected == [
+        (
+            "work.approval_required",
+            {
+                "work_id": str(msg.id),
+                "work_type": "mailbox",
+                "summary": "Approve deployment",
+                "status": "approval_required",
+                "dashboard_path": "/mission/mailbox",
+                "idempotency_key": f"mailbox:{msg.id}:work.approval_required",
+            },
+        )
+    ]
+    assert "never-project-this" not in repr(projected)
+
+
 def test_send_creates_per_recipient_deliveries(svc):
     # Parity: mailbox.ts:sendMessage() — one delivery per recipient
     msg = svc.send_message(SendMessageInput(

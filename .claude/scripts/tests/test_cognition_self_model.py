@@ -87,6 +87,88 @@ def test_strengthen_existing(tmp_path):
     assert r2.confidence > 0.7  # Boosted by INFERENCE_CONFIRM_BOOST
 
 
+def test_merge_upgrades_reflection_to_explicit(tmp_path):
+    """A reflection-sourced record that dedup-merges with an explicit claim is upgraded.
+
+    Regression for #173 Finding 2: the merge branch of add_inference must ratchet
+    source UP (never down) so a belief first seen casually and later restated
+    explicitly by the operator actually gains B1 protection.
+    """
+    path = tmp_path / "inf.json"
+    tracker = InferenceTracker(path)
+    tracker.add_inference("operator prefers concise answers", "obs", 0.5, source="reflection")
+    hit = tracker.add_inference("operator prefers concise answers", "obs", 0.6, source="explicit")
+    assert hit.source == "explicit"
+    assert InferenceTracker(path).load()[0].source == "explicit"
+
+
+def test_merge_never_downgrades_explicit(tmp_path):
+    """An explicit-sourced record is never downgraded by a later lower-rank merge."""
+    path = tmp_path / "inf.json"
+    tracker = InferenceTracker(path)
+    tracker.add_inference("operator prefers concise answers", "obs", 0.5, source="explicit")
+    hit = tracker.add_inference("operator prefers concise answers", "obs", 0.6, source="reflection")
+    assert hit.source == "explicit"
+    assert InferenceTracker(path).load()[0].source == "explicit"
+
+
+def test_merge_same_rank_source_is_a_noop(tmp_path):
+    """Two reflection merges in a row: source stays reflection (no spurious flip)."""
+    path = tmp_path / "inf.json"
+    tracker = InferenceTracker(path)
+    tracker.add_inference("operator prefers concise answers", "obs", 0.5, source="reflection")
+    hit = tracker.add_inference("operator prefers concise answers", "obs", 0.6, source="reflection")
+    assert hit.source == "reflection"
+
+
+def test_merge_upgrades_auto_capture_to_reflection(tmp_path):
+    """A legacy auto_capture record that dedup-merges with a reflection claim is upgraded.
+
+    Covers the pre-migration / not-yet-quarantined corpus path — add_inference
+    is only ever called with source in {explicit, reflection}, but the EXISTING
+    hit it merges into can still carry the auto_capture default.
+    """
+    path = tmp_path / "inf.json"
+    tracker = InferenceTracker(path)
+    tracker.add_inference("operator prefers concise answers", "obs", 0.5, source="auto_capture")
+    hit = tracker.add_inference("operator prefers concise answers", "obs", 0.6, source="reflection")
+    assert hit.source == "reflection"
+
+
+def test_merge_unknown_source_ranks_as_zero(tmp_path):
+    """An unrecognized source string on either side falls back to rank 0 (Rule-2 safety)."""
+    path = tmp_path / "inf.json"
+    tracker = InferenceTracker(path)
+    tracker.add_inference("operator prefers concise answers", "obs", 0.5, source="typo_source")
+    # a known-rank source (reflection, rank 1) must still upgrade an unranked hit (rank 0)
+    hit = tracker.add_inference("operator prefers concise answers", "obs", 0.6, source="reflection")
+    assert hit.source == "reflection"
+
+
+def test_merge_incoming_case_variant_source_still_upgrades(tmp_path):
+    """add_inference normalizes its own source arg — the ratchet is self-defending.
+
+    A caller passing "Explicit"/" EXPLICIT " (provider casing variance) must
+    rank as explicit, not as an unranked rank-0 string that can never upgrade
+    a reflection record.
+    """
+    path = tmp_path / "inf.json"
+    tracker = InferenceTracker(path)
+    tracker.add_inference("operator prefers concise answers", "obs", 0.5, source="reflection")
+    hit = tracker.add_inference("operator prefers concise answers", "obs", 0.6, source="Explicit")
+    assert hit.source == "explicit"
+    assert InferenceTracker(path).load()[0].source == "explicit"
+
+
+def test_new_record_case_variant_source_is_normalized(tmp_path):
+    """A brand-new record persists canonical lowercase provenance."""
+    path = tmp_path / "inf.json"
+    tracker = InferenceTracker(path)
+    r = tracker.add_inference("operator ships lean v1s", "obs", 0.7, source=" EXPLICIT ")
+    assert r.source == "explicit"
+    assert InferenceTracker(path).load()[0].source == "explicit"
+
+
 def test_strengthen_three_times_confirms(tmp_path):
     tracker = InferenceTracker(tmp_path / "inf.json")
     tracker.add_inference("likes dark mode", "obs1", 0.7)
@@ -270,3 +352,19 @@ def test_corrupt_state_file(tmp_path):
     path.write_text("not json at all", encoding="utf-8")
     tracker = InferenceTracker(path)
     assert tracker.load() == []
+
+
+# === Cross-module invariant ===
+
+
+def test_source_rank_is_single_sourced():
+    """belief_conflicts must alias self_model._SOURCE_RANK, not re-literalize it.
+
+    Kimi design gate on PR #174: B1's sacrosanct ranking has exactly one owner
+    (self_model); belief_conflicts imports it along its existing dependency
+    edge. Identity (is), not equality — a re-introduced literal copy that
+    happens to match would still be the drift-by-forgetfulness bug.
+    """
+    from cognition import belief_conflicts, self_model
+
+    assert belief_conflicts._SOURCE_RANK is self_model._SOURCE_RANK

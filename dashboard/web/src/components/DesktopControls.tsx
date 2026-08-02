@@ -32,6 +32,7 @@ interface DesktopBridge {
   status: () => Promise<DesktopStatus>;
   startStack: () => Promise<DesktopStatus>;
   stopStack: () => Promise<DesktopStatus>;
+  openBuzz: () => Promise<{ mode: string; target: string }>;
   onStackEvent: (callback: (event: { type: string; status?: DesktopStatus }) => void) => () => void;
 }
 

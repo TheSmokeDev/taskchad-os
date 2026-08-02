@@ -342,6 +342,19 @@ def empty_homie_root(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     monkeypatch.setenv("HOMIE_BIN_DIR", str(bin_dir))
+    # Blueprint creation shares the Discord binding owner with the default
+    # profile. Keep CLI creation tests from writing the checkout's live data.
+    monkeypatch.setenv(
+        "DISCORD_CHANNEL_BINDINGS_FILE",
+        str(tmp_path / "discord-channel-bindings.json"),
+    )
+    from personas import provisioning
+
+    monkeypatch.setattr(
+        provisioning,
+        "_best_effort_audit",
+        lambda *_args, **_kwargs: None,
+    )
     return homie
 
 

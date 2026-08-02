@@ -791,12 +791,53 @@ def test_propose_belief_apply_b1_ledger_flips_applied(tmp_path, monkeypatch):
         )
     )
     assert result["adopt"] is True
+    assert result["outcome"] == "adopt"
+    assert result["retryable"] is False  # a settled adopt is never retryable
     led = am.ProposalLedger(ledger_file)
     rows = led.read_all()
     assert len(rows) == 1
     assert rows[0].status == "applied"  # NOT pending — the B1 break would leave pending
     # SELF.md gained the block
     assert "lane first" in (mem / "SELF.md").read_text(encoding="utf-8").lower()
+
+
+def test_propose_belief_apply_pending_is_retryable_error_not_reject(
+    tmp_path, monkeypatch
+):
+    """Finding 1 (code-review, #169) — a live apply that WRITES the target but
+    fails the final ledger flip (``AmendmentApplyResult.status ==
+    "apply_pending"``) must be reported as a retryable "error", never a
+    "reject" — the policy gate did NOT decline this belief, it physically
+    landed. Collapsing it into "reject" would be exactly the Rule-2 lie F4a
+    was written to fix, one hop downstream."""
+    mem = _supporting_memory(tmp_path)
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(config, "AMENDMENT_LEDGER_FILE", ledger_file)
+    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
+    monkeypatch.setattr(am.ProposalLedger, "_update_record", lambda self, pid, updates: False)
+    cand = _candidate(
+        proposed_content="The Homie routes tasks by lane first then provider.",
+        evidence_paths=["daily/x.md"],
+    )
+    result = asyncio.run(
+        el.propose_belief(
+            cand,
+            dry_run=False,
+            memory_dir=mem,
+            reasoning=_fake_reasoning(
+                {"supported": True, "correctness": 0.8, "evidence_fidelity": 0.8}
+            ),
+        )
+    )
+    assert result["outcome"] == "error"  # NOT "reject" — content physically landed
+    assert result["outcome_reason"] == "applied_but_ledger_update_failed"
+    assert result["retryable"] is True  # self-heals on the next apply pass
+    # the target bytes ARE on disk despite the ledger flip failing
+    assert "lane first" in (mem / "SELF.md").read_text(encoding="utf-8").lower()
+    decisions = list((tmp_path / "decisions").glob("decision-*.json"))
+    payload = json.loads(decisions[0].read_text(encoding="utf-8"))
+    assert payload["outcome"] == "error"
+    assert payload["retryable"] is True
 
 
 def test_propose_belief_b2_extra_prediction_key_no_typeerror(tmp_path, monkeypatch):
@@ -911,7 +952,77 @@ def test_propose_belief_judge_says_no_rejects(tmp_path, monkeypatch):
         )
     )
     assert result["adopt"] is False  # evidence read OK, judge said no
+    assert result["outcome"] == "reject"
+    assert result["retryable"] is False  # a real semantic reject is never retryable
     assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"
+
+
+def test_propose_belief_judge_outage_is_retryable_error(tmp_path, monkeypatch):
+    """Finding 2 (#169) — a judge INFRA failure (provider raises) must be
+    outcome="error" + retryable=True, NOT a terminal "reject" indistinguishable
+    from a real evidence-does-not-support-claim verdict."""
+    mem = _supporting_memory(tmp_path)
+    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
+    cand = _candidate(
+        proposed_content="The Homie routes tasks by lane first then provider.",
+        evidence_paths=["daily/x.md"],
+    )
+
+    async def _boom(context, instruction, output_schema=None, cwd=None):
+        raise RuntimeError("provider down")
+
+    result = asyncio.run(
+        el.propose_belief(cand, dry_run=False, memory_dir=mem, reasoning=_boom)
+    )
+    assert result["adopt"] is False
+    assert result["outcome"] == "error"
+    assert result["outcome_reason"] == "judge_failed"
+    assert result["retryable"] is True
+    decisions = list((tmp_path / "decisions").glob("decision-*.json"))
+    payload = json.loads(decisions[0].read_text(encoding="utf-8"))
+    assert payload["outcome"] == "error"
+    assert payload["retryable"] is True
+    assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"  # UNCHANGED
+
+
+def test_propose_belief_semantic_reason_matching_judge_failed_string_is_retryable(
+    tmp_path, monkeypatch
+):
+    """Test-coverage Finding 2 (#169) — documents a KNOWN GAP: a REAL
+    (non-exception) judge verdict whose LLM-authored ``reason`` happens to
+    equal the literal ``"judge_failed"`` sentinel is indistinguishable, at
+    ``evolve_loop.py``'s bare string-equality gate, from the except-Exception
+    infra-outage sentinel judge.py:176 exclusively produces today. The gate has
+    no structural (typed/boolean) signal to tell the two apart, since judge.py
+    is out of scope for this PR (read-only reference) — see the code-review
+    Finding 3 / error-handling Finding 2 recommended follow-up (a dedicated
+    ``infra_failed`` boolean from judge.py) before tightening this assertion."""
+    mem = _supporting_memory(tmp_path)
+    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
+    cand = _candidate(
+        proposed_content="The Homie routes tasks by lane first then provider.",
+        evidence_paths=["daily/x.md"],
+    )
+    result = asyncio.run(
+        el.propose_belief(
+            cand,
+            dry_run=False,
+            memory_dir=mem,
+            reasoning=_fake_reasoning(
+                {
+                    "supported": False,
+                    "correctness": 0.1,
+                    "evidence_fidelity": 0.1,
+                    "reason": "judge_failed",  # coincidental/LLM-echoed, NOT an exception
+                }
+            ),
+        )
+    )
+    # KNOWN GAP: a genuine semantic reject is misclassified as retryable when its
+    # LLM-authored reason string collides with the exception-path sentinel.
+    assert result["outcome"] == "error"
+    assert result["retryable"] is True
+    assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"  # UNCHANGED
 
 
 def test_propose_belief_disabled_kill_switch(tmp_path, monkeypatch):
@@ -973,6 +1084,7 @@ def test_f1_malformed_candidate_missing_evidence_paths_rejects_no_crash(
     payload = json.loads(decisions[0].read_text(encoding="utf-8"))
     assert payload["outcome"] == "reject"
     assert payload["outcome_reason"] == "malformed_candidate"
+    assert payload["retryable"] is False  # F2 (#169) — malformed is terminal, never retryable
     # SELF.md untouched
     assert (tmp_path / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"
     # a distinct visible print
@@ -1338,3 +1450,265 @@ def test_crux_persist_only_if_earned(tmp_path, monkeypatch):
     assert r2["evidence_reason"] == "belief_regression_floor"
     # the asserted candidate's content never reached SELF.md
     assert "i verified the doc" not in self_text.lower()
+
+
+# ===========================================================================
+# Category 10 — nightly dream-cycle autonomy (#170): retry budget, new knobs,
+# candidate extraction, and the retryable-decision reload queue.
+# ===========================================================================
+
+
+def test_belief_evolve_settings_new_knobs_default(monkeypatch):
+    for var in (
+        "BELIEF_MAX_ATTEMPTS",
+        "BELIEF_MAX_ADOPTIONS_PER_NIGHT",
+        "BELIEF_MAX_CANDIDATES_PER_NIGHT",
+        "BELIEF_CANDIDATE_MIN_CONFIDENCE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    s = config.get_belief_evolve_settings()
+    assert s.max_attempts == 3
+    assert s.max_adoptions_per_night == 2
+    assert s.max_candidates_per_night == 3
+    assert s.candidate_min_confidence == 0.75
+
+
+def test_belief_evolve_settings_new_knobs_env_override(monkeypatch):
+    monkeypatch.setenv("BELIEF_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("BELIEF_MAX_ADOPTIONS_PER_NIGHT", "1")
+    monkeypatch.setenv("BELIEF_MAX_CANDIDATES_PER_NIGHT", "7")
+    monkeypatch.setenv("BELIEF_CANDIDATE_MIN_CONFIDENCE", "0.9")
+    s = config.get_belief_evolve_settings()  # no module reload (Rule 1)
+    assert s.max_attempts == 5
+    assert s.max_adoptions_per_night == 1
+    assert s.max_candidates_per_night == 7
+    assert s.candidate_min_confidence == 0.9
+
+
+def test_propose_belief_attempts_below_cap_stays_retryable(tmp_path, monkeypatch):
+    """A judge-infra failure with attempts=0 (next=1 < 3) stays retryable, and the
+    artifact records attempts=1, max_attempts=3."""
+    mem = _supporting_memory(tmp_path)
+    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
+    cand = _candidate(
+        proposed_content="The Homie routes tasks by lane first then provider.",
+        evidence_paths=["daily/x.md"],
+    )
+
+    async def _boom(context, instruction, output_schema=None, cwd=None):
+        raise RuntimeError("provider down")
+
+    result = asyncio.run(
+        el.propose_belief(cand, dry_run=False, memory_dir=mem, reasoning=_boom, attempts=0)
+    )
+    assert result["outcome"] == "error"
+    assert result["retryable"] is True
+    assert result["attempts"] == 1
+    assert result["max_attempts"] == 3
+    payload = json.loads(
+        next((tmp_path / "decisions").glob("decision-*.json")).read_text(encoding="utf-8")
+    )
+    assert payload["attempts"] == 1
+    assert payload["max_attempts"] == 3
+    assert payload["retryable"] is True
+
+
+def test_propose_belief_attempts_at_cap_goes_terminal(tmp_path, monkeypatch):
+    """Same judge-infra failure with attempts=2 (next=3 >= 3) goes TERMINAL:
+    retryable=False, outcome_reason='retry_budget_exhausted', artifact reflects both."""
+    mem = _supporting_memory(tmp_path)
+    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
+    cand = _candidate(
+        proposed_content="The Homie routes tasks by lane first then provider.",
+        evidence_paths=["daily/x.md"],
+    )
+
+    async def _boom(context, instruction, output_schema=None, cwd=None):
+        raise RuntimeError("provider down")
+
+    result = asyncio.run(
+        el.propose_belief(cand, dry_run=False, memory_dir=mem, reasoning=_boom, attempts=2)
+    )
+    assert result["outcome"] == "error"  # still an error outcome...
+    assert result["retryable"] is False  # ...but no longer re-pickable
+    assert result["outcome_reason"] == "retry_budget_exhausted"
+    assert result["attempts"] == 3
+    payload = json.loads(
+        next((tmp_path / "decisions").glob("decision-*.json")).read_text(encoding="utf-8")
+    )
+    assert payload["retryable"] is False
+    assert payload["outcome_reason"] == "retry_budget_exhausted"
+    assert payload["attempts"] == 3
+    assert payload["max_attempts"] == 3
+
+
+def test_propose_belief_dryrun_at_cap_does_not_burn_budget(tmp_path, monkeypatch):
+    """Kimi gate MAJOR on PR #181: a dry-run (--test) at attempts=2 (one below
+    the cap) must NOT increment to 3 and go terminal — the documented safe probe
+    can never push a queued candidate to retry_budget_exhausted. Contrast with
+    test_propose_belief_attempts_at_cap_goes_terminal (dry_run=False -> terminal)."""
+    mem = _supporting_memory(tmp_path)
+    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
+    cand = _candidate(
+        proposed_content="The Homie routes tasks by lane first then provider.",
+        evidence_paths=["daily/x.md"],
+    )
+
+    async def _boom(context, instruction, output_schema=None, cwd=None):
+        raise RuntimeError("provider down")
+
+    result = asyncio.run(
+        el.propose_belief(cand, dry_run=True, memory_dir=mem, reasoning=_boom, attempts=2)
+    )
+    # attempts UNCHANGED (2, not 3) and still retryable — no budget burned.
+    assert result["attempts"] == 2
+    assert result["retryable"] is True
+    assert result["outcome_reason"] != "retry_budget_exhausted"
+    payload = json.loads(
+        next((tmp_path / "decisions").glob("decision-*.json")).read_text(encoding="utf-8")
+    )
+    assert payload["attempts"] == 2
+    assert payload["retryable"] is True
+
+
+def test_extract_belief_candidates_filters_by_kind():
+    belief_block = json.dumps({
+        "kind": "belief_candidate",
+        "target_file": "SELF.md",
+        "summary": "lane-first",
+        "evidence_paths": ["daily/x.md"],
+        "proposed_content": "y",
+        "confidence_score": 0.8,
+    })
+    text = (
+        "Some consolidation prose.\n"
+        '{"target_file": "MEMORY.md", "summary": "a routine amendment", "proposed_content": "x"}\n'
+        f"{belief_block}\n"
+        "More prose. CONSOLIDATION_OK"
+    )
+    out = el.extract_belief_candidates(text)
+    assert len(out) == 1
+    assert "kind" not in out[0]
+    assert out[0]["target_file"] == "SELF.md"
+    assert out[0]["evidence_paths"] == ["daily/x.md"]
+
+
+def test_extract_belief_candidates_empty_text():
+    assert el.extract_belief_candidates("no json here, just CONSOLIDATION_OK") == []
+
+
+def test_load_retryable_belief_candidates_preserves_id(tmp_path):
+    decisions = tmp_path / "decisions"
+    decisions.mkdir()
+    (decisions / "decision-abc123.json").write_text(
+        json.dumps(
+            {
+                "proposal_id": "abc123",
+                "target_file": "SELF.md",
+                "candidate": {
+                    "summary": "s",
+                    "proposed_content": "c",
+                    "evidence_paths": ["daily/x.md"],
+                    "confidence_score": 0.8,
+                },
+                "outcome": "error",
+                "retryable": True,
+                "attempts": 1,
+                "max_attempts": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    out, skipped = el.load_retryable_belief_candidates(decision_dir=decisions)
+    assert len(out) == 1
+    assert skipped == 0
+    assert out[0]["id"] == "abc123"  # ORIGINAL id preserved (retry updates same row)
+    assert out[0]["target_file"] == "SELF.md"
+    assert out[0]["_attempts"] == 1
+    assert out[0]["evidence_paths"] == ["daily/x.md"]
+
+
+def test_load_retryable_belief_candidates_skips_non_retryable(tmp_path):
+    decisions = tmp_path / "decisions"
+    decisions.mkdir()
+    (decisions / "decision-done.json").write_text(
+        json.dumps(
+            {
+                "proposal_id": "done",
+                "target_file": "SELF.md",
+                "candidate": {"evidence_paths": ["daily/x.md"]},
+                "outcome": "reject",
+                "retryable": False,
+                "attempts": 3,
+                "max_attempts": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert el.load_retryable_belief_candidates(decision_dir=decisions) == ([], 0)
+
+
+def test_load_retryable_belief_candidates_skips_corrupted_file(tmp_path):
+    """A corrupted decision file must not vanish the retry queue for the rest
+    of the batch, and the skip must be counted so it's surfaceable in the
+    Phase-5 receipt rather than only visible in stdout."""
+    decisions = tmp_path / "decisions"
+    decisions.mkdir()
+    (decisions / "decision-good.json").write_text(
+        json.dumps(
+            {
+                "proposal_id": "good",
+                "target_file": "SELF.md",
+                "candidate": {"evidence_paths": ["daily/x.md"]},
+                "outcome": "error",
+                "retryable": True,
+                "attempts": 1,
+                "max_attempts": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (decisions / "decision-corrupt.json").write_text("{not valid json", encoding="utf-8")
+    out, skipped = el.load_retryable_belief_candidates(decision_dir=decisions)
+    assert len(out) == 1
+    assert out[0]["id"] == "good"
+    assert skipped == 1
+
+
+def test_load_retryable_belief_candidates_skips_malformed_shape(tmp_path):
+    """Valid JSON but a non-int-castable `attempts` field must be isolated to
+    that ONE file, not raise out of the loader and take the whole batch down."""
+    decisions = tmp_path / "decisions"
+    decisions.mkdir()
+    (decisions / "decision-good.json").write_text(
+        json.dumps(
+            {
+                "proposal_id": "good",
+                "target_file": "SELF.md",
+                "candidate": {"evidence_paths": ["daily/x.md"]},
+                "outcome": "error",
+                "retryable": True,
+                "attempts": 1,
+                "max_attempts": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (decisions / "decision-bad-shape.json").write_text(
+        json.dumps(
+            {
+                "proposal_id": "bad-shape",
+                "target_file": "SELF.md",
+                "candidate": {"evidence_paths": ["daily/y.md"]},
+                "outcome": "error",
+                "retryable": True,
+                "attempts": "three",
+                "max_attempts": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    out, skipped = el.load_retryable_belief_candidates(decision_dir=decisions)
+    assert len(out) == 1
+    assert out[0]["id"] == "good"
+    assert skipped == 1

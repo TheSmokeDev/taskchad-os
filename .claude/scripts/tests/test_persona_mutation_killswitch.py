@@ -249,12 +249,12 @@ def test_post_agents_503_when_persona_mutation_disabled(isolated_app, monkeypatc
 
 
 def test_post_agents_does_not_call_create_profile_when_disabled(isolated_app, monkeypatch):
-    """503 fires BEFORE create_profile is invoked (lifecycle wrap defense-in-depth)."""
+    """503 fires before the atomic provisioner is invoked."""
     monkeypatch.setenv("HOMIE_KILLSWITCH_PERSONA_MUTATION", "disabled")
-    with patch("dashboard_api.create_profile") as mock_create:
+    with patch("personas.creation.apply_provision") as mock_apply:
         r = isolated_app.post("/api/agents", json={"persona_id": "no-call"})
         assert r.status_code == 503
-        mock_create.assert_not_called()
+        mock_apply.assert_not_called()
 
 
 def test_delete_agent_503_when_persona_mutation_disabled(isolated_app, monkeypatch):
@@ -503,16 +503,19 @@ def test_post_agents_not_gated_by_persona_operations_switch(isolated_app, monkey
     monkeypatch.setenv("HOMIE_BIN_DIR", str(tmp_path / "bin"))
     (tmp_path / "bin").mkdir(exist_ok=True)
 
-    with patch("dashboard_api.create_profile") as mock_create:
-        mock_create.return_value = MagicMock(
-            name="ok-create",
-            path=tmp_path / "ok-create",
-            is_default=False,
+    with patch("personas.creation.apply_persona_creation") as mock_create:
+        receipt = MagicMock(
+            persona_id="ok-create",
+            profile_path=str(tmp_path / "ok-create"),
+            outcome="created",
+            preview_hash="a" * 64,
         )
-        mock_create.return_value.name = "ok-create"
+        receipt.as_dict.return_value = {"outcome": "created"}
+        mock_create.return_value = receipt
         r = isolated_app.post("/api/agents", json={"persona_id": "ok-create"})
         # Must not be 503 from persona_mutation gate (which is enabled here).
         assert r.status_code != 503
+        mock_create.assert_called_once()
 
 
 # ──────────────────────────────────────────────────────────────────────

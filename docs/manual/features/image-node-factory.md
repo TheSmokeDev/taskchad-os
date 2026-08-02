@@ -254,11 +254,12 @@ an isolated worktree. Archon locks per working directory, and concurrent starts
 can also contend on the Archon database. Parallel runs therefore need separate
 directories (each a git repository) and staggered starts.
 
-### 4. Do not launch it from inside a Claude Code session
+### 4. In-session launches work now (hang doctrine RETIRED 2026-07-22)
 
-With `CLAUDECODE` set, the daemon hangs while `archon workflow status` still
-reports "running". Launch from a plain shell, background it, and poll the log.
-Verify by inspecting the run directory, not by trusting the status line.
+The old "CLAUDECODE-set daemon hang" is fixed upstream (operator-confirmed,
+retired repo-wide 2026-07-22) -- launching from inside a Claude Code session
+is fine. What survives: never trust the `archon workflow status` line alone;
+verify by inspecting the run directory / logs (physical state).
 
 ### 5. A pack cannot tell you which brand it belongs to
 

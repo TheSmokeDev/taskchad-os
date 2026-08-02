@@ -17,6 +17,10 @@ from .selection import RuntimeSelection, apply_runtime_selection_choice, provide
 CLAUDE_MODEL_ENV_KEY = "SECOND_BRAIN_CLAUDE_MODEL"
 CLAUDE_DEFAULT_MODEL = "claude-sonnet-5"
 CODEX_PLAN_DEFAULT_MODEL = GENERIC_PROVIDER_REGISTRY["openai-codex"].default_model
+CODEX_REASONING_EFFORT_ENV_KEY = "SECOND_BRAIN_CODEX_REASONING_EFFORT"
+CODEX_ALIAS_REASONING_EFFORTS = {
+    "sol": "xhigh",
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,7 @@ class RuntimeModelChoice:
     persist_model: str | None
     used_default: bool
     input_value: str
+    reasoning_effort: str | None = None
 
     @property
     def selection_choice(self) -> str:
@@ -117,6 +122,10 @@ def resolve_runtime_model_choice(raw_choice: str) -> RuntimeModelChoice | None:
             input_value=raw,
         )
 
+    codex_config = MODEL_CONFIGS["openai-codex"]
+    if lowered in codex_config.aliases:
+        return _choice_for_provider_model(codex_config, lowered)
+
     bare_codex_model = _bare_codex_model_shorthand(raw)
     if bare_codex_model is not None:
         return _choice_for_provider_model(MODEL_CONFIGS["openai-codex"], bare_codex_model)
@@ -162,6 +171,15 @@ def apply_runtime_model_choice(
         if write_key is not None:
             write_key(choice.model_env_key, choice.persist_model)
         target_env[choice.model_env_key] = choice.persist_model
+    if choice.provider == "openai-codex":
+        if choice.reasoning_effort is None:
+            if delete_key is not None:
+                delete_key(CODEX_REASONING_EFFORT_ENV_KEY)
+            target_env.pop(CODEX_REASONING_EFFORT_ENV_KEY, None)
+        else:
+            if write_key is not None:
+                write_key(CODEX_REASONING_EFFORT_ENV_KEY, choice.reasoning_effort)
+            target_env[CODEX_REASONING_EFFORT_ENV_KEY] = choice.reasoning_effort
     return choice
 
 
@@ -232,7 +250,12 @@ def format_model_choice(choice: RuntimeModelChoice) -> str:
 
     label = provider_display_name(choice.provider)
     pin_state = "default" if choice.used_default else "pinned"
-    return f"{label} configured model: {choice.model} ({pin_state})"
+    effort = (
+        f", reasoning effort: {choice.reasoning_effort}"
+        if choice.reasoning_effort is not None
+        else ""
+    )
+    return f"{label} configured model: {choice.model} ({pin_state}{effort})"
 
 
 def _split_provider_model(raw: str) -> tuple[str, str] | None:
@@ -279,6 +302,11 @@ def _choice_for_provider_model(
             persist_model=model,
             used_default=False,
             input_value=model_token,
+            reasoning_effort=(
+                CODEX_ALIAS_REASONING_EFFORTS.get(alias_key)
+                if config.provider == "openai-codex"
+                else None
+            ),
         )
     model = _normalize_model_token(config, model_token)
     return RuntimeModelChoice(

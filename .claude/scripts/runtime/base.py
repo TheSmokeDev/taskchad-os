@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,169 @@ class RuntimeRequest:
     # Approved local-file application lane. Adapters must contain this more
     # tightly than ordinary TOOL_REASONING (workspace-write / edit tools only).
     workspace_write_tools: bool = False
+    # Strict model-only reasoning. The lane router admits only adapters that
+    # explicitly prove they can remove every provider-owned tool surface.
+    # This is stronger than `allowed_tools=[]`: several CLIs interpret an
+    # empty allowlist as "use defaults." Curriculum study uses this for
+    # untrusted transcripts so quota fallback cannot silently grant shell,
+    # filesystem, MCP, extension, hook, or browser authority.
+    model_only: bool = False
+    # Epic #236 — caller-supplied tools (persona tool calling).
+    #
+    # `tool_defs` carries OpenAI-format definitions:
+    #     [{"type": "function", "function": {name, description, parameters}}]
+    # This is the wire format on purpose. Portability comes from the FORMAT,
+    # not from a vendor SDK — the identical dict produced a structured call on
+    # Kimi K3 and was ignored outright by the Codex CLI, and neither outcome
+    # involved an SDK-specific field.
+    #
+    # These are NOT `allowed_tools`. That field names built-ins the provider
+    # already owns; a non-empty value there makes `openai_compatible.supports()`
+    # return False and silently pins the request to Claude. `tool_defs` is the
+    # opposite: definitions the CALLER supplies and the CALLER executes.
+    #
+    # `tool_dispatch` is the single execution chokepoint: `(name, arguments)`
+    # -> result string. Modeled as ONE callable rather than a dict of handlers
+    # so there is structurally nowhere else for a tool call to be executed.
+    # Two execution paths means two places to forget a guardrail — the bridge
+    # tools in #245 must land here too, not beside it.
+    #
+    # Both default to None, so every existing caller and all 23 fields above
+    # are byte-identical unchanged.
+    tool_defs: list[dict[str, Any]] | None = None
+    tool_dispatch: Callable[..., Any] | None = None
+    tool_scope_version: str | None = None
+
+
+def assert_model_only_contract(request: RuntimeRequest) -> None:
+    """Reject contradictory authority on a strict model-only request."""
+    if not request.model_only:
+        return
+    violations: list[str] = []
+    if request.capability != TEXT_REASONING:
+        violations.append("capability must be text_reasoning")
+    if request.allowed_tools:
+        violations.append("allowed_tools must be empty")
+    if request.disallowed_tools != ["*"]:
+        violations.append("disallowed_tools must be ['*']")
+    if request_carries_tools(request):
+        violations.append("tool_defs must be empty")
+    if request.mcp_servers:
+        violations.append("mcp_servers must be empty")
+    if request.hooks:
+        violations.append("hooks must be empty")
+    if request.setting_sources:
+        violations.append("setting_sources must be empty")
+    if request.read_only_tools:
+        violations.append("read_only_tools must be false")
+    if request.workspace_write_tools:
+        violations.append("workspace_write_tools must be false")
+    if violations:
+        raise ValueError(
+            "model_only runtime request violates the zero-tool contract: " + "; ".join(violations)
+        )
+
+
+def request_carries_tools(request: RuntimeRequest) -> bool:
+    """True when this request supplies its own tool definitions.
+
+    This is the ONLY definition of "a tool turn" for routing purposes, and it
+    is deliberately narrow: it keys off `tool_defs` being non-empty, NOT off
+    `capability == TOOL_REASONING`.
+
+    The distinction matters. `TOOL_REASONING` means "this request may use
+    tools", which for the CLI lanes means *their own* shell and edit tools —
+    Codex and Gemini both serve those turns perfectly well and must keep doing
+    so. Keying the routing exclusion off the capability tier instead would
+    strip both CLI lanes from every existing tool turn in the framework and
+    collapse the fallback chain to Claude alone, which is the exact failure
+    this epic exists to prevent, inverted.
+
+    Uses an explicit length check rather than truthiness: a list SUBCLASS may
+    override ``__bool__`` and report falsey while holding entries, which would
+    classify a genuine tool turn as a plain one and route it to a lane that
+    drops the definitions (adversarial review, Codex).
+    """
+    defs = request.tool_defs
+    if defs is None:
+        return False
+    try:
+        return len(defs) > 0
+    except TypeError:
+        # Not sized — treat any non-None value as carrying. Fail CLOSED: the
+        # request claims to have tools, so it must not be handed to a lane that
+        # would silently ignore them.
+        return True
+
+
+def assert_tool_defs_are_registered(request: RuntimeRequest) -> None:
+    """Refuse tool definitions that did not come from the tool registry.
+
+    THE BYPASS THIS CLOSES (adversarial review, Codex — BLOCKER):
+    ``tool_registry`` enforces "all tools must be part of a toolset to be
+    accessible" by only ever emitting names a toolset resolved to. But
+    ``tool_defs`` is a plain ``list[dict]`` on the request, so any caller could
+    hand-assemble a schema for an unregistered — or deliberately out-of-scope —
+    tool and hand it straight to a provider, walking around the registry
+    entirely. Correct assembly in the persona layer would then be *convention*,
+    not "default-deny by construction", and the difference between those two is
+    the whole security model.
+
+    So provenance is checked HERE, at the runtime boundary every lane crosses,
+    rather than trusting each caller to have used the registry.
+
+    What this does and does not prove:
+
+    * It proves every carried name is REGISTERED. That is a provenance check.
+    * It does NOT prove the name is in scope for a particular persona — the
+      request does not carry a persona identity, and inventing one here would
+      duplicate scoping logic that belongs in the assembly layer (#244).
+      Scope stays where the toolsets are resolved; this is the backstop that
+      makes an unregistered tool unreachable no matter who assembled it.
+
+    Fails OPEN only when the registry module itself is unavailable (an adopter
+    running the runtime slice without the registry). It never fails open on a
+    name it could not find — that is the case it exists to catch.
+    """
+    if not request_carries_tools(request):
+        return
+
+    try:
+        from runtime import tool_registry
+    except ImportError:
+        # Registry slice absent — nothing to validate against. Deliberate: the
+        # runtime must remain usable without it.
+        return
+
+    unregistered: list[str] = []
+    schema_mismatches: list[str] = []
+    for definition in request.tool_defs or []:
+        name = ""
+        if isinstance(definition, dict):
+            name = ((definition.get("function") or {}) or {}).get("name", "")
+        entry = tool_registry.get_entry(name) if name else None
+        if entry is None:
+            unregistered.append(name or "<unnamed>")
+        elif definition != entry.schema:
+            # A registered NAME is not provenance for a caller-authored schema.
+            # Without exact equality, a caller can reuse an allowed name while
+            # changing its description/arguments to widen what the model sees.
+            schema_mismatches.append(name)
+
+    if unregistered:
+        raise ValueError(
+            "tool_defs contains definitions that did not come from the tool "
+            f"registry: {', '.join(sorted(unregistered))}. Build the array with "
+            "tool_registry.get_tool_definitions(<toolsets>) — a hand-assembled "
+            "schema bypasses toolset scoping entirely."
+        )
+    if schema_mismatches:
+        raise ValueError(
+            "tool_defs contains schemas that do not exactly match the immutable "
+            "registry snapshot: "
+            f"{', '.join(sorted(schema_mismatches))}. Registered-name-only "
+            "provenance is insufficient."
+        )
 
 
 @dataclass(slots=True)
@@ -101,3 +265,4 @@ class RuntimeResult:
     tool_names_used: list[str] = field(default_factory=list)
     tool_calls: list[RuntimeToolCall] = field(default_factory=list)
     usage: dict[str, int] | None = None
+    execution_time_ms: int | None = None

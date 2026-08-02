@@ -1225,3 +1225,359 @@ class TestEpisodeConsolidateFlip:
             "episodes: 1 reviewed, 1 consolidated" in bullet
             for bullet in captured.get("bullets", [])
         )
+
+
+# =============================================================================
+# PHASE 5 TESTS — belief evolution (#170): EVOLVE_SILENT, kill-switch scoping,
+# zero-new-LLM-call regression guard, adoption throttle, fail-open into success.
+# =============================================================================
+
+
+_BELIEF_CANDIDATE_BLOCK = (
+    '{"kind": "belief_candidate", "target_file": "SELF.md", '
+    '"summary": "lane-first", "evidence_paths": ["daily/x.md"], '
+    '"proposed_content": "The Homie routes by lane first.", '
+    '"confidence_score": 0.8}'
+)
+
+
+def test_render_belief_receipt_line_branches():
+    from memory_dream import _render_belief_receipt_line
+
+    assert _render_belief_receipt_line({"result": "not_run"}) == ""
+    assert _render_belief_receipt_line({"result": "EVOLVE_SILENT"}) == (
+        "Beliefs: EVOLVE_SILENT (no new/retryable candidates)"
+    )
+    assert _render_belief_receipt_line({"result": "skipped_killswitch"}) == (
+        "Beliefs: skipped (kill-switch disabled)"
+    )
+    assert _render_belief_receipt_line({"result": "skipped_evolve_disabled"}) == (
+        "Beliefs: skipped (EVOLVE_ENABLED=false)"
+    )
+    assert _render_belief_receipt_line({"result": "failed", "error": "boom"}) == (
+        "Beliefs: phase failed (non-fatal): boom"
+    )
+    ran = {
+        "result": "ran", "proposed": 3, "adopted": 1, "rejected": 1,
+        "error_retryable": 1, "error_terminal": 0,
+    }
+    assert _render_belief_receipt_line(ran) == (
+        "Beliefs: 3 proposed, 1 adopted, 1 rejected, 1 retryable-error, 0 terminal-error"
+    )
+    # lowercase=True is the vault-log style — must actually flip the label.
+    assert _render_belief_receipt_line(ran, lowercase=True).startswith("beliefs: ")
+    # skipped_corrupt (#170 error-handling hardening) appends a visible suffix
+    # rather than silently vanishing corrupted retry-queue files.
+    ran_with_corrupt = dict(ran, skipped_corrupt=2)
+    assert _render_belief_receipt_line(ran_with_corrupt) == (
+        "Beliefs: 3 proposed, 1 adopted, 1 rejected, 1 retryable-error, "
+        "0 terminal-error, 2 corrupt-skipped"
+    )
+    silent_with_corrupt = {"result": "EVOLVE_SILENT", "skipped_corrupt": 1}
+    assert _render_belief_receipt_line(silent_with_corrupt) == (
+        "Beliefs: EVOLVE_SILENT (no new/retryable candidates), 1 corrupt-skipped"
+    )
+
+
+class TestBeliefEvolvePhase:
+    @pytest.mark.asyncio
+    async def test_belief_evolve_silent_no_candidates(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """No belief candidates + empty retry queue -> EVOLVE_SILENT, propose_belief
+        never called (zero extra LLM calls)."""
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("CONSOLIDATION_OK"),  # no belief_candidate blocks
+            _make_llm_result("PRUNE_OK"),
+        ])
+        never = AsyncMock()
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("config.BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions"), \
+             patch("evolve.evolve_loop.propose_belief", never), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+            state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+            assert state["belief_evolve"]["result"] == "EVOLVE_SILENT"
+            never.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_belief_evolve_killswitch_skips_but_dream_still_succeeds(
+        self, tmp_path, mock_memory_dir, mock_daily_logs, monkeypatch
+    ):
+        """HOMIE_KILLSWITCH_BELIEF_AUTONOMY=disabled -> Phase 5 skipped, but the
+        overall dream still succeeds (result='consolidated')."""
+        monkeypatch.setenv("HOMIE_KILLSWITCH_BELIEF_AUTONOMY", "disabled")
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal " + _BELIEF_CANDIDATE_BLOCK),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        never = AsyncMock()
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("evolve.evolve_loop.propose_belief", never), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+            state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+            assert state["result"] == "consolidated"  # dream itself UNCHANGED
+            assert state["belief_evolve"]["result"] == "skipped_killswitch"
+            never.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_belief_evolve_empty_evidence_rejected_end_to_end(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """THE CAMPAIGN CRUX, end-to-end through the REAL propose_belief gate
+        chain (not mocked): an empty-evidence high-confidence belief is REJECTED
+        autonomously and SELF.md is BYTE-UNCHANGED — even with a LYING judge
+        that approves it with max scores. The deterministic evidence gate blocks
+        the write the judge cannot override (issue #170 / #175 acceptance)."""
+        self_md = mock_memory_dir / "SELF.md"
+        before = self_md.read_bytes()
+
+        empty_ev_block = (
+            '{"kind": "belief_candidate", "target_file": "SELF.md", '
+            '"summary": "unearned claim", "evidence_paths": [], '
+            '"proposed_content": "The Homie has read the entire vault.", '
+            '"confidence_score": 0.99}'
+        )
+        # Block must be on its OWN line to parse (_iter_json_records requires a
+        # line starting with '{').
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal.\n" + empty_ev_block),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        # A LYING judge: approves with max scores. The REAL evidence gate must
+        # still block the write because evidence_paths is empty.
+        lying_judge = AsyncMock(return_value={
+            "supported": True, "correctness": 1.0, "evidence_fidelity": 1.0,
+            "reason": "looks great",
+        })
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("config.BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions"), \
+             patch("evolve.judge.judge_belief_candidate", lying_judge), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+            state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+            be = state["belief_evolve"]
+            # The candidate WAS proposed (real gate ran) but adopted NOTHING.
+            assert be["proposed"] >= 1
+            assert be["adopted"] == 0
+            # The load-bearing assertion: identity file untouched by autonomy.
+            assert self_md.read_bytes() == before
+
+    @pytest.mark.asyncio
+    async def test_belief_evolve_regression_call_count_unchanged(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """Regression guard for the 'zero new LLM calls' design claim: with Phase 5
+        wired in, the happy path still makes EXACTLY 2 run_with_runtime_lanes calls
+        (consolidate + prune) — belief evolution rides the SAME consolidation call."""
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal into MEMORY.md"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("config.BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions"), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+            assert mock_rwf.call_count == 2  # NO third call added by Phase 5
+
+    @pytest.mark.asyncio
+    async def test_belief_evolve_throttle_stops_after_max_adoptions(
+        self, tmp_path, mock_memory_dir, mock_daily_logs, monkeypatch
+    ):
+        """3 candidates all 'adopt' with max_adoptions_per_night=2 -> propose_belief
+        called only twice, receipt.adopted == 2 (remaining left for tomorrow)."""
+        monkeypatch.setenv("BELIEF_MAX_ADOPTIONS_PER_NIGHT", "2")
+        monkeypatch.setenv("BELIEF_MAX_CANDIDATES_PER_NIGHT", "5")
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        fake_candidates = [
+            {"target_file": "SELF.md", "evidence_paths": ["daily/x.md"], "summary": f"c{i}"}
+            for i in range(3)
+        ]
+        propose = AsyncMock(return_value={"outcome": "adopt", "retryable": False})
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("evolve.evolve_loop.extract_belief_candidates", lambda _t: fake_candidates), \
+             patch("evolve.evolve_loop.load_retryable_belief_candidates", lambda **_k: ([], 0)), \
+             patch("evolve.evolve_loop.propose_belief", propose), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+            assert propose.call_count == 2  # throttle stopped after 2 adoptions
+            state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+            assert state["belief_evolve"]["adopted"] == 2
+
+    @pytest.mark.asyncio
+    async def test_belief_evolve_never_raises_into_dream_failure(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """propose_belief raising an unexpected error -> Phase 5's own try/except
+        contains it: overall dream result='consolidated' (NOT 'failed'), belief
+        receipt result='failed' with an 'error' key."""
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        fake_candidates = [
+            {"target_file": "SELF.md", "evidence_paths": ["daily/x.md"], "summary": "c0"}
+        ]
+        boom = AsyncMock(side_effect=RuntimeError("unexpected phase-5 bug"))
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("evolve.evolve_loop.extract_belief_candidates", lambda _t: fake_candidates), \
+             patch("evolve.evolve_loop.load_retryable_belief_candidates", lambda **_k: ([], 0)), \
+             patch("evolve.evolve_loop.propose_belief", boom), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+            state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+            assert state["result"] == "consolidated"  # dream NOT flipped to failed
+            assert state["belief_evolve"]["result"] == "failed"
+            assert "error" in state["belief_evolve"]
+
+    @pytest.mark.asyncio
+    async def test_belief_evolve_retry_candidates_processed_before_fresh(
+        self, tmp_path, mock_memory_dir, mock_daily_logs, monkeypatch
+    ):
+        """Retry-queue candidates must be judged before fresh candidates so a
+        throttle cap doesn't starve self-healing in favor of brand-new proposals."""
+        monkeypatch.setenv("BELIEF_MAX_ADOPTIONS_PER_NIGHT", "1")
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal " + _BELIEF_CANDIDATE_BLOCK),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        retry_candidate = {
+            "id": "retry-1",
+            "target_file": "SELF.md",
+            "evidence_paths": ["daily/x.md"],
+            "_attempts": 1,
+        }
+        fresh_candidate = {
+            "target_file": "SELF.md",
+            "evidence_paths": ["daily/y.md"],
+            "summary": "fresh",
+        }
+        propose = AsyncMock(return_value={"outcome": "adopt", "retryable": False})
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("evolve.evolve_loop.load_retryable_belief_candidates",
+                   lambda **_k: ([retry_candidate], 0)), \
+             patch("evolve.evolve_loop.extract_belief_candidates",
+                   lambda _t: [fresh_candidate]), \
+             patch("evolve.evolve_loop.propose_belief", propose), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+            # Only 1 call fires (throttle=1) — it must be the retry candidate.
+            assert propose.call_count == 1
+            called_cand = propose.call_args.args[0]
+            assert called_cand.get("id") == "retry-1"
+            state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+            assert state["belief_evolve"]["retried"] == 1
+            assert state["belief_evolve"]["candidates_seen"] == 2
+
+    @pytest.mark.asyncio
+    async def test_belief_evolve_receipt_counts_retryable_vs_terminal_errors(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """propose_belief returning outcome='error' must increment the correct
+        receipt bucket based on retryable, not just be lumped into 'rejected'."""
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        fake_candidates = [
+            {"target_file": "SELF.md", "evidence_paths": ["daily/x.md"], "summary": "c0"},
+            {"target_file": "SELF.md", "evidence_paths": ["daily/y.md"], "summary": "c1"},
+        ]
+        propose = AsyncMock(side_effect=[
+            {"outcome": "error", "retryable": True},
+            {"outcome": "error", "retryable": False},
+        ])
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("evolve.evolve_loop.extract_belief_candidates", lambda _t: fake_candidates), \
+             patch("evolve.evolve_loop.load_retryable_belief_candidates",
+                   lambda **_k: ([], 0)), \
+             patch("evolve.evolve_loop.propose_belief", propose), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+            state = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+            assert state["belief_evolve"]["error_retryable"] == 1
+            assert state["belief_evolve"]["error_terminal"] == 1
+            assert state["belief_evolve"]["adopted"] == 0
+            assert state["belief_evolve"]["rejected"] == 0
+
+    @pytest.mark.asyncio
+    async def test_belief_evolve_caps_fresh_but_not_retry_queue(
+        self, tmp_path, mock_memory_dir, mock_daily_logs, monkeypatch
+    ):
+        """max_candidates_per_night truncates FRESH candidates only; the retry
+        queue backlog must never be silently dropped."""
+        monkeypatch.setenv("BELIEF_MAX_CANDIDATES_PER_NIGHT", "2")
+        monkeypatch.setenv("BELIEF_MAX_ADOPTIONS_PER_NIGHT", "100")  # no throttle interference
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        retry_candidates = [
+            {"id": f"retry-{i}", "target_file": "SELF.md",
+             "evidence_paths": ["daily/x.md"], "_attempts": 1}
+            for i in range(4)
+        ]
+        fresh_candidates = [
+            {"target_file": "SELF.md", "evidence_paths": ["daily/y.md"], "summary": f"f{i}"}
+            for i in range(5)
+        ]
+        propose = AsyncMock(return_value={"outcome": "reject", "retryable": False})
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("evolve.evolve_loop.load_retryable_belief_candidates",
+                   lambda **_k: (retry_candidates, 0)), \
+             patch("evolve.evolve_loop.extract_belief_candidates",
+                   lambda _t: fresh_candidates), \
+             patch("evolve.evolve_loop.propose_belief", propose), \
+             patch("memory_dream._run_entity_compilation"), \
+             patch("memory_dream._run_reindex"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+            # 4 retry (uncapped) + 2 fresh (capped from 5) = 6
+            assert propose.call_count == 6

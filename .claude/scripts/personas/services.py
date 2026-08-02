@@ -32,10 +32,14 @@ PRP anchors: §"Implementation Blueprint" / §"Per-task pseudocode" / §1971-198
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import logging
 import os
+import re
 import socket
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -53,6 +57,8 @@ from .core import (
     get_homie_home,
     get_persona_paths,
 )
+
+_logger = logging.getLogger(__name__)
 
 ServiceName = Literal["orchestration_api", "health_check", "whatsapp_webhook"]
 
@@ -75,15 +81,17 @@ class ConfigShapeError(ValueError):
 # personas slice is structural plumbing — operators authoring config.yaml
 # get a clear "unknown provider" error at load time, not a vague KeyError
 # at runtime.
-_KNOWN_VOICE_PROVIDERS: frozenset[str] = frozenset({
-    "edge",
-    "elevenlabs",
-    "groq",
-    "gradium",
-    "openai",
-    "google",
-    "azure",
-})
+_KNOWN_VOICE_PROVIDERS: frozenset[str] = frozenset(
+    {
+        "edge",
+        "elevenlabs",
+        "groq",
+        "gradium",
+        "openai",
+        "google",
+        "azure",
+    }
+)
 
 
 # Legacy port defaults (load-bearing for Mission Control compat).
@@ -265,9 +273,7 @@ def allocate_port(
         RuntimeError: if no free port can be found within probe range.
     """
     if service not in _LEGACY_PORTS:
-        raise ValueError(
-            f"Unknown service '{service}'. Known: {list(_LEGACY_PORTS.keys())}"
-        )
+        raise ValueError(f"Unknown service '{service}'. Known: {list(_LEGACY_PORTS.keys())}")
     if profile_name is None:
         profile_name = _activity.get_active_profile_name()
     env_var = _PORT_ENV_VARS[service]
@@ -300,9 +306,7 @@ def allocate_port(
     while not _port_is_free(candidate):
         candidate += 1
         if candidate >= 65535:
-            raise RuntimeError(
-                f"No free port found near base={base} for service '{service}'"
-            )
+            raise RuntimeError(f"No free port found near base={base} for service '{service}'")
     _write_persisted_port(config_path, service, candidate)
     return candidate
 
@@ -391,7 +395,11 @@ def detect_telegram_token_collision(
     return None
 
 
-def load_persona_config(persona_id: str | None = None) -> dict[str, Any]:
+def load_persona_config(
+    persona_id: str | None = None,
+    *,
+    profile_root: Path | None = None,
+) -> dict[str, Any]:
     """Read ``<profile>/config.yaml`` strictly for *persona_id* (or active profile).
 
     PRD-8 Phase 2 — public reader for the operator-extended config.yaml.
@@ -440,10 +448,15 @@ def load_persona_config(persona_id: str | None = None) -> dict[str, Any]:
     """
     # Rule 1 — None sentinel resolved at call time (not bound at def time).
     # Rule 3 — module-attribute lookup so monkeypatch propagates.
-    actual_id = (
-        persona_id if persona_id is not None else _activity.get_active_profile_name()
-    )
-    config_path = _resolve_profile_config_path(actual_id)
+    actual_id = persona_id if persona_id is not None else _activity.get_active_profile_name()
+    if profile_root is None:
+        config_path = _resolve_profile_config_path(actual_id)
+    else:
+        # Scheduled workers deliberately root operational databases at the
+        # repository while identity/config stay under ~/.homie/profiles.  Do
+        # not let HOMIE_HOME silently redirect an explicitly selected persona.
+        explicit_root = Path(profile_root).expanduser().resolve(strict=False)
+        config_path = explicit_root / "config.yaml"
 
     if not config_path.is_file():
         # R3 NM1 — only the default profile permits empty-dict back-compat
@@ -451,9 +464,7 @@ def load_persona_config(persona_id: str | None = None) -> dict[str, Any]:
         # config.yaml is a setup error.
         if persona_id is None and actual_id == "default":
             return {}
-        raise FileNotFoundError(
-            f"config.yaml not found for persona {actual_id!r}: {config_path}"
-        )
+        raise FileNotFoundError(f"config.yaml not found for persona {actual_id!r}: {config_path}")
 
     # Rule 2 — read on every call. STRICT semantics: do NOT delegate to
     # _read_yaml_safe (which fail-opens to {}); operator typos must surface.
@@ -467,8 +478,7 @@ def load_persona_config(persona_id: str | None = None) -> dict[str, Any]:
 
     if not isinstance(raw, dict):
         raise ConfigShapeError(
-            f"shape: {config_path}: top-level must be mapping, "
-            f"got {type(raw).__name__}"
+            f"shape: {config_path}: top-level must be mapping, got {type(raw).__name__}"
         )
 
     # Validate each section (only when present). Missing sections are
@@ -481,14 +491,26 @@ def load_persona_config(persona_id: str | None = None) -> dict[str, Any]:
         _validate_model_section(raw["model"], config_path)
     if "mcp" in raw:
         _validate_mcp_section(raw["mcp"], config_path)
+    if "toolsets" in raw:
+        _validate_toolsets_section(raw["toolsets"], config_path)
+    if "tools" in raw:
+        _validate_tools_section(raw["tools"], config_path)
+    if "capability_blueprint" in raw:
+        _validate_capability_blueprint_section(
+            raw["capability_blueprint"], config_path
+        )
     if "cabinet" in raw:
         _validate_cabinet_section(raw["cabinet"], config_path)
     if "voice" in raw:
         _validate_voice_section(raw["voice"], config_path)
     if "learning" in raw:
         _validate_learning_section(raw["learning"], config_path)
+    if "curriculum" in raw:
+        _validate_curriculum_section(raw["curriculum"], config_path)
     if "delegation" in raw:
         _validate_delegation_section(raw["delegation"], config_path)
+    if "market_round" in raw:
+        _validate_market_round_section(raw["market_round"], config_path)
 
     return raw
 
@@ -667,11 +689,43 @@ def set_persona_learning(persona_id: str, enabled: bool) -> None:
     learning = data.get("learning", {})
     if not isinstance(learning, dict):
         raise ConfigShapeError(
-            f"shape: {config_path}: learning must be mapping, "
-            f"got {type(learning).__name__}"
+            f"shape: {config_path}: learning must be mapping, got {type(learning).__name__}"
         )
     learning["enabled"] = enabled
     data["learning"] = learning
+    _minimal_yaml_write(config_path, data)
+
+
+def set_persona_curriculum(
+    persona_id: str,
+    curriculum: dict[str, Any],
+) -> None:
+    """Replace one persona's ``curriculum`` section using strict-read RMW.
+
+    The caller supplies the complete section deliberately: source removals and
+    budget changes must be visible in one operator-owned write. Unknown
+    top-level profile keys are preserved. Validation runs before the write, so
+    a malformed source URL or unsafe limit cannot partially update the file.
+    """
+    config_path = _resolve_profile_config_path(persona_id)
+    _validate_curriculum_section(curriculum, config_path)
+    data = _read_yaml_strict(config_path)
+    data["curriculum"] = curriculum
+    _minimal_yaml_write(config_path, data)
+
+
+def set_persona_curriculum_enabled(persona_id: str, enabled: bool) -> None:
+    """Toggle ``curriculum.enabled`` while preserving its source registry."""
+    config_path = _resolve_profile_config_path(persona_id)
+    data = _read_yaml_strict(config_path)
+    curriculum = data.get("curriculum", {})
+    if not isinstance(curriculum, dict):
+        raise ConfigShapeError(
+            f"shape: {config_path}: curriculum must be mapping, got {type(curriculum).__name__}"
+        )
+    curriculum["enabled"] = enabled
+    _validate_curriculum_section(curriculum, config_path)
+    data["curriculum"] = curriculum
     _minimal_yaml_write(config_path, data)
 
 
@@ -689,9 +743,7 @@ def _read_persisted_port(config_path: Path, service: str) -> int | None:
     return None
 
 
-def _write_persisted_port(
-    config_path: Path, service: str, port: int
-) -> None:
+def _write_persisted_port(config_path: Path, service: str, port: int) -> None:
     """Write ``ports.<service> = port`` atomically; preserve other top-level keys.
 
     R3 NB1 fix (PRD-8 Phase 2): reads via ``_read_yaml_strict()`` so a
@@ -714,8 +766,7 @@ def _write_persisted_port(
         # R4 NM3: malformed top-level ``ports`` value is a setup error,
         # not a silent overwrite trigger. Refuse to clobber.
         raise ConfigShapeError(
-            f"shape: {config_path}: ports must be mapping, "
-            f"got {type(ports).__name__}"
+            f"shape: {config_path}: ports must be mapping, got {type(ports).__name__}"
         )
     ports[service] = int(port)
     data["ports"] = ports
@@ -839,13 +890,9 @@ def _atomic_write_text(path: Path, text: str) -> None:
 # existing ``except ValueError`` callers.
 
 
-def _shape_error(
-    config_path: Path, field: str, actual: Any, expected: str
-) -> ConfigShapeError:
+def _shape_error(config_path: Path, field: str, actual: Any, expected: str) -> ConfigShapeError:
     """Construct a uniform ConfigShapeError with field path + path context."""
-    return ConfigShapeError(
-        f"{field}: {actual!r} (expected {expected}) in {config_path}"
-    )
+    return ConfigShapeError(f"{field}: {actual!r} (expected {expected}) in {config_path}")
 
 
 def _validate_ports_section(value: Any, config_path: Path) -> None:
@@ -868,9 +915,7 @@ def _validate_persona_section(value: Any, config_path: Path) -> None:
         raise _shape_error(config_path, "persona", value, "mapping")
     for field in ("id", "name", "display_name", "role"):
         if field in value and not isinstance(value[field], str):
-            raise _shape_error(
-                config_path, f"persona.{field}", value[field], "str"
-            )
+            raise _shape_error(config_path, f"persona.{field}", value[field], "str")
 
 
 def _validate_model_section(value: Any, config_path: Path) -> None:
@@ -883,18 +928,14 @@ def _validate_model_section(value: Any, config_path: Path) -> None:
     if not isinstance(value, dict):
         raise _shape_error(config_path, "model", value, "mapping")
     if "preferred" in value and not isinstance(value["preferred"], str):
-        raise _shape_error(
-            config_path, "model.preferred", value["preferred"], "str"
-        )
+        raise _shape_error(config_path, "model.preferred", value["preferred"], "str")
     if "fallback" in value:
         fallback = value["fallback"]
         if not isinstance(fallback, list):
             raise _shape_error(config_path, "model.fallback", fallback, "list")
         for idx, item in enumerate(fallback):
             if not isinstance(item, str):
-                raise _shape_error(
-                    config_path, f"model.fallback[{idx}]", item, "str"
-                )
+                raise _shape_error(config_path, f"model.fallback[{idx}]", item, "str")
 
 
 def _validate_mcp_section(value: Any, config_path: Path) -> None:
@@ -920,17 +961,207 @@ def _validate_mcp_section(value: Any, config_path: Path) -> None:
                 )
 
 
-_CABINET_VOICE_PROVIDER_ENUM: frozenset[str] = frozenset({
-    "elevenlabs",
-    "edge",
-    "openai",
-    "gemini",
-    "mistral",
-    "gradium",
-    "kokoro",
-    "kittentts",
-    "macos_say",
-})
+_CABINET_VOICE_PROVIDER_ENUM: frozenset[str] = frozenset(
+    {
+        "elevenlabs",
+        "edge",
+        "openai",
+        "gemini",
+        "mistral",
+        "gradium",
+        "kokoro",
+        "kittentts",
+        "macos_say",
+    }
+)
+
+
+@dataclass(frozen=True)
+class PersonaToolScope:
+    """What one persona is allowed to reach, resolved from its config.
+
+    Attributes:
+        toolsets: Declared toolset names. Resolved against the live registry at
+            assembly time — this object carries intent, never a tool list.
+        tools: Individual tool grants (the escape hatch).
+        used_deprecated_alias: True when the values came from ``cabinet.tools``.
+            Surfaced rather than hidden so an operator can see WHY a persona
+            has the scope it has, and so the migration has something to report.
+    """
+
+    toolsets: tuple[str, ...] = ()
+    tools: tuple[str, ...] = ()
+    used_deprecated_alias: bool = False
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.toolsets and not self.tools
+
+
+def resolve_persona_tool_scope(config: dict[str, Any]) -> PersonaToolScope:
+    """Resolve a persona's declared tool scope from its parsed config.
+
+    Precedence — the NEW keys win outright:
+
+    1. Top-level ``toolsets:`` / ``tools:`` if either is present.
+    2. Otherwise ``cabinet.tools`` (deprecated alias), read as individual
+       grants because that key held TOOL names, never toolset names.
+    3. Otherwise empty — and empty means NO tools. Default-deny survives the
+       rename; an absent key has never granted anything and must not start now.
+
+    The new keys win as a PAIR rather than merging with the alias. Merging
+    would make a profile mid-migration carry a scope that appears in neither
+    key alone, so the effective grant would be invisible in the file the
+    operator is reading.
+
+    Surveyed 2026-07-27: all 25 live profiles have ``cabinet.tools`` empty or
+    absent, so no profile's scope changes when this ships. The alias exists for
+    forward-compat and for any profile edited before the rename lands, not to
+    carry existing data.
+    """
+    if not isinstance(config, dict):
+        return PersonaToolScope()
+
+    raw_toolsets = config.get("toolsets")
+    raw_tools = config.get("tools")
+    if raw_toolsets is not None or raw_tools is not None:
+        return PersonaToolScope(
+            toolsets=_clean_name_tuple(raw_toolsets),
+            tools=_clean_name_tuple(raw_tools),
+        )
+
+    cabinet = config.get("cabinet")
+    if isinstance(cabinet, dict) and cabinet.get("tools") is not None:
+        legacy = _clean_name_tuple(cabinet.get("tools"))
+        if legacy:
+            _logger.warning(
+                "persona config uses the deprecated `cabinet.tools` key "
+                "(%s). That name claimed to scope cabinet meetings while "
+                "gating every persona turn on every surface. Move these to "
+                "the top-level `tools:` list, or declare a `toolsets:` entry.",
+                ", ".join(legacy),
+            )
+        return PersonaToolScope(tools=legacy, used_deprecated_alias=True)
+
+    return PersonaToolScope()
+
+
+def _clean_name_tuple(value: Any) -> tuple[str, ...]:
+    """Strings only, stripped, blanks dropped, ORDER and duplicates preserved.
+
+    Order is meaningful downstream (toolset resolution is order-sensitive for
+    diagnostics), and silently deduplicating would hide a config mistake the
+    operator should see.
+    """
+    if not isinstance(value, list):
+        return ()
+    return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _validate_toolsets_section(value: Any, config_path: Path) -> None:
+    """Validate the persona-level ``toolsets:`` list (epic #236).
+
+    The honestly-named replacement for ``cabinet.tools``. That key claimed to
+    scope cabinet meetings while actually gating a persona's whole tool surface
+    on every surface — the name lied, which is why it is being retired rather
+    than extended.
+
+    Names are validated for SHAPE here, not for existence. Whether a toolset is
+    registered is a runtime question (`runtime.toolsets.TOOLSETS` is a live
+    registry that plugins extend), and failing config load because a toolset
+    has not been imported yet would make profile loading depend on import
+    order. Unknown names resolve to nothing at assembly time — fail-closed,
+    per the tool registry's silent-on-missing contract.
+    """
+    if not isinstance(value, list):
+        raise _shape_error(config_path, "toolsets", value, "list")
+    for idx, item in enumerate(value):
+        if not isinstance(item, str):
+            raise _shape_error(config_path, f"toolsets[{idx}]", item, "str")
+        if not item.strip():
+            raise ConfigShapeError(
+                f"toolsets[{idx}]: toolset name must not be blank in {config_path}"
+            )
+
+
+def _validate_tools_section(value: Any, config_path: Path) -> None:
+    """Validate the persona-level ``tools:`` list — individual grants.
+
+    An escape hatch for "this persona needs exactly one extra verb" without
+    minting a whole toolset for it. Deliberately NOT the primary mechanism:
+    toolsets are what make one persona differ from the other twenty-four, and a
+    config that grants everything tool-by-tool has no scoping story left.
+    """
+    if not isinstance(value, list):
+        raise _shape_error(config_path, "tools", value, "list")
+    for idx, item in enumerate(value):
+        if not isinstance(item, str):
+            raise _shape_error(config_path, f"tools[{idx}]", item, "str")
+        if not item.strip():
+            raise ConfigShapeError(f"tools[{idx}]: tool name must not be blank in {config_path}")
+
+
+def _validate_capability_blueprint_section(value: Any, config_path: Path) -> None:
+    """Validate compiler-owned, profile-local capability metadata."""
+
+    if not isinstance(value, dict):
+        raise _shape_error(config_path, "capability_blueprint", value, "mapping")
+    allowed = {
+        "schema_version",
+        "template",
+        "domain",
+        "domain_packs",
+        "operator_exec",
+        "env_groups",
+        "skill_groups",
+        "skills",
+        "scheduled_authorities",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ConfigShapeError(
+            "capability_blueprint: unknown field(s) "
+            f"{', '.join(unknown)} in {config_path}"
+        )
+    version = value.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise _shape_error(
+            config_path, "capability_blueprint.schema_version", version, "int"
+        )
+    for field in ("template", "domain"):
+        raw = value.get(field)
+        if not isinstance(raw, str) or not raw.strip():
+            raise _shape_error(
+                config_path, f"capability_blueprint.{field}", raw, "non-empty str"
+            )
+    operator_exec = value.get("operator_exec")
+    if not isinstance(operator_exec, bool):
+        raise _shape_error(
+            config_path,
+            "capability_blueprint.operator_exec",
+            operator_exec,
+            "bool",
+        )
+    for field in (
+        "domain_packs",
+        "env_groups",
+        "skill_groups",
+        "skills",
+        "scheduled_authorities",
+    ):
+        raw = value.get(field, [])
+        if not isinstance(raw, list):
+            raise _shape_error(
+                config_path, f"capability_blueprint.{field}", raw, "list[str]"
+            )
+        for index, item in enumerate(raw):
+            if not isinstance(item, str) or not item.strip():
+                raise _shape_error(
+                    config_path,
+                    f"capability_blueprint.{field}[{index}]",
+                    item,
+                    "non-empty str",
+                )
 
 
 def _validate_cabinet_section(value: Any, config_path: Path) -> None:
@@ -953,9 +1184,7 @@ def _validate_cabinet_section(value: Any, config_path: Path) -> None:
     """
     if not isinstance(value, dict):
         raise _shape_error(config_path, "cabinet", value, "mapping")
-    if "portfolio_context" in value and not isinstance(
-        value["portfolio_context"], bool
-    ):
+    if "portfolio_context" in value and not isinstance(value["portfolio_context"], bool):
         raise _shape_error(
             config_path,
             "cabinet.portfolio_context",
@@ -963,16 +1192,12 @@ def _validate_cabinet_section(value: Any, config_path: Path) -> None:
             "bool",
         )
     if "voice_id" in value and not isinstance(value["voice_id"], str):
-        raise _shape_error(
-            config_path, "cabinet.voice_id", value["voice_id"], "str"
-        )
+        raise _shape_error(config_path, "cabinet.voice_id", value["voice_id"], "str")
     # PRD-8 Phase 6 — voice_provider enum validation.
     if "voice_provider" in value:
         provider = value["voice_provider"]
         if not isinstance(provider, str):
-            raise _shape_error(
-                config_path, "cabinet.voice_provider", provider, "str"
-            )
+            raise _shape_error(config_path, "cabinet.voice_provider", provider, "str")
         if provider not in _CABINET_VOICE_PROVIDER_ENUM:
             raise ConfigShapeError(
                 f"cabinet.voice_provider: {provider!r} is not a known voice "
@@ -987,18 +1212,14 @@ def _validate_cabinet_section(value: Any, config_path: Path) -> None:
             "str",
         )
     if "avatar_path" in value and not isinstance(value["avatar_path"], str):
-        raise _shape_error(
-            config_path, "cabinet.avatar_path", value["avatar_path"], "str"
-        )
+        raise _shape_error(config_path, "cabinet.avatar_path", value["avatar_path"], "str")
     if "tools" in value:
         tools = value["tools"]
         if not isinstance(tools, list):
             raise _shape_error(config_path, "cabinet.tools", tools, "list")
         for idx, item in enumerate(tools):
             if not isinstance(item, str):
-                raise _shape_error(
-                    config_path, f"cabinet.tools[{idx}]", item, "str"
-                )
+                raise _shape_error(config_path, f"cabinet.tools[{idx}]", item, "str")
 
 
 def _validate_delegation_section(value: Any, config_path: Path) -> None:
@@ -1021,9 +1242,7 @@ def _validate_delegation_section(value: Any, config_path: Path) -> None:
             raise _shape_error(config_path, "delegation.repos", repos, "list")
         for idx, item in enumerate(repos):
             if not isinstance(item, str):
-                raise _shape_error(
-                    config_path, f"delegation.repos[{idx}]", item, "str"
-                )
+                raise _shape_error(config_path, f"delegation.repos[{idx}]", item, "str")
 
 
 def _validate_voice_section(value: Any, config_path: Path) -> None:
@@ -1053,9 +1272,7 @@ def _validate_voice_section(value: Any, config_path: Path) -> None:
                         config_path,
                         f"voice.cascade[{idx}].provider",
                         None,
-                        "str (one of "
-                        + ", ".join(sorted(_KNOWN_VOICE_PROVIDERS))
-                        + ")",
+                        "str (one of " + ", ".join(sorted(_KNOWN_VOICE_PROVIDERS)) + ")",
                     )
                 if not isinstance(provider, str):
                     raise _shape_error(
@@ -1079,6 +1296,7 @@ def _validate_voice_section(value: Any, config_path: Path) -> None:
                     f"in {config_path}"
                 )
 
+
 def _validate_learning_section(value: Any, config_path: Path) -> None:
     """Validate the ``learning`` section: mapping with optional ``enabled`` bool.
 
@@ -1088,9 +1306,362 @@ def _validate_learning_section(value: Any, config_path: Path) -> None:
     if not isinstance(value, dict):
         raise _shape_error(config_path, "learning", value, "mapping")
     if "enabled" in value and not isinstance(value["enabled"], bool):
-        raise _shape_error(
-            config_path, "learning.enabled", value["enabled"], "bool"
+        raise _shape_error(config_path, "learning.enabled", value["enabled"], "bool")
+
+
+_MARKET_ROUND_TOP_LEVEL = frozenset(
+    {"enabled", "domain", "source", "cadence", "budgets", "model", "delivery"}
+)
+_MARKET_ROUND_SOURCE_KEYS = frozenset(
+    {"debauchery_alias", "approved_guild_id", "discord_channels", "x_feeds"}
+)
+_MARKET_ROUND_CADENCE_KEYS = frozenset(
+    {
+        "every_hours",
+        "discord_minute",
+        "x_minute",
+        "research_prefetch_times",
+        "rollup_times",
+        "timezone",
+    }
+)
+_MARKET_ROUND_BUDGET_KEYS = frozenset(
+    {
+        "discord_messages_per_channel",
+        "x_items_per_feed",
+        "last30days_days",
+        "last30days_runs_per_day",
+        "max_evidence_chars",
+    }
+)
+_MARKET_ROUND_MODEL_KEYS = frozenset({"tier", "judge_tier", "max_turns"})
+_MARKET_ROUND_DELIVERY_KEYS = frozenset(
+    {"enabled", "binding_file", "ping_on_call"}
+)
+
+
+def _reject_unknown_keys(
+    value: dict[str, Any],
+    allowed: frozenset[str],
+    *,
+    field: str,
+    config_path: Path,
+) -> None:
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise ConfigShapeError(
+            f"{field}: unknown field(s) {', '.join(unknown)} in {config_path}"
         )
+
+
+def _validate_market_round_section(value: Any, config_path: Path) -> None:
+    """Validate the strict profile-private Crypto Homie round contract.
+
+    This section contains tenant-specific source IDs, so the framework only
+    validates its shape.  Runtime code keeps it in the named profile and the
+    sanitizer excludes the physical profile tree.
+    """
+    if not isinstance(value, dict):
+        raise _shape_error(config_path, "market_round", value, "mapping")
+    _reject_unknown_keys(
+        value, _MARKET_ROUND_TOP_LEVEL, field="market_round", config_path=config_path
+    )
+
+    if "enabled" in value and not isinstance(value["enabled"], bool):
+        raise _shape_error(config_path, "market_round.enabled", value["enabled"], "bool")
+    if "domain" in value:
+        domain = value["domain"]
+        if not isinstance(domain, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9-]{0,62}", domain.strip()
+        ):
+            raise ConfigShapeError(
+                f"market_round.domain: use a lowercase slug in {config_path}"
+            )
+
+    source = value.get("source", {})
+    if not isinstance(source, dict):
+        raise _shape_error(config_path, "market_round.source", source, "mapping")
+    _reject_unknown_keys(
+        source,
+        _MARKET_ROUND_SOURCE_KEYS,
+        field="market_round.source",
+        config_path=config_path,
+    )
+    for key in ("debauchery_alias", "approved_guild_id"):
+        if key in source and (not isinstance(source[key], str) or not source[key].strip()):
+            raise _shape_error(
+                config_path, f"market_round.source.{key}", source[key], "non-empty str"
+            )
+    channels = source.get("discord_channels", [])
+    if not isinstance(channels, list):
+        raise _shape_error(
+            config_path, "market_round.source.discord_channels", channels, "list"
+        )
+    seen_channels: set[str] = set()
+    for index, channel in enumerate(channels):
+        field = f"market_round.source.discord_channels[{index}]"
+        if not isinstance(channel, dict):
+            raise _shape_error(config_path, field, channel, "mapping")
+        _reject_unknown_keys(
+            channel,
+            frozenset({"id", "name", "tier"}),
+            field=field,
+            config_path=config_path,
+        )
+        channel_id = channel.get("id")
+        if not isinstance(channel_id, str) or not channel_id.isdigit():
+            raise _shape_error(config_path, f"{field}.id", channel_id, "digit string")
+        if channel_id in seen_channels:
+            raise ConfigShapeError(f"{field}.id: duplicate channel in {config_path}")
+        seen_channels.add(channel_id)
+        if channel.get("tier") not in {"primary", "secondary", "tertiary"}:
+            raise ConfigShapeError(
+                f"{field}.tier: expected primary, secondary, or tertiary in {config_path}"
+            )
+        if "name" in channel and not isinstance(channel["name"], str):
+            raise _shape_error(config_path, f"{field}.name", channel["name"], "str")
+    x_feeds = source.get("x_feeds", ["for_you", "following"])
+    if not isinstance(x_feeds, list) or not x_feeds:
+        raise _shape_error(config_path, "market_round.source.x_feeds", x_feeds, "non-empty list")
+    if any(feed not in {"for_you", "following"} for feed in x_feeds):
+        raise ConfigShapeError(
+            f"market_round.source.x_feeds: expected for_you/following in {config_path}"
+        )
+
+    cadence = value.get("cadence", {})
+    if not isinstance(cadence, dict):
+        raise _shape_error(config_path, "market_round.cadence", cadence, "mapping")
+    _reject_unknown_keys(
+        cadence,
+        _MARKET_ROUND_CADENCE_KEYS,
+        field="market_round.cadence",
+        config_path=config_path,
+    )
+    cadence_ranges = {
+        "every_hours": (1, 24),
+        "discord_minute": (0, 59),
+        "x_minute": (0, 59),
+    }
+    for key, (minimum, maximum) in cadence_ranges.items():
+        if key in cadence:
+            raw = cadence[key]
+            if isinstance(raw, bool) or not isinstance(raw, int) or not minimum <= raw <= maximum:
+                raise ConfigShapeError(
+                    f"market_round.cadence.{key}: expected {minimum}..{maximum} in {config_path}"
+                )
+    for key in ("research_prefetch_times", "rollup_times"):
+        if key not in cadence:
+            continue
+        times = cadence[key]
+        if not isinstance(times, list) or any(
+            not isinstance(item, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", item)
+            for item in times
+        ):
+            raise _shape_error(config_path, f"market_round.cadence.{key}", times, "list[HH:MM]")
+    if "timezone" in cadence and (
+        not isinstance(cadence["timezone"], str) or not cadence["timezone"].strip()
+    ):
+        raise _shape_error(
+            config_path, "market_round.cadence.timezone", cadence["timezone"], "non-empty str"
+        )
+
+    budgets = value.get("budgets", {})
+    if not isinstance(budgets, dict):
+        raise _shape_error(config_path, "market_round.budgets", budgets, "mapping")
+    _reject_unknown_keys(
+        budgets,
+        _MARKET_ROUND_BUDGET_KEYS,
+        field="market_round.budgets",
+        config_path=config_path,
+    )
+    budget_ranges = {
+        "discord_messages_per_channel": (1, 250),
+        "x_items_per_feed": (1, 250),
+        "last30days_days": (1, 30),
+        "last30days_runs_per_day": (0, 2),
+        "max_evidence_chars": (1_000, 100_000),
+    }
+    for key, (minimum, maximum) in budget_ranges.items():
+        if key in budgets:
+            raw = budgets[key]
+            if isinstance(raw, bool) or not isinstance(raw, int) or not minimum <= raw <= maximum:
+                raise ConfigShapeError(
+                    f"market_round.budgets.{key}: expected {minimum}..{maximum} in {config_path}"
+                )
+
+    model = value.get("model", {})
+    if not isinstance(model, dict):
+        raise _shape_error(config_path, "market_round.model", model, "mapping")
+    _reject_unknown_keys(
+        model,
+        _MARKET_ROUND_MODEL_KEYS,
+        field="market_round.model",
+        config_path=config_path,
+    )
+    for key in ("tier", "judge_tier"):
+        if key in model and model[key] not in {"fast", "quality"}:
+            raise ConfigShapeError(
+                f"market_round.model.{key}: expected fast or quality in {config_path}"
+            )
+    if "max_turns" in model and model["max_turns"] != 6:
+        raise ConfigShapeError(
+            f"market_round.model.max_turns: scheduled rounds are fixed at 6 in {config_path}"
+        )
+
+    delivery = value.get("delivery", {})
+    if not isinstance(delivery, dict):
+        raise _shape_error(config_path, "market_round.delivery", delivery, "mapping")
+    _reject_unknown_keys(
+        delivery,
+        _MARKET_ROUND_DELIVERY_KEYS,
+        field="market_round.delivery",
+        config_path=config_path,
+    )
+    for key in ("enabled", "ping_on_call"):
+        if key in delivery and not isinstance(delivery[key], bool):
+            raise _shape_error(
+                config_path,
+                f"market_round.delivery.{key}",
+                delivery[key],
+                "bool",
+            )
+    if "binding_file" in delivery and (
+        not isinstance(delivery["binding_file"], str)
+        or not delivery["binding_file"].strip()
+    ):
+        raise _shape_error(
+            config_path,
+            "market_round.delivery.binding_file",
+            delivery["binding_file"],
+            "non-empty str",
+        )
+    if delivery.get("enabled") is True and not str(
+        delivery.get("binding_file") or ""
+    ).strip():
+        raise ConfigShapeError(
+            "market_round.delivery.binding_file: required when delivery is enabled "
+            f"in {config_path}"
+        )
+
+
+_CURRICULUM_POLICY_ENUM = frozenset({"full", "curated"})
+_CURRICULUM_KIND_ENUM = frozenset({"youtube_channel", "okf_seed"})
+_CURRICULUM_MODEL_TIER_ENUM = frozenset({"fast", "quality"})
+
+
+def _validate_curriculum_section(value: Any, config_path: Path) -> None:
+    """Validate the private per-persona curriculum contract.
+
+    URLs are restricted to HTTPS. YouTube channel sources must name a YouTube
+    host and OKF seeds must name a git HTTPS URL. Runtime code resolves channel
+    IDs and confines local paths separately; this validation is the persisted
+    configuration boundary.
+    """
+    from urllib.parse import urlparse
+
+    if not isinstance(value, dict):
+        raise _shape_error(config_path, "curriculum", value, "mapping")
+
+    for key in ("enabled",):
+        if key in value and not isinstance(value[key], bool):
+            raise _shape_error(config_path, f"curriculum.{key}", value[key], "bool")
+
+    if "domain" in value:
+        domain = value["domain"]
+        if not isinstance(domain, str):
+            raise _shape_error(config_path, "curriculum.domain", domain, "str")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", domain.strip()):
+            raise ConfigShapeError(f"curriculum.domain: use a lowercase slug in {config_path}")
+
+    integer_ranges = {
+        "schedule_hours": (1, 168),
+        "backfill_limit": (0, 10_000),
+        "metadata_batch_size": (1, 50),
+        "daily_skims": (0, 100),
+        "daily_deep_studies": (0, 25),
+        "steady_daily_deep_studies": (0, 10),
+    }
+    for key, (minimum, maximum) in integer_ranges.items():
+        if key not in value:
+            continue
+        raw = value[key]
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise _shape_error(config_path, f"curriculum.{key}", raw, "int")
+        if not minimum <= raw <= maximum:
+            raise ConfigShapeError(
+                f"curriculum.{key}: expected {minimum}..{maximum}, got {raw} in {config_path}"
+            )
+
+    for key in ("admission_model_tier", "study_model_tier"):
+        if key not in value:
+            continue
+        tier = value[key]
+        if not isinstance(tier, str):
+            raise _shape_error(config_path, f"curriculum.{key}", tier, "str")
+        if tier not in _CURRICULUM_MODEL_TIER_ENUM:
+            raise ConfigShapeError(f"curriculum.{key}: expected fast or quality in {config_path}")
+
+    sources = value.get("sources", [])
+    if not isinstance(sources, list):
+        raise _shape_error(config_path, "curriculum.sources", sources, "list")
+    seen_ids: set[str] = set()
+    for index, source in enumerate(sources):
+        path = f"curriculum.sources[{index}]"
+        if not isinstance(source, dict):
+            raise _shape_error(config_path, path, source, "mapping")
+        source_id = source.get("id")
+        if not isinstance(source_id, str):
+            raise _shape_error(config_path, f"{path}.id", source_id, "str")
+        source_id = source_id.strip()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", source_id):
+            raise ConfigShapeError(f"{path}.id: use a lowercase slug in {config_path}")
+        if source_id in seen_ids:
+            raise ConfigShapeError(f"{path}.id: duplicate source id {source_id!r} in {config_path}")
+        seen_ids.add(source_id)
+
+        kind = source.get("kind", "youtube_channel")
+        if not isinstance(kind, str) or kind not in _CURRICULUM_KIND_ENUM:
+            raise ConfigShapeError(
+                f"{path}.kind: expected one of "
+                f"{', '.join(sorted(_CURRICULUM_KIND_ENUM))} in {config_path}"
+            )
+        policy = source.get("policy", "curated")
+        if not isinstance(policy, str) or policy not in _CURRICULUM_POLICY_ENUM:
+            raise ConfigShapeError(f"{path}.policy: expected full or curated in {config_path}")
+        url = source.get("url")
+        if not isinstance(url, str):
+            raise _shape_error(config_path, f"{path}.url", url, "str")
+        parsed = urlparse(url.strip())
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ConfigShapeError(
+                f"{path}.url: only public HTTPS URLs are accepted in {config_path}"
+            )
+        if parsed.username is not None or parsed.password is not None:
+            raise ConfigShapeError(
+                f"{path}.url: credentials in URLs are not accepted in {config_path}"
+            )
+        host = parsed.hostname.casefold()
+        if kind == "youtube_channel" and host not in {
+            "youtube.com",
+            "www.youtube.com",
+            "m.youtube.com",
+        }:
+            raise ConfigShapeError(
+                f"{path}.url: YouTube channel source must use youtube.com in {config_path}"
+            )
+        if "seed_url" in source:
+            seed_url = source["seed_url"]
+            if not isinstance(seed_url, str):
+                raise _shape_error(config_path, f"{path}.seed_url", seed_url, "str")
+            seed = urlparse(seed_url.strip())
+            if seed.scheme != "https" or not seed.hostname:
+                raise ConfigShapeError(
+                    f"{path}.seed_url: only public HTTPS URLs are accepted in {config_path}"
+                )
+            if seed.username is not None or seed.password is not None:
+                raise ConfigShapeError(
+                    f"{path}.seed_url: credentials in URLs are not accepted in {config_path}"
+                )
 
 
 # ── PRD-8 Phase 3 / WS2 (R1 B4) — validation helpers ─────────────────────
@@ -1151,14 +1722,26 @@ def validate_config_dict(data: dict) -> None:
         _validate_model_section(data["model"], _DICT_VALIDATION_PATH)
     if "mcp" in data:
         _validate_mcp_section(data["mcp"], _DICT_VALIDATION_PATH)
+    if "toolsets" in data:
+        _validate_toolsets_section(data["toolsets"], _DICT_VALIDATION_PATH)
+    if "tools" in data:
+        _validate_tools_section(data["tools"], _DICT_VALIDATION_PATH)
+    if "capability_blueprint" in data:
+        _validate_capability_blueprint_section(
+            data["capability_blueprint"], _DICT_VALIDATION_PATH
+        )
     if "cabinet" in data:
         _validate_cabinet_section(data["cabinet"], _DICT_VALIDATION_PATH)
     if "voice" in data:
         _validate_voice_section(data["voice"], _DICT_VALIDATION_PATH)
     if "learning" in data:
         _validate_learning_section(data["learning"], _DICT_VALIDATION_PATH)
+    if "curriculum" in data:
+        _validate_curriculum_section(data["curriculum"], _DICT_VALIDATION_PATH)
     if "delegation" in data:
         _validate_delegation_section(data["delegation"], _DICT_VALIDATION_PATH)
+    if "market_round" in data:
+        _validate_market_round_section(data["market_round"], _DICT_VALIDATION_PATH)
 
 
 def validate_config_yaml_text(text: str) -> dict:
@@ -1190,8 +1773,7 @@ def validate_config_yaml_text(text: str) -> dict:
 
     if not isinstance(raw, dict):
         raise ConfigShapeError(
-            f"shape: top-level must be mapping, got {type(raw).__name__} "
-            f"in <config-text>"
+            f"shape: top-level must be mapping, got {type(raw).__name__} in <config-text>"
         )
 
     # Re-use the dict validator so the two helpers share one validation
@@ -1199,3 +1781,43 @@ def validate_config_yaml_text(text: str) -> dict:
     # we let it propagate untouched.
     validate_config_dict(raw)
     return raw
+
+
+def merge_config_patch(
+    current: dict[str, Any],
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    """Deep-merge a compiler patch without discarding authored sections.
+
+    Mappings merge recursively; all other values, including explicit empty
+    lists, replace the prior value. The result is validated before it is
+    returned and neither input is mutated.
+    """
+
+    if not isinstance(current, dict) or not isinstance(patch, dict):
+        raise ConfigShapeError("config merge requires two mappings")
+
+    def _merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+        merged = copy.deepcopy(left)
+        for key, value in right.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = _merge(merged[key], value)
+            else:
+                merged[key] = copy.deepcopy(value)
+        return merged
+
+    result = _merge(current, patch)
+    validate_config_dict(result)
+    return result
+
+
+def dump_config_yaml(data: dict[str, Any]) -> str:
+    """Validate and deterministically serialize profile config YAML."""
+
+    validate_config_dict(data)
+    return yaml.safe_dump(
+        data,
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=False,
+    )

@@ -181,7 +181,7 @@ The vault is where The Homie's mind actually lives. Not a notes folder it writes
 | **Indexes & log** | `INDEX.md` (whole-wiki catalog, auto-refreshed), `concepts/INDEX.md` (concept drill-down), `LOG.md` (append-only compilation timeline) |
 | **Structure** | wikilinks (`[[YourBusiness]]`), backlinks, MOCs, dashboards, Dataview queries, canvases, graph view |
 | **Tooling** | `vault_lint.py` (8 health checks, zero LLM cost), `entity_extractor.py` (extract / compile / contradictions / backfill / sweep / index / preserve-raw / archive), automatic raw-source preservation |
-| **Pipelines** | daily reflection (8 AM), weekly synthesis (Sunday 8 PM), dream consolidation (post-weekly + on-demand) |
+| **Pipelines** | daily reflection (8 AM), weekly synthesis (Sunday 8 PM), dream consolidation (nightly ~3 AM + post-weekly + on-demand) |
 | **Sync state** | `_state/` — memory candidates, self-model inferences, sync manifest. Optional Obsidian Sync via `_state/` exclusion patterns. |
 
 **Is Obsidian required?** No. The vault is plain Markdown — edit it with anything. Obsidian is the *recommended* editor because the wikilinks, backlinks, graph view, Dataview, and canvas all light up natively. The Homie itself only needs the files.
@@ -342,7 +342,7 @@ Private PRDs, PRPs, and vault notes stay outside the public framework export.
 | I-1 | Canonical Ingress | All 6 channels enter `ChatRouter._handle_inner()`. No bypasses. |
 | I-2 | Durable Session Identity | `session_key` (conversation) separated from `request_id` (transport). |
 | I-3 | One Recall Service | `recall_service.recall()` is the sole entrypoint — chat, heartbeat, reflection, weekly. |
-| I-4 | UI Through APIs | Mission Control calls framework APIs, not raw DB. |
+| I-4 | UI Through APIs | The Homie Dashboard calls framework APIs, not raw DB. |
 | I-5 | Runtime Contract | Provider invocation only through `runtime/`. No leaky provider hints. |
 
 ---

@@ -130,8 +130,18 @@ def auto_capture_from_turn(
         user_message, assistant_response, session_id, turn_number
     )
 
+    # One utterance = at most ONE evidence unit per dedupe_key. A single
+    # sentence can fire multiple trigger types ("remember we decided..." hits
+    # both fact and decision) producing same-key candidates in ONE batch; the
+    # append() merge would count them as independent corroboration and let a
+    # single message clear the promotion evidence floor by itself. Dedupe
+    # within the batch so only cross-turn re-observations accumulate evidence.
+    seen_keys: set[str] = set()
     written = 0
     for candidate in candidates:
+        if candidate.dedupe_key in seen_keys:
+            continue
+        seen_keys.add(candidate.dedupe_key)
         if staging_store.append(candidate):
             written += 1
 

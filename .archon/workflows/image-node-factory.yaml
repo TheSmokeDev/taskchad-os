@@ -314,9 +314,60 @@ nodes:
     depends_on: [intake, ground, prompt-pack]
     timeout: 60000
 
+  # THE RENDER GATE: the only node in this factory that spends. Carries the
+  # same `when` as render, so a pack-only run (render_requested=false) never
+  # pauses and the prompt-pack lane stays fully unattended. NO on_reject: a
+  # reject CANCELS the run rather than reworking the pack, because the pack is
+  # already on disk at the paths below and re-running the factory against an
+  # edited brief is the cheaper correction than an in-run rewrite.
+  # This whole file is a born-clean public export rail: plain ASCII only, no
+  # em-dashes. Gate copy needs it twice over, since Archon renders yaml through
+  # a non-UTF-8 seam on this box and an em-dash reaches the operator as garble.
+  - id: render-gate
+    depends_on: [intake, prompt-pack, validate-pack]
+    when: "$intake.output.render_requested == 'true'"
+    approval:
+      message: |
+        IMAGE RENDER GATE - approve to spend on renders, reject to CANCEL.
+
+        Pack is validated and on disk: $prompt-pack.output.prompt_count prompt(s),
+        render_mode $prompt-pack.output.render_mode.
+
+          $prompt-pack.output.prompt_pack_md_path
+          $prompt-pack.output.manifest_path
+
+        Read the pack before approving - the Subject line is the usual defect.
+        Reply with the exact phrase APPROVE SPEND to render every prompt in
+        the pack. ANY other reply (including "no") stops the run at the next
+        node with the pack kept, nothing rendered - Archon treats every
+        non-slash reply as an approval, so the phrase check below guards the
+        spend.
+      capture_response: true
+
+  # SPEND SAFETY (issue #255 codex R3 blocker): the DAG enforces the verbatim
+  # phrase because Archon's NL-approval path approves on ANY non-slash reply.
+  - id: render-gate-check
+    depends_on: [render-gate]
+    when: "$intake.output.render_requested == 'true'"
+    bash: |
+      set -euo pipefail
+      RESP="$(cat <<'GATE255_INF_EOF'
+      $render-gate.output
+      GATE255_INF_EOF
+      )"
+      case "$RESP" in
+        *"APPROVE SPEND"*) echo "spend approved by exact phrase" ;;
+        *)
+          echo "SPEND REFUSED: reply lacked the exact phrase APPROVE SPEND"
+          printf 'captured reply: %s\n' "$RESP"
+          exit 1
+          ;;
+      esac
+    timeout: 30000
+
   - id: render
     command: image-node-render
-    depends_on: [intake, prompt-pack, validate-pack]
+    depends_on: [intake, prompt-pack, validate-pack, render-gate-check]
     when: "$intake.output.render_requested == 'true'"
     context: fresh
     idle_timeout: 900000

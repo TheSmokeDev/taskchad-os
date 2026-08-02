@@ -14,9 +14,8 @@ Design invariants (PRP §Known Gotchas):
   ``browser_audit.py:18``'s import-time ``BROWSER_AUDIT_LOG = DATA_DIR / ...``).
 - Rule 2 — state derives ONLY from the physical sidecar on disk, never a cache.
 - M4 (locking) — every read-modify-write acquires ``shared.file_lock`` DIRECTLY
-  around the RMW (the ``proactive_actions._append_lock`` idiom). We do NOT
-  "mirror StagingStore", whose ``_update_record`` relies on the CALLER holding
-  the lock and does not acquire it itself.
+  around the RMW (the ``proactive_actions._append_lock`` idiom, also used by
+  ``cognition.staging.StagingStore._locked`` as of #166).
 - NM1 (Windows-safe atomic write) — write a sibling temp file, flush, CLOSE it,
   THEN ``os.replace``. Never ``os.replace`` while the temp handle is open.
 - NM2 (audit ownership) — ``prune_stale`` flips state ONLY; it writes NO audit

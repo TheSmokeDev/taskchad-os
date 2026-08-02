@@ -590,11 +590,39 @@ class DiscordAdapter:
         )
         self._tree.add_command(group)
 
-    async def _sync_native_slash_commands(self, discord: Any) -> None:
-        """Sync once per process. Guild syncs update immediately; global can lag."""
+    async def _sync_native_slash_commands(
+        self, discord: Any, *, attempts: int = 4
+    ) -> None:
+        """Sync once per process. Guild syncs update immediately; global can lag.
+
+        Retries with backoff. Discord rate-limits command syncs hard, and this
+        runs once at adapter connect — so a single slow response used to cost
+        the WHOLE process its slash commands, silently, until the next restart.
+        Observed 2026-07-27: one 20s timeout and `/shots` never appeared.
+        A transient failure must not become a permanent one.
+        """
 
         if self._slash_commands_synced:
             return
+        for attempt in range(1, attempts + 1):
+            await self._sync_native_slash_commands_once(discord, attempt=attempt)
+            if self._slash_commands_synced:
+                return
+            if attempt < attempts:
+                # 5s, 15s, 45s — comfortably inside Discord's rate-limit window
+                # without hammering a service that just asked us to wait.
+                await asyncio.sleep(5.0 * (3 ** (attempt - 1)))
+        print(
+            f"[{datetime.now()}] Discord slash commands NOT registered after "
+            f"{attempts} attempts; typed commands still work, autocomplete does not",
+            flush=True,
+        )
+
+    async def _sync_native_slash_commands_once(
+        self, discord: Any, *, attempt: int = 1
+    ) -> None:
+        """One sync attempt. Sets ``_slash_commands_synced`` only on success."""
+
         try:
             timeout_s = _discord_sync_timeout_seconds()
             if self.allowed_guilds:
@@ -617,11 +645,16 @@ class DiscordAdapter:
             self._slash_commands_synced = True
         except asyncio.TimeoutError:
             print(
-                f"[{datetime.now()}] Discord slash command sync timed out after {timeout_s:g}s",
+                f"[{datetime.now()}] Discord slash command sync timed out after "
+                f"{timeout_s:g}s (attempt {attempt})",
                 flush=True,
             )
         except Exception as e:
-            print(f"[{datetime.now()}] Discord slash command sync failed: {e}", flush=True)
+            print(
+                f"[{datetime.now()}] Discord slash command sync failed "
+                f"(attempt {attempt}): {e}",
+                flush=True,
+            )
 
     async def _queue_native_slash_command(
         self,

@@ -2,7 +2,7 @@
 
 Status: shipped (v2 native — Expo/React Native, M0–M12 + PhoneOps P3.0, live-proven on device)
 Owner: `mobile/` in-tree Expo app over the Hono dashboard proxy
-Last updated: 2026-07-06
+Last updated: 2026-07-29
 
 > Deep manual: [The Homie Mobile Manual](../../homie-mobile-manual.md) —
 > architecture, every screen, PhoneOps, safety model, failure modes, and the
@@ -18,7 +18,8 @@ a Browser screen that watches AND drives the desktop's Chrome — plus a
 Desktop | Phone toggle (PhoneOps P3.0) that drives the phone's own Chrome
 through the same gated surface.
 
-It is a **thin native client**: Expo (runs in Expo Go for all of v1),
+It is a **thin native client**: Expo (the M0–M12 surfaces run in Expo Go;
+native Realtime Talk requires a development or production build),
 TypeScript strict, expo-router. It talks only to the Hono proxy (`:3141`)
 with a Bearer header on every call including SSE — never Python `:4322`
 directly, never SQLite, zero business logic in the app.
@@ -29,6 +30,8 @@ the native app replaced it (M0–M4 shipped 2026-07-04/05, phone-verified).
 ## Operator Entry Points
 
 - Phone: Expo Go + the Metro dev server for v1 (`cd mobile && npx expo start`).
+- Native Talk: Android development build (`cd mobile && npm run android`) or
+  the `development` EAS profile. Expo Go does not contain the WebRTC module.
 - Pairing: scan the operator-minted QR (`POST /api/pair/start`), then approve
   the pending device — default-deny with audit rows.
 - Backstop: the same dashboard is reachable from a phone browser via
@@ -39,6 +42,7 @@ the native app replaced it (M0–M4 shipped 2026-07-04/05, phone-verified).
 | Layer | Files |
 |---|---|
 | App | `mobile/src/app/` (screens), `mobile/src/api/` (client, sse, browser-stream), `mobile/src/ui/` (tokens/icons/chrome/markdown/tools/palette), `mobile/src/state/connection.tsx` |
+| Native Talk | `mobile/src/app/talk.tsx`, `mobile/src/api/talk-api.ts`, `talk-realtime.ts`, `talk-realtime-core.ts` |
 | Hono proxy | `dashboard/server/src/routes/conversation.ts`, `sessions.ts`, `browser-viewer.ts` |
 | Framework API | `.claude/scripts/dashboard_api.py` (send/stream/stop/steer, sessions, library, browser-viewer + target gate, pairing) |
 | Phone transport | `.claude/chat/adb_control.py`, `.claude/chat/browser_control.py` (target registry) |
@@ -88,7 +92,7 @@ cd <repo>\dashboard\server
 npm run typecheck; npm test
 
 cd <repo>\mobile
-npx tsc --noEmit; npx expo lint
+npm test; npm run typecheck; npm run lint; npx expo-doctor
 ```
 
 Device smoke: pair → chat streams with tool cards → stop/steer → Browser
@@ -113,6 +117,10 @@ host IPs, and deployment branding stay out of tree.
 
 ## Next Slices
 
+- Mobile Realtime Talk W2/#277: build/install the development APK and settle
+  the current 17/18 Expo Doctor WebRTC metadata warning with real Samsung
+  audio, interruption, SDP, and lifecycle proof. W1 static proof is complete;
+  no phone success is claimed yet.
 - P3.1+: phone read layer, agent-device app/OS control, scrcpy mirror —
   same adb transport, explicitly out of P3.0 scope.
 - iOS build target; store packaging deferred until the daily-drive feel is

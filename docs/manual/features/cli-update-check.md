@@ -1,8 +1,8 @@
-# Safe Framework Updates
+# Safe Framework And Toolchain Updates
 
 Status: Active baseline
 Owner: runtime-chat
-Last updated: 2026-07-15
+Last updated: 2026-07-31
 
 ## What It Does
 
@@ -10,6 +10,12 @@ The Homie polls the latest stable `taskchad-os` GitHub release and can apply it
 through one canonical staged updater. The updater supports clean installs and
 clean customized deployment branches without treating a live checkout like a
 disposable clone.
+
+The same operator surface now checks the external agent toolchain: Codex CLI,
+Claude Code CLI, Codex SDK, Claude Agent SDK, OpenAI SDK, and MCP SDK. These
+targets are manifest-driven and reported separately from the Homie release.
+Scheduled and detached updates run the compatibility-aware toolchain step
+before the framework step and write an independent durable receipt.
 
 Every update uses this order:
 
@@ -52,6 +58,9 @@ the manual” do not.
 ### CLI
 
 ```powershell
+thehomie toolchain --json
+thehomie toolchain --apply-safe --yes --json
+thehomie toolchain --history --json
 thehomie update --check
 thehomie update --check --json
 thehomie update
@@ -65,6 +74,21 @@ thehomie auto-update off
 `thehomie update` remains interactive by default. `--yes --json` is the quiet,
 non-interactive machine contract. The passive once-per-day update banner still
 prints to stderr, keeping JSON stdout clean.
+
+## Toolchain Compatibility Policy
+
+| Target | Scheduled behavior |
+|---|---|
+| Codex CLI | Enforce only the exact app-server version that passed Homie's production gate. A newer registry release is reported but not installed until the gate and adversarial suite pass. |
+| Claude Code CLI | Enforce the exact CLI version paired with the tested Python SDK/runtime. A newer release is reported until the joint runtime suite passes. |
+| Codex SDK (JavaScript) | Inventory only. Homie uses the Codex app-server protocol, so the unused SDK is not globally installed. |
+| Claude Agent SDK + MCP SDK | Read from `uv.lock`. Breaking-series upgrades create a migration-required result; scheduled jobs never rewrite project locks. |
+| OpenAI SDK (Python) | Read from `uv.lock`. Dependency changes arrive through a tested framework PR, not live repo mutation. |
+
+For pre-1.0 dependencies, a minor version change is treated as a breaking
+series. This is why Claude Agent SDK `0.1` to `0.2` is a gated migration. The
+current Python pairing deliberately keeps Claude Agent SDK on `0.1.x` and MCP
+on `1.x` until their joint runtime/tool-calling regression suite passes.
 
 ## Deployment Modes
 
@@ -102,6 +126,11 @@ Task Scheduler provides missed-start recovery according to the host's task
 policy. The host timezone should be Pacific when the configured framework
 timezone is `America/Los_Angeles`.
 
+The scheduled worker first applies compatibility-approved CLI updates, then
+runs the staged Homie release updater. A dirty checkout can block the framework
+step without suppressing the independent toolchain receipt. Registry checks
+and CLI updates make zero model calls.
+
 The manual and scheduled paths share the same lock. A scheduled failure can
 notify an admin channel when `HOMIE_UPDATE_ADMIN_PLATFORM` and
 `HOMIE_UPDATE_ADMIN_CHANNEL` are configured.
@@ -128,18 +157,19 @@ restarts/verifies the restored build when those callbacks are available.
 |---|---|
 | Passive release banner | `.claude/chat/update_check.py` |
 | Canonical updater and receipts | `.claude/scripts/framework_update.py` |
+| Toolchain manifest, policies, and receipts | `.claude/scripts/toolchain_currency.py` |
 | Detached worker/restart/notification | `.claude/scripts/update_worker.py` |
 | Linux and Windows schedules | `.claude/scripts/update_scheduler.py` |
 | CLI | `.claude/chat/cli.py` |
 | Chat command and direct routing | `.claude/chat/commands.py`, `.claude/chat/core_handlers.py`, `.claude/chat/router.py` |
 | Execution-intent classifier | `.claude/chat/engine.py` |
-| Tests | `.claude/scripts/tests/test_framework_update.py`, `test_update_scheduler.py`, `test_update_chat_command.py` |
+| Tests | `.claude/scripts/tests/test_framework_update.py`, `test_toolchain_currency.py`, `test_update_scheduler.py`, `test_update_chat_command.py` |
 
 ## Test It
 
 ```powershell
 cd .claude/scripts
-uv run pytest tests/test_framework_update.py tests/test_update_scheduler.py tests/test_update_chat_command.py -q
+uv run pytest tests/test_framework_update.py tests/test_toolchain_currency.py tests/test_update_scheduler.py tests/test_update_chat_command.py -q
 uv run pytest tests/test_chat_runtime_engine.py tests/test_command_menu.py tests/test_cli.py -q
 ```
 

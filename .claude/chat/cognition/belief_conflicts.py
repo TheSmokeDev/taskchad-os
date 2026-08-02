@@ -44,8 +44,10 @@ from typing import Any
 
 # Provenance rank — EXPLICIT outranks REFLECTION outranks AUTO_CAPTURE. B1's
 # sacrosanct invariant rides this: the dropping loser is ALWAYS the lower rank,
-# and explicit (2) is never the loser against reflection (1).
-_SOURCE_RANK = {"explicit": 2, "reflection": 1, "auto_capture": 0}
+# and explicit (2) is never the loser against reflection (1). Canonical
+# definition lives in cognition.self_model; this module already depends on
+# self_model, so the import rides an existing edge (no cycle).
+from cognition.self_model import _SOURCE_RANK
 
 
 def find_candidate_pairs(
@@ -201,15 +203,28 @@ async def judge_contradictions(
     from cognition.operator_beliefs import _coerce_claim_list  # the EXTENDED M2 unwrap
 
     items = _coerce_claim_list(getattr(result, "parsed", None))
-    valid_ids = {a.id for a, _ in pairs} | {b.id for _, b in pairs}
+    # Validate against the ACTUAL submitted pairs (order-insensitive), not the
+    # union of every id mentioned anywhere in the batch — a judge that combines
+    # ids across unrelated numbered lines (e.g. pair 3's a_id with pair 11's
+    # b_id) must not pass id-membership-only validation. Each id individually
+    # being "valid" proved nothing about whether that TUPLE was ever a candidate.
+    valid_pairs = {frozenset((a.id, b.id)) for a, b in pairs}
     conflicts = [
         c
         for c in items
         if isinstance(c, dict)
-        and c.get("a_id") in valid_ids
-        and c.get("b_id") in valid_ids
         and c.get("a_id") != c.get("b_id")
+        and frozenset((c.get("a_id"), c.get("b_id"))) in valid_pairs
     ]
+    dropped = sum(1 for c in items if isinstance(c, dict)) - len(conflicts)
+    if dropped > 0:
+        # A judge that fabricates cross-pair tuples is a signal, not just noise
+        # to filter — leave a receipt so systematic hallucination is visible.
+        print(
+            f"[belief_conflicts] dropped {dropped} judge verdict(s) not matching "
+            f"a submitted pair",
+            flush=True,
+        )
 
     if span is not None:
         try:

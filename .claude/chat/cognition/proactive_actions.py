@@ -49,6 +49,7 @@ ACTION_STATUSES = frozenset({
     "dispatched",
     "failed",
     "skipped",
+    "expired",
 })
 
 
@@ -147,19 +148,29 @@ class ProactiveActionQueue:
         ]
 
     def mark(self, action_id: str, **updates: Any) -> bool:
-        """Update one queued action record."""
+        """Update one queued action record.
 
-        records = self._iter_records()
-        found = False
-        for record in records:
-            if record.get("id") == action_id:
-                record.update(updates)
-                found = True
-        if found:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._path, "w", encoding="utf-8") as handle:
-                for record in records:
-                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        Guarded by the same cross-process ``_append_lock`` as ``append()``
+        (F3 follow-up, issue #171): an unlocked read-then-rewrite here could
+        race a concurrent locked ``append()`` and silently drop the
+        just-queued action when this rewrite's stale snapshot overwrites the
+        file. Never reachable in production before a drain existed; MUST be
+        fixed in the same change as the drain that makes ``mark()`` a live
+        write path.
+        """
+
+        with _append_lock(self._path):
+            records = self._iter_records()
+            found = False
+            for record in records:
+                if record.get("id") == action_id:
+                    record.update(updates)
+                    found = True
+            if found:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._path, "w", encoding="utf-8") as handle:
+                    for record in records:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         return found
 
     def dispatch_console(self, action_id: str) -> bool:

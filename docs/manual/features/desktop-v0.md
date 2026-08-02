@@ -143,7 +143,7 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
   - fresh clone Electron smoke passed with `ok=true` on alternate ports
     `45138/33156`
   - renderer loaded `The Homie Dashboard`, reported dashboard root, Desktop
-    IPC bridge, embedded `Desktop Stack` controls, and Mission Control content
+    IPC bridge, embedded `Desktop Stack` controls, and Homie Dashboard content
   - in-window route checks passed for `/mission`, `/chat`, `/mobile`,
     `/browser`, `/work`, `/convoy`, and `/teams`
   - every route reported `hasRawFetchError=false`
@@ -189,7 +189,7 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
   - package built `dashboard/desktop/dist/win-unpacked/The Homie Desktop.exe`
   - Electron renderer loaded `The Homie Dashboard`, not the standalone shell
   - renderer reported dashboard root, Desktop IPC bridge, embedded
-    `Desktop Stack` controls, and Mission Control content
+    `Desktop Stack` controls, and Homie Dashboard content
   - in-window route checks passed for `/mission`, `/chat`, `/mobile`,
     `/browser`, `/work`, `/convoy`, and `/teams`
   - direct Python `/api/health` returned 200 from `45135`

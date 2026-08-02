@@ -216,7 +216,7 @@ async def apply_operator_beliefs(
             continue
         if not claim_text:
             continue
-        kind = c.get("kind", "inferred")
+        kind = str(c.get("kind", "inferred")).strip().lower()
         source = "explicit" if kind == "explicit" else "reflection"
         try:
             confidence = float(c.get("confidence", 0.5))

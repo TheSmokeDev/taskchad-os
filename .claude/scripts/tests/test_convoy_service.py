@@ -45,6 +45,34 @@ def test_create_convoy_basic(svc):
     assert result.edges == []
 
 
+def test_buzz_receipts_project_started_and_terminal_without_work_details(svc, monkeypatch):
+    import buzz_signals
+
+    projected = []
+    monkeypatch.setattr(
+        buzz_signals,
+        "enqueue_work_receipt",
+        lambda receipt_type, **payload: projected.append((receipt_type, payload)) or True,
+    )
+    result = svc.create_convoy(
+        CreateConvoyInput(
+            title="Public bounded summary",
+            description="private prompt and tool arguments",
+            created_by="sb",
+            subtasks=[CreateSubtaskInput(title="Only task", description="private detail")],
+        )
+    )
+    task_id = result.subtasks[0].id
+    svc.dispatch_subtask(task_id)
+    svc.handle_subtask_completion(task_id)
+
+    assert [item[0] for item in projected] == ["work.started", "work.completed"]
+    rendered = repr(projected)
+    assert "private prompt" not in rendered
+    assert "private detail" not in rendered
+    assert all(item[1]["dashboard_path"].startswith("/mission/convoys/") for item in projected)
+
+
 def test_create_convoy_with_subtasks_auto_ready(svc):
     # Parity: convoy.ts:createConvoy() — subtasks with 0 deps become 'ready'
     inp = CreateConvoyInput(

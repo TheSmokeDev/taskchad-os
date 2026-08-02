@@ -29,6 +29,89 @@ def test_resolve_runtime_lane_defaults_to_generic(
     assert lane == RUNTIME_LANE_GENERIC
 
 
+@pytest.mark.asyncio
+async def test_model_only_routing_skips_adapter_without_literal_guarantee(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = RuntimeRequest(
+        prompt="untrusted evidence",
+        cwd=".",
+        task_name="curriculum_study",
+        runtime_lane=RUNTIME_LANE_GENERIC,
+        allowed_tools=[],
+        disallowed_tools=["*"],
+        model_only=True,
+    )
+    profiles = [
+        RuntimeProfile(key="codex", provider="openai-codex", model="gpt"),
+        RuntimeProfile(key="gemini", provider="gemini-cli", model="gemini"),
+    ]
+    monkeypatch.setattr(lane_router, "_resolve_lane_profiles", lambda _request: profiles)
+
+    class UnsafeAdapter:
+        def supports_model_only(self) -> bool:
+            return False
+
+        def supports(self, _request: RuntimeRequest) -> bool:
+            return True
+
+        async def run(self, _request: RuntimeRequest) -> RuntimeResult:
+            raise AssertionError("unsafe adapter must be skipped")
+
+    class SafeAdapter:
+        def supports_model_only(self) -> bool:
+            return True
+
+        def supports(self, _request: RuntimeRequest) -> bool:
+            return True
+
+        async def run(self, _request: RuntimeRequest) -> RuntimeResult:
+            return RuntimeResult(
+                text="safe",
+                runtime_lane=RUNTIME_LANE_GENERIC,
+                provider="gemini-cli",
+                model="gemini",
+            )
+
+    adapters = {"openai-codex": UnsafeAdapter(), "gemini-cli": SafeAdapter()}
+    monkeypatch.setattr(lane_router, "_adapter_for", lambda profile: adapters[profile.provider])
+    monkeypatch.setattr(lane_router, "mark_profile_success", lambda _profile: None)
+
+    result = await lane_router.run_with_runtime_lanes(request)
+    assert result.text == "safe"
+    assert result.provider == "gemini-cli"
+
+
+def test_model_only_contract_rejects_tool_authority() -> None:
+    with pytest.raises(ValueError, match="zero-tool contract"):
+        lane_router._base.assert_model_only_contract(
+            RuntimeRequest(
+                prompt="bad",
+                cwd=".",
+                task_name="bad",
+                allowed_tools=["Read"],
+                disallowed_tools=["*"],
+                model_only=True,
+            )
+        )
+
+    for forbidden in (
+        {"hooks": {"PreToolUse": []}},
+        {"setting_sources": ["project"]},
+    ):
+        with pytest.raises(ValueError, match="zero-tool contract"):
+            lane_router._base.assert_model_only_contract(
+                RuntimeRequest(
+                    prompt="bad",
+                    cwd=".",
+                    task_name="bad",
+                    disallowed_tools=["*"],
+                    model_only=True,
+                    **forbidden,
+                )
+            )
+
+
 def test_resolve_runtime_lane_uses_claude_for_auto_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

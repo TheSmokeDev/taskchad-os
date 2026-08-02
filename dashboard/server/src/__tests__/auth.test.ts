@@ -71,6 +71,35 @@ describe('auth: 4-branch boot policy (R4 NM1)', () => {
     expect(reject.status).toBe(401);
   });
 
+  it('SSE token via query: accepted on /api/archon/stream, not on the REST snapshot', async () => {
+    // #257 — the Talk sidebar reads this tail with a browser EventSource,
+    // which cannot set an Authorization header. Without the allowlist entry
+    // the sidebar 401s on every tokened deployment (and only there, so a
+    // dev-mode-loopback box would never show the bug).
+    _resetAuthPolicyForTest();
+    setAuthPolicy({
+      mode: 'token-equal',
+      expectedToken: 'archon-token',
+      warnPerRequest: false,
+      bind: '127.0.0.1',
+    });
+    const app = new Hono();
+    app.use('*', buildAuthMiddleware());
+    app.get('/api/archon/stream', (c) => c.json({ ok: true }));
+    app.get('/api/archon/events', (c) => c.json({ ok: true }));
+
+    expect((await app.request('/api/archon/stream?sinceSeq=4&token=archon-token')).status).toBe(200);
+    expect((await app.request('/api/archon/stream?token=wrong')).status).toBe(401);
+    // The REST snapshot is a fetch() call — it carries a Bearer header and
+    // must NOT accept a URL token.
+    expect((await app.request('/api/archon/events?token=archon-token')).status).toBe(401);
+    expect(
+      (await app.request('/api/archon/events', {
+        headers: { Authorization: 'Bearer archon-token' },
+      })).status,
+    ).toBe(200);
+  });
+
   it('query token is accepted for Cabinet voice document/static GETs only', async () => {
     _resetAuthPolicyForTest();
     setAuthPolicy({

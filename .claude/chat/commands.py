@@ -45,6 +45,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("execute", "Alias for /go — enable execute mode", "router", "viewer"),
     ("mode", "Show current mode (plan or execute)", "router", "viewer"),
     ("voice", "Voice replies across Telegram and Discord - always | auto | off", "router", "admin"),
+    ("talk", "Live voice in your Discord voice channel - join | leave | status", "router", "admin"),
     ("provider", "Show runtime lane status - selection, routes, provider health", "router", "admin"),
     ("model", "Select lane/model: claude, sonnet, opus, codex, gemini, openrouter, openai, kimi(:k3), auto", "router", "admin"),
     ("reload", "Reload bot config without restarting", "router", "admin"),
@@ -106,9 +107,11 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("vault", "Vault operations — status, db, search, context, contacts, ingest, ops", "router", "admin"),
     ("file", "File the last answer as a vault note with entity compilation", "engine", "admin"),
     ("working", "Show cross-session scratchpad — open threads, hypotheses, questions", "router", "admin"),
+    ("shots", "Called-shots ledger — list open bets, decided <id> <who>, resolve <id> <outcome>", "router", "admin"),
     ("skills", "Review/promote/reject self-authored skill drafts", "router", "operator"),
     ("learn", "Author a reusable skill from a URL, local dir, this conversation, or pasted notes (staged for /skills)", "router", "operator"),
     ("watch", "Learn from one video, save a sourced note, and compare it with the current work", "router", "operator"),
+    ("curriculum", "Persona curriculum - status, sources, run, review, route, grade, enable, disable", "router", "admin"),
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
     ("image", "Generate or edit an image through Codex imagegen", "engine", "admin"),
@@ -157,7 +160,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Session & Mode",
         ["plan", "go", "execute", "mode", "provider", "model", "reload", "restart",
-         "voice", "autostart", "update", "help", "commands", "status", "diagnostics", "cost", "clear", "new",
+         "voice", "talk", "autostart", "update", "help", "commands", "status", "diagnostics", "cost", "clear", "new",
          "extensions"],
     ),
     (
@@ -174,7 +177,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     # Co-Founder (US-015) — autonomous project steering.
     ("Co-Founder", ["cofounder"]),
     ("Communication", ["send", "brief"]),
-    ("Memory", ["search", "vault", "file", "working", "skills", "learn", "watch"]),
+    ("Memory", ["search", "vault", "file", "working", "shots", "skills", "learn", "watch", "curriculum"]),
     (
         "Content Creation",
         ["blog", "image", "generate-image", "owner-image", "quote", "linkedin", "primo", "tweet", "instagram", "yt_script", "shorts", "video"],
@@ -202,6 +205,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "provider",
     "model",
     "voice",
+    "talk",
     "restart",
     "autostart",
     "update",
@@ -240,6 +244,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "skills",
     "learn",
     "watch",
+    "curriculum",
     "blog",
     "image",
     "tweet",
@@ -249,6 +254,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "gsc",
     "analytics",
     "signal",
+    "shots",
     "stars",
     "social",
     "recap",

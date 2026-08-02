@@ -14,7 +14,10 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
+from . import base as _base
 from .auth_profiles import GeminiAuthProfile, gemini_auth_status
 from .base import RUNTIME_LANE_GENERIC, RuntimeRequest, RuntimeResult
 from .capabilities import TEXT_REASONING, TOOL_REASONING
@@ -42,12 +45,41 @@ class GeminiCliRuntime:
     def __init__(self, profile: RuntimeProfile) -> None:
         self.profile = profile
 
+    def supports_caller_tool_defs(self) -> bool:
+        """False — verified against the installed Gemini CLI.
+
+        ``gemini --help`` exposes ``--allowed-tools`` ("Tools that are allowed
+        to run without confirmation") and ``--approval-mode``. Both govern
+        APPROVAL over the CLI's own built-in tools; neither registers a
+        caller-supplied OpenAI-format schema. That is the same shape as Codex's
+        ``--sandbox`` and is not a tool-definition surface.
+
+        Structural, like Codex — this does not flip when execution lands
+        elsewhere in the epic. Gemini stays fully eligible for text turns and
+        for TOOL_REASONING turns driving its OWN tools.
+        """
+        return False
+
+    def supports_model_only(self) -> bool:
+        """True via an isolated, system-precedence Gemini settings contract."""
+        return True
+
     def supports(self, request: RuntimeRequest) -> bool:
         if request.capability not in {TEXT_REASONING, TOOL_REASONING}:
             return False
+        if request.model_only:
+            try:
+                _base.assert_model_only_contract(request)
+            except ValueError:
+                return False
         # Session resume is Claude-specific. Hooks are allowed but ignored
         # (the Gemini CLI handles its own tool approval/safety).
         if request.resume is not None:
+            return False
+        # Defense in depth — see the identical guard in openai_codex.py. A
+        # direct caller must not be able to hand this adapter definitions it
+        # would silently discard.
+        if _base.request_carries_tools(request) and not self.supports_caller_tool_defs():
             return False
         return True
 
@@ -99,7 +131,14 @@ class GeminiCliRuntime:
         for model in candidate_models:
             args = [resolved, "--model", model]
 
-            if is_tool_task:
+            if request.model_only:
+                args.extend([
+                    "--approval-mode", "default",
+                    "--extensions", "none",
+                    "--allowed-mcp-server-names", "",
+                    "--output-format", "text", "-",
+                ])
+            elif is_tool_task:
                 # Visual evidence analysis is deliberately read-only. Gemini
                 # receives exact paths in the prompt and may only use read_file.
                 if request.read_only_tools:
@@ -121,37 +160,38 @@ class GeminiCliRuntime:
                 args.extend(["--output-format", "text", "-"])
 
             process = None
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *args,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(request.cwd),
-                    env=env,
-                )
-                stdout, stderr = await process.communicate(prompt_text.encode("utf-8"))
-            except asyncio.CancelledError:
-                # The lane-level wait_for (or an operator cancel) fired mid-run.
-                # Cancelling communicate() does NOT kill the child — the orphaned
-                # Gemini CLI keeps running and its pipes keep the transport alive.
-                # Kill, reap (bounded), re-raise. Do NOT advance the model ladder
-                # on cancel — the deadline is per-adapter, not per-model.
-                _reap_process(process)
-                if process is not None:
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=5)
-                    except Exception:
-                        _logger.warning(
-                            "failed to reap cancelled Gemini subprocess pid=%s after kill()",
-                            getattr(process, "pid", "?"),
-                            exc_info=True,
-                        )
-                raise
-            except FileNotFoundError as exc:
-                raise RuntimeConfigError(f"Gemini CLI not found: {command}") from exc
-            except Exception as exc:
-                raise RuntimeExecutionError(str(exc)) from exc
+            with _ModelOnlyLaunchEnv(request, env) as launch_env:
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        *args,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=str(request.cwd),
+                        env=launch_env,
+                    )
+                    stdout, stderr = await process.communicate(prompt_text.encode("utf-8"))
+                except asyncio.CancelledError:
+                    # The lane-level wait_for (or an operator cancel) fired mid-run.
+                    # Cancelling communicate() does NOT kill the child — the orphaned
+                    # Gemini CLI keeps running and its pipes keep the transport alive.
+                    # Kill, reap (bounded), re-raise. Do NOT advance the model ladder
+                    # on cancel — the deadline is per-adapter, not per-model.
+                    _reap_process(process)
+                    if process is not None:
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=5)
+                        except Exception:
+                            _logger.warning(
+                                "failed to reap cancelled Gemini subprocess pid=%s after kill()",
+                                getattr(process, "pid", "?"),
+                                exc_info=True,
+                            )
+                    raise
+                except FileNotFoundError as exc:
+                    raise RuntimeConfigError(f"Gemini CLI not found: {command}") from exc
+                except Exception as exc:
+                    raise RuntimeExecutionError(str(exc)) from exc
 
             stdout_text = stdout.decode("utf-8", errors="replace")
             stderr_text = stderr.decode("utf-8", errors="replace")
@@ -181,6 +221,65 @@ class GeminiCliRuntime:
         if errors:
             raise RuntimeRetryableError("; ".join(errors))
         raise RuntimeExecutionError("Gemini CLI execution failed with no candidate models")
+
+
+class _ModelOnlyLaunchEnv:
+    """Temporary system-precedence Gemini config for zero-tool execution."""
+
+    def __init__(self, request: RuntimeRequest, env: dict[str, str]) -> None:
+        self.request = request
+        self.env = env
+        self._temp: tempfile.TemporaryDirectory[str] | None = None
+
+    def __enter__(self) -> dict[str, str]:
+        if not self.request.model_only:
+            return self.env
+        self._temp = tempfile.TemporaryDirectory(prefix="homie-model-only-")
+        settings_path = Path(self._temp.name) / "settings.json"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "context": {
+                        "fileName": "__HOMIE_MODEL_ONLY_NO_CONTEXT__.md",
+                        "includeDirectories": [],
+                    },
+                    "tools": {
+                        "core": [],
+                        "allowed": [],
+                        "discoveryCommand": "",
+                        "callCommand": "",
+                        "enableMessageBusIntegration": False,
+                        "enableHooks": False,
+                    },
+                    "mcp": {
+                        "allowed": [],
+                        "serverCommand": "",
+                    },
+                    "security": {"disableYoloMode": True},
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        launch_env = dict(self.env)
+        # Gemini gives system settings final precedence over user/workspace
+        # settings, so the empty core allowlist cannot be widened downstream.
+        launch_env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(settings_path)
+        launch_env["GEMINI_CLI_SYSTEM_DEFAULTS_PATH"] = str(
+            Path(self._temp.name) / "system-defaults.json"
+        )
+        # This adapter authenticates through the personal Gemini CLI OAuth
+        # profile. An unrelated inherited Cloud project silently reroutes that
+        # OAuth token to Code Assist / Vertex and can either fail IAM checks or
+        # charge the wrong project. Keep model-only fallback on the consumer
+        # OAuth surface it was authenticated for.
+        launch_env.pop("GOOGLE_CLOUD_PROJECT", None)
+        launch_env.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+        return launch_env
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._temp is not None:
+            self._temp.cleanup()
 
 
 

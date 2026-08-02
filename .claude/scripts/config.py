@@ -22,6 +22,7 @@ PRP-7a Workstream 2 (config-refactor):
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from datetime import datetime
@@ -392,10 +393,12 @@ REGION_BUDGETS = {
     # small on purpose: the win32 27k append envelope is nearly full at the
     # existing region caps.
     "portfolio": int(os.getenv("REGION_BUDGET_PORTFOLIO", "200")),
-    # Living Self Act 3: the gated cognitive-pass monologue renders here as a
-    # role="system", region="internal" memory. 500 tokens (~2000 chars) caps a
-    # runaway monologue; assemble_regions truncates per the budget. Without this
-    # row the cap would fall back to DEFAULT_REGION_BUDGETS.get == 1000.
+    # Living Self Act 3: the gated cognitive-pass monologue. 500 tokens
+    # (~2000 chars) caps a runaway monologue. #172: the monologue no longer
+    # renders through assemble_regions (it rides the prompt-suffix transport
+    # instead) — engine.py's extraction site applies this same budget via
+    # truncate_region directly. Without this row the cap would fall back to
+    # DEFAULT_REGION_BUDGETS.get == 1000.
     "internal": int(os.getenv("REGION_BUDGET_INTERNAL_MONOLOGUE", "500")),
     "recent_conversation": int(os.getenv("REGION_BUDGET_RECENT_CONVERSATION", "24000")),
 }
@@ -537,9 +540,58 @@ def get_today_log_path() -> Path:
 
 
 def is_within_active_hours() -> bool:
-    """Check if current time is within active hours (local timezone)."""
+    """Check if current time is within active hours (local timezone).
+
+    String compare on ``"%H:%M"``, so it CANNOT express a window that crosses
+    midnight (``"23:00" <= "01:00"`` is False for every minute of the night).
+    Fine for the heartbeat's 08:00-22:00; use ``is_within_waking_window`` for
+    any window that wraps.
+    """
     current_time = now_local().strftime("%H:%M")
     return HEARTBEAT_ACTIVE_START <= current_time <= HEARTBEAT_ACTIVE_END
+
+
+def is_within_waking_window(now: datetime | None = None) -> bool:
+    """Is the operator awake right now? Handles windows that cross midnight.
+
+    The desk pings the operator directly, so it needs his waking hours, not the
+    heartbeat's business hours -- and his window (08:00-02:00) wraps, which the
+    string compare above structurally cannot represent.
+
+    A wrapping window is the union of two spans rather than one range: start ->
+    midnight, and midnight -> end. Same-day windows keep the ordinary single
+    span, so setting an end later than the start behaves exactly as expected.
+
+    Env + ``now`` are both resolved at CALL time (Rule 1). Unparseable bounds
+    fail OPEN (awake): a malformed env var must not silently mute the desk,
+    because a muted desk is indistinguishable from a quiet one.
+    """
+    start_raw = os.getenv("DESK_WAKING_START", "08:00").strip() or "08:00"
+    end_raw = os.getenv("DESK_WAKING_END", "02:00").strip() or "02:00"
+
+    def _minutes(label: str, value: str) -> int | None:
+        try:
+            hh, mm = value.split(":", 1)
+            h, m = int(hh), int(mm)
+        except (ValueError, AttributeError):
+            return None
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            return None
+        return h * 60 + m
+
+    start = _minutes("start", start_raw)
+    end = _minutes("end", end_raw)
+    if start is None or end is None:
+        return True  # fail open -- never mute on a typo
+
+    current = now if now is not None else now_local()
+    minute = current.hour * 60 + current.minute
+
+    if start == end:
+        return True  # a zero-width window is a config mistake; assume always-on
+    if start < end:
+        return start <= minute < end          # ordinary same-day window
+    return minute >= start or minute < end    # wraps midnight
 
 
 class HeartbeatBlockerSettings(NamedTuple):
@@ -1210,6 +1262,10 @@ class BeliefEvolveSettings(NamedTuple):
     min_correctness: float  # judge correctness floor for adoption
     min_fidelity: float  # judge evidence-fidelity floor for adoption
     corpus_path: str | None  # None -> evolve/belief_regression_corpus.json sibling
+    max_attempts: int  # retry-budget cap per candidate (nightly dream Phase 5)
+    max_adoptions_per_night: int  # adoption throttle per nightly run
+    max_candidates_per_night: int  # cap on FRESH LLM-authored candidates per run
+    candidate_min_confidence: float  # nightly-candidate confidence hint (advisory)
 
 
 def get_belief_evolve_settings(
@@ -1220,6 +1276,10 @@ def get_belief_evolve_settings(
     min_correctness: float | None = None,
     min_fidelity: float | None = None,
     corpus_path: str | None = None,
+    max_attempts: int | None = None,
+    max_adoptions_per_night: int | None = None,
+    max_candidates_per_night: int | None = None,
+    candidate_min_confidence: float | None = None,
 ) -> BeliefEvolveSettings:
     """Resolve belief-evolve knobs at CALL TIME (Rule 1) — Living Self Act 4.
 
@@ -1257,6 +1317,20 @@ def get_belief_evolve_settings(
             ``evolve/belief_regression_corpus.json``) — Rule-2 path to the
             deterministic falsifiable-check corpus (data, extendable without a
             code change).
+        BELIEF_MAX_ATTEMPTS (3, int) — retry-budget cap per candidate. A candidate
+            whose ``attempts`` reaches this on a nightly dream Phase-5 run is
+            downgraded to terminal (``retryable=False``,
+            ``outcome_reason="retry_budget_exhausted"``) instead of being re-judged
+            forever after a transient judge-provider outage.
+        BELIEF_MAX_ADOPTIONS_PER_NIGHT (2, int) — adoption throttle. Phase 5 stops
+            processing candidates once this many are adopted in a single run;
+            remaining candidates wait for the next night (never judged this run).
+        BELIEF_MAX_CANDIDATES_PER_NIGHT (3, int) — cap on FRESH LLM-authored
+            candidates parsed from the consolidation response per run (the retry
+            queue is NOT bounded by this — ``max_attempts`` bounds that instead).
+        BELIEF_CANDIDATE_MIN_CONFIDENCE (0.75, float) — advisory confidence hint
+            surfaced in the nightly consolidation prompt for identity-grade
+            candidates (the UNCHANGED apply-time 0.75 policy gate is the real floor).
     """
     if enabled is None:
         enabled = os.getenv("EVOLVE_ENABLED", "true").lower() == "true"
@@ -1275,6 +1349,16 @@ def get_belief_evolve_settings(
     if corpus_path is None:
         env_corpus = os.getenv("BELIEF_REGRESSION_CORPUS_PATH")
         corpus_path = env_corpus if env_corpus else None
+    if max_attempts is None:
+        max_attempts = int(os.getenv("BELIEF_MAX_ATTEMPTS", "3"))
+    if max_adoptions_per_night is None:
+        max_adoptions_per_night = int(os.getenv("BELIEF_MAX_ADOPTIONS_PER_NIGHT", "2"))
+    if max_candidates_per_night is None:
+        max_candidates_per_night = int(os.getenv("BELIEF_MAX_CANDIDATES_PER_NIGHT", "3"))
+    if candidate_min_confidence is None:
+        candidate_min_confidence = float(
+            os.getenv("BELIEF_CANDIDATE_MIN_CONFIDENCE", "0.75")
+        )
     return BeliefEvolveSettings(
         enabled=enabled,
         min_supporting_paths=min_supporting_paths,
@@ -1283,6 +1367,2209 @@ def get_belief_evolve_settings(
         min_correctness=min_correctness,
         min_fidelity=min_fidelity,
         corpus_path=corpus_path,
+        max_attempts=max_attempts,
+        max_adoptions_per_night=max_adoptions_per_night,
+        max_candidates_per_night=max_candidates_per_night,
+        candidate_min_confidence=candidate_min_confidence,
+    )
+
+
+class CalledShotsSettings(NamedTuple):
+    """Effective called-shots knobs (call-time resolved) — epic #186 T1."""
+
+    enabled: bool  # feature soft-toggle (the kill-switch is the hard gate)
+    db_path: str  # SQLite ledger file (own DB — WAL, single writer)
+    stale_age_days: int  # T3 sweep: open shots older than this are stale
+    mirror_enabled: bool  # write the human-readable vault mirror note per shot
+    mirror_dir: str  # vault dir for mirror notes (derived state, never truth)
+
+
+def get_called_shots_settings(
+    enabled: bool | None = None,
+    db_path: str | None = None,
+    stale_age_days: int | None = None,
+    mirror_enabled: bool | None = None,
+    mirror_dir: str | None = None,
+) -> CalledShotsSettings:
+    """Resolve called-shots knobs at CALL TIME (Rule 1) — epic #186 T1.
+
+    Mirrors ``get_belief_evolve_settings``: None-sentinel args resolve the
+    matching ``CALLED_SHOTS_*`` env var inside the body, so env overrides and
+    ``monkeypatch.setenv`` take effect on the NEXT call with no module reload.
+
+    Knobs:
+        CALLED_SHOTS_ENABLED ("true") — soft toggle for the AUTONOMOUS EMISSION
+            surfaces only (T2's challenge, T3's stale-nag + callback injection).
+            Operator-initiated reconcile/track_record/list_open ride the
+            kill-switch ONLY — soft-OFF must never strand open shots the
+            operator can't settle. The HARD gate on every ledger entrypoint is
+            the operator kill-switch HOMIE_KILLSWITCH_CALLED_SHOTS (default-ON:
+            absent env = enabled; the switch only turns it OFF).
+        CALLED_SHOTS_DB_PATH (DATA_DIR/called_shots.db) — the ledger SQLite file.
+        CALLED_SHOTS_STALE_AGE_DAYS (14, int) — T3 stale-open-shot sweep age.
+        CALLED_SHOTS_MIRROR_ENABLED ("true") — per-shot vault mirror notes.
+        CALLED_SHOTS_MIRROR_DIR (MEMORY_DIR/called-shots) — mirror note dir.
+    """
+    if enabled is None:
+        enabled = os.getenv("CALLED_SHOTS_ENABLED", "true").lower() == "true"
+    if db_path is None:
+        db_path = os.getenv("CALLED_SHOTS_DB_PATH", "") or str(
+            DATA_DIR / "called_shots.db"
+        )
+    if stale_age_days is None:
+        # Malformed env degrades to the default with a visible receipt (the
+        # heartbeat _int_env pattern) — a garbage value must never propagate a
+        # ValueError through every ledger entrypoint.
+        _raw_stale = os.getenv("CALLED_SHOTS_STALE_AGE_DAYS", "14")
+        try:
+            stale_age_days = int(_raw_stale)
+        except (TypeError, ValueError):
+            print(
+                f"CALLED_SHOTS_STALE_AGE_DAYS={_raw_stale!r} is not an int; "
+                "using default 14",
+                flush=True,
+            )
+            stale_age_days = 14
+    if mirror_enabled is None:
+        mirror_enabled = (
+            os.getenv("CALLED_SHOTS_MIRROR_ENABLED", "true").lower() == "true"
+        )
+    if mirror_dir is None:
+        mirror_dir = os.getenv("CALLED_SHOTS_MIRROR_DIR", "") or str(
+            MEMORY_DIR / "called-shots"
+        )
+    return CalledShotsSettings(
+        enabled=enabled,
+        db_path=db_path,
+        stale_age_days=stale_age_days,
+        mirror_enabled=mirror_enabled,
+        mirror_dir=mirror_dir,
+    )
+
+
+class CryptoPlaysSettings(NamedTuple):
+    """Effective crypto-play ledger paths, resolved at call time (issue #203)."""
+
+    db_path: str
+    mirror_enabled: bool
+    mirror_dir: str
+
+
+def get_crypto_plays_settings(
+    db_path: str | None = None,
+    mirror_enabled: bool | None = None,
+    mirror_dir: str | None = None,
+) -> CryptoPlaysSettings:
+    """Resolve the private crypto-play ledger settings at call time.
+
+    ``HOMIE_KILLSWITCH_CRYPTO_PLAYS`` is the only enablement control and is
+    enforced by every service entrypoint.  These settings contain paths and
+    the derived vault-mirror preference only:
+
+    - ``CRYPTO_PLAYS_DB_PATH`` (``DATA_DIR/crypto_plays.db``)
+    - ``CRYPTO_PLAYS_MIRROR_ENABLED`` (``true``)
+    - ``CRYPTO_PLAYS_MIRROR_DIR`` (``MEMORY_DIR/crypto-plays``)
+    """
+
+    if db_path is None:
+        db_path = os.getenv("CRYPTO_PLAYS_DB_PATH", "") or str(
+            DATA_DIR / "crypto_plays.db"
+        )
+    if mirror_enabled is None:
+        mirror_enabled = (
+            os.getenv("CRYPTO_PLAYS_MIRROR_ENABLED", "true").lower() == "true"
+        )
+    if mirror_dir is None:
+        mirror_dir = os.getenv("CRYPTO_PLAYS_MIRROR_DIR", "") or str(
+            MEMORY_DIR / "crypto-plays"
+        )
+    return CryptoPlaysSettings(
+        db_path=db_path,
+        mirror_enabled=mirror_enabled,
+        mirror_dir=mirror_dir,
+    )
+
+
+class CryptoAnchorSettings(NamedTuple):
+    """Freshness bounds on a play's CALL-TIME price anchor (crypto Wave 4)."""
+
+    max_age_seconds: float
+    max_future_skew_seconds: float
+
+
+#: A call-time anchor read more than this long before the play row is created
+#: is refused. The live ledger's disease was measuring moves from prices
+#: captured 4-46 hours after the call (median 24h, 2026-07-26); a window in
+#: minutes turns "I fetched this yesterday" into a contract error.
+CRYPTO_ANCHOR_DEFAULT_MAX_AGE_SECONDS = 300.0
+#: Tolerated clock skew for an anchor stamped slightly ahead of the insert.
+CRYPTO_ANCHOR_DEFAULT_MAX_FUTURE_SKEW_SECONDS = 60.0
+
+
+def get_crypto_anchor_settings(
+    max_age_seconds: float | None = None,
+    max_future_skew_seconds: float | None = None,
+) -> CryptoAnchorSettings:
+    """Resolve the call-time anchor freshness bounds at call time.
+
+    - ``CRYPTO_PLAYS_ANCHOR_MAX_AGE_SECONDS`` (``300``)
+    - ``CRYPTO_PLAYS_ANCHOR_MAX_FUTURE_SKEW_SECONDS`` (``60``)
+
+    A malformed or non-positive env value falls back to the default rather than
+    widening the window: an unparseable bound must never become "no bound".
+    """
+
+    if max_age_seconds is None:
+        max_age_seconds = _positive_float_or(
+            os.getenv("CRYPTO_PLAYS_ANCHOR_MAX_AGE_SECONDS", ""),
+            CRYPTO_ANCHOR_DEFAULT_MAX_AGE_SECONDS,
+        )
+    if max_future_skew_seconds is None:
+        max_future_skew_seconds = _positive_float_or(
+            os.getenv("CRYPTO_PLAYS_ANCHOR_MAX_FUTURE_SKEW_SECONDS", ""),
+            CRYPTO_ANCHOR_DEFAULT_MAX_FUTURE_SKEW_SECONDS,
+        )
+    return CryptoAnchorSettings(
+        max_age_seconds=float(max_age_seconds),
+        max_future_skew_seconds=float(max_future_skew_seconds),
+    )
+
+
+def _positive_float_or(raw: object, fallback: float) -> float:
+    """Positive finite float, or the fallback.  Never widens to zero/inf."""
+
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(value) or value <= 0:
+        return fallback
+    return value
+
+
+class CryptoLookaheadSettings(NamedTuple):
+    """Effective look-ahead detector bounds, resolved at call time."""
+
+    enabled: bool
+    tolerance: float
+    max_observations: int
+    max_items: int
+    recursive_depths: tuple[int, ...]
+    drift_tolerance_pct: float
+
+
+#: freqtrade `optimize/analysis/recursive.py` recomputes at exactly this ladder
+#: and diffs the last row. Kept verbatim so a drift number here is comparable
+#: to one produced upstream.
+CRYPTO_LOOKAHEAD_DEFAULT_DEPTHS = (199, 399, 499, 999, 1999)
+
+#: Hard ceiling on the score-equality tolerance. `math.isclose(rel_tol=1.0)`
+#: matches EVERYTHING, so any value at or above 1 silently converts the
+#: detector into a rubber stamp. Rejecting only `inf` stopped the one value
+#: that would have been obvious. Mirrored by `cognition.crypto_lookahead`.
+CRYPTO_LOOKAHEAD_TOLERANCE_CEILING = 1e-3
+
+
+def _finite_or(value: object, fallback: float) -> float:
+    """Non-negative finite float, or the fallback."""
+
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(parsed) or parsed < 0:
+        return fallback
+    return parsed
+
+
+def _banded_or(value: object, fallback: float, ceiling: float) -> float:
+    """Finite float inside [0, ceiling), or the fallback. Loosening is refused."""
+
+    parsed = _finite_or(value, fallback)
+    if parsed >= ceiling:
+        return fallback
+    return parsed
+
+
+def _parse_lookahead_depths(raw: str) -> tuple[int, ...]:
+    """Parse a comma ladder; a malformed entry falls back to the default.
+
+    A partly-parsed ladder would silently shrink the depth sweep and make a
+    recursive indicator look stabler than it is, so the fallback is all-or-
+    nothing rather than best-effort.
+    """
+
+    parts = [chunk.strip() for chunk in raw.split(",") if chunk.strip()]
+    if not parts:
+        return CRYPTO_LOOKAHEAD_DEFAULT_DEPTHS
+    try:
+        depths = tuple(sorted({int(chunk) for chunk in parts}))
+    except ValueError:
+        return CRYPTO_LOOKAHEAD_DEFAULT_DEPTHS
+    if any(depth <= 0 for depth in depths):
+        return CRYPTO_LOOKAHEAD_DEFAULT_DEPTHS
+    return depths
+
+
+def get_crypto_lookahead_settings(
+    enabled: bool | None = None,
+    tolerance: float | None = None,
+    max_observations: int | None = None,
+    max_items: int | None = None,
+    recursive_depths: tuple[int, ...] | None = None,
+    drift_tolerance_pct: float | None = None,
+) -> CryptoLookaheadSettings:
+    """Resolve the crypto look-ahead detector settings at call time.
+
+    ``CRYPTO_LOOKAHEAD_ENABLED`` is default-ON and only turns the detector OFF.
+    A disabled detector returns the explicit UNKNOWN verdict, which BLOCKS —
+    turning it off removes the proof, never the requirement.
+
+    - ``CRYPTO_LOOKAHEAD_ENABLED`` (``true``)
+    - ``CRYPTO_LOOKAHEAD_TOLERANCE`` (``1e-9``) — numeric score equality
+    - ``CRYPTO_LOOKAHEAD_MAX_OBSERVATIONS`` (``20000``) — per-replay bound
+    - ``CRYPTO_LOOKAHEAD_MAX_ITEMS`` (``5000``) — per-batch bound
+    - ``CRYPTO_LOOKAHEAD_RECURSIVE_DEPTHS`` (``199,399,499,999,1999``)
+    - ``CRYPTO_LOOKAHEAD_DRIFT_TOLERANCE_PCT`` (``0.01``)
+    """
+
+    if enabled is None:
+        enabled = os.getenv("CRYPTO_LOOKAHEAD_ENABLED", "true").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+            "disabled",
+        )
+    if tolerance is None:
+        try:
+            tolerance = float(os.getenv("CRYPTO_LOOKAHEAD_TOLERANCE", "") or 1e-9)
+        except ValueError:
+            tolerance = 1e-9
+    if max_observations is None:
+        try:
+            max_observations = int(
+                os.getenv("CRYPTO_LOOKAHEAD_MAX_OBSERVATIONS", "") or 20_000
+            )
+        except ValueError:
+            max_observations = 20_000
+    if max_items is None:
+        try:
+            max_items = int(os.getenv("CRYPTO_LOOKAHEAD_MAX_ITEMS", "") or 5_000)
+        except ValueError:
+            max_items = 5_000
+    if recursive_depths is None:
+        recursive_depths = _parse_lookahead_depths(
+            os.getenv("CRYPTO_LOOKAHEAD_RECURSIVE_DEPTHS", "")
+        )
+    if drift_tolerance_pct is None:
+        try:
+            drift_tolerance_pct = float(
+                os.getenv("CRYPTO_LOOKAHEAD_DRIFT_TOLERANCE_PCT", "") or 0.01
+            )
+        except ValueError:
+            drift_tolerance_pct = 0.01
+    # A non-finite tolerance would make every score compare equal, which reads
+    # as CLEAN — the one direction this detector must never fail in.
+    return CryptoLookaheadSettings(
+        enabled=bool(enabled),
+        tolerance=_banded_or(tolerance, 1e-9, CRYPTO_LOOKAHEAD_TOLERANCE_CEILING),
+        max_observations=max(1, int(max_observations)),
+        max_items=max(1, int(max_items)),
+        recursive_depths=tuple(recursive_depths),
+        drift_tolerance_pct=_finite_or(drift_tolerance_pct, 0.01),
+    )
+
+
+class CryptoProofSettings(NamedTuple):
+    """Effective backtest promotion policy, resolved at call time."""
+
+    max_p_value: float
+    min_trades: int
+    min_bars: int
+    min_consistency_rate: float
+    min_prob_positive: float
+    permutation_iterations: int
+    bootstrap_iterations: int
+    walk_forward_folds: int
+    min_bars_per_fold: int
+    confidence_level: float
+    seed: int
+    require_run_card: bool
+
+
+#: Hard bounds on the two gate-critical knobs. Env may TIGHTEN them; it can
+#: never loosen them past these. Same shape as CRYPTO_EYES_MAX_ACTIONS_CEILING,
+#: and re-clamped inside ``cognition.crypto_proof`` so an injected settings
+#: object cannot widen them either. The trade floor is backtrader
+#: `analyzers/sqn.py:31-85` — below N=30 the banding stops meaning anything.
+CRYPTO_PROOF_MAX_P_VALUE_CEILING = 0.10
+CRYPTO_PROOF_MIN_TRADES_FLOOR = 30
+
+
+def _bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Parse one bounded int knob; a malformed value degrades to the default."""
+
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        print(f"{name}={raw!r} is not an int; using default {default}", flush=True)
+        return default
+    if not minimum <= parsed <= maximum:
+        print(f"{name}={raw!r} is out of range; using default {default}", flush=True)
+        return default
+    return parsed
+
+
+def get_crypto_proof_settings(
+    max_p_value: float | None = None,
+    min_trades: int | None = None,
+    min_bars: int | None = None,
+    min_consistency_rate: float | None = None,
+    min_prob_positive: float | None = None,
+    permutation_iterations: int | None = None,
+    bootstrap_iterations: int | None = None,
+    walk_forward_folds: int | None = None,
+    min_bars_per_fold: int | None = None,
+    confidence_level: float | None = None,
+    seed: int | None = None,
+    require_run_card: bool | None = None,
+) -> CryptoProofSettings:
+    """Resolve the proof-harness promotion policy at CALL TIME (Rule 1).
+
+    Knobs (all optional; every default is the STRICT direction):
+
+        CRYPTO_PROOF_MAX_P_VALUE (0.05) — permutation p-value bound, clamped
+            to CRYPTO_PROOF_MAX_P_VALUE_CEILING.
+        CRYPTO_PROOF_MIN_TRADES (30) — SQN's N>=30 reliability floor, clamped
+            to CRYPTO_PROOF_MIN_TRADES_FLOOR.
+        CRYPTO_PROOF_MIN_BARS (200) — minimum bars before a verdict is a
+            finding rather than noise.
+        CRYPTO_PROOF_MIN_CONSISTENCY_RATE (0.6) — walk-forward floor.
+        CRYPTO_PROOF_MIN_PROB_POSITIVE (0.9) — bootstrap P(Sharpe > 0) floor.
+        CRYPTO_PROOF_PERMUTATION_ITERATIONS (1000).
+        CRYPTO_PROOF_BOOTSTRAP_ITERATIONS (1000).
+        CRYPTO_PROOF_WALK_FORWARD_FOLDS (5).
+        CRYPTO_PROOF_MIN_BARS_PER_FOLD (30).
+        CRYPTO_PROOF_CONFIDENCE_LEVEL (0.95).
+        CRYPTO_PROOF_SEED (20260726) — permutation/bootstrap seed, so a receipt
+            is reproducible.
+        CRYPTO_PROOF_REQUIRE_RUN_CARD ("true") — a complete hash chain is part
+            of the definition of proven; turning it off cannot make a verdict
+            more permissive than UNEVALUATED elsewhere, it only removes the
+            chain requirement for local experiments.
+    """
+
+    if max_p_value is None:
+        max_p_value = _finite_or(os.getenv("CRYPTO_PROOF_MAX_P_VALUE", ""), 0.05)
+        if max_p_value <= 0.0:
+            max_p_value = 0.05
+    if min_trades is None:
+        min_trades = _bounded_int(
+            "CRYPTO_PROOF_MIN_TRADES", 30, minimum=1, maximum=1_000_000
+        )
+    if min_bars is None:
+        min_bars = _bounded_int(
+            "CRYPTO_PROOF_MIN_BARS", 200, minimum=2, maximum=10_000_000
+        )
+    if min_consistency_rate is None:
+        min_consistency_rate = _finite_or(
+            os.getenv("CRYPTO_PROOF_MIN_CONSISTENCY_RATE", ""), 0.6
+        )
+    if min_prob_positive is None:
+        min_prob_positive = _finite_or(
+            os.getenv("CRYPTO_PROOF_MIN_PROB_POSITIVE", ""), 0.9
+        )
+    if permutation_iterations is None:
+        permutation_iterations = _bounded_int(
+            "CRYPTO_PROOF_PERMUTATION_ITERATIONS", 1000, minimum=1, maximum=1_000_000
+        )
+    if bootstrap_iterations is None:
+        bootstrap_iterations = _bounded_int(
+            "CRYPTO_PROOF_BOOTSTRAP_ITERATIONS", 1000, minimum=1, maximum=1_000_000
+        )
+    if walk_forward_folds is None:
+        walk_forward_folds = _bounded_int(
+            "CRYPTO_PROOF_WALK_FORWARD_FOLDS", 5, minimum=2, maximum=100
+        )
+    if min_bars_per_fold is None:
+        min_bars_per_fold = _bounded_int(
+            "CRYPTO_PROOF_MIN_BARS_PER_FOLD", 30, minimum=2, maximum=1_000_000
+        )
+    if confidence_level is None:
+        confidence_level = _finite_or(
+            os.getenv("CRYPTO_PROOF_CONFIDENCE_LEVEL", ""), 0.95
+        )
+        if not 0.0 < confidence_level < 1.0:
+            confidence_level = 0.95
+    if seed is None:
+        seed = _bounded_int("CRYPTO_PROOF_SEED", 20260726, minimum=0, maximum=2**31 - 1)
+    if require_run_card is None:
+        require_run_card = (
+            os.getenv("CRYPTO_PROOF_REQUIRE_RUN_CARD", "true").lower() == "true"
+        )
+
+    return CryptoProofSettings(
+        max_p_value=min(float(max_p_value), CRYPTO_PROOF_MAX_P_VALUE_CEILING),
+        min_trades=max(int(min_trades), CRYPTO_PROOF_MIN_TRADES_FLOOR),
+        min_bars=int(min_bars),
+        min_consistency_rate=min(max(float(min_consistency_rate), 0.0), 1.0),
+        min_prob_positive=min(max(float(min_prob_positive), 0.0), 1.0),
+        permutation_iterations=int(permutation_iterations),
+        bootstrap_iterations=int(bootstrap_iterations),
+        walk_forward_folds=int(walk_forward_folds),
+        min_bars_per_fold=int(min_bars_per_fold),
+        confidence_level=float(confidence_level),
+        seed=int(seed),
+        require_run_card=bool(require_run_card),
+    )
+
+
+class CryptoEyesSettings(NamedTuple):
+    """Effective crypto persona live-look settings, resolved at call time."""
+
+    db_path: str
+    max_actions: int
+    timeout_seconds: float
+    default_query: str
+    discord_guild: str
+    discord_channels: str
+
+
+#: A look with no named subject falls back to this live X search.
+CRYPTO_EYES_DEFAULT_QUERY = (
+    "(crypto OR solana OR ethereum OR onchain) min_faves:40 -filter:replies"
+)
+
+#: Hard ceilings on one live look. The spec is 8 browser actions and 90
+#: seconds; env vars and explicit arguments may only lower them. Mirrored at
+#: the execution boundary by ``crypto_eyes_driver.LookBudget``, which clamps
+#: again so an injected settings object cannot raise them.
+CRYPTO_EYES_MAX_ACTIONS_CEILING = 8
+CRYPTO_EYES_TIMEOUT_CEILING_S = 90.0
+
+
+def get_crypto_eyes_settings(
+    db_path: str | None = None,
+    max_actions: int | None = None,
+    timeout_seconds: float | None = None,
+    default_query: str | None = None,
+    discord_guild: str | None = None,
+    discord_channels: str | None = None,
+) -> CryptoEyesSettings:
+    """Resolve the crypto persona's live-look settings at call time.
+
+    ``HOMIE_KILLSWITCH_CRYPTO_EYES`` is the only enablement control (absent =
+    ON; the switch only turns the look OFF) and is enforced by the driver and
+    the receipt store, not here. These settings are bounds and targets:
+
+    There is deliberately NO CDP-port knob: the look attaches to 18222 and the
+    ``crypto-persona-look`` session as constants in the driver. An
+    env-overridable "fixed" port is not fixed, and 9222 is unusable on this
+    host.
+
+    - ``CRYPTO_EYES_DB_PATH`` (``DATA_DIR/crypto_looks.db``)
+    - ``CRYPTO_EYES_MAX_ACTIONS`` (``8``, ceiling ``8``) — actions per look
+    - ``CRYPTO_EYES_TIMEOUT_SECONDS`` (``90``, ceiling ``90``) — wall clock
+    - ``CRYPTO_EYES_DEFAULT_QUERY`` — subject-less look fallback search
+    - ``CRYPTO_EYES_DISCORD_GUILD`` / ``CRYPTO_EYES_DISCORD_CHANNELS``,
+      falling back to the alpha desk's already-configured source surface
+      (``DISCORD_ALPHA_SOURCE_GUILD`` / ``DISCORD_ALPHA_CHANNELS``).
+    """
+
+    if db_path is None:
+        db_path = os.getenv("CRYPTO_EYES_DB_PATH", "") or str(
+            DATA_DIR / "crypto_looks.db"
+        )
+    if max_actions is None:
+        try:
+            max_actions = int(os.getenv("CRYPTO_EYES_MAX_ACTIONS", "") or 8)
+        except ValueError:
+            max_actions = 8
+    # Ceilings, not suggestions: env AND explicit arguments are clamped here,
+    # and the execution boundary (LookBudget) clamps again so an injected
+    # settings object cannot raise them either.
+    max_actions = max(1, min(int(max_actions), CRYPTO_EYES_MAX_ACTIONS_CEILING))
+    if timeout_seconds is None:
+        try:
+            timeout_seconds = float(
+                os.getenv("CRYPTO_EYES_TIMEOUT_SECONDS", "") or 90.0
+            )
+        except ValueError:
+            timeout_seconds = 90.0
+    timeout_seconds = max(
+        1.0, min(float(timeout_seconds), CRYPTO_EYES_TIMEOUT_CEILING_S)
+    )
+    if default_query is None:
+        default_query = (
+            os.getenv("CRYPTO_EYES_DEFAULT_QUERY", "").strip()
+            or CRYPTO_EYES_DEFAULT_QUERY
+        )
+    if discord_guild is None:
+        discord_guild = (
+            os.getenv("CRYPTO_EYES_DISCORD_GUILD", "").strip()
+            or os.getenv("DISCORD_ALPHA_SOURCE_GUILD", "").strip()
+        )
+    if discord_channels is None:
+        discord_channels = (
+            os.getenv("CRYPTO_EYES_DISCORD_CHANNELS", "").strip()
+            or os.getenv("DISCORD_ALPHA_CHANNELS", "").strip()
+        )
+    return CryptoEyesSettings(
+        db_path=db_path,
+        max_actions=max_actions,
+        timeout_seconds=timeout_seconds,
+        default_query=default_query,
+        discord_guild=discord_guild,
+        discord_channels=discord_channels,
+    )
+
+
+class CryptoOrderGuardSettings(NamedTuple):
+    """Effective Wave-8 execution-guard settings, resolved at call time."""
+
+    state_path: str
+    halt_path: str
+    live_armed: bool
+    submit_timeout_seconds: float
+    max_reconcile_retries: int
+    lock_timeout_seconds: float
+    ticket_ttl_seconds: float
+
+
+#: The ONE token that arms live execution. Anything else — unset, empty,
+#: "true", "1", "yes" — leaves the guard in dry-run. A boolean-ish knob invites
+#: a stray `=1` in a copied .env to arm a funded wallet.
+CRYPTO_ORDER_GUARD_LIVE_TOKEN = "enabled"
+
+
+def get_crypto_order_guard_settings(
+    state_path: str | None = None,
+    halt_path: str | None = None,
+    live_armed: bool | None = None,
+    submit_timeout_seconds: float | None = None,
+    max_reconcile_retries: int | None = None,
+    lock_timeout_seconds: float | None = None,
+    ticket_ttl_seconds: float | None = None,
+) -> CryptoOrderGuardSettings:
+    """Resolve the crypto execution-guard settings at call time.
+
+    ``HOMIE_KILLSWITCH_CRYPTO_ORDER_GUARD`` is the enablement control (absent =
+    ON; the switch only turns the guard OFF) and is enforced by the guard, not
+    here. Arming live execution is a SEPARATE, explicitly-named gate:
+
+    - ``CRYPTO_ORDER_GUARD_STATE_PATH`` (``STATE_DIR/crypto-order-guard.json``)
+      — the physical request/day ledger. Idempotency and the day counter both
+      read it fresh; it is never cached.
+    - ``CRYPTO_ORDER_GUARD_HALT_PATH`` (``STATE_DIR/live/HALT``) — the
+      filesystem halt sentinel. Existence is the halt.
+    - ``CRYPTO_ORDER_GUARD_LIVE`` — must equal ``enabled`` exactly
+      (case-insensitive) to arm live execution. Default: dry-run only.
+    - ``CRYPTO_ORDER_GUARD_SUBMIT_TIMEOUT_SECONDS`` (``20``, 1-120) — hard wall
+      on the async submit path.
+    - ``CRYPTO_ORDER_GUARD_MAX_RECONCILE_RETRIES`` (``1``, 0-5) — how many times
+      an AUTHORITATIVELY-absent order may be re-armed after a timeout.
+    - ``CRYPTO_ORDER_GUARD_LOCK_TIMEOUT_SECONDS`` (``10``, 0.5-120) — ledger
+      cross-process lock wait.
+    - ``CRYPTO_ORDER_GUARD_TICKET_TTL_SECONDS`` (``300``, 5-3600) — how long an
+      armed ticket may sit before ``submit`` refuses it. Without a TTL a ticket
+      is a standing permission, and an 8-hour-old one placed without complaint.
+    """
+
+    if state_path is None:
+        state_path = os.getenv("CRYPTO_ORDER_GUARD_STATE_PATH", "") or str(
+            STATE_DIR / "crypto-order-guard.json"
+        )
+    if halt_path is None:
+        halt_path = os.getenv("CRYPTO_ORDER_GUARD_HALT_PATH", "") or str(
+            STATE_DIR / "live" / "HALT"
+        )
+    if live_armed is None:
+        live_armed = (
+            os.getenv("CRYPTO_ORDER_GUARD_LIVE", "").strip().lower()
+            == CRYPTO_ORDER_GUARD_LIVE_TOKEN
+        )
+    if submit_timeout_seconds is None:
+        try:
+            submit_timeout_seconds = float(
+                os.getenv("CRYPTO_ORDER_GUARD_SUBMIT_TIMEOUT_SECONDS", "") or 20.0
+            )
+        except ValueError:
+            submit_timeout_seconds = 20.0
+    submit_timeout_seconds = max(1.0, min(float(submit_timeout_seconds), 120.0))
+    if max_reconcile_retries is None:
+        try:
+            max_reconcile_retries = int(
+                os.getenv("CRYPTO_ORDER_GUARD_MAX_RECONCILE_RETRIES", "") or 1
+            )
+        except ValueError:
+            max_reconcile_retries = 1
+    max_reconcile_retries = max(0, min(int(max_reconcile_retries), 5))
+    if lock_timeout_seconds is None:
+        try:
+            lock_timeout_seconds = float(
+                os.getenv("CRYPTO_ORDER_GUARD_LOCK_TIMEOUT_SECONDS", "") or 10.0
+            )
+        except ValueError:
+            lock_timeout_seconds = 10.0
+    lock_timeout_seconds = max(0.5, min(float(lock_timeout_seconds), 120.0))
+    if ticket_ttl_seconds is None:
+        try:
+            ticket_ttl_seconds = float(
+                os.getenv("CRYPTO_ORDER_GUARD_TICKET_TTL_SECONDS", "") or 300.0
+            )
+        except ValueError:
+            ticket_ttl_seconds = 300.0
+    ticket_ttl_seconds = max(5.0, min(float(ticket_ttl_seconds), 3600.0))
+    return CryptoOrderGuardSettings(
+        state_path=state_path,
+        halt_path=halt_path,
+        live_armed=bool(live_armed),
+        submit_timeout_seconds=submit_timeout_seconds,
+        max_reconcile_retries=max_reconcile_retries,
+        lock_timeout_seconds=lock_timeout_seconds,
+        ticket_ttl_seconds=ticket_ttl_seconds,
+    )
+
+
+class CryptoExecutionSettings(NamedTuple):
+    """Effective Wave-8 execution-CLIENT settings, resolved at call time."""
+
+    venue_id: str
+    market_type: str
+    request_timeout_seconds: float
+    place_timeout_seconds: float
+    ip_allowlist_claimed: bool
+    withdrawals_attested_disabled: bool
+    first_run_max_notional_usd: float
+
+
+def get_crypto_execution_settings(
+    venue_id: str | None = None,
+    market_type: str | None = None,
+    request_timeout_seconds: float | None = None,
+    place_timeout_seconds: float | None = None,
+    ip_allowlist_claimed: bool | None = None,
+    withdrawals_attested_disabled: bool | None = None,
+    first_run_max_notional_usd: float | None = None,
+) -> CryptoExecutionSettings:
+    """Resolve the ccxt execution-client settings at call time.
+
+    This module holds NO credentials and reads none: there is deliberately no
+    ``*_API_KEY`` knob here. An authenticated exchange is injected by the
+    caller or the client stays in dry-run.
+
+    - ``CRYPTO_EXECUTION_VENUE_ID`` (``binance``) / ``CRYPTO_EXECUTION_MARKET_TYPE``
+      (``swap``) — which ccxt venue the OFFLINE capability probe describes.
+    - ``CRYPTO_EXECUTION_REQUEST_TIMEOUT_SECONDS`` (``20``, 1-120) — per-request
+      wall pushed down into ccxt itself.
+    - ``CRYPTO_EXECUTION_PLACE_TIMEOUT_SECONDS`` (``30``, 1-180) — hard wall on
+      the async place/resolve path. It cannot kill the worker thread, so a
+      breach surfaces as "reconcile required", never as a resubmittable ticket.
+    - ``CRYPTO_EXECUTION_IP_ALLOWLISTED`` (``false``) — the operator's CLAIM that
+      the key is IP-allowlisted. Absent = refuse live.
+    - ``CRYPTO_EXECUTION_WITHDRAWALS_DISABLED_ATTESTED`` (``false``) — the
+      operator's CLAIM that withdrawals are off, used ONLY when the venue
+      cannot be asked. A physical read showing withdrawals ON always wins.
+    - ``CRYPTO_EXECUTION_FIRST_RUN_MAX_NOTIONAL_USD`` (``25``, 1-100000) — the
+      "minimum sizes on first live runs" hygiene item, as a live-only ceiling.
+    """
+
+    if venue_id is None:
+        venue_id = os.getenv("CRYPTO_EXECUTION_VENUE_ID", "").strip() or "binance"
+    if market_type is None:
+        market_type = os.getenv("CRYPTO_EXECUTION_MARKET_TYPE", "").strip() or "swap"
+    if request_timeout_seconds is None:
+        try:
+            request_timeout_seconds = float(
+                os.getenv("CRYPTO_EXECUTION_REQUEST_TIMEOUT_SECONDS", "") or 20.0
+            )
+        except ValueError:
+            request_timeout_seconds = 20.0
+    request_timeout_seconds = max(1.0, min(float(request_timeout_seconds), 120.0))
+    if place_timeout_seconds is None:
+        try:
+            place_timeout_seconds = float(
+                os.getenv("CRYPTO_EXECUTION_PLACE_TIMEOUT_SECONDS", "") or 30.0
+            )
+        except ValueError:
+            place_timeout_seconds = 30.0
+    place_timeout_seconds = max(1.0, min(float(place_timeout_seconds), 180.0))
+    if ip_allowlist_claimed is None:
+        ip_allowlist_claimed = (
+            os.getenv("CRYPTO_EXECUTION_IP_ALLOWLISTED", "false").strip().lower()
+            == "true"
+        )
+    if withdrawals_attested_disabled is None:
+        withdrawals_attested_disabled = (
+            os.getenv("CRYPTO_EXECUTION_WITHDRAWALS_DISABLED_ATTESTED", "false")
+            .strip()
+            .lower()
+            == "true"
+        )
+    if first_run_max_notional_usd is None:
+        try:
+            first_run_max_notional_usd = float(
+                os.getenv("CRYPTO_EXECUTION_FIRST_RUN_MAX_NOTIONAL_USD", "") or 25.0
+            )
+        except ValueError:
+            first_run_max_notional_usd = 25.0
+    first_run_max_notional_usd = max(
+        1.0, min(float(first_run_max_notional_usd), 100_000.0)
+    )
+    return CryptoExecutionSettings(
+        venue_id=venue_id,
+        market_type=market_type,
+        request_timeout_seconds=request_timeout_seconds,
+        place_timeout_seconds=place_timeout_seconds,
+        ip_allowlist_claimed=bool(ip_allowlist_claimed),
+        withdrawals_attested_disabled=bool(withdrawals_attested_disabled),
+        first_run_max_notional_usd=first_run_max_notional_usd,
+    )
+
+
+class CryptoRiskSettings(NamedTuple):
+    """Effective Wave-6 risk-gate settings, resolved at call time."""
+
+    halt_path: str
+    mandate_path: str
+    mandate_max_consent_days: int
+    lookback_minutes: int
+    stop_duration_minutes: int
+    unlock_at: str
+    stoploss_trade_limit: int
+    stoploss_required_profit: float
+    stoploss_only_per_side: bool
+    stoploss_only_per_pair: bool
+    cooldown_minutes: int
+    drawdown_trade_limit: int
+    max_allowed_drawdown: float
+    starting_balance_usd: float
+
+
+#: Hard ceiling on how long ONE mandate may authorize autonomous trading.
+#: ``CRYPTO_RISK_MANDATE_MAX_DAYS`` may only LOWER it. The ceiling is a module
+#: constant rather than an env value because "authorization decays" is the
+#: whole point: an env knob that could raise it to 3650 would convert a bounded
+#: grant back into a permanent one.
+CRYPTO_RISK_MANDATE_MAX_DAYS_CEILING = 90
+
+def _crypto_risk_unlock_at_ok(value: str) -> bool:
+    """``HH:MM`` on a 24-hour clock, zero-padded. Anything else is ignored."""
+
+    hour, _, minute = value.partition(":")
+    if len(hour) != 2 or len(minute) != 2 or not hour.isdigit() or not minute.isdigit():
+        return False
+    return 0 <= int(hour) <= 23 and 0 <= int(minute) <= 59
+
+
+def get_crypto_risk_settings(
+    halt_path: str | None = None,
+    mandate_path: str | None = None,
+    mandate_max_consent_days: int | None = None,
+    lookback_minutes: int | None = None,
+    stop_duration_minutes: int | None = None,
+    unlock_at: str | None = None,
+    stoploss_trade_limit: int | None = None,
+    stoploss_required_profit: float | None = None,
+    stoploss_only_per_side: bool | None = None,
+    stoploss_only_per_pair: bool | None = None,
+    cooldown_minutes: int | None = None,
+    drawdown_trade_limit: int | None = None,
+    max_allowed_drawdown: float | None = None,
+    starting_balance_usd: float | None = None,
+) -> CryptoRiskSettings:
+    """Resolve the Wave-6 risk-gate settings at call time (Rule 1).
+
+    These bound the circuit breakers (``cognition.crypto_protections``), the
+    filesystem halt sentinel (``crypto_halt``), and the trading mandate
+    (``cognition.crypto_mandate``). None of them ENABLE anything — every gate
+    they configure is a refusal surface.
+
+    - ``CRYPTO_RISK_HALT_PATH`` — the ONE physical halt sentinel. Falls back to
+      ``CRYPTO_ORDER_GUARD_HALT_PATH`` before the default so an operator who
+      relocated the Wave-8 guard's sentinel does not end up with two files and
+      a desk that only half-stops. Default ``STATE_DIR/live/HALT``.
+    - ``CRYPTO_RISK_MANDATE_PATH`` (``STATE_DIR/live/mandate.json``) — read
+      fresh on every check; never cached, because expiry has to be real.
+    - ``CRYPTO_RISK_MANDATE_MAX_DAYS`` (``30``, ceiling
+      ``CRYPTO_RISK_MANDATE_MAX_DAYS_CEILING``) — a mandate whose consent
+      window is longer is INVALID, which denies.
+    - ``CRYPTO_RISK_LOOKBACK_MINUTES`` (``60``) / ``CRYPTO_RISK_STOP_DURATION_MINUTES``
+      (``60``) — freqtrade ``IProtection`` window and lock length.
+    - ``CRYPTO_RISK_UNLOCK_AT`` (``""``) — optional ``HH:MM`` fixed unlock
+      time; an unparseable value is ignored with a receipt.
+    - ``CRYPTO_RISK_STOPLOSS_TRADE_LIMIT`` (``4``),
+      ``CRYPTO_RISK_STOPLOSS_REQUIRED_PROFIT`` (``0.0``),
+      ``CRYPTO_RISK_STOPLOSS_ONLY_PER_SIDE`` (``true``),
+      ``CRYPTO_RISK_STOPLOSS_ONLY_PER_PAIR`` (``false``) — StoplossGuard.
+      ``only_per_side`` defaults ON because this operator trades both
+      directions: a run of long stop-outs must lock LONGS and leave shorts
+      open, not freeze the book.
+    - ``CRYPTO_RISK_COOLDOWN_MINUTES`` (``60``) — CooldownPeriod, the
+      revenge-trade blocker.
+    - ``CRYPTO_RISK_DRAWDOWN_TRADE_LIMIT`` (``5``),
+      ``CRYPTO_RISK_MAX_ALLOWED_DRAWDOWN`` (``0.20``),
+      ``CRYPTO_RISK_STARTING_BALANCE_USD`` (``0`` = unknown) — MaxDrawdown.
+      With no starting balance the drawdown is peak-relative and therefore
+      uncomputable while cumulative profit is still negative; that case
+      resolves to UNKNOWN, which blocks.
+    """
+
+    if halt_path is None:
+        halt_path = (
+            os.getenv("CRYPTO_RISK_HALT_PATH", "").strip()
+            or os.getenv("CRYPTO_ORDER_GUARD_HALT_PATH", "").strip()
+            or str(STATE_DIR / "live" / "HALT")
+        )
+    if mandate_path is None:
+        mandate_path = os.getenv("CRYPTO_RISK_MANDATE_PATH", "").strip() or str(
+            STATE_DIR / "live" / "mandate.json"
+        )
+    if mandate_max_consent_days is None:
+        try:
+            mandate_max_consent_days = int(
+                os.getenv("CRYPTO_RISK_MANDATE_MAX_DAYS", "") or 30
+            )
+        except ValueError:
+            mandate_max_consent_days = 30
+    mandate_max_consent_days = max(
+        1, min(int(mandate_max_consent_days), CRYPTO_RISK_MANDATE_MAX_DAYS_CEILING)
+    )
+    if lookback_minutes is None:
+        try:
+            lookback_minutes = int(os.getenv("CRYPTO_RISK_LOOKBACK_MINUTES", "") or 60)
+        except ValueError:
+            lookback_minutes = 60
+    lookback_minutes = max(1, min(int(lookback_minutes), 60 * 24 * 30))
+    if stop_duration_minutes is None:
+        try:
+            stop_duration_minutes = int(
+                os.getenv("CRYPTO_RISK_STOP_DURATION_MINUTES", "") or 60
+            )
+        except ValueError:
+            stop_duration_minutes = 60
+    stop_duration_minutes = max(1, min(int(stop_duration_minutes), 60 * 24 * 30))
+    if unlock_at is None:
+        unlock_at = os.getenv("CRYPTO_RISK_UNLOCK_AT", "").strip()
+    unlock_at = str(unlock_at).strip()
+    if unlock_at and not _crypto_risk_unlock_at_ok(unlock_at):
+        print(
+            f"[config] invalid CRYPTO_RISK_UNLOCK_AT={unlock_at!r}; ignoring",
+            flush=True,
+        )
+        unlock_at = ""
+    if stoploss_trade_limit is None:
+        try:
+            stoploss_trade_limit = int(
+                os.getenv("CRYPTO_RISK_STOPLOSS_TRADE_LIMIT", "") or 4
+            )
+        except ValueError:
+            stoploss_trade_limit = 4
+    stoploss_trade_limit = max(1, min(int(stoploss_trade_limit), 1_000))
+    if stoploss_required_profit is None:
+        try:
+            stoploss_required_profit = float(
+                os.getenv("CRYPTO_RISK_STOPLOSS_REQUIRED_PROFIT", "") or 0.0
+            )
+        except ValueError:
+            stoploss_required_profit = 0.0
+    stoploss_required_profit = float(stoploss_required_profit)
+    if not math.isfinite(stoploss_required_profit):
+        stoploss_required_profit = 0.0
+    if stoploss_only_per_side is None:
+        stoploss_only_per_side = (
+            os.getenv("CRYPTO_RISK_STOPLOSS_ONLY_PER_SIDE", "true").strip().lower()
+            == "true"
+        )
+    if stoploss_only_per_pair is None:
+        stoploss_only_per_pair = (
+            os.getenv("CRYPTO_RISK_STOPLOSS_ONLY_PER_PAIR", "false").strip().lower()
+            == "true"
+        )
+    if cooldown_minutes is None:
+        try:
+            cooldown_minutes = int(os.getenv("CRYPTO_RISK_COOLDOWN_MINUTES", "") or 60)
+        except ValueError:
+            cooldown_minutes = 60
+    cooldown_minutes = max(1, min(int(cooldown_minutes), 60 * 24 * 30))
+    if drawdown_trade_limit is None:
+        try:
+            drawdown_trade_limit = int(
+                os.getenv("CRYPTO_RISK_DRAWDOWN_TRADE_LIMIT", "") or 5
+            )
+        except ValueError:
+            drawdown_trade_limit = 5
+    drawdown_trade_limit = max(1, min(int(drawdown_trade_limit), 1_000))
+    if max_allowed_drawdown is None:
+        try:
+            max_allowed_drawdown = float(
+                os.getenv("CRYPTO_RISK_MAX_ALLOWED_DRAWDOWN", "") or 0.20
+            )
+        except ValueError:
+            max_allowed_drawdown = 0.20
+    max_allowed_drawdown = float(max_allowed_drawdown)
+    if not math.isfinite(max_allowed_drawdown) or max_allowed_drawdown <= 0.0:
+        max_allowed_drawdown = 0.20
+    max_allowed_drawdown = min(max_allowed_drawdown, 1.0)
+    if starting_balance_usd is None:
+        try:
+            starting_balance_usd = float(
+                os.getenv("CRYPTO_RISK_STARTING_BALANCE_USD", "") or 0.0
+            )
+        except ValueError:
+            starting_balance_usd = 0.0
+    starting_balance_usd = float(starting_balance_usd)
+    if not math.isfinite(starting_balance_usd) or starting_balance_usd < 0.0:
+        starting_balance_usd = 0.0
+    return CryptoRiskSettings(
+        halt_path=halt_path,
+        mandate_path=mandate_path,
+        mandate_max_consent_days=mandate_max_consent_days,
+        lookback_minutes=lookback_minutes,
+        stop_duration_minutes=stop_duration_minutes,
+        unlock_at=unlock_at,
+        stoploss_trade_limit=stoploss_trade_limit,
+        stoploss_required_profit=stoploss_required_profit,
+        stoploss_only_per_side=bool(stoploss_only_per_side),
+        stoploss_only_per_pair=bool(stoploss_only_per_pair),
+        cooldown_minutes=cooldown_minutes,
+        drawdown_trade_limit=drawdown_trade_limit,
+        max_allowed_drawdown=max_allowed_drawdown,
+        starting_balance_usd=starting_balance_usd,
+    )
+
+
+class CryptoCandlesSettings(NamedTuple):
+    """Effective candle-store knobs, resolved at call time (crypto TA Wave 0)."""
+
+    exchange_id: str
+    market_type: str
+    symbol: str
+    timeframes: tuple[str, ...]
+    store_dir: str
+    fetch_budget_s: float
+    request_timeout_s: float
+    async_grace_s: float
+    page_limit: int
+    max_pages: int
+    max_empty_pages: int
+    max_attempts: int
+    retry_base_delay_s: float
+
+
+#: The desk's default instrument: a LEVERAGED linear perpetual, not spot.
+CRYPTO_CANDLES_DEFAULT_SYMBOL = "BTC/USDT:USDT"
+#: Scalp frames first — the persona reads 5m/15m and takes 1h for context.
+CRYPTO_CANDLES_DEFAULT_TIMEFRAMES = ("5m", "15m", "1h")
+#: Hard ceiling on one fetch's wall clock. A hung exchange inside a persona
+#: prefetch is the failure class that froze the bot's event loop on
+#: 2026-07-13, so env vars and explicit arguments may only LOWER this.
+CRYPTO_CANDLES_BUDGET_CEILING_S = 30.0
+
+
+def get_crypto_candles_settings(
+    exchange_id: str | None = None,
+    market_type: str | None = None,
+    symbol: str | None = None,
+    timeframes: tuple[str, ...] | None = None,
+    store_dir: str | None = None,
+    fetch_budget_s: float | None = None,
+    request_timeout_s: float | None = None,
+    async_grace_s: float | None = None,
+    page_limit: int | None = None,
+    max_pages: int | None = None,
+    max_empty_pages: int | None = None,
+    max_attempts: int | None = None,
+    retry_base_delay_s: float | None = None,
+) -> CryptoCandlesSettings:
+    """Resolve the candle store's knobs at CALL TIME (Rule 1).
+
+    There is no API key knob and no secret: every endpoint the candle store
+    touches is public, and nothing in that slice can place or fund an order.
+
+    - ``CRYPTO_CANDLES_EXCHANGE`` (``okx``) — ccxt exchange id. Binance and
+      Bybit both refuse this operator's location outright (HTTP 451 / 403 on
+      the public endpoints, no key involved), so a Binance default renders the
+      whole chart read UNAVAILABLE here. OKX serves the same ``BTC/USDT:USDT``
+      linear perp and answers. Kraken and Coinbase are also reachable but are
+      spot-only for this symbol shape.
+    - ``CRYPTO_CANDLES_MARKET_TYPE`` (``swap``) — ccxt ``defaultType``
+    - ``CRYPTO_CANDLES_SYMBOL`` (``BTC/USDT:USDT``)
+    - ``CRYPTO_CANDLES_TIMEFRAMES`` (``5m,15m,1h``) — first entry is the default
+    - ``CRYPTO_CANDLES_STORE_DIR`` (``DATA_DIR/crypto_candles``)
+    - ``CRYPTO_CANDLES_BUDGET_SECONDS`` (``12``, ceiling ``30``) — whole fetch
+    - ``CRYPTO_CANDLES_REQUEST_TIMEOUT_SECONDS`` (``8``) — one HTTP attempt
+    - ``CRYPTO_CANDLES_ASYNC_GRACE_SECONDS`` (``3``) — added to the budget for
+      the ``asyncio.wait_for`` belt so the inner path can report a real reason
+    - ``CRYPTO_CANDLES_PAGE_LIMIT`` (``100``) — candles per fetch. This is a
+      CORRECTNESS floor, not a throughput knob. With no explicit ``since_ms``
+      the fetch window is sized ``span * page_limit * max_pages`` and the loop
+      walks FORWARD, so it only reaches the present when each page really does
+      advance ``page_limit`` bars. An exchange that silently caps below the
+      request falls short by that ratio — and asking for MORE pages moves the
+      window start further back, so the answer gets staler, not fresher. At 500
+      against OKX (real cap 100) the newest 1h bar came back a month old.
+      100 is honoured everywhere measured. Raise it only for an exchange whose
+      real cap you have checked.
+    - ``CRYPTO_CANDLES_MAX_PAGES`` (``4``) — pages per fetch call
+    - ``CRYPTO_CANDLES_MAX_EMPTY_PAGES`` (``3``) — consecutive empty pages the
+      pagination loop steps over before giving up (an empty page is NOT
+      end-of-data; a Binance maintenance window outlives one page span)
+    - ``CRYPTO_CANDLES_MAX_ATTEMPTS`` (``3``) — transient retries per page
+    - ``CRYPTO_CANDLES_RETRY_BASE_DELAY_SECONDS`` (``0.5``)
+    """
+
+    if exchange_id is None:
+        exchange_id = os.getenv("CRYPTO_CANDLES_EXCHANGE", "").strip() or "okx"
+    if market_type is None:
+        market_type = os.getenv("CRYPTO_CANDLES_MARKET_TYPE", "").strip() or "swap"
+    if symbol is None:
+        symbol = (
+            os.getenv("CRYPTO_CANDLES_SYMBOL", "").strip()
+            or CRYPTO_CANDLES_DEFAULT_SYMBOL
+        )
+    if timeframes is None:
+        raw_timeframes = os.getenv("CRYPTO_CANDLES_TIMEFRAMES", "").strip()
+        parsed = tuple(
+            entry.strip() for entry in raw_timeframes.split(",") if entry.strip()
+        )
+        timeframes = parsed or CRYPTO_CANDLES_DEFAULT_TIMEFRAMES
+    if store_dir is None:
+        store_dir = os.getenv("CRYPTO_CANDLES_STORE_DIR", "") or str(
+            DATA_DIR / "crypto_candles"
+        )
+    if fetch_budget_s is None:
+        try:
+            fetch_budget_s = float(
+                os.getenv("CRYPTO_CANDLES_BUDGET_SECONDS", "") or 12.0
+            )
+        except ValueError:
+            fetch_budget_s = 12.0
+    # Ceiling, not a suggestion: an injected settings object cannot raise it.
+    fetch_budget_s = max(1.0, min(float(fetch_budget_s), CRYPTO_CANDLES_BUDGET_CEILING_S))
+    if request_timeout_s is None:
+        try:
+            request_timeout_s = float(
+                os.getenv("CRYPTO_CANDLES_REQUEST_TIMEOUT_SECONDS", "") or 8.0
+            )
+        except ValueError:
+            request_timeout_s = 8.0
+    request_timeout_s = max(0.5, min(float(request_timeout_s), fetch_budget_s))
+    if async_grace_s is None:
+        try:
+            async_grace_s = float(
+                os.getenv("CRYPTO_CANDLES_ASYNC_GRACE_SECONDS", "") or 3.0
+            )
+        except ValueError:
+            async_grace_s = 3.0
+    async_grace_s = max(0.5, min(float(async_grace_s), 15.0))
+    if page_limit is None:
+        try:
+            page_limit = int(os.getenv("CRYPTO_CANDLES_PAGE_LIMIT", "") or 100)
+        except ValueError:
+            page_limit = 500
+    page_limit = max(1, min(int(page_limit), 1000))
+    if max_pages is None:
+        try:
+            max_pages = int(os.getenv("CRYPTO_CANDLES_MAX_PAGES", "") or 4)
+        except ValueError:
+            max_pages = 4
+    max_pages = max(1, int(max_pages))
+    if max_empty_pages is None:
+        try:
+            max_empty_pages = int(os.getenv("CRYPTO_CANDLES_MAX_EMPTY_PAGES", "") or 3)
+        except ValueError:
+            max_empty_pages = 3
+    max_empty_pages = max(0, int(max_empty_pages))
+    if max_attempts is None:
+        try:
+            max_attempts = int(os.getenv("CRYPTO_CANDLES_MAX_ATTEMPTS", "") or 3)
+        except ValueError:
+            max_attempts = 3
+    max_attempts = max(1, int(max_attempts))
+    if retry_base_delay_s is None:
+        try:
+            retry_base_delay_s = float(
+                os.getenv("CRYPTO_CANDLES_RETRY_BASE_DELAY_SECONDS", "") or 0.5
+            )
+        except ValueError:
+            retry_base_delay_s = 0.5
+    retry_base_delay_s = max(0.0, min(float(retry_base_delay_s), 10.0))
+    return CryptoCandlesSettings(
+        exchange_id=exchange_id,
+        market_type=market_type,
+        symbol=symbol,
+        timeframes=tuple(timeframes),
+        store_dir=store_dir,
+        fetch_budget_s=fetch_budget_s,
+        request_timeout_s=request_timeout_s,
+        async_grace_s=async_grace_s,
+        page_limit=page_limit,
+        max_pages=max_pages,
+        max_empty_pages=max_empty_pages,
+        max_attempts=max_attempts,
+        retry_base_delay_s=retry_base_delay_s,
+    )
+
+
+class CryptoTaSettings(NamedTuple):
+    """Effective chart-reading knobs, resolved at call time (crypto TA Wave 1)."""
+
+    symbol: str
+    base_timeframe: str
+    closed_only: bool
+    recursive_warmup_multiplier: float
+    max_staleness_bars: int
+    max_context_chars: int
+    async_timeout_s: float
+
+
+#: Recursive smoothing never forgets its seed, it only decays it. At this
+#: multiple of an indicator's nominal window the seed carries roughly
+#: ``e ** -5`` (~0.7%) of the answer, which is where the number stops depending
+#: on how deep the fetch happened to go. Raise it after freqtrade's
+#: ``optimize/analysis/recursive.py`` measures the real floor on live candles.
+CRYPTO_TA_DEFAULT_WARMUP_MULT = 5.0
+
+
+def get_crypto_ta_settings(
+    symbol: str | None = None,
+    base_timeframe: str | None = None,
+    closed_only: bool | None = None,
+    recursive_warmup_multiplier: float | None = None,
+    max_staleness_bars: int | None = None,
+    max_context_chars: int | None = None,
+    async_timeout_s: float | None = None,
+) -> CryptoTaSettings:
+    """Resolve the chart reader's knobs at CALL TIME (Rule 1).
+
+    - ``CRYPTO_TA_SYMBOL`` — defaults to the candle store's symbol
+    - ``CRYPTO_TA_BASE_TIMEFRAME`` (``5m``) — the frame slower frames merge onto
+    - ``CRYPTO_TA_CLOSED_ONLY`` (``true``) — serve closed candles only; the
+      forming candle's indicators change every second and cannot be
+      cross-checked against a chart
+    - ``CRYPTO_TA_RECURSIVE_WARMUP_MULT`` (``5``, clamped ``1``-``50``) —
+      warm-up multiple for recursive indicators (RSI, EMA, MACD, ATR, ADX, KDJ)
+    - ``CRYPTO_TA_MAX_STALENESS_BARS`` (``3``, ``0`` disables) — how far behind
+      the read instant the newest closed candle may be before the read refuses
+      rather than quoting an old number as current
+    - ``CRYPTO_TA_MAX_CHARS`` (``3000``, floor ``512``) — prefetch payload cap
+    - ``CRYPTO_TA_ASYNC_TIMEOUT_SECONDS`` (``5``, clamped ``0.5``-``60``)
+    """
+
+    if symbol is None:
+        symbol = (
+            os.getenv("CRYPTO_TA_SYMBOL", "").strip()
+            or get_crypto_candles_settings().symbol
+        )
+    if base_timeframe is None:
+        base_timeframe = os.getenv("CRYPTO_TA_BASE_TIMEFRAME", "").strip() or "5m"
+    if closed_only is None:
+        closed_only = os.getenv("CRYPTO_TA_CLOSED_ONLY", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if recursive_warmup_multiplier is None:
+        try:
+            recursive_warmup_multiplier = float(
+                os.getenv("CRYPTO_TA_RECURSIVE_WARMUP_MULT", "")
+                or CRYPTO_TA_DEFAULT_WARMUP_MULT
+            )
+        except ValueError:
+            recursive_warmup_multiplier = CRYPTO_TA_DEFAULT_WARMUP_MULT
+    # Floor of 1.0: the multiplier may only ever RAISE the warm-up bar. A value
+    # below 1 would publish an indicator before it had enough candles to exist.
+    recursive_warmup_multiplier = max(1.0, min(float(recursive_warmup_multiplier), 50.0))
+    if max_staleness_bars is None:
+        try:
+            max_staleness_bars = int(os.getenv("CRYPTO_TA_MAX_STALENESS_BARS", "") or 3)
+        except ValueError:
+            max_staleness_bars = 3
+    max_staleness_bars = max(0, int(max_staleness_bars))
+    if max_context_chars is None:
+        try:
+            max_context_chars = int(os.getenv("CRYPTO_TA_MAX_CHARS", "") or 3000)
+        except ValueError:
+            max_context_chars = 3000
+    max_context_chars = max(512, int(max_context_chars))
+    if async_timeout_s is None:
+        try:
+            async_timeout_s = float(
+                os.getenv("CRYPTO_TA_ASYNC_TIMEOUT_SECONDS", "") or 5.0
+            )
+        except ValueError:
+            async_timeout_s = 5.0
+    async_timeout_s = max(0.5, min(float(async_timeout_s), 60.0))
+    return CryptoTaSettings(
+        symbol=symbol,
+        base_timeframe=base_timeframe,
+        closed_only=closed_only,
+        recursive_warmup_multiplier=recursive_warmup_multiplier,
+        max_staleness_bars=max_staleness_bars,
+        max_context_chars=max_context_chars,
+        async_timeout_s=async_timeout_s,
+    )
+
+
+class CryptoLevelsSettings(NamedTuple):
+    """Effective swing/fib/CME-gap knobs, resolved at call time (crypto TA Wave 2)."""
+
+    swing_left: int
+    swing_right: int
+    fib_ratios: tuple[float, ...]
+    price_tick: float
+    cme_timezone: str
+    cme_close_weekday: int
+    cme_close_hour: int
+    cme_close_minute: int
+    cme_open_weekday: int
+    cme_open_hour: int
+    cme_open_minute: int
+    cme_lookback_weeks: int
+    boundary_tolerance_spans: float
+    stale_after_spans: float
+    async_timeout_s: float
+
+
+#: TradingView's default retracement set minus the 0/1 anchors, which the level
+#: builder always emits separately as the swing endpoints.
+CRYPTO_LEVELS_DEFAULT_FIB_RATIOS = (0.236, 0.382, 0.5, 0.618, 0.786)
+#: CME Globex crypto-futures week: closes Friday 16:00 America/Chicago, reopens
+#: Sunday 17:00. Both are WALL-CLOCK instants in a DST-observing zone, so the
+#: UTC offset moves by an hour twice a year. Weekday numbers are Python's
+#: ``date.weekday()`` (Monday=0).
+CRYPTO_LEVELS_CME_TIMEZONE = "America/Chicago"
+CRYPTO_LEVELS_CME_CLOSE_WEEKDAY = 4
+CRYPTO_LEVELS_CME_OPEN_WEEKDAY = 6
+
+
+def get_crypto_levels_settings(
+    swing_left: int | None = None,
+    swing_right: int | None = None,
+    fib_ratios: tuple[float, ...] | None = None,
+    price_tick: float | None = None,
+    cme_timezone: str | None = None,
+    cme_close_weekday: int | None = None,
+    cme_close_hour: int | None = None,
+    cme_close_minute: int | None = None,
+    cme_open_weekday: int | None = None,
+    cme_open_hour: int | None = None,
+    cme_open_minute: int | None = None,
+    cme_lookback_weeks: int | None = None,
+    boundary_tolerance_spans: float | None = None,
+    stale_after_spans: float | None = None,
+    async_timeout_s: float | None = None,
+) -> CryptoLevelsSettings:
+    """Resolve the level-builder's knobs at CALL TIME (Rule 1).
+
+    Every endpoint below is arithmetic over a candle frame the caller already
+    holds; nothing here reaches the network or carries a secret.
+
+    - ``CRYPTO_LEVELS_SWING_LEFT`` (``3``) — bars a pivot must dominate behind it
+    - ``CRYPTO_LEVELS_SWING_RIGHT`` (``3``) — bars a pivot must dominate ahead of
+      it. This is also the CONFIRMATION LAG: a pivot is not confirmed until this
+      many bars have printed after it, which is what keeps the detector out of
+      the future.
+    - ``CRYPTO_LEVELS_FIB_RATIOS`` (``0.236,0.382,0.5,0.618,0.786``)
+    - ``CRYPTO_LEVELS_PRICE_TICK`` (``0.1``) — binance BTC USDT-perp price
+      precision; the quote grid levels are rounded onto
+    - ``CRYPTO_LEVELS_CME_TIMEZONE`` (``America/Chicago``)
+    - ``CRYPTO_LEVELS_CME_CLOSE_WEEKDAY`` / ``_HOUR`` / ``_MINUTE`` (``4``/``16``/``0``)
+    - ``CRYPTO_LEVELS_CME_OPEN_WEEKDAY`` / ``_HOUR`` / ``_MINUTE`` (``6``/``17``/``0``)
+    - ``CRYPTO_LEVELS_CME_LOOKBACK_WEEKS`` (``8``) — session boundaries scanned
+    - ``CRYPTO_LEVELS_BOUNDARY_TOLERANCE_SPANS`` (``1.0``) — how far a candle may
+      sit from a session instant and still be read as that instant's price
+    - ``CRYPTO_LEVELS_STALE_AFTER_SPANS`` (``3.0``) — a frame whose last candle
+      is older than this many timeframe spans cannot support an UNFILLED
+      verdict; the fill state degrades to UNKNOWN instead
+    - ``CRYPTO_LEVELS_ASYNC_TIMEOUT_SECONDS`` (``5``) — off-loop deadline
+    """
+
+    if swing_left is None:
+        try:
+            swing_left = int(os.getenv("CRYPTO_LEVELS_SWING_LEFT", "") or 3)
+        except ValueError:
+            swing_left = 3
+    swing_left = max(1, min(int(swing_left), 500))
+    if swing_right is None:
+        try:
+            swing_right = int(os.getenv("CRYPTO_LEVELS_SWING_RIGHT", "") or 3)
+        except ValueError:
+            swing_right = 3
+    swing_right = max(1, min(int(swing_right), 500))
+    if fib_ratios is None:
+        raw_ratios = os.getenv("CRYPTO_LEVELS_FIB_RATIOS", "").strip()
+        parsed: list[float] = []
+        for entry in raw_ratios.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                value = float(entry)
+            except ValueError:
+                continue
+            if 0.0 < value < 1.0:
+                parsed.append(value)
+        fib_ratios = tuple(sorted(set(parsed))) or CRYPTO_LEVELS_DEFAULT_FIB_RATIOS
+    if price_tick is None:
+        try:
+            price_tick = float(os.getenv("CRYPTO_LEVELS_PRICE_TICK", "") or 0.1)
+        except ValueError:
+            price_tick = 0.1
+    price_tick = float(price_tick)
+    if not price_tick > 0.0:
+        price_tick = 0.1
+    if cme_timezone is None:
+        cme_timezone = (
+            os.getenv("CRYPTO_LEVELS_CME_TIMEZONE", "").strip()
+            or CRYPTO_LEVELS_CME_TIMEZONE
+        )
+    if cme_close_weekday is None:
+        try:
+            cme_close_weekday = int(
+                os.getenv("CRYPTO_LEVELS_CME_CLOSE_WEEKDAY", "")
+                or CRYPTO_LEVELS_CME_CLOSE_WEEKDAY
+            )
+        except ValueError:
+            cme_close_weekday = CRYPTO_LEVELS_CME_CLOSE_WEEKDAY
+    if cme_open_weekday is None:
+        try:
+            cme_open_weekday = int(
+                os.getenv("CRYPTO_LEVELS_CME_OPEN_WEEKDAY", "")
+                or CRYPTO_LEVELS_CME_OPEN_WEEKDAY
+            )
+        except ValueError:
+            cme_open_weekday = CRYPTO_LEVELS_CME_OPEN_WEEKDAY
+    cme_close_weekday = int(cme_close_weekday) % 7
+    cme_open_weekday = int(cme_open_weekday) % 7
+    if cme_close_hour is None:
+        try:
+            cme_close_hour = int(os.getenv("CRYPTO_LEVELS_CME_CLOSE_HOUR", "") or 16)
+        except ValueError:
+            cme_close_hour = 16
+    if cme_close_minute is None:
+        try:
+            cme_close_minute = int(os.getenv("CRYPTO_LEVELS_CME_CLOSE_MINUTE", "") or 0)
+        except ValueError:
+            cme_close_minute = 0
+    if cme_open_hour is None:
+        try:
+            cme_open_hour = int(os.getenv("CRYPTO_LEVELS_CME_OPEN_HOUR", "") or 17)
+        except ValueError:
+            cme_open_hour = 17
+    if cme_open_minute is None:
+        try:
+            cme_open_minute = int(os.getenv("CRYPTO_LEVELS_CME_OPEN_MINUTE", "") or 0)
+        except ValueError:
+            cme_open_minute = 0
+    cme_close_hour = max(0, min(int(cme_close_hour), 23))
+    cme_close_minute = max(0, min(int(cme_close_minute), 59))
+    cme_open_hour = max(0, min(int(cme_open_hour), 23))
+    cme_open_minute = max(0, min(int(cme_open_minute), 59))
+    if cme_lookback_weeks is None:
+        try:
+            cme_lookback_weeks = int(
+                os.getenv("CRYPTO_LEVELS_CME_LOOKBACK_WEEKS", "") or 8
+            )
+        except ValueError:
+            cme_lookback_weeks = 8
+    cme_lookback_weeks = max(1, min(int(cme_lookback_weeks), 260))
+    if boundary_tolerance_spans is None:
+        try:
+            boundary_tolerance_spans = float(
+                os.getenv("CRYPTO_LEVELS_BOUNDARY_TOLERANCE_SPANS", "") or 1.0
+            )
+        except ValueError:
+            boundary_tolerance_spans = 1.0
+    boundary_tolerance_spans = max(0.0, min(float(boundary_tolerance_spans), 100.0))
+    if stale_after_spans is None:
+        try:
+            stale_after_spans = float(
+                os.getenv("CRYPTO_LEVELS_STALE_AFTER_SPANS", "") or 3.0
+            )
+        except ValueError:
+            stale_after_spans = 3.0
+    stale_after_spans = max(1.0, min(float(stale_after_spans), 1000.0))
+    if async_timeout_s is None:
+        try:
+            async_timeout_s = float(
+                os.getenv("CRYPTO_LEVELS_ASYNC_TIMEOUT_SECONDS", "") or 5.0
+            )
+        except ValueError:
+            async_timeout_s = 5.0
+    async_timeout_s = max(0.5, min(float(async_timeout_s), 60.0))
+    return CryptoLevelsSettings(
+        swing_left=swing_left,
+        swing_right=swing_right,
+        fib_ratios=tuple(fib_ratios),
+        price_tick=price_tick,
+        cme_timezone=cme_timezone,
+        cme_close_weekday=cme_close_weekday,
+        cme_close_hour=cme_close_hour,
+        cme_close_minute=cme_close_minute,
+        cme_open_weekday=cme_open_weekday,
+        cme_open_hour=cme_open_hour,
+        cme_open_minute=cme_open_minute,
+        cme_lookback_weeks=cme_lookback_weeks,
+        boundary_tolerance_spans=boundary_tolerance_spans,
+        stale_after_spans=stale_after_spans,
+        async_timeout_s=async_timeout_s,
+    )
+
+
+class CryptoLeverageSettings(NamedTuple):
+    """Effective liquidation/sizing knobs, resolved at call time (crypto TA Wave 3)."""
+
+    tiers_path: str
+    tiers_cache_enabled: bool
+    margin_mode: str
+    default_notional: float
+    default_risk_fraction: float
+    price_increment: float
+    size_increment: float
+    async_timeout_s: float
+
+
+#: Vendored freqtrade artifact (`freqtrade/exchange/binance_leverage_tiers.json`,
+#: 846 pairs). Local file, no key, no network — the whole point of Wave 3.
+CRYPTO_LEVERAGE_TIERS_FILENAME = "binance_leverage_tiers.json"
+#: Isolated is the only mode the local math can answer honestly. Cross needs the
+#: mark price and maintenance margin of every OTHER open position in the wallet,
+#: and this framework holds no position book.
+CRYPTO_LEVERAGE_SUPPORTED_MARGIN_MODES = ("isolated",)
+
+
+def get_crypto_leverage_settings(
+    tiers_path: str | None = None,
+    tiers_cache_enabled: bool | None = None,
+    margin_mode: str | None = None,
+    default_notional: float | None = None,
+    default_risk_fraction: float | None = None,
+    price_increment: float | None = None,
+    size_increment: float | None = None,
+    async_timeout_s: float | None = None,
+) -> CryptoLeverageSettings:
+    """Resolve the leverage-math knobs at CALL TIME (Rule 1).
+
+    Nothing here reaches the network and nothing here can place an order: the
+    maintenance-margin table is a local JSON file and every function is
+    arithmetic over it.
+
+    - ``CRYPTO_LEVERAGE_TIERS_PATH`` (``.claude/scripts/data/binance_leverage_tiers.json``)
+    - ``CRYPTO_LEVERAGE_TIERS_CACHE_ENABLED`` (``true``) — the parsed table is
+      re-validated against the file's physical ``(mtime_ns, size)`` on every
+      read, so a stale cache cannot outlive an edited table (Rule 2)
+    - ``CRYPTO_LEVERAGE_MARGIN_MODE`` (``isolated``) — anything else refuses
+    - ``CRYPTO_LEVERAGE_DEFAULT_NOTIONAL`` (``10000``) — position notional used
+      to pick a maintenance tier when the caller names no size; the result
+      flags that the notional was assumed
+    - ``CRYPTO_LEVERAGE_DEFAULT_RISK_FRACTION`` (``0.01``) — 1% of equity
+    - ``CRYPTO_LEVERAGE_PRICE_INCREMENT`` (``0.1``) — BTC/USDT perp tick
+    - ``CRYPTO_LEVERAGE_SIZE_INCREMENT`` (``0.001``) — BTC/USDT perp lot
+    - ``CRYPTO_LEVERAGE_ASYNC_TIMEOUT_SECONDS`` (``5``)
+    """
+
+    if tiers_path is None:
+        tiers_path = os.getenv("CRYPTO_LEVERAGE_TIERS_PATH", "").strip() or str(
+            SCRIPTS_DIR / "data" / CRYPTO_LEVERAGE_TIERS_FILENAME
+        )
+    if tiers_cache_enabled is None:
+        tiers_cache_enabled = (
+            os.getenv("CRYPTO_LEVERAGE_TIERS_CACHE_ENABLED", "true").strip().lower()
+            != "false"
+        )
+    if margin_mode is None:
+        margin_mode = (
+            os.getenv("CRYPTO_LEVERAGE_MARGIN_MODE", "").strip().lower() or "isolated"
+        )
+    if default_notional is None:
+        try:
+            default_notional = float(
+                os.getenv("CRYPTO_LEVERAGE_DEFAULT_NOTIONAL", "") or 10_000.0
+            )
+        except ValueError:
+            default_notional = 10_000.0
+    default_notional = max(1.0, float(default_notional))
+    if default_risk_fraction is None:
+        try:
+            default_risk_fraction = float(
+                os.getenv("CRYPTO_LEVERAGE_DEFAULT_RISK_FRACTION", "") or 0.01
+            )
+        except ValueError:
+            default_risk_fraction = 0.01
+    default_risk_fraction = max(0.0001, min(float(default_risk_fraction), 1.0))
+    if price_increment is None:
+        try:
+            price_increment = float(
+                os.getenv("CRYPTO_LEVERAGE_PRICE_INCREMENT", "") or 0.1
+            )
+        except ValueError:
+            price_increment = 0.1
+    price_increment = max(1e-12, float(price_increment))
+    if size_increment is None:
+        try:
+            size_increment = float(
+                os.getenv("CRYPTO_LEVERAGE_SIZE_INCREMENT", "") or 0.001
+            )
+        except ValueError:
+            size_increment = 0.001
+    size_increment = max(0.0, float(size_increment))
+    if async_timeout_s is None:
+        try:
+            async_timeout_s = float(
+                os.getenv("CRYPTO_LEVERAGE_ASYNC_TIMEOUT_SECONDS", "") or 5.0
+            )
+        except ValueError:
+            async_timeout_s = 5.0
+    async_timeout_s = max(0.5, min(float(async_timeout_s), 60.0))
+    return CryptoLeverageSettings(
+        tiers_path=tiers_path,
+        tiers_cache_enabled=tiers_cache_enabled,
+        margin_mode=margin_mode,
+        default_notional=default_notional,
+        default_risk_fraction=default_risk_fraction,
+        price_increment=price_increment,
+        size_increment=size_increment,
+        async_timeout_s=async_timeout_s,
+    )
+
+
+
+class CryptoDeskPriceSettings(NamedTuple):
+    """Effective desk-prefetch price-block knobs, resolved at call time."""
+
+    enabled: bool
+    timeframes: tuple[str, ...]
+    max_chars: int
+    fetch_budget_s: float
+    prefetch_timeout_s: float
+    fib_timeframe: str
+    gap_timeframe: str
+
+
+def get_crypto_desk_price_settings(
+    enabled: bool | None = None,
+    timeframes: tuple[str, ...] | None = None,
+    max_chars: int | None = None,
+    fetch_budget_s: float | None = None,
+    prefetch_timeout_s: float | None = None,
+    fib_timeframe: str | None = None,
+    gap_timeframe: str | None = None,
+) -> CryptoDeskPriceSettings:
+    """Resolve the desk snapshot's price block at CALL TIME (Rule 1).
+
+    - ``CRYPTO_DESK_PRICE_ENABLED`` (``true``) — attach the live price block
+    - ``CRYPTO_DESK_PRICE_TIMEFRAMES`` (``5m,15m,1h``) — frames to read
+    - ``CRYPTO_DESK_PRICE_MAX_CHARS`` (``4000``, floor ``1200``) — block cap;
+      the floor is what lets the fib/gap/liquidation reservation fit
+    - ``CRYPTO_DESK_PRICE_FETCH_BUDGET_SECONDS`` (``6``) — per-frame fetch budget
+    - ``CRYPTO_DESK_PREFETCH_TIMEOUT_SECONDS`` (``25``, clamped ``1``-``120``) —
+      the HARD deadline the router applies to the whole off-loop snapshot
+    - ``CRYPTO_DESK_PRICE_FIB_TIMEFRAME`` (``1h``) — frame the fib anchors read
+    - ``CRYPTO_DESK_PRICE_GAP_TIMEFRAME`` (``1h``) — frame the CME scan reads
+    """
+
+    if enabled is None:
+        enabled = os.getenv("CRYPTO_DESK_PRICE_ENABLED", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if timeframes is None:
+        raw = os.getenv("CRYPTO_DESK_PRICE_TIMEFRAMES", "").strip()
+        parsed = tuple(part.strip() for part in raw.split(",") if part.strip())
+        timeframes = parsed or ("5m", "15m", "1h")
+    if max_chars is None:
+        try:
+            max_chars = int(os.getenv("CRYPTO_DESK_PRICE_MAX_CHARS", "") or 4000)
+        except ValueError:
+            max_chars = 4000
+    max_chars = max(1_200, int(max_chars))
+    if fetch_budget_s is None:
+        try:
+            fetch_budget_s = float(
+                os.getenv("CRYPTO_DESK_PRICE_FETCH_BUDGET_SECONDS", "") or 6.0
+            )
+        except ValueError:
+            fetch_budget_s = 6.0
+    fetch_budget_s = max(0.5, min(float(fetch_budget_s), CRYPTO_CANDLES_BUDGET_CEILING_S))
+    if prefetch_timeout_s is None:
+        try:
+            prefetch_timeout_s = float(
+                os.getenv("CRYPTO_DESK_PREFETCH_TIMEOUT_SECONDS", "") or 25.0
+            )
+        except ValueError:
+            prefetch_timeout_s = 25.0
+    prefetch_timeout_s = max(1.0, min(float(prefetch_timeout_s), 120.0))
+    if fib_timeframe is None:
+        fib_timeframe = os.getenv("CRYPTO_DESK_PRICE_FIB_TIMEFRAME", "").strip() or "1h"
+    if gap_timeframe is None:
+        gap_timeframe = os.getenv("CRYPTO_DESK_PRICE_GAP_TIMEFRAME", "").strip() or "1h"
+    return CryptoDeskPriceSettings(
+        enabled=enabled,
+        timeframes=tuple(timeframes),
+        max_chars=max_chars,
+        fetch_budget_s=fetch_budget_s,
+        prefetch_timeout_s=prefetch_timeout_s,
+        fib_timeframe=fib_timeframe,
+        gap_timeframe=gap_timeframe,
+    )
+
+
+class CryptoReflectionSettings(NamedTuple):
+    """Effective Wave-4 reflection knobs, resolved at call time."""
+
+    enabled: bool
+    min_graded_plays: int
+    max_lessons: int
+    max_values: int
+    max_lesson_chars: int
+    retrieval_limit: int
+    min_similarity: float
+    anchor_price_field: str
+    anchor_at_field: str
+    async_timeout_s: float
+
+
+def get_crypto_reflection_settings(
+    enabled: bool | None = None,
+    min_graded_plays: int | None = None,
+    max_lessons: int | None = None,
+    max_values: int | None = None,
+    max_lesson_chars: int | None = None,
+    retrieval_limit: int | None = None,
+    min_similarity: float | None = None,
+    anchor_price_field: str | None = None,
+    anchor_at_field: str | None = None,
+    async_timeout_s: float | None = None,
+) -> CryptoReflectionSettings:
+    """Resolve the per-role reflection knobs at CALL TIME (Rule 1).
+
+    Nothing here reaches the network, a database, or a model. The pass is
+    arithmetic plus string assembly over rows the caller already read.
+
+    - ``CRYPTO_REFLECTION_ENABLED`` (``true``) — default-ON; only turns the
+      faculty OFF, and OFF renders as the explicit UNKNOWN state
+    - ``CRYPTO_REFLECTION_MIN_GRADED_PLAYS`` (``5``, floor ``1``) — below this
+      the pass answers INSUFFICIENT_HISTORY instead of drawing a lesson from a
+      handful of grades
+    - ``CRYPTO_REFLECTION_MAX_LESSONS`` (``50``, clamped ``1``-``500``)
+    - ``CRYPTO_REFLECTION_MAX_VALUES`` (``64``, clamped ``1``-``512``) — cap on
+      the condition/formula values one entry snapshot may freeze
+    - ``CRYPTO_REFLECTION_MAX_LESSON_CHARS`` (``320``, clamped ``40``-``2000``)
+    - ``CRYPTO_REFLECTION_RETRIEVAL_LIMIT`` (``3``, clamped ``1``-``20``)
+    - ``CRYPTO_REFLECTION_MIN_SIMILARITY`` (``0.15``, clamped ``0``-``1``)
+    - ``CRYPTO_REFLECTION_ANCHOR_PRICE_FIELD`` (``price_at_call_usd``) — the
+      ledger column holding the call-time price. ``cognition.crypto_plays``
+      owns that column; this knob follows a rename without a code change
+    - ``CRYPTO_REFLECTION_ANCHOR_AT_FIELD`` (``price_at_call_at``)
+    - ``CRYPTO_REFLECTION_ASYNC_TIMEOUT_SECONDS`` (``10``, clamped
+      ``0.5``-``120``)
+    """
+
+    if enabled is None:
+        enabled = os.getenv(
+            "CRYPTO_REFLECTION_ENABLED", "true"
+        ).strip().lower() not in {"0", "false", "no", "off"}
+    if min_graded_plays is None:
+        try:
+            min_graded_plays = int(
+                os.getenv("CRYPTO_REFLECTION_MIN_GRADED_PLAYS", "") or 5
+            )
+        except ValueError:
+            min_graded_plays = 5
+    min_graded_plays = max(1, int(min_graded_plays))
+    if max_lessons is None:
+        try:
+            max_lessons = int(os.getenv("CRYPTO_REFLECTION_MAX_LESSONS", "") or 50)
+        except ValueError:
+            max_lessons = 50
+    max_lessons = max(1, min(int(max_lessons), 500))
+    if max_values is None:
+        try:
+            max_values = int(os.getenv("CRYPTO_REFLECTION_MAX_VALUES", "") or 64)
+        except ValueError:
+            max_values = 64
+    max_values = max(1, min(int(max_values), 512))
+    if max_lesson_chars is None:
+        try:
+            max_lesson_chars = int(
+                os.getenv("CRYPTO_REFLECTION_MAX_LESSON_CHARS", "") or 320
+            )
+        except ValueError:
+            max_lesson_chars = 320
+    max_lesson_chars = max(40, min(int(max_lesson_chars), 2_000))
+    if retrieval_limit is None:
+        try:
+            retrieval_limit = int(
+                os.getenv("CRYPTO_REFLECTION_RETRIEVAL_LIMIT", "") or 3
+            )
+        except ValueError:
+            retrieval_limit = 3
+    retrieval_limit = max(1, min(int(retrieval_limit), 20))
+    if min_similarity is None:
+        try:
+            min_similarity = float(
+                os.getenv("CRYPTO_REFLECTION_MIN_SIMILARITY", "") or 0.15
+            )
+        except ValueError:
+            min_similarity = 0.15
+    if not math.isfinite(float(min_similarity)):
+        min_similarity = 0.15
+    min_similarity = max(0.0, min(float(min_similarity), 1.0))
+    if anchor_price_field is None:
+        anchor_price_field = (
+            os.getenv("CRYPTO_REFLECTION_ANCHOR_PRICE_FIELD", "").strip()
+            or "price_at_call_usd"
+        )
+    if anchor_at_field is None:
+        anchor_at_field = (
+            os.getenv("CRYPTO_REFLECTION_ANCHOR_AT_FIELD", "").strip()
+            or "price_at_call_at"
+        )
+    if async_timeout_s is None:
+        try:
+            async_timeout_s = float(
+                os.getenv("CRYPTO_REFLECTION_ASYNC_TIMEOUT_SECONDS", "") or 10.0
+            )
+        except ValueError:
+            async_timeout_s = 10.0
+    if not math.isfinite(float(async_timeout_s)):
+        async_timeout_s = 10.0
+    async_timeout_s = max(0.5, min(float(async_timeout_s), 120.0))
+    return CryptoReflectionSettings(
+        enabled=enabled,
+        min_graded_plays=min_graded_plays,
+        max_lessons=max_lessons,
+        max_values=max_values,
+        max_lesson_chars=max_lesson_chars,
+        retrieval_limit=retrieval_limit,
+        min_similarity=min_similarity,
+        anchor_price_field=anchor_price_field,
+        anchor_at_field=anchor_at_field,
+        async_timeout_s=async_timeout_s,
+    )
+
+
+class CryptoShadowSettings(NamedTuple):
+    """Effective Shadow-Account attribution knobs, resolved at call time."""
+
+    enabled: bool
+    min_settled: int
+    allowed_per_signal: int
+    residual_tolerance_usd: float
+    max_items: int
+    max_chars: int
+    async_timeout_s: float
+
+
+def get_crypto_shadow_settings(
+    enabled: bool | None = None,
+    min_settled: int | None = None,
+    allowed_per_signal: int | None = None,
+    residual_tolerance_usd: float | None = None,
+    max_items: int | None = None,
+    max_chars: int | None = None,
+    async_timeout_s: float | None = None,
+) -> CryptoShadowSettings:
+    """Resolve the delta-PnL attribution knobs at CALL TIME (Rule 1).
+
+    - ``CRYPTO_SHADOW_ENABLED`` (``true``) — default-ON; only turns the
+      attribution OFF, and OFF renders as the explicit UNKNOWN state
+    - ``CRYPTO_SHADOW_MIN_SETTLED`` (``10``, floor ``1``) — below this the
+      attribution answers INSUFFICIENT_SAMPLE rather than five tidy buckets
+      over a handful of trades
+    - ``CRYPTO_SHADOW_ALLOWED_PER_SIGNAL`` (``1``, floor ``1``) — entries one
+      signal may carry before the surplus counts as overtrading
+    - ``CRYPTO_SHADOW_RESIDUAL_TOLERANCE_USD`` (``0.01``, floor ``1e-9``) —
+      how far the residual may sit from the direct missed total before the
+      decomposition is declared broken
+    - ``CRYPTO_SHADOW_MAX_ITEMS`` (``500``, clamped ``1``-``5000``)
+    - ``CRYPTO_SHADOW_MAX_CHARS`` (``1200``, floor ``200``)
+    - ``CRYPTO_SHADOW_ASYNC_TIMEOUT_SECONDS`` (``10``, clamped ``0.5``-``120``)
+    """
+
+    if enabled is None:
+        enabled = os.getenv(
+            "CRYPTO_SHADOW_ENABLED", "true"
+        ).strip().lower() not in {"0", "false", "no", "off"}
+    if min_settled is None:
+        try:
+            min_settled = int(os.getenv("CRYPTO_SHADOW_MIN_SETTLED", "") or 10)
+        except ValueError:
+            min_settled = 10
+    min_settled = max(1, int(min_settled))
+    if allowed_per_signal is None:
+        try:
+            allowed_per_signal = int(
+                os.getenv("CRYPTO_SHADOW_ALLOWED_PER_SIGNAL", "") or 1
+            )
+        except ValueError:
+            allowed_per_signal = 1
+    allowed_per_signal = max(1, int(allowed_per_signal))
+    if residual_tolerance_usd is None:
+        try:
+            residual_tolerance_usd = float(
+                os.getenv("CRYPTO_SHADOW_RESIDUAL_TOLERANCE_USD", "") or 0.01
+            )
+        except ValueError:
+            residual_tolerance_usd = 0.01
+    if not math.isfinite(float(residual_tolerance_usd)):
+        residual_tolerance_usd = 0.01
+    residual_tolerance_usd = max(1e-9, float(residual_tolerance_usd))
+    if max_items is None:
+        try:
+            max_items = int(os.getenv("CRYPTO_SHADOW_MAX_ITEMS", "") or 500)
+        except ValueError:
+            max_items = 500
+    max_items = max(1, min(int(max_items), 5_000))
+    if max_chars is None:
+        try:
+            max_chars = int(os.getenv("CRYPTO_SHADOW_MAX_CHARS", "") or 1200)
+        except ValueError:
+            max_chars = 1200
+    max_chars = max(200, int(max_chars))
+    if async_timeout_s is None:
+        try:
+            async_timeout_s = float(
+                os.getenv("CRYPTO_SHADOW_ASYNC_TIMEOUT_SECONDS", "") or 10.0
+            )
+        except ValueError:
+            async_timeout_s = 10.0
+    if not math.isfinite(float(async_timeout_s)):
+        async_timeout_s = 10.0
+    async_timeout_s = max(0.5, min(float(async_timeout_s), 120.0))
+    return CryptoShadowSettings(
+        enabled=enabled,
+        min_settled=min_settled,
+        allowed_per_signal=allowed_per_signal,
+        residual_tolerance_usd=residual_tolerance_usd,
+        max_items=max_items,
+        max_chars=max_chars,
+        async_timeout_s=async_timeout_s,
+    )
+
+
+class CryptoPaperSettings(NamedTuple):
+    """Effective paper-ladder knobs, resolved at call time (crypto TA Wave 7)."""
+
+    armed_tiers: tuple[str, ...]
+    exchange_id: str
+    market_type: str
+    symbol: str
+    credential_env: str
+    api_key_env_var: str
+    api_secret_env_var: str
+    book_depth: int
+    book_max_age_s: float
+    slippage_cap_bps: float
+    fetch_budget_s: float
+    request_timeout_s: float
+    async_grace_s: float
+    max_attempts: int
+    retry_base_delay_s: float
+    db_path: str
+
+
+#: Every rung ships DISARMED. Arming a rung is the explicit named gate that the
+#: default-deny mutation policy requires, and the default is the empty set.
+CRYPTO_PAPER_TIER_NAMES = ("validate_only", "sandbox", "demo_real_prices")
+#: Credential environments the ladder recognises. ``none`` is the default and
+#: means no key exists, which every rung reports as `credentials-missing`
+#: rather than pretending the rung was exercised.
+CRYPTO_PAPER_CREDENTIAL_ENVS = ("none", "live", "testnet", "demo")
+
+
+def get_crypto_paper_settings(
+    armed_tiers: tuple[str, ...] | None = None,
+    exchange_id: str | None = None,
+    market_type: str | None = None,
+    symbol: str | None = None,
+    credential_env: str | None = None,
+    api_key_env_var: str | None = None,
+    api_secret_env_var: str | None = None,
+    book_depth: int | None = None,
+    book_max_age_s: float | None = None,
+    slippage_cap_bps: float | None = None,
+    fetch_budget_s: float | None = None,
+    request_timeout_s: float | None = None,
+    async_grace_s: float | None = None,
+    max_attempts: int | None = None,
+    retry_base_delay_s: float | None = None,
+    db_path: str | None = None,
+) -> CryptoPaperSettings:
+    """Resolve the paper-ladder knobs at CALL TIME (Rule 1).
+
+    No knob here holds a secret. ``CRYPTO_PAPER_API_KEY_ENV_VAR`` names the
+    variable a future execution client would read; the value never passes
+    through this module, the ladder, or any receipt.
+
+    - ``CRYPTO_PAPER_ARMED_TIERS`` ("" — DISARMED) — comma-separated subset of
+      ``validate_only,sandbox,demo_real_prices``. Unset means every preflight
+      DENIES; this is the default-deny gate for the one part of Wave 7 that
+      can reach a venue.
+    - ``CRYPTO_PAPER_EXCHANGE`` (``binance``) — ccxt exchange id
+    - ``CRYPTO_PAPER_MARKET_TYPE`` (``swap``) — ccxt ``defaultType``
+    - ``CRYPTO_PAPER_SYMBOL`` (``BTC/USDT:USDT``)
+    - ``CRYPTO_PAPER_CREDENTIAL_ENV`` (``none``) — which world the configured
+      credential belongs to. A mismatch against the resolved HOST class is
+      refused before any request is built.
+    - ``CRYPTO_PAPER_API_KEY_ENV_VAR`` / ``CRYPTO_PAPER_API_SECRET_ENV_VAR``
+      (``CRYPTO_PAPER_API_KEY`` / ``CRYPTO_PAPER_API_SECRET``) — variable NAMES
+    - ``CRYPTO_PAPER_BOOK_DEPTH`` (``50``, clamped 1-1000) — L2 levels fetched
+    - ``CRYPTO_PAPER_BOOK_MAX_AGE_SECONDS`` (``10``; ``0`` disables) — a book
+      older than this prices a market that has already moved
+    - ``CRYPTO_PAPER_SLIPPAGE_CAP_BPS`` (``0`` — OFF) — freqtrade's flattering
+      clamp on the walked fill. Default-off on purpose (backtrader's rule:
+      name the unrealistic behaviour and ship it disabled); when it bites, the
+      receipt carries both the capped and the uncapped price.
+    - ``CRYPTO_PAPER_FETCH_BUDGET_SECONDS`` (``8``, ceiling ``30``)
+    - ``CRYPTO_PAPER_REQUEST_TIMEOUT_SECONDS`` (``6``)
+    - ``CRYPTO_PAPER_ASYNC_GRACE_SECONDS`` (``3``)
+    - ``CRYPTO_PAPER_MAX_ATTEMPTS`` (``3``) — transient retries per fetch
+    - ``CRYPTO_PAPER_RETRY_BASE_DELAY_SECONDS`` (``0.5``)
+    - ``CRYPTO_PAPER_DB_PATH`` (``DATA_DIR/crypto_paper.db``)
+    """
+
+    if armed_tiers is None:
+        raw_armed = os.getenv("CRYPTO_PAPER_ARMED_TIERS", "").strip()
+        armed_tiers = tuple(
+            entry.strip().lower()
+            for entry in raw_armed.split(",")
+            if entry.strip()
+        )
+    # An unrecognised rung name never arms anything: it is dropped, so a typo
+    # in the env fails CLOSED instead of arming an adjacent rung.
+    armed_tiers = tuple(
+        entry for entry in armed_tiers if entry in CRYPTO_PAPER_TIER_NAMES
+    )
+    if exchange_id is None:
+        exchange_id = os.getenv("CRYPTO_PAPER_EXCHANGE", "").strip().lower() or "binance"
+    if market_type is None:
+        market_type = os.getenv("CRYPTO_PAPER_MARKET_TYPE", "").strip() or "swap"
+    if symbol is None:
+        symbol = (
+            os.getenv("CRYPTO_PAPER_SYMBOL", "").strip()
+            or CRYPTO_CANDLES_DEFAULT_SYMBOL
+        )
+    if credential_env is None:
+        credential_env = (
+            os.getenv("CRYPTO_PAPER_CREDENTIAL_ENV", "").strip().lower() or "none"
+        )
+    if credential_env not in CRYPTO_PAPER_CREDENTIAL_ENVS:
+        print(
+            f"[config] CRYPTO_PAPER_CREDENTIAL_ENV={credential_env!r} unknown; "
+            "degrading to 'none'",
+            flush=True,
+        )
+        credential_env = "none"
+    if api_key_env_var is None:
+        api_key_env_var = (
+            os.getenv("CRYPTO_PAPER_API_KEY_ENV_VAR", "").strip()
+            or "CRYPTO_PAPER_API_KEY"
+        )
+    if api_secret_env_var is None:
+        api_secret_env_var = (
+            os.getenv("CRYPTO_PAPER_API_SECRET_ENV_VAR", "").strip()
+            or "CRYPTO_PAPER_API_SECRET"
+        )
+    if book_depth is None:
+        try:
+            book_depth = int(os.getenv("CRYPTO_PAPER_BOOK_DEPTH", "") or 50)
+        except ValueError:
+            book_depth = 50
+    book_depth = max(1, min(int(book_depth), 1000))
+    if book_max_age_s is None:
+        try:
+            book_max_age_s = float(
+                os.getenv("CRYPTO_PAPER_BOOK_MAX_AGE_SECONDS", "") or 10.0
+            )
+        except ValueError:
+            book_max_age_s = 10.0
+    book_max_age_s = max(0.0, float(book_max_age_s))
+    if slippage_cap_bps is None:
+        try:
+            slippage_cap_bps = float(
+                os.getenv("CRYPTO_PAPER_SLIPPAGE_CAP_BPS", "") or 0.0
+            )
+        except ValueError:
+            slippage_cap_bps = 0.0
+    slippage_cap_bps = max(0.0, float(slippage_cap_bps))
+    if fetch_budget_s is None:
+        try:
+            fetch_budget_s = float(
+                os.getenv("CRYPTO_PAPER_FETCH_BUDGET_SECONDS", "") or 8.0
+            )
+        except ValueError:
+            fetch_budget_s = 8.0
+    # Same ceiling as the candle store: a hung exchange inside a persona
+    # prefetch is the failure class that froze the bot's event loop.
+    fetch_budget_s = max(1.0, min(float(fetch_budget_s), CRYPTO_CANDLES_BUDGET_CEILING_S))
+    if request_timeout_s is None:
+        try:
+            request_timeout_s = float(
+                os.getenv("CRYPTO_PAPER_REQUEST_TIMEOUT_SECONDS", "") or 6.0
+            )
+        except ValueError:
+            request_timeout_s = 6.0
+    request_timeout_s = max(0.5, min(float(request_timeout_s), fetch_budget_s))
+    if async_grace_s is None:
+        try:
+            async_grace_s = float(
+                os.getenv("CRYPTO_PAPER_ASYNC_GRACE_SECONDS", "") or 3.0
+            )
+        except ValueError:
+            async_grace_s = 3.0
+    async_grace_s = max(0.5, min(float(async_grace_s), 15.0))
+    if max_attempts is None:
+        try:
+            max_attempts = int(os.getenv("CRYPTO_PAPER_MAX_ATTEMPTS", "") or 3)
+        except ValueError:
+            max_attempts = 3
+    max_attempts = max(1, int(max_attempts))
+    if retry_base_delay_s is None:
+        try:
+            retry_base_delay_s = float(
+                os.getenv("CRYPTO_PAPER_RETRY_BASE_DELAY_SECONDS", "") or 0.5
+            )
+        except ValueError:
+            retry_base_delay_s = 0.5
+    retry_base_delay_s = max(0.0, min(float(retry_base_delay_s), 10.0))
+    if db_path is None:
+        db_path = os.getenv("CRYPTO_PAPER_DB_PATH", "").strip() or str(
+            DATA_DIR / "crypto_paper.db"
+        )
+    return CryptoPaperSettings(
+        armed_tiers=tuple(armed_tiers),
+        exchange_id=exchange_id,
+        market_type=market_type,
+        symbol=symbol,
+        credential_env=credential_env,
+        api_key_env_var=api_key_env_var,
+        api_secret_env_var=api_secret_env_var,
+        book_depth=book_depth,
+        book_max_age_s=book_max_age_s,
+        slippage_cap_bps=slippage_cap_bps,
+        fetch_budget_s=fetch_budget_s,
+        request_timeout_s=request_timeout_s,
+        async_grace_s=async_grace_s,
+        max_attempts=max_attempts,
+        retry_base_delay_s=retry_base_delay_s,
+        db_path=db_path,
+    )
+
+
+# Process-lifetime flag for the one-time live-mode arming receipt (print-once
+# observability — never consulted for behavior, so Rule 2 is untouched).
+_CALLED_SHOTS_LIVE_RECEIPT_EMITTED = False
+
+
+class CalledShotsChallengeSettings(NamedTuple):
+    """Effective challenge-surface knobs (call-time resolved) — epic #186 T2."""
+
+    mode: str  # "silent" (default — record candidates, no reply challenge) | "live"
+    min_chars: int  # message-length floor for staked-position detection
+    max_receipts: int  # recall hits gathered as receipts per detected position
+    dedup_cache_size: int  # per-session recent-position cache cap
+    receipts_timeout_s: float  # hard wall on the receipts recall leg (fired branch only)
+
+
+def get_called_shots_challenge_settings(
+    mode: str | None = None,
+    min_chars: int | None = None,
+    max_receipts: int | None = None,
+    dedup_cache_size: int | None = None,
+    receipts_timeout_s: float | None = None,
+) -> CalledShotsChallengeSettings:
+    """Resolve challenge-surface knobs at CALL TIME (Rule 1) — epic #186 T2.
+
+    Knobs:
+        CALLED_SHOTS_CHALLENGE_MODE ("silent") — "silent" records detected
+            candidate shots (reviewable/voidable) with NO reply challenge; this
+            is the architecture doc's Spike-2 measurement phase, default-ON.
+            "live" arms the reply-challenge wire. The ARMING BAR is the
+            architecture doc's Spike 2 as written — a historical-turn replay
+            with a measured false-positive rate; the spike harness's bundled
+            sample set is only a regression lock on the patterns, never the
+            arming evidence. Any other value degrades to "silent" with a
+            receipt.
+        CALLED_SHOTS_CHALLENGE_MIN_CHARS (60, int) — detection length floor.
+        CALLED_SHOTS_CHALLENGE_MAX_RECEIPTS (3, int) — receipts per position.
+        CALLED_SHOTS_CHALLENGE_DEDUP_CACHE (16, int) — per-session cache cap.
+        CALLED_SHOTS_CHALLENGE_RECEIPTS_TIMEOUT_S (3.0, float) — hard wall on
+            the receipts recall leg; the gather runs ONLY inside the pass's
+            fired branch under its own asyncio.wait_for (gate-closed turns
+            never gather).
+    Malformed numeric envs degrade to defaults with a receipt (never raise —
+    the challenge surface must stay fail-open end to end).
+    """
+    if mode is None:
+        mode = os.getenv("CALLED_SHOTS_CHALLENGE_MODE", "silent").strip().lower()
+    if mode not in ("silent", "live"):
+        print(
+            f"[config] CALLED_SHOTS_CHALLENGE_MODE={mode!r} unknown; "
+            "degrading to 'silent'",
+            flush=True,
+        )
+        mode = "silent"
+
+    def _guarded_int(value: int | None, env: str, default: int) -> int:
+        if value is not None:
+            return value
+        raw = os.getenv(env, str(default))
+        try:
+            return int(raw)
+        except ValueError:
+            print(
+                f"[config] {env}={raw!r} is not an int; using {default}",
+                flush=True,
+            )
+            return default
+
+    if receipts_timeout_s is None:
+        _raw_timeout = os.getenv("CALLED_SHOTS_CHALLENGE_RECEIPTS_TIMEOUT_S", "3.0")
+        try:
+            receipts_timeout_s = float(_raw_timeout)
+        except ValueError:
+            print(
+                f"[config] CALLED_SHOTS_CHALLENGE_RECEIPTS_TIMEOUT_S="
+                f"{_raw_timeout!r} is not a float; using 3.0",
+                flush=True,
+            )
+            receipts_timeout_s = 3.0
+
+    # One-time-per-process arming receipt (Kimi suggestion — observability,
+    # not an interlock): live mode should announce itself and its bar once.
+    global _CALLED_SHOTS_LIVE_RECEIPT_EMITTED
+    if mode == "live" and not _CALLED_SHOTS_LIVE_RECEIPT_EMITTED:
+        _CALLED_SHOTS_LIVE_RECEIPT_EMITTED = True
+        print(
+            "[config] CALLED_SHOTS_CHALLENGE_MODE=live — reply-challenge wire "
+            "ARMED. Arming bar: the architecture doc's historical-turn replay "
+            "(the bundled spike set is only a regression lock).",
+            flush=True,
+        )
+
+    # Kimi L3: clamp to sane floors — degenerate values are intentional
+    # decisions, not accidents (0 receipts would silently disarm live mode;
+    # a 0 cache would disable dedup; a 0s timeout would starve every gather).
+    return CalledShotsChallengeSettings(
+        mode=mode,
+        min_chars=_guarded_int(min_chars, "CALLED_SHOTS_CHALLENGE_MIN_CHARS", 60),
+        max_receipts=max(1, _guarded_int(
+            max_receipts, "CALLED_SHOTS_CHALLENGE_MAX_RECEIPTS", 3,
+        )),
+        dedup_cache_size=max(1, _guarded_int(
+            dedup_cache_size, "CALLED_SHOTS_CHALLENGE_DEDUP_CACHE", 16,
+        )),
+        receipts_timeout_s=max(0.5, receipts_timeout_s),
     )
 
 
@@ -1998,6 +4285,87 @@ def get_cofounder_report_settings(
         notify=notify,
         checkout_hour=checkout_hour,
         poll_days=poll_days,
+    )
+
+
+class ArchonEventsSettings(NamedTuple):
+    """Effective Archon live-telemetry ingest knobs (call-time resolved)."""
+
+    db_path: Path
+    poll_interval_s: float
+    drain_limit: int
+    buffer_size: int
+    snapshot_limit: int
+    max_data_chars: int
+    connect_timeout_s: float
+
+
+def get_archon_events_settings(
+    db_path: Path | str | None = None,
+    poll_interval_s: float | None = None,
+    drain_limit: int | None = None,
+    buffer_size: int | None = None,
+    snapshot_limit: int | None = None,
+    max_data_chars: int | None = None,
+    connect_timeout_s: float | None = None,
+) -> ArchonEventsSettings:
+    """Resolve Archon events-ingest knobs at CALL TIME (Rule 1).
+
+    The ingest (``integrations/archon_events.py``) cursor-tails Archon's
+    ``remote_agent_workflow_events`` table READ-ONLY and fans the rows out to
+    the dashboard as REST + SSE. Every arg uses the None-sentinel pattern so
+    tests can point ``ARCHON_EVENTS_DB`` at a fixture db and shrink the
+    cadence without a module reload.
+
+    Knobs:
+        ARCHON_EVENTS_DB (~/.archon/archon.db) — Archon's run ledger. Opened
+            with a ``mode=ro`` URI ONLY; the framework never writes it.
+        ARCHON_EVENTS_POLL_INTERVAL_S ("1.5") — tail cadence. Matches the
+            ~1-2s band Archon's own DashboardEventPoller already places on
+            this DB; the poller skips the query entirely when nobody is
+            subscribed.
+        ARCHON_EVENTS_DRAIN_LIMIT ("500") — max rows per drain. Rows past the
+            limit inside one boundary second are NOT lost: the cursor uses
+            ``created_at >= cursor`` so the next drain re-queries that second
+            and the id-set suppresses only what was already emitted.
+        ARCHON_EVENTS_BUFFER_SIZE ("1000") — SSE replay ring-buffer depth. A
+            reconnect whose Last-Event-ID predates the ring gets 410 +
+            ``X-Refetch-Hint`` pointing at the REST snapshot.
+        ARCHON_EVENTS_SNAPSHOT_LIMIT ("200") — max rows the REST snapshot (and
+            the SSE subscribe-time snapshot frame) returns per query.
+        ARCHON_EVENTS_MAX_DATA_CHARS ("2000") — per-event budget for the
+            serialized ``data`` blob. Archon's ``data`` carries LLM-authored
+            ``tool_input`` and node output, so it is treated as hostile: each
+            value is redacted and capped, then the whole object is trimmed to
+            this budget.
+        ARCHON_EVENTS_CONNECT_TIMEOUT_S ("2.0") — bounded busy-wait on the
+            WAL-active db; expiry degrades to an empty read, never a hang.
+    """
+    if db_path is None:
+        raw_db = os.getenv("ARCHON_EVENTS_DB", "").strip()
+        db_path = Path(raw_db) if raw_db else Path.home() / ".archon" / "archon.db"
+    else:
+        db_path = Path(db_path)
+    if poll_interval_s is None:
+        poll_interval_s = float(os.getenv("ARCHON_EVENTS_POLL_INTERVAL_S", "1.5"))
+    if drain_limit is None:
+        drain_limit = int(os.getenv("ARCHON_EVENTS_DRAIN_LIMIT", "500"))
+    if buffer_size is None:
+        buffer_size = int(os.getenv("ARCHON_EVENTS_BUFFER_SIZE", "1000"))
+    if snapshot_limit is None:
+        snapshot_limit = int(os.getenv("ARCHON_EVENTS_SNAPSHOT_LIMIT", "200"))
+    if max_data_chars is None:
+        max_data_chars = int(os.getenv("ARCHON_EVENTS_MAX_DATA_CHARS", "2000"))
+    if connect_timeout_s is None:
+        connect_timeout_s = float(os.getenv("ARCHON_EVENTS_CONNECT_TIMEOUT_S", "2.0"))
+    return ArchonEventsSettings(
+        db_path=db_path,
+        poll_interval_s=poll_interval_s,
+        drain_limit=drain_limit,
+        buffer_size=buffer_size,
+        snapshot_limit=snapshot_limit,
+        max_data_chars=max_data_chars,
+        connect_timeout_s=connect_timeout_s,
     )
 
 

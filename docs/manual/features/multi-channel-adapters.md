@@ -2,7 +2,7 @@
 
 Status: active baseline, continuity locally proven, adapter startup live-proven
 Owner: `.claude/chat/adapters/`
-Last updated: 2026-07-14
+Last updated: 2026-07-31
 
 ## What It Does
 
@@ -48,7 +48,7 @@ message as explicit slash commands.
 
 Adapter startup is isolated per platform. Router startup connects configured
 adapters concurrently with a bounded timeout so a stuck Telegram, Discord,
-Slack, or relay connect cannot keep the other channels offline. Discord native
+Slack, or Buzz connect cannot keep the other channels offline. Discord native
 slash-command sync also runs asynchronously with its own timeout so gateway
 connect and command registration do not block the rest of startup.
 
@@ -86,7 +86,8 @@ uploads.
 | Discord | Immediate status, typing, editable phase/tool status, recovery, final-send fallback |
 | Telegram | Typing plus one editable status bubble, recovery, final-send fallback |
 | Slack | One editable status bubble, recovery, final-send fallback; no typing |
-| Mission Control relay | Editable progress frames, recovery, final-send fallback; no typing |
+| Buzz | Disabled; sends one receipt reaction plus the final answer |
+| Legacy Mission Control relay | Deprecated compatibility path pending separate audited retirement |
 | CLI | Disabled; quiet JSON is unchanged |
 | WhatsApp | Disabled to avoid permanent-message spam |
 | Webhook | Disabled to avoid permanent-message spam |
@@ -127,7 +128,7 @@ appointment, posting/publishing, or deploying.
 ## Operator Entry Points
 
 - Telegram bot channel
-- Slack, Discord, WhatsApp, web relay, and CLI adapters when configured
+- Slack, Discord, WhatsApp, Buzz, legacy web relay, and CLI adapters when configured
 - Health/status: the configured profile health port
   (`http://127.0.0.1:<health-port>/health`) and `thehomie status --json`
 
@@ -184,6 +185,7 @@ guild. DMs are always handled. The user allowlist applies before any of these.
 | Shared message models | `.claude/chat/models.py` |
 | Telegram adapter | `.claude/chat/adapters/telegram.py` |
 | Discord adapter | `.claude/chat/adapters/discord.py` |
+| Buzz adapter | `.claude/chat/adapters/buzz.py` |
 | Attachment parser | `.claude/chat/attachment_context.py` |
 | Command registry | `.claude/chat/commands.py` |
 | Command and safety gate registry | `.claude/chat/extension_manager.py` |
@@ -191,7 +193,7 @@ guild. DMs are always handled. The user allowlist applies before any of these.
 | Transcript persistence | `.claude/chat/session.py` |
 | Continuity state | `.claude/chat/cognition/continuity.py` |
 | Launcher (all platforms, Git Bash on Windows) | `.claude/chat/run_chat.sh` |
-| Tests | `.claude/scripts/tests/test_adapter_telegram.py`, `.claude/scripts/tests/test_adapter_discord.py`, `.claude/scripts/tests/test_attachment_context.py`, `.claude/scripts/tests/test_chat_runtime_engine.py`, `.claude/scripts/tests/test_chat_router_timeout.py`, `.claude/scripts/tests/test_cognition_continuity.py` |
+| Tests | `.claude/scripts/tests/test_adapter_telegram.py`, `.claude/scripts/tests/test_adapter_discord.py`, `.claude/scripts/tests/test_adapter_buzz.py`, `.claude/scripts/tests/test_buzz_transport_integration.py`, `.claude/scripts/tests/test_attachment_context.py`, `.claude/scripts/tests/test_chat_runtime_engine.py`, `.claude/scripts/tests/test_chat_router_timeout.py`, `.claude/scripts/tests/test_cognition_continuity.py` |
 | Public reference | `docs/adapters.md` |
 
 ## Safety Boundaries

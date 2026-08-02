@@ -13,7 +13,7 @@ export function MissionControl() {
 
   return (
     <div class="flex flex-col h-full">
-      <TopBar title="Mission Control" subtitle={`${agents.filter((a) => a.running).length} running · ${agents.length} total`} />
+      <TopBar title="Homie Dashboard" subtitle={`${agents.filter((a) => a.running).length} running · ${agents.length} total`} />
       <div class="flex-1 overflow-y-auto scroll-safe-bottom">
         {loading && !data && <div class="flex items-center justify-center h-full"><Spinner /></div>}
         {error && <Empty title="Failed to load" description={error} />}

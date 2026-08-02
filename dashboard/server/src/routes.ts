@@ -76,6 +76,7 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/agents',
 
   // agents.ts — static routes (declared before dynamic /:id per FastAPI parity)
+  '/api/agents/preview',
   '/api/agents/suggestions',
   '/api/agents/suggestions/refresh',
   '/api/agents/templates',
@@ -183,6 +184,22 @@ export const ROUTE_MANIFEST: readonly string[] = [
   // voice.ts — mobile push-to-talk round-trip (Homie Mobile M4).
   '/api/voice/stt',
   '/api/voice/tts',
+
+  // talk.ts — Talk mode (OpenAI Realtime WebRTC) session proxy.
+  '/api/talk/status',
+  '/api/talk/session',
+  '/api/talk/tool',
+  '/api/talk/flush',
+  '/api/talk/runs',
+  '/api/talk/runs/:runId',
+  '/api/talk/skill-runs/:runId',
+
+  // archon.ts — Archon live telemetry (epic #252 / #254): REST snapshot of the
+  // run ledger + the cabinet-style SSE bridge over the read-only DB tail.
+  // #258 adds the convoy-row enrichment join (worker identity + current node).
+  '/api/archon/events',
+  '/api/archon/stream',
+  '/api/archon/convoy/:convoyId',
 
   // work.ts — dashboard work queue over the framework orchestration API.
   '/api/work/tasks',

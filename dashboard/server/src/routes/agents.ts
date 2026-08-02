@@ -38,6 +38,23 @@ agentsRoute.get('/api/agents', async (c) => {
   return c.json(translated, 200);
 });
 
+agentsRoute.post('/api/agents/preview', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  if (typeof body.persona_id === 'string') {
+    body.persona_id = inboundPersonaId(body.persona_id) ?? body.persona_id;
+  }
+  const result = await authedFetch('/api/agents/preview', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const json = result.json() as Record<string, unknown> | null;
+  if (json && typeof json === 'object') {
+    return c.json(outboundPersonaDict(json), result.status as 200);
+  }
+  return c.body(result.body, result.status as 200);
+});
+
 agentsRoute.post('/api/agents', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   // Inbound translate persona_id.

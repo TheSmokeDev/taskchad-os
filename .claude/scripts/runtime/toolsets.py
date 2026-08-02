@@ -39,6 +39,77 @@ class Toolset(TypedDict):
     live_filter: NotRequired[str]
 
 
+# ---------------------------------------------------------------------------
+# Capability classes
+# ---------------------------------------------------------------------------
+#
+# ``core`` shipped as one wide Hermes-compatible bundle that mixed recall with
+# terminal and write authority. Existing profiles may rely on that effective
+# grant, so ``core`` remains as a compatibility wrapper. New persona blueprints
+# compile against the two explicit classes below instead:
+#
+# * ``safe_core`` — profile-scoped recall, indexed search, skill reading, and
+#   a private planning scratchpad.
+# * ``operator_exec`` — broad file reads, shell/process access, writes, patching,
+#   and draft-skill mutation. It is never implied by persona creation.
+#
+# The split is structural rather than cosmetic. A domain pack may include
+# ``safe_core`` but it may not inherit ``operator_exec``. Scheduled curriculum
+# study does not use either class; it keeps its existing ``model_only`` runtime.
+_HOMIE_SAFE_CORE_TOOLS: list[str] = [
+    "memory_search",
+    "recall",
+    "search_files",
+    "skills_list",
+    "skill_view",
+    "request_tool",
+    "todo",
+]
+
+_HOMIE_OPERATOR_EXEC_TOOLS: list[str] = [
+    "terminal",
+    "process",
+    # ``read_file`` is here because its current confinement spans the repo and
+    # the whole ~/.homie tree rather than the active persona only.
+    "read_file",
+    "write_file",
+    "patch",
+    "skill_manage",
+]
+
+# Backward-compatible flattened name used by the existing tool-calling tests
+# and diagnostics. It is the exact effective membership of legacy ``core``.
+_HOMIE_CORE_TOOLS: list[str] = [
+    *_HOMIE_SAFE_CORE_TOOLS,
+    *_HOMIE_OPERATOR_EXEC_TOOLS,
+]
+
+_RESEARCH_READ_TOOLS: list[str] = [
+    "web_search",
+    "web_extract",
+    "firecrawl_scrape",
+    "firecrawl_search",
+    "exa_search",
+    "x_search",
+]
+
+_REPO_READ_TOOLS: list[str] = [
+    "gh_issue_view",
+    "gh_issue_list",
+    "gh_pr_view",
+    "gh_pr_list",
+    "gh_run_list",
+    "repo_search",
+]
+
+_BROWSER_READ_TOOLS: list[str] = [
+    "browser_status",
+    "browser_tabs",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_console",
+]
+
 # Static module-level registry. Hermes shape: dict of dicts.
 #
 # Auto-discovery toolsets (those carrying ``live_source``) resolve their
@@ -46,6 +117,142 @@ class Toolset(TypedDict):
 # ``resolve_toolset()`` call. There is no cache layer between the registry
 # and the live aggregator — staleness window is zero.
 TOOLSETS: dict[str, Toolset] = {
+    # -----------------------------------------------------------------------
+    # Blueprint-safe classes and domain packs.
+    # -----------------------------------------------------------------------
+    "safe_core": {
+        "description": "Safe persona floor: scoped memory/search, skill reads, and todo",
+        "tools": _HOMIE_SAFE_CORE_TOOLS,
+        "includes": [],
+    },
+    "operator_exec": {
+        "description": "Explicit operator-exec authority: shell, process, broad files, writes",
+        "tools": _HOMIE_OPERATOR_EXEC_TOOLS,
+        "includes": ["safe_core"],
+    },
+    "research_read": {
+        "description": "Read-only web, Firecrawl, Exa, and X research",
+        "tools": _RESEARCH_READ_TOOLS,
+        "includes": ["safe_core"],
+    },
+    "repo_read": {
+        "description": "Read-only repository and GitHub inspection",
+        "tools": _REPO_READ_TOOLS,
+        "includes": ["safe_core"],
+    },
+    "browser_read": {
+        "description": "Visible-browser navigation and observation without browser writes",
+        "tools": _BROWSER_READ_TOOLS,
+        "includes": ["research_read"],
+    },
+    "ai_engineering": {
+        "description": "AI engineering domain pack: web/browser research plus repository reads",
+        "tools": [],
+        "includes": ["browser_read", "repo_read"],
+    },
+    "founder_operations": {
+        "description": "Founder/operator domain pack: market research plus repository reads",
+        "tools": [],
+        "includes": ["research_read", "repo_read"],
+    },
+    # -----------------------------------------------------------------------
+    # Legacy compatibility toolsets.
+    #
+    # These preserve the effective grants of profiles authored before persona
+    # blueprints. In particular, ``core`` still resolves to terminal and writes,
+    # and research/browser/repo still inherit that wide legacy floor. New
+    # profiles must compile against the explicit classes above.
+    # -----------------------------------------------------------------------
+    "core": {
+        "description": "Legacy wide core compatibility alias (safe core + operator exec)",
+        "tools": [],
+        "includes": ["safe_core", "operator_exec"],
+    },
+    "research": {
+        "description": (
+            "Read-only research: web search, Firecrawl scrape/crawl, Exa, and X "
+            "reads, plus the legacy wide core grant."
+        ),
+        "tools": [],
+        "includes": ["research_read", "operator_exec"],
+    },
+    "repo": {
+        "description": "Legacy repository/GitHub reads plus operator-exec authority",
+        "tools": [],
+        "includes": ["repo_read", "operator_exec"],
+    },
+    "browser": {
+        "description": (
+            "Visible-Chrome browser automation via the BrowserOps CDP session. "
+            "READ verbs only — navigate/snapshot/read. Browser WRITE actions "
+            "(post, DM, connect, profile edit) stay default-denied behind their "
+            "own operator-approval gates. Retains the legacy operator-exec floor."
+        ),
+        "tools": [],
+        "includes": ["browser_read", "operator_exec"],
+    },
+    "crypto": {
+        "description": (
+            "Crypto desk: live candles/indicators/levels, DexScreener + Polymarket "
+            "reads, the play ledger, and the paper ladder — composed on top of "
+            "browser (X/Discord reads) and repo."
+        ),
+        # Operator direction 2026-07-27: "he already uses Twitter... he needs
+        # browser ops and shit... the repo, GH... X and Firecrawl to do
+        # research." The desk's work CROSSES these surfaces constantly, and a
+        # scoped persona that has to stop mid-thought because the next step is
+        # in another toolset is the same "I can't do it" this epic exists to
+        # kill — just relocated.
+        #
+        # So `crypto` composes rather than enumerating: browser pulls in
+        # research, research pulls in core. One line here is the whole desk.
+        # Every name here must be REGISTERED somewhere, or the ownership check
+        # refuses it and the persona is silently short a tool it was promised.
+        # That is not hypothetical: `crypto_indicators`, `crypto_levels`,
+        # `crypto_plays_read` and `crypto_paper_read` sat in this list unwired
+        # for the whole first pass of the epic — declared, refused, invisible.
+        "tools": [
+            # Market read
+            "crypto_candles",
+            "crypto_indicators",
+            "crypto_levels",
+            "crypto_funding",
+            "crypto_bar_clock",
+            "crypto_desk_snapshot",
+            "crypto_dexscreener",
+            "crypto_polymarket",
+            "crypto_last30days_read",
+            "crypto_prediction_markets",
+            "crypto_prediction_book",
+            # Risk + sizing — read-only maths, no order path
+            "crypto_position_size",
+            "crypto_liquidation",
+            "crypto_safety_check",
+            "crypto_proof",
+            "crypto_call_anchor",
+            "crypto_hit_rate",
+            "crypto_looks_read",
+            # The book
+            "crypto_plays_read",
+            "crypto_paper_read",
+            # The order path. Authorization is an operator FILE with an expiry
+            # (`mandate.json`); with none present the guard refuses every order
+            # including DRY_RUN, and no tool here can set the guard's mode.
+            "crypto_mandate_read",
+            "crypto_preflight",
+            "crypto_submit_bracket",
+        ],
+        "includes": ["browser", "repo"],
+    },
+    "social": {
+        "description": (
+            "Social/marketing research: Firecrawl + X + web search via research, "
+            "plus browser reads. Read-only — every social WRITE keeps its own "
+            "operator-approval gate and is never reachable from a toolset."
+        ),
+        "tools": [],
+        "includes": ["browser"],
+    },
     "chat_commands": {
         "description": "All registered chat commands (auto-discovered from extension manager)",
         # No hand-listed tools — auto-discovery via live_source.

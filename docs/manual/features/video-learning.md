@@ -34,6 +34,12 @@ The default is `smart`, saves a sourced note, and contextualizes the video again
 
 `/watch apply` is read-only: it produces a bounded proposal and an approval token derived from that exact proposal. `/watch approve` accepts only the matching token. That approval covers local workspace edits only. Posts, messages, deploys, commits, pushes, purchases, browser writes, and other external effects retain their own gates.
 
+`/watch` remains the operator-driven single-video lane. The
+[Persona Curriculum Engine](persona-curriculum-engine.md) builds above its
+caption/STT and smart-frame primitives for approved channel feeds, adding
+metadata admission, persona recall, complete-transcript comparison, compiled
+OKF doctrine, persistent scheduling, and proposal-only applications.
+
 Remote chat channels accept public URLs only. Local video paths are intentionally CLI-only so a chat message cannot request arbitrary machine-file access.
 
 ## Evidence and memory boundaries

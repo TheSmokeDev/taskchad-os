@@ -563,6 +563,17 @@ def _autonomous_loop_status(source: dict[str, str]) -> dict[str, Any]:
             else "Future behavior proof harness is not wired yet.",
             harness="build_future_behavior_autonomy_report" in source["harness"],
         ),
+        "belief_evolve_nightly": _status(
+            LIVE
+            if "_run_belief_evolution_phase" in source["dream"]
+            else PLANNED,
+            "Belief evolution runs nightly as dream-cycle Phase 5 (identity rail — "
+            "evidence gate + deterministic floor + LLM judge + amendment policy), "
+            "gated by HOMIE_KILLSWITCH_BELIEF_AUTONOMY and retry-budgeted."
+            if "_run_belief_evolution_phase" in source["dream"]
+            else "Nightly belief-evolution phase is not wired into memory_dream.py yet.",
+            phase_wired="_run_belief_evolution_phase" in source["dream"],
+        ),
     }
     return {"subsystems": subsystems}
 

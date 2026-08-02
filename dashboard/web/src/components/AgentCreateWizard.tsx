@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'preact/hooks';
-import { Power, Copy, Check } from 'lucide-preact';
+import { Power } from 'lucide-preact';
 import { Modal } from './Modal';
 import { useFetch } from '@/lib/useFetch';
 import { useDebouncedValue } from '@/lib/useDebounce';
@@ -11,16 +11,36 @@ interface CreateAgentWizardProps {
   onCreated: () => void;
 }
 
-interface Template { id: string; name: string; description: string; }
+interface Template {
+  id: string;
+  name: string;
+  description: string;
+  default_role: string;
+  default_model: string;
+  domain: string;
+}
+
+interface CreationPreview {
+  preview_hash: string;
+  state_hash: string;
+}
+
+interface CreationResponse {
+  persona_id: string;
+  path: string;
+  status: string;
+  preview_hash: string;
+  receipt: { transaction_id: string; outcome: string };
+}
 
 /**
- * Three-step wizard: basics → bot token → activate.
+ * Three-step wizard: blueprint → channel intent → activate.
  *
  * Contract surface (Phase 3 canonical, NOT donor-shaped):
  *   - validate-id: POST body `{persona_id}` → `{valid, reason}`
- *   - validate-token: POST body `{bot_token}` → `{valid, display_name, username, error}`
- *   - create: POST `/api/agents` body `{persona_id, display_name, bot_token_env, model}`
- *             → `{persona_id, path, status}`
+ *   - preview: POST `/api/agents/preview` with the complete blueprint intent
+ *   - create: POST `/api/agents` with that same intent plus preview/state hashes
+ *             → `{persona_id, path, status, preview_hash, receipt}`
  *   - activate: POST `/api/agents/{persona_id}/activate`
  *
  * Donor used `apiPost('/api/agents/create', ...)` and donor-shaped fields
@@ -34,22 +54,26 @@ export function AgentCreateWizard({ open, onClose, onCreated }: CreateAgentWizar
   const [name, setName] = useState('');
   const [nameTouched, setNameTouched] = useState(false);
   const [description, setDescription] = useState('');
-  const [model, setModel] = useState('claude-sonnet-4-6');
-  const [template, setTemplate] = useState('');
-  const [botToken, setBotToken] = useState('');
+  const [model, setModel] = useState('claude-sonnet-4-7');
+  const [template, setTemplate] = useState('general-specialist');
+  const [channelId, setChannelId] = useState('');
   const [createdId, setCreatedId] = useState<string | null>(null);
-  const [createdSummary, setCreatedSummary] = useState<{ path?: string; status?: string } | null>(null);
+  const [createdSummary, setCreatedSummary] = useState<{
+    path?: string;
+    status?: string;
+    previewHash?: string;
+    transactionId?: string;
+  } | null>(null);
   const [creating, setCreating] = useState(false);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const debouncedId = useDebouncedValue(id, 350);
-  const debouncedToken = useDebouncedValue(botToken, 600);
 
   // Reset on close.
   function close() {
     setStep(1); setId(''); setName(''); setNameTouched(false); setDescription('');
-    setModel('claude-sonnet-4-6'); setTemplate(''); setBotToken('');
+    setModel('claude-sonnet-4-7'); setTemplate('general-specialist'); setChannelId('');
     setCreatedId(null); setCreatedSummary(null); setError(null);
     onClose();
   }
@@ -65,17 +89,6 @@ export function AgentCreateWizard({ open, onClose, onCreated }: CreateAgentWizar
     return () => { cancelled = true; };
   }, [debouncedId]);
 
-  // Live token validation. Phase 3 contract: POST body `{bot_token}` → `{valid, display_name, username, error}`.
-  const [tokenStatus, setTokenStatus] = useState<{ valid?: boolean; error?: string | null; username?: string } | null>(null);
-  useEffect(() => {
-    if (!debouncedToken || !debouncedToken.includes(':')) { setTokenStatus(null); return; }
-    let cancelled = false;
-    apiPost<{ valid: boolean; error: string | null; username: string; display_name: string }>('/api/agents/validate-token', { bot_token: debouncedToken })
-      .then((r) => { if (!cancelled) setTokenStatus({ valid: r.valid, error: r.error, username: r.username }); })
-      .catch((e) => { if (!cancelled) setTokenStatus({ valid: false, error: e?.message || String(e) }); });
-    return () => { cancelled = true; };
-  }, [debouncedToken]);
-
   // Templates list.
   const templates = useFetch<{ templates: Template[] }>('/api/agents/templates');
 
@@ -88,30 +101,40 @@ export function AgentCreateWizard({ open, onClose, onCreated }: CreateAgentWizar
   }, [id, nameTouched]);
 
   const idValid = !!debouncedId && idCheck?.valid === true;
-  const tokenValid = tokenStatus?.valid === true;
-  const suggestedBotName = `Homie ${name || 'Agent'}`;
-  const suggestedBotUsername = `homie_${id || 'agent'}_bot`;
+  const channelValid = !channelId || /^[0-9]+$/.test(channelId);
+  const selectedTemplate = templates.data?.templates?.find((item) => item.id === template);
 
   async function create() {
     setCreating(true); setError(null);
     try {
-      // CANONICAL ROUTE — never /api/agents/create (donor alias dropped).
-      // Phase 3 contract: body `{persona_id, display_name, bot_token_env, model}`,
-      // response `{persona_id, path, status}`.
-      // bot_token_env is the env-var NAME that holds the token, not the token value
-      // itself — Python framework dereferences via os.environ at activation time.
-      const botTokenEnv = `HOMIE_TG_TOKEN_${id.toUpperCase().replace(/-/g, '_')}`;
-      const res = await apiPost<{ persona_id: string; path: string; status: string }>(
+      const intent = {
+        persona_id: id,
+        display_name: name,
+        template,
+        role: description,
+        model,
+        domain: selectedTemplate?.domain,
+        channel_intent: channelId
+          ? { kind: 'discord', channel_id: channelId, name: id }
+          : undefined,
+        operator_exec: false,
+      };
+      const preview = await apiPost<CreationPreview>('/api/agents/preview', intent);
+      const res = await apiPost<CreationResponse>(
         '/api/agents',
         {
-          persona_id: id,
-          display_name: name,
-          bot_token_env: botTokenEnv,
-          model,
+          ...intent,
+          expected_preview_hash: preview.preview_hash,
+          expected_state_hash: preview.state_hash,
         },
       );
       setCreatedId(res.persona_id);
-      setCreatedSummary({ path: res.path, status: res.status });
+      setCreatedSummary({
+        path: res.path,
+        status: res.status,
+        previewHash: res.preview_hash,
+        transactionId: res.receipt.transaction_id,
+      });
       setStep(3);
     } catch (err: any) {
       setError(err?.message || String(err));
@@ -148,7 +171,7 @@ export function AgentCreateWizard({ open, onClose, onCreated }: CreateAgentWizar
                 disabled={!idValid || !name || !description}
                 class="ml-auto px-3 py-1.5 rounded text-[12px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                Next: Bot token
+                Next: Channel
               </button>
             </>
           )}
@@ -158,7 +181,7 @@ export function AgentCreateWizard({ open, onClose, onCreated }: CreateAgentWizar
               <button
                 type="button"
                 onClick={create}
-                disabled={!tokenValid || creating}
+                disabled={!channelValid || creating}
                 class="ml-auto px-3 py-1.5 rounded text-[12px] font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {creating ? 'Creating...' : 'Create Agent'}
@@ -195,7 +218,7 @@ export function AgentCreateWizard({ open, onClose, onCreated }: CreateAgentWizar
               {step > n ? '✓' : n}
             </div>
             <span class={step === n ? 'text-[var(--color-text)]' : 'text-[var(--color-text-faint)]'}>
-              {n === 1 ? 'Basics' : n === 2 ? 'Bot token' : 'Activate'}
+              {n === 1 ? 'Blueprint' : n === 2 ? 'Channel' : 'Activate'}
             </span>
             {n < 3 && <span class="text-[var(--color-border)]">·</span>}
           </div>
@@ -249,6 +272,7 @@ export function AgentCreateWizard({ open, onClose, onCreated }: CreateAgentWizar
                 class="w-full bg-[var(--color-elevated)] border border-[var(--color-border)] rounded px-2.5 py-1.5 text-[12.5px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
               >
                 <option value="claude-opus-4-7">Opus 4.7</option>
+                <option value="claude-sonnet-4-7">Sonnet 4.7</option>
                 <option value="claude-sonnet-4-6">Sonnet 4.6</option>
                 <option value="claude-haiku-4-5">Haiku 4.5</option>
               </select>
@@ -256,45 +280,54 @@ export function AgentCreateWizard({ open, onClose, onCreated }: CreateAgentWizar
             <Field label="Template">
               <select
                 value={template}
-                onChange={(e) => setTemplate((e.target as HTMLSelectElement).value)}
+                onChange={(e) => {
+                  const nextId = (e.target as HTMLSelectElement).value;
+                  const next = templates.data?.templates?.find((item) => item.id === nextId);
+                  setTemplate(nextId);
+                  if (next) {
+                    if (!nameTouched) setName(next.name);
+                    if (!description) setDescription(next.default_role);
+                    setModel(next.default_model);
+                  }
+                }}
                 class="w-full bg-[var(--color-elevated)] border border-[var(--color-border)] rounded px-2.5 py-1.5 text-[12.5px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
               >
-                <option value="">Blank</option>
                 {templates.data?.templates?.map((t) => (
                   <option key={t.id} value={t.id}>{t.name}</option>
                 ))}
               </select>
             </Field>
           </div>
+          {selectedTemplate?.description && (
+            <div class="text-[10.5px] text-[var(--color-text-faint)]">
+              {selectedTemplate.description}
+            </div>
+          )}
         </div>
       )}
 
       {step === 2 && (
         <div class="space-y-3">
           <div class="bg-[var(--color-elevated)] border border-[var(--color-border)] rounded p-3 text-[12px] leading-relaxed">
-            <div class="font-semibold text-[var(--color-text)] mb-2">Create the bot in Telegram</div>
-            <ol class="list-decimal list-inside space-y-1 text-[var(--color-text-muted)]">
-              <li>Open <span class="font-mono text-[var(--color-accent)]">@BotFather</span> in Telegram</li>
-              <li>Send <span class="font-mono text-[var(--color-accent)]">/newbot</span></li>
-              <li>Name it: <CopyButton text={suggestedBotName} /></li>
-              <li>Username: <CopyButton text={suggestedBotUsername} /></li>
-              <li>Copy the token BotFather returns</li>
-            </ol>
+            <div class="font-semibold text-[var(--color-text)] mb-2">Optional Discord binding</div>
+            <p class="text-[var(--color-text-muted)]">
+              Add a Discord channel id to compile a disabled-by-default ingress binding.
+              Enabling shared ingress remains a separate operator action.
+            </p>
           </div>
 
-          <Field label="Paste bot token">
+          <Field label="Discord channel ID" hint="Digits only. Creation never enables shared ingress.">
             <input
               type="text"
-              value={botToken}
-              onInput={(e) => setBotToken((e.target as HTMLInputElement).value.trim())}
-              placeholder="123456789:ABC..."
+              value={channelId}
+              onInput={(e) => setChannelId((e.target as HTMLInputElement).value.trim())}
+              placeholder="123456789012345678"
               class="w-full bg-[var(--color-elevated)] border border-[var(--color-border)] rounded px-2.5 py-1.5 text-[12.5px] font-mono text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
             />
-            {tokenStatus?.error && (
-              <div class="text-[var(--color-status-failed)] text-[11px] mt-1">{tokenStatus.error}</div>
-            )}
-            {tokenStatus?.valid && tokenStatus.username && (
-              <div class="text-[var(--color-status-done)] text-[11px] mt-1">✓ Verified: @{tokenStatus.username}</div>
+            {!channelValid && (
+              <div class="text-[var(--color-status-failed)] text-[11px] mt-1">
+                Discord channel ids contain digits only.
+              </div>
             )}
           </Field>
 
@@ -309,6 +342,8 @@ export function AgentCreateWizard({ open, onClose, onCreated }: CreateAgentWizar
             <div><span class="text-[var(--color-text-faint)]">id:</span> {createdId}</div>
             {createdSummary?.path && <div><span class="text-[var(--color-text-faint)]">path:</span> {createdSummary.path}</div>}
             {createdSummary?.status && <div><span class="text-[var(--color-text-faint)]">status:</span> {createdSummary.status}</div>}
+            {createdSummary?.previewHash && <div><span class="text-[var(--color-text-faint)]">preview:</span> {createdSummary.previewHash}</div>}
+            {createdSummary?.transactionId && <div><span class="text-[var(--color-text-faint)]">transaction:</span> {createdSummary.transactionId}</div>}
           </div>
           {error && <div class="text-[var(--color-status-failed)] text-[11px]">{error}</div>}
         </div>
@@ -324,22 +359,5 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       {children}
       {hint && <div class="text-[10.5px] text-[var(--color-text-faint)] mt-1">{hint}</div>}
     </div>
-  );
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={async (e) => {
-        e.preventDefault();
-        try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {}
-      }}
-      class="inline-flex items-center gap-1 font-mono text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] transition-colors"
-    >
-      <span>{text}</span>
-      {copied ? <Check size={11} /> : <Copy size={11} />}
-    </button>
   );
 }

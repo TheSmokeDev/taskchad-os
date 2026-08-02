@@ -1,7 +1,7 @@
 # The Homie Framework — Development Guide
 
 Personal AI agent framework: multi-platform chat bot, memory pipelines,
-scheduled jobs, platform integrations, and Mission Control dashboard.
+scheduled jobs, platform integrations, and the Homie Dashboard.
 
 ## Quick Start
 

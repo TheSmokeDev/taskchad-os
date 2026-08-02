@@ -102,3 +102,12 @@ def test_capability_gateway_status_shape() -> None:
     assert isinstance(payload["integrations"]["items"], list)
     assert payload["approval_policy"]["default_deny"] is True
     assert payload["outbound_messaging"]["requires_operator_confirmation"] is True
+    assert payload["collaboration"]["buzz_approval_authority"] is False
+    assert payload["collaboration"]["approval_surface"] == "homie_only"
+    assert payload["collaboration"]["buzz"]["state"] in {
+        "disabled",
+        "stopped",
+        "connected",
+        "degraded",
+        "failed",
+    }

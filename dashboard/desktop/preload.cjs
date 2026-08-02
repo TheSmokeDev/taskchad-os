@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('homieDesktop', {
   stopStack: () => ipcRenderer.invoke('stack:stop'),
   openDashboard: () => ipcRenderer.invoke('dashboard:open'),
   openOperatingRoom: () => ipcRenderer.invoke('operating-room:open'),
+  openBuzz: () => ipcRenderer.invoke('buzz:open'),
   onStackEvent: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('stack:event', listener);

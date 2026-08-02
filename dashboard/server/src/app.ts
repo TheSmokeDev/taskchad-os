@@ -39,6 +39,8 @@ import { browserViewerRoute } from './routes/browser-viewer.js';
 import { ghostViewerRoute } from './routes/ghost-viewer.js';
 import { pairRoute } from './routes/pair.js';
 import { voiceRoute } from './routes/voice.js';
+import { talkRoute } from './routes/talk.js';
+import { archonRoute } from './routes/archon.js';
 import { mountStaticWeb } from './static-web.js';
 
 export function buildDashboardApp(): Hono {
@@ -70,6 +72,8 @@ export function buildDashboardApp(): Hono {
   app.route('/', ghostViewerRoute);
   app.route('/', pairRoute);
   app.route('/', voiceRoute);
+  app.route('/', talkRoute);
+  app.route('/', archonRoute);
   mountStaticWeb(app);
 
   return app;

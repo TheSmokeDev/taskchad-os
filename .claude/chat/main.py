@@ -307,7 +307,7 @@ async def _mc_heartbeat_loop(
     status_fn: Callable[[], str] | None = None,
     interval: int = 300,
 ) -> None:
-    """POST to the MC heartbeat endpoint every `interval` seconds.
+    """POST to the deprecated legacy heartbeat endpoint every `interval` seconds.
 
     The payload is rebuilt EVERY iteration from live liveness state. It used
     to be a constant ``{"status": "online"}`` encoded once before the loop —
@@ -429,6 +429,7 @@ def main() -> None:
     parser.add_argument("--discord", action="store_true", help="Start Discord adapter only")
     parser.add_argument("--whatsapp", action="store_true", help="Start WhatsApp adapter only")
     parser.add_argument("--webhook", action="store_true", help="Start webhook ingress adapter only")
+    parser.add_argument("--buzz", action="store_true", help="Start native Buzz adapter only")
     args = parser.parse_args()
 
     # Instance lock — prevents Windows venv double-spawn from running two polling loops
@@ -481,13 +482,18 @@ def main() -> None:
     # If no specific flag is set, start all configured adapters
     start_all = not (
         args.telegram or args.slack or args.relay or args.discord or args.whatsapp
-        or args.webhook
+        or args.webhook or args.buzz
     )
 
     has_slack = bool(SLACK_BOT_TOKEN and SLACK_APP_TOKEN)
     has_telegram = bool(TELEGRAM_BOT_TOKEN)
     has_discord = bool(DISCORD_BOT_TOKEN)
     has_whatsapp = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID)
+
+    from buzz_config import get_buzz_settings
+
+    buzz_settings = get_buzz_settings()
+    has_buzz = buzz_settings.configured
 
     # Webhook ingress (hermes-v18 Phase 4) — dormant by default: the adapter
     # is only ever CONSTRUCTED when WEBHOOK_ROUTES yields at least one valid
@@ -551,9 +557,9 @@ def main() -> None:
         print("  Telegram:      not configured")
 
     if has_relay:
-        print(f"  Relay WS:      {relay_ws_url}")
+        print(f"  Legacy relay:  {relay_ws_url} (deprecated)")
     else:
-        print("  Relay WS:      not configured (set RELAY_AUTH_TOKEN to enable)")
+        print("  Legacy relay:  not configured (deprecated; Buzz is the collaboration transport)")
 
     if has_discord:
         print(f"  Discord:       {DISCORD_BOT_TOKEN[:12]}...")
@@ -573,12 +579,20 @@ def main() -> None:
     else:
         print("  Webhook:       not configured (set WEBHOOK_ROUTES to enable)")
 
+    if has_buzz:
+        print(
+            f"  Buzz:          {buzz_settings.relay_host or 'configured relay'} "
+            f"({len(buzz_settings.channels) or 'all joined'} channels)"
+        )
+    else:
+        print("  Buzz:          not configured")
+
     print(f"  Health check:  port {HEALTH_CHECK_PORT}")
 
     if has_heartbeat:
-        print(f"  MC Heartbeat:  {mc_heartbeat_url}")
+        print(f"  Legacy beat:   {mc_heartbeat_url} (deprecated)")
     else:
-        print("  MC Heartbeat:  not configured (set MC_HEARTBEAT_URL + MC_AGENT_API_KEY to enable)")
+        print("  Legacy beat:   not configured (deprecated)")
 
     print(f"{'=' * 60}\n")
 
@@ -608,13 +622,21 @@ def main() -> None:
         print("ERROR: WEBHOOK_ROUTES not set in .env (or no route passed validation)")
         sys.exit(1)
 
+    if args.buzz and not has_buzz:
+        missing = ", ".join(buzz_settings.missing_required())
+        print(f"ERROR: Buzz required configuration missing: {missing}")
+        sys.exit(1)
+
     has_any = (
         has_slack or has_telegram or has_relay or has_discord or has_whatsapp
-        or has_webhook
+        or has_webhook or has_buzz
     )
     if start_all and not has_any:
         print("ERROR: No chat adapters configured.")
-        print("Set TELEGRAM_BOT_TOKEN, SLACK_BOT_TOKEN + SLACK_APP_TOKEN, or RELAY_AUTH_TOKEN in .env")
+        print(
+            "Set a supported adapter configuration, for example TELEGRAM_BOT_TOKEN "
+            "or BUZZ_RELAY_URL + BUZZ_PRIVATE_KEY + BUZZ_ALLOWED_PUBKEYS."
+        )
         sys.exit(1)
 
     # Initialize Langfuse tracing (no-op if keys not configured)
@@ -734,8 +756,14 @@ def main() -> None:
             router.register(wh)
             print(f"  Webhook adapter OK ({len(webhook_settings.routes)} route(s))")
 
+        if has_buzz and (start_all or args.buzz):
+            from adapters.buzz import BuzzAdapter
+
+            router.register(BuzzAdapter(buzz_settings))
+            print("  Buzz adapter configuration OK")
+
         if has_relay and (start_all or args.relay):
-            print(f"  Relay WS OK ({relay_ws_url})")
+            print(f"  Deprecated legacy relay configuration OK ({relay_ws_url})")
 
         print("\nAll checks passed. Run without --test to start.")
         return
@@ -775,6 +803,11 @@ def main() -> None:
             WHATSAPP_VERIFY_TOKEN, WHATSAPP_WEBHOOK_PORT,
         )
         router.register(wa)
+
+    if has_buzz and (start_all or args.buzz):
+        from adapters.buzz import BuzzAdapter
+
+        router.register(BuzzAdapter(buzz_settings))
 
     # Set up relay WebSocket client (runs alongside other adapters)
     relay_client = None

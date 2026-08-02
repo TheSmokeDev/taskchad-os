@@ -217,7 +217,7 @@ def test_route_policy_covers_every_real_route(tmp_path, monkeypatch):
 
 
 def test_route_policy_count_is_134(tmp_path, monkeypatch):
-    """130 declared routes + 4 FastAPI auto-routes = 134 (R2 count lock).
+    """165 declared routes + 4 FastAPI auto-routes = 169 (R2 count lock).
 
     History: 117 -> 123 on 2026-07-04 (+6 pairing routes, Homie Mobile M2);
     123 -> 125 on 2026-07-05 (+2 voice STT/TTS routes, Homie Mobile M4);
@@ -234,13 +234,38 @@ def test_route_policy_count_is_134(tmp_path, monkeypatch):
     (+4 ghost-viewer input routes — tap/text/swipe/key, P4.1 Phase B B3);
     151 -> 153 on 2026-07-07 (+2 ghost-viewer app routes — launch/install,
     P4.1 Phase B B4); 153 -> 155 on 2026-07-14 (+2 autostart routes —
-    GET/POST /api/autostart, bot-autostart toggle).
+    GET/POST /api/autostart, bot-autostart toggle); 155 -> 162 on 2026-07-25
+    (+7 talk-mode / discord-voice routes that shipped unregistered — this test
+    had been failing since Talk Mode landed); 162 -> 165 on 2026-07-25 (+3
+    voice-desk routes — appointments, calls, sync); 165 -> 162 on 2026-07-26
+    (-3 voice-desk routes, withdrawn from thehomie — the desk is YourProduct
+    product and moves to its own repo. The 7 talk-mode routes above are an
+    unrelated repair and stay classified, so this lands on 162, not 155);
+    162 -> 164 on 2026-07-27 (+2 unified talk-run routes — GET /api/talk/runs
+    and /api/talk/runs/{run_id} — the poll surface for archon/agent/skill/look
+    runs; the skill-runs route stays as a back-compat alias); 164 -> 166 on
+    2026-07-27 (+2 Archon live-telemetry routes — GET /api/archon/events +
+    GET /api/archon/stream, epic #252 ticket #254, the read-only DB-tail
+    bridge over Archon's own run ledger; both lanes bumped 162 -> 164
+    independently against the same base, so the merge lands on 166);
+    166 -> 167 on 2026-07-28 (+1 convoy-row enrichment route —
+    GET /api/archon/convoy/{convoy_id}, epic #252 ticket #258, the join that
+    names the real worker and its current node on a Convoy row. Classified
+    `tenant_workspace`, NOT `admin` like its two #254 siblings: it is entered
+    through a convoy id, which carries a workspace column to scope by);
+    167 -> 169 on 2026-08-01 (+1 talk session-end debrief route —
+    POST /api/talk/flush, the voice surface's memory flush: transcript →
+    detached memory_flush spawn → daily log + episode, classified `admin`
+    on the talk-mode precedent — and +1 repair: POST /api/agents/preview
+    shipped unclassified in the blueprint-unification commit 72a381c0 and
+    this suite had been red since; classified `tenant_persona` matching its
+    own _require_persona_in_scope gate and the validate-id sibling).
     """
     monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     api_mod = _reload_real_api(tmp_path / "count.db")
     try:
-        assert len(all_registered_routes(api_mod.app)) == 155
-        assert len(ROUTE_POLICY) == 155
+        assert len(all_registered_routes(api_mod.app)) == 169
+        assert len(ROUTE_POLICY) == 169
     finally:
         api_mod._db.close()
 

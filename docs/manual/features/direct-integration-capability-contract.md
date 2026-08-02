@@ -155,7 +155,7 @@ Policy code is public-exported through `scripts/sanitize.py`.
 ## Next Slices
 
 - Google OAuth token/scope segmentation by service.
-- Mission Control policy/status UI that reads the Python capability contract.
+- Homie Dashboard policy/status UI that reads the Python capability contract.
 - Real `thehomie chat --toolsets` and a Homie-native messaging dispatcher.
 - Broader mutator coverage for integrations beyond the current high-value
   wrapper/internal entrypoints.

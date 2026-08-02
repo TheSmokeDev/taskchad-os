@@ -116,6 +116,21 @@ function wireIpc() {
     const targetUrl = await loadDashboardPath('/teams');
     return { targetUrl };
   });
+  ipcMain.handle('buzz:open', async () => {
+    const configuredPath = (process.env.BUZZ_DESKTOP_PATH || '').trim();
+    if (configuredPath) {
+      const executable = path.resolve(configuredPath);
+      if (!path.isAbsolute(configuredPath) || !fs.existsSync(executable) || !fs.statSync(executable).isFile()) {
+        throw new Error('BUZZ_DESKTOP_PATH must name an existing absolute file');
+      }
+      const error = await shell.openPath(executable);
+      if (error) throw new Error(`Unable to open Buzz Desktop: ${error}`);
+      return { mode: 'executable', target: executable };
+    }
+    const target = 'buzz://';
+    await shell.openExternal(target);
+    return { mode: 'scheme', target };
+  });
 }
 
 async function waitForEndpoint(url, options = {}) {
@@ -192,12 +207,12 @@ async function runSmoke() {
         hasDashboardRoot: Boolean(document.querySelector('#app')),
         hasDesktopBridge: Boolean(window.homieDesktop),
         hasDesktopControls: document.body.innerText.toLowerCase().includes('desktop stack'),
-        hasMissionControl: document.body.innerText.includes('Mission Control'),
+        hasHomieDashboard: document.body.innerText.includes('Homie Dashboard'),
         text: document.body.innerText
       })
     `, (result) => result?.hasDashboardRoot && result?.hasDesktopBridge && result?.hasDesktopControls);
     const routeExpectations = {
-      '/mission': 'Mission Control',
+      '/mission': 'Homie Dashboard',
       '/chat': 'Chat',
       '/mobile': 'Mobile Access',
       '/browser': 'Browser Viewer',
@@ -268,7 +283,7 @@ async function runSmoke() {
       report.renderer?.hasDashboardRoot
       && report.renderer?.hasDesktopBridge
       && report.renderer?.hasDesktopControls
-      && report.renderer?.hasMissionControl
+      && report.renderer?.hasHomieDashboard
       && report.beforeStop?.running
       && report.beforeStop?.services?.every((service) => service.running)
       && Object.values(report.routes).every((route) => route.ok)

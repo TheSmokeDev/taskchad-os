@@ -22,6 +22,25 @@ if TYPE_CHECKING:
     from router import ChatRouter
 
 
+
+_AUTH_CLOSE_CODE = 4001
+
+
+def _is_auth_rejection(exc: BaseException) -> bool:
+    """True when the relay closed the socket for a bad token.
+
+    The relay accepts the handshake and authorizes afterwards, so the rejection
+    arrives as a CLOSE frame, not an HTTP status -- websockets surfaces it on
+    the exception's ``rcvd``/``sent`` Close objects. Checked structurally
+    rather than by string-matching the message, which changes between releases.
+    """
+
+    for attr in ("rcvd", "sent"):
+        close = getattr(exc, attr, None)
+        if getattr(close, "code", None) == _AUTH_CLOSE_CODE:
+            return True
+    return False
+
 class RelayWSClient:
     """Persistent WebSocket client connecting to the server relay.
 
@@ -38,6 +57,11 @@ class RelayWSClient:
     INITIAL_BACKOFF_S = 2.0
     MAX_BACKOFF_S = 120.0
     BACKOFF_MULTIPLIER = 2.0
+    # How long a session must last before it counts as healthy enough to reset
+    # the backoff. Comfortably longer than a connect->reject round trip and
+    # comfortably shorter than the 30s ping interval, so a genuinely working
+    # relay always earns the reset and a rejected one never does.
+    HEALTHY_SESSION_S = 10.0
 
     def __init__(
         self,
@@ -61,10 +85,17 @@ class RelayWSClient:
     async def connect_forever(self) -> None:
         """Connect to relay with auto-reconnect. Run as asyncio.create_task().
 
-        Uses exponential backoff on failures, resets on successful connection.
+        Backoff resets only once a session has proven USEFUL, not on the
+        handshake. The relay authorizes AFTER the socket opens, so a rejected
+        token produced connect -> close(4001) -> reset -> retry, and the reset
+        pinned the delay at the 2s floor forever: an infinite tight loop
+        against someone else's server, logged once every two seconds. A
+        connection that dies immediately is a failure however far it got.
+
         Never raises -- logs errors and retries indefinitely.
         """
         while True:
+            session_started = asyncio.get_running_loop().time()
             try:
                 url = f"{self.relay_url}?token={self.relay_token}"
                 async with websockets.connect(
@@ -79,7 +110,6 @@ class RelayWSClient:
                 ) as ws:
                     self._ws = ws
                     self._connected = True
-                    self._backoff = self.INITIAL_BACKOFF_S  # Reset on success
                     print(
                         f"[{datetime.now()}] [RelayWS] Connected to {self.relay_url}",
                         flush=True,
@@ -100,14 +130,36 @@ class RelayWSClient:
                         flush=True,
                     )
             except Exception as e:
-                print(
-                    f"[{datetime.now()}] [RelayWS] Disconnected: {e}. "
-                    f"Reconnecting in {self._backoff:.0f}s...",
-                    flush=True,
-                )
+                if _is_auth_rejection(e):
+                    # The relay authorizes after the socket opens, so this
+                    # arrives as a CLOSE code rather than a handshake status --
+                    # the InvalidStatus branch above never sees it. Say the
+                    # actionable thing instead of a bare "Disconnected".
+                    print(
+                        f"[{datetime.now()}] [RelayWS] Auth rejected by the relay "
+                        f"(close 4001). RELAY_AUTH_TOKEN is not accepted by "
+                        f"{self.relay_url}; the bot keeps running without the web "
+                        f"adapter. Retrying in {self._backoff:.0f}s...",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[{datetime.now()}] [RelayWS] Disconnected: {e}. "
+                        f"Reconnecting in {self._backoff:.0f}s...",
+                        flush=True,
+                    )
             finally:
                 self._ws = None
                 self._connected = False
+
+            # A session that survived long enough to be useful earns the reset.
+            # Anything shorter is a failure dressed as a success -- resetting
+            # there is what turned a rejected token into a 2s hammer loop.
+            if (
+                asyncio.get_running_loop().time() - session_started
+                >= self.HEALTHY_SESSION_S
+            ):
+                self._backoff = self.INITIAL_BACKOFF_S
 
             await asyncio.sleep(self._backoff)
             self._backoff = min(

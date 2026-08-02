@@ -63,7 +63,7 @@ _FRONTMATTER_BLOCK_RE = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
 _TIMESTAMP_DATE_RE = re.compile(r"^\d{8}$")
 _TIMESTAMP_TIME_RE = re.compile(r"^\d{6}$")
 
-_PLATFORM_SURFACE_RE = re.compile(r"^(telegram|discord|slack|whatsapp|web|cli)-")
+_PLATFORM_SURFACE_RE = re.compile(r"^(telegram|discord|slack|whatsapp|web|cli|talk)-")
 
 
 # =============================================================================

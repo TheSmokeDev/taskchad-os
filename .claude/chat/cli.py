@@ -271,6 +271,7 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, with_proactiv
             )
         else:
             click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
     elif json_out:
         log = resp.log
         payload = {
@@ -346,9 +347,15 @@ def _console_hard_exit() -> None:
 @main.command()
 @click.option("-q", "--query", default=None, help="Single query (non-interactive)")
 @click.option("-Q", "--quiet", is_flag=True, help="Quiet/JSON output (for Paperclip)")
-@click.option("-m", "--model", default=None, help="Select runtime lane/provider/model (claude/codex/gemini/openrouter/openai/auto, provider:model, or gpt5.5)")
+@click.option("-m", "--model", default=None, help="Select runtime lane/provider/model (claude/codex/gemini/openrouter/openai/auto, sol/terra/luna, provider:model, or gpt5.5)")
 @click.option("-t", "--toolsets", default=None, help="Filter tool access (reserved for future)")
 @click.option("--resume", "-r", "resume_id", default=None, help="Resume session by ID")
+@click.option(
+    "--resume-strict",
+    "resume_strict",
+    is_flag=True,
+    help="With --resume: refuse to run if the session is missing instead of starting fresh",
+)
 @click.option("--continue", "-c", "continue_last", is_flag=True, help="Resume most recent session")
 @click.option(
     "--voice",
@@ -376,11 +383,25 @@ def _console_hard_exit() -> None:
         "Values are case-sensitive (lowercase only)."
     ),
 )
-def chat(query, quiet, model, toolsets, resume_id, continue_last, voice_path, voice_out_path, source):
+@click.option(
+    "--buzz",
+    is_flag=True,
+    help="Run only the long-lived native Buzz collaboration adapter.",
+)
+def chat(query, quiet, model, toolsets, resume_id, resume_strict, continue_last, voice_path, voice_out_path, source, buzz):
     """Chat with The Homie. Interactive REPL or single query (-q)."""
     ensure_directories()
 
     import os
+
+    if buzz:
+        if any((query, quiet, model, toolsets, resume_id, continue_last, voice_path, voice_out_path)):
+            raise click.UsageError("--buzz is adapter-only and cannot be combined with query/session options")
+        import subprocess
+
+        chat_main = Path(__file__).resolve().with_name("main.py")
+        completed = subprocess.run([sys.executable, str(chat_main), "--buzz"], check=False)
+        raise SystemExit(completed.returncode)
 
     from adapters.cli_adapter import CLIAdapter
 
@@ -408,6 +429,7 @@ def chat(query, quiet, model, toolsets, resume_id, continue_last, voice_path, vo
         model=model,
         toolsets=toolsets,
         resume_session=resume_id,
+        resume_strict=resume_strict,
         continue_last=continue_last,
         voice_path=voice_path,
         voice_out_path=voice_out_path,
@@ -494,7 +516,45 @@ def chat(query, quiet, model, toolsets, resume_id, continue_last, voice_path, vo
             sys.exit(1)
         else:
             click.echo(f"Error: {exc}", err=True)
-            sys.exit(1)
+
+
+@main.group("buzz")
+def buzz_group():
+    """Operate the native Buzz collaboration transport."""
+
+
+@buzz_group.command("deliver")
+@click.argument("text")
+@click.option(
+    "--file",
+    "files",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    help="Attach a local file; may be supplied more than once.",
+)
+@click.option("--json", "json_mode", is_flag=True, help="Emit a machine-readable receipt.")
+def buzz_deliver(text: str, files: tuple[Path, ...], json_mode: bool) -> None:
+    """Deliver a cron result to the profile's BUZZ_HOME_CHANNEL."""
+    from adapters.buzz import BuzzAdapter
+    from models import Attachment
+
+    adapter = BuzzAdapter()
+    attachments = [Attachment(filename=path.name, url=str(path)) for path in files]
+
+    try:
+        event_id = asyncio.run(adapter.deliver_scheduled(text, attachments=attachments))
+    except Exception as exc:
+        detail = str(exc)
+        if adapter.settings.private_key:
+            detail = detail.replace(adapter.settings.private_key, "[redacted]")
+        raise click.ClickException(detail[:240]) from exc
+
+    if json_mode:
+        click.echo(json_mod.dumps({"success": True, "event_id": event_id}))
+    elif event_id:
+        click.echo(f"Buzz delivery sent: {event_id}")
+    else:
+        click.echo("Buzz delivery sent")
 
 
 def _collect_profile_lifecycle_contract() -> dict:
@@ -866,10 +926,34 @@ def doctor():
     click.echo("The Homie — Doctor")
     click.echo("=" * 40)
 
-    issues = check_environment()
-    _print_issues(issues)
-
     report = collect_diagnostics()
+    issues = check_environment()
+    errors = [issue for issue in issues if issue[0] == "error"]
+    active_providers = [
+        status for status in report.runtime_providers.values() if status == "ON"
+    ]
+    auth_issue_count = len(report.runtime_auth_issues)
+    persona_attention = [
+        snapshot
+        for snapshot in report.persona_readiness.values()
+        if snapshot.get("status") != "READY"
+    ]
+    has_diagnostics_failure = (
+        not active_providers and report.runtime_providers
+    )
+    if (
+        not issues
+        and (
+            errors
+            or has_diagnostics_failure
+            or auth_issue_count
+            or persona_attention
+        )
+    ):
+        click.echo("  Environment checks passed.")
+    else:
+        _print_issues(issues)
+
     click.echo(
         f"\nRuntime providers: "
         f"{len([v for v in report.runtime_providers.values() if v == 'ON'])} active"
@@ -883,9 +967,13 @@ def doctor():
     _print_cognitive_loop(report.cognitive_loop)
     _print_browser_readiness(report.browser)
     _print_ghost_state(report.ghost)
+    _print_curriculum_status(report.curriculum)
+    _print_crypto_round_status(report.crypto_round)
+    _print_persona_readiness(report.persona_readiness)
     _print_live_execution(report.live_execution)
     _print_video_learning_readiness()
     click.echo(f"Sessions: {report.sessions_active} active")
+    _print_buzz_status(report.buzz)
     if report.clear_lifecycle_recent_failures:
         click.echo(
             "Clear lifecycle warnings/errors (recent): "
@@ -897,15 +985,13 @@ def doctor():
     _print_native_commands()
 
     # Check for real failures: env errors OR zero runtime providers
-    errors = [i for i in issues if i[0] == "error"]
-    active_providers = [v for v in report.runtime_providers.values() if v == "ON"]
-    auth_issue_count = len(report.runtime_auth_issues)
-    has_diagnostics_failure = (
-        not active_providers and report.runtime_providers  # providers checked but none ON
-    )
-
-    if errors or has_diagnostics_failure or auth_issue_count:
-        problems = len(errors) + auth_issue_count + (1 if has_diagnostics_failure else 0)
+    if errors or has_diagnostics_failure or auth_issue_count or persona_attention:
+        problems = (
+            len(errors)
+            + auth_issue_count
+            + len(persona_attention)
+            + (1 if has_diagnostics_failure else 0)
+        )
         if has_diagnostics_failure and not errors:
             click.echo("\nNo runtime providers available — check API keys or CLI installs.")
         click.echo(f"\n{problems} issue(s) found. Fix them and re-run `thehomie doctor`.")
@@ -974,12 +1060,19 @@ def update(check, yes, json_mode, scheduled, restart):
 
         restart_callback = BotRestarter()
         health_callback = HealthVerifier(restart_callback)
+    from toolchain_currency import ToolchainCurrency
+
+    toolchain_receipt = ToolchainCurrency(repo_root).apply_safe_cli_updates(
+        scheduled=scheduled
+    )
     receipt = updater.apply(
         scheduled=scheduled,
         restart=restart_callback,
         health_check=health_callback,
     )
     payload = receipt.to_dict()
+    payload["toolchain"] = toolchain_receipt.to_dict()
+    payload["overall_success"] = receipt.success and toolchain_receipt.success
     if json_mode:
         click.echo(json_mod.dumps(payload, sort_keys=True))
     elif receipt.success:
@@ -989,7 +1082,63 @@ def update(check, yes, json_mode, scheduled, restart):
         )
     else:
         click.echo(f"Update {receipt.status}: {receipt.blocker}. Receipt: {receipt.receipt_id}")
-    raise SystemExit(0 if receipt.success else 1)
+    raise SystemExit(0 if payload["overall_success"] else 1)
+
+
+@main.command("toolchain")
+@click.option("--apply-safe", is_flag=True, help="Update only compatibility-approved global CLIs.")
+@click.option("-y", "--yes", is_flag=True, help="Confirm compatibility-approved CLI updates.")
+@click.option("--history", is_flag=True, help="Show recent durable toolchain receipts.")
+@click.option("--json", "json_mode", is_flag=True, help="Machine-readable JSON output.")
+def toolchain(apply_safe, yes, history, json_mode):
+    """Inspect Codex, Claude, OpenAI, and MCP CLI/SDK currency."""
+    from toolchain_currency import ToolchainCurrency
+
+    repo_root = _resolve_git_repo_for_runner()
+    if not repo_root:
+        raise click.ClickException("could not resolve Git repository root")
+    manager = ToolchainCurrency(repo_root)
+    if history:
+        payload = manager.history(limit=10)
+    elif apply_safe:
+        if not yes:
+            raise click.ClickException("--apply-safe requires --yes")
+        payload = manager.apply_safe_cli_updates().to_dict()
+    else:
+        payload = manager.check().to_dict()
+
+    if json_mode:
+        click.echo(json_mod.dumps(payload, sort_keys=True))
+        return
+    if history:
+        if not payload:
+            click.echo("No toolchain update receipts yet.")
+            return
+        for row in payload:
+            click.echo(
+                f"{row.get('finished_at')} — "
+                f"{'ok' if row.get('success') else 'failed'} "
+                f"({row.get('receipt_id')})"
+            )
+        return
+    if apply_safe:
+        click.echo(
+            f"Toolchain update {'complete' if payload['success'] else 'failed'} — "
+            f"{len(payload['attempted'])} CLI change(s). Receipt: {payload['receipt_id']}"
+        )
+        if not payload["success"]:
+            raise SystemExit(1)
+        return
+    click.echo("Homie toolchain currency:")
+    for item in payload["items"]:
+        current = item.get("current_version") or "not installed"
+        latest = item.get("latest_version") or "unavailable"
+        click.echo(
+            f"  {item['display_name']}: {item['state']} "
+            f"(current {current}, latest {latest})"
+        )
+        if item.get("blocker"):
+            click.echo(f"    {item['blocker']}")
 
 
 @main.command("auto-update")
@@ -1052,6 +1201,352 @@ def _get_team_services():
     init_orchestration_observability()
     db = OrchestrationDB(ORCHESTRATION_DB_PATH)
     return db, TeamService(db), MailboxService(db)
+
+
+# ── Persona curriculum commands ──────────────────────────────────────────
+
+
+@main.group()
+def curriculum():
+    """Operate one persona's private, source-grounded curriculum."""
+
+
+def _curriculum_service(persona_id: str):
+    from curriculum.service import get_curriculum_service
+
+    return get_curriculum_service(persona_id)
+
+
+def _emit_curriculum(payload: dict, *, json_mode: bool) -> None:
+    if json_mode:
+        click.echo(json_mod.dumps(payload, indent=2, sort_keys=True))
+        return
+    click.echo(
+        f"Curriculum [{payload.get('persona_id', 'unknown')}]: "
+        f"{'OK' if payload.get('success') else 'ATTENTION'}"
+    )
+    if payload.get("reason"):
+        click.echo(f"  {payload['reason']}")
+    if "enabled" in payload:
+        click.echo(f"  enabled: {payload['enabled']}")
+    if payload.get("state_counts"):
+        click.echo(f"  states: {payload['state_counts']}")
+    if "discovered" in payload:
+        click.echo(
+            "  decisions: "
+            f"{payload.get('admitted', 0)} admitted, "
+            f"{payload.get('skimmed', 0)} skimmed, "
+            f"{payload.get('rejected', 0)} rejected"
+        )
+    if payload.get("studies") is not None:
+        click.echo(f"  studies: {len(payload.get('studies') or [])}")
+    if payload.get("sources") is not None:
+        click.echo(json_mod.dumps(payload["sources"], indent=2, sort_keys=True))
+    if payload.get("proposals") is not None:
+        click.echo(json_mod.dumps(payload["proposals"], indent=2, sort_keys=True))
+    if payload.get("proposal_id"):
+        click.echo(f"  proposal: {payload['proposal_id']}")
+    if payload.get("error"):
+        click.echo(f"  error: {payload['error']}")
+
+
+@curriculum.command("status")
+@click.argument("persona_id")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def curriculum_status(persona_id: str, json_mode: bool):
+    """Show status without creating a ledger or invoking a model."""
+    _emit_curriculum(
+        _curriculum_service(persona_id).status(), json_mode=json_mode
+    )
+
+
+@curriculum.command("sources")
+@click.argument("persona_id")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def curriculum_sources(persona_id: str, json_mode: bool):
+    """List approved sources and their physical watermarks."""
+    _emit_curriculum(
+        _curriculum_service(persona_id).sources(), json_mode=json_mode
+    )
+
+
+@curriculum.command("run")
+@click.argument("persona_id")
+@click.option("--full-inventory", is_flag=True, help="Use metadata-only catalog fallback.")
+@click.option("--study-limit", type=click.IntRange(0, 25), default=None)
+@click.option("--deterministic-admission", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def curriculum_run(
+    persona_id: str,
+    full_inventory: bool,
+    study_limit: int | None,
+    deterministic_admission: bool,
+    json_mode: bool,
+):
+    """Discover, admit, and run a bounded study turn."""
+    payload = asyncio.run(
+        _curriculum_service(persona_id).run_once(
+            full_inventory=full_inventory,
+            study_limit=study_limit,
+            cognitive_admission=not deterministic_admission,
+        )
+    )
+    _emit_curriculum(payload, json_mode=json_mode)
+    if not payload.get("success"):
+        raise SystemExit(1)
+
+
+@curriculum.command("review")
+@click.argument("persona_id")
+@click.option("--all", "include_all", is_flag=True, help="Include routed proposals.")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def curriculum_review(persona_id: str, include_all: bool, json_mode: bool):
+    """Review pending application proposals."""
+    _emit_curriculum(
+        _curriculum_service(persona_id).review(
+            status=None if include_all else "pending"
+        ),
+        json_mode=json_mode,
+    )
+
+
+@curriculum.command("route")
+@click.argument("persona_id")
+@click.argument("proposal_id")
+@click.option("--recipient", default="operator", show_default=True)
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def curriculum_route(
+    persona_id: str, proposal_id: str, recipient: str, json_mode: bool
+):
+    """Approve routing into the mailbox; never start executable work."""
+    _emit_curriculum(
+        _curriculum_service(persona_id).route(
+            proposal_id, recipient=recipient
+        ),
+        json_mode=json_mode,
+    )
+
+
+@curriculum.command("grade")
+@click.argument("persona_id")
+@click.argument("proposal_id")
+@click.argument("grade", type=click.Choice(["A", "B", "C", "D", "F"], case_sensitive=False))
+@click.option("--note", default="", help="Observed application outcome.")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def curriculum_grade(
+    persona_id: str,
+    proposal_id: str,
+    grade: str,
+    note: str,
+    json_mode: bool,
+):
+    """Grade an insight and stage persona-scoped reflection learning."""
+    _emit_curriculum(
+        _curriculum_service(persona_id).grade(
+            proposal_id, grade, note=note
+        ),
+        json_mode=json_mode,
+    )
+
+
+@curriculum.command("enable")
+@click.argument("persona_id")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def curriculum_enable(persona_id: str, json_mode: bool):
+    """Enable scheduled study for a configured persona."""
+    _emit_curriculum(
+        _curriculum_service(persona_id).enable(), json_mode=json_mode
+    )
+
+
+@curriculum.command("disable")
+@click.argument("persona_id")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def curriculum_disable(persona_id: str, json_mode: bool):
+    """Disable scheduled study without deleting state."""
+    _emit_curriculum(
+        _curriculum_service(persona_id).disable(), json_mode=json_mode
+    )
+
+
+@curriculum.command("import-seed")
+@click.argument("persona_id")
+@click.argument(
+    "seed_root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--source-id", default="private-okf-seed", show_default=True)
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def curriculum_import_seed(
+    persona_id: str, seed_root: Path, source_id: str, json_mode: bool
+):
+    """Migrate a local/private synthesized OKF seed."""
+    from curriculum.seed import import_okf_seed
+
+    payload = import_okf_seed(
+        persona_id, seed_root, source_id=source_id
+    )
+    _emit_curriculum(payload, json_mode=json_mode)
+    if not payload.get("success"):
+        raise SystemExit(1)
+
+
+# ── Crypto Homie zero-paid scheduled round ───────────────────────────────
+
+
+@main.group("crypto")
+def crypto_group():
+    """Operate Crypto Homie's private market intelligence surfaces."""
+
+
+@crypto_group.group("round")
+def crypto_round_group():
+    """Inspect or run the read-and-paper-only two-hour market round."""
+
+
+def _emit_crypto_round(payload: dict, *, json_mode: bool) -> None:
+    if json_mode:
+        click.echo(json_mod.dumps(payload, indent=2, sort_keys=True, default=str))
+        return
+    click.echo(f"Crypto round: {'OK' if payload.get('success') else 'ATTENTION'}")
+    for key in ("enabled", "stage", "round_id", "decision", "status", "error"):
+        if payload.get(key) is not None:
+            click.echo(f"  {key}: {payload[key]}")
+    if payload.get("config"):
+        click.echo(f"  config: {json_mod.dumps(payload['config'], sort_keys=True)}")
+    if payload.get("ledger"):
+        click.echo(f"  ledger: {json_mod.dumps(payload['ledger'], sort_keys=True, default=str)}")
+    if payload.get("sources") is not None:
+        click.echo(json_mod.dumps(payload["sources"], indent=2, sort_keys=True, default=str))
+    if payload.get("paper") is not None:
+        click.echo(json_mod.dumps(payload["paper"], indent=2, sort_keys=True, default=str))
+    if payload.get("failed_gates"):
+        click.echo(f"  failed gates: {', '.join(payload['failed_gates'])}")
+
+
+def _crypto_round_status_payload() -> dict:
+    try:
+        from crypto_round.config import load_market_round_settings
+        from crypto_round.db import CryptoRoundDB
+        from crypto_round.provenance import status as provenance_status
+
+        settings = load_market_round_settings()
+        return {
+            "success": True,
+            "enabled": settings.enabled,
+            "config": settings.as_public_dict(),
+            "ledger": CryptoRoundDB(initialize=False).status(),
+            "dependency_provenance": provenance_status(),
+        }
+    except Exception as exc:
+        return {"success": False, "enabled": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+@crypto_round_group.command("status")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def crypto_round_status(json_mode: bool):
+    """Show sanitized config, ledger, and dependency health."""
+    payload = _crypto_round_status_payload()
+    _emit_crypto_round(payload, json_mode=json_mode)
+    if not payload["success"]:
+        raise SystemExit(1)
+
+
+@crypto_round_group.command("sources")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def crypto_round_sources(json_mode: bool):
+    """Show source health for the latest round, without private source IDs."""
+    try:
+        from crypto_round.db import CryptoRoundDB
+
+        sources = CryptoRoundDB(initialize=False).source_status()
+        # Source labels are generic; watermarks can be private platform IDs.
+        public = [{key: value for key, value in row.items() if key != "watermark"} for row in sources]
+        payload = {"success": True, "sources": public}
+    except Exception as exc:
+        payload = {"success": False, "sources": [], "error": f"{type(exc).__name__}: {exc}"}
+    _emit_crypto_round(payload, json_mode=json_mode)
+    if not payload["success"]:
+        raise SystemExit(1)
+
+
+@crypto_round_group.command("run")
+@click.option(
+    "--stage",
+    type=click.Choice(["discord", "round", "research"], case_sensitive=False),
+    default="round",
+    show_default=True,
+)
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def crypto_round_run(stage: str, json_mode: bool):
+    """Run one bounded collection/cognition/research stage now."""
+    try:
+        normalized = stage.casefold()
+        if normalized == "discord":
+            import dataclasses
+
+            from discord_alpha.scout import run_alpha_scout
+
+            result = dataclasses.asdict(run_alpha_scout(preview=False, collect_only=True))
+            payload = {"success": bool(result.get("allowed")), "stage": normalized, **result}
+        elif normalized == "research":
+            from crypto_round.last30days_adapter import run
+
+            result = run()
+            payload = {
+                "success": bool(result.get("success")),
+                "stage": normalized,
+                "error": result.get("error"),
+                "sources_excluded": result.get("sources_excluded", []),
+            }
+        else:
+            from crypto_round.service import run_round
+
+            payload = {"stage": normalized, **run_round()}
+    except Exception as exc:
+        payload = {"success": False, "stage": stage, "error": f"{type(exc).__name__}: {exc}"}
+    _emit_crypto_round(payload, json_mode=json_mode)
+    if not payload.get("success"):
+        raise SystemExit(1)
+
+
+@crypto_round_group.command("paper")
+@click.option("--limit", type=click.IntRange(1, 250), default=25, show_default=True)
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def crypto_round_paper(limit: int, json_mode: bool):
+    """Read recent Homie-owned paper calls and prediction observations."""
+    try:
+        from crypto_round.db import CryptoRoundDB
+
+        db = CryptoRoundDB(initialize=False)
+        payload = {
+            "success": True,
+            "paper": db.paper_status(limit),
+            "prediction_observations": db.prediction_arb_observations(limit=limit),
+        }
+    except Exception as exc:
+        payload = {"success": False, "paper": [], "error": f"{type(exc).__name__}: {exc}"}
+    _emit_crypto_round(payload, json_mode=json_mode)
+    if not payload["success"]:
+        raise SystemExit(1)
+
+
+@crypto_round_group.command("promotion")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def crypto_round_promotion(json_mode: bool):
+    """Show earned-eligibility readiness; never arm or execute a canary."""
+    try:
+        from crypto_round.db import CryptoRoundDB
+
+        payload = {
+            "success": True,
+            **CryptoRoundDB(initialize=False).promotion_readiness(),
+        }
+    except Exception as exc:
+        payload = {"success": False, "status": "NOT_ELIGIBLE", "error": f"{type(exc).__name__}: {exc}"}
+    _emit_crypto_round(payload, json_mode=json_mode)
+    if not payload["success"]:
+        raise SystemExit(1)
 
 
 def _fmt_relative_time(ts: int | None) -> str:
@@ -2151,6 +2646,27 @@ def _print_issues(issues):
             click.echo(f"      Fix: {hint}")
 
 
+def _print_buzz_status(buzz):
+    """Render the secret-free Buzz transport snapshot for operator surfaces."""
+    if not buzz:
+        return
+    click.echo("\nBuzz:")
+    click.echo(f"  State: {buzz.get('state', 'disabled')}")
+    click.echo(f"  Transport: {buzz.get('active_transport', 'none')}")
+    click.echo(f"  Relay: {buzz.get('relay_host') or 'not configured'}")
+    click.echo(f"  Identity: {buzz.get('identity') or 'not available'}")
+    click.echo(f"  Watched channels: {buzz.get('watched_channel_count', 0)}")
+    click.echo(f"  Last event: {buzz.get('last_event_time') or 'none'}")
+    click.echo(
+        f"  CLI: {buzz.get('cli_version') or 'unknown'} "
+        f"(0.5.x compatible: {buzz.get('cli_compatible')})"
+    )
+    if buzz.get("lock_conflict"):
+        click.echo("  Lock conflict: yes")
+    if buzz.get("last_error"):
+        click.echo(f"  Last error: {buzz['last_error']}")
+
+
 def _print_status_human(report):
     """Format DiagnosticsReport for terminal output."""
     click.echo("The Homie — System Status")
@@ -2204,6 +2720,8 @@ def _print_status_human(report):
 
     _print_browser_readiness(report.browser)
     _print_ghost_state(report.ghost)
+    _print_persona_readiness(report.persona_readiness)
+    _print_crypto_round_status(report.crypto_round)
 
     click.echo(f"\nMemory: {report.memory_doc_count} docs ({report.memory_embedding_status})")
     _print_cognitive_loop(report.cognitive_loop)
@@ -2214,6 +2732,8 @@ def _print_status_human(report):
         click.echo("\nAdapters:")
         for name, connected in report.adapters_connected.items():
             click.echo(f"  {name}: {'connected' if connected else 'disconnected'}")
+
+    _print_buzz_status(report.buzz)
 
     if report.capabilities:
         click.echo("\nCapabilities:")
@@ -2255,6 +2775,67 @@ def _print_live_execution(live_execution: dict[str, object]) -> None:
         "  Default contract: "
         f"{live_execution.get('default_contract', 'dry-run/read-only')}"
     )
+
+
+def _print_curriculum_status(curriculum_status: dict[str, object]) -> None:
+    if not curriculum_status:
+        return
+    click.echo("\nPersona curriculum:")
+    state = (
+        "KILL-SWITCHED"
+        if curriculum_status.get("kill_switch_disabled")
+        else "ready"
+        if curriculum_status.get("available")
+        else "unavailable"
+    )
+    click.echo(f"  State: {state}")
+    click.echo(
+        "  Profiles: "
+        f"{curriculum_status.get('enabled_personas', 0)} enabled / "
+        f"{curriculum_status.get('configured_personas', 0)} configured"
+    )
+    for error in list(curriculum_status.get("config_errors") or [])[:5]:
+        click.echo(f"  Config error: {error}")
+
+
+def _print_crypto_round_status(snapshot: dict[str, object]) -> None:
+    if not snapshot:
+        return
+    click.echo("\nCrypto market round:")
+    click.echo(
+        "  State: "
+        + (
+            "enabled"
+            if snapshot.get("available") and snapshot.get("enabled")
+            else "disabled"
+            if snapshot.get("available")
+            else "unavailable"
+        )
+    )
+    if snapshot.get("latest"):
+        latest = snapshot["latest"]
+        click.echo(
+            f"  Latest: {latest.get('round_id', 'unknown')} "
+            f"({latest.get('state', 'unknown')})"
+        )
+    if snapshot.get("error"):
+        click.echo(f"  Error: {snapshot['error']}")
+
+
+def _print_persona_readiness(
+    inventory: dict[str, dict[str, object]],
+) -> None:
+    """Render all six axes; never collapse persona readiness to one boolean."""
+
+    if not inventory:
+        return
+    from personas.readiness import render_persona_readiness
+
+    click.echo("\nPersona readiness:")
+    for persona_id in sorted(inventory):
+        rendered = render_persona_readiness(inventory[persona_id])
+        for line in rendered.splitlines():
+            click.echo(f"  {line}")
 
 
 def _print_browser_readiness(browser):
@@ -3371,6 +3952,24 @@ def _profile_info_to_dict(info) -> dict:
 @click.option("--clone", is_flag=True, default=False, help="Light-clone from --from (or default)")
 @click.option("--clone-all", is_flag=True, default=False, help="Full-clone from --from (or default)")
 @click.option("--from", "clone_from", default=None, help="Source profile name to clone from")
+@click.option("--template", "template_id", default=None, help="Blueprint template id")
+@click.option("--display-name", default=None, help="Persona display name")
+@click.option("--role", default=None, help="Persona role or responsibility")
+@click.option("--model", default=None, help="Preferred model id")
+@click.option("--domain", default=None, help="Persona domain")
+@click.option(
+    "--channel",
+    "--discord-channel",
+    "discord_channel_id",
+    default=None,
+    help="Discord channel id to bind disabled-by-default",
+)
+@click.option(
+    "--operator-exec",
+    is_flag=True,
+    default=False,
+    help="Explicitly grant the operator-exec capability class",
+)
 @click.option("--install-launchd", is_flag=True, default=False, help="Install macOS launchd auto-start (darwin only)")
 @click.option("--install-systemd", is_flag=True, default=False, help="Install Linux systemd user unit (linux only)")
 @click.option("--no-alias", is_flag=True, default=False, help="Skip wrapper alias creation")
@@ -3385,34 +3984,420 @@ def profile_create(
     clone,
     clone_all,
     clone_from,
+    template_id,
+    display_name,
+    role,
+    model,
+    domain,
+    discord_channel_id,
+    operator_exec,
     install_launchd,
     install_systemd,
     no_alias,
     best_effort_alias,
 ):
-    """Create a new persona profile."""
+    """Create a useful persona through the canonical blueprint compiler."""
     try:
         from personas.lifecycle import LifecycleError, create_profile
+        from personas.provisioning import ProvisioningError
         # Lazy import of cli_root for R1 M2 collision check (must be inside body).
         from cli import main as cli_root
 
         registered = frozenset(cli_root.commands.keys())
-        info = create_profile(
-            name,
-            clone=clone,
-            clone_all=clone_all,
-            clone_from=clone_from,
-            install_launchd=install_launchd,
-            install_systemd=install_systemd,
-            no_alias=no_alias,
+        clone_requested = clone or clone_all or clone_from is not None
+        blueprint_customized = any(
+            value is not None
+            for value in (
+                template_id,
+                display_name,
+                role,
+                model,
+                domain,
+                discord_channel_id,
+            )
+        ) or operator_exec
+        if clone_requested:
+            if blueprint_customized:
+                raise ValueError(
+                    "clone creation cannot be combined with blueprint options"
+                )
+            info = create_profile(
+                name,
+                clone=clone,
+                clone_all=clone_all,
+                clone_from=clone_from,
+                install_launchd=install_launchd,
+                install_systemd=install_systemd,
+                no_alias=no_alias,
+                best_effort_alias=best_effort_alias,
+                registered_subcommands=registered,
+            )
+            click.echo(f"Created profile '{name}' at {info.path}")
+            return
+
+        from personas.creation import (
+            PersonaCreationSpec,
+            apply_persona_creation,
+        )
+
+        receipt = apply_persona_creation(
+            PersonaCreationSpec(
+                persona_id=name,
+                template_id=template_id,
+                display_name=display_name,
+                role=role,
+                model=model,
+                domain=domain,
+                discord_channel_id=discord_channel_id,
+                operator_exec=operator_exec,
+            ),
+            actor="cli",
+            create_alias=not no_alias,
             best_effort_alias=best_effort_alias,
             registered_subcommands=registered,
+            install_launchd=install_launchd,
+            install_systemd=install_systemd,
         )
-        # create_profile returns ProfileInfo; print path for the operator.
-        click.echo(f"Created profile '{name}' at {info.path}")
-    except (LifecycleError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        click.echo(f"Created profile '{name}' at {receipt.profile_path}")
+        click.echo(f"Preview hash: {receipt.preview_hash}")
+        click.echo(
+            f"Provisioning receipt: {receipt.outcome} "
+            f"transaction={receipt.transaction_id}"
+        )
+    except (
+        LifecycleError,
+        ProvisioningError,
+        ValueError,
+        FileExistsError,
+        FileNotFoundError,
+    ) as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
+
+
+def _blueprint_creation_spec(
+    name,
+    template_id,
+    display_name,
+    role,
+    model,
+    domain,
+    discord_channel_id,
+    operator_exec,
+):
+    from personas.creation import PersonaCreationSpec
+
+    return PersonaCreationSpec(
+        persona_id=name,
+        template_id=template_id,
+        display_name=display_name,
+        role=role,
+        model=model,
+        domain=domain,
+        discord_channel_id=discord_channel_id,
+        operator_exec=operator_exec,
+    )
+
+
+def _blueprint_spec_options(function):
+    options = [
+        click.option("--template", "template_id", default=None),
+        click.option("--display-name", default=None),
+        click.option("--role", default=None),
+        click.option("--model", default=None),
+        click.option("--domain", default=None),
+        click.option(
+            "--channel",
+            "--discord-channel",
+            "discord_channel_id",
+            default=None,
+            help="Discord channel id",
+        ),
+        click.option("--operator-exec", is_flag=True, default=False),
+    ]
+    for option in reversed(options):
+        function = option(function)
+    return function
+
+
+@profile.group("blueprint")
+def profile_blueprint():
+    """List, preview, apply, and inspect persona blueprints."""
+    pass
+
+
+@profile_blueprint.command("list")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_blueprint_list(json_mode):
+    """List the canonical persona template catalog."""
+    from personas.creation import get_creation_catalog
+
+    catalog = list(get_creation_catalog())
+    if json_mode:
+        click.echo(json_mod.dumps(catalog, indent=2))
+        return
+    for item in catalog:
+        click.echo(f"{item['id']:<20} {item['name']} — {item['description']}")
+
+
+@profile_blueprint.command("show")
+@click.argument("template_id")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_blueprint_show(template_id, json_mode):
+    """Show one canonical persona template."""
+    from personas.creation import get_creation_catalog
+
+    item = next(
+        (row for row in get_creation_catalog() if row["id"] == template_id),
+        None,
+    )
+    if item is None:
+        raise click.ClickException(f"unknown persona template {template_id!r}")
+    if json_mode:
+        click.echo(json_mod.dumps(item, indent=2))
+        return
+    click.echo(json_mod.dumps(item, indent=2))
+
+
+@profile_blueprint.command("plan")
+@click.argument("name")
+@_blueprint_spec_options
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_blueprint_plan(
+    name,
+    template_id,
+    display_name,
+    role,
+    model,
+    domain,
+    discord_channel_id,
+    operator_exec,
+    json_mode,
+):
+    """Preview a persona blueprint without writing state."""
+    from personas.creation import preview_persona_creation
+
+    try:
+        preview = preview_persona_creation(
+            _blueprint_creation_spec(
+                name,
+                template_id,
+                display_name,
+                role,
+                model,
+                domain,
+                discord_channel_id,
+                operator_exec,
+            )
+        )
+    except (ValueError, FileExistsError, FileNotFoundError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    payload = preview.as_dict()
+    if not json_mode:
+        click.echo(f"Preview hash: {preview.preview_hash}")
+        click.echo(f"State hash:   {preview.state_hash}")
+    click.echo(json_mod.dumps(payload, indent=2))
+
+
+@profile_blueprint.command("reconcile-plan")
+@click.argument("name")
+@_blueprint_spec_options
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_blueprint_reconcile_plan(
+    name,
+    template_id,
+    display_name,
+    role,
+    model,
+    domain,
+    discord_channel_id,
+    operator_exec,
+    json_mode,
+):
+    """Preview an existing profile reconcile without writing state."""
+    from personas.creation import (
+        preview_persona_reconcile,
+        resolve_callable_tool_inventory,
+    )
+    from personas.provisioning import ProvisioningError
+
+    try:
+        preview = preview_persona_reconcile(
+            _blueprint_creation_spec(
+                name,
+                template_id,
+                display_name,
+                role,
+                model,
+                domain,
+                discord_channel_id,
+                operator_exec,
+            ),
+            callable_tools=resolve_callable_tool_inventory(),
+        )
+    except (
+        ValueError,
+        FileExistsError,
+        FileNotFoundError,
+        ProvisioningError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+    payload = preview.as_dict()
+    if not json_mode:
+        click.echo(f"Preview hash: {preview.preview_hash}")
+        click.echo(f"State hash:   {preview.state_hash}")
+    click.echo(json_mod.dumps(payload, indent=2))
+
+
+@profile_blueprint.command("apply")
+@click.argument("name")
+@_blueprint_spec_options
+@click.option("--preview-hash", default=None, help="Expected plan SHA-256")
+@click.option("--state-hash", default=None, help="Expected physical-state SHA-256")
+@click.option("--no-alias", is_flag=True, default=False)
+@click.option("--best-effort-alias", is_flag=True, default=False)
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_blueprint_apply(
+    name,
+    template_id,
+    display_name,
+    role,
+    model,
+    domain,
+    discord_channel_id,
+    operator_exec,
+    preview_hash,
+    state_hash,
+    no_alias,
+    best_effort_alias,
+    json_mode,
+):
+    """Atomically create a persona from a canonical blueprint."""
+    from personas.creation import apply_persona_creation
+    from personas.provisioning import ProvisioningError
+
+    try:
+        receipt = apply_persona_creation(
+            _blueprint_creation_spec(
+                name,
+                template_id,
+                display_name,
+                role,
+                model,
+                domain,
+                discord_channel_id,
+                operator_exec,
+            ),
+            actor="cli",
+            expected_preview_hash=preview_hash,
+            expected_state_hash=state_hash,
+            create_alias=not no_alias,
+            best_effort_alias=best_effort_alias,
+        )
+    except (ValueError, FileExistsError, FileNotFoundError, ProvisioningError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    payload = receipt.as_dict()
+    if not json_mode:
+        click.echo(
+            f"{receipt.outcome.title()} profile '{name}' at "
+            f"{receipt.profile_path}"
+        )
+    click.echo(json_mod.dumps(payload, indent=2))
+
+
+@profile_blueprint.command("reconcile")
+@click.argument("name")
+@_blueprint_spec_options
+@click.option(
+    "--preview-hash",
+    required=True,
+    help="Reviewed reconcile plan SHA-256",
+)
+@click.option(
+    "--state-hash",
+    required=True,
+    help="Reviewed physical-state SHA-256",
+)
+@click.option(
+    "--approve-reconcile",
+    is_flag=True,
+    default=False,
+    help="Explicitly approve applying this reconcile",
+)
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_blueprint_reconcile(
+    name,
+    template_id,
+    display_name,
+    role,
+    model,
+    domain,
+    discord_channel_id,
+    operator_exec,
+    preview_hash,
+    state_hash,
+    approve_reconcile,
+    json_mode,
+):
+    """Apply an explicitly approved reconcile of an existing profile."""
+    from personas.creation import (
+        apply_persona_reconcile,
+        resolve_callable_tool_inventory,
+    )
+    from personas.provisioning import ProvisioningError
+
+    try:
+        receipt = apply_persona_reconcile(
+            _blueprint_creation_spec(
+                name,
+                template_id,
+                display_name,
+                role,
+                model,
+                domain,
+                discord_channel_id,
+                operator_exec,
+            ),
+            actor="cli",
+            expected_preview_hash=preview_hash,
+            expected_state_hash=state_hash,
+            reconcile_approved=approve_reconcile,
+            callable_tools=resolve_callable_tool_inventory(),
+        )
+    except (
+        ValueError,
+        FileExistsError,
+        FileNotFoundError,
+        ProvisioningError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+    payload = receipt.as_dict()
+    if not json_mode:
+        click.echo(
+            f"{receipt.outcome.title()} profile '{name}' at "
+            f"{receipt.profile_path}"
+        )
+    click.echo(json_mod.dumps(payload, indent=2))
+
+
+@profile_blueprint.command("readiness")
+@click.argument("name")
+@click.option("--json", "json_mode", is_flag=True, help="JSON output")
+def profile_blueprint_readiness(name, json_mode):
+    """Read the physical six-axis readiness vector for one profile."""
+    from personas.readiness import (
+        build_persona_readiness_snapshot,
+        render_persona_readiness,
+    )
+
+    try:
+        payload = build_persona_readiness_snapshot(name).as_dict()
+    except (ValueError, FileNotFoundError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if json_mode:
+        click.echo(json_mod.dumps(payload, indent=2))
+        return
+    click.echo(render_persona_readiness(payload))
 
 
 @profile.command("list")

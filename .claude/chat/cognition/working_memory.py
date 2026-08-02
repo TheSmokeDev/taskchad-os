@@ -83,7 +83,15 @@ class WorkingMemory:
         # region="internal") sits LATE — after durable context, just before the
         # live conversation — so current-turn thinking renders near the turn it
         # informs. Additive entry; makes the ordering DETERMINISTIC (it was
-        # tail-dumped via default_order before).
+        # tail-dumped via default_order before). #172: on the engine's main
+        # reply path this region is now extracted and stripped from turn_wm
+        # BEFORE render (engine.py's cognitive-pass block), so it never
+        # actually reaches order_regions()/assemble_regions() there — the
+        # monologue instead rides the prompt-suffix transport, positioned
+        # relative to the attachment context and session brief, not this
+        # ordering. This position still governs other WM consumers that call
+        # order_regions()/to_system_prompt() directly (e.g. cognitive_pass.py's
+        # own monologue-generation prompt).
         "internal",
         "recent_conversation",
     )

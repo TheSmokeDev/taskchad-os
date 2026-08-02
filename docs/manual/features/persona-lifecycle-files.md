@@ -71,4 +71,7 @@ Framework core. Verify the public mirror before claiming current export state.
 
 - Split detailed profile lifecycle/import/export docs into a dedicated manual
   pass.
+- Route every create surface through the typed, atomic
+  [persona blueprint provisioner](persona-blueprints-capability-provisioning.md)
+  once its post-foundation waves land.
 - Add current dashboard screenshot/proof when persona UI changes next.

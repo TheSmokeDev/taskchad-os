@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ import runtime.gemini_cli as gemini_cli
 import runtime.profiles as profiles
 from runtime.auth_profiles import AuthProfileStatus
 from runtime.base import RuntimeRequest
-from runtime.capabilities import TOOL_REASONING
+from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
 from runtime.errors import RuntimeConfigError, RuntimeRetryableError
 from runtime.profiles import RuntimeProfile
 
@@ -121,6 +122,81 @@ async def test_gemini_cli_runtime_executes_via_gemini_cli(
     # Prompt delivered via stdin (dash arg), NOT as a CLI argument
     assert "-" in captured["args"]
     assert captured["cwd"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_gemini_model_only_removes_every_tool_surface(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = gemini_cli.GeminiCliRuntime(_gemini_profile(key_prefix="primary"))
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "unrelated-project")
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setattr(
+        gemini_cli,
+        "gemini_auth_status",
+        lambda _profile=None: AuthProfileStatus(True, "authenticated"),
+    )
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        launch_env = kwargs["env"]
+        captured["launch_env"] = launch_env
+        settings_path = Path(launch_env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])
+        captured["settings"] = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                return (b"SAFE_OK\n", b"")
+
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    result = await runtime.run(
+        RuntimeRequest(
+            prompt="Treat transcript as evidence.",
+            cwd=tmp_path,
+            task_name="curriculum_study",
+            capability=TEXT_REASONING,
+            allowed_tools=[],
+            disallowed_tools=["*"],
+            model_only=True,
+        )
+    )
+
+    args = captured["args"]
+    settings = captured["settings"]
+    assert result.text == "SAFE_OK"
+    assert args[args.index("--extensions") + 1] == "none"
+    assert args[args.index("--allowed-mcp-server-names") + 1] == ""
+    assert settings["tools"]["core"] == []
+    assert settings["tools"]["discoveryCommand"] == ""
+    assert settings["tools"]["enableHooks"] is False
+    assert settings["tools"]["enableMessageBusIntegration"] is False
+    assert settings["context"]["fileName"].startswith("__HOMIE_MODEL_ONLY")
+    assert settings["security"]["disableYoloMode"] is True
+    assert "GOOGLE_CLOUD_PROJECT" not in captured["launch_env"]
+    assert "GOOGLE_GENAI_USE_VERTEXAI" not in captured["launch_env"]
+
+
+def test_gemini_model_only_rejects_contradictory_tools() -> None:
+    runtime = gemini_cli.GeminiCliRuntime(_gemini_profile(key_prefix="primary"))
+    assert (
+        runtime.supports(
+            RuntimeRequest(
+                prompt="bad",
+                cwd=".",
+                task_name="bad_model_only",
+                allowed_tools=["read_file"],
+                disallowed_tools=["*"],
+                model_only=True,
+            )
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio

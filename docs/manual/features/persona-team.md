@@ -19,18 +19,25 @@ compose into a company.
 
 ## The Anatomy Of A Persona
 
-A persona is the sum of five layers, each owned by an existing slice:
+A persona is the sum of the layers below, each owned by an existing slice:
 
 | Layer | What it gives the persona | Deep page |
 |---|---|---|
+| **Blueprint (the provisioning intent)** | One reviewable declaration of identity, safe defaults, domain packs, explicit operator-exec, channels, and scheduled authority | [persona-blueprints-capability-provisioning](persona-blueprints-capability-provisioning.md) |
 | **Identity (the brain)** | Its own `SOUL` / `USER` / `MEMORY` / `SELF` files under its profile root — who it is, what it believes, its boundaries | [persona-lifecycle-files](persona-lifecycle-files.md) |
 | **Capabilities (tools + secrets)** | A lane-scoped `.env` and skill set delegated from the capability matrix — it can only touch its lane's keys | [persona-capability-matrix](persona-capability-matrix.md) |
+| **Elevation (bounded exceptions)** | An authenticated operator can approve one exact out-of-scope tool call without widening the profile | [persona-capability-elevation](persona-capability-elevation.md) |
 | **Learning (getting sharper)** | Opt-in scheduled belief extraction from its OWN attributed turns — the compounding engine | [persona-learning-loop](persona-learning-loop.md) |
+| **Curriculum (domain mastery)** | Approved external feeds compiled into private, cited doctrine; applications remain proposal-only | [persona-curriculum-engine](persona-curriculum-engine.md) |
 | **Channel (where you talk to it)** | A chat channel (e.g. a Discord channel) bound to the persona | [multi-channel-adapters](multi-channel-adapters.md) |
 | **Collaboration (meetings)** | Multi-persona Cabinet rooms — standups, discussions, a roster that answers together | [cabinet-rooms](cabinet-rooms.md) |
 
 The default profile stays broad/admin. Specialist personas get the *smallest*
 capability set that matches their lane.
+
+The blueprint compiler and capability-class foundation are implemented. Until
+the atomic provisioner/operator surfaces land, the lifecycle steps below remain
+the current manual setup path; profile creation does not yet apply a blueprint.
 
 ## The Lifecycle — Standing Up An Employee
 

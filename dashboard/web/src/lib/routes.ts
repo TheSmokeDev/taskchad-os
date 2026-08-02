@@ -1,9 +1,9 @@
 import {
   LayoutGrid, ListTodo, Users, MessageSquare,
   Brain, Network, Activity, ShieldCheck,
-  Briefcase, Mic, Calendar,
+  Briefcase, Mic, AudioLines, Calendar,
   Kanban, Monitor, PlugZap, Settings as SettingsIcon,
-  Smartphone, Share2, Ghost,
+  Smartphone, Share2, Ghost, Workflow,
 } from 'lucide-preact';
 import type { ComponentChildren } from 'preact';
 
@@ -21,9 +21,10 @@ export interface RouteDef {
 // Renames vs donor (per INTENTIONAL_DEVIATIONS.md):
 //   - WarRoom → Cabinet (Q-naming lock; route /cabinet)
 export const ROUTES: RouteDef[] = [
-  { path: '/mission',       label: 'Mission Control', section: 'workspace',    icon: LayoutGrid,    shortcut: 'g m' },
+  { path: '/mission',       label: 'Homie Dashboard', section: 'workspace',    icon: LayoutGrid,    shortcut: 'g m' },
   { path: '/work',          label: 'Work Queue',      section: 'workspace',    icon: Kanban,        shortcut: 'g q' },
   { path: '/convoy',        label: 'Convoy',          section: 'workspace',    icon: Network,       shortcut: 'g v' },
+  { path: '/runs',          label: 'Runs',            section: 'workspace',    icon: Workflow,      shortcut: 'g r' },
   { path: '/scheduled',     label: 'Scheduled',       section: 'workspace',    icon: ListTodo,      shortcut: 'g s' },
   { path: '/agents',        label: 'Agents',          section: 'workspace',    icon: Users,         shortcut: 'g a' },
   { path: '/chat',          label: 'Chat',            section: 'workspace',    icon: MessageSquare, shortcut: 'g c' },
@@ -41,6 +42,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/cabinet',       label: 'Cabinet',         section: 'collaborate',  icon: Briefcase,     shortcut: 'g w' },
   { path: '/teams',         label: 'Operating Room',  section: 'collaborate',  icon: Users,         shortcut: 'g t' },
   { path: '/voices',        label: 'Voices',          section: 'collaborate',  icon: Mic                           },
+  { path: '/talk',          label: 'Talk',            section: 'collaborate',  icon: AudioLines,   shortcut: 'g k' },
   { path: '/standup',       label: 'Standup',         section: 'collaborate',  icon: Calendar                      },
 
   { path: '/settings',      label: 'Settings',        section: 'configure',    icon: SettingsIcon                  },

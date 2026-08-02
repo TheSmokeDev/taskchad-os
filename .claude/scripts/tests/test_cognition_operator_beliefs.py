@@ -178,6 +178,26 @@ def test_apply_kind_explicit_maps_to_explicit(tmp_path, monkeypatch):
     assert InferenceTracker(path).load()[0].source == "explicit"
 
 
+def test_apply_kind_explicit_case_and_whitespace_variants_map_to_explicit(tmp_path, monkeypatch):
+    """A case-mismatched or whitespace-padded 'explicit' kind still maps to source='explicit'.
+
+    Regression for #173 Finding 1: a fallback provider (Codex/Gemini) returning
+    'Explicit' / 'EXPLICIT' / 'explicit ' must not silently downgrade a direct
+    operator statement to source='reflection'.
+    """
+    _patch_fake_embed_batch(monkeypatch)
+    path = tmp_path / "inf.json"
+    claims = [
+        {"claim": "operator always tests before shipping one", "kind": "Explicit"},
+        {"claim": "operator always tests before shipping two", "kind": "EXPLICIT"},
+        {"claim": "operator always tests before shipping three", "kind": "explicit "},
+    ]
+    n = _run_apply(claims, path)
+    assert n == 3
+    records = InferenceTracker(path).load()
+    assert {r.source for r in records} == {"explicit"}
+
+
 def test_apply_bad_confidence_falls_back_to_half(tmp_path, monkeypatch):
     """A non-numeric / missing confidence -> 0.5 default, claim STILL written."""
     _patch_fake_embed_batch(monkeypatch)

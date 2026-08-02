@@ -7,6 +7,7 @@ Used by `thehomie chat` CLI command and consumed by Paperclip adapter.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -94,6 +95,15 @@ def build_quiet_error_envelope(
     return json_mod.dumps(payload)
 
 
+class ResumeTargetMissing(RuntimeError):
+    """--resume-strict found no matching session; the run refuses to start.
+
+    Message contains the literal marker ``resume session not found`` — the
+    Talk agent steer loop matches it in the quiet error envelope (a
+    cross-file tripwire test pins the string on both sides).
+    """
+
+
 class CLIAdapter:
     """CLI adapter — stdin/stdout for single-query and interactive modes."""
 
@@ -109,6 +119,7 @@ class CLIAdapter:
         model: str | None = None,
         toolsets: str | None = None,
         resume_session: str | None = None,
+        resume_strict: bool = False,
         continue_last: bool = False,
         source: str = "interactive",
         voice_path: str | None = None,
@@ -119,6 +130,7 @@ class CLIAdapter:
         self._model = model
         self._toolsets = toolsets
         self._resume = resume_session
+        self._resume_strict = resume_strict
         self._continue_last = continue_last
         # PRD-7 §7.10 / Phase 4 (PRP-7d): session source tag, propagated into
         # every IncomingMessage this adapter yields and surfaced via
@@ -177,9 +189,25 @@ class CLIAdapter:
             if match:
                 channel_id = match.channel_id
             else:
+                if self._resume_strict:
+                    # Strict resume ABORTS before the engine ever runs: a
+                    # context-less turn could act on real targets with none
+                    # of the conversation it was steering. The exception
+                    # rides the quiet error-envelope path, so programmatic
+                    # callers see the marker in `error` and fall back.
+                    raise ResumeTargetMissing(
+                        f"resume session not found: '{self._resume}'"
+                    )
                 channel_id = f"cli-{uuid.uuid4().hex[:8]}"
-                if not self._quiet:
-                    print(f"Warning: session '{self._resume}' not found, starting new session")
+                # Always on STDERR, quiet mode included: the stdout envelope
+                # contract is untouched, and this line is the non-strict
+                # resume-miss signal — programmatic callers (the Talk agent
+                # steer loop) grep for it, because envelope session_id
+                # equality cannot distinguish an SDK id rotation from a miss.
+                print(
+                    f"Warning: session '{self._resume}' not found, starting new session",
+                    file=sys.stderr,
+                )
                 self._resume = None
 
         elif self._continue_last:

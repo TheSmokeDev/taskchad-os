@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
@@ -9,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -425,8 +427,256 @@ def build_agent_browser_global_argv(
     return [*resolution.command, *args], resolution
 
 
+# ── Scoped client reaping — the Windows Job Object kill scope ───────────────
+# A timed-out agent-browser client must not leave descendants behind. On
+# Windows the command frequently resolves through npm's `.cmd` shim, so the
+# process we hold is `cmd.exe` and the real work is a Node grandchild:
+# `proc.kill()` reaps the shim and the Node child survives, holding the named
+# session or an in-flight CDP operation open indefinitely (gate finding, 2026-
+# 07-24).
+#
+# `taskkill /T` walks the LIVE process tree, which is exactly the wrong tool
+# near an operator-owned browser: anything that has been re-parented onto the
+# client at kill time gets swept up with it. A Job Object cannot do that. Job
+# membership is decided at CREATION — only the client we spawned and processes
+# it goes on to create are ever members — so terminating the job is
+# structurally incapable of touching the operator's pre-existing Chrome, which
+# was launched independently and is reached over CDP, never as a child.
+#
+# The job is NOT created with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: on a
+# successful command the background daemon the client may have started has to
+# outlive the invocation (that daemon IS the named session). The job is only
+# ever terminated on the timeout path.
+
+#
+# Membership at creation is only worth something if the client cannot RUN
+# before it is a member. Assigning after `Popen` returns leaves a window in
+# which a fast shim spawns its node child, and that grandchild is born outside
+# the job: terminating the job then reports success while the descendant is
+# still alive holding the session (re-gate 2026-07-24 — reproduced with an
+# 0.8s assignment delay). The client is therefore created SUSPENDED, assigned,
+# and only then resumed, so nothing it spawns can predate its membership.
+# Python's `subprocess` exposes no `lpAttributeList`, so the atomic
+# PROC_THREAD_ATTRIBUTE_JOB_LIST route is unavailable without reimplementing
+# CreateProcess; suspend-assign-resume closes the same window.
+#
+# SCOPE. All of this — the job, the suspended start, the thread resume — runs
+# for `reap_on_timeout=True` callers ONLY. Everything below is machinery in
+# service of terminating the scope on a timeout, and a caller that never
+# terminates its scope gains nothing from being inside one. The named desktop
+# WRITE sessions (Upwork, the social X poster) therefore keep the exact
+# pre-existing path: plain Popen, plain `proc.kill()` on timeout, no ctypes
+# anywhere near them.
+
+_JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
+_PROCESS_TERMINATE = 0x0001
+_PROCESS_SET_QUOTA = 0x0100
+_ERROR_MORE_DATA = 234
+_REAP_VERIFY_TIMEOUT_S = 10.0
+
+# Windows creation/thread constants subprocess does not re-export.
+_CREATE_SUSPENDED = 0x00000004
+_THREAD_SUSPEND_RESUME = 0x0002
+_TH32CS_SNAPTHREAD = 0x00000004
+_INVALID_HANDLE_VALUE = -1
+
+
+class _WindowsKillScope:
+    """A kill-scoped Windows Job Object for ONE agent-browser client run."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPDWORD,
+        ]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._k = kernel32
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "CreateJobObject failed")
+        self._handle = handle
+
+    def assign(self, pid: int) -> bool:
+        """Put a freshly spawned client into the scope. Best effort."""
+
+        process = self._k.OpenProcess(
+            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, int(pid)
+        )
+        if not process:
+            return False
+        try:
+            return bool(self._k.AssignProcessToJobObject(self._handle, process))
+        finally:
+            self._k.CloseHandle(process)
+
+    def terminate(self) -> None:
+        self._k.TerminateJobObject(self._handle, 1)
+
+    def live_pids(self) -> list[int]:
+        """PIDs still alive inside the scope (empty == fully reaped)."""
+
+        ctypes = self._ctypes
+        from ctypes import wintypes
+
+        class _ProcessIdList(ctypes.Structure):
+            _fields_ = [
+                ("NumberOfAssignedProcesses", wintypes.DWORD),
+                ("NumberOfProcessIdsInList", wintypes.DWORD),
+                ("ProcessIdList", ctypes.c_size_t * 256),
+            ]
+
+        payload = _ProcessIdList()
+        returned = wintypes.DWORD(0)
+        ok = self._k.QueryInformationJobObject(
+            self._handle,
+            _JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+            ctypes.byref(payload),
+            ctypes.sizeof(payload),
+            ctypes.byref(returned),
+        )
+        if not ok and ctypes.get_last_error() != _ERROR_MORE_DATA:
+            # Unknowable state: report a non-empty scope so callers never
+            # claim a clean reap they cannot prove.
+            return [-1]
+        count = min(int(payload.NumberOfProcessIdsInList), 256)
+        return [int(payload.ProcessIdList[index]) for index in range(count)]
+
+    def close(self) -> None:
+        handle, self._handle = getattr(self, "_handle", None), None
+        if handle:
+            self._k.CloseHandle(handle)
+
+
+def _open_kill_scope() -> Any:
+    """A kill scope for one client run, or ``None`` when unavailable."""
+
+    if platform.system() != "Windows":
+        return None
+    try:
+        return _WindowsKillScope()
+    except Exception:  # pragma: no cover - kernel/ctypes dependent
+        return None
+
+
+def _resume_process(pid: int) -> tuple[int, int]:
+    """Resume every thread of a CREATE_SUSPENDED process.
+
+    Returns ``(threads_found, threads_resumed)``. The client is spawned
+    suspended so it can be put inside the kill scope before it is able to
+    spawn anything; `subprocess` does not hand back the primary thread handle,
+    so the threads are enumerated by owner pid and resumed.
+
+    The two numbers are different failures. ``found == 0`` means the OS has no
+    live process under that pid — there is nothing frozen and nothing to do.
+    ``found > resumed`` means a real suspended client could NOT be woken, and
+    the caller must kill it: a suspended agent-browser would otherwise sit
+    there burning the whole timeout.
+    """
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:  # pragma: no cover - non-Windows
+        return (0, 0)
+
+    class _ThreadEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32)]
+        kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32)]
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+        if not snapshot or snapshot == ctypes.c_void_p(_INVALID_HANDLE_VALUE).value:
+            # Cannot enumerate: report a frozen thread we failed to resume so
+            # the caller kills rather than waiting on a possibly-suspended
+            # client.
+            return (1, 0)
+        try:
+            entry = _ThreadEntry32()
+            entry.dwSize = ctypes.sizeof(_ThreadEntry32)
+            found = 0
+            resumed = 0
+            more = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while more:
+                if entry.th32OwnerProcessID == int(pid):
+                    found += 1
+                    handle = kernel32.OpenThread(
+                        _THREAD_SUSPEND_RESUME, False, entry.th32ThreadID
+                    )
+                    if handle:
+                        try:
+                            if kernel32.ResumeThread(handle) != 0xFFFFFFFF:
+                                resumed += 1
+                        finally:
+                            kernel32.CloseHandle(handle)
+                more = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+            return (found, resumed)
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:  # pragma: no cover - kernel/ctypes dependent
+        return (1, 0)
+
+
+def _reap_kill_scope(scope: Any, pid: int) -> bool:
+    """Terminate the scope and VERIFY every member is gone. Returns success."""
+
+    try:
+        scope.terminate()
+    except Exception:  # pragma: no cover - kernel dependent
+        return False
+    deadline = time.monotonic() + _REAP_VERIFY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        try:
+            if not scope.live_pids():
+                return True
+        except Exception:  # pragma: no cover - kernel dependent
+            return False
+        time.sleep(0.05)
+    print(
+        f"[browser_control] client scope for pid {pid} did not fully exit "
+        "within the reap deadline",
+        flush=True,
+    )
+    return False
+
+
 def _captured_agent_browser_run(
-    argv: list[str], *, kill_tree_on_timeout: bool, **kwargs: Any
+    argv: list[str], *, reap_on_timeout: bool, **kwargs: Any
 ) -> Any:
     """Bound a Windows client without waiting on daemon-owned pipe handles."""
 
@@ -446,43 +696,103 @@ def _captured_agent_browser_run(
             return raw.decode(encoding, errors=errors)
         return raw
 
+    # The kill scope exists ONLY to serve the timeout reap, so it is opened
+    # ONLY for callers that opt into reaping. Opening it for a `reap_on_timeout
+    # =False` caller — the named desktop WRITE sessions behind Upwork and the
+    # social X poster — bought them nothing (their scope is never terminated)
+    # while handing them three new ways to fail before the browser is even
+    # touched: a job-assignment refusal, a thread-enumeration miss, and the
+    # `could not resume the suspended agent-browser client` OSError. Those
+    # callers keep the frozen M12 path: plain Popen, plain `proc.kill()`.
+    scope = _open_kill_scope() if reap_on_timeout else None
     with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
         mode="w+b"
     ) as stderr_file:
+        # Suspended FIRST when there is a scope to join: a client that has not
+        # run yet cannot have spawned a descendant outside the job.
+        popen_kwargs = dict(kwargs)
+        if scope is not None:
+            popen_kwargs["creationflags"] = (
+                int(popen_kwargs.get("creationflags", 0)) | _CREATE_SUSPENDED
+            )
         proc = subprocess.Popen(
             argv,
             stdout=stdout_file,
             stderr=stderr_file,
-            **kwargs,
+            **popen_kwargs,
         )
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            if kill_tree_on_timeout:
-                subprocess.run(
-                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                    capture_output=True,
-                    timeout=10,
-                )
-            else:
-                # A desktop named session attaches to the operator-owned Chrome.
-                # Kill only the timed-out CLI client; never its daemon/browser
-                # descendants or the shared visible CDP session.
-                proc.kill()
+        if scope is not None:
+            assigned = False
             try:
-                proc.wait(timeout=10)
+                assigned = bool(scope.assign(proc.pid))
+            except Exception:  # pragma: no cover - kernel dependent
+                assigned = False
+            if not assigned:
+                with contextlib.suppress(Exception):
+                    scope.close()
+                scope = None
+            # Resume LAST, whether or not the assignment landed — a client left
+            # suspended would hang until the timeout and reap nothing useful.
+            found, resumed = _resume_process(proc.pid)
+            if found and not resumed:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=10)
+                if scope is not None:
+                    with contextlib.suppress(Exception):
+                        scope.close()
+                raise OSError(
+                    "could not resume the suspended agent-browser client"
+                )
+        try:
+            try:
+                proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                pass
+                _kill_timed_out_client(proc, scope, reap_on_timeout=reap_on_timeout)
+                stdout = read_capture(stdout_file)
+                stderr = read_capture(stderr_file)
+                raise subprocess.TimeoutExpired(
+                    argv, timeout, output=stdout, stderr=stderr
+                )
             stdout = read_capture(stdout_file)
             stderr = read_capture(stderr_file)
-            raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr)
-        stdout = read_capture(stdout_file)
-        stderr = read_capture(stderr_file)
-        return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+            return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+        finally:
+            if scope is not None:
+                # Closing WITHOUT kill-on-close: a daemon started by a
+                # successful client owns the named session and must survive.
+                scope.close()
+
+
+def _kill_timed_out_client(proc: Any, scope: Any, *, reap_on_timeout: bool) -> None:
+    """Reap a hung client. Never reaches the operator's own Chrome."""
+
+    if reap_on_timeout:
+        reaped = scope is not None and _reap_kill_scope(scope, proc.pid)
+        if not reaped:
+            # No job scope available (non-Windows kernel surface or an
+            # assignment refusal): fall back to the documented tree kill of
+            # THIS client pid. Chrome is not a descendant of the client — the
+            # client attaches over CDP and never launches a browser.
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=10,
+            )
+    else:
+        # Opt-out callers (named desktop write sessions) keep the frozen M12
+        # semantics: kill only the timed-out CLI client so an in-flight write
+        # its child is finishing is never severed mid-action.
+        proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _tree_kill_run(argv: list[str], **kwargs: Any) -> Any:
-    """Phone/ghost runner that reaps the full client tree on timeout.
+    """Phone/ghost runner that reaps the full client scope on timeout.
 
     Live E2E finding (2026-07-06, phone navigate): agent-browser resolves to a
     .CMD wrapper on Windows; subprocess.run's timeout kills cmd.exe but the
@@ -493,20 +803,28 @@ def _tree_kill_run(argv: list[str], **kwargs: Any) -> Any:
     its background daemon: the one-shot client exits successfully, but the
     daemon keeps PIPE handles open and ``communicate()`` waits forever for EOF.
     Capture through temporary files and wait on the client PID instead. A real
-    timeout still taskkills the complete client tree and surfaces on time.
+    timeout terminates the client's kill scope and surfaces on time.
     """
 
-    return _captured_agent_browser_run(
-        argv, kill_tree_on_timeout=True, **kwargs
-    )
+    return _captured_agent_browser_run(argv, reap_on_timeout=True, **kwargs)
+
+
+def _reaping_session_run(argv: list[str], **kwargs: Any) -> Any:
+    """Named desktop-session runner for READ-ONLY callers that opt into reaping.
+
+    Same scope-terminate semantics as the adb runner. Safe here precisely
+    because the opting-in caller performs no writes: severing a hung read can
+    never leave a half-typed post behind, and the scope cannot reach the
+    operator's Chrome.
+    """
+
+    return _captured_agent_browser_run(argv, reap_on_timeout=True, **kwargs)
 
 
 def _desktop_session_run(argv: list[str], **kwargs: Any) -> Any:
     """Named desktop-session runner that never reaps shared Chrome."""
 
-    return _captured_agent_browser_run(
-        argv, kill_tree_on_timeout=False, **kwargs
-    )
+    return _captured_agent_browser_run(argv, reap_on_timeout=False, **kwargs)
 
 
 def run_agent_browser(
@@ -517,15 +835,34 @@ def run_agent_browser(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     environ: dict[str, str] | None = None,
     runner: Any = None,
+    reap_on_timeout: bool = False,
+    env: dict[str, str] | None = None,
 ) -> CommandResult:
+    """Run one agent-browser command against a CDP target.
+
+    ``reap_on_timeout`` is opt-in and belongs to READ-ONLY callers: on timeout
+    the client's whole kill scope is terminated so no descendant survives
+    holding a named session. Write callers leave it False — their in-flight
+    child is finishing a real action and must not be severed mid-write.
+
+    ``env`` is the CHILD process environment. Its reason for existing is
+    ``AGENT_BROWSER_DEFAULT_TIMEOUT``: agent-browser exposes no per-command
+    timeout flag (``wait --timeout`` is download-only in 0.33.0), so the only
+    way to make the CLI's own bound fire BEFORE ``timeout`` — the ordering that
+    keeps our layer from severing a live client and orphaning its descendants —
+    is to hand the child a smaller default. ``None`` (the default) inherits the
+    parent environment exactly as before; nothing else changes shape.
+    """
+
     if runner is None:
-        # Tree-kill ONLY on adb-target sessions: their slow/freezable renderers
-        # are what make the client outlive a timeout. A named desktop workflow
-        # session (for example Upwork on shared CDP 18222) must keep plain
-        # desktop timeout semantics so cleanup can never reap the visible
-        # desktop browser/daemon tree.
+        # Tree-kill ONLY on adb-target sessions and explicit opt-ins: slow or
+        # freezable renderers are what make a client outlive its timeout. A
+        # named desktop WRITE session (for example Upwork or X on shared CDP
+        # 18222) keeps plain desktop timeout semantics.
         if session in {PHONE_AGENT_BROWSER_SESSION, GHOST_AGENT_BROWSER_SESSION}:
             runner = _tree_kill_run
+        elif reap_on_timeout:
+            runner = _reaping_session_run
         elif session is not None:
             runner = _desktop_session_run
         else:
@@ -534,9 +871,20 @@ def run_agent_browser(
         args, port=port, session=session, environ=environ
     )
     session_label = f" --session {session}" if session else ""
-    result = runner(
-        argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
-    )
+    # `env` is passed ONLY when a caller supplied one: omitting the kwarg keeps
+    # every pre-existing call byte-identical (subprocess treats env=None as
+    # "inherit", but the runners are also monkeypatched in tests that assert on
+    # the exact kwargs).
+    run_kwargs: dict[str, Any] = {
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "timeout": timeout,
+    }
+    if env is not None:
+        run_kwargs["env"] = env
+    result = runner(argv, **run_kwargs)
     return CommandResult(
         ok=result.returncode == 0,
         returncode=result.returncode,

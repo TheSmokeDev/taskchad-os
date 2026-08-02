@@ -78,7 +78,14 @@ def test_windows_task_uses_daily_local_four_am_trigger(tmp_path, monkeypatch):
             enabled = True
             return completed(argv)
         if "/Query" in argv and enabled:
-            return completed(argv, stdout="Next Run Time: 7/15/2026 4:00:00 AM\n")
+            return completed(
+                argv,
+                stdout=(
+                    "Next Run Time: 7/15/2026 4:00:00 AM\n"
+                    "Scheduled Task State: Enabled\n"
+                    "Idle Time: Disabled\n"
+                ),
+            )
         return completed(argv, returncode=1, stderr="not found")
 
     monkeypatch.setattr(update_scheduler, "_run", fake_run)

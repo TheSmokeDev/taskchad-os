@@ -26,7 +26,7 @@ cd .claude/scripts && uv run python ../chat/main.py --test
 | **Adapter isolation** | Each adapter connects independently — one failing doesn't block the others. |
 | **Crash logging** | Top-level `except Exception` around `asyncio.run()` ensures no crash ever goes unlogged, and exits `1` (it used to fall through and exit `0`, so a crash was indistinguishable from a clean shutdown). |
 | **Adapter liveness** | `.claude/chat/liveness.py` — `LivenessSupervisor` probes each adapter's PHYSICAL state on an interval (Telegram: `updater.running` + a live `get_me()`; Discord: gateway task alive + `is_ready()`; web: relay socket connected). K consecutive failures → in-process reconnect → re-probe (never trust the reconnect's own return) → fail fast. Knobs: `BOT_LIVENESS_*` via `config.get_bot_liveness_settings()`. |
-| **Gateway criticality** | Adapters declare `liveness_critical`. Telegram/Discord are **gateways** (the operator talks through them) — their death is restart-worthy. The web/relay adapter is **not** — it dials OUT to Mission Control and redials itself, so a dead relay is reported but never restarted over (restarting can't fix someone else's outage). |
+| **Gateway criticality** | Adapters declare `liveness_critical`. Telegram/Discord are restart-worthy gateways. Buzz self-recovers through WebSocket-to-polling degradation and reports its detailed state without forcing a bot restart. The retired web relay remains non-critical compatibility code. |
 | **External watchdog** | `.claude/scripts/bot_watchdog.py` + scheduled task `SecondBrain-BotWatchdog` (every 5 min). Polls `/health`, restarts via `run_chat.sh` when a gateway is dead or the process is gone, verifies recovery by re-polling `/health`, and enforces a 5-restarts-per-hour budget. Catches what the in-bot supervisor can't: a hard hang, an OOM kill, or a bot that never started. Restart receipts land in `.claude/data/state/watchdog-launcher.log` (launcher output) + `resolver-stderr.log` — the 2026-07-14 all-morning silent-restart-failure (Task Scheduler PATH resolves bash to WSL's System32 shim, which mangles Windows script paths) was invisible until these existed. |
 | **At-logon autostart** | Opt-in `SecondBrain-BotStart` task (`.claude/scripts/autostart.py` behind `/autostart`, `thehomie autostart`, dashboard Settings toggle, `GET/POST /api/autostart`). The watchdog only RECOVERS a dead bot; nothing STARTS one after a reboot unless this is on. Physical Task Scheduler state, idempotent overwrite-on-enable, `HOMIE_KILLSWITCH_AUTOSTART`, audit row per flip. Manual: `docs/manual/features/bot-autostart.md`. |
 
@@ -50,7 +50,8 @@ cd .claude/scripts && uv run python ../chat/main.py --test
 | `engine.py` | Runtime-backed conversations via Claude Agent SDK |
 | `adapters/telegram.py` | Telegram polling, voice/photo/document handlers, inline buttons (hash-mapped custom_ids for 64-byte callback_data limit), message formatting |
 | `adapters/cli_adapter.py` | CLI adapter — interactive REPL and single-query mode |
-| `adapters/web.py` | Web/relay adapter — WebSocket to Mission Control relay |
+| `adapters/web.py` | Deprecated legacy web relay compatibility adapter |
+| `adapters/buzz.py` | Buzz adapter — signed NIP-42 WebSocket with official CLI polling fallback |
 | `adapters/slack.py` | Slack adapter |
 | `adapters/discord.py` | Discord adapter |
 | `adapters/whatsapp.py` | WhatsApp adapter |

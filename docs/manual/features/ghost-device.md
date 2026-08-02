@@ -314,7 +314,11 @@ from env:
 - **Spare-device backend** (no `HOMIE_GHOST_AVD`) — a dedicated physical Android
   this module only **connects + forwards**. There is nothing to boot, so it
   never tries; `ghost_shutdown` leaves a spare running (not this module's to
-  power off).
+  power off). Before any screen or input operation, set
+  `HOMIE_GHOST_SPARE_HARDWARE_ID` to that device's `ro.serialno` value. The
+  framework verifies the live hardware value over the pinned
+  `HOMIE_GHOST_ADB_SERIAL` transport and fails closed if the binding is missing
+  or mismatched; the transport address alone is never accepted as identity.
 
 `ghost_status` **never boots** — auto-booting on a status poll would pin several
 GB of RAM. `ensure_ghost_running` (i.e. `thehomie ghost up`) is the only boot

@@ -1125,18 +1125,38 @@ def test_get_agent_detail_404_on_missing(isolated_app):
     assert r.status_code in (404, 422)
 
 
-def test_post_agent_calls_lifecycle_create_profile(isolated_app, tmp_path, monkeypatch):
-    """POST /api/agents calls personas.lifecycle.create_profile (R1 B1)."""
-    monkeypatch.setenv("HOMIE_HOME", str(tmp_path / ".homie"))
-    (tmp_path / ".homie").mkdir(exist_ok=True)
-    monkeypatch.setenv("HOMIE_BIN_DIR", str(tmp_path / "bin"))
-    (tmp_path / "bin").mkdir(exist_ok=True)
+def test_post_agent_calls_canonical_creation_service(isolated_app, tmp_path):
+    """POST /api/agents stays thin over the Python-owned creation adapter."""
+    from personas.creation import (
+        PersonaCreationReceipt,
+        PersonaCreationSpec,
+        compile_creation_plan,
+    )
 
-    with patch("dashboard_api.create_profile") as mock_create:
-        mock_create.return_value = MagicMock(name="newhomie", path=tmp_path / "newhomie", is_default=False)
+    plan = compile_creation_plan(PersonaCreationSpec(persona_id="newhomie"))
+    receipt = PersonaCreationReceipt(
+        schema_version=1,
+        persona_id="newhomie",
+        outcome="created",
+        preview_hash="a" * 64,
+        state_before_hash="b" * 64,
+        state_after_hash="c" * 64,
+        transaction_id="tx-dashboard-test",
+        profile_path=str(tmp_path / "newhomie"),
+        receipt_path=str(tmp_path / "receipt.json"),
+        changed_paths=(),
+        alias_paths=(),
+        warnings=(),
+        plan=plan,
+    )
+    with patch(
+        "personas.creation.apply_persona_creation",
+        return_value=receipt,
+    ) as mock_create:
         r = isolated_app.post("/api/agents", json={"persona_id": "newhomie"})
         assert r.status_code == 200
         assert mock_create.called
+        assert r.json()["receipt"]["transaction_id"] == "tx-dashboard-test"
 
 
 def test_post_agent_400_on_validation_error(isolated_app):

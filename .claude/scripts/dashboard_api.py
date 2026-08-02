@@ -49,7 +49,7 @@ import uuid
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 import httpx
 from fastapi import (
@@ -63,7 +63,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 import config
 import dashboard_bot_lifecycle
@@ -72,7 +72,6 @@ from dashboard_db import get_connection
 from personas import lifecycle as _lifecycle
 from personas.lifecycle import (
     LifecycleError,
-    create_profile,
     delete_profile,
     resolve_profile_root,
 )
@@ -811,11 +810,34 @@ def run_agent_browser_open(url: str, target: str = "desktop"):
 # ── Pydantic request bodies ──────────────────────────────────────────────
 
 
+class PersonaChannelIntentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    kind: Literal["discord"]
+    channel_id: str = Field(min_length=1, max_length=32, pattern=r"^[0-9]+$")
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class CreatePersonaBody(BaseModel):
-    persona_id: str
-    display_name: str | None = None
-    bot_token_env: str | None = None
-    model: str | None = None
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    persona_id: str = Field(min_length=1, max_length=64)
+    display_name: str | None = Field(default=None, min_length=1, max_length=128)
+    template: str | None = Field(default=None, min_length=1, max_length=64)
+    description: str | None = Field(default=None, min_length=1, max_length=2000)
+    role: str | None = Field(default=None, min_length=1, max_length=2000)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    domain: str | None = Field(default=None, min_length=1, max_length=64)
+    channel_intent: PersonaChannelIntentBody | None = None
+    operator_exec: StrictBool = False
+    expected_preview_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    expected_state_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
 
 class ValidateIdBody(BaseModel):
@@ -1623,12 +1645,13 @@ def _build_jarvis_status() -> dict[str, Any]:
                     "memory_doc_count_matches_cli": telegram_memory_count == report.memory_doc_count,
                 },
             },
-            "mission_control_relay": {
+            "homie_dashboard": {
                 "orchestration_api_port": lifecycle.get("orchestration_api_port"),
                 "health_check_port": lifecycle.get("health_check_port"),
                 "whatsapp_webhook_port": lifecycle.get("whatsapp_webhook_port"),
                 "active_profile": lifecycle.get("active_profile"),
             },
+            "buzz": report.buzz,
         },
         "observability": _collect_documented_proofs(),
         "diagnostics": report_dict,
@@ -1637,7 +1660,7 @@ def _build_jarvis_status() -> dict[str, Any]:
 
 @router.get("/api/jarvis/status")
 def get_jarvis_status() -> dict:
-    """Read-only Jarvis proof surface for Mission Control and dashboards."""
+    """Read-only Jarvis proof surface for the Homie Dashboard."""
     return _build_jarvis_status()
 
 
@@ -1773,7 +1796,7 @@ def get_info() -> dict:
 # ── /api/agents — list / detail / create / soft-delete ───────────────────
 #
 # IMPORTANT: FastAPI matches routes in declaration order. Static routes
-# (``/api/agents/suggestions``, ``/api/agents/templates``,
+# (``/api/agents/preview``, ``/api/agents/suggestions``, ``/api/agents/templates``,
 # ``/api/agents/model``, ``/api/agents/validate-id``,
 # ``/api/agents/validate-token``) MUST be declared BEFORE the dynamic
 # ``/api/agents/{persona_id}`` route — otherwise the dynamic match would
@@ -1800,43 +1823,114 @@ def list_agents(request: Request) -> dict:
     return {"agents": agents}
 
 
-@router.post("/api/agents")
-def create_agent(body: CreatePersonaBody) -> dict:
-    _reject_main_translation(body.persona_id)
+def _creation_spec_from_body(body: CreatePersonaBody):
+    from personas import creation as creation_mod
 
-    # PRD-8 Phase 7b WS4.2 — persona_mutation kill-switch (Rule 3 module-attr).
-    from security import kill_switches  # noqa: PLC0415
+    if body.description and body.role and body.description != body.role:
+        raise HTTPException(
+            status_code=422,
+            detail="description and role must match when both are supplied",
+        )
+    channel = body.channel_intent
+    return creation_mod.PersonaCreationSpec(
+        persona_id=body.persona_id,
+        template_id=body.template,
+        display_name=body.display_name,
+        role=body.role or body.description,
+        model=body.model,
+        domain=body.domain,
+        discord_channel_id=channel.channel_id if channel is not None else None,
+        discord_channel_name=channel.name if channel is not None else None,
+        operator_exec=body.operator_exec,
+    )
+
+
+@router.post("/api/agents/preview")
+def preview_agent(body: CreatePersonaBody, request: Request) -> dict:
+    """Return the canonical no-write plan and physical-state CAS hashes."""
+
+    _reject_main_translation(body.persona_id)
+    _require_persona_in_scope(request, body.persona_id)
     try:
-        kill_switches.requireEnabled("persona_mutation", caller="api_create_agent")
-    except kill_switches.KillSwitchDisabled:
+        personas.validate_persona_name(body.persona_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    spec = _creation_spec_from_body(body)
+
+    from personas import creation as creation_mod
+    from personas import provisioning as provisioning_mod
+
+    try:
+        return creation_mod.preview_persona_creation(spec).as_dict()
+    except provisioning_mod.ProvisioningError as exc:
+        raise HTTPException(status_code=409, detail=_redact(str(exc))) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=_redact(str(exc))) from exc
+    except Exception as exc:
+        logger.error(
+            "persona_creation_preview_failed persona=%s error=%s",
+            body.persona_id,
+            _redact(f"{type(exc).__name__}: {exc}"),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="persona creation preview failed",
+        ) from exc
+
+
+@router.post("/api/agents")
+def create_agent(body: CreatePersonaBody, request: Request) -> dict:
+    _reject_main_translation(body.persona_id)
+    _require_persona_in_scope(request, body.persona_id)
+
+    # Validate via personas.validate_persona_name first (regex + reserved check).
+    try:
+        personas.validate_persona_name(body.persona_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    spec = _creation_spec_from_body(body)
+
+    from personas import creation as creation_mod
+    from personas import provisioning as provisioning_mod
+    from security import kill_switches
+
+    try:
+        receipt = creation_mod.apply_persona_creation(
+            spec,
+            actor=_operator_id_from_request(request),
+            expected_preview_hash=body.expected_preview_hash,
+            expected_state_hash=body.expected_state_hash,
+        )
+    except kill_switches.KillSwitchDisabled as exc:
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "persona mutations are disabled by operator",
                 "switch": "persona_mutation",
             },
+        ) from exc
+    except provisioning_mod.ProvisioningError as exc:
+        raise HTTPException(status_code=409, detail=_redact(str(exc))) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=_redact(str(exc))) from exc
+    except Exception as exc:
+        logger.error(
+            "persona_creation_apply_failed persona=%s error=%s",
+            body.persona_id,
+            _redact(f"{type(exc).__name__}: {exc}"),
         )
-
-    # Validate via personas.validate_persona_name first (regex + reserved check).
-    try:
-        personas.validate_persona_name(body.persona_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-    try:
-        info = create_profile(body.persona_id)
-    except FileExistsError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except LifecycleError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="persona creation failed",
+        ) from exc
 
     return {
-        "persona_id": info.name,
-        "path": str(info.path),
-        "is_default": info.is_default,
-        "status": "created",
+        "persona_id": receipt.persona_id,
+        "path": receipt.profile_path,
+        "is_default": False,
+        "status": receipt.outcome,
+        "preview_hash": receipt.preview_hash,
+        "receipt": receipt.as_dict(),
     }
 
 
@@ -2708,7 +2802,9 @@ def refresh_suggestions() -> dict:
 
 @router.get("/api/agents/templates")
 def get_templates() -> dict:
-    return {"templates": []}
+    from personas import creation as creation_mod
+
+    return {"templates": list(creation_mod.get_creation_catalog())}
 
 
 # ── /api/agents/model (GET + global PATCH — declared BEFORE persona detail) ──
@@ -7369,3 +7465,526 @@ async def cabinet_voice_avatar(persona_id: str) -> Any:
         )
 
     raise HTTPException(status_code=404, detail="avatar_missing")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Archon live telemetry (epic #252 / ticket #254) — the browser half of the
+# events bridge. The ingest half is the read-only DB tail in
+# ``integrations/archon_events.py``; the framework consumes NO Archon SSE
+# (its ``__dashboard__`` stream is single-slot and evicts a second subscriber).
+#
+# Degradation contract: Archon's SERVER being down is irrelevant — the DB is
+# the ledger. A missing or unreadable db returns 200 with an honest ``status``
+# field and an empty list; these endpoints never 500 on a cold machine.
+#
+# Both routes are classified ``admin`` in ``orchestration/route_policy.py``
+# (the talk-mode / cabinet precedent: an operator-global surface with no
+# persona or workspace dimension to scope by).
+# ─────────────────────────────────────────────────────────────────────────────
+_ARCHON_KILLSWITCH = "archon_events"
+
+# Rows returned by the SSE subscribe-time snapshot frame. Bounded independently
+# of the REST `limit` so one reconnect cannot ask for an unbounded backfill.
+_ARCHON_STREAM_SNAPSHOT_LIMIT = 200
+# Seconds of queue silence before a keepalive ping. Module-level so tests can
+# monkeypatch it (the ping itself carries NO id: line — Kimi R1 MAJOR 1).
+_ARCHON_STREAM_KEEPALIVE_INTERVAL_S = 20.0
+# conversationId-only scopes re-resolve their run-id set on this interval so a
+# run started after subscribe still joins the stream (Kimi R1 MINOR 1).
+_ARCHON_SCOPE_REFRESH_INTERVAL_S = 5.0
+
+
+def _archon_scope(
+    run_id: str | None, conversation_id: str | None
+) -> frozenset[str] | None:
+    """Expand a correlation key to its run ids for subscriber-side filtering.
+
+    Returns ``None`` when unscoped. An EMPTY frozenset is a real answer ("that
+    conversation has no runs") and matches nothing — deliberately distinct from
+    ``None`` so a mis-typed correlation key cannot silently open the firehose.
+    """
+    from integrations import archon_events  # noqa: PLC0415
+
+    if not conversation_id:
+        return None
+    runs, status = archon_events.read_run_rows(conversation_id=conversation_id)
+    if status != archon_events.STATUS_OK:
+        return frozenset()
+    ids = {run["runId"] for run in runs if run["runId"]}
+    if run_id:
+        ids &= {run_id}
+    return frozenset(ids)
+
+
+def _archon_read_recent(
+    run_id: str | None, conversation_id: str | None, limit: int
+) -> tuple[list[dict[str, Any]], str]:
+    """Worker-thread target — resolves settings inside the thread (to_thread rule)."""
+    from integrations import archon_events  # noqa: PLC0415
+
+    return archon_events.read_recent_events(
+        run_id=run_id, conversation_id=conversation_id, limit=limit
+    )
+
+
+def _archon_read_runs(
+    run_id: str | None, conversation_id: str | None
+) -> tuple[list[dict[str, Any]], str]:
+    """Worker-thread target — run-ledger rows for the same filter."""
+    from integrations import archon_events  # noqa: PLC0415
+
+    return archon_events.read_run_rows(run_id=run_id, conversation_id=conversation_id)
+
+
+def _archon_run_is_terminal(run_id: str) -> bool:
+    """Worker-thread target — the ledger row decides (Rule 2)."""
+    from integrations import archon_events  # noqa: PLC0415
+
+    return archon_events.run_is_terminal(run_id)
+
+
+@router.get("/api/archon/events")
+async def archon_events_snapshot(
+    runId: str | None = Query(default=None),
+    conversationId: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> JSONResponse:
+    """REST snapshot — recent ledger events per run / per correlation key.
+
+    This is the backfill the SSE stream deliberately does not do (the tail's
+    cursor starts at boot and never replays history), and the target of the
+    410 ``X-Refetch-Hint``. ``latestSeq`` is captured BEFORE the read so a
+    consumer can hand it straight to ``sinceSeq`` without a gap (the cabinet
+    ``/transcripts`` pattern).
+    """
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled(_ARCHON_KILLSWITCH, caller="api_archon_events")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "archon event ingest is disabled by operator",
+                "switch": _ARCHON_KILLSWITCH,
+            },
+        )
+
+    from integrations import archon_events  # noqa: PLC0415
+
+    archon_events.ensure_poller_started()
+    # Capture the SSE position BEFORE the DB read so events landing during the
+    # query are replayed by the stream rather than lost between the two.
+    latest_seq = archon_events.get_channel().latest_seq()
+
+    # The ledger read is blocking sqlite — keep it off the event loop.
+    events, status = await asyncio.to_thread(
+        _archon_read_recent, runId, conversationId, limit
+    )
+    runs, run_status = await asyncio.to_thread(_archon_read_runs, runId, conversationId)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "status": status,
+            "runStatus": run_status,
+            "runId": runId,
+            "conversationId": conversationId,
+            "events": events,
+            "runs": runs,
+            "latestSeq": latest_seq,
+            "poller": archon_events.get_poller().snapshot(),
+        }
+    )
+
+
+# response_model=None — the handler honestly returns EITHER a StreamingResponse
+# (the live tail) or a JSONResponse (503 kill-switch / 410 replay gap), and
+# FastAPI cannot build a Pydantic field from that union.
+@router.get("/api/archon/stream", response_model=None)
+async def archon_events_stream(
+    request: Request,
+    runId: str | None = Query(default=None),
+    conversationId: str | None = Query(default=None),
+    sinceSeq: int = Query(default=0, ge=0),
+) -> StreamingResponse | JSONResponse:
+    """Cabinet-style SSE bridge over the ingested tail.
+
+    Mirrors ``/api/cabinet/stream`` (the reference implementation): subscribe
+    BEFORE replay so events emitted during the drain are not lost, monotonic
+    ``seq`` ids, ``Last-Event-ID`` resume, and 410 + ``X-Refetch-Hint`` on a
+    replay-buffer miss.
+
+    Homie delta vs cabinet: ``seq`` is global across every run and each
+    subscriber filters, because there is ONE tail over the whole table. A
+    per-run stream closes itself once the run reaches a terminal state — a
+    finished run should not hold a socket open.
+
+    CONSUMER CONTRACT (the Talk-sidebar ticket builds against this):
+    - only ring-backed entries carry an ``id:`` line; pings and synthesized
+      frames (snapshot, ``run_ended``, ``events_dropped``) never do, so the
+      browser's ``Last-Event-ID`` cursor always names a real seq.
+    - an ``events_dropped`` frame (or any observed seq jump) means live
+      frames were shed — the client MUST refetch ``GET /api/archon/events``.
+    - the client MUST close on ``run_ended``; the server also sends
+      ``retry: 30000`` so an EventSource that ignores this backs off instead
+      of reconnect-looping a finished run.
+    """
+    from security import kill_switches  # noqa: PLC0415
+    try:
+        kill_switches.requireEnabled(_ARCHON_KILLSWITCH, caller="api_archon_stream")
+    except kill_switches.KillSwitchDisabled:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "archon event ingest is disabled by operator",
+                "switch": _ARCHON_KILLSWITCH,
+            },
+        )
+
+    from integrations import archon_events  # noqa: PLC0415
+
+    # Last-Event-ID overrides sinceSeq when present (browser standard).
+    last_event_id_header = request.headers.get("Last-Event-ID")
+    if last_event_id_header:
+        try:
+            sinceSeq = max(sinceSeq, int(last_event_id_header))
+        except ValueError:
+            pass
+
+    channel = archon_events.get_channel()
+    archon_events.ensure_poller_started()
+
+    # Subscribe BEFORE the replay-gap check, at request time (Codex R3 major):
+    # with check-then-subscribe, the ring could advance between a passing
+    # precheck and the generator's own subscribe, evicting seqs the client was
+    # promised without the 410 contract ever firing. Subscribing first pins
+    # this subscriber's live position — whatever the ring evicts afterwards is
+    # already in the queue. The generator's finally only covers a stream that
+    # started, so the 410 path and pre-stream failures release the
+    # subscription themselves (exactly one unsub per path).
+    queue, unsub = channel.subscribe()
+    try:
+        oldest = channel.oldest_seq()
+        replay_gap = sinceSeq > 0 and oldest > 0 and sinceSeq < oldest - 1
+        run_ids = (
+            ()
+            if replay_gap
+            else await asyncio.to_thread(_archon_scope, runId, conversationId)
+        )
+    except BaseException:
+        unsub()
+        raise
+    if replay_gap:
+        unsub()
+        hint = "GET /api/archon/events"
+        if runId:
+            hint = f"{hint}?runId={runId}"
+        elif conversationId:
+            hint = f"{hint}?conversationId={conversationId}"
+        return JSONResponse(
+            status_code=410,
+            content={
+                "error": "replay_gap",
+                "sinceSeq": sinceSeq,
+                "oldestSeq": oldest,
+                "latestSeq": channel.latest_seq(),
+            },
+            headers={"X-Refetch-Hint": hint},
+        )
+
+    async def event_gen() -> AsyncIterator[bytes]:
+        # queue/unsub are the request-time subscription above; replay below
+        # drains `channel.since(sinceSeq)` deduped against live entries queued
+        # while the snapshot was read.
+        nonlocal run_ids
+        seen_seqs: set[int] = set()
+        try:
+            snapshot_events, status = await asyncio.to_thread(
+                _archon_read_recent, runId, conversationId, _ARCHON_STREAM_SNAPSHOT_LIMIT
+            )
+            snapshot = {
+                "type": "archon_snapshot",
+                "status": status,
+                "runId": runId,
+                "conversationId": conversationId,
+                "events": snapshot_events,
+                "poller": archon_events.get_poller().snapshot(),
+            }
+            # No id: line — a snapshot must not clobber the browser's
+            # lastEventId cursor on reconnect (cabinet's SSE fix).
+            yield _sse_format_no_id(
+                "message", json.dumps({"seq": 0, "event": snapshot})
+            ).encode("utf-8")
+
+            # A run that is already over gets its snapshot and a clean close.
+            # `retry:` slows EventSource's auto-reconnect on the close (Kimi
+            # R1 MINOR 2); no id: line — synthetic frames must not clobber
+            # the browser's lastEventId cursor (Kimi R1 MAJOR 1).
+            if runId and await asyncio.to_thread(_archon_run_is_terminal, runId):
+                ended = {"type": "run_ended", "runId": runId, "reason": "terminal"}
+                yield b"retry: 30000\n\n"
+                yield _sse_format_no_id(
+                    "message", json.dumps({"seq": 0, "event": ended})
+                ).encode("utf-8")
+                return
+
+            # Replay AFTER subscribing, deduped against what we forward live.
+            for entry in channel.since(sinceSeq):
+                if entry.seq in seen_seqs:
+                    continue
+                seen_seqs.add(entry.seq)
+                if not archon_events.event_matches(
+                    entry.event, run_id=runId, run_ids=run_ids
+                ):
+                    continue
+                yield _sse_format(
+                    entry.seq,
+                    "message",
+                    json.dumps({"seq": entry.seq, "event": entry.event}),
+                ).encode("utf-8")
+
+            last_keepalive = time.monotonic()
+            last_scope_refresh = time.monotonic()
+            while True:
+                if await request.is_disconnected():
+                    return
+                if channel.consume_dropped(queue):
+                    # Live-path overflow: the ring + REST snapshot still hold
+                    # the events, but this subscriber's queue dropped frames —
+                    # tell the client to refetch instead of leaving a silent
+                    # hole (Kimi R1 MAJOR 2). Synthetic frame: no id: line.
+                    gap = {
+                        "type": "events_dropped",
+                        "refetch": "GET /api/archon/events",
+                    }
+                    yield _sse_format_no_id(
+                        "message", json.dumps({"seq": 0, "event": gap})
+                    ).encode("utf-8")
+                # conversationId-only scopes freeze the run-id set at
+                # subscribe time; a run started under the same conversation
+                # afterwards would never match. Re-resolve on an interval
+                # (Kimi R1 MINOR 1). A single runId scope can't gain runs.
+                if (
+                    conversationId
+                    and not runId
+                    and time.monotonic() - last_scope_refresh
+                    >= _ARCHON_SCOPE_REFRESH_INTERVAL_S
+                ):
+                    run_ids = await asyncio.to_thread(
+                        _archon_scope, runId, conversationId
+                    )
+                    last_scope_refresh = time.monotonic()
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except TimeoutError:
+                    now = time.monotonic()
+                    if now - last_keepalive >= _ARCHON_STREAM_KEEPALIVE_INTERVAL_S:
+                        # No id: line — a ping must not clobber the browser's
+                        # lastEventId cursor (Kimi R1 MAJOR 1).
+                        yield _sse_format_no_id("ping", "{}").encode("utf-8")
+                        last_keepalive = now
+                    continue
+                if entry.seq in seen_seqs:
+                    continue
+                seen_seqs.add(entry.seq)
+                if not archon_events.event_matches(
+                    entry.event, run_id=runId, run_ids=run_ids
+                ):
+                    continue
+                yield _sse_format(
+                    entry.seq,
+                    "message",
+                    json.dumps({"seq": entry.seq, "event": entry.event}),
+                ).encode("utf-8")
+                # The run can finish mid-stream; close on its terminal event
+                # rather than waiting for a poll of the run row.
+                if (
+                    runId
+                    and entry.event.get("type") in archon_events.TERMINAL_EVENT_TYPES
+                ):
+                    ended = {
+                        "type": "run_ended",
+                        "runId": runId,
+                        "reason": entry.event.get("type"),
+                    }
+                    # Synthetic frame: no id: line; retry: slows the
+                    # EventSource reconnect cycle on this deliberate close.
+                    yield b"retry: 30000\n\n"
+                    yield _sse_format_no_id(
+                        "message", json.dumps({"seq": entry.seq, "event": ended})
+                    ).encode("utf-8")
+                    return
+        finally:
+            unsub()
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Convoy row enrichment (epic #252 / ticket #258) — kills the
+# `running` / `Unassigned` row on the Convoy page.
+#
+# The convoy stays the LEDGER and Archon owns execution truth; this endpoint
+# only JOINS the two. It writes nothing on either side and adds no convoy
+# column: the correlation key #256 already stores on the subtask's
+# `paperclip_issue_id` external ref is the whole join key.
+#
+# Classified `tenant_workspace` (NOT `admin` like the two #254 routes): unlike
+# the raw ledger surfaces, this one is ENTERED through a convoy id, which has a
+# workspace column. The authorizing grain is threaded into the service read
+# (Rule 4), so a cross-workspace convoy id 404s BEFORE any Archon row is
+# touched — the enrichment cannot become a side channel onto another tenant's
+# work.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Max subtasks enriched in one request. Each enriched row costs two small
+# indexed ledger reads, so an absurdly wide convoy is bounded rather than
+# turning one page poll into an unbounded query fan-out. Never silent: the
+# response carries `truncated` and the handler logs what it dropped.
+_ARCHON_CONVOY_MAX_ROWS = 100
+
+
+def _archon_convoy_rows(
+    convoy_id: int, workspace_id: int
+) -> tuple[list[dict[str, Any]] | None, str, bool]:
+    """Worker-thread target — join one convoy's ledger rows to Archon's runs.
+
+    Returns ``(rows, status, truncated)``. ``rows is None`` means the convoy does
+    not exist IN THIS WORKSPACE — the caller turns that into a 404.
+
+    Every blocking read (orchestration sqlite + the ro archon.db) happens here,
+    inside the thread, and the settings each reader needs resolve inside it too
+    (``to_thread`` ARGUMENTS evaluate on the loop).
+
+    Only subtasks whose correlation ref resolves to a REAL Archon run are
+    returned. A row with no ref, a legacy ``talk:<run_id>`` ref carrying no
+    Archon ids, or a dispatch whose run has not registered yet is simply absent
+    from the map, and the page renders it exactly as it does today.
+    """
+    from integrations import archon_events  # noqa: PLC0415
+    import talk_archon  # noqa: PLC0415
+
+    db = _open_work_orchestration_db(create=False)
+    if db is None:
+        # No orchestration db => no convoy => the same answer as a bad id.
+        return (None, archon_events.STATUS_OK, False)
+
+    from orchestration.convoy_service import ConvoyService  # noqa: PLC0415
+
+    try:
+        svc = ConvoyService(db)
+        # Rule 4 — the authorizing grain is PASSED INTO the read, not merely
+        # checked upstream. A cross-workspace id resolves to None here.
+        detail = svc.get_convoy(convoy_id, workspace_id=workspace_id)
+        if not detail:
+            return (None, archon_events.STATUS_OK, False)
+        subtasks = list(detail.subtasks)
+    finally:
+        db.close()
+
+    candidates: list[tuple[Any, dict[str, Any]]] = []
+    for subtask in subtasks:
+        parsed = talk_archon.parse_correlation_ref(subtask.paperclip_issue_id)
+        if not parsed or not parsed.get("conversation_db_id"):
+            continue
+        candidates.append((subtask, parsed))
+
+    truncated = len(candidates) > _ARCHON_CONVOY_MAX_ROWS
+    if truncated:
+        logger.warning(
+            "archon convoy enrichment: convoy %s has %d correlated subtasks; "
+            "enriching the first %d",
+            convoy_id,
+            len(candidates),
+            _ARCHON_CONVOY_MAX_ROWS,
+        )
+        candidates = candidates[:_ARCHON_CONVOY_MAX_ROWS]
+
+    status = archon_events.STATUS_OK
+    rows: list[dict[str, Any]] = []
+    for subtask, parsed in candidates:
+        runs, run_status = archon_events.read_run_rows(
+            parent_conversation_id=parsed["conversation_db_id"], limit=1
+        )
+        if run_status != archon_events.STATUS_OK:
+            # An unreadable ledger is reported ONCE on the envelope; it must not
+            # look like "this work has no Archon run".
+            if status == archon_events.STATUS_OK:
+                status = run_status
+            continue
+        if not runs:
+            continue
+        run = runs[0]
+        node, node_status = archon_events.read_current_node(run["runId"])
+        if node_status != archon_events.STATUS_OK and status == archon_events.STATUS_OK:
+            status = node_status
+        rows.append(
+            {
+                "subtaskId": subtask.id,
+                "homieRunId": parsed.get("run_id"),
+                "archonRunId": run["runId"],
+                "conversationId": parsed.get("conversation_id"),
+                "workflowName": run["workflowName"] or None,
+                "runStatus": run["status"] or None,
+                "workingPath": run["workingPath"],
+                "startedAt": run["startedAt"],
+                "lastActivityAt": run["lastActivityAt"],
+                "currentNode": node["currentNode"] if node else None,
+                "nodeStatus": node["nodeStatus"] if node else None,
+                "nodeAt": node["at"] if node else None,
+            }
+        )
+    return (rows, status, truncated)
+
+
+@router.get("/api/archon/convoy/{convoy_id}")
+async def archon_convoy_enrichment(convoy_id: int, request: Request) -> JSONResponse:
+    """Real worker identity + current node for one convoy's Archon-backed rows.
+
+    The epic's acceptance criterion — "the Convoy row names the actual worker and
+    its current node" — needs three facts the convoy ledger does not hold: which
+    Archon workflow is running, which run, and which node it is on. All three
+    come from Archon's own ledger, read-only, joined through the #256
+    correlation key.
+
+    Degradation contract (inherited from #254): a missing or unreadable
+    ``archon.db`` returns 200 with an honest ``status`` and an empty ``tasks``
+    list. Archon's SERVER being down is irrelevant — the DB is the ledger.
+    """
+    from security import kill_switches  # noqa: PLC0415
+
+    try:
+        kill_switches.requireEnabled(_ARCHON_KILLSWITCH, caller="api_archon_convoy")
+    except kill_switches.KillSwitchDisabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "archon event ingest is disabled by operator",
+                "switch": _ARCHON_KILLSWITCH,
+            },
+        )
+
+    workspace_id = _workspace_id(request)
+    rows, status, truncated = await asyncio.to_thread(
+        _archon_convoy_rows, convoy_id, workspace_id
+    )
+    if rows is None:
+        raise HTTPException(status_code=404, detail=f"convoy {convoy_id} not found")
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "status": status,
+            "convoyId": convoy_id,
+            "tasks": rows,
+            "truncated": truncated,
+        }
+    )

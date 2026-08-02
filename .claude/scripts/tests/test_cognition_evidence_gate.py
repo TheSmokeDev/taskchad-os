@@ -130,6 +130,56 @@ def test_thehomie_memory_tail_reroots_under_memory_dir(tmp_path):
     assert any("lane first provider memory" in v for v in texts.values())
 
 
+def test_lowercase_memory_tail_reroots_under_memory_dir(tmp_path):
+    """Finding 1 (#169) — a lowercase ``thehomie/memory/<tail>`` citation must
+    still re-root under memory_dir; LLM-authored evidence_paths cannot be
+    trusted to reproduce exact vault casing."""
+    s = config.get_belief_evolve_settings()
+    (tmp_path / "MEMORY.md").write_text("lane first provider memory", encoding="utf-8")
+    prop = _prop(evidence_paths=["thehomie/memory/MEMORY.md"])
+    texts = eg.read_evidence_texts(prop, tmp_path, settings=s)
+    assert any("lane first provider memory" in v for v in texts.values())
+
+
+def test_multi_occurrence_memory_tail_matches_last_segment(tmp_path):
+    """_vault_tail must re-root from the LAST 'memory/' occurrence, matching
+    evolve.regression._normalize_path (the function it claims to mirror) —
+    not silently flip to the FIRST occurrence for a path with more than one
+    'memory/'-boundaried segment."""
+    s = config.get_belief_evolve_settings()
+    (tmp_path / "MEMORY.md").write_text("lane first provider memory", encoding="utf-8")
+    prop = _prop(evidence_paths=["vault/memory/backup/Memory/MEMORY.md"])
+    texts = eg.read_evidence_texts(prop, tmp_path, settings=s)
+    assert any("lane first provider memory" in v for v in texts.values())
+
+
+def test_substring_memory_component_does_not_substitute_evidence(tmp_path):
+    """Codex gate MAJOR on PR #175: 'memory/' must match a PATH COMPONENT, not
+    a substring. A crafted traversal citation like
+    ``vault/memory/../../../../notmemory/MEMORY.md`` must NOT have its tail
+    anchored inside ``notmemory/`` (which would silently substitute the vault's
+    own MEMORY.md as evidence for a citation that pointed OUTSIDE the jail) —
+    the tail anchors at the real ``Memory/`` component, the traversal escapes
+    confinement, and the citation is omitted, matching master's behavior."""
+    s = config.get_belief_evolve_settings()
+    (tmp_path / "MEMORY.md").write_text("lane first provider memory", encoding="utf-8")
+    prop = _prop(
+        evidence_paths=["vault/memory/../../../../notmemory/MEMORY.md"]
+    )
+    texts = eg.read_evidence_texts(prop, tmp_path, settings=s)
+    assert not texts
+
+
+def test_component_anchored_tail_still_reroots_plain_citations(tmp_path):
+    """Sibling guard for the component anchor: an ordinary citation whose only
+    'memory/' occurrence is a genuine component still reroots normally."""
+    s = config.get_belief_evolve_settings()
+    (tmp_path / "MEMORY.md").write_text("lane first provider memory", encoding="utf-8")
+    prop = _prop(evidence_paths=["Memory/MEMORY.md"])
+    texts = eg.read_evidence_texts(prop, tmp_path, settings=s)
+    assert any("lane first provider memory" in v for v in texts.values())
+
+
 def test_in_repo_out_of_vault_path_is_omitted(tmp_path):
     """A repo-relative path OUTSIDE the vault (e.g. .env) has NO in-root candidate -> omitted."""
     s = config.get_belief_evolve_settings()

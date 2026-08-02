@@ -132,6 +132,6 @@ Dashboard framework files are public-exported only when a slice explicitly runs
 ## Next Slices
 
 - Team Room V3 artifact panels on `/teams`.
-- Mission Control / Hub consumer for the BrowserOps viewer API.
+- Homie Dashboard consumer for the BrowserOps viewer API.
 - Manual pages for Unified Brain, memory graph, Work Queue, and runtime lane
   surfaces.

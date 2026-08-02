@@ -71,6 +71,11 @@ chat context; direct requests to send, contact, book, post, publish, deploy, or
 otherwise mutate live state still require the existing explicit authorization
 path.
 
+When an otherwise useful task reaches the edge of the matrix, the persona can
+use the separate [Persona Capability Elevation](persona-capability-elevation.md)
+path. That path binds approval to one persona, channel, request, tool, and exact
+argument payload; it never edits this matrix or the profile's derived `.env`.
+
 ## Learning Opt-In
 
 Persona learning (the scheduled belief-extraction loop) is controlled by a
@@ -87,3 +92,8 @@ capability scoping — learning controls whether the persona forms beliefs from
 its interactions, not which env keys or skills it can access.
 
 See [Persona Learning Loop](persona-learning-loop.md) for full details.
+
+The matrix remains the env/skill derivation owner. The planned
+[Persona Blueprint Provisioner](persona-blueprints-capability-provisioning.md)
+will compile domain requirements into this existing matrix/env-sync path; it
+will not duplicate secret storage or write credential values into a blueprint.

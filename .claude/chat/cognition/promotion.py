@@ -10,10 +10,16 @@ Pattern: memory_reflect.py async flow with file reads and writes.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from cognition.staging import StagingCandidate, StagingStore
+from cognition.staging import (
+    LOW_EVIDENCE_REASON_PREFIX,
+    StagingCandidate,
+    StagingStore,
+    is_low_evidence_reason,
+)
 
 
 @dataclass
@@ -52,16 +58,39 @@ def _rejection_reason(c: StagingCandidate) -> str:
     if c.confidence < PROMOTION_CONFIDENCE_THRESHOLD:
         return f"low_confidence ({c.confidence:.2f} < {PROMOTION_CONFIDENCE_THRESHOLD})"
     if c.evidence_count < min_evidence:
-        return f"low_evidence ({c.evidence_count} < {min_evidence})"
+        return f"{LOW_EVIDENCE_REASON_PREFIX} ({c.evidence_count} < {min_evidence})"
     return "unknown"
 
 
+def _normalize_line(line: str) -> str:
+    """Fold a bullet/text line to a comparable form: strip bullet markers
+    (``-``/``*``/``+``, ordered ``N.``/``N)``, and ``[ ]``/``[x]`` task boxes),
+    trailing punctuation, and case/whitespace variance."""
+    line = line.strip()
+    line = re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", line)
+    line = re.sub(r"^\[[ xX]?\]\s+", "", line)
+    line = line.rstrip(".!?,;:")
+    line = re.sub(r"\s+", " ", line)
+    return line.lower()
+
+
 def _is_duplicate(text: str, existing: str) -> bool:
-    """Check if text already appears in target file content."""
-    normalized = text.strip().lower()
-    if not normalized:
+    """Check if text matches existing LINE(s) in target file content.
+
+    Line-level comparison (not whole-file substring) so a short new fact
+    that happens to be a contiguous substring of an unrelated, longer
+    existing sentence is never mistaken for a duplicate. BOTH sides are
+    split into physical lines and normalized identically (Codex gate MAJOR
+    on PR #180 — the old code collapsed the new text's newlines to spaces
+    while splitting existing per line, giving both false negatives and false
+    positives on multi-line units). A multi-line unit is a duplicate only
+    when every one of its lines already exists.
+    """
+    new_lines = [_normalize_line(ln) for ln in text.splitlines() if ln.strip()]
+    if not new_lines:
         return True  # Empty text is a no-op
-    return normalized in existing.lower()
+    existing_lines = {_normalize_line(line) for line in existing.splitlines() if line.strip()}
+    return all(nl in existing_lines for nl in new_lines)
 
 
 def _read_file(filepath: Path) -> str:
@@ -81,44 +110,93 @@ def _append_to_file(filepath: Path, text: str) -> None:
         f.write(f"\n- {text}\n")
 
 
-async def _batch_distill(candidates: list[StagingCandidate], cwd: Path) -> list[str]:
+async def _batch_distill(candidates: list[StagingCandidate], cwd: Path) -> dict[str, str]:
     """Distill all candidates in a single reasoning_step call.
 
     CRITICAL: one LLM call for ALL candidates, not per-candidate.
-    Falls back to raw observations if distillation fails.
+
+    Returns a dict keyed by candidate.id (never positional). Each item in the
+    LLM's response round-trips the "i" index it was given so a dropped or
+    reordered item can never shift a later candidate's text onto the wrong
+    id — a missing/invalid "i" just falls back to that one candidate's own
+    raw observation instead of corrupting every candidate after it.
     """
     from cognition.steps import reasoning_step
 
     observations = [
-        {"id": c.id, "type": c.candidate_type, "observation": c.observation}
-        for c in candidates
+        {"i": i, "type": c.candidate_type, "observation": c.observation}
+        for i, c in enumerate(candidates)
     ]
     instruction = (
         "Distill each observation into a concise knowledge unit suitable for "
         "long-term memory. Keep facts precise. Remove conversation noise. "
-        "Return a JSON array of strings, one per observation, in the same order."
+        'Return a JSON array of objects: [{"i": <index>, "text": <distilled '
+        'text>}], echoing back the same "i" index each observation was given.'
     )
     context = (
         "You are distilling raw conversation captures into structured knowledge.\n"
         f"Candidates:\n{json.dumps(observations, indent=2)}"
     )
 
+    # Default: every candidate falls back to its own raw observation.
+    result_map: dict[str, str] = {c.id: c.observation for c in candidates}
+
     try:
+        # Item schema mirrors the round-trip contract so strict structured-output
+        # providers enforce the {"i": int, "text": str} shape at the boundary,
+        # not just via prompt prose (Kimi gate MINOR). Response-side validation
+        # below still handles lenient providers.
         result = await reasoning_step(
-            context, instruction, output_schema={"type": "array"}, cwd=cwd
+            context,
+            instruction,
+            output_schema={
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "i": {"type": "integer"},
+                        "text": {"type": "string"},
+                    },
+                    "required": ["i", "text"],
+                },
+            },
+            cwd=cwd,
         )
 
         if result.parsed and isinstance(result.parsed, list):
-            parsed = result.parsed
-            # Pad if LLM returned fewer items
-            while len(parsed) < len(candidates):
-                parsed.append(candidates[len(parsed)].observation)
-            return [str(item) for item in parsed]
+            seen: set[int] = set()
+            for item in result.parsed:
+                if not isinstance(item, dict):
+                    continue
+                idx = item.get("i")
+                text = item.get("text")
+                if not isinstance(idx, int) or isinstance(idx, bool):
+                    continue
+                if not (0 <= idx < len(candidates)):
+                    continue
+                cid = candidates[idx].id
+                if idx in seen:
+                    # Duplicate index — the LLM mislabeled at least one item, so
+                    # DISTRUST BOTH: revert this id to its raw observation rather
+                    # than let a later "i" silently overwrite an earlier
+                    # candidate's text onto the wrong id (the exact
+                    # cross-contamination this fix exists to kill). Idempotent
+                    # for 3rd+ duplicates. (Codex gate BLOCKER on PR #180.)
+                    result_map[cid] = candidates[idx].observation
+                    continue
+                seen.add(idx)
+                # Keep the raw-observation fallback (already in result_map) for
+                # empty/whitespace/non-string text: persisting "" makes the
+                # downstream _is_duplicate("") return True -> mark_rejected ->
+                # PERMANENT loss of a valid candidate; str()-ing a list/dict
+                # pollutes durable memory. (Codex gate BLOCKER + MAJOR.)
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                result_map[cid] = text
     except Exception:
         pass
 
-    # Fallback: use raw observations if distillation fails
-    return [c.observation for c in candidates]
+    return result_map
 
 
 async def run_promotion_pipeline(
@@ -130,6 +208,7 @@ async def run_promotion_pipeline(
     """Main promotion entry point. Called by daily reflection.
 
     Steps:
+    0. Migrate legacy low_evidence rejections back to pending (#166)
     1. Load unpromoted candidates
     2. Pre-filter by quality gate
     3. Batch distill via reasoning_step (one LLM call)
@@ -138,22 +217,39 @@ async def run_promotion_pipeline(
     """
     results: list[PromotionResult] = []
 
+    # Migrate legacy low_evidence rejections back to pending before loading
+    # unpromoted candidates, so previously-stuck rows re-enter this run (#166).
+    # Best-effort: a migration failure (e.g. a lock timeout racing the live
+    # bot's append()) must not abort the whole promotion pass. NEVER under
+    # dry_run — a --test reflection must not mutate the staging file.
+    if not dry_run:
+        try:
+            staging_store.unreject_low_evidence()
+        except Exception as e:
+            print(f"[promotion] unreject_low_evidence migration failed (non-blocking): {e}")
+
     # Step 1: Load unpromoted candidates
     candidates = staging_store.read_unpromoted()
     if not candidates:
         return results
 
-    # Step 2: Pre-filter by quality gate
-    eligible = [c for c in candidates if _passes_quality_gate(c)]
-    rejected = [c for c in candidates if not _passes_quality_gate(c)]
+    # Step 2: Pre-filter by quality gate. low_evidence candidates are
+    # DEFERRED (left pending — they can still accumulate evidence via
+    # StagingStore.append()'s merge path and re-qualify on a future run);
+    # only a real quality failure (low_confidence) is permanently rejected.
+    eligible: list[StagingCandidate] = []
+    for c in candidates:
+        if _passes_quality_gate(c):
+            eligible.append(c)
+            continue
 
-    # Mark rejected candidates
-    for c in rejected:
         reason = _rejection_reason(c)
-        staging_store.mark_rejected(c.id, reason)
+        action = "deferred" if is_low_evidence_reason(reason) else "rejected"
+        if action == "rejected" and not dry_run:
+            staging_store.mark_rejected(c.id, reason)
         results.append(PromotionResult(
             candidate_id=c.id,
-            action="rejected",
+            action=action,
             target_file="",
             reason=reason,
             distilled_text="",
@@ -174,14 +270,16 @@ async def run_promotion_pipeline(
     }
 
     # Step 5: Promote each distilled candidate
-    for candidate, distilled_text in zip(eligible, distilled):
+    for candidate in eligible:
+        distilled_text = distilled.get(candidate.id, candidate.observation)
         target = candidate.promotion_target
         if not target or target not in existing_content:
             target = "MEMORY.md"
 
         # Dedup: skip if distilled text already appears in target
         if _is_duplicate(distilled_text, existing_content[target]):
-            staging_store.mark_rejected(candidate.id, "duplicate_in_target")
+            if not dry_run:
+                staging_store.mark_rejected(candidate.id, "duplicate_in_target")
             results.append(PromotionResult(
                 candidate_id=candidate.id,
                 action="rejected",

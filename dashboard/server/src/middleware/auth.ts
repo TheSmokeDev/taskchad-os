@@ -4,7 +4,9 @@
  *
  * Query-token fallback:
  *   - Browser EventSource API CANNOT set custom headers, so SSE endpoints
- *     accept `?token=...` query param.
+ *     accept `?token=...` query param. Mounting a new SSE route WITHOUT
+ *     adding it to `isQueryTokenPath` ships a 401 that only appears once a
+ *     token is configured — see the /api/archon/stream note below.
  *   - Cabinet voice document/static GETs also accept `?token=...` because
  *     they are opened as browser documents/resources, not fetch() calls.
  *   - Hono access logs scrub the token from the URL before write.
@@ -55,6 +57,12 @@ function isQueryTokenPath(pathname: string, method: string): boolean {
   // (Phase 5a, action/query-shaped — meetingId is in the query string).
   if (/^\/api\/conversation\/[^/]+\/stream$/.test(pathname)) return true;
   if (pathname === '/api/cabinet/stream') return true;
+  // /api/archon/stream — the live-run tail the Talk sidebar consumes with a
+  // browser EventSource (epic #252 / #257). #254 mounted the proxy route and
+  // already strips `token` before forwarding upstream (routes/archon.ts:52),
+  // but this allowlist never learned the path, so the sidebar would have
+  // 401'd on every tokened deployment while passing in dev-mode-loopback.
+  if (pathname === '/api/archon/stream') return true;
   if (method.toUpperCase() !== 'GET') return false;
   if (pathname === '/api/cabinet/voice/ui') return true;
   if (pathname === '/api/cabinet/voice/client.bundle.js') return true;

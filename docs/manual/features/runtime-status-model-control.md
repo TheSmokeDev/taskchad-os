@@ -11,6 +11,11 @@ lane/model without editing config files. The contract is lane-first: operator
 surfaces should talk about lanes first and keep provider-specific details behind
 the runtime layer.
 
+`thehomie doctor` also reports curriculum readiness: optional video
+dependencies, configured/enabled persona counts, the global curriculum kill
+switch, and malformed profile config. Per-persona physical state is available
+without side effects through `thehomie curriculum status <persona> --json`.
+
 ## Operator Entry Points
 
 - Chat/Telegram: `/provider`, `/model`, `/diagnostics`
@@ -67,6 +72,9 @@ uv run thehomie chat -q "/model codex:default" -Q   # Codex plan default; no --m
 uv run thehomie chat -q "/model codex:gpt-5.5" -Q   # Pin a concrete Codex model
 uv run thehomie chat -q "/model gpt5.5" -Q           # Same pin, easier shorthand
 uv run thehomie chat -q "/model codex 5.5" -Q        # Same pin, provider + version shorthand
+uv run thehomie chat -q "/model sol" -Q              # GPT-5.6 Sol + xhigh reasoning
+uv run thehomie chat -q "/model terra" -Q            # GPT-5.6 Terra; clears Sol effort
+uv run thehomie chat -q "/model luna" -Q             # GPT-5.6 Luna; clears Sol effort
 uv run thehomie chat -m codex:gpt-5.5 -q "Reply OK" -Q
 ```
 
@@ -74,6 +82,11 @@ uv run thehomie chat -m codex:gpt-5.5 -q "Reply OK" -Q
 leave the Codex CLI/ChatGPT plan to choose its hidden backend model. Pinned
 values such as `codex:gpt-5.5`, `gpt5.5`, `gpt 5.5`, `gbt 5.5`, `codex 5.5`,
 and `codec 5.5` are normalized to `gpt-5.5`.
+
+The bare tier aliases `sol`, `terra`, and `luna` pin their corresponding
+GPT-5.6 Codex models. `sol` also owns an `xhigh` reasoning-effort override.
+Selecting any other Codex tier or `codex:default` clears that override, so Sol's
+cost/latency setting cannot silently stick to a later model choice.
 
 `/provider`, `/diagnostics`, and `thehomie status --json` report the configured
 model. When Codex is set to `chatgpt-plan-default`, the CLI/ChatGPT plan

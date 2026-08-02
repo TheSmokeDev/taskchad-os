@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -190,6 +191,7 @@ async def handle_diagnostics(adapter: Any, incoming: Any, args: str, *, collect_
     lines.append(f"  Documents: {report.memory_doc_count}")
     lines.append(f"  Embeddings: {report.memory_embedding_status}")
     _append_cognitive_loop_lines(lines, report.cognitive_loop)
+    _append_called_shots_lines(lines, report.called_shots)
     lines.append("")
     lines.append("*Runtime*:")
     lines.append(f"  selected lane: {report.runtime_selected_lane}")
@@ -264,7 +266,43 @@ async def handle_diagnostics(adapter: Any, incoming: Any, args: str, *, collect_
     lines.append("*Adapters*:")
     for name, connected in report.adapters_connected.items():
         lines.append(f"  {name}: {'connected' if connected else 'off'}")
+    if report.buzz:
+        buzz = report.buzz
+        lines.append(
+            "  buzz: "
+            f"{buzz.get('state', 'disabled')} via {buzz.get('active_transport', 'none')} "
+            f"({buzz.get('relay_host') or 'not configured'}, "
+            f"{buzz.get('watched_channel_count', 0)} channels)"
+        )
+        if buzz.get("last_error"):
+            lines.append(f"    error: {buzz['last_error']}")
     return "\n".join(lines)
+
+
+def _append_called_shots_lines(lines: list[str], called_shots: dict[str, Any]) -> None:
+    """Append called-shots ledger status to router diagnostics output.
+
+    The operator's default-on rule makes visibility half the feature: /diagnostics
+    must PROVE the ledger is on (or say why it isn't), not leave it JSON-only.
+    """
+
+    if not called_shots:
+        return
+
+    lines.append("")
+    lines.append("*Called Shots*:")
+    enabled = called_shots.get("enabled")
+    if enabled is None:
+        detail = called_shots.get("error") or "collector failed"
+        lines.append(f"  status: unknown ({detail})")
+        return
+    if enabled:
+        lines.append("  status: ON")
+    elif called_shots.get("kill_switch_disabled"):
+        lines.append("  status: OFF (kill-switch)")
+    else:
+        lines.append("  status: OFF (CALLED_SHOTS_ENABLED=false)")
+    lines.append(f"  open shots: {called_shots.get('open_count', 0)}")
 
 
 def _append_cognitive_loop_lines(lines: list[str], cognitive_loop: dict[str, Any]) -> None:
@@ -319,6 +357,13 @@ async def handle_clear(adapter: Any, incoming: Any, args: str, *, collect_only: 
         note_router_activity = getattr(engine, "note_router_activity", None)
         if callable(note_router_activity):
             note_router_activity(incoming)
+
+        # Called-Shots T3: a cleared session's callback dedup entries reset so
+        # its domains may fire again. Defensive getattr (fake engines) + the
+        # engine method is whole-body fail-open.
+        reset_shots = getattr(engine, "reset_shots_callback_for_session", None)
+        if callable(reset_shots):
+            reset_shots(platform_str, channel_id, thread_id)
 
         result = clear_session_with_lifecycle(
             store=store,
@@ -407,6 +452,173 @@ async def handle_voice(adapter: Any, incoming: Any, args: str, *, collect_only: 
         "off": "all replies are text only",
     }
     return f"Voice mode: *{mode}* — {descriptions[mode]}. This survives restarts."
+
+
+# ─── /talk — Discord voice sidecar (orchestration API client) ────────────────
+
+_TALK_USAGE = "Usage: /talk [join | leave | status] — live voice in your Discord voice channel."
+
+
+async def _talk_api_request(
+    method: str, path: str, payload: dict | None = None, *, timeout: float = 15.0
+) -> tuple[dict | None, str | None]:
+    """Call the orchestration discord-voice API; return ``(body, friendly_error)``.
+
+    Loopback client for the ``/api/discord/voice/*`` surface — mirrors
+    ``integrations/cabinet_api.py`` env rules (base URL + ORCHESTRATION_API_TOKEN
+    resolved at call time). Kept here because the surface is three routes wide.
+    """
+    import httpx  # lazy: avoid HTTP/httpx cost on every import
+
+    base = os.environ.get("ORCHESTRATION_API_BASE_URL", "http://127.0.0.1:4322").rstrip("/")
+    token = os.environ.get("ORCHESTRATION_API_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if method == "GET":
+                r = await client.get(f"{base}{path}", headers=headers)
+            else:
+                r = await client.post(f"{base}{path}", json=payload or {}, headers=headers)
+    except httpx.ConnectError:
+        return None, (
+            "Orchestration API is not running. Start it with "
+            "`cd .claude/scripts && uv run python -m orchestration.run_api`."
+        )
+    except httpx.HTTPError:
+        return None, "Voice talk request failed — check the orchestration API logs."
+    try:
+        body = r.json()
+    except ValueError:
+        body = {}
+    if r.status_code >= 400:
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, dict) and detail.get("error"):
+            return None, str(detail["error"])
+        if isinstance(detail, str) and detail:
+            return None, detail
+        return None, f"Voice talk API returned HTTP {r.status_code}."
+    return (body if isinstance(body, dict) else {}), None
+
+
+async def _talk_api_get(path: str) -> tuple[dict | None, str | None]:
+    return await _talk_api_request("GET", path)
+
+
+async def _talk_api_post(path: str, payload: dict) -> tuple[dict | None, str | None]:
+    # join can block up to the lifecycle's 60s sidecar join timeout.
+    return await _talk_api_request("POST", path, payload, timeout=75.0)
+
+
+def _author_voice_channel(client: Any, incoming: Any) -> tuple[int | None, Any]:
+    """Resolve the author's current voice channel via the discord.py client."""
+
+    raw_event = getattr(incoming, "raw_event", None) or {}
+    try:
+        guild_id = int(raw_event.get("guild") or 0)
+    except (TypeError, ValueError):
+        return None, None
+    guild = client.get_guild(guild_id) if guild_id else None
+    if guild is None:
+        return None, None
+    author_raw = getattr(getattr(incoming, "user", None), "platform_id", "") or ""
+    try:
+        member = guild.get_member(int(author_raw))
+    except (TypeError, ValueError):
+        member = None
+    channel = getattr(getattr(member, "voice", None), "channel", None)
+    if channel is None:
+        return None, None
+    return guild_id, channel
+
+
+def _format_talk_status(body: dict[str, Any]) -> str:
+    """One human line for `/talk status`: state, channel, uptime, auth, log tail."""
+
+    state = str(body.get("status") or "unknown")
+    bridge = body.get("bridge") or {}
+    channel_id = bridge.get("channelId") or body.get("channelId")
+    uptime = bridge.get("uptimeS")
+    if uptime is None and body.get("readyAt"):
+        try:
+            uptime = round(time.time() - float(body["readyAt"]), 1)
+        except (TypeError, ValueError):
+            uptime = None
+    auth = bridge.get("authSource")
+    log_path = str(body.get("logPath") or "")
+    log_tail = os.path.basename(log_path) if log_path else None
+
+    details: list[str] = []
+    if channel_id:
+        details.append(f"channel `{channel_id}`")
+    if uptime is not None:
+        details.append(f"uptime {uptime}s")
+    if auth:
+        details.append(f"auth {auth}")
+    if log_tail:
+        details.append(f"log {log_tail}")
+    if body.get("lastError"):
+        details.append(f"last error: {body['lastError']}")
+    suffix = f" — {', '.join(details)}" if details else ""
+    return f"Voice talk: *{state}*{suffix}"
+
+
+async def handle_talk(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Live voice in the author's Discord voice channel — `/talk [join | leave | status]`.
+
+    Discord-only: the sidecar (py-cord + DAVE) sits behind the orchestration
+    API's ``/api/discord/voice/*`` routes; this handler resolves the author's
+    current voice channel through the Discord adapter's client and passes the
+    command's text channel along for transcript mirroring.
+    """
+    from models import Platform
+
+    sub = (args or "").strip().lower() or "status"
+    if sub in {"help", "?"}:
+        return _TALK_USAGE
+
+    platform = getattr(incoming, "platform", None)
+    client = getattr(adapter, "_client", None)
+    if platform != Platform.DISCORD or client is None:
+        return (
+            "Voice talk is Discord-only right now — the browser Talk page "
+            "lives on the dashboard at /talk."
+        )
+
+    if sub == "status":
+        body, err = await _talk_api_get("/api/discord/voice/status")
+        if err:
+            return err
+        return _format_talk_status(body or {})
+
+    if collect_only:
+        return "Cannot chain /talk — use it alone."
+
+    if sub == "join":
+        guild_id, channel = _author_voice_channel(client, incoming)
+        if guild_id is None or channel is None:
+            return "Join a voice channel first, then run /talk join."
+        payload: dict[str, Any] = {"guildId": guild_id, "channelId": int(channel.id)}
+        text_channel_id = getattr(getattr(incoming, "channel", None), "platform_id", None)
+        try:
+            payload["textChannelId"] = int(text_channel_id)
+        except (TypeError, ValueError):
+            pass
+        body, err = await _talk_api_post("/api/discord/voice/join", payload)
+        if err:
+            return err
+        body = body or {}
+        if body.get("alreadyJoined"):
+            return f"Already live in *#{channel.name}* — say something."
+        auth = (body.get("bridge") or {}).get("authSource") or "unknown"
+        return f"Joined *#{channel.name}* — live voice is on (auth: {auth}). Transcripts mirror here."
+
+    if sub == "leave":
+        _body, err = await _talk_api_post("/api/discord/voice/leave", {})
+        if err:
+            return err
+        return "Left the voice channel — session stopped."
+
+    return _TALK_USAGE
 
 
 async def handle_reload(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
@@ -559,10 +771,12 @@ def _update_sync(action: str, extra: list[str], incoming: Any) -> str:
     import config
     import update_scheduler
     from framework_update import FrameworkUpdater
+    from toolchain_currency import ToolchainCurrency
 
     updater = FrameworkUpdater(config.PROJECT_ROOT)
     if action == "status":
         result = updater.status().to_dict()
+        toolchain = ToolchainCurrency(config.PROJECT_ROOT).check().to_dict()
         schedule = result.get("schedule") or {}
         schedule_state = "ON" if schedule.get("enabled") else "OFF"
         lines = [
@@ -571,7 +785,13 @@ def _update_sync(action: str, extra: list[str], incoming: Any) -> str:
             f"  Latest stable: {('v' + result['latest_version']) if result.get('latest_version') else 'unavailable'}",
             f"  Deployment: {result['deployment_mode']}",
             f"  Auto-update: {schedule_state} — {schedule.get('time', '04:00')} {schedule.get('timezone', 'America/Los_Angeles')}",
+            f"  Toolchain: {toolchain['current_count']} current, "
+            f"{toolchain['actionable_count']} safe CLI update(s), "
+            f"{toolchain['migration_count']} gated migration(s)",
         ]
+        for item in toolchain["items"]:
+            if item["state"] not in {"current", "not_in_use"}:
+                lines.append(f"    {item['display_name']}: {item['state']}")
         if schedule.get("next_run"):
             lines.append(f"  Next run: {schedule['next_run']}")
         if result.get("blocker"):
@@ -3790,6 +4010,222 @@ async def handle_working(adapter: Any, incoming: Any, args: str, *, collect_only
     return "\n".join(lines)
 
 
+def _shots_age_days(created_at: str) -> str:
+    """Compact age label for a shot row; '?' on garbage (fail-open).
+
+    Thin RENDER over the shared cognition age parser (LOW-4): the ISO parse
+    now lives once in ``cognition.called_shots.shot_age_days`` (lazy-imported,
+    matching this slice's cognition-import discipline); this keeps only the
+    chat-surface label (today / Nd / ?).
+    """
+    from cognition.called_shots import shot_age_days
+
+    age = shot_age_days(created_at)
+    if age is None:
+        return "?"
+    days = int(age)
+    return "today" if days <= 0 else f"{days}d"
+
+
+_SHOTS_FLATTEN_RE = re.compile(r"[\r\n]+")
+
+
+def _flatten_shot_text(text: str, cap: int = 80) -> str:
+    """Fold newlines out of untrusted position text (LOW-5) — a
+    newline-embedded position must not break the numbered list layout."""
+    return _SHOTS_FLATTEN_RE.sub(" ", text or "(none)").strip()[:cap]
+
+
+def _render_shots_list(shots: list, scope_label: str) -> str:
+    """Numbered open-bets listing — ids are the resolve handles."""
+    if not shots:
+        return (
+            f"*Called Shots* ({scope_label})\nNo open bets. "
+            "When I challenge a position and it gets staked, it lands here."
+        )
+    lines = [f"*Called Shots* — open bets ({scope_label})"]
+    for shot in shots:
+        domain = shot.domain or "general"
+        lines.append(
+            f"  #{shot.id} [{domain}] {_shots_age_days(shot.created_at)} — "
+            f"you: {_flatten_shot_text(shot.operator_position)} / "
+            f"me: {_flatten_shot_text(shot.homie_position)}"
+        )
+    lines.append(
+        "\nSettle: `/shots resolve <id> <operator_right|homie_right|push|void>`"
+        " (void = strike a bad bet)\n"
+        "Log the call: `/shots decided <id> <operator|homie>` (who's going "
+        "with whose position — bet stays open)"
+    )
+    return "\n".join(lines)
+
+
+_SHOTS_SETTLE_VOICE = {
+    # One line each, SOUL-consistent — direct, no sycophancy, no gloating spiral.
+    "operator_right": "You called it — shot #{id} [{domain}] settled your way. On the record.",
+    "homie_right": "Told you so — shot #{id} [{domain}] settled my way. On the record.",
+    "push": "Push — shot #{id} [{domain}] settled a wash. Nobody collects.",
+    "void": "Struck shot #{id} [{domain}] from the record — bad bet, it never counts.",
+}
+
+
+_SHOTS_UNREADABLE_MSG = (
+    "Called-shots ledger unreadable right now — try again "
+    "(receipt in the bot log)."
+)
+
+
+async def handle_shots(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+    """Called-Shots ledger — the receipts surface (epic #186 T3).
+
+    Subcommands:
+      /shots [list]                  — open bets for the active persona
+      /shots list all                — open bets across ALL personas
+      /shots resolve <id> <outcome>  — settle a bet
+                                       (operator_right|homie_right|push|void)
+
+    Operator-initiated surface: rides the HARD kill-switch only — the
+    CALLED_SHOTS_ENABLED soft toggle darkens autonomous emission (challenge/
+    nag/callback), never the operator's ability to settle open bets (Kimi L1).
+    Every ledger read/write rides ``asyncio.to_thread`` (the event-loop-wedge
+    rule — no sync DB work on the async path). Persona resolution fails
+    CLOSED: unresolvable → refuse persona-scoped ops, never guess (Rule 4).
+    """
+    from cognition import called_shots as _shots  # lazy — same-slice service
+    from cognition import shots_callback as _shots_cb  # shared persona resolver
+    from security import kill_switches
+
+    sub = (args or "").strip()
+    # Resolver hits the file-backed profile store — off the loop (MINOR-1).
+    persona = await asyncio.to_thread(
+        _shots_cb.resolve_active_persona
+    )  # str | None (None = ERROR)
+    unresolvable = (
+        "Can't resolve the active persona right now — try again in a moment. "
+        "(No ledger operation was run. `/shots list all` still works for "
+        "read-only visibility.)"
+    )
+    try:
+        low = sub.lower()
+        if not sub or low == "list":
+            if persona is None:
+                return unresolvable
+            shots, ok = await asyncio.to_thread(_shots.list_open_checked, persona)
+            if not ok:
+                return _SHOTS_UNREADABLE_MSG
+            return _render_shots_list(shots, persona)
+        if low in ("list all", "all"):
+            shots, ok = await asyncio.to_thread(_shots.list_open_checked, None)
+            if not ok:
+                return _SHOTS_UNREADABLE_MSG
+            return _render_shots_list(shots, "all personas")
+        if low.startswith("decided "):
+            # The operator names WHO made the final call on an open bet —
+            # "I went with my call on #41" → /shots decided 41 operator.
+            # One-way ratchet from 'open'; the bet stays open to settle later.
+            if persona is None:
+                return unresolvable
+            parts = sub.split()
+            if len(parts) != 3:
+                return "Usage: `/shots decided <id> <operator|homie>`"
+            try:
+                shot_id = int(parts[1])
+            except ValueError:
+                return f"Bad input: shot id must be a number, got {parts[1]!r}"
+            target = parts[2].lower()
+            updated = await asyncio.to_thread(
+                _shots.set_decided_by, shot_id, target, persona_id=persona
+            )
+            if updated is not None:
+                who = "you" if target == "operator" else "me"
+                return (
+                    f"Logged — shot #{updated.id} "
+                    f"[{updated.domain or 'general'}] decided by {who}. "
+                    "Still open; settle it later with `/shots resolve`."
+                )
+            row, ok = await asyncio.to_thread(_shots.get_shot_checked, shot_id)
+            if not ok:
+                return _SHOTS_UNREADABLE_MSG
+            if row is None:
+                return (
+                    f"Couldn't log #{shot_id} — no such shot. "
+                    "`/shots list` shows what's open."
+                )
+            if row.status == "resolved":
+                return (
+                    f"Shot #{shot_id} was already settled "
+                    f"({row.outcome or 'unknown outcome'}) — decided_by is "
+                    "locked with it."
+                )
+            if row.decided_by != "open":
+                return (
+                    f"Shot #{shot_id} already has its call logged "
+                    f"(decided by {row.decided_by}) — one-way ratchet, "
+                    "no take-backs."
+                )
+            return (
+                f"Shot #{shot_id} is open but belongs to persona "
+                f"'{row.persona_id}' (you're acting as '{persona}'). "
+                "`/shots list all` to see whose it is."
+            )
+        if low.startswith("resolve "):
+            if persona is None:
+                return unresolvable
+            parts = sub.split()
+            if len(parts) != 3:
+                return (
+                    "Usage: `/shots resolve <id> "
+                    "<operator_right|homie_right|push|void>`"
+                )
+            try:
+                shot_id = int(parts[1])
+            except ValueError:
+                return f"Bad input: shot id must be a number, got {parts[1]!r}"
+            outcome = parts[2].lower()
+            # Rule 4 — the settle is keyed at the persona grain (service adds
+            # AND persona_id to the CAS UPDATE).
+            settled = await asyncio.to_thread(
+                _shots.reconcile, shot_id, outcome, persona_id=persona
+            )
+            if settled is not None:
+                voice = _SHOTS_SETTLE_VOICE.get(outcome, "Shot #{id} settled.")
+                return voice.format(id=settled.id, domain=settled.domain or "general")
+            # None = skipped. Classify via the HONEST read probe (never the
+            # schema-creating _connect path) — FOUR distinct outcomes.
+            row, ok = await asyncio.to_thread(_shots.get_shot_checked, shot_id)
+            if not ok:
+                return _SHOTS_UNREADABLE_MSG
+            if row is None:
+                return (
+                    f"Couldn't settle #{shot_id} — no such shot. "
+                    "`/shots list` shows what's open."
+                )
+            if row.status == "resolved":
+                return (
+                    f"Shot #{shot_id} was already settled "
+                    f"({row.outcome or 'unknown outcome'})."
+                )
+            return (
+                f"Shot #{shot_id} is open but belongs to persona "
+                f"'{row.persona_id}' (you're settling as '{persona}'). "
+                "`/shots list all` to see whose it is."
+            )
+        return (
+            "*Called Shots* — the receipts ledger\n"
+            "  `/shots` or `/shots list` — your open bets\n"
+            "  `/shots list all` — everyone's open bets\n"
+            "  `/shots decided <id> <operator|homie>` — log whose call won the argument\n"
+            "  `/shots resolve <id> <operator_right|homie_right|push|void>` — settle up"
+        )
+    except kill_switches.KillSwitchDisabled:
+        return (
+            "Called-shots is disabled by operator "
+            "(HOMIE_KILLSWITCH_CALLED_SHOTS). Flip it back on to use the ledger."
+        )
+    except ValueError as exc:
+        return f"Bad input: {exc}"
+
+
 async def handle_vault(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Registry guard for /vault.
 
@@ -4444,8 +4880,10 @@ def _switch_provider(choice: str) -> str:
             "  /model fable - Claude Fable 5 (flagship)\n"
             "  /model codex - generic runtime lane via Codex\n"
             "  /model codex:default - Codex plan default (no --model passed)\n"
-            "  /model gpt5.5 - Codex pinned model shortcut\n"
-            "  /model codex 5.5 - Codex pinned model shortcut\n"
+            "  /model sol - Codex GPT-5.6 Sol (xhigh reasoning)\n"
+            "  /model terra - Codex GPT-5.6 Terra\n"
+            "  /model luna - Codex GPT-5.6 Luna\n"
+            "  /model gpt5.5 - Codex GPT-5.5 legacy pin\n"
             "  /model gemini - generic runtime lane via Gemini\n"
             "  /model openrouter - generic runtime lane via OpenRouter\n"
             "  /model openai - generic runtime lane via OpenAI-compatible\n"
@@ -4494,7 +4932,7 @@ def _switch_provider(choice: str) -> str:
         return (
             "Unknown runtime selection: "
             f"{choice}. Use: claude, sonnet, opus, fable, codex, codex:default, "
-            "codex:<model>, gpt5.5, gpt 5.5, codex 5.5, gemini, openrouter, openai, kimi, or auto"
+            "sol, terra, luna, codex:<model>, gpt5.5, gemini, openrouter, openai, kimi, or auto"
         )
     except Exception as e:
         return f"Failed to switch provider: {e}"
@@ -7900,6 +8338,78 @@ async def handle_debrief(adapter: Any, incoming: Any, args: str, *, collect_only
     return await _persona_channel_turn(incoming, instruction)
 
 
+async def handle_curriculum(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
+    """Operate the active persona's private curriculum through one strict parser."""
+    from cognition import shots_callback as persona_callback
+    from curriculum.service import get_curriculum_service
+
+    try:
+        parts = shlex.split(args or "")
+    except ValueError as exc:
+        return f"Curriculum argument error: {exc}"
+    action = parts.pop(0).casefold() if parts else "status"
+    persona_id = await asyncio.to_thread(persona_callback.resolve_active_persona)
+    persona_tokens = [part for part in parts if part.startswith("persona=")]
+    if len(persona_tokens) > 1:
+        return "Curriculum argument error: provide at most one persona=<id>."
+    if persona_tokens:
+        token = persona_tokens[0]
+        parts.remove(token)
+        persona_id = token.split("=", 1)[1].strip()
+    if not persona_id:
+        return (
+            "Could not resolve the active persona. Use "
+            "`/curriculum status persona=ai-engineer`."
+        )
+    service = get_curriculum_service(persona_id)
+    try:
+        if action == "status":
+            payload = await asyncio.to_thread(service.status)
+        elif action == "sources":
+            payload = await asyncio.to_thread(service.sources)
+        elif action == "run":
+            full_inventory = "--full-inventory" in parts
+            payload = await service.run_once(full_inventory=full_inventory)
+        elif action == "review":
+            payload = await asyncio.to_thread(service.review)
+        elif action == "route":
+            if not parts:
+                return "Usage: `/curriculum route <proposal-id> [persona=<id>]`"
+            payload = await asyncio.to_thread(service.route, parts[0])
+        elif action == "grade":
+            if len(parts) < 2:
+                return (
+                    "Usage: `/curriculum grade <proposal-id> <A|B|C|D|F> "
+                    "[outcome note] [persona=<id>]`"
+                )
+            payload = await asyncio.to_thread(
+                service.grade,
+                parts[0],
+                parts[1],
+                note=" ".join(parts[2:]),
+            )
+        elif action == "enable":
+            payload = await asyncio.to_thread(service.enable)
+        elif action == "disable":
+            payload = await asyncio.to_thread(service.disable)
+        else:
+            return (
+                "Usage: `/curriculum status|sources|run|review|route|grade|"
+                "enable|disable [persona=<id>]`"
+            )
+    except Exception as exc:
+        return f"Curriculum {action} failed: {type(exc).__name__}: {exc}"
+    return "```json\n" + __import__("json").dumps(
+        payload, indent=2, sort_keys=True
+    ) + "\n```"
+
+
 CORE_HANDLERS: dict[str, Any] = {
     "draft": handle_draft,
     "spar": handle_spar,
@@ -7917,6 +8427,8 @@ CORE_HANDLERS: dict[str, Any] = {
     "execute": handle_go,
     "mode": handle_mode,
     "voice": handle_voice,
+    # Discord voice sidecar — live voice in the author's voice channel (Discord-only).
+    "talk": handle_talk,
     "reload": handle_reload,
     "provider": handle_provider,
     "model": handle_model,
@@ -7956,6 +8468,8 @@ CORE_HANDLERS: dict[str, Any] = {
     "send": handle_send,
     "brief": handle_brief,
     "working": handle_working,
+    # Called-Shots ledger (epic #186 T3) — operator settle/read surface.
+    "shots": handle_shots,
     "vault": handle_vault,
     # Skill-from-experience loop (WS4) — operator-gated promotion surface.
     # Router-dispatched via the manager (no router.py edit needed); key is
@@ -7965,6 +8479,7 @@ CORE_HANDLERS: dict[str, Any] = {
     # draft that graduates through the /skills gate above.
     "learn": handle_learn,
     "watch": handle_watch,
+    "curriculum": handle_curriculum,
     "extensions": handle_extensions,
     # Native design — Open Design power, no daemon (brief -> artifact -> critique).
     "design": handle_design,

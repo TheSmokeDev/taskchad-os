@@ -12,6 +12,7 @@ The Homie supports multiple chat platforms via a unified adapter interface.
 | Slack | `.claude/chat/adapters/slack.py` | Socket Mode |
 | Discord | `.claude/chat/adapters/discord.py` | Gateway WebSocket |
 | WhatsApp | `.claude/chat/adapters/whatsapp.py` | Cloud API webhooks |
+| Buzz | `.claude/chat/adapters/buzz.py` | NIP-42 WebSocket + official CLI fallback |
 
 ## Writing a Custom Adapter
 

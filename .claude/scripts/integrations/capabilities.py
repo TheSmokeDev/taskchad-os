@@ -349,6 +349,39 @@ _ACTIONS: tuple[IntegrationAction, ...] = (
         config_hints=("TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_IDS"),
         description="Co-founder terminal-flip notification to the operator's Telegram.",
     ),
+    # Archon execution spine. Deploying a workflow clones the repo and cuts a
+    # worktree, so it mutates LOCAL state and spends tokens — but it posts,
+    # sends, and publishes nothing. Under the operator's blast-radius rule
+    # that is the free tier, so this is honestly declared model-initiable
+    # rather than carrying an "operator_confirmed" claim the Talk lane cannot
+    # prove (its only server surface is a model-authored tool name + args).
+    # The gate for real spend lives where the spend happens: the workflow's
+    # own APPROVE SPEND pause nodes. Accountability here is the append-only
+    # audit row per attempt plus HOMIE_KILLSWITCH_ARCHON_DISPATCH.
+    _action(
+        "archon",
+        "dispatch",
+        "write",
+        exposures=("model", "operator_confirmed", "internal"),
+        config_hints=("ARCHON_API_BASE_URL", "ARCHON_CODEBASE_ID"),
+        description="Deploy a workflow run through Archon's orchestrator.",
+    ),
+    # Steering a run the Homie already dispatched: approve, reject, resume,
+    # cancel, abandon, or send a correcting message. Same blast radius as the
+    # dispatch it corrects — it moves LOCAL run state and posts nothing
+    # outward — so it is declared model-initiable on the same honest terms.
+    # The ceremony that does exist is a conversation contract, not a policy
+    # one: destructive actions (cancel/abandon/reject) preview first and act
+    # only on an explicit confirm. Accountability is the append-only
+    # archon_steer.jsonl trail plus HOMIE_KILLSWITCH_ARCHON_STEER.
+    _action(
+        "archon",
+        "steer",
+        "write",
+        exposures=("model", "operator_confirmed", "internal"),
+        config_hints=("ARCHON_API_BASE_URL",),
+        description="Approve, reject, resume, cancel, abandon or correct an Archon run.",
+    ),
 )
 
 try:

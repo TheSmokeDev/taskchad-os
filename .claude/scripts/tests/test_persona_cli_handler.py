@@ -123,12 +123,12 @@ def test_bare_runtime_error_is_not_swallowed_as_click_exception(
     FileNotFoundError):` does NOT include `RuntimeError`. A bug in
     production code surfaces as a real uncaught exception so tests notice.
     """
-    from personas import lifecycle
+    from personas import creation
 
     def _bug(*args, **kwargs):
         raise RuntimeError("simulated implementation bug — not LifecycleError")
 
-    monkeypatch.setattr(lifecycle, "create_profile", _bug)
+    monkeypatch.setattr(creation, "apply_persona_creation", _bug)
     runner = CliRunner()
     result = runner.invoke(main, ["profile", "create", "ops"])
     # RuntimeError MUST surface. Click will set result.exit_code != 0 and
@@ -136,20 +136,19 @@ def test_bare_runtime_error_is_not_swallowed_as_click_exception(
     assert result.exit_code != 0
     assert result.exception is not None
     assert isinstance(result.exception, RuntimeError)
-    assert not isinstance(result.exception, lifecycle.LifecycleError)
     assert "simulated implementation bug" in str(result.exception)
 
 
-def test_lifecycle_error_is_caught_and_routed_through_handler(
+def test_provisioning_error_is_caught_and_routed_through_handler(
     monkeypatch, empty_homie_root
 ):
-    """R3 NNM3 — converse: LifecycleError surfaces as exit_code=1 + Error msg."""
-    from personas import lifecycle
+    """Operator-facing provisioning refusals surface as exit_code=1 + Error."""
+    from personas import creation, provisioning
 
     def _operator_error(*args, **kwargs):
-        raise lifecycle.LifecycleError("simulated operator error")
+        raise provisioning.ProvisioningError("simulated operator error")
 
-    monkeypatch.setattr(lifecycle, "create_profile", _operator_error)
+    monkeypatch.setattr(creation, "apply_persona_creation", _operator_error)
     runner = CliRunner()
     result = runner.invoke(main, ["profile", "create", "ops"])
     assert result.exit_code == 1, result.output

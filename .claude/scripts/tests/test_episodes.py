@@ -150,7 +150,7 @@ class TestEpisodeSettings:
 
 class TestDeriveFlushMeta:
     @pytest.mark.parametrize(
-        "platform", ["telegram", "discord", "slack", "whatsapp", "web", "cli"]
+        "platform", ["telegram", "discord", "slack", "whatsapp", "web", "cli", "talk"]
     )
     def test_platform_tokens_map_to_surface(self, platform):
         name = f"session-flush-{platform}-1111111111-2222222222-20260612-100000.md"

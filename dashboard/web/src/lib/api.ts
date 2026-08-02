@@ -94,8 +94,8 @@ export function describeApiError(err: unknown): string {
   return message;
 }
 
-export async function apiGet<T = unknown>(path: string): Promise<T> {
-  const res = await fetch(path, { method: 'GET', headers: bearerHeaders() });
+export async function apiGet<T = unknown>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, { method: 'GET', headers: bearerHeaders(), signal });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new ApiError(res.status, body, `GET ${path} failed: ${res.status}`);

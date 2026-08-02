@@ -10,9 +10,10 @@ from __future__ import annotations
 import copy
 import os
 import re
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import yaml
 
@@ -37,7 +38,7 @@ class EnvSyncPlan:
     allowed_keys: list[str]
     present_keys: list[str]
     missing_keys: list[str]
-    values: dict[str, str]
+    values: dict[str, str] = field(repr=False)
 
 
 _BASE_RUNTIME_ENV_KEYS: frozenset[str] = frozenset({
@@ -520,21 +521,33 @@ def resolve_env_keys(
     matrix: dict[str, Any] | None = None,
     matrix_path: str | Path | None = None,
     master_keys: Iterable[str] | None = None,
+    env_groups: Iterable[str] | None = None,
+    profile_config: dict[str, Any] | None = None,
 ) -> list[str]:
     """Return env key names delegated to *profile_name*."""
 
-    capability_matrix = matrix or load_capability_matrix(matrix_path)
-    env_groups = capability_matrix.get("env_groups", {})
-    profile = _profile_entry(capability_matrix, profile_name)
-    group_names = _coerce_string_list(profile.get("env_groups", []))
+    capability_matrix = (
+        matrix if matrix is not None else load_capability_matrix(matrix_path)
+    )
+    env_group_map = capability_matrix.get("env_groups", {})
+    profile = resolve_profile_capability_entry(
+        capability_matrix,
+        profile_name,
+        profile_config=profile_config,
+    )
+    group_names = (
+        [str(name).strip() for name in env_groups if str(name).strip()]
+        if env_groups is not None
+        else _coerce_string_list(profile.get("env_groups", []))
+    )
     if "*" in group_names:
         if master_keys is not None:
             return sorted({key for key in master_keys if key})
-        return sorted({key for keys in env_groups.values() for key in keys})
+        return sorted({key for keys in env_group_map.values() for key in keys})
     keys: set[str] = set()
     for group_name in group_names:
         try:
-            keys.update(env_groups[group_name])
+            keys.update(env_group_map[group_name])
         except KeyError as exc:
             raise CapabilityMatrixError(
                 f"profile {profile_name!r} references unknown env group "
@@ -548,12 +561,19 @@ def resolve_skill_allowlist(
     *,
     matrix: dict[str, Any] | None = None,
     matrix_path: str | Path | None = None,
+    profile_config: dict[str, Any] | None = None,
 ) -> frozenset[str] | None:
     """Return allowed central skill names, or None when the profile gets all."""
 
-    capability_matrix = matrix or load_capability_matrix(matrix_path)
+    capability_matrix = (
+        matrix if matrix is not None else load_capability_matrix(matrix_path)
+    )
     skill_groups = capability_matrix.get("skill_groups", {})
-    profile = _profile_entry(capability_matrix, profile_name)
+    profile = resolve_profile_capability_entry(
+        capability_matrix,
+        profile_name,
+        profile_config=profile_config,
+    )
     group_names = _coerce_string_list(profile.get("skill_groups", []))
     direct_skills = _coerce_string_list(profile.get("skills", []))
     if "*" in group_names or "*" in direct_skills:
@@ -586,6 +606,9 @@ def build_env_sync_plan(
     *,
     matrix_path: str | Path | None = None,
     master_env_path: str | Path | None = None,
+    env_groups: Iterable[str] | None = None,
+    profile_config: dict[str, Any] | None = None,
+    profile_env_path: str | Path | None = None,
 ) -> EnvSyncPlan:
     """Build a no-side-effect plan to derive a profile env file."""
 
@@ -595,6 +618,8 @@ def build_env_sync_plan(
         profile_name,
         matrix_path=matrix_path,
         master_keys=master_env.keys(),
+        env_groups=env_groups,
+        profile_config=profile_config,
     )
     values = {
         key: master_env[key]
@@ -605,7 +630,11 @@ def build_env_sync_plan(
     missing_keys = sorted(key for key in allowed_keys if key not in values)
     return EnvSyncPlan(
         profile_name=profile_name,
-        profile_env_path=get_persona_paths(profile_name)["env_file"],
+        profile_env_path=(
+            Path(profile_env_path)
+            if profile_env_path is not None
+            else get_persona_paths(profile_name)["env_file"]
+        ),
         allowed_keys=allowed_keys,
         present_keys=present_keys,
         missing_keys=missing_keys,
@@ -618,17 +647,25 @@ def write_profile_env(plan: EnvSyncPlan) -> Path:
 
     if plan.profile_name == "default":
         raise CapabilityMatrixError("default profile uses the master env directly")
+    from shared import atomic_write_text
+
     plan.profile_env_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(plan.profile_env_path, render_profile_env(plan))
+    return plan.profile_env_path
+
+
+def render_profile_env(plan: EnvSyncPlan) -> str:
+    """Render a derived env file without writing or exposing secret values."""
+
     lines = [
-        "# Generated by `thehomie profile env-sync --write`.",
+        "# Generated by Homie persona capability sync.",
         "# Source: .claude/scripts/.env",
         "# Do not hand-edit secrets here; update the master env and resync.",
         "",
     ]
     for key in plan.present_keys:
         lines.append(f"{key}={_format_env_value(plan.values[key])}")
-    plan.profile_env_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    return plan.profile_env_path
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def build_capability_scoped_env(
@@ -684,7 +721,17 @@ def capability_matrix_template_text() -> str:
     )
 
 
-def _profile_entry(matrix: dict[str, Any], profile_name: str) -> dict[str, Any]:
+def resolve_profile_capability_entry(
+    matrix: dict[str, Any],
+    profile_name: str,
+    *,
+    profile_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve the canonical profile-local or shared matrix capability row."""
+
+    compiled = _compiled_profile_entry(profile_name, profile_config)
+    if compiled is not None:
+        return copy.deepcopy(compiled)
     profiles = matrix.get("profiles", {})
     if profile_name in profiles:
         profile = profiles[profile_name]
@@ -692,7 +739,41 @@ def _profile_entry(matrix: dict[str, Any], profile_name: str) -> dict[str, Any]:
         profile = matrix.get("profile_defaults", {})
     if not isinstance(profile, dict):
         raise CapabilityMatrixError(f"profile {profile_name!r} must resolve to mapping")
-    return profile
+    return copy.deepcopy(profile)
+
+
+def _compiled_profile_entry(
+    profile_name: str,
+    profile_config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the profile-local compiler overlay when one is present."""
+
+    config = profile_config
+    if config is None and profile_name not in {"default", "custom"}:
+        config_path = get_persona_paths(profile_name)["memory"].parent / "config.yaml"
+        if not config_path.is_file():
+            return None
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            raise CapabilityMatrixError(
+                f"could not load capability overlay from {config_path}: {exc}"
+            ) from exc
+        if not isinstance(raw, dict):
+            raise CapabilityMatrixError(
+                f"capability overlay config must be a mapping: {config_path}"
+            )
+        config = raw
+    if not isinstance(config, dict):
+        return None
+    compiled = config.get("capability_blueprint")
+    if not isinstance(compiled, dict):
+        return None
+    return {
+        "env_groups": _coerce_string_list(compiled.get("env_groups", [])),
+        "skill_groups": _coerce_string_list(compiled.get("skill_groups", [])),
+        "skills": _coerce_string_list(compiled.get("skills", [])),
+    }
 
 
 def _coerce_string_list(value: Any) -> list[str]:
@@ -738,7 +819,9 @@ __all__ = [
     "get_matrix_path",
     "load_capability_matrix",
     "read_env_values",
+    "render_profile_env",
     "resolve_env_keys",
+    "resolve_profile_capability_entry",
     "resolve_skill_allowlist",
     "safe_env_sync_summary",
     "validate_capability_matrix",

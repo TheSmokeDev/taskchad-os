@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from adapters.base import ProgressCapabilities, resolve_progress_capabilities
+from adapters.buzz import BuzzAdapter
 from adapters.cli_adapter import CLIAdapter
 from adapters.discord import DiscordAdapter
 from adapters.slack import SlackAdapter
@@ -66,6 +67,7 @@ def test_progress_capabilities_are_frozen_and_default_disabled() -> None:
         pytest.param(CLIAdapter, ALL_DISABLED, id="cli"),
         pytest.param(WhatsAppAdapter, ALL_DISABLED, id="whatsapp"),
         pytest.param(WebhookAdapter, ALL_DISABLED, id="webhook"),
+        pytest.param(BuzzAdapter, ALL_DISABLED, id="buzz-final-only"),
     ],
 )
 def test_framework_adapter_progress_matrix(

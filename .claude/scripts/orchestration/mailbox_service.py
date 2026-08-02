@@ -107,7 +107,31 @@ class MailboxService:
                     "msg_type": inp.msg_type or "direct",
                 }
             )
-            return self.db.row_to_message(row)
+            message = self.db.row_to_message(row)
+
+            if inp.message_type == "approval_request":
+                try:
+                    from buzz_signals import enqueue_work_receipt
+
+                    work_id = str(inp.convoy_id or message_id)
+                    enqueue_work_receipt(
+                        "work.approval_required",
+                        work_id=work_id,
+                        work_type="convoy" if inp.convoy_id else "mailbox",
+                        summary=inp.subject or "Operator approval required",
+                        status="approval_required",
+                        dashboard_path=(
+                            f"/mission/convoys/{inp.convoy_id}"
+                            if inp.convoy_id
+                            else "/mission/mailbox"
+                        ),
+                        idempotency_key=f"mailbox:{message_id}:work.approval_required",
+                    )
+                except Exception:
+                    # A collaboration projection can never roll back canonical
+                    # mailbox state or become an approval authority.
+                    pass
+            return message
 
     # ── Claim ──────────────────────────────────────────────────────────────
     # Parity: mailbox.ts:claimDeliveries()

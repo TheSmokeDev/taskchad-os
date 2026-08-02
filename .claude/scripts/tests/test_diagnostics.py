@@ -110,6 +110,77 @@ class TestDiagnosticsReport:
         assert isinstance(report.runtime_lanes, dict)
         assert isinstance(report.runtime_providers, dict)
 
+    def test_persona_readiness_keeps_full_vector(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import diagnostics as diagnostics_module
+        from personas import readiness
+
+        vector = {
+            "ai-engineer": {
+                "schema_version": 1,
+                "persona_id": "ai-engineer",
+                "status": "PARTIAL",
+                "selected_lane": "claude_native",
+                "selected_providers": ["claude"],
+                "axes": {
+                    axis: {
+                        "status": "READY" if axis != "callable" else "PARTIAL",
+                        "reasons": [],
+                        "evidence": {},
+                    }
+                    for axis in readiness.AXIS_NAMES
+                },
+                "surfaces": {},
+                "capabilities": [],
+            }
+        }
+        monkeypatch.setattr(
+            readiness,
+            "collect_persona_readiness_inventory",
+            lambda: vector,
+        )
+        report = DiagnosticsReport(timestamp="now", uptime_seconds=0.0)
+
+        diagnostics_module._check_persona_readiness(report)
+
+        assert report.persona_readiness == vector
+        assert tuple(report.persona_readiness["ai-engineer"]["axes"]) == (
+            "declared",
+            "transportable",
+            "callable",
+            "configured",
+            "channel-bound",
+            "scheduler-safe",
+        )
+
+    def test_persona_readiness_collector_error_uses_canonical_schema_and_redaction(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import diagnostics as diagnostics_module
+        from personas import readiness
+
+        secret = "must-not-leak"
+        monkeypatch.setattr(readiness, "READINESS_SCHEMA_VERSION", 7)
+        monkeypatch.setattr(readiness, "AXIS_NAMES", ("declared", "future-axis"))
+        monkeypatch.setattr(
+            readiness,
+            "collect_persona_readiness_inventory",
+            lambda: (_ for _ in ()).throw(
+                RuntimeError(f"OPENAI_API_KEY={secret}")
+            ),
+        )
+        report = DiagnosticsReport(timestamp="now", uptime_seconds=0.0)
+
+        diagnostics_module._check_persona_readiness(report)
+
+        collector = report.persona_readiness["_collector"]
+        serialized = json.dumps(collector)
+        assert collector["schema_version"] == 7
+        assert tuple(collector["axes"]) == ("declared", "future-axis")
+        assert secret not in serialized
+        assert "OPENAI_API_KEY=<redacted>" in serialized
+
     def test_collect_diagnostics_includes_url_free_browser_readiness(
         self, monkeypatch: pytest.MonkeyPatch,
     ):

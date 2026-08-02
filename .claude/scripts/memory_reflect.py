@@ -423,6 +423,20 @@ async def run_reflection(test_mode: bool = False, days: int = 1) -> str | None:
         return None
 
 
+async def _run_crypto_plays_post_step() -> str:
+    """Run the synchronous crypto verification sweep entirely in a worker."""
+
+    def _resolve_and_run() -> str:
+        # Import + call-time config resolution both happen in the worker.
+        # Passing run_crypto_plays_sweep(...) as a to_thread argument would
+        # evaluate it on the event loop before the worker starts.
+        from crypto_plays_sweep import run_crypto_plays_sweep
+
+        return run_crypto_plays_sweep(persona_id="crypto")
+
+    return await asyncio.to_thread(_resolve_and_run)
+
+
 async def _run_reflection_inner(test_mode: bool = False, days: int = 1) -> str | None:
     """Run daily reflection using Agent SDK.
 
@@ -844,6 +858,47 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
                 print(f"[{now_local()}] Signal engine: no relevant signal (SILENT)")
         except Exception as exc:
             print(f"[{now_local()}] Signal engine post-reflection failed (non-blocking): {exc}")
+
+    # --- Called-shots stale sweep post-step (epic #186 T3) ---
+    # Pull-only nag: stale open bets get one daily-log receipt line. Soft
+    # toggle + kill-switch respected INSIDE the sweep; failure never blocks
+    # reflection.
+    if not test_mode:
+        try:
+            from called_shots_sweep import run_called_shots_sweep
+
+            sweep_result = run_called_shots_sweep(test_mode=False)
+            if sweep_result and sweep_result != "SHOTS_SWEEP_SILENT":
+                print(f"[{now_local()}] Called-shots sweep: {sweep_result}")
+            else:
+                print(f"[{now_local()}] Called-shots sweep: nothing stale (SILENT)")
+        except Exception as exc:
+            print(f"[{now_local()}] Called-shots sweep failed (non-blocking): {exc}")
+
+    # --- Crypto-play tiered verification post-step (epic #199 W3) ---
+    # Reuses this scheduled reflection chain: no new timer. The entire
+    # source-DB/DexScreener/ledger/spend-log sweep runs in a worker thread.
+    if not test_mode:
+        try:
+            crypto_sweep_result = await _run_crypto_plays_post_step()
+            if (
+                crypto_sweep_result
+                and crypto_sweep_result != "CRYPTO_PLAYS_SWEEP_SILENT"
+            ):
+                print(
+                    f"[{now_local()}] Crypto-play verification: "
+                    f"{crypto_sweep_result}"
+                )
+            else:
+                print(
+                    f"[{now_local()}] Crypto-play verification: "
+                    "no open plays (SILENT)"
+                )
+        except Exception as exc:
+            print(
+                f"[{now_local()}] Crypto-play verification failed "
+                f"(non-blocking): {exc}"
+            )
 
     # --- Vault log append (chronological wiki timeline) ---
     if not test_mode and "REFLECTION_OK" not in response_text:

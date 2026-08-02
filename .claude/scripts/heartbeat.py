@@ -1906,6 +1906,267 @@ def process_heartbeat_observations(
 
 
 # =============================================================================
+# PROACTIVE ACTION DRAIN (Living Mind Act 3 closer — issue #171)
+# =============================================================================
+#
+# cognitive_pass.maybe_queue_actions() (Act 3) queues operator_notification
+# proposals to PROACTIVE_ACTION_QUEUE_FILE; nothing ever read them back
+# ("the mind thinks, decides to surface something to the operator, writes
+# the decision to disk, and it is never seen again" — issue #171). This
+# drain runs every heartbeat (~every 2h on this box), BEFORE the runtime
+# turn (zero LLM, deterministic, safe if the runtime call later fails):
+# backlog entries older than the age cap are marked "expired" (never
+# dumped on the operator in one burst), the rest dispatch oldest-first up
+# to the per-run cap through the SAME notification path the main heartbeat
+# alert already uses (send_toast_notification: desktop toast + Slack,
+# itself gated by the existing Slack integration policy/kill-switch), each
+# delivery gets a daily-log receipt, and every action — not just ones
+# assumed to be notifications — is routed through evaluate_action_policy()
+# (the unchanged default-deny integration gate) so this drain can never
+# become a mutation bypass for a future non-notification action type.
+
+
+def _proactive_drain_settings() -> tuple[int, int]:
+    """Resolve proactive-action drain knobs at CALL TIME (Rule 1).
+
+    Deliberately not module-level constants (mirrors ``_heartbeat_codex_model``
+    above) — env overrides (and ``monkeypatch.setenv`` in tests) take effect
+    on the next call with no reload. Returns (max_age_days, max_dispatch_per_run).
+    """
+    # Degrade a malformed env value to the built-in default rather than raising
+    # (Kimi gate MINOR) — a typo like MAX_PER_RUN=three must not kill the drain
+    # every run before its own try/except can catch anything.
+    def _int_env(name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            print(f"[{now_local()}] {name} is not an int; using default {default}")
+            return default
+
+    max_age_days = _int_env("HEARTBEAT_PROACTIVE_DRAIN_MAX_AGE_DAYS", 7)
+    max_per_run = _int_env("HEARTBEAT_PROACTIVE_DRAIN_MAX_PER_RUN", 3)
+    return max_age_days, max_per_run
+
+
+def _proactive_action_age_days(created_at: str, now: datetime) -> float | None:
+    """Return an action's age in days, or None if created_at is unparseable."""
+    if not created_at:
+        return None
+    try:
+        created = datetime.fromisoformat(created_at)
+    except ValueError:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=LOCAL_TZ)
+    return (now - created).total_seconds() / 86400
+
+
+def _mark_and_report(
+    queue: Any,
+    report: dict[str, list[str]],
+    bucket: str,
+    action: Any,
+    label: str,
+    success_note: str | None = None,
+    **updates: Any,
+) -> None:
+    """Call ``queue.mark()`` for the expire/policy-reject outcomes and record it.
+
+    Shared by both paths in ``drain_proactive_actions`` — they have identical
+    mark()-then-report semantics. The dispatch path stays separate: notify and
+    mark() carry different failure meanings there (see the comment at that
+    call site), so it is not folded into this helper.
+    """
+    try:
+        if queue.mark(action.id, **updates):
+            report[bucket].append(action.id)
+            if success_note:
+                print(success_note)
+        else:
+            report["failed"].append(action.id)
+            print(
+                f"[{now_local()}] Proactive action {label} mark() found "
+                f"no matching record: {action.id}"
+            )
+    except Exception as e:
+        report["failed"].append(action.id)
+        print(f"[{now_local()}] Proactive action {label} failed (non-fatal): {action.id}: {e}")
+
+
+def drain_proactive_actions(
+    *,
+    test_mode: bool = False,
+    max_age_days: int | None = None,
+    max_dispatch_per_run: int | None = None,
+    now: datetime | None = None,
+    queue: Any = None,
+) -> dict[str, Any]:
+    """Drain PROACTIVE_ACTION_QUEUE_FILE: expire stale entries, dispatch the rest.
+
+    Zero LLM — deterministic queue housekeeping. Fail-open at every seam: a
+    single action's expire/dispatch failure is logged and the drain
+    continues with the next action; an unavailable queue module or an
+    unreadable queue file returns an empty report instead of raising.
+    """
+    settings_max_age, settings_max_per_run = _proactive_drain_settings()
+    if max_age_days is None:
+        max_age_days = settings_max_age
+    if max_dispatch_per_run is None:
+        max_dispatch_per_run = settings_max_per_run
+
+    current = _resolve_blocker_now(now)
+    report: dict[str, Any] = {
+        "expired": [],
+        "dispatched": [],
+        "policy_rejected": [],
+        "failed": [],
+    }
+
+    try:
+        from cognition.proactive_actions import (
+            ProactiveActionQueue,
+            evaluate_action_policy,
+        )
+    except Exception as e:
+        print(f"[{now_local()}] Proactive action drain unavailable (non-fatal): {e}")
+        return report
+
+    if queue is None:
+        try:
+            from config import PROACTIVE_ACTION_QUEUE_FILE
+
+            queue = ProactiveActionQueue(PROACTIVE_ACTION_QUEUE_FILE)
+        except Exception as e:
+            print(f"[{now_local()}] Proactive action queue init failed (non-fatal): {e}")
+            return report
+
+    try:
+        # Sort oldest-first by PARSED datetime, not the raw ISO string (Kimi
+        # gate MINOR): mixed-offset timestamps (DST edge, hand-edited record)
+        # misorder as strings. Unparseable timestamps sort last (treated as
+        # "newest") so a bad record can't jump the queue.
+        def _sort_key(a: object) -> tuple[int, str]:
+            created = getattr(a, "created_at", "") or ""
+            try:
+                return (0, datetime.fromisoformat(created).astimezone().isoformat())
+            except (TypeError, ValueError):
+                return (1, created)
+
+        queued = sorted(queue.read_queued(), key=_sort_key)
+    except Exception as e:
+        print(f"[{now_local()}] Proactive action queue read failed (non-fatal): {e}")
+        return report
+
+    dispatched = 0
+    for action in queued:
+        age_days = _proactive_action_age_days(action.created_at, current)
+        if age_days is not None and age_days > max_age_days:
+            _mark_and_report(
+                queue, report, "expired", action, "expire",
+                success_note=(
+                    f"[{now_local()}] Proactive action expired "
+                    f"(backlog, {age_days:.1f}d old): {action.id}"
+                ),
+                dispatch_status="expired",
+                policy_decision="expired",
+                result=f"backlog_expired_{age_days:.1f}d",
+            )
+            continue
+
+        if dispatched >= max_dispatch_per_run:
+            continue
+
+        allowed, decision = evaluate_action_policy(action)
+        if not allowed:
+            _mark_and_report(
+                queue, report, "policy_rejected", action, "policy-reject",
+                dispatch_status="policy_rejected",
+                policy_decision=decision,
+                result="drain_policy_rejected",
+            )
+            continue
+
+        # Notify and mark() are split into two try/except blocks (not one)
+        # because they have different failure semantics: a notify failure is
+        # safe to retry next run (nothing was delivered), but a mark()
+        # failure AFTER a successful notify means the operator already saw
+        # it — that must be logged distinctly instead of folded into the
+        # same "failed" bucket as a plain notify failure.
+        try:
+            if test_mode:
+                send_console_notification(
+                    "The Homie — Proactive Note (TEST)", action.message
+                )
+            else:
+                send_toast_notification(
+                    "The Homie — Proactive Note",
+                    action.message,
+                    caller="heartbeat.drain_proactive_actions",
+                )
+        except Exception as e:
+            report["failed"].append(action.id)
+            print(f"[{now_local()}] Proactive action notify failed (non-fatal): {action.id}: {e}")
+            continue
+
+        # Cap on the OPERATOR-VISIBLE act (the notify), not on mark() success:
+        # the operator has already seen the toast at this point, so it counts
+        # against the per-run anti-burst cap even if the mark() below fails.
+        # Counting on mark() success (the old behavior) let a run where every
+        # mark() failed toast the whole backlog in one pass — defeating the cap
+        # exactly when it matters most (Codex gate MINOR on PR #177).
+        dispatched += 1
+
+        try:
+            marked = queue.mark(
+                action.id,
+                dispatch_status="dispatched",
+                policy_decision="allow",
+                result="heartbeat_drain_notification",
+            )
+        except Exception as e:
+            report["failed"].append(action.id)
+            print(
+                f"[{now_local()}] Proactive action ALREADY NOTIFIED but mark() "
+                f"failed — will re-notify next run: {action.id}: {e}"
+            )
+            continue
+
+        if marked:
+            report["dispatched"].append(action.id)
+            # Fail-open at THIS seam too (Kimi gate MAJOR): mark() already
+            # succeeded, so a daily-log write failure (disk full, perms) must
+            # NOT abort the drain mid-backlog and starve the remaining actions.
+            try:
+                append_to_daily_log(
+                    f"**Proactive note dispatched** (source: {action.source}): "
+                    f"{action.message}",
+                    "Heartbeat",
+                )
+            except Exception as e:
+                print(
+                    f"[{now_local()}] Proactive action daily-log receipt failed "
+                    f"(non-fatal, already dispatched): {action.id}: {e}"
+                )
+            print(f"[{now_local()}] Proactive action dispatched: {action.id}")
+        else:
+            report["failed"].append(action.id)
+            print(
+                f"[{now_local()}] Proactive action ALREADY NOTIFIED but mark() "
+                f"found no matching record — will re-notify next run: {action.id}"
+            )
+
+    if any(report[k] for k in ("expired", "dispatched", "policy_rejected", "failed")):
+        print(
+            f"[{now_local()}] Proactive action drain: "
+            f"{len(report['dispatched'])} dispatched, "
+            f"{len(report['expired'])} expired, "
+            f"{len(report['policy_rejected'])} policy-rejected, "
+            f"{len(report['failed'])} failed"
+        )
+    return report
+
+
+# =============================================================================
 # HEARTBEAT THREAD TRACKING
 # =============================================================================
 
@@ -2083,6 +2344,17 @@ async def run_heartbeat(test_mode: bool = False) -> str | None:
         process_heartbeat_observations(state, sense_facts, MEMORY_DIR)
     except Exception as e:
         print(f"[{now_local()}] Ambient observation error (non-fatal): {e}")
+
+    # Living Mind Act 3 closer (issue #171) — drain the proactive-action
+    # queue. Zero LLM, deterministic; runs BEFORE the runtime turn (like the
+    # two pipelines above) so a runtime failure never blocks delivery or
+    # expiry of already-queued decisions. Runs in --test mode too (console
+    # notification path instead of a real toast/Slack send — mirrors how
+    # the end-of-run heartbeat alert itself behaves in test mode).
+    try:
+        drain_proactive_actions(test_mode=test_mode)
+    except Exception as e:
+        print(f"[{now_local()}] Proactive action drain error (non-fatal): {e}")
 
     # Pre-runtime state persistence: persist blocker counters and
     # last_promoted now — a runtime failure must not drop them while

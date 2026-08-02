@@ -10,6 +10,12 @@ Scheduled Jobs, Settings, and Audit cover utility dashboard surfaces: cron-like
 scheduled tasks, dashboard settings, mobile access status, kill-switch banners,
 and audit placeholders.
 
+Persona curricula use the dedicated `curriculum_tick.py` scheduler and the
+`SecondBrain-PersonaCurriculum` Windows task. The default-profile parent runs
+every six hours, applies each persona's own cadence, records attempt and
+success separately, and skips disabled profiles without a provider call. See
+[Persona Curriculum Engine](persona-curriculum-engine.md#scheduling).
+
 ## Operator Entry Points
 
 - Dashboard: `/scheduled`, `/settings`, `/audit`, `/mobile`

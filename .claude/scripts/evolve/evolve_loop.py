@@ -139,6 +139,9 @@ def _write_belief_decision(
     outcome: str,
     *,
     outcome_reason: str = "",
+    retryable: bool = False,
+    attempts: int = 0,
+    max_attempts: int = 0,
 ) -> Path:
     """M1 — the belief SIBLING decision artifact (NO recall ReportDelta).
 
@@ -157,12 +160,27 @@ def _write_belief_decision(
       - ``"reject"``  — the floor/judge said no, OR the live apply's policy gate
                         REJECTED it (``outcome_reason`` carries the real
                         ``policy_reason`` so a low-confidence/oversized reject is
-                        not mislabelled "adopt").
-      - ``"error"``   — the live apply RAISED (``outcome_reason`` = the repr);
-                        SELF.md is untouched, no lying "adopt" is written.
+                        not mislabelled "adopt"). SELF.md/MEMORY.md is untouched
+                        for this outcome.
+      - ``"error"``   — the live apply RAISED (``outcome_reason`` = the repr),
+                        OR the judge infra call raised (``outcome_reason`` =
+                        ``"judge_failed"``, ``retryable=True``; SELF.md is
+                        untouched, no lying "adopt" is written), OR the live
+                        apply returned ``AmendmentApplyResult.status ==
+                        "apply_pending"`` (``outcome_reason`` = the real
+                        ``policy_reason``/status, ``retryable=True``) — the
+                        target bytes ARE on disk but the ledger flip to
+                        "applied" did not confirm; NOT a policy reject (the
+                        belief was not declined), self-heals on the next
+                        ``apply_amendment_if_allowed`` pass.
     ``outcome_reason`` records WHY (Rule 2 — physical), distinct from the pre-gate
     ``evidence_reason`` so the audit shows the floor/judge verdict AND the real
-    apply-gate verdict.
+    apply-gate verdict. Note the deliberate asymmetry inside ``"error"``: the
+    apply-RAISED path stays ``retryable=False`` (a raise may indicate a
+    deterministic content failure and a partial write — the rollback snapshot
+    covers it), while judge-infra and apply_pending are ``retryable=True``
+    (transient, safe to re-pick). Consumers must branch on ``retryable``, not
+    on ``outcome == "error"`` alone.
     """
     from datetime import UTC, datetime
 
@@ -179,6 +197,7 @@ def _write_belief_decision(
                 "target_file": proposal.target_file,
                 "candidate": {
                     "summary": proposal.summary,
+                    "rationale": proposal.rationale,  # audit trail parity with `prediction`
                     "proposed_content": proposal.proposed_content,
                     "evidence_paths": proposal.evidence_paths,
                     "confidence_score": proposal.confidence_score,
@@ -189,6 +208,13 @@ def _write_belief_decision(
                 "judge": verdict,
                 "outcome": outcome,  # F2 — REAL outcome, not a pre-gate prediction
                 "outcome_reason": outcome_reason,
+                "retryable": retryable,  # F2 (#169) — judge outage is re-pickable
+                # #170 — the retry budget for this candidate id. A retry updates
+                # this SAME artifact (keyed by proposal.id), so `attempts` is the
+                # running count across nights; when it reaches `max_attempts`,
+                # propose_belief downgrades `retryable` to False (terminal).
+                "attempts": attempts,
+                "max_attempts": max_attempts,
             },
             indent=2,
         ),
@@ -237,6 +263,11 @@ def _malformed_candidate_decision(candidate: dict, reason: str) -> dict:
                     "judge": {},
                     "outcome": "reject",
                     "outcome_reason": reason,
+                    "retryable": False,  # F2 (#169) — malformed is terminal, never retryable
+                    # #170 — a malformed candidate is terminal on sight; it never
+                    # accrues attempts (schema-consistent with the real artifact).
+                    "attempts": 0,
+                    "max_attempts": 0,
                 },
                 indent=2,
             ),
@@ -270,6 +301,7 @@ async def propose_belief(
     dry_run: bool = True,
     memory_dir: Path | str | None = None,
     reasoning: Any | None = None,
+    attempts: int = 0,
 ) -> dict:
     """The identity rail — evidence-READ -> floor -> judge -> decision artifact.
 
@@ -279,6 +311,14 @@ async def propose_belief(
     gate bound — defense-in-depth; the gate is the source of truth, not the loop's
     earlier pass). ``--dry-run`` writes the artifact + prints the verdict but does
     NOT mutate SELF.md. m6: ``EVOLVE_ENABLED`` is enforced at the entrypoint.
+
+    ``attempts`` (#170) is the count of PRIOR judge attempts for this candidate id
+    (0 for a fresh candidate). When the outcome is ``retryable=True`` and this run
+    would push the running total (``attempts + 1``) to ``max_attempts`` or beyond,
+    the candidate is downgraded to TERMINAL (``retryable=False``,
+    ``outcome_reason="retry_budget_exhausted"``) so a permanently-broken judge call
+    cannot be re-picked forever. Every existing caller passes no ``attempts`` (so
+    ``next_attempts=1 < 3`` default) — byte-identical to pre-#170 behavior.
     """
     from cognition.evidence_gate import read_evidence_texts, verify_evidence_support
 
@@ -338,12 +378,30 @@ async def propose_belief(
         and verdict["evidence_fidelity"] >= s.min_fidelity
     )
 
+    # F2 (issue #169) — a judge INFRA failure (rate limit / network / provider
+    # outage) is NOT a semantic reject: verdict["supported"] is False either way,
+    # but "the judge said no" and "the judge never ran" must not collapse into the
+    # same terminal "reject". A retryable "error" lets the Archon rail re-pick this
+    # candidate instead of permanently vetoing a belief that was never actually
+    # judged. Gated strictly on the exact "judge_failed" reason string, which
+    # judge_belief_candidate returns ONLY from its except-Exception branch
+    # (evolve/judge.py:176) — judge.py is out of scope for this PR, so there is no
+    # shared constant; if that literal string ever changes there, update here too.
+    judge_infra_failed = verdict.get("reason") == "judge_failed"
+    # Separate from `judge_infra_failed` (judge never ran) — this also flips True
+    # when the live apply lands bytes but the ledger flip doesn't confirm (see the
+    # `apply_pending` branch below). Both are "retryable", for different reasons.
+    retryable = judge_infra_failed
+
     # The REAL outcome + reason, reconciled from the apply result (F2). Defaults to
     # the prediction for the floor/judge-reject and dry-run paths (where no apply
     # runs); overwritten by the live apply's actual AmendmentApplyResult below.
-    outcome = "adopt" if predicted_adopt else "reject"
-    outcome_reason = "" if predicted_adopt else (ev_reason or verdict.get("reason", ""))
-    applied = predicted_adopt  # what we REPORT as `adopt` — corrected on the live path
+    if judge_infra_failed:
+        outcome, outcome_reason, applied = "error", "judge_failed", False
+    else:
+        outcome = "adopt" if predicted_adopt else "reject"
+        outcome_reason = "" if predicted_adopt else (ev_reason or verdict.get("reason", ""))
+        applied = predicted_adopt  # what we REPORT as `adopt` — corrected on the live path
 
     if predicted_adopt and not dry_run:
         from cognition.amendments import (
@@ -378,10 +436,23 @@ async def propose_belief(
             # Reconcile the artifact to the REAL apply result.
             if result.status == "applied":
                 outcome, outcome_reason, applied = "adopt", result.policy_reason, True
+            elif result.status == "apply_pending":
+                # F4a (#169) follow-through: the target bytes ARE on disk (the
+                # atomic write succeeded), but the ledger flip to "applied" did
+                # not confirm. This is neither an adopt (not ledger-settled) nor
+                # a policy "reject" (the belief was NOT declined — it physically
+                # landed); calling it "reject" would lie about SELF.md/MEMORY.md
+                # having changed. Report it as a retryable "error" instead — the
+                # next apply_amendment_if_allowed pass self-heals the ledger row
+                # (amendments.py's apply_pending reconciliation block).
+                outcome = "error"
+                outcome_reason = result.policy_reason or result.status
+                applied = False
+                retryable = True
             else:
-                # policy_rejected (or any non-applied terminal) — the belief did NOT
-                # land. Record the REAL policy_reason (low_confidence / content_too_large
-                # / etc.) so the artifact does not lie.
+                # policy_rejected (or any other non-applied terminal) — the belief
+                # did NOT land. Record the REAL policy_reason (low_confidence /
+                # content_too_large / etc.) so the artifact does not lie.
                 outcome = "reject"
                 outcome_reason = result.policy_reason or result.status
                 applied = False
@@ -393,12 +464,33 @@ async def propose_belief(
                 flush=True,
             )
 
+    # #170 — retry-budget cap. This is the LAST mutation before the write, so it
+    # overrides whatever judge_infra_failed / apply_pending set `retryable` to
+    # (never the other way around): a candidate that would otherwise be re-picked
+    # forever goes TERMINAL once its running attempt count reaches the budget.
+    # Kimi gate MAJOR on PR #181: a dry-run (memory_dream.py --test) must NOT
+    # burn retry budget — incrementing `attempts` / downgrading to
+    # retry_budget_exhausted here would let the documented "safe probe" push a
+    # queued candidate TERMINAL without it ever being permitted to write. Under
+    # dry-run the artifact is still written (preview), but with the attempt count
+    # UNCHANGED and no budget downgrade.
+    recorded_attempts = attempts
+    if not dry_run:
+        next_attempts = attempts + 1
+        recorded_attempts = next_attempts
+        if retryable and next_attempts >= s.max_attempts:
+            retryable = False
+            outcome_reason = "retry_budget_exhausted"
+
     # F2 — write the artifact AFTER the apply, from the REAL outcome (never the
     # pre-gate prediction). On dry-run / floor-reject, `outcome` is the prediction
     # (no apply ran); on the live path it is the actual applied/rejected/error truth.
     _write_belief_decision(
         proposal, candidate, ev_ok, ev_reason, verdict, outcome,
         outcome_reason=outcome_reason,
+        retryable=retryable,
+        attempts=recorded_attempts,
+        max_attempts=s.max_attempts,
     )
 
     print(
@@ -413,6 +505,9 @@ async def propose_belief(
         "adopt": applied,  # F2 — the REAL outcome (apply-reconciled), not the prediction
         "outcome": outcome,
         "outcome_reason": outcome_reason,
+        "retryable": retryable,  # F2 (#169) — judge outage / apply_pending != real reject
+        "attempts": recorded_attempts,  # #170 — running count (unchanged on dry-run)
+        "max_attempts": s.max_attempts,  # #170 — the budget this run enforced
         "evidence_ok": ev_ok,
         "evidence_reason": ev_reason,
         **verdict,
@@ -525,6 +620,86 @@ def _load_candidate(value: str) -> dict:
             f"--candidate must be a JSON object, got {type(raw).__name__}"
         )
     return raw
+
+
+def extract_belief_candidates(text: str) -> list[dict[str, Any]]:
+    """Pull ``kind: belief_candidate`` JSON blocks out of the nightly
+    consolidation LLM response (Living Self Act 4, dream-cycle autonomy — #170).
+
+    Reuses ``cognition.amendments._iter_json_records`` — no new parser was written.
+    This is a NEW dependency for this module (``_proposal_from`` already reaches into
+    ``amendments.py`` for the DIFFERENT private helper ``_coerce_dataclass``; this is
+    the first call site here for ``_iter_json_records``). Returns RAW dicts with
+    ``kind`` stripped; ``propose_belief``'s own ``_proposal_from`` does the
+    ``AmendmentProposal`` coercion later, so this function's only job is to find +
+    tag-filter the blocks.
+    """
+    from cognition.amendments import _iter_json_records
+
+    out: list[dict[str, Any]] = []
+    for record in _iter_json_records(text):
+        if isinstance(record, dict) and record.get("kind") == "belief_candidate":
+            # Strip `kind` AND any LLM-supplied `id` (Kimi gate MINOR on PR
+            # #181): a hallucinated/injected id on a FRESH candidate would
+            # collide with a queued retry's decision-artifact/ledger identity
+            # (one file per id, overwritten) and clobber its audit/retry state.
+            # Only load_retryable_belief_candidates mints trusted ids; a fresh
+            # block gets a new uuid via AmendmentProposal.__post_init__.
+            out.append({k: v for k, v in record.items() if k not in ("kind", "id")})
+    return out
+
+
+def load_retryable_belief_candidates(
+    *, decision_dir: Path | str | None = None
+) -> tuple[list[dict[str, Any]], int]:
+    """Reconstruct re-postable candidate dicts from prior retryable decision
+    artifacts (#170).
+
+    Preserves the ORIGINAL proposal id (``AmendmentProposal.__post_init__`` only
+    mints a new uuid when id is falsy) so a retry updates the SAME decision artifact
+    + ledger row instead of duplicating it. ``decision-*.json`` is ONE file per
+    ``proposal.id``, OVERWRITTEN on every write — every file IS the latest state for
+    its id (no "latest of many" ambiguity). ``_malformed_candidate_decision``'s
+    synthetic ``malformed-*`` ids are ALWAYS ``retryable=False`` so they never
+    appear here. ``_attempts`` carries the running count so the caller can thread it
+    back into ``propose_belief(attempts=...)``.
+
+    Returns ``(candidates, skipped_count)`` — a file that fails to read/parse
+    (truncated write, transient lock, malformed shape) is logged and skipped
+    rather than silently dropped or crashing the whole retry queue; the count
+    lets the caller surface corruption in the Phase-5 receipt instead of it
+    being invisible outside ``dream_runs.log``.
+    """
+    from config import BELIEF_EVOLVE_DECISION_DIR
+
+    base = (
+        Path(decision_dir)
+        if decision_dir is not None
+        else Path(BELIEF_EVOLVE_DECISION_DIR)
+    )
+    out: list[dict[str, Any]] = []
+    if not base.exists():
+        return out, 0
+    skipped = 0
+    for f in sorted(base.glob("decision-*.json")):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            if not d.get("retryable"):
+                continue
+            cand = dict(d.get("candidate") or {})
+            cand["id"] = d.get("proposal_id", "")
+            cand["target_file"] = d.get("target_file", "")
+            cand["_attempts"] = int(d.get("attempts", 0))
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            skipped += 1
+            print(
+                f"[evolve.loop] load_retryable_belief_candidates: skipping "
+                f"unreadable/malformed {f.name}: {exc!r}",
+                flush=True,
+            )
+            continue
+        out.append(cand)
+    return out, skipped
 
 
 def main() -> None:

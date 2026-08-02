@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from collections import OrderedDict
 from dataclasses import asdict
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from attachment_context import build_attachment_context
-from models import IncomingMessage, OutgoingMessage, Platform
+from models import IncomingMessage, MessageComponent, OutgoingMessage, Platform
 from session import (
     HeartbeatThread,
     PostgresSessionStore,
@@ -50,7 +51,7 @@ try:
         log_recall_event,
         prompt_regions_from_working_memory,
     )
-    from cognition.regions import PromptRegion
+    from cognition.regions import DEFAULT_REGION_BUDGETS, PromptRegion, truncate_region
     from cognition.staging import StagingStore
     from cognition.working_memory import Memory, WorkingMemory
 
@@ -302,6 +303,14 @@ class ConversationEngine:
         # promotion-eligible this process lifetime, so the post-response hook
         # emits the `promotion_eligible` event once per draft (not every turn).
         self._skill_eligible_logged: set[str] = set()
+        # Called-Shots callback (epic #186 T3): (session_key, domain) pairs
+        # already surfaced — the track-record line fires once per domain per
+        # SESSION (canonical build_session_key grain: two threads on one
+        # channel never suppress each other). Insertion-ordered + capped
+        # (FIFO eviction) so a long-lived process can't grow it unbounded;
+        # /clear resets the session's entries via
+        # reset_shots_callback_for_session.
+        self._shots_callback_fired: OrderedDict[tuple[str, str], None] = OrderedDict()
 
     def _build_active_inference_region(self) -> str:
         """Render active user inferences as a WorkingMemory system region."""
@@ -587,6 +596,151 @@ class ConversationEngine:
         except Exception:
             return None
 
+    _SHOTS_CALLBACK_FIRED_CAP = 256
+
+    async def _maybe_called_shots_callback(
+        self,
+        message: IncomingMessage,
+        *,
+        trace_decisions: dict[str, Any] | None = None,
+    ) -> str:
+        """Called-Shots track-record line for this turn (epic #186 T3).
+
+        Gated EXACTLY like the session brief BEFORE any ledger read: raw
+        ``source == "interactive"`` equality + non-PIV — cron/tool/PIV turns
+        never touch the ledger and never consume dedup. The ledger read leg
+        rides ``asyncio.to_thread`` (event-loop-wedge rule, the capture-path
+        idiom). Whole-body fail-open: any failure returns "" (bare, correct
+        turn). Writes ``trace_decisions["called_shots_callback"]`` on EVERY
+        turn in a ``finally``. The engine OWNS dedup marking: a key is marked
+        fired only after the builder returned a rendered block (stats-first by
+        construction), keyed by the CANONICAL session key, FIFO-capped.
+        """
+        decision: dict[str, Any] = {"fired": False, "reason": "error", "domain": ""}
+        try:
+            if getattr(message, "is_piv", False):
+                decision["reason"] = "is_piv"
+                return ""
+            # RAW exact equality (the _maybe_session_brief gate): fail-open
+            # normalize_source must never be the eligibility gate for a
+            # proactive surface — "cron "/"TOOL"/"" all fail closed here. The
+            # getattr default is None (LOW-3): a malformed message with NO
+            # source attribute fails DARK, matching the gate's own idiom.
+            if getattr(message, "source", None) != "interactive":
+                decision["reason"] = "non_interactive"
+                return ""
+
+            from cognition import shots_callback as _shots_cb  # lazy — re-binds per call
+
+            thread_id = resolve_thread_id(
+                message.channel.platform_id,
+                message.thread.thread_id if message.thread else None,
+            )
+            session_key = build_session_key(
+                message.platform.value, message.channel.platform_id, thread_id
+            )
+            text = getattr(message, "text", "") or ""
+            fired_keys = self._shots_callback_fired
+
+            def _resolve_and_build() -> tuple[str, dict[str, Any]]:
+                # Persona resolution hits the file-backed profile store — it
+                # must run INSIDE the thread too. (to_thread ARGUMENTS evaluate
+                # on the loop thread before the worker spawns — the Kimi
+                # MINOR-1 arg-evaluation trap.)
+                return _shots_cb.build_shots_callback(
+                    text,
+                    _shots_cb.resolve_active_persona(),
+                    fired_keys=fired_keys,
+                    conversation_key=session_key,
+                )
+
+            line, decision = await asyncio.to_thread(_resolve_and_build)
+            if line and decision.get("fired") and decision.get("dedup_key"):
+                # Mark ONLY on an accepted rendered block; FIFO-cap the store.
+                # Check-then-mark is not atomic across the to_thread boundary,
+                # but each dict lookup/insert is GIL-atomic and the worst case
+                # is one bounded double-fire per (session, domain) under
+                # concurrent turns — accepted and documented (Kimi LOW-1).
+                self._shots_callback_fired[decision["dedup_key"]] = None
+                while len(self._shots_callback_fired) > self._SHOTS_CALLBACK_FIRED_CAP:
+                    self._shots_callback_fired.popitem(last=False)
+            return line
+        except Exception as exc:
+            print(f"[CalledShots] callback non-blocking failure: {exc!r}", flush=True)
+            return ""
+        finally:
+            if trace_decisions is not None:
+                trace_decisions["called_shots_callback"] = decision
+
+    async def _maybe_crypto_plays_callback(
+        self,
+        message: IncomingMessage,
+        *,
+        trace_decisions: dict[str, Any] | None = None,
+    ) -> str:
+        """One earned crypto-play callback on an interactive crypto turn.
+
+        Gate before every ledger touch: PIV and non-interactive traffic stay
+        dark.  Persona resolution, DB access, and durable callback claim all
+        run inside ``to_thread`` so no sync profile/file/SQLite work wedges
+        the event loop.  The ledger owns exact earned+moved eligibility and
+        dedup; the engine only transports an accepted private suffix.
+        """
+
+        decision: dict[str, Any] = {
+            "fired": False,
+            "reason": "error",
+            "play_id": None,
+        }
+        try:
+            if getattr(message, "is_piv", False):
+                decision["reason"] = "is_piv"
+                return ""
+            if getattr(message, "source", None) != "interactive":
+                decision["reason"] = "non_interactive"
+                return ""
+
+            from cognition import crypto_plays_callback as _crypto_callback
+
+            def _resolve_and_build() -> tuple[str, dict[str, Any]]:
+                # Resolve INSIDE the worker: to_thread arguments evaluate on
+                # the loop before the worker is scheduled.
+                return _crypto_callback.build_crypto_plays_callback(
+                    _crypto_callback.resolve_active_persona(),
+                )
+
+            line, decision = await asyncio.to_thread(_resolve_and_build)
+            return line
+        except Exception as exc:
+            print(
+                f"[CryptoPlays] callback non-blocking failure: {exc!r}",
+                flush=True,
+            )
+            return ""
+        finally:
+            if trace_decisions is not None:
+                trace_decisions["crypto_plays_callback"] = decision
+
+    def reset_shots_callback_for_session(
+        self, platform_str: str, channel_id: str, thread_id: str | None
+    ) -> None:
+        """Drop a session's fired (session, domain) dedup entries on /clear.
+
+        A cleared conversation starts fresh — its domains may fire again.
+        Whole-body fail-open; foreign sessions' entries are untouched.
+        """
+        try:
+            session_key = build_session_key(platform_str, channel_id, thread_id)
+            for key in [
+                k for k in self._shots_callback_fired if k[0] == session_key
+            ]:
+                self._shots_callback_fired.pop(key, None)
+        except Exception as exc:
+            print(
+                f"[CalledShots] dedup reset non-blocking failure: {exc!r}",
+                flush=True,
+            )
+
     def _maybe_session_brief(
         self,
         message: IncomingMessage,
@@ -785,6 +939,16 @@ class ConversationEngine:
         ``require_integration_action`` for any non-notification action). Queuing
         != dispatch; the queue block is best-effort (a queue failure -> 0
         queued, the turn still replies).
+
+        T2 #188 (called-shots challenge): a DETECTED staked position rides this
+        same pass. Silent mode (default) records a reviewable candidate shot on
+        every path (even gate-closed/timeout — detection is independent of the
+        monologue); live mode injects a challenge directive into the pass's
+        EXISTING monologue call, parses the CHALLENGE_VERDICT block back out,
+        and — only when a bet was ACTUALLY recorded (no bet, no challenge) —
+        appends a ``region="challenge"`` memory the reply transport surfaces.
+        Whole challenge weave is fail-open and traced under
+        ``trace_decisions["called_shots_challenge"]`` every turn.
         """
         from config import get_cognitive_pass_settings
 
@@ -795,12 +959,45 @@ class ConversationEngine:
             "monologue_chars": 0,
             "actions_queued": 0,
         }
+        challenge_decision: dict[str, Any] = {
+            "detected": False,
+            "mode": None,
+            "staked": False,
+            "surfaced": False,
+            "reason": "no_position",
+            "shot_id": None,
+            "receipts": 0,
+        }
+        # Bound BEFORE the try so the outer exception handler's rescue stake
+        # can always reference them (R1 M3 — a crash mid-pass must not lose a
+        # detected candidate to an UnboundLocalError in the handler itself).
+        challenge_mod = None
+        challenge_ctx = None
         try:
             from cognition.cognitive_pass import (
                 maybe_queue_actions,
                 run_cognitive_monologue,
                 should_run_cognitive_pass,
             )
+
+            # T2: DETECTION (cheap regex only — receipts are NOT gathered
+            # here) runs before the pass gate so a closed gate still records a
+            # silent candidate; the monologue is only needed to JUDGE
+            # disagreement. The challenge module import is guarded separately
+            # so a broken import degrades the CHALLENGE only, never the pass.
+            try:
+                from cognition import challenge as challenge_mod  # noqa: F811
+            except Exception as ce:
+                challenge_decision["reason"] = "error"
+                print(
+                    f"[{datetime.now()}] [Challenge] module unavailable "
+                    f"(non-blocking): {ce!r}",
+                    flush=True,
+                )
+            if challenge_mod is not None:
+                challenge_ctx = await challenge_mod.prepare_challenge(
+                    message, challenge_decision,
+                )
 
             settings = get_cognitive_pass_settings()
             fired, reason = should_run_cognitive_pass(
@@ -809,14 +1006,42 @@ class ConversationEngine:
             decision["reason"] = reason
             if not fired:
                 # DEFAULT/short -> one call, gate closed (no monologue invoked).
+                if challenge_mod is not None:
+                    challenge_mod.silent_stake(
+                        challenge_ctx, challenge_decision,
+                        note="pass_gate_closed",
+                    )
                 return turn_wm
 
             decision["ran"] = True
+            # Receipts are gathered ONLY here — inside the FIRED branch, under
+            # their own hard time bound (R1 BLOCKER 2: gate-closed turns pay
+            # zero recall; the keyword-mode gather can never reach the Tier-1
+            # rerank LLM leg; timeout -> [] -> silent candidate).
+            if challenge_mod is not None and challenge_ctx is not None:
+                await challenge_mod.gather_receipts_bounded(
+                    challenge_ctx, challenge_decision,
+                )
+            # Live-mode directive rides the EXISTING monologue call (zero extra
+            # LLM calls). Requires receipts — a challenge cites evidence or it
+            # is not a challenge (epic AC #1); receipt-less detections stay
+            # silent candidates.
+            challenge_directive = None
+            if (
+                challenge_mod is not None
+                and challenge_ctx is not None
+                and challenge_ctx["settings"].mode == "live"
+                and challenge_ctx["receipts"]
+            ):
+                challenge_directive = challenge_mod.build_challenge_directive(
+                    challenge_ctx["position"], challenge_ctx["receipts"],
+                )
             try:
                 out, thought, actions, ok = await asyncio.wait_for(
                     run_cognitive_monologue(
                         turn_wm, active_process, self.project_root,
                         settings=settings,
+                        challenge_directive=challenge_directive,
                     ),
                     timeout=settings.timeout_s,
                 )
@@ -828,11 +1053,21 @@ class ConversationEngine:
                     f"after {settings.timeout_s}s — bare turn",
                     flush=True,
                 )
+                if challenge_mod is not None:
+                    challenge_mod.silent_stake(
+                        challenge_ctx, challenge_decision,
+                        note="monologue_timeout",
+                    )
                 return turn_wm
 
             if not ok:
                 # M3/M4: the SURFACED process/provider failure (reachable).
                 decision["reason"] = "monologue_failed"
+                if challenge_mod is not None:
+                    challenge_mod.silent_stake(
+                        challenge_ctx, challenge_decision,
+                        note="monologue_failed",
+                    )
                 return turn_wm
             if not thought:
                 # M3: ran-but-empty is OBSERVABLE, not a benign gate-closed.
@@ -841,7 +1076,28 @@ class ConversationEngine:
                     f"[{datetime.now()}] [CognitivePass] ran but empty — bare turn",
                     flush=True,
                 )
+                if challenge_mod is not None:
+                    challenge_mod.silent_stake(
+                        challenge_ctx, challenge_decision,
+                        note="empty_monologue",
+                    )
                 return turn_wm
+
+            # T2: consume the verdict (live) or fall back to a silent candidate.
+            # May rebuild ``out``/``thought`` (the verdict block is stripped so
+            # raw JSON never reaches the reply prompt).
+            if challenge_mod is not None:
+                out, thought = challenge_mod.consume_verdict(
+                    challenge_ctx, challenge_decision,
+                    turn_wm=turn_wm, out=out, thought=thought,
+                    directive_sent=challenge_directive is not None,
+                )
+            if not thought:
+                # The monologue was ONLY the verdict block — no residual
+                # thought to enrich with; the challenge memory (if any) is
+                # already on ``out``.
+                decision["reason"] = "empty_monologue"
+                return out
 
             decision.update(
                 fired=True, reason="fired_content", monologue_chars=len(thought),
@@ -874,10 +1130,22 @@ class ConversationEngine:
                 f"[{datetime.now()}] [CognitivePass] non-blocking failure: {e}",
                 flush=True,
             )
+            # R1 M3: a detected candidate must survive a pass-level crash —
+            # double fail-open rescue stake (receipts may be []); silent_stake
+            # is itself whole-body fail-open, the bare try is belt-and-braces
+            # inside an exception handler.
+            try:
+                if challenge_mod is not None:
+                    challenge_mod.silent_stake(
+                        challenge_ctx, challenge_decision, note="pass_error",
+                    )
+            except Exception:
+                pass
             return turn_wm
         finally:
             if trace_decisions is not None:
                 trace_decisions["cognitive_pass"] = decision
+                trace_decisions["called_shots_challenge"] = challenge_decision
 
     def note_router_activity(self, message: Any) -> None:
         """Brief-owed marker seam (Living Mind Act 4, R1 B4).
@@ -1168,6 +1436,68 @@ class ConversationEngine:
         )
         from config import DEFAULT_AGENT_TOOLSET  # canonical homie toolset (shared w/ cabinet parity)
         allowed_tools = list(DEFAULT_AGENT_TOOLSET)
+
+        # Epic #236 — per-persona scoped tools. THIS site is why the epic exists
+        # twice over: every persona bot (dashboard_bot_lifecycle spawns
+        # chat/main.py) landed here and got the SAME DEFAULT_AGENT_TOOLSET, so
+        # scoping did not exist on the chat surface at all — the opposite bug
+        # from cabinet's default-deny, same root cause.
+        #
+        # A persona that declares a scope gets THAT scope. One that declares
+        # nothing keeps DEFAULT_AGENT_TOOLSET, so the main 1:1 homie and every
+        # un-migrated persona are byte-identical to before.
+        persona_tool_defs = None
+        persona_tool_dispatch = None
+        persona_scope_version = None
+        persona_elevation_context = None
+        persona_elevation_grant = None
+        persona_elevation_claim_error = ""
+        try:
+            import personas as _personas
+            from runtime import persona_elevation
+            from runtime.persona_tools import (
+                build_persona_tool_payload,
+                persona_tool_scope_version,
+            )
+
+            _active_profile = _personas.get_active_profile_name()
+            if _active_profile and _active_profile != "default":
+                persona_elevation_context = persona_elevation.build_turn_context(
+                    _active_profile,
+                    message,
+                    session_key=session_key,
+                    project_root=self.project_root,
+                )
+                _resume_id = ""
+                if isinstance(getattr(message, "raw_event", None), dict):
+                    _resume_id = str(
+                        message.raw_event.get("elevation_resume_request_id") or ""
+                    ).strip()
+                if _resume_id:
+                    persona_elevation_grant, persona_elevation_claim_error = (
+                        persona_elevation.claim_grant(
+                            _resume_id,
+                            persona_id=_active_profile,
+                            platform=platform_str,
+                            channel_id=channel_id,
+                        )
+                    )
+                _payload = build_persona_tool_payload(
+                    _active_profile,
+                    _personas.load_persona_config(_active_profile),
+                    request_context=persona_elevation_context,
+                    elevation_grant=persona_elevation_grant,
+                )
+                if _payload is not None:
+                    persona_tool_defs, persona_tool_dispatch = _payload
+                    persona_scope_version = persona_tool_scope_version(
+                        _active_profile, persona_tool_defs
+                    )
+                    # Scoped personas do NOT also get the built-in surface.
+                    # Granting `crypto` must not silently hand over Bash.
+                    allowed_tools = []
+        except Exception:  # noqa: BLE001 — a scope failure must never kill the turn
+            logger.warning("persona tool scope resolution failed; using defaults", exc_info=True)
 
         requested_model = os.getenv("SECOND_BRAIN_CLAUDE_MODEL", "claude-sonnet-5")
         piv_max_turns = self.max_turns
@@ -1460,6 +1790,15 @@ class ConversationEngine:
 
         recent_region_meta = {"messages": 0, "chars": 0}
         recent_conversation_prompt_text = ""
+        # Hoisted to method-body level (Codex gate BLOCKER on PR #178): this
+        # name is READ unconditionally below (`if internal_monologue_text...`),
+        # but was only initialized inside the `if _COGNITION_AVAILABLE:` branch
+        # — the cognition-unavailable graceful-degradation mode would raise
+        # UnboundLocalError on every turn.
+        internal_monologue_text = ""
+        # Same hoist discipline for the T2 #188 challenge block (read
+        # unconditionally at the splice below).
+        challenge_directive_text = ""
         if _COGNITION_AVAILABLE:
             budgets = adjusted_budgets if adjusted_budgets else REGION_BUDGETS
             turn_wm = current_wm
@@ -1521,19 +1860,83 @@ class ConversationEngine:
                 ))
             # Living Self Act 3: the gated cognitive pass — the mind thinks
             # before it speaks on substantive turns. Inserted HERE (after
-            # turn_wm assembly, immediately before the region render) so the
-            # monologue rides system_prompt["append"] IN SCOPE for the reply and
-            # the existing render + win32 cap cover it (no second cap site, no
-            # separate prompt suffix). _PROCESSES_AVAILABLE is the load-bearing
-            # guard — it makes active_process a real MentalProcess (set :930,
-            # detected :953), never None (R1 🟢 #2). DEFAULT/short turns are a
-            # no-op (zero extra LLM calls); the whole pass fails open to the
-            # bare turn_wm.
+            # turn_wm assembly, immediately before the region render).
+            # #172: the monologue used to ride system_prompt["append"]
+            # (region="internal"), where the win32 head-keep cap silently
+            # drops it on heavy-context turns (routine, not rare — the
+            # regions ahead of "internal" in region_order regularly sum past
+            # the 27K cap) while trace_decisions still reports fired:true. It
+            # now rides the SAME uncapped stdin/"User task:" prompt-suffix
+            # transport already used by the attachment context and the
+            # session-opening brief (see the "# Internal Monologue" and
+            # "# Session Opening Brief" splices further down in this
+            # function) — exempt from the argv cap by construction, and
+            # already history-pure (never touches message.text / persisted
+            # rows; turn_wm is never persisted regardless — see
+            # _append_turn_to_working_memory, which consumes current_wm, not
+            # turn_wm). The monologue's own length is still capped at
+            # REGION_BUDGETS["internal"] via truncate_region — previously
+            # enforced only by the region-render path this extraction now
+            # bypasses.
+            # _PROCESSES_AVAILABLE is the load-bearing guard — it makes
+            # active_process a real MentalProcess (set near the top of this
+            # method, detected via detect_process()), never None (R1 🟢 #2).
+            # DEFAULT/short turns are a no-op (zero extra LLM calls); the
+            # whole pass fails open to the bare turn_wm.
+            # (internal_monologue_text is initialized at method-body level
+            # above so the cognition-unavailable path can read it safely.)
             if _PROCESSES_AVAILABLE:
                 turn_wm = await self._maybe_cognitive_pass(
                     turn_wm, message, active_process,
                     trace_decisions=_trace_decisions,
                 )
+                try:
+                    internal_memories = [
+                        m for m in turn_wm.memories if m.region == "internal"
+                    ]
+                    if internal_memories:
+                        if len(internal_memories) > 1:
+                            print(
+                                f"[{datetime.now()}] [CognitivePass] "
+                                f"{len(internal_memories)} internal memories "
+                                "present, only using the last (possible "
+                                "upstream regression)",
+                                flush=True,
+                            )
+                        internal_monologue_text = truncate_region(PromptRegion(
+                            "internal",
+                            internal_memories[-1].content,
+                            budgets.get(
+                                "internal",
+                                DEFAULT_REGION_BUDGETS.get("internal", 1000),
+                            ),
+                        ))
+                        # Never render "internal" into the win32-capped system
+                        # append — the prompt suffix below is its only channel now.
+                        turn_wm = turn_wm.without_regions("internal")
+                except Exception as e:
+                    print(
+                        f"[{datetime.now()}] [CognitivePass] region "
+                        f"extraction failed (non-blocking): {e}",
+                        flush=True,
+                    )
+                try:
+                    # T2 #188: the challenge block rides the SAME uncapped
+                    # prompt-suffix transport as the monologue (never the
+                    # win32-capped system append). Region is stripped so the
+                    # renderer can't double-carry it.
+                    challenge_memories = [
+                        m for m in turn_wm.memories if m.region == "challenge"
+                    ]
+                    if challenge_memories:
+                        challenge_directive_text = challenge_memories[-1].content
+                        turn_wm = turn_wm.without_regions("challenge")
+                except Exception as e:
+                    print(
+                        f"[{datetime.now()}] [Challenge] region extraction "
+                        f"failed (non-blocking): {e}",
+                        flush=True,
+                    )
             regions = prompt_regions_from_working_memory(turn_wm, budgets)
             if regions:
                 system_prompt["append"] = (
@@ -1600,6 +2003,13 @@ class ConversationEngine:
             max_append = 27000
             if len(append_text) > max_append:
                 system_prompt["append"] = _truncate_win32_append(append_text, max_append)
+                # #172: make ANY future tail-region loss visible instead of
+                # silent — absent entirely (no key) when nothing truncates.
+                if _trace_decisions is not None:
+                    _trace_decisions["win32_append_truncated"] = {
+                        "before_chars": len(append_text),
+                        "after_chars": len(system_prompt["append"]),
+                    }
                 print(
                     f"[{datetime.now()}] System prompt truncated: "
                     f"{len(append_text)} -> {max_append} chars (Windows CLI limit)",
@@ -1628,6 +2038,73 @@ class ConversationEngine:
                 + "\n\n# Current User Message\n"
                 + prompt_text
             )
+        if persona_elevation_grant is not None:
+            from runtime import persona_elevation
+
+            prompt_text = (
+                prompt_text
+                + "\n\n# One-Time Approved Capability\n"
+                + f"The operator approved exactly one `{persona_elevation_grant.tool_name}` "
+                + "call for this retry. Call it once with these exact arguments, then "
+                + "complete the original task. Any different or second call will be refused.\n"
+                + persona_elevation.canonical_arguments(
+                    persona_elevation_grant.intended_arguments
+                )
+            )
+        elif persona_elevation_claim_error:
+            prompt_text = (
+                prompt_text
+                + "\n\n# One-Time Capability Unavailable\n"
+                + persona_elevation_claim_error
+                + ". Do not claim the tool ran."
+            )
+        # #172: the cognitive-pass "internal" monologue rides the SAME turn
+        # prompt (stdin on every lane — no win32 argv cap, no region budget)
+        # instead of system_prompt["append"], where the win32 head-keep cap
+        # could silently drop it. message.text is NEVER mutated; persistence
+        # and working memory never saw this region either (turn_wm is not
+        # persisted) — history purity is unchanged either way. Placed BEFORE
+        # the session brief so the brief keeps its trailing recency position.
+        if internal_monologue_text.strip():
+            prompt_text = (
+                prompt_text
+                + "\n\n# Internal Monologue (private reasoning for this turn)\n"
+                "This is your own private pre-thought for this turn. Use it "
+                "to inform your reply; do not quote or repeat it verbatim.\n\n"
+                + internal_monologue_text
+            )
+        # T2 #188: the called-shot challenge rides the same uncapped prompt
+        # suffix. Present ONLY when a bet was actually recorded this turn (no
+        # bet, no challenge — the engine seam enforces it before the region is
+        # ever appended). message.text is never mutated; history purity holds.
+        # Ordering: monologue -> challenge (born from the monologue) ->
+        # called-shots callback -> crypto-play receipt -> session brief LAST
+        # for recency.
+        if challenge_directive_text.strip():
+            prompt_text = (
+                prompt_text
+                + "\n\n# Called-Shot Challenge (voice this in your reply)\n"
+                + challenge_directive_text
+            )
+        # Called-Shots T3 (epic #186): the track-record line rides the SAME
+        # turn prompt, BEFORE the session brief so the brief keeps its
+        # trailing recency position. message.text is NEVER mutated; history
+        # purity unchanged (turn_wm/persistence never see this region).
+        shots_callback_text = await self._maybe_called_shots_callback(
+            message, trace_decisions=_trace_decisions,
+        )
+        if shots_callback_text:
+            prompt_text = prompt_text + "\n\n" + shots_callback_text
+        # Crypto Intel W3 (#205): a durably deduped earned+moved play receipt
+        # rides the same private prompt suffix. The service re-proves A/B +
+        # high + receipt + hit from physical ledger state and derives the
+        # displayed track record by query. History still sees the bare turn.
+        crypto_callback_text = await self._maybe_crypto_plays_callback(
+            message,
+            trace_decisions=_trace_decisions,
+        )
+        if crypto_callback_text:
+            prompt_text = prompt_text + "\n\n" + crypto_callback_text
         # Living Mind Act 4: the session-opening brief rides the SAME turn
         # prompt (stdin on every lane — no win32 argv cap, no region budget),
         # LAST so the open-with-the-brief instruction holds the recency
@@ -1684,6 +2161,11 @@ class ConversationEngine:
             max_turns=piv_max_turns,
             max_budget_usd=piv_max_budget,
             allowed_tools=allowed_tools,
+            # Epic #236 — both None on every legacy path, so a persona that
+            # declares no scope produces a byte-identical request.
+            tool_defs=persona_tool_defs,
+            tool_dispatch=persona_tool_dispatch,
+            tool_scope_version=persona_scope_version,
             permission_mode="plan" if mode == "plan" else "bypassPermissions",
             setting_sources=[],
             system_prompt=system_prompt,
@@ -1693,7 +2175,14 @@ class ConversationEngine:
             allow_fallback=not imagegen_turn,
             runtime_lane=RUNTIME_LANE_GENERIC if imagegen_turn else None,
             resume=resume_session_id or None,
-            metadata={"speaker_context": speaker_context_metadata(current_speaker)},
+            metadata={
+                "speaker_context": speaker_context_metadata(current_speaker),
+                **(
+                    {"tool_scope_version": persona_scope_version}
+                    if persona_scope_version is not None
+                    else {}
+                ),
+            },
         )
 
         # Run through runtime (propagate_attributes is at the outer scope)
@@ -1824,6 +2313,47 @@ class ConversationEngine:
         except Exception as e:
             print(f"[{datetime.now()}] [Drafter] Failed (non-blocking): {e}", flush=True)
 
+        if persona_elevation_context is not None:
+            try:
+                from runtime import persona_elevation
+
+                _pending_elevation = persona_elevation.pending_request_for_turn(
+                    str(persona_elevation_context["persona_id"]),
+                    str(persona_elevation_context["turn_id"]),
+                )
+                if _pending_elevation is not None:
+                    response_text = (
+                        response_text.rstrip()
+                        + "\n\n"
+                        + persona_elevation.request_card_text(_pending_elevation)
+                    )
+                    draft_components.extend(
+                        [
+                            MessageComponent(
+                                label="Approve once",
+                                custom_id=(
+                                    "capability:approve:"
+                                    + _pending_elevation.short_code
+                                ),
+                                style="success",
+                            ),
+                            MessageComponent(
+                                label="Deny",
+                                custom_id=(
+                                    "capability:deny:"
+                                    + _pending_elevation.short_code
+                                ),
+                                style="danger",
+                            ),
+                        ]
+                    )
+            except Exception as e:
+                print(
+                    f"[{datetime.now()}] [PersonaElevation] card failed "
+                    f"(non-blocking): {e}",
+                    flush=True,
+                )
+
         try:
             yield OutgoingMessage(
                 text=response_text,             # answer ONLY - no footer fusion
@@ -1867,7 +2397,12 @@ class ConversationEngine:
                 from config import STAGING_STORE_PATH
 
                 store = StagingStore(STAGING_STORE_PATH)
-                captures = auto_capture_from_turn(
+                # Off the event loop: append() now takes the cross-process
+                # file lock (default 30s timeout) and does an O(n) rewrite on
+                # a dedupe merge — never block the shared loop on that
+                # (the 2026-07-13 event-loop-wedge rule).
+                captures = await asyncio.to_thread(
+                    auto_capture_from_turn,
                     message.text, response_text, store,
                     session_id=thread_id, turn_number=0,
                 )

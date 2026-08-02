@@ -72,6 +72,29 @@ class ConvoyService:
     def __init__(self, db: OrchestrationDB):
         self.db = db
 
+    def _emit_buzz_receipt(
+        self, convoy_id: int, receipt_type: str, status: str, *, summary: str | None = None
+    ) -> None:
+        """Fail-open projection; Buzz is never orchestration authority."""
+        try:
+            from buzz_signals import enqueue_work_receipt
+
+            row = self.db.conn.execute(
+                "SELECT title FROM convoys WHERE id = ?", (convoy_id,)
+            ).fetchone()
+            title = str(row["title"] or "Convoy update") if row else "Convoy update"
+            enqueue_work_receipt(
+                receipt_type,
+                work_id=str(convoy_id),
+                work_type="convoy",
+                summary=summary or title,
+                status=status,
+                dashboard_path=f"/mission/convoys/{convoy_id}",
+                idempotency_key=f"convoy:{convoy_id}:{receipt_type}:{status}",
+            )
+        except Exception:
+            logger.warning("Buzz work receipt enqueue failed for convoy %s", convoy_id, exc_info=True)
+
     # ── Create ─────────────────────────────────────────────────────────────
     # Parity: convoy.ts:createConvoy()
 
@@ -172,7 +195,10 @@ class ConvoyService:
 
             convoy = self._get_convoy_row(convoy_id)
             subtasks = self._get_subtask_rows(convoy_id)
-            return ConvoyWithSubtasks(convoy=convoy, subtasks=subtasks, edges=edges)
+            result = ConvoyWithSubtasks(convoy=convoy, subtasks=subtasks, edges=edges)
+
+        self._emit_buzz_receipt(convoy_id, "work.started", "started", summary=inp.title)
+        return result
 
     # ── Read ───────────────────────────────────────────────────────────────
     # Parity: convoy.ts:getConvoy(), listConvoys(), getReadySubtasks()
@@ -189,7 +215,11 @@ class ConvoyService:
         if not row:
             return None
         convoy = self.db.row_to_convoy(row)
-        subtasks = self._get_subtask_rows(convoy_id)
+        # Scoped read: the caller proved access to THIS workspace's convoy, so
+        # the children must be filtered by the same grain (see
+        # _get_subtask_rows — a mixed-grain row leaks an Archon correlation
+        # ref the reader can follow into another tenant's run).
+        subtasks = self._get_subtask_rows(convoy_id, workspace_id)
         edges = self._get_edge_rows(convoy_id)
         return ConvoyWithSubtasks(convoy=convoy, subtasks=subtasks, edges=edges)
 
@@ -709,6 +739,10 @@ class ConvoyService:
             self._update_progress(subtask.convoy_id)
             convoy_completed = self._check_completion(subtask.convoy_id)
 
+        if convoy_completed:
+            final = self._get_convoy_row(subtask.convoy_id)
+            receipt_type = "work.failed" if final.status == "failed" else "work.completed"
+            self._emit_buzz_receipt(subtask.convoy_id, receipt_type, final.status)
         return newly_unblocked, convoy_completed
 
     # ── Failure ────────────────────────────────────────────────────────────
@@ -747,7 +781,13 @@ class ConvoyService:
                 (error_message, now, now, subtask_id),
             )
             self._update_progress(subtask.convoy_id)
-            return self._check_completion(subtask.convoy_id)
+            convoy_completed = self._check_completion(subtask.convoy_id)
+
+        if convoy_completed:
+            final = self._get_convoy_row(subtask.convoy_id)
+            receipt_type = "work.failed" if final.status == "failed" else "work.completed"
+            self._emit_buzz_receipt(subtask.convoy_id, receipt_type, final.status)
+        return convoy_completed
 
     # ── Executor Callback Ingress ──────────────────────────────────────────
     # Phase 6b: framework-owned conductor loop. Replaces the need for Mission
@@ -1047,11 +1087,36 @@ class ConvoyService:
         ).fetchone()
         return self.db.row_to_convoy(row)
 
-    def _get_subtask_rows(self, convoy_id: int) -> list[Subtask]:
-        rows = self.db.conn.execute(
-            "SELECT * FROM subtasks WHERE convoy_id = ? ORDER BY seq",
-            (convoy_id,),
-        ).fetchall()
+    def _get_subtask_rows(
+        self, convoy_id: int, workspace_id: int | None = None
+    ) -> list[Subtask]:
+        """Child rows for a convoy, scoped to ``workspace_id`` when given.
+
+        Rule 4 — the authorizing grain must reach the STORAGE query. Scoping
+        only the parent convoy and then fetching children by ``convoy_id``
+        alone returns rows the caller was never authorized to see: subtasks
+        carry their own ``workspace_id``, so a row written under another
+        workspace comes back inside an authorized convoy. That matters beyond
+        the row itself here, because a subtask's ``paperclip_issue_id`` is the
+        Archon correlation ref, and a reader that follows it discloses the
+        other tenant's workflow, run id, and current node.
+
+        ``None`` keeps the unscoped behavior for internal callers that have
+        already established the grain (the create path, which just wrote the
+        rows it is reading back).
+        """
+
+        if workspace_id is None:
+            rows = self.db.conn.execute(
+                "SELECT * FROM subtasks WHERE convoy_id = ? ORDER BY seq",
+                (convoy_id,),
+            ).fetchall()
+        else:
+            rows = self.db.conn.execute(
+                "SELECT * FROM subtasks WHERE convoy_id = ? AND workspace_id = ? "
+                "ORDER BY seq",
+                (convoy_id, workspace_id),
+            ).fetchall()
         return [self.db.row_to_subtask(r) for r in rows]
 
     def _get_edge_rows(self, convoy_id: int) -> list[DependencyEdge]:

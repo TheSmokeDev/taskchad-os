@@ -39,6 +39,7 @@ __pycache__/
 .claude/scripts/stdout_*.txt
 .claude/scripts/stderr_*.txt
 .claude/scripts/.venv/
+.claude/scripts/discord_voice/.venv/
 .claude/scripts/heartbeat_runs.log
 .claude/scripts/monthly_finance_runs.log
 .claude/scripts/reflection_runs.log
@@ -156,9 +157,8 @@ skills-lock.json
 # Video render output — hundreds of MB of HTML/audio/video/image binaries; stays local
 .claude/video/
 
-# client-site factory: client data stays UNTRACKED until scripts/sanitize.py
-# gains a clients/ DENY_DIRS entry (that file is owned by a parallel session
-# right now). Untracked = git ls-files never sees it = can never ship publicly.
+# Client-site factory runtime data stays untracked for workspace hygiene and is
+# also explicitly denied by scripts/sanitize.py (the export security boundary).
 clients/
 
 # Archived (retired) skills — consolidated into vault-ops 2026-07-11
@@ -187,3 +187,25 @@ teller.zip
 
 # Editor config
 mobile/.vscode/
+
+# Claude Ads state (paid-media profiles, run bundles, business economics - operator-private)
+.claude-ads/
+
+# Discord voice sidecar runtime state
+.claude/scripts/discord_voice/bridge.pid
+
+# Local runtime/scratch state discovered during the 2026-07-30 root cleanup.
+# These paths are recoverable working artifacts, not source inputs.
+/.claude/.tmp/
+/.claude/state/
+/.kimi-code/
+/.tmp-YourBusiness-core-adapter-*/
+/.tmp-tokenmax-redirect-fix/
+/.tmp-tokenmax-repair-*/
+/outputs/
+/1500
+
+# One-off operator action and bounded investigation helpers. Keep them local:
+# the former can send email; the latter embeds a personal account lookup.
+/.claude/scripts/send_dispute_email_once.py
+/.claude/scripts/tmp_poly.sh

@@ -140,12 +140,22 @@ def _linux_status(repo_root: Path, settings: dict[str, str]) -> dict[str, Any]:
 
 def _windows_status(repo_root: Path, settings: dict[str, str]) -> dict[str, Any]:
     result = _run(["schtasks", "/Query", "/TN", settings["task_name"], "/FO", "LIST", "/V"])
-    enabled = result.returncode == 0 and "disabled" not in result.stdout.lower()
+    scheduled_state = None
     next_run = None
     for line in result.stdout.splitlines():
-        if line.lower().startswith("next run time:"):
-            next_run = line.split(":", 1)[1].strip()
-            break
+        key, separator, value = line.partition(":")
+        if not separator:
+            continue
+        normalized_key = key.strip().lower()
+        if normalized_key == "scheduled task state":
+            scheduled_state = value.strip().lower()
+        elif normalized_key == "next run time":
+            next_run = value.strip()
+    # Do not search the whole verbose payload for "disabled": healthy tasks
+    # contain unrelated rows such as "Idle Time: Disabled". Older Windows
+    # variants may omit Scheduled Task State, so a successful exact-name query
+    # remains the compatibility fallback.
+    enabled = result.returncode == 0 and scheduled_state in {None, "enabled"}
     return {
         "supported": True,
         "platform": "windows-task-scheduler",

@@ -9,6 +9,7 @@ import pytest
 import background_tasks
 import router as router_module
 from adapters.base import ProgressCapabilities
+from adapters.buzz import BuzzAdapter
 from adapters.cli_adapter import CLIAdapter
 from adapters.webhook import WebhookAdapter
 from adapters.whatsapp import WhatsAppAdapter
@@ -482,6 +483,7 @@ async def test_null_final_edit_falls_back_to_fresh_final_send(tmp_path):
         pytest.param(CLIAdapter.progress_capabilities, id="cli"),
         pytest.param(WhatsAppAdapter.progress_capabilities, id="whatsapp"),
         pytest.param(WebhookAdapter.progress_capabilities, id="webhook"),
+        pytest.param(BuzzAdapter.progress_capabilities, id="buzz"),
         pytest.param(object(), id="unknown-adapter"),
     ],
 )

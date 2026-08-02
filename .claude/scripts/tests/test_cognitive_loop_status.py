@@ -155,6 +155,8 @@ def test_cognitive_loop_reports_autonomous_loop_truth_surface() -> None:
     assert autonomous["subsystems"]["self_model_evolution"]["state"] == "live"
     assert autonomous["subsystems"]["proactive_agency"]["state"] == "live"
     assert autonomous["subsystems"]["future_behavior_feedback"]["state"] == "live"
+    assert autonomous["subsystems"]["belief_evolve_nightly"]["state"] == "live"
+    assert autonomous["subsystems"]["belief_evolve_nightly"]["details"]["phase_wired"] is True
 
 
 def test_heartbeat_identity_flips_live_when_helper_is_wired(tmp_path: Path) -> None:

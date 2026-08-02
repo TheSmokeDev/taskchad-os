@@ -25,7 +25,7 @@ from local_extension_loader import (
     any_local_extension_hook,
     dispatch_local_extension_hook,
 )
-from models import OutgoingMessage, Platform
+from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, User
 from session import Session, get_persist_lock
 from session_keys import build_session_key, resolve_thread_id
 
@@ -57,6 +57,13 @@ _VAULT_COMMAND_ALIAS_RE = re.compile(
 # caption-less uploads all fall through to the engine unchanged.
 _VAULT_INGEST_DOC_RE = re.compile(r"^/vault-ingest\s*$", re.IGNORECASE)
 
+# Spoken or typed approval is deliberately request-ID-bound.  Bare "yes" can
+# be ordinary conversation or audio crosstalk and never carries authority.
+_CAPABILITY_DECISION_RE = re.compile(
+    r"^\s*(approve|deny)\s+capability\s+([a-f0-9]{10,32})\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
 # Direct operational phrasing for the framework itself.  Keep this anchored
 # and named so ordinary requests like "update the document" still reach the
 # engine; only explicit self/framework/public-repo requests become `/update now`.
@@ -69,6 +76,220 @@ _FRAMEWORK_UPDATE_NOW_RE = re.compile(
     r")\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
+
+_CRYPTO_DESK_STATUS_RE = re.compile(
+    r"""
+    ^\s*(?:yo[\s,!-]*)?
+    (?:
+        tl\s*;?\s*dr(?:\s+me)?
+        | desk\s+(?:status|brief|tldr)
+        | (?:full\s+)?(?:crypto\s+|desk\s+)?status
+        | (?:what(?:'s|\s+is)|how(?:'s|\s+is))\s+
+          (?:the\s+)?(?:crypto\s+)?desk
+          (?:\s+(?:looking|doing|status))?
+        | (?:what(?:'s|\s+is|\s+are)\s+)?(?:the\s+)?open\s+plays?
+        | (?:any|what(?:'s|\s+is|\s+are))\s+(?:the\s+)?pending\s+follow-?ups?
+        | (?:give\s+me|gimme)\s+(?:the\s+)?(?:desk\s+)?
+          (?:status|tldr|brief|rundown)
+        | (?:brief|update|catch)\s+me\s+(?:up\s+)?(?:on\s+)?
+          (?:the\s+)?(?:crypto\s+)?desk
+    )
+    \s*[?.!]*\s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_crypto_desk_status_intent(text: object) -> bool:
+    return isinstance(text, str) and _CRYPTO_DESK_STATUS_RE.fullmatch(text) is not None
+
+
+# Anchored like the desk-status matcher: only an explicit "is anything worth
+# playing / what does the market say" ask browses the board. Ordinary crypto
+# chatter must still reach the persona untouched.
+_CRYPTO_MARKET_BROWSE_RE = re.compile(
+    r"""
+    ^\s*(?:yo[\s,!-]*)?(?:hey[\s,!-]*)?
+    (?:
+        (?:what(?:'s|\s+is)\s+)?(?:a\s+|any\s+)?good\s+(?:playable\s+)?
+        (?:play|bet|market)s?(?:\s+(?:on|in)\s+polymarket)?
+      | (?:what(?:'s|\s+is)\s+)?playable(?:\s+(?:right\s+now|today))?
+      | anything\s+(?:playable|worth\s+(?:playing|betting))
+      | (?:what(?:'s|\s+is)\s+)?polymarket\s+(?:saying|showing|got)
+      | (?:what\s+(?:do|does)\s+)?(?:the\s+)?(?:prediction\s+)?markets?\s+say
+      | (?:what\s+are\s+)?(?:the\s+)?odds
+    )
+    \s*[?.!]*\s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_crypto_market_browse_intent(text: object) -> bool:
+    return (
+        isinstance(text, str)
+        and _CRYPTO_MARKET_BROWSE_RE.fullmatch(text) is not None
+    )
+
+
+def _build_polymarket_reply_for_router(operator_text: str) -> str:
+    """Resolve the market module and its call-time config inside a worker."""
+
+    from cognition import crypto_polymarket
+
+    return crypto_polymarket.build_market_reply_context(operator_text)
+
+
+def _has_testable_market_claim(text: object) -> bool:
+    """Does the operator's message contain a claim real money can bound?
+
+    ``parse_claim`` IS the gate. It refuses anything it cannot reduce to
+    asset + direction + threshold, so "I think BTC breaks $80k" opens a market
+    check while "solana is gonna rip" does not -- no regex of conversational
+    phrasing required, and no risk of hijacking ordinary crypto talk.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        return False
+    try:
+        from cognition import crypto_polymarket
+
+        return crypto_polymarket.parse_claim(text) is not None
+    except Exception as exc:
+        print(f"[crypto_polymarket] claim gate failed (fail-open): {exc!r}", flush=True)
+        return False
+
+
+async def _attach_polymarket_context(
+    incoming: Any,
+    binding: Any,
+) -> bool:
+    """Attach a bounded market read for one crypto-channel turn.
+
+    Rides the SAME prefetch seam as the desk snapshot and runs off the event
+    loop -- this makes up to three HTTP calls, and the bot never blocks its
+    loop on network work.
+
+    Returns False on an empty block so the turn stays bare: an unreadable
+    upstream should produce a normal persona reply, not an outage announcement.
+    """
+
+    persona_id = getattr(binding, "persona_id", "")
+    text = getattr(incoming, "text", "")
+    if not isinstance(persona_id, str) or persona_id.strip().casefold() != "crypto":
+        return False
+    if not (_is_crypto_market_browse_intent(text) or _has_testable_market_claim(text)):
+        return False
+
+    try:
+        block = await asyncio.to_thread(_build_polymarket_reply_for_router, text)
+    except ValueError:
+        # Contract violations are programmer/configuration errors, not runtime
+        # read failures. Preserve the contract instead of relabeling it.
+        raise
+    except Exception as exc:
+        print(
+            f"[crypto_polymarket] router prefetch failed (fail-open): {exc!r}",
+            flush=True,
+        )
+        return False
+
+    if not isinstance(block, str) or not block.strip():
+        return False
+
+    existing = getattr(incoming, "prefetched_context", "")
+    if isinstance(existing, str) and existing.strip():
+        incoming.prefetched_context = f"{existing.strip()}\n\n{block}"
+    else:
+        incoming.prefetched_context = block
+    return True
+
+
+def _build_crypto_desk_snapshot_for_router(persona_id: str) -> str:
+    """Resolve the ledger module and its call-time config inside a worker."""
+
+    from cognition import crypto_desk_snapshot
+
+    return crypto_desk_snapshot.build_crypto_desk_snapshot(persona_id)
+
+
+async def _attach_crypto_desk_snapshot(
+    incoming: Any,
+    binding: Any,
+) -> bool:
+    """Attach live crypto state for one anchored desk-status turn."""
+
+    persona_id = getattr(binding, "persona_id", "")
+    if (
+        not isinstance(persona_id, str)
+        or persona_id.strip().casefold() != "crypto"
+        or not _is_crypto_desk_status_intent(getattr(incoming, "text", ""))
+    ):
+        return False
+
+    try:
+        import config
+
+        # HARD deadline. The snapshot now fetches candles, and an exchange that
+        # accepts the connection and never answers is the 2026-07-13 wedge with
+        # a different payload: Telegram, Discord, /health and the liveness
+        # supervisor all share this loop.
+        snapshot = await asyncio.wait_for(
+            asyncio.to_thread(
+                _build_crypto_desk_snapshot_for_router,
+                persona_id,
+            ),
+            timeout=config.get_crypto_desk_price_settings().prefetch_timeout_s,
+        )
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError:
+        print(
+            "[crypto_desk_snapshot] prefetch exceeded its deadline; "
+            "attaching an explicit unavailable receipt",
+            flush=True,
+        )
+        snapshot = (
+            "# Crypto Desk Live Snapshot\n\n"
+            "The live desk snapshot did not finish inside its deadline. "
+            "Do not describe this as an empty desk, a quiet market, or invent "
+            "play state or prices."
+        )
+    except ValueError:
+        # Contract violations are programmer/configuration errors, not runtime
+        # read failures. Preserve the contract instead of relabeling it.
+        raise
+    except Exception as exc:
+        from security import kill_switches
+
+        if isinstance(exc, kill_switches.KillSwitchDisabled):
+            print(
+                "[crypto_desk_snapshot] prefetch refused by operator kill-switch",
+                flush=True,
+            )
+            snapshot = (
+                "# Crypto Desk Live Snapshot\n\n"
+                "The operator disabled the crypto play ledger. "
+                "Do not infer or invent current desk state."
+            )
+        else:
+            print(
+                "[crypto_desk_snapshot] router prefetch failed "
+                f"(fail-open): {exc!r}",
+                flush=True,
+            )
+            snapshot = (
+                "# Crypto Desk Live Snapshot\n\n"
+                "The live desk snapshot failed at runtime. "
+                "Do not describe this as an empty desk or invent play state."
+            )
+
+    existing = getattr(incoming, "prefetched_context", "")
+    if isinstance(existing, str) and existing.strip():
+        incoming.prefetched_context = f"{existing.strip()}\n\n{snapshot}"
+    else:
+        incoming.prefetched_context = snapshot
+    return True
 
 
 def _adapter_connect_timeout_seconds() -> float:
@@ -446,7 +667,9 @@ class ChatRouter:
             "__button:social:"
         ) or text.startswith("__button:linkedin_flow:") or text.startswith(
             "__button:primo_flow:"
-        ) or any_local_extension_hook("is_immediate_button", incoming)
+        ) or text.startswith("__button:capability:") or any_local_extension_hook(
+            "is_immediate_button", incoming
+        )
 
     def _retain_task(self, task: "asyncio.Task[Any]") -> None:
         """Keep a strong reference to a fire-and-forget task.
@@ -747,6 +970,17 @@ class ChatRouter:
             await self._handle_button(adapter, incoming, text[len("__button:"):])
             return
 
+        capability_decision = _CAPABILITY_DECISION_RE.fullmatch(text)
+        if capability_decision:
+            await self._handle_capability_decision(
+                adapter,
+                incoming,
+                action=capability_decision.group(1).lower(),
+                request_code=capability_decision.group(2).upper(),
+                authenticated_button=False,
+            )
+            return
+
         # --- Guided /video wizard: a pending wizard consumes typed input
         # stage-gated (pickers are match-only; the input step takes the
         # brief; the vision step takes redo feedback). State set by
@@ -986,8 +1220,27 @@ class ChatRouter:
                     else:
                         incoming.text = desc or command
 
+        discord_persona_binding = (
+            resolve_discord_channel_binding(incoming)
+            if parsed is None and not skip_intent_detection
+            else None
+        )
+        crypto_desk_status_intent = await _attach_crypto_desk_snapshot(
+            incoming,
+            discord_persona_binding,
+        )
+        crypto_market_intent = await _attach_polymarket_context(
+            incoming,
+            discord_persona_binding,
+        )
+
         # --- Smart intent detection: natural language -> router commands ---
-        if not parsed and not skip_intent_detection:
+        if (
+            not parsed
+            and not skip_intent_detection
+            and not crypto_desk_status_intent
+            and not crypto_market_intent
+        ):
             requires_confirmation = getattr(
                 self.manager, "requires_external_action_confirmation", None
             )
@@ -1091,12 +1344,6 @@ class ChatRouter:
                         )
                         await self._persist_router_turn_off_loop(incoming, reply)
                         return
-
-        discord_persona_binding = (
-            resolve_discord_channel_binding(incoming)
-            if parsed is None and not skip_intent_detection
-            else None
-        )
 
         try:
             print(
@@ -1269,12 +1516,31 @@ class ChatRouter:
             nonlocal final_embed, final_embeds
             nonlocal engine_result_started
             if discord_persona_binding is not None:
+
+                async def _announce_persona_interim(text: str) -> None:
+                    """Send the persona's interim note as its own message.
+
+                    Used by the crypto live look so "give me a sec, looking..."
+                    lands BEFORE the browser drive starts and the answer lands
+                    as a separate second message. Fail-open: a failed interim
+                    send never affects the real reply.
+                    """
+
+                    await adapter.send(
+                        OutgoingMessage(
+                            text=text,
+                            channel=incoming.channel,
+                            thread=incoming.thread,
+                        )
+                    )
+
                 outgoing = await run_discord_persona_channel_turn(
                     incoming=incoming,
                     binding=discord_persona_binding,
                     session_store=getattr(self.engine, "session_store", None),
                     project_root=getattr(self.engine, "project_root", Path.cwd()),
                     progress=progress,
+                    announce=_announce_persona_interim,
                 )
                 final_text = outgoing.text
                 engine_result_started = True
@@ -2426,6 +2692,25 @@ class ChatRouter:
             await self._handle_social_button(adapter, incoming, custom_id)
         elif custom_id.startswith("cofounder:"):
             await self._handle_cofounder_button(adapter, incoming, custom_id)
+        elif custom_id.startswith("capability:"):
+            parts = custom_id.split(":")
+            if len(parts) != 3 or parts[1] not in {"approve", "deny"}:
+                await adapter.send(
+                    OutgoingMessage(
+                        text="Malformed capability decision.",
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                        is_error=True,
+                    )
+                )
+                return
+            await self._handle_capability_decision(
+                adapter,
+                incoming,
+                action=parts[1],
+                request_code=parts[2],
+                authenticated_button=True,
+            )
         else:
             handled = await dispatch_local_extension_hook(
                 "handle_button",
@@ -2437,6 +2722,153 @@ class ChatRouter:
             if not handled:
                 # Unknown button — log and ignore
                 print(f"[{datetime.now()}] Unknown button: {custom_id}")
+
+    async def _handle_capability_decision(
+        self,
+        adapter: Any,
+        incoming: Any,
+        *,
+        action: str,
+        request_code: str,
+        authenticated_button: bool,
+    ) -> None:
+        """Approve/deny one exact persona tool call, then retry once on approve."""
+
+        raw_event = getattr(incoming, "raw_event", None)
+        raw_event = raw_event if isinstance(raw_event, dict) else {}
+        if authenticated_button and (
+            raw_event.get("interaction_type") != "button"
+            or raw_event.get("source_message_is_own") is not True
+        ):
+            await adapter.send(
+                OutgoingMessage(
+                    text="Capability decisions only run from this bot's authenticated buttons.",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        role = str(getattr(incoming, "user_role", "admin") or "admin")
+        if role not in {"operator", "admin"}:
+            await adapter.send(
+                OutgoingMessage(
+                    text="Capability approval requires operator or admin role.",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        from runtime import persona_elevation
+
+        platform_value = getattr(getattr(incoming, "platform", None), "value", None) or str(
+            getattr(incoming, "platform", "")
+        )
+        channel_id = str(getattr(getattr(incoming, "channel", None), "platform_id", "") or "")
+        operator_id = str(getattr(getattr(incoming, "user", None), "platform_id", "") or "")
+        if not operator_id:
+            await adapter.send(
+                OutgoingMessage(
+                    text="Capability decision refused: operator identity is missing.",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        decision = persona_elevation.decide_request(
+            request_code,
+            approve=action == "approve",
+            operator_id=f"{platform_value}:{operator_id}",
+            platform=str(platform_value),
+            channel_id=channel_id,
+        )
+        await adapter.send(
+            OutgoingMessage(
+                text=decision.message,
+                channel=incoming.channel,
+                thread=incoming.thread,
+                is_error=decision.outcome in {"invalid", "refused"},
+            )
+        )
+        if decision.outcome != "approved" or decision.request is None:
+            return
+
+        request = decision.request
+        resume_platform = getattr(incoming, "platform", Platform.DISCORD)
+        resume_channel = Channel(
+            platform=resume_platform,
+            platform_id=request.channel_id,
+            name=getattr(getattr(incoming, "channel", None), "name", None),
+            is_dm=bool(getattr(getattr(incoming, "channel", None), "is_dm", False)),
+        )
+        resume_thread = Thread(thread_id=request.thread_id or request.channel_id)
+        resume = IncomingMessage(
+            text=request.original_text,
+            user=User(
+                platform=resume_platform,
+                platform_id=request.original_user_id,
+                display_name=request.original_user_name or None,
+            ),
+            channel=resume_channel,
+            platform=resume_platform,
+            thread=resume_thread,
+            platform_message_id=f"elevation-resume:{request.request_id}",
+            user_role=request.original_user_role,
+            raw_event={
+                "guild": request.guild_id,
+                "elevation_resume_request_id": request.request_id,
+                "elevation_original_turn_id": request.turn_id,
+                "display_text": request.original_text,
+            },
+            source="interactive",
+            voice_origin=bool(getattr(incoming, "voice_origin", False)),
+        )
+
+        try:
+            binding = resolve_discord_channel_binding(resume)
+            if binding is not None:
+                if binding.persona_id != request.persona_id:
+                    raise RuntimeError("persona binding changed after approval")
+                outgoing = await run_discord_persona_channel_turn(
+                    incoming=resume,
+                    binding=binding,
+                    session_store=getattr(self.engine, "session_store", None),
+                    project_root=getattr(self.engine, "project_root", Path.cwd()),
+                )
+                await adapter.send(outgoing)
+                return
+
+            # Telegram profile bots use the ordinary engine surface.  Refuse
+            # cross-profile resumption rather than mutating the active profile.
+            import personas
+
+            if personas.get_active_profile_name() != request.persona_id:
+                raise RuntimeError(
+                    "the approved persona is not active on this surface; no tool ran"
+                )
+            async for outgoing in self.engine.handle_message(resume):
+                await adapter.send(outgoing)
+        except Exception as exc:
+            persona_elevation.invalidate_grant(
+                request.request_id,
+                detail=f"automatic retry failed: {type(exc).__name__}: {exc}",
+            )
+            await adapter.send(
+                OutgoingMessage(
+                    text=(
+                        "The approval was recorded, but the one-time retry failed: "
+                        f"{type(exc).__name__}: {exc}. The grant cannot be reused."
+                    ),
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
 
     async def _handle_social_button(
         self, adapter: Any, incoming: Any, custom_id: str

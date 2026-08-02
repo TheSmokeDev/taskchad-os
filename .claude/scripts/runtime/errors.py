@@ -21,3 +21,12 @@ class RuntimeRetryableError(RuntimeLayerError):
 
 class RuntimeExecutionError(RuntimeLayerError):
     """The runtime failed and no valid fallback succeeded."""
+
+
+class RuntimeCallerToolTransportError(RuntimeExecutionError):
+    """No selected runtime safely carried the caller's scoped tool snapshot.
+
+    Channel adapters may use this narrow signal to retry a conversational turn
+    without tools. They must not treat a generic runtime failure as permission
+    to drop capability silently.
+    """

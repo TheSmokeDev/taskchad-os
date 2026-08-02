@@ -22,7 +22,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
@@ -47,6 +47,7 @@ if str(_CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(_CHAT_DIR))
 
 from session import get_session_store  # noqa: E402
+from cognition.proactive_brief import normalize_physical_timestamp  # noqa: E402
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 
@@ -63,29 +64,48 @@ def _count_attributed_rows_since(
     persona_id: str,
     since_iso: str | None,
     chat_db_path: Path,
+    *,
+    silent_skip_window_hours: float,
 ) -> int:
-    """Count sessions with this persona_id updated after the stamp.
+    """Count sessions with this persona_id updated after the effective boundary.
 
     Uses the EXPLICIT install-DB path (the R1 keystone) so parent and child
-    agree on the data source. Returns 0 on any error (fail-open).
+    agree on the data source. The boundary is `since_iso` (the persona's
+    `last_run` stamp) when present and parsable, else `now -
+    silent_skip_window_hours` (PERSONA_LEARNING_SILENT_SKIP_WINDOW) — cold
+    start (and a corrupted stamp) is bounded by the same window instead of
+    scanning every session ever. Both the boundary and each session's
+    `updated_at` are normalized through the canonical
+    `normalize_physical_timestamp` owner (naive local) before comparing as
+    datetimes, never as strings — `last_run` is stamped aware-UTC while
+    `updated_at` is naive-local (SQLite) or aware (Postgres), and a raw
+    string compare is wrong in both directions depending on the box's UTC
+    offset: it silently undercounts (misses real rows) on a UTC-negative box
+    and could overcount (spurious triggers) on a UTC-positive one. Returns 0
+    on any error (fail-open).
     """
     try:
         store = get_session_store(chat_db_path=chat_db_path)
         sessions = store.list_active(persona_id=persona_id)
-        if not since_iso:
-            return len(sessions)
+
+        since_dt = normalize_physical_timestamp(since_iso)
+        if since_dt is None:
+            boundary = datetime.now(timezone.utc) - timedelta(
+                hours=silent_skip_window_hours
+            )
+            since_dt = normalize_physical_timestamp(boundary)
+
         count = 0
         for s in sessions:
-            if s.updated_at:
-                updated_str = (
-                    s.updated_at.isoformat()
-                    if isinstance(s.updated_at, datetime)
-                    else str(s.updated_at)
-                )
-                if updated_str > since_iso:
-                    count += 1
+            updated_dt = normalize_physical_timestamp(s.updated_at)
+            if updated_dt is not None and updated_dt > since_dt:
+                count += 1
         return count
-    except Exception:
+    except Exception as exc:
+        print(
+            f"[{_now_iso()}] PERSONA_LEARNING_TICK [{persona_id}]: "
+            f"row-count error ({exc}), treating as 0 (fail-open)"
+        )
         return 0
 
 
@@ -204,9 +224,21 @@ def run_tick(*, test_mode: bool = False, once: bool = False) -> None:
             except Exception:
                 pass  # fail-open: a bad stamp never blocks the run
 
-        row_count = _count_attributed_rows_since(persona_name, last_run, install_db)
+        row_count = _count_attributed_rows_since(
+            persona_name,
+            last_run,
+            install_db,
+            silent_skip_window_hours=settings.silent_skip_window_hours,
+        )
         if row_count == 0:
-            print(f"[{_now_iso()}] PERSONA_LEARNING_TICK [{persona_name}]: PERSONA_REFLECT_SILENT (0 new rows since {last_run or 'never'})")
+            if last_run and normalize_physical_timestamp(last_run) is None:
+                boundary_desc = (
+                    f"corrupted stamp '{last_run}', fell back to "
+                    f"{settings.silent_skip_window_hours}h window"
+                )
+            else:
+                boundary_desc = f"{last_run or 'never'}"
+            print(f"[{_now_iso()}] PERSONA_LEARNING_TICK [{persona_name}]: PERSONA_REFLECT_SILENT (0 new rows since {boundary_desc})")
             if once:
                 break
             continue

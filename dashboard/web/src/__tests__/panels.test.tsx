@@ -853,9 +853,13 @@ describe('panels populate from fixture API responses', () => {
             memory_doc_count_matches_cli: true,
           },
         },
-        mission_control_relay: {
+        homie_dashboard: {
           health_check_port: 8787,
           orchestration_api_port: 4322,
+        },
+        buzz: {
+          state: 'connected',
+          active_transport: 'websocket',
         },
       },
       capabilities: {
@@ -933,6 +937,20 @@ describe('panels populate from fixture API responses', () => {
         dashboard_mode: 'read_only',
         model_exposed_mutating_actions: [],
       },
+      collaboration: {
+        buzz: {
+          enabled: true,
+          state: 'degraded',
+          active_transport: 'polling',
+          relay_host: 'localhost',
+          identity: 'npub1test…signed',
+          watched_channel_count: 2,
+          cli_version: '0.5.2',
+          lock_conflict: false,
+        },
+        buzz_approval_authority: false,
+        approval_surface: 'homie_only',
+      },
     });
 
     render(<CapabilityGateway />);
@@ -944,5 +962,9 @@ describe('panels populate from fixture API responses', () => {
     expect(screen.getByText('Telegram')).toBeInTheDocument();
     expect(screen.getByText('telegram.send_message')).toBeInTheDocument();
     expect(screen.getAllByText(/read_only/i).length).toBeGreaterThan(0);
+    expect(screen.getByText('Buzz Collaboration')).toBeInTheDocument();
+    expect(screen.getByText('polling')).toBeInTheDocument();
+    expect(screen.getByText('npub1test…signed')).toBeInTheDocument();
+    expect(screen.getByText('homie_only')).toBeInTheDocument();
   });
 });
