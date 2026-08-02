@@ -1,14 +1,14 @@
 # The Homie
 
-**An open-source cognitive agent OS — not a chat wrapper. A 9-layer cognitive stack (29 modules in `.claude/chat/cognition/`), DAG-based multi-agent orchestration, a typed inter-agent mailbox, and a provider-agnostic lane-first runtime, with 4,262 tests across 230 files.**
+**An open-source cognitive agent OS — not a chat wrapper. A 9-layer cognitive stack (62 modules in `.claude/chat/cognition/`), DAG-based multi-agent orchestration, a typed inter-agent mailbox, real-time voice with the full tool surface behind it, and a provider-agnostic lane-first runtime, with 10,406 tests across 480 files.**
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)
-![Public Preview](https://img.shields.io/badge/public%20preview-v0.1.0--alpha.1-blue?style=flat-square)
-![Tests: 4262](https://img.shields.io/badge/tests-4%2C262%20across%20230%20files-brightgreen?style=flat-square)
+![Release: v1.2.0](https://img.shields.io/badge/release-v1.2.0-blue?style=flat-square)
+![Tests: 10406](https://img.shields.io/badge/tests-10%2C406%20across%20480%20files-brightgreen?style=flat-square)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Channels: 6](https://img.shields.io/badge/Channels-Telegram%20%C2%B7%20Slack%20%C2%B7%20Discord%20%C2%B7%20WhatsApp%20%C2%B7%20Web%20%C2%B7%20CLI-4A154B?style=flat-square)
 
-Run it locally, on a VPS, or in Docker. Talk to it from Telegram, Slack, Discord, WhatsApp, the web, or the CLI — all six channels enter one canonical ingress and share one session model, one recall service, and one runtime. It monitors your world on a heartbeat, remembers what matters in a Markdown vault, coordinates multi-agent work over a dependency-tracked convoy graph, and runs the same on Claude, Codex, Gemini, or any OpenAI-compatible backend.
+Run it locally, on a VPS, or in Docker. Talk to it from Telegram, Slack, Discord, WhatsApp, the web, the CLI — or out loud, over real-time voice on the dashboard and in Discord voice channels. All of it enters one canonical ingress and shares one session model, one recall service, and one runtime. It monitors your world on a heartbeat, remembers what matters in a Markdown vault, coordinates multi-agent work over a dependency-tracked convoy graph, and runs the same on Claude, Codex, Gemini, or any OpenAI-compatible backend.
 
 What sets it apart from a linear chat agent is the cognition stack underneath: a frozen, token-budgeted prompt-region system over an immutable working memory; tiered recall with keyword + vector search, graph traversal, and hub-score boosting; an operator-belief and contradiction engine; a gated inner monologue that never enters the transcript; and durable identity-file amendments that only land after passing a default-deny evidence + policy gate. Every one of those is a shipped, tested module — the [Cognition Stack](#the-9-layer-cognitive-stack) section maps each claim to its file and test count.
 
@@ -35,6 +35,9 @@ sponsored by, or endorsed by those projects. See [NOTICE.md](NOTICE.md) and
 
 45-second product tour: dashboard, Desktop Stack controls, Mobile Access,
 Browser Viewer, Work Queue, Convoy, Operating Room, and clean shutdown proof.
+(Recorded on the initial preview; the real-time voice, quick-agent steering,
+and Runs surfaces described below shipped in later releases — see the
+[v1.2.0 release](https://github.com/TheSmokeDev/taskchad-os/releases/tag/v1.2.0).)
 
 Full-quality MP4 is attached on the
 [v0.1.0-alpha.1 release](https://github.com/TheSmokeDev/taskchad-os/releases/tag/v0.1.0-alpha.1).
@@ -43,17 +46,18 @@ Full-quality MP4 is attached on the
 
 ## Proof: Tests + Operator Loops
 
-The suite is **4,262 test functions across 230 files** in `.claude/scripts/tests/`
+The suite is **10,406 test functions across 480 files** in `.claude/scripts/tests/`
 (count it yourself: `git ls-files '.claude/scripts/tests/test_*.py' | wc -l` for
 files, and a `def test_` grep for functions). Coverage is concentrated where the
 moat is, not spread thin across getters:
 
 | Subsystem | Tests | Where |
 |-----------|-------|-------|
-| Orchestration (convoy / mailbox / team / executor) | 322 across 13 files | `test_orchestration_api.py` (73), `test_executor_boundary.py` (45), team suite (136 / 8 files) |
-| Cognition + memory (recall, beliefs, episodes, briefs) | 606 across 25 files | living-self acts (192 / 4 files), `test_living_memory.py` (48), `test_episodes.py` (58), `test_session_brief.py` (51), `test_recall_*.py` (24) |
-| Runtime + lane routing | 70 across 6 files | `test_selection_*.py`, `test_lane_*.py`, `test_runtime_*.py` |
-| Memory pipelines | 54 across 4 files | `test_memory_*.py` |
+| Orchestration (convoy / mailbox / team / executor) | 331 across 13 files | `test_orchestration_api.py`, `test_executor_boundary.py`, the team suite |
+| Cognition + memory (recall, beliefs, episodes, briefs) | 479 across 13 files | living-self acts, `test_living_memory.py`, `test_episodes.py`, `test_session_brief.py`, `test_recall_*.py`, `test_belief_*.py` |
+| Talk Mode voice (session, runs, steering, Discord debrief) | 350 across 12 files | `test_talk_tools.py`, `test_talk_runs.py`, `test_talk_steering.py`, `test_talk_flush.py`, `test_discord_voice_*.py` |
+| Runtime + lane routing | 70+ across 6 files | `test_selection_*.py`, `test_lane_*.py`, `test_runtime_*.py` |
+| Memory pipelines | 54+ across 4 files | `test_memory_*.py` |
 | Observability (Langfuse) | 27 | `test_langfuse.py` |
 
 On top of unit coverage, the framework is exercised through operator-loop and
@@ -121,10 +125,11 @@ thehomie team list               # Inspect team sessions
 <tr><td><b>Compiles knowledge like code</b></td><td>Entity compilation engine (Karpathy LLM Wiki port): ingest a source → extract entities → create/update concept pages → detect connections → flag contradictions. Concept pages in <code>concepts/</code> accumulate claims from multiple sources. Connection articles in <code>connections/</code> link related concepts. Q&A answers filed via <code>/file</code> persist in <code>qa/</code>. Raw sources preserved immutably in <code>raw/</code>. Build log tracks every compilation. 8 entry points — fires automatically during ingest, daily reflection, weekly synthesis, and on-demand via <code>/file</code> or CLI.</td></tr>
 <tr><td><b>Gets smarter from experience</b></td><td>Per-turn auto-capture (6 regex triggers) → staging store → batch promotion in daily reflection. Auto-skill generation after 5+ tool calls. InferenceTracker with confidence decay. An operator-belief + contradiction engine (<code>cognition/operator_beliefs.py</code>, <code>cognition/belief_conflicts.py</code>) extracts beliefs from verbatim operator turns and flags conflicts via an embedding pre-filter plus a batched LLM judge — explicit operator statements are never overruled by the model. Durable identity-file amendments (SELF/SOUL/USER/MEMORY) are proposed to an append-only ledger and only land after a default-deny evidence + policy gate (confidence floor, vault-confined evidence read, secret rejection), with a rollback snapshot per apply (<code>cognition/amendments.py</code>, <code>cognition/evidence_gate.py</code>).</td></tr>
 <tr><td><b>One brain, six channels</b></td><td>Telegram, Slack, Discord, WhatsApp, Web relay, CLI — all enter through a single canonical ingress. One session model, one recall service, one runtime. Transport identity is separated from conversation identity so sessions survive reconnects.</td></tr>
+<tr><td><b>Talk to it out loud</b></td><td>Real-time voice (OpenAI Realtime) on the dashboard and in Discord voice channels, with the framework's full tool surface behind it — memory search, calendar, work delegation, computer use, skill and Archon runs. It knows you when the session opens (identity injected) and remembers when you hang up (the conversation flushes into the daily log and a searchable episode — on both surfaces). Delegate a background agent by voice and then <b>steer it mid-flight</b>: a spoken course-correction queues to the agent's next turn boundary and lands as a resumed conversation turn (real context, not a restart); <code>cancel</code> stops one with a finish-first compare-and-set plus a process-tree kill. Every voice-deployed worker stays visible on a Runs page with restart-surviving history.</td></tr>
 <tr><td><b>Any model, no lock-in</b></td><td>Claude SDK, OpenAI Codex, Gemini CLI, OpenRouter, OpenAI-compatible — with health-aware fallback, manual <code>/provider</code> + <code>/model</code> control, lane-first runtime (<code>selection.py</code>, <code>lane_router.py</code>), cost tracking, and automatic retry on transient failures.</td></tr>
 <tr><td><b>Many homies, one framework</b></td><td>Multi-persona roster — register specialized homies (a business homie, a finance homie, a sales homie), each with its own identity, memory, tools, and voice. Drop them in a Cabinet room and they debate, vote, and ship proof together, with roster and turn order owned by the framework, not improvised by the model.</td></tr>
 <tr><td><b>Watch the browser homie work</b></td><td>The browser homie drives a real visible Chrome session you watch live in the dashboard's read-only viewer — not a headless black box. Navigation goes through workflow gates with audit rows, and write actions like posting, editing, and DMs are default-denied until you greenlight them.</td></tr>
-<tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs with real dependency edges: completing a subtask decrements <code>remaining_dependencies</code> on downstream tasks and releases the newly-ready ones (true parallel release, not a linear queue). Dispatch claims each subtask with a compare-and-swap before the executor is ever called, and external completion callbacks are exactly-once (UNIQUE <code>attempt_key</code> + <code>INSERT OR IGNORE</code> on an idempotency key), so duplicate webhooks can't corrupt convoy state. A typed inter-agent mailbox (<code>msg_type</code> payloads) with a claim → ack lifecycle and claim-token ownership checks. Team sessions with typed roles, <code>auto → paperclip → workflow → local</code> backend fallback, and per-team vault memory. Frozen state machine (transition maps, terminal sets, field allowlists) in <code>orchestration/contract.py</code>; all of it on a local API at port 4322. 322 tests across 13 files (<code>test_orchestration_api.py</code>, <code>test_executor_boundary.py</code>, the team suite).</td></tr>
+<tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs with real dependency edges: completing a subtask decrements <code>remaining_dependencies</code> on downstream tasks and releases the newly-ready ones (true parallel release, not a linear queue). Dispatch claims each subtask with a compare-and-swap before the executor is ever called, and external completion callbacks are exactly-once (UNIQUE <code>attempt_key</code> + <code>INSERT OR IGNORE</code> on an idempotency key), so duplicate webhooks can't corrupt convoy state. A typed inter-agent mailbox (<code>msg_type</code> payloads) with a claim → ack lifecycle and claim-token ownership checks. Team sessions with typed roles, <code>auto → paperclip → workflow → local</code> backend fallback, and per-team vault memory. Frozen state machine (transition maps, terminal sets, field allowlists) in <code>orchestration/contract.py</code>; all of it on a local API at port 4322. 331 tests across 13 files (<code>test_orchestration_api.py</code>, <code>test_executor_boundary.py</code>, the team suite).</td></tr>
 <tr><td><b>Full observability</b></td><td>Every message → one nested Langfuse trace: session lookup → process detection → recall (tier + pipeline) → region assembly → runtime where supported → post-response. Cost, provider, model, and tool calls are tracked when the active runtime exposes them. Sentry/GlitchTip captures unexpected orchestration errors when a DSN is configured.</td></tr>
 </table>
 
@@ -147,8 +152,12 @@ thehomie team list               # Inspect team sessions
   portable no-admin Windows artifacts. A signed installer is not claimed yet.
 - Fresh public Windows install smoke has proven install, setup check, real CLI
   chat, Desktop launch, route checks, and clean shutdown from a clean clone.
-- Cabinet Voice has lifecycle controls and a partial LiveKit spike. The browser
-  mic -> transcript -> Cabinet reply path is not claimed ready.
+- Talk Mode voice ships end to end on the dashboard (`/talk`, OpenAI Realtime
+  WebRTC) and in Discord voice channels, with tool calling, real execution, and
+  the session-end vault debrief on both surfaces — every slice adversarially
+  reviewed and live-canary proven. One open boundary: Discord voice *receive*
+  has a known audio-quality bug (an opus corrupted-stream cascade) tracked as a
+  next slice; the outbound and tool paths are solid.
 - Optional integrations require user-owned credentials. No private account
   data, local tokens, or machine-specific proof artifacts belong in the public
   export.
@@ -313,8 +322,8 @@ L1  IDENTITY          SOUL.md — personality, values, boundaries, tone
 L0  FOUNDATION        Obsidian vault graph + MOCs + autolink
 ```
 
-29 cognition modules in `.claude/chat/cognition/`, covered by 606 tests across
-25 files (recall, beliefs, episodes, working memory, session briefs). Every L5–L9
+62 cognition modules in `.claude/chat/cognition/`, covered by 479 tests across
+13 core files (recall, beliefs, episodes, working memory, session briefs). Every L5–L9
 claim above resolves to a named module and test file — see the
 [Proof](#proof-tests--operator-loops) table. PageRank and Brandes betweenness are
 implemented in `graph.py`, but the live recall path boosts by a simpler
