@@ -210,6 +210,13 @@ class RealtimeSession:
                 # GA-shape probe: real comprehension but empty transcript —
                 # dump the payload once so we can see where the text lives.
                 _log.debug("empty input transcript, raw event: %s", event)
+                # Surface the miss instead of silent ambiguity (operator ask,
+                # 2026-08-03): speech was DETECTED but transcription came
+                # back empty — an empty-string final lets the bridge mirror
+                # "(heard you, couldn't make out the words)" so the operator
+                # can SEE every pickup, intelligible or not.
+                if self._on_transcript:
+                    self._on_transcript("user", "", True)
             if transcript and self._on_transcript:
                 self._on_transcript("user", transcript, True)
         elif etype in (

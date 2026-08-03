@@ -147,6 +147,7 @@ class VoiceBridge:
         intents.voice_states = True
         self.client = discord.Client(intents=intents)
         self.client.event(self.on_ready)
+        self.client.event(self.on_voice_state_update)
 
         self.voice: discord.VoiceClient | None = None
         self.session: RealtimeSession | None = None
@@ -159,6 +160,43 @@ class VoiceBridge:
         self._mic_task: asyncio.Task | None = None
         self._mic_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
         self._mic_sent = 0
+        # DAVE re-key self-heal (2026-08-03): any membership change in the
+        # bot's voice channel re-keys the E2EE group (a new MLS epoch), and
+        # py-cord's receive path does not survive the transition — every
+        # frame from the re-keyed epoch is silently dropped and the bot goes
+        # DEAF (live session 07:53-07:55: user joined 46s after the bot,
+        # epoch 1 fired, zero RTP decrypted ever after). Reconnecting the
+        # voice transport re-forms the group at the current epoch, so a
+        # membership event bumps `_rekey_gen` and a single worker coalesces
+        # events into transport reconnects (the OpenAI session stays up).
+        # Design (r1 review): every re-key event is either covered by the
+        # in-flight reconnect or GUARANTEES a trailing one — cooldowns sleep,
+        # never drop. Transport mutations (join/leave/heal) serialize on
+        # `_transport_lock`; a fresh join/leave syncs the generations so a
+        # stale worker pass becomes a no-op. Repairing py-cord's MLS epoch
+        # transition in patches.py was evaluated and parked: deep libdave
+        # state surgery vs a lifecycle-safe 1-2s reconnect.
+        # Known residuals (K3 design gate, accepted): a re-key mid-utterance
+        # makes the ~1.5s reconnect gap split the turn at the server VAD
+        # (assistant answers a fragment — defer-to-turn-boundary is a
+        # follow-up if it proves annoying live); and only MEMBERSHIP-event
+        # re-keys are healed — a voice-server failover or py-cord-internal
+        # reconnect that moves the MLS group without a voice_state_update is
+        # not covered (a DAVE_STATS epoch watchdog is the follow-up).
+        self._transport_lock = asyncio.Lock()
+        self._heal_task: asyncio.Task | None = None
+        self._heal_count = 0
+        self._heal_failures = 0
+        self._last_heal_at = 0.0
+        self._rekey_gen = 0
+        self._healed_gen = 0
+        # Churn backoff (K3 C1): a busy channel (members constantly in/out)
+        # would otherwise flap a reconnect every ~11.5s forever — a 10-15%
+        # deaf duty cycle. Rapid consecutive heals escalate the cooldown
+        # 10s -> 30s -> 60s; the streak decays after a quiet minute.
+        self._heal_streak = 0
+        self._churn_advised = False
+        self._fail_advised = False
         self._playback_state = None  # ratecv state for the 24k->48k upsampler
         self._ready = asyncio.Event()
         # Vault-debrief transcript: disabled no-op when the lifecycle did
@@ -172,6 +210,226 @@ class VoiceBridge:
         # __name__ — this must literally be called on_ready to fire.
         _log.info("logged in as %s", self.client.user)
         self._ready.set()
+
+    @staticmethod
+    def membership_change_kind(
+        member_is_self: bool,
+        before_channel_id: int | None,
+        after_channel_id: int | None,
+        our_channel_id: int | None,
+    ) -> str | None:
+        """Classify a voice-state update against OUR channel.
+
+        Returns "join" / "leave" for ANY other member — human or bot —
+        entering/exiting the bot's channel (every membership change re-keys
+        the MLS group, r1 finding 4), "self_move" / "self_gone" for this
+        client's own channel change (admin move / kick), and None for
+        same-channel state flips (mute/deafen do NOT re-key) or unrelated
+        channels. Pure function so the re-key trigger is unit-testable.
+        """
+        if before_channel_id == after_channel_id:
+            return None  # mute/deafen/stream toggle — no membership change
+        if member_is_self:
+            if after_channel_id is None:
+                return "self_gone"
+            return "self_move"
+        if our_channel_id is None:
+            return None
+        if after_channel_id == our_channel_id:
+            return "join"
+        if before_channel_id == our_channel_id:
+            return "leave"
+        return None
+
+    async def on_voice_state_update(self, member, before, after) -> None:
+        self_id = self.client.user.id if self.client.user else None
+        kind = self.membership_change_kind(
+            getattr(member, "id", None) == self_id,
+            before.channel.id if getattr(before, "channel", None) else None,
+            after.channel.id if getattr(after, "channel", None) else None,
+            self.channel_id,
+        )
+        if kind is None or self.channel_id is None:
+            return
+        if kind == "self_move":
+            after_id = after.channel.id
+            if self._transport_lock.locked() and after_id == self.channel_id:
+                # Our own reconnect echo — heal/join re-entering the TARGET
+                # channel. Only the expected transition is suppressed (r2
+                # finding 2): a move to any OTHER channel is a real admin
+                # drag, even mid-operation, and is followed below.
+                return
+            self.channel_id = after_id
+            _log.info("moved to voice channel %s — scheduling re-key heal", after_id)
+        elif kind == "self_gone":
+            if self.voice is None:
+                return  # echo of our own teardown (leave/kick already handled)
+            if self._transport_lock.locked():
+                # Mid-operation disconnect echo (heal/join flapping the old
+                # transport). Residual, documented: a REAL kick landing inside
+                # this 1-2s window is suppressed and the heal rejoins once —
+                # the admin's next kick arrives with the lock free and tears
+                # down properly below.
+                return
+            # Kicked / externally disconnected with no operation in flight:
+            # full teardown (r2 finding 1). Leaving the session/pump live
+            # would orphan them on the next /talk join, and any later
+            # membership event in the old channel would AUTO-REJOIN a bot an
+            # admin deliberately removed.
+            _log.warning("externally disconnected from voice (kick) — tearing down")
+            await self._mirror_text(
+                "I was disconnected from the voice channel. Run `/talk join` "
+                "to bring me back."
+            )
+            await self._teardown()
+            return
+        else:
+            _log.info("voice membership %s (%s) — scheduling DAVE re-key heal", kind, member)
+        self._rekey_gen += 1
+        if self._heal_task is None or self._heal_task.done():
+            self._heal_task = asyncio.get_running_loop().create_task(self._heal_worker())
+
+    async def _heal_worker(self) -> None:
+        """Coalescing reconnect worker: runs until every re-key is covered.
+
+        Every `_rekey_gen` bump is either covered by the reconnect in flight
+        or picked up by the next loop pass — cooldowns SLEEP instead of
+        dropping (r1 finding 1: a drop = permanently deaf). Transport
+        mutations serialize on `_transport_lock` against join()/leave()
+        (r1 finding 2); a fresh join/leave syncs the generations, making a
+        stale pass a no-op. Repeated FAILURES (not legitimate re-keys) stop
+        the worker after 3 in a row.
+        """
+        try:
+            while self._healed_gen != self._rekey_gen:
+                target_gen = self._rekey_gen
+                await _sleep(1.5)  # debounce: let a join burst settle
+                if self._rekey_gen != target_gen:
+                    continue  # more events arrived — re-coalesce
+                # Churn backoff (K3 C1): rapid consecutive heals escalate the
+                # cooldown so a busy channel converges on one reconnect per
+                # minute instead of flapping ~10-15% of the time forever.
+                if self._heal_streak >= 6:
+                    cool_s = 60.0
+                elif self._heal_streak >= 3:
+                    cool_s = 30.0
+                else:
+                    cool_s = 10.0
+                cooldown = self._last_heal_at + cool_s - _now()
+                if cooldown > 0:
+                    await _sleep(cooldown)  # sleep, never drop
+                    continue  # re-coalesce after the wait
+                async with self._transport_lock:
+                    if self.voice is None or self.channel_id is None:
+                        return  # torn down (leave) — generations synced there
+                    if self._healed_gen == self._rekey_gen:
+                        return  # a join() refreshed the transport meanwhile
+                    try:
+                        prev_heal_at = self._last_heal_at
+                        await self._reconnect_transport()
+                        self._healed_gen = target_gen
+                        self._heal_failures = 0
+                        self._fail_advised = False  # healthy again — re-arm advisory
+                        self._last_heal_at = _now()
+                        self._heal_count += 1
+                        # Streak: rapid heals escalate the cooldown. The decay
+                        # window (90s) must EXCEED the max cooldown (60s) or a
+                        # channel still churning at the top tier would reset
+                        # the streak on every heal and oscillate between tiers
+                        # (re-firing the advisory each cycle).
+                        if prev_heal_at and self._last_heal_at - prev_heal_at < 90:
+                            self._heal_streak += 1
+                        else:
+                            self._heal_streak = 0
+                            self._churn_advised = False
+                        if self._heal_streak >= 6 and not self._churn_advised:
+                            self._churn_advised = True
+                            await self._mirror_text(
+                                "This voice channel is churning (people joining/"
+                                "leaving constantly) — re-syncing at most once a "
+                                "minute, so I may miss a few seconds here and there."
+                            )
+                        _log.info(
+                            "DAVE re-key heal #%d complete (dave=%s, streak=%d)",
+                            self._heal_count,
+                            self.voice.is_dave_connection() if self.voice else None,
+                            self._heal_streak,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — heal is best-effort
+                        self._heal_failures += 1
+                        self._last_heal_at = _now()
+                        _log.warning(
+                            "DAVE re-key heal failed (%d/3): %s: %s",
+                            self._heal_failures, type(exc).__name__, exc,
+                        )
+                        if self._heal_failures >= 3:
+                            # Latched (K3 C4): one advisory per degraded episode
+                            # — a busy channel generates unlimited events, and
+                            # each 3-failure worker would otherwise spam it.
+                            if not self._fail_advised:
+                                self._fail_advised = True
+                                await self._mirror_text(
+                                    "Voice re-sync keeps failing — if I can't hear "
+                                    "you, run `/talk leave` then `/talk join`."
+                                )
+                            return
+        finally:
+            self._heal_task = None
+
+    async def _reconnect_transport(self) -> None:
+        """Flap ONLY the Discord voice transport; the OpenAI session, mic
+        pump, and mic queue stay up (the pump starves through the ~1-2s gap
+        on paced zeros; the SSRC change hits the per-SSRC resampler reset).
+
+        Pending assistant audio is TRANSPLANTED into a fresh source before
+        the old transport stops: py-cord's AudioPlayer calls
+        source.cleanup() (== flush) when stop() ends its thread, so reusing
+        the old source would silently discard everything queued (r1
+        finding 3). The drain+swap block is synchronous on the loop —
+        _on_assistant_audio pushes are loop-confined, so no push can land
+        between the drain and the swap.
+        """
+        guild = self.client.get_guild(self.guild_id) if self.guild_id else None
+        channel = guild.get_channel(self.channel_id) if guild else None
+        if channel is None:
+            raise RuntimeError(f"voice channel {self.channel_id} not found")
+        old_voice = self.voice
+        # -- synchronous transplant block (no await) --
+        new_playback = QueueAudioSource()
+        if self.playback is not None:
+            pending = self.playback.drain_pending()
+            if pending:
+                new_playback.push(pending)
+        self.playback = new_playback
+        # -- transport flap --
+        if old_voice is not None:
+            try:
+                old_voice.stop_listening()
+            except Exception:
+                pass
+            try:
+                old_voice.stop()  # old source now empty — cleanup flushes nothing
+            except Exception:
+                pass
+            try:
+                await old_voice.disconnect(force=True)
+            except Exception:
+                pass
+        self.voice = await channel.connect()
+        for _ in range(30):
+            if self.voice.is_connected():
+                break
+            await _sleep(0.5)
+        # Rule 2 — reconcile against PHYSICAL state before declaring success:
+        # if an admin moved us while connect() was in flight (that self event
+        # is suppressed under the lock), py-cord followed the move; adopt the
+        # channel the transport actually landed in, not the cached target.
+        actual = getattr(getattr(self.voice, "channel", None), "id", None)
+        if actual is not None and actual != self.channel_id:
+            _log.info("reconnect landed in channel %s (moved mid-heal) — following", actual)
+            self.channel_id = actual
+        self.voice.start_listening(RealtimeSink(self._on_mic_pcm))
+        self.voice.play(self.playback)
 
     async def start(self) -> None:
         asyncio.get_running_loop().create_task(self.client.start(self._token(), reconnect=True))
@@ -201,6 +459,7 @@ class VoiceBridge:
             "rtAppends": self.session.appends_sent if self.session else None,
             "rtEvents": self.session.events_received if self.session else None,
             "micSent": self._mic_sent,
+            "daveHeals": self._heal_count,
             "daveStats": dict(patches.DAVE_STATS),
             "uptimeS": round(time.time() - self.started_at, 1) if self.started_at else None,
         }
@@ -242,83 +501,126 @@ class VoiceBridge:
         return {"ok": True, "pushedBytes": len(buf.getvalue()), "playing": self.voice.is_playing() if self.voice else None}
 
     async def join(self, guild_id: int, channel_id: int, text_channel_id: int | None) -> dict:
-        if self.voice is not None and self.voice.is_connected():
+        # Clean up ANY existing runtime state, not only a connected voice
+        # client (r2 finding 1): after an external kick the voice client is
+        # disconnected but the Realtime session, mic pump, and playback are
+        # still live — overwriting them here would orphan a receive loop and
+        # leave two pumps feeding one session.
+        if (
+            self.voice is not None
+            or self.session is not None
+            or self._mic_task is not None
+        ):
             await self.leave()
         guild = self.client.get_guild(guild_id)
         channel = guild.get_channel(channel_id) if guild else None
         if channel is None or not isinstance(channel, discord.VoiceChannel):
             raise RuntimeError(f"voice channel {channel_id} not found")
 
-        self.voice = await channel.connect()
-        for _ in range(30):
-            if self.voice.is_connected():
-                break
-            await asyncio.sleep(0.5)
-        self.guild_id, self.channel_id = guild_id, channel_id
-        self.text_channel_id = text_channel_id
-        _log.info(
-            "joined #%s in %s (dave=%s)",
-            channel.name, guild.name, self.voice.is_dave_connection(),
-        )
-
-        try:
-            from runtime import openai_platform_auth
-            import talk_session
-            import talk_tools
-
-            auth = openai_platform_auth.resolve_openai_platform_auth(
-                configured_api_key=talk_session.talk_configured_api_key()
+        # Serialize with the heal worker (r1 finding 2): a stale heal pass
+        # must not interleave its disconnect/connect with ours. Generations
+        # are snapshotted at lock acquisition — re-keys that land DURING this
+        # join stay uncovered, so the worker heals them right after (never
+        # assume the forming MLS group absorbed a mid-join member).
+        async with self._transport_lock:
+            gen_at_join = self._rekey_gen
+            # Publish the target identity BEFORE the handshake (r2 finding 3):
+            # membership events during connect() must classify against the
+            # channel we are joining — with channel_id still None they were
+            # dropped entirely, so a re-key during the handshake left the bot
+            # deaf with no trailing heal. Rolled back in the except below.
+            self.guild_id, self.channel_id = guild_id, channel_id
+            self.text_channel_id = text_channel_id
+            self.voice = await channel.connect()
+            for _ in range(30):
+                if self.voice.is_connected():
+                    break
+                await asyncio.sleep(0.5)
+            _log.info(
+                "joined #%s in %s (dave=%s)",
+                channel.name, guild.name, self.voice.is_dave_connection(),
             )
-            self.auth_source = auth.source
-            self.session = RealtimeSession(
-                RealtimeConfig(
-                    token=auth.token,
-                    instructions=talk_session.build_talk_instructions(),
-                    model=talk_session.talk_openai_model(),
-                    voice=talk_session.talk_openai_voice(),
-                    tools=talk_tools.default_talk_tools(),
-                    tool_executor=_api_tool_executor,
-                    run_reader=_api_run_reader,
-                ),
-                on_audio=self._on_assistant_audio,
-                on_transcript=self._on_transcript,
-                on_barge_in=self._on_barge_in,
-            )
-            await self.session.connect()
-        except Exception:
-            # Roll back the voice connection we just made — a failed session
-            # setup must not leave the bot parked in the channel.
-            try:
-                self.voice.stop_listening()
-            except Exception:
-                pass
-            try:
-                await self.voice.disconnect(force=True)
-            except Exception:
-                pass
-            self.voice = None
-            self.session = None
-            self.guild_id = self.channel_id = self.text_channel_id = None
-            raise
-        self.started_at = time.time()
-        # Rotate any leftover file to a unique .pending and start fresh —
-        # channel-switch re-joins never touch the lifecycle, so this
-        # rotation is what keeps the predecessor session sweepable.
-        self.transcript.start(guild_id, channel_id)
 
-        sink = RealtimeSink(self._on_mic_pcm)
-        self.voice.start_listening(sink)
-        self._mic_task = asyncio.create_task(self._pump_mic())
+            try:
+                from runtime import openai_platform_auth
+                import talk_session
+                import talk_tools
 
-        self.playback = QueueAudioSource()
-        self._playback_state = None
-        self.voice.play(self.playback)
+                auth = openai_platform_auth.resolve_openai_platform_auth(
+                    configured_api_key=talk_session.talk_configured_api_key()
+                )
+                self.auth_source = auth.source
+                self.session = RealtimeSession(
+                    RealtimeConfig(
+                        token=auth.token,
+                        instructions=talk_session.build_talk_instructions(),
+                        model=talk_session.talk_openai_model(),
+                        voice=talk_session.talk_openai_voice(),
+                        tools=talk_tools.default_talk_tools(),
+                        tool_executor=_api_tool_executor,
+                        run_reader=_api_run_reader,
+                    ),
+                    on_audio=self._on_assistant_audio,
+                    on_transcript=self._on_transcript,
+                    on_barge_in=self._on_barge_in,
+                )
+                await self.session.connect()
+            except Exception:
+                # Roll back the voice connection we just made — a failed session
+                # setup must not leave the bot parked in the channel.
+                try:
+                    self.voice.stop_listening()
+                except Exception:
+                    pass
+                try:
+                    await self.voice.disconnect(force=True)
+                except Exception:
+                    pass
+                self.voice = None
+                self.session = None
+                self.guild_id = self.channel_id = self.text_channel_id = None
+                raise
+            self.started_at = time.time()
+            # Rotate any leftover file to a unique .pending and start fresh —
+            # channel-switch re-joins never touch the lifecycle, so this
+            # rotation is what keeps the predecessor session sweepable.
+            self.transcript.start(guild_id, channel_id)
+
+            sink = RealtimeSink(self._on_mic_pcm)
+            self.voice.start_listening(sink)
+            self._mic_task = asyncio.create_task(self._pump_mic())
+
+            self.playback = QueueAudioSource()
+            self._playback_state = None
+            self.voice.play(self.playback)
+            # This fresh transport covers every re-key up to the snapshot.
+            self._healed_gen = gen_at_join
         _log.info("realtime session active (auth=%s)", self.auth_source)
         await self._mirror_text(f"Joined **#{channel.name}** — talk to me. (auth: {self.auth_source})")
         return self.status()
 
     async def leave(self) -> dict:
         await self._mirror_text("Leaving voice. Catch you later.")
+        await self._teardown()
+        return self.status()
+
+    async def _teardown(self) -> None:
+        """Full runtime teardown — shared by /talk leave and the kick path.
+
+        Cancels the heal worker FIRST (an in-flight heal must never rejoin a
+        channel we are leaving or were kicked from), then the mic pump, then
+        closes the Realtime session and voice transport under the lock.
+        """
+        heal_task = self._heal_task
+        if heal_task is not None:
+            # Cancel BEFORE taking the lock: a worker pass blocked on (or
+            # holding) the lock unwinds via CancelledError and releases it.
+            heal_task.cancel()
+            try:
+                await heal_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._heal_task = None
         if self._mic_task is not None:
             self._mic_task.cancel()
             try:
@@ -326,28 +628,36 @@ class VoiceBridge:
             except (asyncio.CancelledError, Exception):
                 pass
             self._mic_task = None
-        if self.voice is not None:
-            try:
-                self.voice.stop_listening()
-            except Exception:
-                pass
-            try:
-                self.voice.stop()
-            except Exception:
-                pass
-        if self.session is not None:
-            await self.session.close()
-            self.session = None
-        if self.voice is not None:
-            try:
-                await self.voice.disconnect(force=True)
-            except Exception:
-                pass
-            self.voice = None
-        self.playback = None
-        self._playback_state = None
-        self.started_at = None
-        return self.status()
+        # Session forensics receipt: the counters live in-process and were
+        # unreachable after every dead session — land them in the log.
+        _log.info("session DAVE_STATS: %s", dict(patches.DAVE_STATS))
+        async with self._transport_lock:
+            self._healed_gen = self._rekey_gen  # nothing left to cover
+            if self.voice is not None:
+                try:
+                    self.voice.stop_listening()
+                except Exception:
+                    pass
+                try:
+                    self.voice.stop()
+                except Exception:
+                    pass
+            if self.session is not None:
+                await self.session.close()
+                self.session = None
+            if self.voice is not None:
+                try:
+                    await self.voice.disconnect(force=True)
+                except Exception:
+                    pass
+                self.voice = None
+            self.playback = None
+            self._playback_state = None
+            self.started_at = None
+            # Not in a channel anymore — stale membership events in the old
+            # channel must not classify against us (status now reports null),
+            # and a kicked bot must never auto-rejoin off a later event.
+            self.guild_id = self.channel_id = None
 
     # -- audio + transcript flow ------------------------------------------------
 
@@ -557,6 +867,15 @@ class VoiceBridge:
             self.playback.flush()
 
     def _on_transcript(self, role: str, text: str, final: bool) -> None:
+        if final and not text and role == "user":
+            # Speech was DETECTED but transcription came back empty. Mirror
+            # the miss (operator ask, 2026-08-03) so a pickup is always
+            # VISIBLE — but never write placeholders into the vault debrief.
+            _log.info("[user] (speech detected, transcription empty)")
+            asyncio.get_running_loop().create_task(
+                self._mirror_text("**You:** *(heard you — couldn't make out the words)*")
+            )
+            return
         _log.info("[%s] %s", role, text)
         if final:
             # Synchronous on the event loop by contract (see transcript.py)

@@ -77,10 +77,10 @@ Configure one identity per Homie profile:
 BUZZ_RELAY_URL=
 BUZZ_PRIVATE_KEY=
 <REDACTED-buzz-private-key>
+BUZZ_PUBKEY_ROLES=
 
-BUZZ_CHANNELS=
 
-
+BUZZ_SIGNAL_CHANNEL=
 
 BUZZ_TRANSPORT=auto
 BUZZ_REQUIRE_MENTION=true

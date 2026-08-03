@@ -64,6 +64,21 @@ class QueueAudioSource(discord.AudioSource):
             self._queue.clear()
             self._carry.clear()
 
+    def drain_pending(self) -> bytes:
+        """Atomically remove and return all queued + partial PCM.
+
+        Used by the DAVE re-key heal to transplant pending assistant audio
+        into a FRESH source before the old transport stops — py-cord's
+        AudioPlayer calls ``cleanup()`` (== ``flush()``) when ``stop()`` ends
+        its thread, so reusing the same source across a transport flap would
+        silently discard everything still queued.
+        """
+        with self._lock:
+            pending = bytes(self._carry) + b"".join(self._queue)
+            self._queue.clear()
+            self._carry.clear()
+            return pending
+
     def read(self) -> bytes:
         with self._lock:
             while len(self._carry) < DISCORD_FRAME_BYTES and self._queue:

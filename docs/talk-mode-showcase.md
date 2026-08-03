@@ -107,9 +107,23 @@ thing you'll hit:
 
 That fix went through two rounds of adversarial code review plus an independent
 design gate before shipping — the buffer, the gate, and the padding classifier
-are all covered by a deterministic virtual-clock test harness. The point for you:
-**this is the receive pipeline you want to copy**, because the naive version is
-the one that "can't hear you."
+are all covered by a deterministic virtual-clock test harness.
+
+And it wasn't even the deepest one. Under it sat **the shredder**: the RTP
+extension header gets parsed and removed at the transport-decrypt layer, but
+the upstream library's E2EE branch re-parses the *decrypted audio itself* as if
+it began with another extension header — slicing a garbage offset off the front
+of every frame. Every packet from a real client carries the extension flag, so
+**100% of received voice decoded to noise**: half threw "corrupted stream", the
+rest decoded garbage, and the transcription model hallucinated phrases nobody
+said. It was found with per-frame forensics (log the frame length, opus TOC
+byte, sequence, and extension flag on both decode paths — failed frames had
+*random* TOC bytes, the fingerprint of frames starting mid-buffer), and fixed
+by one rule: **the E2EE plaintext IS the codec frame — never re-parse it.**
+
+The point for you: **this is the receive pipeline you want to copy**, because
+the naive version is the one that "can't hear you" — and when voice "doesn't
+work," instrument the actual frames before touching the code.
 
 The mechanics live in `.claude/scripts/discord_voice/bridge.py` (`_pump_mic`) and
 `patches.py`, with the tests in `.claude/scripts/discord_voice/tests/`.

@@ -216,16 +216,17 @@ def _reset_dave_stats():
 class _ReadyDave:
     """Recording DAVE session with .ready, shaped like davey.DaveSession."""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, result: bytes | None = None) -> None:
         self.ready = True
         self.received: list[bytes] = []
         self._fail = fail
+        self._result = result
 
     def decrypt(self, user_id: int, media_type, frame: bytes) -> bytes:
         self.received.append(frame)
         if self._fail:
             raise RuntimeError("undecryptable frame")
-        return b"plain:" + frame
+        return self._result if self._result is not None else b"plain:" + frame
 
 
 def _decryptor_self(payload: bytes, dave, ssrc_map: dict[int, int] | None = None) -> SimpleNamespace:
@@ -324,6 +325,30 @@ def test_over_length_padding_is_concealed_as_lost_not_silence() -> None:
     assert patches.DAVE_STATS["pad_all"] == 0  # NOT counted as genuine silence
     assert patches.DAVE_STATS["dave_fail"] == 0
     assert packet.realtime_lost is True  # marked lost -> decoder conceals (PLC)
+
+
+def test_extended_packet_dave_plaintext_never_resliced() -> None:
+    """THE SHREDDER regression lock (2026-08-03). packet.extended is True on
+    ALL Discord client audio; the RTP extension is already consumed at the
+    transport layer. Stock py-cord re-parsed the DAVE PLAINTEXT as another
+    extension header and sliced a garbage offset off the front of every
+    opus frame — chopping the TOC byte, corrupting ~half the decodes, and
+    turning the rest into noise. The DAVE plaintext must reach the decoder
+    WHOLE, and update_extended_header must never be called on it."""
+    plaintext = b"\x78\x0b\x22real-opus-frame-bytes"
+    dave = _ReadyDave(result=plaintext)
+    packet = _packet(extended=True)
+
+    def _boom(_data: bytes) -> int:
+        raise AssertionError("update_extended_header must NOT touch DAVE plaintext")
+
+    packet.update_extended_header = _boom
+
+    result = patches._patched_decrypt_rtp(_decryptor_self(b"ciphertext", dave), packet)
+
+    assert result == plaintext  # whole frame, TOC byte intact, no slice
+    assert packet.decrypted_data == plaintext
+    assert patches.DAVE_STATS["dave_ok"] == 1
 
 
 def test_dave_failure_substitutes_opus_silence() -> None:

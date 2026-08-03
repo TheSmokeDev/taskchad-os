@@ -66,6 +66,8 @@ DAVE_STATS: dict[str, int] = {
     "dave_fail": 0,    # DAVE decryptions that threw -> concealed
     "dave_unencrypted": 0,  # subset of dave_fail: frame carried no DAVE framing
     "concealed": 0,    # 20ms slots filled by opus PLC
+    "opus_ok": 0,      # frames libopus decoded cleanly
+    "opus_fail": 0,    # frames libopus rejected ("corrupted stream" cascade)
 }
 
 
@@ -117,7 +119,7 @@ class RealtimeDecoder:
             # precisely "healthy RMS, unintelligible speech" on the model side.
             pcm = self._conceal() if getattr(packet, "realtime_lost", False) else SILENCE_PCM_20MS
         else:
-            pcm = self._decode(frame) or self._conceal()
+            pcm = self._decode(frame, packet) or self._conceal()
         member = self._resolve_member()
         return VoiceData(packet, member, pcm=pcm)
 
@@ -155,7 +157,7 @@ class RealtimeDecoder:
             return None
         return vc.guild.get_member(user_id) or vc.client.get_user(user_id)
 
-    def _decode(self, frame: bytes) -> bytes:
+    def _decode(self, frame: bytes, packet=None) -> bytes:
         """Opus-decode one frame.
 
         DAVE decrypt is owned by py-cord's reader (reader.decrypt_rtp runs
@@ -165,12 +167,36 @@ class RealtimeDecoder:
         """
 
         assert self._decoder is not None
+        # Forensics (2026-08-03): every live session ever recorded shows a
+        # ~50% "corrupted stream" decode-failure rate on the operator's SSRC
+        # — the audio content is shredded and transcription hallucinates.
+        # Log the frame SHAPE on both paths so one instrumented session can
+        # discriminate the suspects: a wrong extension-header offset (frame
+        # starts mid-buffer), an interleave (TOC byte flips config between
+        # frames), or genuinely damaged payloads.
+        seq = getattr(packet, "sequence", None) if packet is not None else None
+        ext = getattr(packet, "extended", None) if packet is not None else None
         try:
             pcm = self._decoder.decode(frame, fec=False)
-            _log.debug("opus ok ssrc=%s pcm_len=%d", self.ssrc, len(pcm))
+            DAVE_STATS["opus_ok"] += 1
+            if DAVE_STATS["opus_ok"] <= 40 or len(pcm) != 3840:
+                _log.debug(
+                    "opus ok ssrc=%s pcm_len=%d len=%d toc=%s head=%s seq=%s ext=%s",
+                    self.ssrc, len(pcm), len(frame),
+                    f"{frame[0]:02x}" if frame else "-",
+                    frame[:8].hex(), seq, ext,
+                )
+            else:
+                _log.debug("opus ok ssrc=%s pcm_len=%d", self.ssrc, len(pcm))
             return pcm
         except Exception as exc:  # noqa: BLE001 — corrupt opus frame
-            _log.debug("opus decode failed for ssrc %s: %s", self.ssrc, exc)
+            DAVE_STATS["opus_fail"] += 1
+            _log.debug(
+                "opus decode failed for ssrc %s: %s | len=%d toc=%s head=%s seq=%s ext=%s",
+                self.ssrc, exc, len(frame),
+                f"{frame[0]:02x}" if frame else "-",
+                frame[:8].hex(), seq, ext,
+            )
             return b""
 
 
@@ -259,11 +285,24 @@ def _patched_decrypt_rtp(self, packet):
                     uid, davey.MediaType.audio, raw_payload
                 )
 
-                if packet.extended:
-                    offset = packet.update_extended_header(decrypted_audio)
-                    packet.decrypted_data = decrypted_audio[offset:]
-                else:
-                    packet.decrypted_data = decrypted_audio
+                # THE SHREDDER — root cause of the ~50% "corrupted stream"
+                # cascade present in every session since bring-up (found
+                # 2026-08-03 via per-frame forensics: failed frames had
+                # RANDOM opus TOC bytes = frames starting mid-buffer). The
+                # RTP extension was ALREADY parsed and sliced off at the
+                # transport layer (the rtpsize decryptor runs
+                # update_extended_header and returns result[8:]). Stock
+                # py-cord then re-parses the DAVE PLAINTEXT as if it began
+                # with another extension header — in rtpsize mode that
+                # helper even prepends the header's ext word and returns a
+                # length*4 offset — and slices that off the real opus frame.
+                # packet.extended is True on ALL Discord client audio, so
+                # EVERY E2EE frame lost its TOC byte + leading data:
+                # libopus threw on ~half and decoded noise from the rest,
+                # transcription hallucinated, and the operator was never
+                # actually heard. The DAVE plaintext IS the opus frame —
+                # use it whole.
+                packet.decrypted_data = decrypted_audio
                 DAVE_STATS["dave_ok"] += 1
             except Exception as exc:
                 DAVE_STATS["dave_fail"] += 1
