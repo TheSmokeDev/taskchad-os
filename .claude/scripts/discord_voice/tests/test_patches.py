@@ -286,6 +286,46 @@ def test_bad_padding_left_for_dave_to_reject() -> None:
     assert patches.DAVE_STATS["dave_fail"] == 1
 
 
+def test_all_padding_frame_short_circuits_to_silence() -> None:
+    """A frame that is ENTIRELY padding (pad byte >= payload len) carries no
+    audio — Discord's all-0xFF connection/probe burst (pad byte 0xFF == len
+    255). It must return OPUS_SILENCE WITHOUT calling dave.decrypt, which
+    would otherwise raise UnencryptedWhenPassthroughDisabled and spam a
+    traceback per frame (52 in one live session, 2026-08-02)."""
+    dave = _ReadyDave(fail=True)  # raises if ever called
+    payload = b"\xff" * 255  # last byte 0xFF == 255 == len -> all padding
+    packet = _packet(padding=True)
+
+    result = patches._patched_decrypt_rtp(_decryptor_self(payload, dave), packet)
+
+    assert result == patches.OPUS_SILENCE
+    assert dave.received == []  # dave.decrypt was NEVER reached
+    assert patches.DAVE_STATS["pad_all"] == 1
+    assert patches.DAVE_STATS["dave_fail"] == 0  # no doomed decrypt attempt
+    assert patches.DAVE_STATS["dave_unencrypted"] == 0  # no spurious warning
+    assert packet.realtime_lost is False  # this IS silence, not a loss
+
+
+def test_over_length_padding_is_concealed_as_lost_not_silence() -> None:
+    """pad > len is an over-count — it violates RFC 3550 and is NOT genuine
+    end-of-transmission silence (unlike pad == len). It must be marked lost so
+    the decoder conceals it (PLC), not mislabelled as silence and not handed to
+    DAVE (which would raise). Finding 3 from the 2026-08-02 review: the old
+    `pad >= len` branch swept this into the all-padding silence path."""
+    dave = _ReadyDave(fail=True)  # raises if ever called
+    payload = b"opus-payload-bytes" + bytes([200])  # last byte 200 > len (19)
+    packet = _packet(padding=True)
+
+    result = patches._patched_decrypt_rtp(_decryptor_self(payload, dave), packet)
+
+    assert result == patches.OPUS_SILENCE
+    assert dave.received == []  # malformed — never handed to DAVE
+    assert patches.DAVE_STATS["pad_bad"] == 1
+    assert patches.DAVE_STATS["pad_all"] == 0  # NOT counted as genuine silence
+    assert patches.DAVE_STATS["dave_fail"] == 0
+    assert packet.realtime_lost is True  # marked lost -> decoder conceals (PLC)
+
+
 def test_dave_failure_substitutes_opus_silence() -> None:
     dave = _ReadyDave(fail=True)
     packet = _packet()

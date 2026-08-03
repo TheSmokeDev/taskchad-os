@@ -59,6 +59,14 @@ for _name in ("discord.voice", "discord.opus"):
     logging.getLogger(_name).setLevel(logging.DEBUG)
 _log = logging.getLogger("discord_voice.bridge")
 
+# Injectable pacing seam for the mic pump. The pump paces on a monotonic clock;
+# tests drive a virtual clock by patching THESE module names instead of the
+# global time.monotonic / asyncio.sleep — patching the globals would also warp
+# asyncio's own event-loop timekeeping and the realtime run-poller's deadline
+# (realtime.py time.monotonic), which leaked across tests as scheduling flake.
+_now = time.monotonic
+_sleep = asyncio.sleep
+
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = 7861
 TALK_API_BASE = os.environ.get("DISCORD_VOICE_TALK_API", "http://127.0.0.1:4322")
@@ -387,53 +395,150 @@ class VoiceBridge:
         ring: deque[bytes] = deque()
         zeros24 = b"\x00" * 960  # 20ms of 24kHz mono s16
         self._mic_sent = 0
+        self._mic_drops = 0  # frames shed to bound latency (observability)
+        # Paced jitter buffer (fixes the 20ms mid-word zero-splices, 2026-08-02).
+        # The old bare `wait_for(get, timeout=0.02)` RACED Discord's 20ms packet
+        # cadence: any packet arriving even 1ms late timed out and injected a
+        # zero frame INTO the middle of a word (71 such splices in one live
+        # session shredded the operator's speech into empty transcripts). Now a
+        # small input buffer (`jbuf`) absorbs arrival jitter — a late packet is
+        # covered by a spare buffered frame instead of a zero — while a
+        # monotonic clock keeps the emit rate at exactly one 20ms frame per 20ms
+        # of wall time. Realtime pacing is preserved (OpenAI's server VAD
+        # measures silence in audio time; an unpaced pump glues separate
+        # sentences into one turn), so this fixes the splicing WITHOUT
+        # regressing the pacing the old loop got right.
+        jitter_frames = max(1, int(os.environ.get("DISCORD_VOICE_JITTER_FRAMES", "3")))
+        # Latency ceiling: if the pump ever falls behind (a stalled send_audio,
+        # a sustained arrival burst), drop the OLDEST buffered frames to stay
+        # current rather than let latency grow unbounded — the standard realtime
+        # choice (you can't play 2s-stale audio into a live call). Default ~500ms.
+        jbuf_max = max(
+            jitter_frames,
+            int(os.environ.get("DISCORD_VOICE_JITTER_MAX_FRAMES", str(jitter_frames + 25))),
+        )
+        # Soft high-water (K3 design gate): a one-time arrival burst that pushes
+        # the buffer above ~2x priming but below the hard ceiling would FREEZE
+        # there — arrival rate == consumption rate, so depth never drains and
+        # ~2x priming of latency sticks for the rest of the utterance, a gap the
+        # overflow ceiling and the >200ms resync both miss. Depth alone is the
+        # signal, so shed back to priming the moment we cross it (no clock event
+        # needed). Caps the working set at ~120ms while still absorbing normal
+        # jitter, and also bleeds off slow clock-skew drift 60ms-at-a-time
+        # instead of a rare 500ms lurch. (Env-tunable; a huge value disables it,
+        # which the gate-logic tests use to bulk-preload without shedding.)
+        soft_high_water = max(
+            jitter_frames,
+            int(os.environ.get("DISCORD_VOICE_JITTER_SOFT_FRAMES", str(2 * jitter_frames))),
+        )
+        jbuf: deque = deque()
+        primed = False
+        next_frame_at: float | None = None
+        resync_pending = False
         try:
             while True:
-                try:
-                    pcm, ssrc = await asyncio.wait_for(
-                        self._mic_queue.get(), timeout=0.02
-                    )
-                except asyncio.TimeoutError:
-                    pcm, ssrc = None, current_ssrc  # starved — pace with zeros
-                if self.session is None:
-                    continue
-                if ssrc != current_ssrc:
-                    # Resampler state is per-SSRC — a speaker change or SSRC
-                    # re-negotiation must restart it or streams interleave
-                    # into garbage (discord.js#11432).
-                    state = None
-                    ring.clear()
-                    current_ssrc = ssrc
-                if pcm is None:
-                    pcm24, level = zeros24, -96.0
-                else:
-                    pcm24, state = pcm48stereo_to_24mono(pcm, state)
-                    level = rms_dbfs(pcm24)
-                if level >= silence_dbfs:
-                    speech_tail = hangover_chunks + lookahead
-                elif speech_tail > 0:
-                    speech_tail -= 1
-                ring.append(pcm24)
-                if len(ring) < lookahead:
-                    continue  # still filling the delay line
-                out = ring.popleft() if speech_tail > 0 else zeros24
-                if speech_tail <= 0:
-                    ring.popleft()  # discard the gated chunk, keep the line moving
-                try:
-                    if tap is not None:
-                        tap.write(out)
-                    await self.session.send_audio(out)
-                    self._mic_sent += 1
-                    if self._mic_sent % 250 == 1:
-                        _log.info(
-                            "mic pump: sent=%d pcm24=%dB rms=%.1f dBFS gate=%s qsize=%d",
-                            self._mic_sent, len(out), level,
-                            "open" if speech_tail > 0 else "shut",
-                            self._mic_queue.qsize(),
+                # Drain every frame currently available (absorbs arrival bursts).
+                while True:
+                    try:
+                        jbuf.append(self._mic_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                # Discontinuity trim (2026-08-02 review, r1+r2): a hard buffer
+                # overflow OR a >200ms clock resync both mean the pump fell
+                # behind and is now carrying stale backlog (a stalled send_audio
+                # triggers both at once). Shed it down to the priming depth so
+                # latency RECOVERS instead of persisting for the rest of the
+                # utterance — the resync alone reset the clock but left the
+                # backlog, which a 250ms stall measured as ~180ms->~410ms of
+                # sticky latency. Reset ONLY the resampler (the drop is an input
+                # discontinuity, so filter state is stale). Deliberately do NOT:
+                #   - clear the ring — that emptied the delay line and the
+                #     len(ring) >= lookahead guard then emitted NOTHING for the
+                #     8-frame refill, a ~140ms hole in the paced timeline (r2-A);
+                #     keeping it holds <=160ms of recent same-speaker audio and
+                #     keeps every slot filled.
+                #   - force the gate open — overflow does NOT imply speech (a
+                #     stall during below-threshold ambient input would then leak
+                #     600ms of noise into the VAD, r2-B). Preserving speech_tail
+                #     keeps a mid-speech shed flowing (it was already open) while
+                #     an ambient shed stays gated; the retained frames re-open
+                #     the gate normally on the next above-threshold syllable.
+                if resync_pending or len(jbuf) > soft_high_water or len(jbuf) > jbuf_max:
+                    resync_pending = False
+                    dropped = 0
+                    while len(jbuf) > jitter_frames:
+                        jbuf.popleft()
+                        dropped += 1
+                    if dropped:
+                        self._mic_drops += dropped
+                        state = None
+                        _log.warning(
+                            "mic pump: shed %d stale frame(s) to bound latency "
+                            "(drops=%d)", dropped, self._mic_drops,
                         )
-                except Exception as exc:  # noqa: BLE001
-                    _log.warning("mic pump send failed: %s", exc)
-                    return
+                # Prime to depth before draining so a single late/lost packet has
+                # a spare frame to cover it; an underrun re-primes on next fill.
+                if not primed and len(jbuf) >= jitter_frames:
+                    primed = True
+                if primed and jbuf:
+                    pcm, ssrc = jbuf.popleft()
+                else:
+                    if primed:
+                        primed = False  # buffer underran — concede one zero
+                    pcm, ssrc = None, current_ssrc
+
+                if self.session is not None:
+                    if ssrc != current_ssrc:
+                        # Resampler state is per-SSRC — a speaker change or SSRC
+                        # re-negotiation must restart it or streams interleave
+                        # into garbage (discord.js#11432).
+                        state = None
+                        ring.clear()
+                        current_ssrc = ssrc
+                    if pcm is None:
+                        pcm24, level = zeros24, -96.0
+                    else:
+                        pcm24, state = pcm48stereo_to_24mono(pcm, state)
+                        level = rms_dbfs(pcm24)
+                    if level >= silence_dbfs:
+                        speech_tail = hangover_chunks + lookahead
+                    elif speech_tail > 0:
+                        speech_tail -= 1
+                    ring.append(pcm24)
+                    if len(ring) >= lookahead:
+                        out = ring.popleft() if speech_tail > 0 else zeros24
+                        if speech_tail <= 0:
+                            ring.popleft()  # discard gated chunk, keep the line moving
+                        try:
+                            if tap is not None:
+                                tap.write(out)
+                            await self.session.send_audio(out)
+                            self._mic_sent += 1
+                            if self._mic_sent % 250 == 1:
+                                _log.info(
+                                    "mic pump: sent=%d pcm24=%dB rms=%.1f dBFS "
+                                    "gate=%s qsize=%d jbuf=%d drops=%d",
+                                    self._mic_sent, len(out), level,
+                                    "open" if speech_tail > 0 else "shut",
+                                    self._mic_queue.qsize(), len(jbuf),
+                                    self._mic_drops,
+                                )
+                        except Exception as exc:  # noqa: BLE001
+                            _log.warning("mic pump send failed: %s", exc)
+                            return
+
+                # Realtime pace: hold each iteration to a 20ms wall-clock frame.
+                now = _now()
+                next_frame_at = (now if next_frame_at is None else next_frame_at) + 0.02
+                delay = next_frame_at - now
+                if delay > 0:
+                    await _sleep(delay)
+                elif delay < -0.2:
+                    # Drifted too far behind (a stall). Resync the clock AND flag
+                    # the next iteration to shed the buffered backlog the stall
+                    # accumulated — otherwise latency stays doubled all utterance.
+                    next_frame_at = now
+                    resync_pending = True
         finally:
             if tap is not None:
                 tap.close()

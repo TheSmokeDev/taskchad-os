@@ -140,6 +140,7 @@ thehomie team list               # Inspect team sessions
 | Start here | What it covers |
 |---|---|
 | [Install Guide](INSTALL.md) | Prerequisites, setup wizard, channel credentials, Docker, systemd, vault setup |
+| [Talk Mode Showcase](docs/talk-mode-showcase.md) | Give your AI a real-time voice co-founder — architecture, the battle-tested receive pipeline, build-your-own guide |
 | [Operator Manual](docs/manual/README.md) | Public feature map, source-of-truth files, operator entry points, tests, proof boundaries |
 | [Desktop v0](docs/manual/features/desktop-v0.md) | Dashboard-first Electron app, portable/package smoke proof, Desktop/Hono/Python lifecycle |
 | [Multi-Channel Adapters](docs/manual/features/multi-channel-adapters.md) | Telegram attachments, grouped documents, quick-turn batching, Queue/Steer controls |
@@ -155,9 +156,12 @@ thehomie team list               # Inspect team sessions
 - Talk Mode voice ships end to end on the dashboard (`/talk`, OpenAI Realtime
   WebRTC) and in Discord voice channels, with tool calling, real execution, and
   the session-end vault debrief on both surfaces — every slice adversarially
-  reviewed and live-canary proven. One open boundary: Discord voice *receive*
-  has a known audio-quality bug (an opus corrupted-stream cascade) tracked as a
-  next slice; the outbound and tool paths are solid.
+  reviewed and live-canary proven. The Discord voice *receive* audio bug
+  (mid-word zero-splices from a mic-pump timing race) was root-caused from a
+  live PCM capture and fixed with a paced jitter buffer — two adversarial
+  review rounds plus an independent design gate, locked by a deterministic
+  virtual-clock test harness. See the
+  [Talk Mode Showcase](docs/talk-mode-showcase.md) for the full story.
 - Optional integrations require user-owned credentials. No private account
   data, local tokens, or machine-specific proof artifacts belong in the public
   export.

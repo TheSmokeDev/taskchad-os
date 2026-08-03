@@ -59,7 +59,8 @@ DAVE_STATS: dict[str, int] = {
     "transport": 0,    # transport-layer decryptions performed
     "silence": 0,      # unencrypted Opus silence frames passed through
     "padded": 0,       # packets with the RTP padding bit set
-    "pad_bad": 0,      # padding byte invalid (0 or >= payload length)
+    "pad_all": 0,      # pad count >= payload len: entirely padding, no audio
+    "pad_bad": 0,      # padding byte 0 (RFC-invalid; left for DAVE to decide)
     "non_opus": 0,     # RTP payload type != 0x78 (observe-only for now)
     "dave_ok": 0,      # DAVE decryptions that succeeded
     "dave_fail": 0,    # DAVE decryptions that threw -> concealed
@@ -219,10 +220,35 @@ def _patched_decrypt_rtp(self, packet):
         pad = raw_payload[-1]
         if 0 < pad < len(raw_payload):
             raw_payload = raw_payload[:-pad]
+        elif pad == len(raw_payload):
+            # pad == len means the frame is EXACTLY padding — every byte is
+            # padding, there is no audio to extract. Discord's connection/probe
+            # burst sends these UNENCRYPTED as 255 bytes of 0xFF (pad byte
+            # 0xFF == len 255). Handing one to dave.decrypt() only raises
+            # UnencryptedWhenPassthroughDisabled and spams a traceback per
+            # frame (52 in one live session, 2026-08-02, which the old
+            # "should be unreachable" guard below could not explain), so
+            # short-circuit to genuine silence exactly like the f8fffe frame
+            # above — realtime_lost stays False: this IS silence, not a loss.
+            DAVE_STATS["pad_all"] += 1
+            packet.decrypted_data = OPUS_SILENCE
+            return packet.decrypted_data
+        elif pad > len(raw_payload):
+            # pad > len is an over-count — it violates RFC 3550 and is NOT
+            # genuine end-of-transmission silence. Do not hand it to DAVE (it
+            # would raise) and do not mislabel it as silence: mark the packet
+            # lost so the decoder conceals it (PLC), the same shape as the
+            # dave_fail path below, instead of hard-zeroing a real audio slot.
+            DAVE_STATS["pad_bad"] += 1
+            packet.realtime_lost = True
+            packet.decrypted_data = OPUS_SILENCE
+            return packet.decrypted_data
         else:
-            # pad == 0 violates RFC 3550 (the count includes itself); a pad
-            # >= len would underflow. Leave the payload as-is — DAVE will
-            # reject it and dave_fail records the packet.
+            # pad == 0 violates RFC 3550 (the count includes itself) but strips
+            # NOTHING — the full payload may be intact audio carrying a spurious
+            # padding bit. Leave it as-is and let DAVE try; dave_fail records a
+            # genuine crypto failure. (Not short-circuited: unlike pad > len,
+            # this can still be real audio.)
             DAVE_STATS["pad_bad"] += 1
 
     if dave is not None and dave.ready:
@@ -242,10 +268,11 @@ def _patched_decrypt_rtp(self, packet):
             except Exception as exc:
                 DAVE_STATS["dave_fail"] += 1
                 if "UnencryptedWhenPassthroughDisabled" in str(exc):
-                    # Should be unreachable now that silence frames short-
-                    # circuit above. If it fires, the payload shape is not
-                    # what we think — log it periodically so the next live
-                    # run identifies it instead of guessing again.
+                    # The 2026-08-02 live run identified these as all-padding
+                    # probe frames (pad byte 0xFF == len 255), now
+                    # short-circuited by the pad_all guard above. If this
+                    # STILL fires, it is a genuinely different unencrypted
+                    # shape — log it periodically so the next run can name it.
                     DAVE_STATS["dave_unencrypted"] += 1
                     if DAVE_STATS["dave_unencrypted"] % 25 == 1:
                         _log.warning(
