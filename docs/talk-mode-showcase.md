@@ -33,6 +33,28 @@ a co-founder you can talk to, not a chatbot with a speaker.
 
 ---
 
+## Why not just wire a speech-to-text bot?
+
+The obvious build is a transcript pipeline: record the caller, wait for a
+stretch of silence, transcribe, hand the text to the agent, synthesize a reply,
+play the file. It works on every platform and it's easy to reason about. It's
+also a voicemail exchange: the model never hears tone or pacing, nothing can be
+interrupted once it starts talking, and every turn pays the full
+record → transcribe → think → speak round trip before the caller hears a
+syllable.
+
+Talk Mode is the other architecture: the model is ON the call. Your audio
+streams into a realtime session as you speak, the reply streams back as audio,
+you can cut it off mid-sentence, and you can steer running work by voice
+instead of waiting for your turn. The difference isn't polish — it's which
+conversations are possible.
+
+Both shapes are valid. Voice notes and maximum platform breadth favor the
+transcript pipeline; a live call favors realtime. This repo ships the realtime
+one because a co-founder is someone you talk *with*, not leave messages for.
+
+---
+
 ## How it's built
 
 Talk Mode is two thin transports feeding one shared runtime — the assistant, its
@@ -120,6 +142,13 @@ said. It was found with per-frame forensics (log the frame length, opus TOC
 byte, sequence, and extension flag on both decode paths — failed frames had
 *random* TOC bytes, the fingerprint of frames starting mid-buffer), and fixed
 by one rule: **the E2EE plaintext IS the codec frame — never re-parse it.**
+
+After the fix shipped, we read another major agent framework's hand-rolled
+Discord receiver for comparison. Different codebase, different Discord
+library — and the same conclusion baked into their pipeline: extension math
+happens before E2EE decryption, and the decrypted frame reaches the decoder
+whole. Two implementations arriving independently at the same invariant is the
+strongest validation a receive pipeline gets.
 
 The point for you: **this is the receive pipeline you want to copy**, because
 the naive version is the one that "can't hear you" — and when voice "doesn't
