@@ -2,7 +2,7 @@
 name: meme-generator
 description: Generate captioned meme images for social replies and chat. Use when the user asks for a meme, wants to caption an image with top/bottom text, or needs a quick visual for a post. Produces a PNG from a template plus caption text.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

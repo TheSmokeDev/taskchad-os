@@ -2,7 +2,7 @@
 name: heartbeat-monitor
 description: External uptime and liveness check for the bot, memory pipelines, and local API. Use when the user wants to monitor whether the agent is alive, set up a health check, get notified when the bot goes down, or debug why scheduled jobs stopped running.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

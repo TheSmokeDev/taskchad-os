@@ -2,7 +2,7 @@
 name: secret-scan
 description: Scan the vault and repo for leaked secrets — API keys, tokens, private keys — before committing or sending content externally. Use before a commit/push, before posting vault content to any external surface, or when the user asks to check for exposed credentials.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

@@ -1,6 +1,6 @@
 # Optional Skills
 
-A curated catalog of **opt-in** skills for YourProduct OS (The Homie Framework).
+A curated catalog of **opt-in** skills for TaskChad OS (The Homie Framework).
 
 These skills are **not loaded by default**. The always-on skill set lives in
 `.claude/skills/` and is part of every session. The skills in this directory are

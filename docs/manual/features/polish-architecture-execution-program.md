@@ -8,7 +8,7 @@ Last updated: 2026-07-10
 
 The polish program gives The Homie one normative architecture target and a
 bounded way to implement it. The
-[YourProduct OS Polish Architecture Specification](../../specs/taskchad-os-polish-architecture-spec.md)
+[TaskChad OS Polish Architecture Specification](../../specs/taskchad-os-polish-architecture-spec.md)
 defines the destination; it does **not** assert that the repository already
 conforms. The merged `implement-prp` Archon workflow turns one reviewed PRP at
 a time into isolated, test-first work with deterministic gates and two human

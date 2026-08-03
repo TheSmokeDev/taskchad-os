@@ -2,7 +2,7 @@
 name: whatsapp-bridge
 description: Add WhatsApp as a chat channel for the agent, routing inbound WhatsApp messages into the chat engine and replies back out. Use when the user wants to talk to the bot over WhatsApp, set up a WhatsApp number, or bridge WhatsApp into the existing multi-platform chat interface.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

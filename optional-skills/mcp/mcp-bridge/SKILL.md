@@ -2,7 +2,7 @@
 name: mcp-bridge
 description: Connect arbitrary Model Context Protocol (MCP) servers as on-demand tool sources for the agent, with progressive disclosure so tool definitions don't bloat the context window. Use when the user wants to add an external MCP server (Zapier, filesystem, GitHub, a custom server), list its tools, or call one of its actions.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

@@ -2,7 +2,7 @@
 name: crypto-watch
 description: Track cryptocurrency prices and fire alerts when a coin crosses a threshold. Use when the user asks for a crypto price, wants to watch a coin, set a price alert, or schedule periodic market check-ins. Uses the keyless CoinGecko API.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

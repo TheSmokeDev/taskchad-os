@@ -1,4 +1,4 @@
-# The Homie
+# TaskChad OS
 
 **An open-source cognitive agent OS — not a chat wrapper. A 9-layer cognitive stack (62 modules in `.claude/chat/cognition/`), DAG-based multi-agent orchestration, a typed inter-agent mailbox, real-time voice with the full tool surface behind it, and a provider-agnostic lane-first runtime, with 10,406 tests across 480 files.**
 
@@ -16,14 +16,14 @@ It is built to push back, not just please — identity (`SOUL.md` / `SELF.md`) i
 
 ## Lineage + Provenance
 
-The Homie is the original public Homie framework export maintained by The
-Homie contributors. It evolved from Cole and the Dynamous Community's Claude
-Code The Homie workshop, then grew into an identity-first agent OS with its
-own memory, orchestration, multi-channel ingress, Operating Room, and desktop
-surfaces.
+TaskChad OS is the original public export of this framework, maintained by
+the TaskChad OS contributors. It evolved from Cole and the TheHomie
+Community's Claude Code Second Brain workshop, then grew into an identity-first
+agent OS with its own memory, orchestration, multi-channel ingress, Operating
+Room, and desktop surfaces.
 
 OpenClaw, Hermes Agent, OpenSouls, and ClaudeClaw are credited as ecosystem
-influences. The Homie is an independent project and is not affiliated with,
+influences. TaskChad OS is an independent project and is not affiliated with,
 sponsored by, or endorsed by those projects. See [NOTICE.md](NOTICE.md) and
 [AUTHORS.md](AUTHORS.md).
 
@@ -127,8 +127,8 @@ thehomie team list               # Inspect team sessions
 <tr><td><b>One brain, six channels</b></td><td>Telegram, Slack, Discord, WhatsApp, Web relay, CLI — all enter through a single canonical ingress. One session model, one recall service, one runtime. Transport identity is separated from conversation identity so sessions survive reconnects.</td></tr>
 <tr><td><b>Talk to it out loud</b></td><td>Real-time voice (OpenAI Realtime) on the dashboard and in Discord voice channels, with the framework's full tool surface behind it — memory search, calendar, work delegation, computer use, skill and Archon runs. It knows you when the session opens (identity injected) and remembers when you hang up (the conversation flushes into the daily log and a searchable episode — on both surfaces). Delegate a background agent by voice and then <b>steer it mid-flight</b>: a spoken course-correction queues to the agent's next turn boundary and lands as a resumed conversation turn (real context, not a restart); <code>cancel</code> stops one with a finish-first compare-and-set plus a process-tree kill. Every voice-deployed worker stays visible on a Runs page with restart-surviving history.</td></tr>
 <tr><td><b>Any model, no lock-in</b></td><td>Claude SDK, OpenAI Codex, Gemini CLI, OpenRouter, OpenAI-compatible — with health-aware fallback, manual <code>/provider</code> + <code>/model</code> control, lane-first runtime (<code>selection.py</code>, <code>lane_router.py</code>), cost tracking, and automatic retry on transient failures.</td></tr>
-<tr><td><b>Many homies, one framework</b></td><td>Multi-persona roster — register specialized homies (a business homie, a finance homie, a sales homie), each with its own identity, memory, tools, and voice. Drop them in a Cabinet room and they debate, vote, and ship proof together, with roster and turn order owned by the framework, not improvised by the model.</td></tr>
-<tr><td><b>Watch the browser homie work</b></td><td>The browser homie drives a real visible Chrome session you watch live in the dashboard's read-only viewer — not a headless black box. Navigation goes through workflow gates with audit rows, and write actions like posting, editing, and DMs are default-denied until you greenlight them.</td></tr>
+<tr><td><b>Many agents, one framework</b></td><td>Multi-persona roster — register specialized TaskChad OS agents (a business agent, a finance agent, a sales agent), each with its own identity, memory, tools, and voice. Drop them in a Cabinet room and they debate, vote, and ship proof together, with roster and turn order owned by the framework, not improvised by the model.</td></tr>
+<tr><td><b>Watch the browser agent work</b></td><td>The TaskChad OS browser agent drives a real visible Chrome session you watch live in the dashboard's read-only viewer — not a headless black box. Navigation goes through workflow gates with audit rows, and write actions like posting, editing, and DMs are default-denied until you greenlight them.</td></tr>
 <tr><td><b>Multi-agent orchestration</b></td><td>Convoy DAGs with real dependency edges: completing a subtask decrements <code>remaining_dependencies</code> on downstream tasks and releases the newly-ready ones (true parallel release, not a linear queue). Dispatch claims each subtask with a compare-and-swap before the executor is ever called, and external completion callbacks are exactly-once (UNIQUE <code>attempt_key</code> + <code>INSERT OR IGNORE</code> on an idempotency key), so duplicate webhooks can't corrupt convoy state. A typed inter-agent mailbox (<code>msg_type</code> payloads) with a claim → ack lifecycle and claim-token ownership checks. Team sessions with typed roles, <code>auto → paperclip → workflow → local</code> backend fallback, and per-team vault memory. Frozen state machine (transition maps, terminal sets, field allowlists) in <code>orchestration/contract.py</code>; all of it on a local API at port 4322. 331 tests across 13 files (<code>test_orchestration_api.py</code>, <code>test_executor_boundary.py</code>, the team suite).</td></tr>
 <tr><td><b>Full observability</b></td><td>Every message → one nested Langfuse trace: session lookup → process detection → recall (tier + pipeline) → region assembly → runtime where supported → post-response. Cost, provider, model, and tool calls are tracked when the active runtime exposes them. Sentry/GlitchTip captures unexpected orchestration errors when a DSN is configured.</td></tr>
 </table>
@@ -172,7 +172,7 @@ Instead of *"Hi, how can I help you today?"* — you get:
 
 > *"Morning. While you were out — your business had 3 new leads overnight, the loan you flagged is 5 days from maturity, and there's an inbound email from a backlink partner worth reviewing. Yesterday you were mid-decision on the routing refactor. Pick that up, or hit the leads first?"*
 
-You didn't set up a notification. You didn't write a morning brief. The Homie was watching. Its memory isn't a static file you load — it's a living record tended between sessions. Its identity isn't a document you edit — it's a self that amends when the evidence is strong enough.
+You didn't set up a notification. You didn't write a morning brief. TaskChad OS was watching. Its memory isn't a static file you load — it's a living record tended between sessions. Its identity isn't a document you edit — it's a self that amends when the evidence is strong enough.
 
 The load-bearing walls are up. The "while you were out" brief is a shipped feature — the Session Opening Brief composes fresh heartbeat observations, new threads, episodes written while you were away, and applied memory amendments into the first turn after an absence, with zero extra LLM calls (`cognition/proactive_brief.py`, 51 tests in `test_session_brief.py`). Vault, tiered recall, daily reflection, weekly synthesis, dream consolidation, WorkingMemory-owned prompt state, and the self-evolution replay loop all ship today. Ambient monitoring runs on the heartbeat; durable identity amendments only apply after clearing the default-deny evidence + policy gate described below.
 
@@ -180,7 +180,7 @@ The load-bearing walls are up. The "while you were out" brief is a shipped featu
 
 ## The Vault — Brain Substrate, Not Storage
 
-The vault is where The Homie's mind actually lives. Not a notes folder it writes to — the substrate it thinks on. Every recall, every reflection, every promotion reads and writes here. When you edit `SOUL.md`, you're editing the agent's personality. When `concepts/YourBusiness.md` accumulates a new section, the agent learned something.
+The vault is where TaskChad OS's mind actually lives. Not a notes folder it writes to — the substrate it thinks on. Every recall, every reflection, every promotion reads and writes here. When you edit `SOUL.md`, you're editing the agent's personality. When `concepts/YourBusiness.md` accumulates a new section, the agent learned something.
 
 | Layer | What's in it |
 |-------|--------------|
@@ -193,13 +193,13 @@ The vault is where The Homie's mind actually lives. Not a notes folder it writes
 | **Pipelines** | daily reflection (8 AM), weekly synthesis (Sunday 8 PM), dream consolidation (nightly ~3 AM + post-weekly + on-demand) |
 | **Sync state** | `_state/` — memory candidates, self-model inferences, sync manifest. Optional Obsidian Sync via `_state/` exclusion patterns. |
 
-**Is Obsidian required?** No. The vault is plain Markdown — edit it with anything. Obsidian is the *recommended* editor because the wikilinks, backlinks, graph view, Dataview, and canvas all light up natively. The Homie itself only needs the files.
+**Is Obsidian required?** No. The vault is plain Markdown — edit it with anything. Obsidian is the *recommended* editor because the wikilinks, backlinks, graph view, Dataview, and canvas all light up natively. TaskChad OS itself only needs the files.
 
 **Where does the vault live?** Default `vault/memory/`, override with `HOMIE_VAULT_DIR=/path/to/your/vault` (env var honored across runtime, bootstrap, heartbeat, team memory, finance, sanitizer).
 
 ### Framework vs. adapter
 
-The Homie is provider-agnostic. Claude SDK, Codex, Gemini, OpenRouter, OpenAI-compatible — interchangeable batteries. The framework runs the same regardless. Editor adapters (Claude Code project instructions, hooks, MCP bridges) are integration surfaces *layered on top of* the framework, not part of it. When the heartbeat runs through Codex or Gemini fallback, those editor instructions are not touched.
+TaskChad OS is provider-agnostic. Claude SDK, Codex, Gemini, OpenRouter, OpenAI-compatible — interchangeable batteries. The framework runs the same regardless. Editor adapters (Claude Code project instructions, hooks, MCP bridges) are integration surfaces *layered on top of* the framework, not part of it. When the heartbeat runs through Codex or Gemini fallback, those editor instructions are not touched.
 
 ---
 
@@ -330,7 +330,7 @@ implemented in `graph.py`, but the live recall path boosts by a simpler
 link-centrality (hub) score; treat the heavier centrality measures as available,
 not as what currently drives ranking. Full breakdown: [docs/architecture.md](docs/architecture.md).
 
-### The 5 Dimensions of The Homie
+### The 5 Dimensions of TaskChad OS
 
 L0-L9 is the engineering view. The product story has five dimensions; the
 operator-facing public map lives in [docs/manual/README.md](docs/manual/README.md).
@@ -351,7 +351,7 @@ Private PRDs, PRPs, and vault notes stay outside the public framework export.
 | I-1 | Canonical Ingress | All 6 channels enter `ChatRouter._handle_inner()`. No bypasses. |
 | I-2 | Durable Session Identity | `session_key` (conversation) separated from `request_id` (transport). |
 | I-3 | One Recall Service | `recall_service.recall()` is the sole entrypoint — chat, heartbeat, reflection, weekly. |
-| I-4 | UI Through APIs | The Homie Dashboard calls framework APIs, not raw DB. |
+| I-4 | UI Through APIs | The TaskChad OS Dashboard calls framework APIs, not raw DB. |
 | I-5 | Runtime Contract | Provider invocation only through `runtime/`. No leaky provider hints. |
 
 ---
@@ -579,7 +579,7 @@ Identity files (`SOUL.md`, `SELF.md`, `USER.md`, `MEMORY.md`) are not edited bli
 
 ## How It Compares
 
-| | OpenClaw | Hermes Agent | The Homie |
+| | OpenClaw | Hermes Agent | TaskChad OS |
 |---|---|---|---|
 | **Thesis** | Channel breadth - 25+ adapters | Self-improving skills loop | A real partner - identity + memory + proactive judgment + the nerve to push back |
 | **Interface** | Many chat channels | TUI, CLI, gateway, and desktop workbench | CLI, Telegram/Slack/Discord/WhatsApp/web relay, dashboard, and Desktop v0 shell |
@@ -618,4 +618,4 @@ docker compose up    # bot + scheduler (heartbeat · reflection · weekly synthe
 
 ## License
 
-MIT. Built by The Homie contributors.
+MIT. Built by the TaskChad OS contributors.

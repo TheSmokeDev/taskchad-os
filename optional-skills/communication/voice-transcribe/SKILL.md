@@ -2,7 +2,7 @@
 name: voice-transcribe
 description: Transcribe inbound voice notes and audio messages to text before the chat engine processes them, so the agent can answer spoken messages. Use when a chat channel delivers an audio/voice attachment, or when the user asks the bot to handle voice notes.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

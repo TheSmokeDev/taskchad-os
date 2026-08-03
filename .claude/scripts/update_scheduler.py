@@ -92,7 +92,7 @@ def _systemd_unit_text(repo_root: Path, settings: dict[str, str]) -> tuple[str, 
     hour, minute = settings["time"].split(":", 1)
     timer = (
         "[Unit]\n"
-        "Description=Daily stable YourProduct OS update check\n\n"
+        "Description=Daily stable TaskChad OS update check\n\n"
         "[Timer]\n"
         f"OnCalendar=*-*-* {int(hour):02d}:{int(minute):02d}:00 {settings['timezone']}\n"
         "Persistent=true\n"

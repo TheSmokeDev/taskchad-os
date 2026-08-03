@@ -1022,7 +1022,7 @@ def _print_video_learning_readiness() -> None:
 @click.option("--scheduled", is_flag=True, help="Mark this as a scheduled run.")
 @click.option("--restart", is_flag=True, help="Restart the running bot and verify health.")
 def update(check, yes, json_mode, scheduled, restart):
-    """Safely stage and install the latest stable YourProduct OS release."""
+    """Safely stage and install the latest stable TaskChad OS release."""
     from framework_update import FrameworkUpdater
 
     repo_root = _resolve_git_repo_for_runner()

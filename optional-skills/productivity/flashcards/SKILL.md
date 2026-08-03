@@ -2,7 +2,7 @@
 name: flashcards
 description: Turn vault notes, lessons, or a topic into spaced-repetition flashcards and quiz the user on due cards. Use when the user wants to study, review, memorize, retain notes, or asks to be quizzed. Stores cards as a simple JSON deck the agent can schedule reviews against.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

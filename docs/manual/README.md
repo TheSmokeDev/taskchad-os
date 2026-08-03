@@ -1,6 +1,6 @@
-# The Homie Manual
+# TaskChad OS Manual
 
-This is the canonical feature manual for The Homie.
+This is the canonical feature manual for TaskChad OS.
 
 Use this when you need to understand what has shipped, where the source of
 truth lives, how to operate a feature, how to test it, and which proof/handoff
@@ -39,11 +39,11 @@ machine-specific proof artifacts stay outside the public manual.
 
 ## Ecosystem Positioning
 
-The Homie sits in the same public agent ecosystem as OpenClaw, Hermes Agent,
+TaskChad OS sits in the same public agent ecosystem as OpenClaw, Hermes Agent,
 OpenSouls, and ClaudeClaw. OpenClaw proved broad agent/channel access; Hermes
 pushed self-improving loops and desktop/operator ergonomics; OpenSouls
 influenced the mental-model vocabulary around AI souls, working memory, and
-mental processes; ClaudeClaw inspired dashboard/operator experience. The Homie
+mental processes; ClaudeClaw inspired dashboard/operator experience. TaskChad OS
 is independent and identity-first: durable memory, judgment, Operating Room
 orchestration, and thin channel/desktop surfaces over one runtime. Use
 [NOTICE](../../NOTICE.md) and [AUTHORS](../../AUTHORS.md) for attribution; use
@@ -178,7 +178,7 @@ When a feature ships or materially changes:
 
 ## Feature Coverage Map
 
-This first manual pass intentionally seeds the highest-churn Homie features.
+This first manual pass intentionally seeds the highest-churn TaskChad OS features.
 The retired Mission Control relay remains deprecated compatibility code. Its
 physical deletion is a separate audited retirement change, not a current
 product surface or a missing manual.

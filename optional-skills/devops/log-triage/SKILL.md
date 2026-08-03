@@ -2,7 +2,7 @@
 name: log-triage
 description: Parse bot logs and Langfuse traces into a short incident digest — what broke, how often, and the likely cause. Use when the user asks why the bot errored, wants a summary of recent failures, is debugging a crash, or after heartbeat-monitor reports a red check.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

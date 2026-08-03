@@ -2,7 +2,7 @@
 name: daily-brief
 description: Compose a morning briefing for the user by pulling today's calendar, open tasks, and relevant memory, then delivering a short prioritized summary over the primary chat channel. Use when the user asks for a daily brief, "what's on today", a standup, or sets up a scheduled morning digest.
 version: 1.0.0
-author: YourProduct OS
+author: TaskChad OS
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

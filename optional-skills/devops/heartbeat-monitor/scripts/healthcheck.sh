@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Liveness probe for the YourProduct OS stack.
+# Liveness probe for the TaskChad OS stack.
 # Exit 0 if every check passes, 1 otherwise.
 set -uo pipefail
 
@@ -18,7 +18,7 @@ check() {
   fi
 }
 
-echo "YourProduct OS heartbeat — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "TaskChad OS heartbeat — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # 1. Local API health endpoint
 if command -v curl >/dev/null 2>&1; then

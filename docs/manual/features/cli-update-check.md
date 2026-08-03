@@ -50,7 +50,7 @@ is GitHub's latest non-prerelease release.
 
 Mutating update commands refuse slash-command chaining. Status and history are
 safe to inspect. Explicit phrases such as “update yourself” and “pull the
-latest YourProduct OS” route to `/update now`; ordinary requests such as “update
+latest TaskChad OS” route to `/update now`; ordinary requests such as “update
 the manual” do not.
 
 `/watch` remains the video-learning command and is unrelated to updates.

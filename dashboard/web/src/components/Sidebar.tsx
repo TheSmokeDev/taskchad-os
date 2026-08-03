@@ -30,7 +30,7 @@ export function Sidebar() {
   return (
     <aside class={asideClass}>
       <div class="px-4 pb-4 pt-[calc(1rem_+_var(--safe-top))] border-b border-[var(--color-border)]">
-        <div class="text-[14px] font-semibold text-[var(--color-text)]">YourProduct OS</div>
+        <div class="text-[14px] font-semibold text-[var(--color-text)]">TaskChad OS</div>
         <div class="text-[11px] text-[var(--color-text-muted)] mt-0.5">Dashboard</div>
       </div>
 
