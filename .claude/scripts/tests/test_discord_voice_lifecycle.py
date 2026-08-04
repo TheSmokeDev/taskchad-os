@@ -714,3 +714,559 @@ def test_same_instant_rotations_do_not_collide(tmp_path, monkeypatch):
 
     pendings = list(tmp_path.glob("t.jsonl.pending-*"))
     assert len(pendings) == 2  # uuid suffix keeps same-ms rotations apart
+
+
+# --- cross-platform launch + teardown --------------------------------------
+#
+# The sidecar shipped Windows-only: `.venv/Scripts/python.exe` (so `uv sync`
+# on a Mac produced a venv the launcher could not see) and a POSIX kill that
+# was a bare `os.kill(pid, 9)`: no tree, no SIGTERM step, no reap. These
+# pin the OS branch each seam takes, in both directions.
+
+
+def _platform(monkeypatch, name):
+    import discord_voice_lifecycle as lifecycle
+
+    monkeypatch.setattr(lifecycle.sys, "platform", name)
+    return lifecycle
+
+
+def _posix_host(monkeypatch, name="linux"):
+    """Fake a POSIX host, including the primitives Windows does not define.
+
+    ``os.killpg`` / ``os.getpgid`` / ``os.WNOHANG`` / ``signal.SIGKILL`` are
+    POSIX-only names, so the branch tests would blow up with AttributeError
+    on the Windows dev box. Install stand-ins ONLY where the real host lacks
+    them; on a real POSIX runner the genuine values stay in place.
+    """
+
+    lifecycle = _platform(monkeypatch, name)
+    for module, attr, stand_in in (
+        (lifecycle.os, "getpgid", lambda _pid: 0),
+        (lifecycle.os, "killpg", lambda _pgid, _sig: None),
+        (lifecycle.signal, "SIGKILL", 9),
+    ):
+        if not hasattr(module, attr):
+            monkeypatch.setattr(module, attr, stand_in, raising=False)
+    return lifecycle
+
+
+def _boom(message):
+    def _raise(*_a, **_k):
+        raise AssertionError(message)
+
+    return _raise
+
+
+def _group_spy(monkeypatch, lifecycle, *, members_after_term=False):
+    """Record real signals; answer the signal-0 group-liveness probe.
+
+    ``_group_alive`` probes with signal 0, so a spy that recorded it as an
+    ordinary signal would make every assertion unreadable. Probes answer
+    from ``members_after_term`` (ProcessLookupError meaning "group empty")
+    and are kept out of the recorded list.
+    """
+
+    signals = []
+    state = {"terminated": False}
+
+    def fake_killpg(pgid, sig):
+        if sig == 0:
+            if state["terminated"] and not members_after_term:
+                raise ProcessLookupError(pgid)
+            return None
+        signals.append(("killpg", pgid, sig))
+        if sig == lifecycle.signal.SIGTERM:
+            state["terminated"] = True
+
+    monkeypatch.setattr(lifecycle.os, "killpg", fake_killpg)
+    monkeypatch.setattr(
+        lifecycle.os, "kill", lambda pid, sig: signals.append(("kill", pid, sig))
+    )
+    monkeypatch.setattr(
+        lifecycle.subprocess, "run", _boom("taskkill must not run off Windows")
+    )
+    return signals
+
+
+def test_sidecar_python_windows_layout(monkeypatch):
+    lifecycle = _platform(monkeypatch, "win32")
+
+    assert lifecycle._sidecar_python().parts[-2:] == ("Scripts", "python.exe")
+
+
+@pytest.mark.parametrize("plat", ["linux", "darwin"])
+def test_sidecar_python_posix_layout(monkeypatch, plat):
+    """uv sync writes .venv/bin/python on POSIX. The hardcoded Windows
+    layout made every Mac/Linux join die on "sidecar venv missing"."""
+
+    lifecycle = _platform(monkeypatch, plat)
+
+    assert lifecycle._sidecar_python().parts[-2:] == ("bin", "python")
+
+
+def test_kill_tree_posix_signals_the_process_group(monkeypatch):
+    """POSIX teardown must take the TREE (killpg), the way taskkill /T does
+    on Windows, not just the bridge pid."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", _FakeProc(4242, returncode=None))
+    monkeypatch.setattr(lifecycle.os, "getpid", lambda: 17)
+    monkeypatch.setattr(lifecycle.os, "getpgid", lambda pid: 4242 if pid == 4242 else 17)
+    signals = _group_spy(monkeypatch, lifecycle)
+    monkeypatch.setattr(lifecycle, "_is_alive", lambda pid: False)  # died on TERM
+
+    assert lifecycle._kill_tree(4242) is True
+    assert signals == [("killpg", 4242, lifecycle.signal.SIGTERM)]
+
+
+def test_kill_tree_posix_escalates_when_a_child_outlives_the_leader(monkeypatch):
+    """The bridge installs a SIGTERM handler, so the LEADER is usually the
+    first thing to go while a busy tool child keeps running. Escalating on
+    leader liveness alone would skip SIGKILL and leave exactly the orphan
+    the group kill exists to prevent, so the decision reads the GROUP."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", _FakeProc(4242, returncode=None))
+    monkeypatch.setattr(lifecycle, "_POSIX_TERM_GRACE_S", 0.0)
+    monkeypatch.setattr(lifecycle.os, "getpid", lambda: 17)
+    monkeypatch.setattr(lifecycle.os, "getpgid", lambda pid: 4242 if pid == 4242 else 17)
+    signals = _group_spy(monkeypatch, lifecycle, members_after_term=True)
+    # Leader dead the whole time; only the group probe still reports members.
+    monkeypatch.setattr(lifecycle, "_is_alive", lambda pid: False)
+
+    assert lifecycle._kill_tree(4242) is True  # the leader IS dead
+    assert signals == [
+        ("killpg", 4242, lifecycle.signal.SIGTERM),
+        ("killpg", 4242, lifecycle.signal.SIGKILL),
+    ]
+
+
+def test_kill_tree_posix_never_signals_its_own_group(monkeypatch):
+    """A sidecar spawned before start_new_session shipped shares OUR process
+    group, and killpg on it would take the orchestration API down with the
+    sidecar. That case must fall back to the single pid."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", _FakeProc(555, returncode=None))
+    monkeypatch.setattr(lifecycle.os, "getpid", lambda: 17)
+    monkeypatch.setattr(lifecycle.os, "getpgid", lambda _pid: 17)  # same group
+    signals = _group_spy(monkeypatch, lifecycle)
+    monkeypatch.setattr(lifecycle.os, "killpg", _boom("killpg on our own group"))
+    monkeypatch.setattr(lifecycle, "_is_alive", lambda pid: False)
+
+    lifecycle._kill_tree(555)
+
+    assert signals == [("kill", 555, lifecycle.signal.SIGTERM)]
+
+
+def test_kill_tree_posix_refuses_the_group_for_a_non_leader(monkeypatch):
+    """start_new_session guarantees a real sidecar leads its own group, so
+    pgid != pid means this pid is NOT a sidecar we started (stale state, pid
+    recycled). Signalling its group would take an unrelated tree down; the
+    blast radius must stay at the one process the old code already risked."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", _FakeProc(555, returncode=None))
+    monkeypatch.setattr(lifecycle.os, "getpid", lambda: 17)
+    monkeypatch.setattr(lifecycle.os, "getpgid", lambda pid: 17 if pid == 0 else 99)
+    signals = _group_spy(monkeypatch, lifecycle)
+    monkeypatch.setattr(lifecycle.os, "killpg", _boom("killpg on a non-leader pid"))
+    monkeypatch.setattr(lifecycle, "_is_alive", lambda pid: False)
+
+    lifecycle._kill_tree(555)
+
+    assert signals == [("kill", 555, lifecycle.signal.SIGTERM)]
+
+
+def test_kill_tree_posix_refuses_the_group_without_an_owned_handle(monkeypatch):
+    """Shape is not identity. A pid can look like a perfect sidecar (leads
+    its own group, not ours) and still be a stranger the OS recycled the
+    number onto. Only the live Popen handle from THIS process's _spawn
+    proves it is our sidecar, and an unreaped child's pid cannot be
+    recycled at all. Without that handle (the state after an api restart)
+    the group is refused and the blast radius falls back to one process."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", None)
+    monkeypatch.setattr(lifecycle.os, "getpid", lambda: 17)
+    monkeypatch.setattr(lifecycle.os, "getpgid", lambda pid: 4242 if pid == 4242 else 17)
+    signals = _group_spy(monkeypatch, lifecycle)
+    monkeypatch.setattr(lifecycle.os, "killpg", _boom("killpg on an unverified pid"))
+    monkeypatch.setattr(lifecycle, "_is_alive", lambda pid: False)
+
+    lifecycle._kill_tree(4242)
+
+    assert signals == [("kill", 4242, lifecycle.signal.SIGTERM)]
+
+
+def test_kill_tree_posix_refuses_the_group_for_an_exited_handle(monkeypatch):
+    """Once our child has exited and been reaped, its pid is recyclable
+    again, so the handle stops proving anything about who holds it now."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", _FakeProc(4242, returncode=0))
+    monkeypatch.setattr(lifecycle.os, "getpid", lambda: 17)
+    monkeypatch.setattr(lifecycle.os, "getpgid", lambda pid: 4242 if pid == 4242 else 17)
+    signals = _group_spy(monkeypatch, lifecycle)
+    monkeypatch.setattr(lifecycle.os, "killpg", _boom("killpg on a reaped pid"))
+    monkeypatch.setattr(lifecycle, "_is_alive", lambda pid: False)
+
+    lifecycle._kill_tree(4242)
+
+    assert signals == [("kill", 4242, lifecycle.signal.SIGTERM)]
+
+
+def test_kill_tree_refuses_to_kill_this_process(monkeypatch):
+    """A restart can recycle the old sidecar's pid onto the API process
+    itself. taskkill /T /F and the single-pid SIGTERM fallback are both
+    fatal to the caller, so this pid is refused outright and reported
+    unverified (the live transcript stays untouched)."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle.os, "getpid", lambda: 555)
+    signals = _group_spy(monkeypatch, lifecycle)
+    monkeypatch.setattr(lifecycle.os, "kill", _boom("signalled ourselves"))
+    monkeypatch.setattr(lifecycle.os, "killpg", _boom("signalled our own group"))
+
+    assert lifecycle._kill_tree(555) is False
+    assert signals == []
+
+
+def test_kill_tree_windows_still_taskkills(monkeypatch):
+    """No Windows regression: the tree kill stays taskkill /T /F."""
+
+    lifecycle = _platform(monkeypatch, "win32")
+    argvs = []
+    monkeypatch.setattr(lifecycle.os, "killpg", _boom("killpg on Windows"), raising=False)
+    monkeypatch.setattr(
+        lifecycle.subprocess, "run", lambda argv, **_k: argvs.append(list(argv))
+    )
+    monkeypatch.setattr(lifecycle, "_is_alive", lambda pid: False)
+
+    assert lifecycle._kill_tree(4242) is True
+    assert argvs == [["taskkill", "/T", "/F", "/PID", "4242"]]
+
+
+def test_kill_tree_refuses_non_positive_pid(monkeypatch):
+    """os.kill(0, SIGKILL) signals OUR OWN process group and os.kill(-1, ...)
+    signals everything we may signal, so a corrupt state file must never turn
+    /talk leave into a self-kill."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle.os, "kill", _boom("signalled a non-pid"))
+    monkeypatch.setattr(lifecycle.os, "killpg", _boom("signalled a non-pid"))
+
+    assert lifecycle._kill_tree(0) is True
+    assert lifecycle._kill_tree(-1) is True
+
+
+class _FakeProc:
+    """A stand-in for the _spawn Popen handle. ``returncode=None`` is a live
+    child (unreaped, so its pid cannot be recycled); an int is one that has
+    already exited."""
+
+    def __init__(self, pid, returncode=0):
+        self.pid = pid
+        self.returncode = returncode
+        self.polls = 0
+
+    def poll(self):
+        self.polls += 1
+        return self.returncode
+
+
+def test_is_alive_reaps_our_own_sidecar_zombie(monkeypatch):
+    """A killed child stays a zombie until its parent waits on it, and
+    os.kill(pid, 0) answers "alive" for a zombie. Unreaped, every POSIX
+    /talk leave would report a survivor and skip the transcript sweep."""
+
+    lifecycle = _posix_host(monkeypatch)
+    proc = _FakeProc(4242)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", proc)
+    monkeypatch.setattr(lifecycle.shared, "is_pid_alive", lambda _pid: False)
+
+    assert lifecycle._is_alive(4242) is False
+    assert proc.polls == 1
+
+
+def test_is_alive_never_reaps_a_pid_we_do_not_own(monkeypatch):
+    """The exit-status theft this avoids: a bare os.waitpid(pid, WNOHANG) on
+    a stale state pid the OS recycled onto ANOTHER of the API's children
+    still succeeds, consuming that process's exit status out from under its
+    real Popen owner. Reaping goes through our own handle or not at all."""
+
+    lifecycle = _posix_host(monkeypatch)
+    other = _FakeProc(111)  # a different subprocess of this API process
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", other)
+    monkeypatch.setattr(lifecycle.os, "waitpid", _boom("waitpid on a foreign pid"))
+    monkeypatch.setattr(lifecycle.shared, "is_pid_alive", lambda _pid: True)
+
+    assert lifecycle._is_alive(4242) is True
+    assert other.polls == 0
+
+
+def test_is_alive_without_a_tracked_child(monkeypatch):
+    """After an API restart the sidecar is no longer our child, so no zombie
+    can exist and the plain liveness probe is the whole answer."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", None)
+    monkeypatch.setattr(lifecycle.os, "waitpid", _boom("waitpid without a handle"))
+    monkeypatch.setattr(lifecycle.shared, "is_pid_alive", lambda _pid: True)
+
+    assert lifecycle._is_alive(4242) is True
+
+
+def test_is_alive_does_not_reap_on_windows(monkeypatch):
+    """Windows has no zombies; the ctypes probe is the whole answer there."""
+
+    lifecycle = _platform(monkeypatch, "win32")
+    proc = _FakeProc(4242)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", proc)
+    monkeypatch.setattr(lifecycle.shared, "is_pid_alive", lambda _pid: True)
+
+    assert lifecycle._is_alive(4242) is True
+    assert proc.polls == 0
+
+
+def test_is_alive_rejects_non_positive_pid(monkeypatch):
+    lifecycle = _posix_host(monkeypatch)
+    proc = _FakeProc(0)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", proc)
+    monkeypatch.setattr(lifecycle.shared, "is_pid_alive", _boom("probed a non-pid"))
+
+    assert lifecycle._is_alive(0) is False
+    assert lifecycle._is_alive(-1) is False
+    assert proc.polls == 0
+
+
+def _spawn_kwargs(monkeypatch, tmp_path, plat, previous=None):
+    """Run _spawn with every external seam faked; return the Popen kwargs."""
+
+    lifecycle = _platform(monkeypatch, plat)
+    python = tmp_path / "python"
+    python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(lifecycle, "_sidecar_python", lambda: python)
+    monkeypatch.setattr(lifecycle, "_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(lifecycle, "_transcript_path", lambda: tmp_path / "t.jsonl")
+    monkeypatch.setattr(lifecycle, "_active_profile_root", lambda: tmp_path)
+    monkeypatch.setattr(lifecycle, "_write_state", lambda _state: None)
+    monkeypatch.setattr(lifecycle, "_sidecar_status", lambda: {"connected": False})
+    monkeypatch.setattr(
+        lifecycle, "get_scrubbed_sdk_env", lambda **_k: {"PATH": "/usr/bin"}
+    )
+    captured = {}
+
+    class _BootingProc:
+        pid = 4242
+
+        def poll(self):
+            return None  # still booting, never exited
+
+    def fake_popen(argv, **kwargs):
+        captured.update(kwargs)
+        captured["argv"] = list(argv)
+        return _BootingProc()
+
+    monkeypatch.setattr(lifecycle.subprocess, "Popen", fake_popen)
+    # _spawn assigns the module-global handle; route it through monkeypatch
+    # so the fake does not outlive this test.
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", previous)
+    lifecycle._spawn(lifecycle._base_state())
+    return captured
+
+
+@pytest.mark.parametrize("plat", ["linux", "darwin"])
+def test_spawn_posix_starts_a_new_session(monkeypatch, tmp_path, plat):
+    """start_new_session is what makes the sidecar's process group its own;
+    without it the teardown's killpg would hit the API process's group."""
+
+    kwargs = _spawn_kwargs(monkeypatch, tmp_path, plat)
+
+    assert kwargs["start_new_session"] is True
+    assert "creationflags" not in kwargs
+
+
+def test_spawn_windows_keeps_the_new_process_group_flag(monkeypatch, tmp_path):
+    """Asserting against the real constant would be vacuous on a POSIX
+    runner, where production and the assertion both resolve the missing name
+    to 0 and the test passes without proving the flag is propagated at all.
+    A sentinel makes the propagation observable on every host."""
+
+    sentinel = 0xABCD
+    monkeypatch.setattr(
+        lifecycle.subprocess, "CREATE_NEW_PROCESS_GROUP", sentinel, raising=False
+    )
+
+    kwargs = _spawn_kwargs(monkeypatch, tmp_path, "win32")
+
+    assert kwargs["creationflags"] == sentinel
+    assert "start_new_session" not in kwargs
+
+
+def test_spawn_reaps_the_previous_handle_before_replacing_it(monkeypatch, tmp_path):
+    """A respawn (crash then rejoin) overwrites the module-global handle.
+    Dropping the old one unreaped orphans that child: nothing else can wait
+    on it, so its zombie would read as alive for the rest of this process's
+    life and every later liveness answer about that pid would be wrong."""
+
+    previous = _FakeProc(999, returncode=None)
+
+    _spawn_kwargs(monkeypatch, tmp_path, "linux", previous=previous)
+
+    assert previous.polls == 1
+
+
+def test_kill_tree_deadlines_are_monotonic(monkeypatch):
+    """Kill deadlines must survive a wall-clock step (ntp correction, dst, a
+    manual set). time.time() jumping backwards would stretch the wait,
+    forwards would collapse it into no wait at all."""
+
+    lifecycle = _posix_host(monkeypatch)
+    monkeypatch.setattr(lifecycle, "_SIDECAR_PROC", _FakeProc(4242, returncode=None))
+    monkeypatch.setattr(lifecycle.os, "getpid", lambda: 17)
+    monkeypatch.setattr(lifecycle.os, "getpgid", lambda pid: 4242 if pid == 4242 else 17)
+    _group_spy(monkeypatch, lifecycle)
+    monkeypatch.setattr(lifecycle, "_is_alive", lambda pid: False)
+    seen = {"monotonic": 0, "wall": 0}
+    real_monotonic, real_time = time.monotonic, time.time
+
+    def spy_monotonic():
+        seen["monotonic"] += 1
+        return real_monotonic()
+
+    def spy_time():
+        seen["wall"] += 1
+        return real_time()
+
+    monkeypatch.setattr(lifecycle.time, "monotonic", spy_monotonic)
+    monkeypatch.setattr(lifecycle.time, "time", spy_time)
+
+    lifecycle._kill_tree(4242)
+
+    assert seen["monotonic"] > 0
+    assert seen["wall"] == 0
+
+
+# --- TALK_PREFER_CODEX_OAUTH directive on a live session --------------------
+
+
+def test_a_live_metered_session_is_rejoined_under_the_directive(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The already-joined shortcut must not keep a key-backed session alive
+    once the billing directive is on — it would meter the operator while the
+    reply says "already live"."""
+
+    monkeypatch.setenv("TALK_PREFER_CODEX_OAUTH", "1")
+    monkeypatch.setattr(shared, "is_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        lifecycle,
+        "_sidecar_status",
+        lambda: {"connected": True, "channelId": 555, "authSource": "configured"},
+    )
+    posts: list[tuple[str, dict]] = []
+
+    def fake_post(path: str, body: dict, timeout: float) -> dict:
+        posts.append((path, body))
+        return {"ok": True, "channelId": body["channelId"], "authSource": "codex-oauth"}
+
+    monkeypatch.setattr(lifecycle, "_control_post", fake_post)
+    state = lifecycle._base_state()
+    state.update(status="ready", pid=777, guildId=1, channelId=555)
+    lifecycle._write_state(state)
+
+    result = lifecycle.start_session(1, 555)
+
+    assert posts == [("/join", {"guildId": 1, "channelId": 555, "textChannelId": None})]
+    assert result.get("alreadyJoined") is not True
+    assert result["bridge"]["authSource"] == "codex-oauth"
+
+
+def test_a_live_subscription_session_still_short_circuits(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directive only forces a re-join when the live session is metered."""
+
+    monkeypatch.setenv("TALK_PREFER_CODEX_OAUTH", "1")
+    monkeypatch.setattr(shared, "is_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        lifecycle,
+        "_sidecar_status",
+        lambda: {"connected": True, "channelId": 555, "authSource": "codex-oauth"},
+    )
+
+    def boom(*_args, **_kwargs) -> dict:  # pragma: no cover - must not run
+        raise AssertionError("a compliant live session must not be torn down")
+
+    monkeypatch.setattr(lifecycle, "_control_post", boom)
+    state = lifecycle._base_state()
+    state.update(status="ready", pid=777, guildId=1, channelId=555)
+    lifecycle._write_state(state)
+
+    assert lifecycle.start_session(1, 555)["alreadyJoined"] is True
+
+
+def test_the_directive_refusal_surfaces_instead_of_a_metered_session(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the re-join cannot meet the directive, the operator gets the
+    both-doors refusal rather than a silently-metered "already live"."""
+
+    from runtime import openai_platform_auth
+
+    monkeypatch.setenv("TALK_PREFER_CODEX_OAUTH", "1")
+    monkeypatch.setattr(shared, "is_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        lifecycle,
+        "_sidecar_status",
+        lambda: {"connected": True, "channelId": 555, "authSource": "env"},
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "_control_post",
+        lambda path, body, timeout: {
+            "ok": False,
+            "error": openai_platform_auth.PREFER_CODEX_UNAVAILABLE_MESSAGE,
+        },
+    )
+    state = lifecycle._base_state()
+    state.update(status="ready", pid=777, guildId=1, channelId=555)
+    lifecycle._write_state(state)
+
+    with pytest.raises(lifecycle.DiscordVoiceError) as caught:
+        lifecycle.start_session(1, 555)
+
+    assert "codex login" in str(caught.value)
+    assert "TALK_PREFER_CODEX_OAUTH" in str(caught.value)
+
+
+def test_a_broken_directive_check_never_blocks_joining(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail OPEN: the check is a billing guard, not a gate on voice itself."""
+
+    monkeypatch.setenv("TALK_PREFER_CODEX_OAUTH", "1")
+    monkeypatch.setattr(shared, "is_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        lifecycle,
+        "_sidecar_status",
+        lambda: {"connected": True, "channelId": 555, "authSource": "configured"},
+    )
+    import talk_session
+
+    def explode() -> bool:
+        raise RuntimeError("resolver unavailable")
+
+    monkeypatch.setattr(talk_session, "talk_prefer_codex_oauth", explode)
+
+    def boom(*_args, **_kwargs) -> dict:  # pragma: no cover - must not run
+        raise AssertionError("a failed check must not force a teardown")
+
+    monkeypatch.setattr(lifecycle, "_control_post", boom)
+    state = lifecycle._base_state()
+    state.update(status="ready", pid=777, guildId=1, channelId=555)
+    lifecycle._write_state(state)
+
+    assert lifecycle.start_session(1, 555)["alreadyJoined"] is True

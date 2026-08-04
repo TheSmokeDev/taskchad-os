@@ -161,30 +161,96 @@ The mechanics live in `.claude/scripts/discord_voice/bridge.py` (`_pump_mic`) an
 
 ## Build your own
 
-You need an OpenAI API key with Realtime access. For the Discord surface you also
-need a Discord bot token with voice permissions.
+Two surfaces, two very different setups. The dashboard Talk view is zero-install
+(the browser negotiates WebRTC with OpenAI directly). The Discord sidecar needs a
+one-time install, because it runs in its own virtual environment.
 
-**1. Configure keys** (in your framework `.env`):
+If you would rather not do this by hand, the repo ships a `talk-mode-setup`
+skill. Point your agent at it ("give my second brain a voice") and it detects
+what you already have, asks before it changes anything, and walks the rest of
+this page for you. The manual version follows.
+
+**1. Authentication.** Talk Mode resolves an OpenAI Platform credential in this
+order, first hit wins:
+
+| Source | How you set it |
+|--------|----------------|
+| `TALK_OPENAI_API_KEY` | A Talk-scoped API key. Present but blank fails closed, with no fallback. |
+| `OPENAI_API_KEY` | The standard environment variable. |
+| Codex OAuth | Run `codex login`. Reuses an existing ChatGPT sign-in, so no API key at all. |
+
+Realtime access follows whichever account ends up authenticated. The credential
+never leaves the framework process: the browser only ever receives a short-lived
+ephemeral secret.
+
+The Discord surface also needs a bot token, from a bot with voice permissions.
+Both go in `.claude/scripts/.env`:
 
 ```env
-OPENAI_API_KEY=sk-...            # Realtime access
+# Set ONE of these two, or set neither and run `codex login` instead.
+TALK_OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=sk-...
+
 DISCORD_BOT_TOKEN=...            # only for the Discord voice surface
 ```
 
-**2. Dashboard voice** — open the dashboard, go to the Talk view, and start a
-session. The browser negotiates WebRTC with OpenAI directly; there's nothing else
-to run.
+**2. Dashboard voice.** Open the dashboard, go to the Talk view, and start a
+session. There is nothing else to run.
 
-**3. Discord voice** — the sidecar has its own virtual environment (it depends on
-py-cord, which is separate from the main framework deps). Install it once, then
-from a text channel the bot can see:
+**3. Discord voice: install the sidecar (once).** py-cord shares the `discord`
+import namespace with discord.py, so the two can never live in the same
+environment. The sidecar gets its own:
+
+```bash
+cd .claude/scripts/discord_voice
+uv sync
+```
+
+That creates `.venv/` with py-cord[voice], PyNaCl, websockets, and httpx. The
+supervisor resolves the interpreter in the local venv layout and reaps the
+sidecar by process group, so this works on Windows, macOS, and Linux alike.
+
+**4. Start the orchestration API.** The `/api/discord/voice/*` routes are mounted
+on it, and the sidecar relays every tool call back through it over loopback
+(default `http://127.0.0.1:4322`). It has to be up before you join:
+
+```bash
+cd .claude/scripts
+uv run python orchestration/run_api.py
+```
+
+If you set `ORCHESTRATION_API_TOKEN`, the sidecar reads that same variable and
+sends it as a bearer token. The two values have to match, or the relay gets a 401
+and tool calls fail while ordinary conversation still works.
+
+**5. Talk.** Join a voice channel yourself first, then from any text channel the
+bot can see:
 
 ```
-/talk join      # the bot joins your current voice channel and starts listening
+/talk join      # bot joins YOUR current voice channel and starts listening
+/talk status    # state, channel, uptime, auth source, log file
 /talk leave     # it leaves and writes a debrief of the conversation
 ```
 
-**4. Tune the receive pipeline** (optional — sane defaults ship):
+You never launch `bridge.py` yourself. `/talk join` spawns it, waits for its
+control server on `127.0.0.1:7861`, and reaps the process tree on `/talk leave`.
+
+**Did it work?** Run `/talk status`. A live session reports `ready` plus the
+channel, uptime, which credential source won, and the log file name:
+
+```
+Voice talk: *ready*, channel `1234...`, uptime 12.4s, auth codex-oauth, log discord-voice.log
+```
+
+Three failures worth recognizing:
+
+| What you see | What it means |
+|--------------|---------------|
+| `sidecar venv missing ... run uv sync` | Step 3 was skipped, or the venv is not on the Windows layout. |
+| `sidecar control server did not come up in 30s` | It spawned but could not boot. The message names the full log path, so read that file. |
+| `Join a voice channel first, then /talk join` | The bot resolves *your* current voice channel, and you are not in one. |
+
+**6. Tune the receive pipeline** (optional — sane defaults ship):
 
 | Knob | Default | What it does |
 |------|---------|--------------|

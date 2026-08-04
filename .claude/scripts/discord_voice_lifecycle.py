@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -36,6 +37,10 @@ SIDECAR_DIR = Path(__file__).resolve().parent / "discord_voice"
 CONTROL_BASE = "http://127.0.0.1:7861"
 
 _JOIN_TIMEOUT_S = 60.0
+#: POSIX teardown only: how long the sidecar's process group gets to honor
+#: SIGTERM before the SIGKILL escalation. Windows has no equivalent step
+#: (``taskkill /F`` is unconditional), so this cost is POSIX-side.
+_POSIX_TERM_GRACE_S = 1.5
 
 #: The vault-debrief transcript contract with the sidecar (see
 #: discord_voice/transcript.py for the format and naming scheme).
@@ -109,11 +114,51 @@ def _write_state(state: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+#: The ``Popen`` handle from THIS process's ``_spawn``, kept for one reason:
+#: reaping our own child. A killed child stays a zombie until its parent
+#: waits on it, and ``os.kill(pid, 0)`` (what ``shared.is_pid_alive`` uses on
+#: POSIX) answers "alive" for a zombie, so an unreaped sidecar would read as
+#: a survivor after every successful kill. ``None`` after an API restart,
+#: where the sidecar is no longer our child and no zombie can exist.
+_SIDECAR_PROC: subprocess.Popen | None = None
+
+
+def _reap_sidecar(pid: int) -> None:
+    """Reap OUR sidecar child, and only ours. Matters on POSIX (zombies);
+    harmless and handle-releasing on Windows, where ``_spawn`` calls it on
+    respawn regardless of platform.
+
+    ``Popen.poll()`` waits on the handle we own, so it cannot consume the
+    exit status of some other subprocess the orchestration API launched. A
+    bare ``os.waitpid(pid, os.WNOHANG)`` can: a stale state-file pid that
+    the OS has recycled onto another of our children is still a child, so
+    the wait succeeds and steals that process's exit status out from under
+    its real owner.
+    """
+
+    proc = _SIDECAR_PROC
+    if proc is None or proc.pid != pid:
+        return
+    try:
+        proc.poll()
+    except Exception:  # noqa: BLE001 - reaping is best-effort
+        pass
+
+
 def _is_alive(pid: object) -> bool:
     try:
-        return shared.is_pid_alive(int(pid))
+        pid_int = int(pid)
     except (TypeError, ValueError):
         return False
+    if pid_int <= 0:
+        # Not a real sidecar pid. On POSIX ``os.kill(0, 0)`` probes OUR OWN
+        # process group and reports "alive", which would aim the teardown at
+        # the API process itself; ``-1`` is worse. Corrupt state file in,
+        # dead sidecar out.
+        return False
+    if sys.platform != "win32":
+        _reap_sidecar(pid_int)
+    return shared.is_pid_alive(pid_int)
 
 
 #: STRICT pending shape — the naive ``.pending-*`` glob also matched
@@ -331,6 +376,133 @@ def sweep_orphan_transcripts() -> list[dict[str, Any]]:
         return []
 
 
+def _sidecar_group(pid: int) -> int | None:
+    """The pid's process group when a group kill is PROVABLY safe, else ``None``.
+
+    A group kill is strictly wider than the single-process kill it replaces,
+    so it fires only when this pid is verifiably OUR live sidecar: the
+    ``Popen`` handle from this process's own ``_spawn``, still unreaped.
+    That ownership test is the one that actually proves identity, and it
+    also closes pid reuse outright, because the OS cannot recycle the pid of
+    a child its parent has not reaped.
+
+    Shape alone is not identity. ``getpgid(pid) == pid`` proves only that
+    SOME process leads its own group, which a recycled pid can satisfy by
+    accident, and killing that group would take an unrelated tree down. It
+    is kept as a second gate, next to the two self-harm gates: never our own
+    pid, and never our own group (a sidecar spawned BEFORE
+    ``start_new_session`` shipped shares our group, so ``killpg`` there
+    would take the orchestration API down with the sidecar).
+
+    Without the handle, which is the state after an api restart, identity
+    cannot be established. Be precise about what happens then, because it is
+    NOT fail-closed: the caller still signals the single unverified pid, and
+    only the GROUP escalation is withheld. So an unprovable pid keeps
+    exactly the blast radius this code had before the group kill existed,
+    one process, and gains nothing wider.
+
+    That is deliberate, not an oversight. Refusing to signal at all would
+    strand teardown after every api restart: the state-file pid is the ONLY
+    handle a restarted process has on a running sidecar, so a fully closed
+    gate would leave it alive through every later ``/talk leave``. Narrowing
+    the radius is the win available here; eliminating it is not.
+    """
+
+    proc = _SIDECAR_PROC
+    if proc is None or proc.pid != pid:
+        return None
+    try:
+        if proc.poll() is not None:
+            return None  # already exited, so the pid is recyclable again
+    except Exception:  # noqa: BLE001 - unprovable identity fails closed
+        return None
+    if pid == os.getpid():
+        return None
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        return None  # gone, or not ours to look at
+    if pgid != pid or pgid == os.getpgid(0):
+        return None
+    return pgid
+
+
+def _group_alive(group: int) -> bool:
+    """Does ANY process remain in the group? Signal 0 is the POSIX probe."""
+
+    try:
+        os.killpg(group, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # EPERM: someone is there, we just may not signal it
+
+
+def _posix_kill_tree(pid: int) -> int | None:
+    """SIGTERM then SIGKILL the sidecar's process group: the POSIX ``taskkill /T``.
+
+    ``_spawn`` starts the sidecar in its own session, so its process-group id
+    equals its pid and signalling the group takes the tool subprocesses it
+    spawned with it. That is the tree half; a bare ``os.kill(pid, ...)``
+    reaps only the bridge and orphans whatever it launched.
+
+    One documented hole, so nobody reads this as "takes everything with it":
+    a grandchild that calls ``setsid()`` (or ``start_new_session``) of its
+    own accord LEAVES this group and survives both signals. It is also
+    invisible to the caller's surviving-member warning, which probes the
+    group it just signalled and cannot see a process that left. Windows has
+    the same class of hole, where a deliberately detached process escapes
+    ``taskkill /T``. Nothing the sidecar launches today does this; the note
+    is here so a future tool runner that does gets caught in review.
+
+    Escalation reads the GROUP, not the leader. The bridge honors SIGTERM
+    (it installs an asyncio handler), so the leader is usually the FIRST
+    thing to go while a busy tool child is still running; deciding on the
+    leader alone would skip SIGKILL and leave exactly the orphan this
+    function exists to prevent.
+
+    When ``_sidecar_group`` refuses the group, this degrades to signalling
+    the single pid. That is not a tree kill, and the caller's postcondition
+    says so.
+
+    Returns the group it operated on so the caller can re-probe it AFTER the
+    leader dies; ``_sidecar_group`` cannot answer then, because looking a
+    dead pid up raises.
+
+    Accepted residual: the group id is a number, so once the leader is dead
+    and reaped, escalating still targets that number. Reuse would need the
+    whole group to empty AND the pid space to wrap onto a fresh session
+    leader inside the sub-second grace window. Closing that needs per-process
+    start-time identity, which has no portable stdlib answer on macOS.
+    """
+
+    group = _sidecar_group(pid)
+
+    def _signal(sig: int) -> None:
+        try:
+            if group is not None:
+                os.killpg(group, sig)
+            else:
+                os.kill(pid, sig)
+        except OSError:
+            pass  # already dead between probe and signal
+
+    def _still_running() -> bool:
+        alive = _is_alive(pid)  # reaps our own leader before the group probe
+        return _group_alive(group) if group is not None else alive
+
+    _signal(signal.SIGTERM)
+    # monotonic, not time(): a wall-clock step (ntp correction, dst, manual
+    # set) must not stretch or collapse a kill deadline.
+    deadline = time.monotonic() + _POSIX_TERM_GRACE_S
+    while time.monotonic() < deadline and _still_running():
+        time.sleep(0.1)
+    if _still_running():
+        _signal(signal.SIGKILL)
+    return group
+
+
 def _kill_tree(pid: int) -> bool:
     """Kill the sidecar process tree, then wait briefly for actual death.
 
@@ -347,8 +519,32 @@ def _kill_tree(pid: int) -> bool:
     The post-kill poll gives callers a real postcondition: when this
     returns, the pid is dead (or we waited ~2s trying) — which is what
     makes reading sidecar-owned files after the kill safe.
+
+    Windows takes the tree with ``taskkill /T``; POSIX takes it with a
+    process-group kill (see ``_posix_kill_tree``). The old POSIX branch was
+    a bare ``os.kill(pid, 9)``: no tree, no SIGTERM step, and no reap, so
+    the sidecar's own children survived and the corpse still read as alive.
+
+    Scope of the boolean, stated precisely because it is load-bearing: it
+    reports the LEADER's death, which is the whole question the transcript
+    sweep asks. Only the bridge process owns ``TranscriptWriter``; a tool
+    grandchild that outlives it cannot write to the transcript. A surviving
+    group member is a separate defect and gets its own log line rather than
+    riding this return value.
     """
 
+    if pid <= 0:
+        return True  # nothing to kill; _is_alive already treats these as dead
+    if pid == os.getpid():
+        # A stale state file naming the CURRENT api process, most plausibly
+        # after a restart recycled the old sidecar's pid onto us. Every kill
+        # path here is fatal to the caller: taskkill /T /F on Windows, and
+        # SIGTERM through the single-pid fallback on POSIX (killpg is
+        # already refused by _sidecar_group). Refuse, and report unverified
+        # so the live transcript is left alone.
+        _log.error("discord voice state names this process (pid %s); refusing to kill", pid)
+        return False
+    group: int | None = None
     try:
         if sys.platform == "win32":
             subprocess.run(  # noqa: S603 — fixed argv
@@ -357,17 +553,39 @@ def _kill_tree(pid: int) -> bool:
                 timeout=10,
             )
         else:
-            os.kill(pid, 9)
+            group = _posix_kill_tree(pid)
     except Exception:
         pass
-    deadline = time.time() + 2.0
-    while time.time() < deadline and _is_alive(pid):
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and _is_alive(pid):
         time.sleep(0.1)
-    return not _is_alive(pid)
+    dead = not _is_alive(pid)
+    if dead and group is not None and _group_alive(group):
+        # The group must be probed with the id captured BEFORE the kill: a
+        # dead leader cannot be looked up any more.
+        _log.warning(
+            "discord voice sidecar %s is dead but process group %s still has "
+            "members; a tool child outlived the SIGKILL",
+            pid,
+            group,
+        )
+    return dead
 
 
 def _sidecar_python() -> Path:
-    return SIDECAR_DIR / ".venv" / "Scripts" / "python.exe"
+    """The sidecar venv's interpreter, in that platform's venv layout.
+
+    ``uv sync`` writes ``.venv/Scripts/python.exe`` on Windows and
+    ``.venv/bin/python`` everywhere else. Hardcoding the Windows layout made
+    every Mac/Linux ``/talk join`` fail the ``_spawn`` existence check with
+    "sidecar venv missing" no matter how many times the operator ran the
+    documented ``uv sync``.
+    """
+
+    venv = SIDECAR_DIR / ".venv"
+    if sys.platform == "win32":
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
 
 
 def _active_profile_root() -> Path:
@@ -403,6 +621,30 @@ def status() -> dict[str, Any]:
     }
 
 
+def _directive_violated_by(bridge: dict[str, Any]) -> bool:
+    """Is this LIVE session metering a key while the billing directive is on?
+
+    ``TALK_PREFER_CODEX_OAUTH`` is enforced where auth is resolved — inside the
+    sidecar's join. A session that was started BEFORE the directive was turned
+    on never passed that gate, so the already-joined shortcut would quietly keep
+    a metered key running and answer "already live". Treat that as not-joined so
+    the caller re-joins under the directive, which either switches to the
+    subscription or refuses. Fail OPEN on any resolution error: a broken check
+    must not block joining voice.
+    """
+
+    try:
+        import talk_session
+
+        if not talk_session.talk_prefer_codex_oauth():
+            return False
+        from runtime import openai_platform_auth
+
+        return bridge.get("authSource") != openai_platform_auth.SOURCE_CODEX_OAUTH
+    except Exception:
+        return False
+
+
 def start_session(guild_id: int, channel_id: int, text_channel_id: int | None = None) -> dict[str, Any]:
     """Ensure the sidecar is running and joined to the given voice channel."""
 
@@ -414,7 +656,12 @@ def start_session(guild_id: int, channel_id: int, text_channel_id: int | None = 
             # files are finished predecessors and always safe.
             _sweep_transcripts(include_live=False)
             bridge = _sidecar_status()
-            if bridge and bridge.get("connected") and bridge.get("channelId") == channel_id:
+            if (
+                bridge
+                and bridge.get("connected")
+                and bridge.get("channelId") == channel_id
+                and not _directive_violated_by(bridge)
+            ):
                 return {**state, "bridge": bridge, "alreadyJoined": True}
         else:
             # Pid dead AND control port dead (zombie probe): a leftover
@@ -469,7 +716,7 @@ def stop_session() -> dict[str, Any]:
             }
         )
         if not sidecar_dead:
-            state["lastError"] = "sidecar survived taskkill — live transcript not swept"
+            state["lastError"] = "sidecar survived the kill; live transcript not swept"
         _write_state(state)
         return {**state, "debrief": debrief}
 
@@ -498,11 +745,24 @@ def _spawn(state: dict[str, Any]) -> dict[str, Any]:
     }
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        # The POSIX counterpart: own session, so the sidecar's process-group
+        # id is its own pid and the teardown can killpg the whole tree
+        # without the signal reaching the orchestration API that spawned it.
+        popen_kwargs["start_new_session"] = True
 
     proc = subprocess.Popen([str(python), "bridge.py"], **popen_kwargs)
+    global _SIDECAR_PROC
+    if _SIDECAR_PROC is not None:
+        # Reap the PREVIOUS sidecar before dropping its handle. A respawn
+        # (crash then rejoin) is the live case: overwriting unreaped would
+        # orphan that handle, and its zombie would then read as alive for
+        # the rest of the process's life with nothing left able to reap it.
+        _reap_sidecar(_SIDECAR_PROC.pid)
+    _SIDECAR_PROC = proc  # the only handle that can safely reap this child
 
-    deadline = time.time() + 30.0
-    while time.time() < deadline:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             log_handle.close()
             raise DiscordVoiceError(

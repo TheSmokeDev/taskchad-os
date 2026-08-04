@@ -5,7 +5,8 @@ process (Discord adapter via the orchestration API) tells us which voice
 channel to join; we stream mic audio to OpenAI Realtime and play the
 responses back, with barge-in. Auth ordering comes from
 ``runtime.openai_platform_auth`` (configured key -> OPENAI_API_KEY -> Codex
-OAuth); instructions come from ``talk_session.build_talk_instructions()``
+OAuth, or Codex-only when ``TALK_PREFER_CODEX_OAUTH`` is on);
+instructions come from ``talk_session.build_talk_instructions()``
 (the same SOUL.md voice preamble as the /talk browser page).
 
 Control surface (loopback only):
@@ -524,6 +525,21 @@ class VoiceBridge:
         # assume the forming MLS group absorbed a mid-join member).
         async with self._transport_lock:
             gen_at_join = self._rekey_gen
+            # Resolve auth BEFORE touching Discord. Under
+            # TALK_PREFER_CODEX_OAUTH a stale subscription is a refusal, not a
+            # fallback, so it is the EXPECTED failure — and a refusal after the
+            # handshake leaves the bot parked in voice (the rollback's
+            # disconnect is best-effort and drops the handle even when it
+            # fails). Nothing here mutates state, so raising costs nothing.
+            from runtime import openai_platform_auth
+            import talk_session
+            import talk_tools
+
+            auth = openai_platform_auth.resolve_openai_platform_auth(
+                configured_api_key=talk_session.talk_configured_api_key(),
+                prefer_codex=talk_session.talk_prefer_codex_oauth(),
+            )
+
             # Publish the target identity BEFORE the handshake (r2 finding 3):
             # membership events during connect() must classify against the
             # channel we are joining — with channel_id still None they were
@@ -542,13 +558,6 @@ class VoiceBridge:
             )
 
             try:
-                from runtime import openai_platform_auth
-                import talk_session
-                import talk_tools
-
-                auth = openai_platform_auth.resolve_openai_platform_auth(
-                    configured_api_key=talk_session.talk_configured_api_key()
-                )
                 self.auth_source = auth.source
                 self.session = RealtimeSession(
                     RealtimeConfig(

@@ -1,18 +1,18 @@
 # TaskChad OS
 
-**An open-source cognitive agent OS — not a chat wrapper. A 9-layer cognitive stack (62 modules in `.claude/chat/cognition/`), DAG-based multi-agent orchestration, a typed inter-agent mailbox, real-time voice with the full tool surface behind it, and a provider-agnostic lane-first runtime, with 10,406 tests across 480 files.**
+**Realtime voice for your second brain. Talk to it like it's on a call. Open source, rides your subscription.**
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)
-![Release: v1.2.0](https://img.shields.io/badge/release-v1.2.0-blue?style=flat-square)
+![Release: v1.3.0](https://img.shields.io/badge/release-v1.3.0-blue?style=flat-square)
 ![Tests: 10406](https://img.shields.io/badge/tests-10%2C406%20across%20480%20files-brightgreen?style=flat-square)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Channels: 6](https://img.shields.io/badge/Channels-Telegram%20%C2%B7%20Slack%20%C2%B7%20Discord%20%C2%B7%20WhatsApp%20%C2%B7%20Web%20%C2%B7%20CLI-4A154B?style=flat-square)
 
-Run it locally, on a VPS, or in Docker. Talk to it from Telegram, Slack, Discord, WhatsApp, the web, the CLI — or out loud, over real-time voice on the dashboard and in Discord voice channels. All of it enters one canonical ingress and shares one session model, one recall service, and one runtime. It monitors your world on a heartbeat, remembers what matters in a Markdown vault, coordinates multi-agent work over a dependency-tracked convoy graph, and runs the same on Claude, Codex, Gemini, or any OpenAI-compatible backend.
+It hears you live, not voice notes. Talk your agents through real work out loud, the way ChatGPT Voice does on the Codex app, except it's your own second brain and it's open source. Steer a running agent mid-flight by voice, and it remembers the whole conversation after you hang up. Two doors: the dashboard, or `/talk join` in your Discord voice channel.
 
-What sets it apart from a linear chat agent is the cognition stack underneath: a frozen, token-budgeted prompt-region system over an immutable working memory; tiered recall with keyword + vector search, graph traversal, and hub-score boosting; an operator-belief and contradiction engine; a gated inner monologue that never enters the transcript; and durable identity-file amendments that only land after passing a default-deny evidence + policy gate. Every one of those is a shipped, tested module — the [Cognition Stack](#the-9-layer-cognitive-stack) section maps each claim to its file and test count.
+It can even install its own voice. Your second brain runs the `talk-mode-setup` skill, checks your keys, wires the sidecar, and defaults to your Codex subscription so there is no per-minute meter.
 
-It is built to push back, not just please — identity (`SOUL.md` / `SELF.md`) is a first-class, version-controlled input to every turn, and the framework forms operator beliefs and flags contradictions instead of agreeing by default. That behavior is a property of the belief engine and the evidence gate below, not a tagline.
+Under the voice is a real cognitive OS, not a chat wrapper: a 9-layer cognition stack (62 modules), multi-agent orchestration over a dependency-tracked convoy graph, and a memory that forms beliefs and flags your contradictions instead of agreeing by default. It is built to push back, not just please. Runs the same on Claude, Codex, Gemini, or any OpenAI-compatible backend, and reaches you on Telegram, Slack, WhatsApp, the web, and the CLI too. 10,406 tests across 480 files, each claim mapped to its file and count in the [Cognition Stack](#the-9-layer-cognitive-stack) section below.
 
 ## Lineage + Provenance
 

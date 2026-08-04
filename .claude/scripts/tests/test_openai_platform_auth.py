@@ -13,6 +13,7 @@ import json
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from runtime import openai_platform_auth as opa
@@ -260,3 +261,527 @@ def test_status_marks_expired_token_for_refresh(codex_home: Path) -> None:
 
     assert status["source"] == opa.SOURCE_CODEX_OAUTH
     assert "expired-will-refresh" in status["detail"]
+
+
+# ─── prefer_codex: the billing directive (voice-scoped, fail-closed) ──────
+#
+# Setting the flag means "use my subscription, do not meter me". A missing or
+# broken Codex login therefore FAILS CLOSED — silently spending the operator's
+# API-key credits is the exact surprise the directive exists to prevent, and a
+# dead voice surface is the lesser harm. Same shape as the set-but-blank
+# configured key, which has always failed closed rather than falling through.
+
+
+def _assert_names_both_remedies(exc: Exception) -> None:
+    text = str(exc)
+    assert "codex login" in text, "must name the subscription remedy"
+    assert "TALK_PREFER_CODEX_OAUTH" in text, "must name the stand-down remedy"
+
+
+def test_prefer_codex_off_is_byte_identical_key_first(codex_home: Path) -> None:
+    """Default-off parity: explicitly passing False changes nothing."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) + 3600))
+
+    auth = opa.resolve_openai_platform_auth(
+        env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=False
+    )
+
+    assert auth.source == opa.SOURCE_ENV
+    assert auth.token == "sk-env"
+
+
+def test_prefer_codex_beats_env_key(codex_home: Path) -> None:
+    """The money case: OPENAI_API_KEY stays set for other subsystems, voice
+    still rides the subscription."""
+
+    access = _jwt(int(time.time()) + 3600)
+    _write_auth_json(codex_home / "auth.json", access=access)
+
+    auth = opa.resolve_openai_platform_auth(
+        env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=True
+    )
+
+    assert auth.source == opa.SOURCE_CODEX_OAUTH
+    assert auth.token == access
+
+
+def test_prefer_codex_beats_configured_key(codex_home: Path) -> None:
+    """The directive outranks ANY key, including the Talk-scoped one."""
+
+    access = _jwt(int(time.time()) + 3600)
+    _write_auth_json(codex_home / "auth.json", access=access)
+
+    auth = opa.resolve_openai_platform_auth(
+        configured_api_key="sk-configured",
+        env={"OPENAI_API_KEY": "sk-env"},
+        codex_home=codex_home,
+        prefer_codex=True,
+    )
+
+    assert auth.source == opa.SOURCE_CODEX_OAUTH
+    assert auth.token == access
+
+
+def test_prefer_codex_fails_closed_when_there_is_no_oauth_login(codex_home: Path) -> None:
+    """A usable key is NOT a fallback here — using it would meter the operator
+    who explicitly asked not to be metered."""
+
+    with pytest.raises(opa.OpenAIPlatformAuthError) as caught:
+        opa.resolve_openai_platform_auth(
+            configured_api_key="sk-configured",
+            env={"OPENAI_API_KEY": "sk-env"},
+            codex_home=codex_home,
+            prefer_codex=True,
+        )
+
+    _assert_names_both_remedies(caught.value)
+    assert "sk-configured" not in str(caught.value)
+    assert "sk-env" not in str(caught.value)
+
+
+def test_prefer_codex_fails_closed_when_the_login_is_apikey_mode(codex_home: Path) -> None:
+    """An api-key-mode Codex login is not a subscription — still closed."""
+
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-codex-file"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(opa.OpenAIPlatformAuthError) as caught:
+        opa.resolve_openai_platform_auth(
+            configured_api_key="sk-configured", codex_home=codex_home, prefer_codex=True
+        )
+
+    _assert_names_both_remedies(caught.value)
+
+
+def test_prefer_codex_fails_closed_when_the_refresh_fails(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead refresh token stops voice; it does not silently start metering."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) - 60))
+    calls: list[dict[str, str]] = []
+
+    def fake_post(fields: dict[str, str]) -> dict:
+        calls.append(fields)
+        raise opa.OpenAIPlatformAuthError("refresh failed (401): invalid_grant")
+
+    monkeypatch.setattr(opa, "_post_token_form", fake_post)
+
+    with pytest.raises(opa.OpenAIPlatformAuthError) as caught:
+        opa.resolve_openai_platform_auth(
+            env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=True
+        )
+
+    _assert_names_both_remedies(caught.value)
+    assert len(calls) == 1, "one refresh attempt, no retry storm"
+
+
+def test_prefer_codex_fails_closed_when_the_refresh_call_cannot_connect(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refresh is a network call — an outage must not read as a meter-me."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) - 60))
+    monkeypatch.setattr(
+        opa,
+        "_post_token_form",
+        lambda fields: (_ for _ in ()).throw(httpx.ConnectError("connection refused")),
+    )
+
+    with pytest.raises(opa.OpenAIPlatformAuthError) as caught:
+        opa.resolve_openai_platform_auth(
+            env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=True
+        )
+
+    _assert_names_both_remedies(caught.value)
+
+
+def test_prefer_codex_fails_closed_when_the_refresh_call_times_out(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) - 60))
+    monkeypatch.setattr(
+        opa,
+        "_post_token_form",
+        lambda fields: (_ for _ in ()).throw(httpx.TimeoutException("timed out")),
+    )
+
+    with pytest.raises(opa.OpenAIPlatformAuthError) as caught:
+        opa.resolve_openai_platform_auth(
+            configured_api_key="sk-configured", codex_home=codex_home, prefer_codex=True
+        )
+
+    _assert_names_both_remedies(caught.value)
+
+
+def test_prefer_codex_fails_closed_when_the_stored_expiry_is_absurd(
+    codex_home: Path,
+) -> None:
+    """A corrupt auth.json overflows the timestamp math instead of raising an
+    auth error — it must still be a named refusal, not a 500 and not a meter."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(10**400))
+
+    with pytest.raises(opa.OpenAIPlatformAuthError) as caught:
+        opa.resolve_openai_platform_auth(
+            env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=True
+        )
+
+    _assert_names_both_remedies(caught.value)
+
+
+def test_prefer_codex_fails_closed_when_the_refresh_returns_an_absurd_expiry(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) - 60))
+    monkeypatch.setattr(
+        opa,
+        "_post_token_form",
+        lambda fields: {
+            "access_token": "opaque",
+            "refresh_token": "rt-new",
+            "expires_in": float("inf"),
+        },
+    )
+
+    with pytest.raises(opa.OpenAIPlatformAuthError) as caught:
+        opa.resolve_openai_platform_auth(
+            configured_api_key="sk-configured", codex_home=codex_home, prefer_codex=True
+        )
+
+    _assert_names_both_remedies(caught.value)
+
+
+def test_prefer_codex_refreshes_an_expired_login_rather_than_refusing(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-closed is the LAST resort — a refreshable login is still used."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) - 60))
+    new_access = _jwt(int(time.time()) + 3600)
+    monkeypatch.setattr(
+        opa,
+        "_post_token_form",
+        lambda fields: {
+            "access_token": new_access,
+            "refresh_token": "rt-new",
+            "expires_in": 3600,
+        },
+    )
+
+    auth = opa.resolve_openai_platform_auth(
+        env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=True
+    )
+
+    assert auth.source == opa.SOURCE_CODEX_OAUTH
+    assert auth.token == new_access
+
+
+def test_prefer_codex_ignores_a_blank_configured_key_when_the_login_works(
+    codex_home: Path,
+) -> None:
+    """The key legs are never consulted under the directive — not even to
+    fail on a misconfigured one."""
+
+    access = _jwt(int(time.time()) + 3600)
+    _write_auth_json(codex_home / "auth.json", access=access)
+
+    auth = opa.resolve_openai_platform_auth(
+        configured_api_key="   ",
+        env={"OPENAI_API_KEY": "sk-env"},
+        codex_home=codex_home,
+        prefer_codex=True,
+    )
+
+    assert auth.source == opa.SOURCE_CODEX_OAUTH
+
+
+def test_a_blank_configured_key_still_fails_closed_with_the_preference_off(
+    codex_home: Path,
+) -> None:
+    """Parity guard for the sibling behaviour this one is modelled on."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) + 3600))
+
+    with pytest.raises(opa.OpenAIPlatformAuthError, match="set but empty"):
+        opa.resolve_openai_platform_auth(
+            configured_api_key="   ",
+            env={"OPENAI_API_KEY": "sk-env"},
+            codex_home=codex_home,
+        )
+
+
+def test_resolver_never_reads_the_preference_from_the_environment(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scope proof: a non-voice caller that does not pass the flag keeps the
+    key-first order even with the operator knob exported process-wide."""
+
+    monkeypatch.setenv("TALK_PREFER_CODEX_OAUTH", "true")
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) + 3600))
+
+    auth = opa.resolve_openai_platform_auth(
+        env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home
+    )
+
+    assert auth.source == opa.SOURCE_ENV
+
+
+def test_status_mirrors_the_preference(codex_home: Path) -> None:
+    """Operator status must not contradict what the next session will use."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) + 3600))
+
+    keys_first = opa.openai_platform_auth_status(
+        env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home
+    )
+    codex_only = opa.openai_platform_auth_status(
+        configured_api_key="sk-x",
+        env={"OPENAI_API_KEY": "sk-env"},
+        codex_home=codex_home,
+        prefer_codex=True,
+    )
+
+    assert keys_first["source"] == opa.SOURCE_ENV
+    assert codex_only["source"] == opa.SOURCE_CODEX_OAUTH
+    assert "valid" in codex_only["detail"]
+
+
+def test_status_reports_unconfigured_when_the_directive_cannot_be_met(
+    codex_home: Path,
+) -> None:
+    """A key on the box is not a usable source under the directive, so status
+    must not name one — it would read as voice being fine."""
+
+    status = opa.openai_platform_auth_status(
+        configured_api_key="sk-x",
+        env={"OPENAI_API_KEY": "sk-env"},
+        codex_home=codex_home,
+        prefer_codex=True,
+    )
+
+    assert status["configured"] is False
+    assert status["source"] is None
+    assert "codex login" in status["detail"]
+    assert "TALK_PREFER_CODEX_OAUTH" in status["detail"]
+
+
+def test_a_refusal_never_carries_the_oauth_response_body(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The OAuth endpoint's body is untrusted and can echo the submitted
+    refresh token; this message reaches operators over HTTP and Discord."""
+
+    _write_auth_json(
+        codex_home / "auth.json", access=_jwt(int(time.time()) - 60), refresh="rt-SECRET"
+    )
+
+    def fake_post(fields: dict[str, str]) -> dict:
+        raise opa.OpenAIPlatformAuthError(
+            "OpenAI Codex token refresh failed (400): "
+            '{"error":"invalid_grant","refresh_token":"rt-SECRET"}'
+        )
+
+    monkeypatch.setattr(opa, "_post_token_form", fake_post)
+
+    with pytest.raises(opa.OpenAIPlatformAuthError) as caught:
+        opa.resolve_openai_platform_auth(env={}, codex_home=codex_home, prefer_codex=True)
+
+    assert "rt-SECRET" not in str(caught.value)
+    assert str(caught.value) == opa.PREFER_CODEX_UNAVAILABLE_MESSAGE
+    assert caught.value.__cause__ is not None, "detail survives in the traceback"
+
+
+def test_status_refuses_a_credential_resolution_cannot_use(codex_home: Path) -> None:
+    """Status must not call a corrupt login valid while resolve refuses it —
+    under the directive status is the operator's only advance warning."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(10**400))
+
+    status = opa.openai_platform_auth_status(
+        env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=True
+    )
+
+    assert status["configured"] is False
+    assert status["detail"] == opa.PREFER_CODEX_UNAVAILABLE_MESSAGE
+    with pytest.raises(opa.OpenAIPlatformAuthError):
+        opa.resolve_openai_platform_auth(
+            env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=True
+        )
+
+
+def test_status_still_reports_a_usable_login_under_the_directive(
+    codex_home: Path,
+) -> None:
+    """The strict check must not reject healthy credentials."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) + 3600))
+    assert (
+        opa.openai_platform_auth_status(codex_home=codex_home, prefer_codex=True)["source"]
+        == opa.SOURCE_CODEX_OAUTH
+    )
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(int(time.time()) - 60))
+    expired = opa.openai_platform_auth_status(codex_home=codex_home, prefer_codex=True)
+    assert expired["source"] == opa.SOURCE_CODEX_OAUTH
+    assert "expired-will-refresh" in expired["detail"]
+
+    _write_auth_json(codex_home / "auth.json", access="opaque-token")
+    assert (
+        opa.openai_platform_auth_status(codex_home=codex_home, prefer_codex=True)["source"]
+        == opa.SOURCE_CODEX_OAUTH
+    )
+
+
+def test_status_keeps_a_refreshable_credential_with_a_corrupt_past_expiry(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolution refreshes an expired credential BEFORE materializing its
+    expiry, so a corrupt past exp is still usable — status must agree."""
+
+    _write_auth_json(codex_home / "auth.json", access=_jwt(-(10**20)))
+
+    status = opa.openai_platform_auth_status(codex_home=codex_home, prefer_codex=True)
+
+    assert status["source"] == opa.SOURCE_CODEX_OAUTH
+    assert "expired-will-refresh" in status["detail"]
+
+    new_access = _jwt(int(time.time()) + 3600)
+    monkeypatch.setattr(
+        opa,
+        "_post_token_form",
+        lambda fields: {
+            "access_token": new_access,
+            "refresh_token": "rt-new",
+            "expires_in": 3600,
+        },
+    )
+    auth = opa.resolve_openai_platform_auth(
+        env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=True
+    )
+
+    assert auth.source == opa.SOURCE_CODEX_OAUTH, "status and resolve must agree"
+
+
+def test_no_key_can_ever_be_reached_under_the_directive(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cardinal invariant, swept rather than sampled.
+
+    Across every combination of key configuration and Codex-login health, the
+    directive must yield the subscription or an error — never a metered key.
+    A single silent key here is a billing violation, so this sweeps the matrix
+    instead of trusting the branches that happen to have their own test.
+    """
+
+    auth_path = codex_home / "auth.json"
+
+    def codex_valid() -> None:
+        _write_auth_json(auth_path, access=_jwt(int(time.time()) + 3600))
+
+    def codex_absent() -> None:
+        auth_path.unlink(missing_ok=True)
+
+    def codex_apikey_mode() -> None:
+        auth_path.write_text(
+            json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-codex-file"}),
+            encoding="utf-8",
+        )
+
+    def codex_malformed() -> None:
+        auth_path.write_text("{not json", encoding="utf-8")
+
+    def codex_corrupt_expiry() -> None:
+        _write_auth_json(auth_path, access=_jwt(10**400))
+
+    def codex_expired() -> None:
+        _write_auth_json(auth_path, access=_jwt(int(time.time()) - 60))
+
+    refresh_outcomes = {
+        "refresh-succeeds": None,
+        "refresh-rejected": opa.OpenAIPlatformAuthError("refresh failed (401): invalid_grant"),
+        "refresh-offline": httpx.ConnectError("connection refused"),
+        "refresh-timeout": httpx.TimeoutException("timed out"),
+    }
+    key_setups = {
+        "no-keys": (None, {}),
+        "env-key": (None, {"OPENAI_API_KEY": "sk-env"}),
+        "configured-key": ("sk-configured", {"OPENAI_API_KEY": "sk-env"}),
+        "blank-configured-key": ("   ", {"OPENAI_API_KEY": "sk-env"}),
+    }
+    codex_states = {
+        "valid": codex_valid,
+        "absent": codex_absent,
+        "apikey-mode": codex_apikey_mode,
+        "malformed": codex_malformed,
+        "corrupt-expiry": codex_corrupt_expiry,
+        "expired": codex_expired,
+    }
+
+    for codex_name, seed in codex_states.items():
+        for refresh_name, outcome in refresh_outcomes.items():
+            for key_name, (configured, env) in key_setups.items():
+                seed()
+                if outcome is None:
+                    monkeypatch.setattr(
+                        opa,
+                        "_post_token_form",
+                        lambda fields: {
+                            "access_token": _jwt(int(time.time()) + 3600),
+                            "refresh_token": "rt-new",
+                            "expires_in": 3600,
+                        },
+                    )
+                else:
+                    monkeypatch.setattr(
+                        opa,
+                        "_post_token_form",
+                        lambda fields, _o=outcome: (_ for _ in ()).throw(_o),
+                    )
+                case = f"{codex_name}/{refresh_name}/{key_name}"
+
+                try:
+                    auth = opa.resolve_openai_platform_auth(
+                        configured_api_key=configured,
+                        env=env,
+                        codex_home=codex_home,
+                        prefer_codex=True,
+                    )
+                except opa.OpenAIPlatformAuthError as exc:
+                    assert str(exc) == opa.PREFER_CODEX_UNAVAILABLE_MESSAGE, case
+                    continue
+
+                assert auth.source == opa.SOURCE_CODEX_OAUTH, f"metered key reached: {case}"
+
+                status = opa.openai_platform_auth_status(
+                    configured_api_key=configured,
+                    env=env,
+                    codex_home=codex_home,
+                    prefer_codex=True,
+                )
+                assert status["source"] in (opa.SOURCE_CODEX_OAUTH, None), case
+
+
+def test_a_type_error_in_the_codex_leg_still_fails_closed_cleanly(
+    codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catch-tuple symmetry with the status path's strict check: a type that
+    escaped here would bypass BOTH the both-remedies message and
+    talk_session's `except OpenAIPlatformAuthError`, surfacing as a raw crash
+    instead of a clean TalkAuthError."""
+
+    def explode(_codex_home):
+        raise TypeError("unsupported operand type for +: 'int' and 'str'")
+
+    monkeypatch.setattr(opa, "_resolve_codex_oauth", explode)
+
+    with pytest.raises(opa.OpenAIPlatformAuthError) as caught:
+        opa.resolve_openai_platform_auth(
+            env={"OPENAI_API_KEY": "sk-env"}, codex_home=codex_home, prefer_codex=True
+        )
+
+    assert str(caught.value) == opa.PREFER_CODEX_UNAVAILABLE_MESSAGE
+    assert isinstance(caught.value.__cause__, TypeError)

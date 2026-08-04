@@ -77,11 +77,11 @@ Configure one identity per Homie profile:
 BUZZ_RELAY_URL=
 BUZZ_PRIVATE_KEY=
 <REDACTED-buzz-private-key>
+BUZZ_PUBKEY_ROLES=
 
-BUZZ_CHANNELS=
 
 
-BUZZ_CLI_PATH=buzz
+
 BUZZ_TRANSPORT=auto
 BUZZ_REQUIRE_MENTION=true
 ```
@@ -96,6 +96,35 @@ transport and CLI compatibility with `uv run thehomie status --json` and
 `uv run thehomie doctor`. See
 [`docs/manual/features/buzz-native-collaboration.md`](docs/manual/features/buzz-native-collaboration.md)
 for security, receipts, desktop, and local-pilot details.
+
+## Talk Mode (voice)
+
+Talk Mode is live speech-to-speech over the OpenAI Realtime API. It has two
+surfaces with different setup costs:
+
+- **Dashboard Talk view** is zero-install. The browser negotiates WebRTC with
+  OpenAI directly, so there is nothing extra to run.
+- **Discord `/talk join`** needs a one-time sidecar install, because py-cord
+  cannot share an environment with discord.py:
+
+```bash
+cd .claude/scripts/discord_voice
+uv sync
+```
+
+Authentication resolves in order: `TALK_OPENAI_API_KEY`, then `OPENAI_API_KEY`,
+then Codex OAuth via `codex login` (which reuses an existing ChatGPT sign-in, so
+no API key is required). The Discord surface also needs `DISCORD_BOT_TOKEN` and
+the orchestration API running on port 4322.
+
+Verify with `/talk status` in Discord. See
+[`docs/talk-mode-showcase.md`](docs/talk-mode-showcase.md) for the full setup
+walkthrough, the receive-pipeline tuning knobs, and troubleshooting.
+
+To have an agent do it instead, the repo ships a `talk-mode-setup` skill that
+detects what is already configured and asks before changing anything. It also
+steers voice to a Codex subscription when one is available, since an API key
+would otherwise outrank it and bill per minute.
 
 ## Docker Deployment
 

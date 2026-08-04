@@ -2,7 +2,8 @@
 
 Server-side half of the Homie Talk slice (OpenClaw PR #100671 port):
 resolves OpenAI Platform auth via ``runtime.openai_platform_auth``
-(configured key -> OPENAI_API_KEY -> Codex OAuth), assembles the Homie
+(configured key -> OPENAI_API_KEY -> Codex OAuth, or Codex OAuth first when
+``TALK_PREFER_CODEX_OAUTH`` is on), assembles the Homie
 persona instructions, and mints an ephemeral Realtime client secret. The
 browser only ever receives the ephemeral secret — the underlying API key /
 OAuth token never leaves this process.
@@ -66,6 +67,11 @@ _IDENTITY_HEADERS: dict[str, str] = {
 }
 
 _IDENTITY_INCLUDE_ENV = "TALK_IDENTITY_INCLUDE"
+
+#: Operator billing directive: run the VOICE surfaces off a Codex OAuth
+#: (ChatGPT subscription) sign-in instead of any API key. Exists because
+#: OPENAI_API_KEY has other consumers on this box and cannot simply be unset.
+_PREFER_CODEX_ENV = "TALK_PREFER_CODEX_OAUTH"
 
 _VOICE_PREAMBLE = (
     "You are The Homie — owner's personal AI partner and second brain — "
@@ -180,6 +186,28 @@ def talk_configured_api_key() -> str | None:
 
     raw = os.environ.get("TALK_OPENAI_API_KEY")
     return raw if raw is not None else None
+
+
+def talk_prefer_codex_oauth() -> bool:
+    """Whether the voice surfaces must run off the Codex OAuth subscription.
+
+    Rule 1 — resolved at CALL time, never bound as a default argument. Default
+    OFF: voice auth ordering is byte-identical to the key-first behaviour
+    unless the operator opts in. The knob is scoped to the voice/talk surfaces
+    (Talk mode + the Discord voice bridge); it does NOT change auth for any
+    other ``OPENAI_API_KEY`` consumer, which is the whole point — the key can
+    stay set for STT, the generic runtime lane, and personas while the
+    subscription carries Realtime.
+
+    Setting it is a BILLING DIRECTIVE, not a ranking: when the subscription is
+    not usable, voice fails closed with both remedies named rather than
+    quietly metering the operator on the API key.
+    """
+
+    return (
+        os.environ.get(_PREFER_CODEX_ENV, "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
 
 def _identity_include() -> tuple[str, ...]:
@@ -338,9 +366,11 @@ def create_talk_session(*, voice: str | None = None, model: str | None = None) -
         )
     selected_model = (model or "").strip() or talk_openai_model()
 
+    prefer_codex = talk_prefer_codex_oauth()
     try:
         auth = openai_platform_auth.resolve_openai_platform_auth(
-            configured_api_key=talk_configured_api_key()
+            configured_api_key=talk_configured_api_key(),
+            prefer_codex=prefer_codex,
         )
     except openai_platform_auth.OpenAIPlatformAuthError as exc:
         raise TalkAuthError(str(exc)) from exc
@@ -355,11 +385,23 @@ def create_talk_session(*, voice: str | None = None, model: str | None = None) -
         payload = _post_client_secret(auth.token, session)
     except TalkUpstreamError as exc:
         if "(401)" in str(exc):
-            remediation = (
-                "the configured OpenAI API key was rejected"
-                if auth.source != openai_platform_auth.SOURCE_CODEX_OAUTH
-                else "the Codex OAuth token was rejected — run `codex login` to refresh your sign-in"
-            )
+            if auth.source != openai_platform_auth.SOURCE_CODEX_OAUTH:
+                remediation = "the configured OpenAI API key was rejected"
+            elif prefer_codex:
+                # Under the billing directive there is no key to fall back to
+                # by design, so the operator needs both doors named — plus the
+                # third possibility, because a 401 on a FRESH login is usually
+                # a missing Realtime entitlement, which re-login cannot cure.
+                remediation = (
+                    "the Codex OAuth token was rejected — run `codex login` to refresh your "
+                    "sign-in; if the sign-in is already fresh, the account likely lacks "
+                    "Realtime access, so unset TALK_PREFER_CODEX_OAUTH to allow the OpenAI "
+                    "API key (metered billing)"
+                )
+            else:
+                remediation = (
+                    "the Codex OAuth token was rejected — run `codex login` to refresh your sign-in"
+                )
             raise TalkUpstreamError(f"OpenAI Realtime auth failed (401): {remediation}") from exc
         raise
     secret, expires_at_ms = _parse_client_secret(payload)
@@ -378,7 +420,8 @@ def talk_status() -> dict:
     """Operator-facing Talk status — which auth source would be used."""
 
     status = openai_platform_auth.openai_platform_auth_status(
-        configured_api_key=talk_configured_api_key()
+        configured_api_key=talk_configured_api_key(),
+        prefer_codex=talk_prefer_codex_oauth(),
     )
     return {
         **status,
@@ -406,6 +449,7 @@ __all__ = [
     "create_talk_session",
     "talk_configured_api_key",
     "talk_openai_model",
+    "talk_prefer_codex_oauth",
     "talk_openai_voice",
     "talk_status",
 ]
