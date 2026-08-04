@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -161,3 +162,81 @@ async def test_commands_all_handler_shows_full_registry() -> None:
     assert "*PIV Workflow*" in reply
     assert "/prime" in reply
     assert "/linkedin" in reply
+
+
+# --- Native command uniqueness (issue #18) ------------------------------------
+# A duplicate native slash-command name makes the Discord library raise
+# CommandAlreadyRegistered and crashes bot startup for every channel. These lock
+# the invariant: the menu handed to any adapter is always unique.
+
+
+def test_shipped_native_menu_has_no_duplicates() -> None:
+    """Regression guard: the real curated menu must never ship a duplicate."""
+    names = list(commands.TELEGRAM_NATIVE_COMMANDS)
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert not dupes, dupes
+
+
+def test_enforce_native_uniqueness_dedupes_and_preserves_order() -> None:
+    result = commands._enforce_native_command_uniqueness(
+        ("help", "status", "help", "brief"),
+        ("help", "status", "brief"),
+    )
+    assert result == ("help", "status", "brief")
+
+
+def test_enforce_native_uniqueness_is_noop_on_clean_menu() -> None:
+    clean = ("a", "b", "c")
+    assert commands._enforce_native_command_uniqueness(clean, clean) == clean
+
+
+def test_enforce_native_uniqueness_blames_overlay_readd_on_extension(caplog) -> None:
+    """An overlay re-adding a core name, or adding its own name twice, is blamed
+    on the local extension — not the core menu — so an operator remediates the
+    real source (issue #18 adversarial-review finding)."""
+    # Merged = core ("help","status") + overlay re-adds "help" and adds "x" twice.
+    with caplog.at_level(logging.WARNING, logger="commands"):
+        result = commands._enforce_native_command_uniqueness(
+            ("help", "status", "help", "x", "x"),
+            ("help", "status"),  # ordered core, before the overlay merged
+        )
+    assert result == ("help", "status", "x")
+    assert "/help (local extension)" in caplog.text
+    assert "/x (local extension)" in caplog.text
+    # Not mis-attributed to core (the static remediation text mentions "core
+    # menu"; the attribution tag "/name (core menu)" must not appear).
+    assert "(core menu)" not in caplog.text
+
+
+def test_enforce_native_uniqueness_blames_core_double_on_core(caplog) -> None:
+    """A name duplicated within the core menu itself (a dev typo) is blamed on
+    the core menu."""
+    with caplog.at_level(logging.WARNING, logger="commands"):
+        result = commands._enforce_native_command_uniqueness(
+            ("help", "help", "status"),
+            ("help", "help", "status"),  # the duplicate lives in the core order
+        )
+    assert result == ("help", "status")
+    assert "/help (core menu)" in caplog.text
+
+
+def test_menu_builder_dedupes_a_duplicated_source(monkeypatch) -> None:
+    """Even if TELEGRAM_NATIVE_COMMANDS is reassigned with a duplicate, the shared
+    builder every adapter consumes still returns unique names."""
+    _register_manager()
+    dupd = commands.TELEGRAM_NATIVE_COMMANDS + ("help", "status")
+    monkeypatch.setattr(commands, "TELEGRAM_NATIVE_COMMANDS", dupd)
+    menu, _hidden = commands.get_telegram_command_menu()
+    names = [name for name, _desc in menu]
+    assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]
+
+
+def test_discord_menu_never_hands_registration_a_duplicate(monkeypatch) -> None:
+    """The Discord registration loop calls add_command once per menu entry; a
+    duplicate would raise CommandAlreadyRegistered. Prove the menu is unique even
+    when the source tuple carries a duplicate."""
+    _register_manager()
+    dupd = commands.TELEGRAM_NATIVE_COMMANDS + ("help", "model")
+    monkeypatch.setattr(commands, "TELEGRAM_NATIVE_COMMANDS", dupd)
+    names = [name for name, _desc in get_discord_native_command_menu()]
+    assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]

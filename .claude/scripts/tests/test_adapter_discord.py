@@ -307,6 +307,23 @@ def test_discord_registers_native_vault_group_without_flat_duplicate():
     assert "vault" not in [name for name, _desc in get_discord_native_command_menu()]
 
 
+def test_discord_registration_survives_a_duplicated_native_menu(monkeypatch):
+    """Issue #18: a duplicate native command name must not crash Discord
+    slash-command registration. Drives the real _register_native_slash_commands
+    (via _make_adapter) with a duplicated source tuple and proves construction
+    does not raise CommandAlreadyRegistered and the command tree stays unique."""
+    import commands as commands_mod
+
+    dupd = commands_mod.TELEGRAM_NATIVE_COMMANDS + ("help", "model")
+    monkeypatch.setattr(commands_mod, "TELEGRAM_NATIVE_COMMANDS", dupd)
+
+    # Would raise discord.app_commands.CommandAlreadyRegistered without the guard.
+    adapter = _make_adapter()
+
+    names = [cmd.name for cmd in adapter._tree.get_commands()]
+    assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]
+
+
 def test_discord_native_vault_text_builds_shared_router_command():
     text = DiscordAdapter._build_native_vault_text(
         "search",

@@ -8,7 +8,11 @@ that delegate to the singleton.
 
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Global slash command instruction files
 _COMMANDS_DIR = Path.home() / ".claude" / "commands"
@@ -266,6 +270,12 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "debrief",
 )
 
+# Snapshot the framework's own native command names (ordered, with multiplicity)
+# BEFORE any local extension overlay merges in — lets the uniqueness guard
+# attribute a dropped duplicate to the core menu vs a downstream overlay by
+# ORIGIN, not by whether the name merely exists in the core menu.
+_CORE_NATIVE_COMMANDS: tuple[str, ...] = TELEGRAM_NATIVE_COMMANDS
+
 # Operator-local commands join the canonical registries only when the optional
 # local package exists. Public/fresh installs simply retain these core values.
 try:
@@ -282,6 +292,67 @@ try:
 except ImportError:
     pass
 
+
+def _enforce_native_command_uniqueness(
+    names: tuple[str, ...],
+    core_order: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Deduplicate the native slash-command menu, keeping the first occurrence.
+
+    A downstream extension overlay (or a core-menu typo) can introduce a
+    duplicate command name. Registering the same slash-command name twice makes
+    the Discord library raise ``CommandAlreadyRegistered`` and crashes bot
+    startup for every channel. This enforces uniqueness once, at import time and
+    before any adapter registers the menu, so one bad entry can never take the
+    bot down. Order is preserved; a menu with no duplicates is returned
+    unchanged.
+
+    A dropped duplicate is attributed by ORIGIN, not by whether the name merely
+    exists in the core menu: the first ``core_order`` occurrences of a name are
+    treated as core-originated, and any further occurrence (an overlay re-adding
+    a core name, or an overlay adding its own name twice) is attributed to the
+    ``local extension`` overlay so remediation points at the real source. Only
+    the offending names are logged.
+
+    Precondition: ``names`` lists core-order entries before overlay-appended
+    entries — ``apply_local_extension_hook`` concatenates the overlay's additions
+    after the core. Both first-occurrence core priority and the origin
+    attribution rely on that ordering; a future mid-list overlay insertion would
+    need to revisit this.
+    """
+    core_budget = Counter(core_order)
+    seen: set[str] = set()
+    unique: list[str] = []
+    dropped: list[str] = []
+    for name in names:
+        from_core = core_budget[name] > 0
+        if from_core:
+            core_budget[name] -= 1
+        if name in seen:
+            source = "core menu" if from_core else "local extension"
+            dropped.append(f"/{name} ({source})")
+            continue
+        seen.add(name)
+        unique.append(name)
+    if dropped:
+        logger.warning(
+            "Duplicate native command name(s) ignored to keep slash-command "
+            "registration stable; kept the first occurrence of each: %s. "
+            "Remove the duplicate from the core menu or the local extension "
+            "overlay.",
+            ", ".join(dropped),
+        )
+    return tuple(unique)
+
+
+# Enforce the uniqueness invariant unconditionally — a core-menu typo or a local
+# extension overlay can each introduce a duplicate. Runs at import, before any
+# adapter registers the menu, so a duplicate never reaches the Discord library
+# (which would raise CommandAlreadyRegistered and crash startup).
+TELEGRAM_NATIVE_COMMANDS = _enforce_native_command_uniqueness(
+    TELEGRAM_NATIVE_COMMANDS, _CORE_NATIVE_COMMANDS
+)
+
 # Every COMMANDS row that is deliberately NOT in the native menu must be listed
 # here with a reason. The completeness test in test_command_menu.py asserts
 #   set(COMMANDS names) == set(TELEGRAM_NATIVE_COMMANDS) | NATIVE_MENU_EXCLUDED
@@ -289,6 +360,23 @@ except ImportError:
 # decision fails CI instead of silently never autocompleting (the documented
 # `/video` drift). To add a command: put its name in TELEGRAM_NATIVE_COMMANDS
 # (shows in the Telegram/Discord slash menu) OR here (typed-only) — not neither.
+#
+# Native command names must also be UNIQUE across the core menu and any local
+# extension overlay: an overlay must not re-add a name already in the core menu.
+# Duplicates are deduplicated first-occurrence-wins with a logged warning (see
+# _enforce_native_command_uniqueness) so a bad overlay entry cannot crash
+# slash-command registration; the overlay should still be fixed.
+#
+# This dedupe covers the MENU (display/registration names) only. A duplicate
+# COMMANDS row — two handlers claiming one name — is a genuine routing conflict
+# and still fails loud via ExtensionManager's CommandCollisionError by design:
+# silently dropping one handler could route a command to the wrong code, which
+# is worse than a loud, attributed startup error.
+#
+# Adapters should consume the deduped menu via get_telegram_command_menu (which
+# dedupes defensively and silently), not the raw TELEGRAM_NATIVE_COMMANDS tuple:
+# a post-import reassignment of this public global could otherwise re-introduce a
+# duplicate that this import-time guard already handled.
 NATIVE_MENU_EXCLUDED: frozenset[str] = frozenset(
     {
         # Mode toggles — session state, not user-facing actions.
@@ -417,11 +505,21 @@ def get_telegram_command_menu(
     *,
     max_commands: int | None = None,
 ) -> tuple[list[tuple[str, str]], int]:
-    """Return the curated Telegram-native command menu and hidden count."""
+    """Return the curated Telegram-native command menu and hidden count.
+
+    Deduplicates defensively (first occurrence wins) so every adapter that
+    consumes the menu receives unique names even if ``TELEGRAM_NATIVE_COMMANDS``
+    is reassigned after import — a duplicate slash-command name crashes Discord
+    registration. The import-time guard already warns; this stays silent.
+    """
 
     descriptions = _command_descriptions()
     menu: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for name in TELEGRAM_NATIVE_COMMANDS:
+        if name in seen:
+            continue
+        seen.add(name)
         desc = descriptions.get(name)
         if desc is not None:
             menu.append((name, desc))
