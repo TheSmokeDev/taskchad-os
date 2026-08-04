@@ -166,7 +166,7 @@ Two surfaces, two very different setups. The dashboard Talk view is zero-install
 one-time install, because it runs in its own virtual environment.
 
 If you would rather not do this by hand, the repo ships a `talk-mode-setup`
-skill. Point your agent at it ("give my second brain a voice") and it detects
+skill. Point your agent at it ("run talk-mode-setup", or just "add voice") and it detects
 what you already have, asks before it changes anything, and walks the rest of
 this page for you. The manual version follows.
 
@@ -192,7 +192,14 @@ TALK_OPENAI_API_KEY=sk-...
 OPENAI_API_KEY=sk-...
 
 DISCORD_BOT_TOKEN=...            # only for the Discord voice surface
+
+TALK_IDENTITY_INCLUDE=SOUL,USER,MEMORY,WORKING   # what "opens knowing you" requires
 ```
+
+The identity line matters more than it looks: the default is `SOUL` only — the
+behavioral contract with none of your personal context — so without it the voice
+is polite, fluent, and a stranger. The list REPLACES the default rather than
+extending it, so always include `SOUL`.
 
 **2. Dashboard voice.** Open the dashboard, go to the Talk view, and start a
 session. There is nothing else to run.
@@ -280,6 +287,14 @@ Three failures worth recognizing:
 - **Debug with the actual waveform.** When voice "doesn't work," dump the exact
   PCM you're sending and *look at it*. Ninety percent of "the model is broken"
   turns out to be "the audio reaching it is shredded."
+- **A child that re-derives its own root will silently disagree with its
+  parent.** The sidecar was once handed a home path it reclassified as a
+  different profile, re-rooted its memory at a directory that didn't exist, and
+  failed open to a bare prompt — so the voice was polite, fluent, and knew
+  nothing, while every status check stayed green. Pass the child a value that
+  round-trips to the SAME resolution the parent made, and make the child log
+  what it actually resolved (`identity roots: profile=... memory_dir=...`) so
+  the next collapse is a grep, not a live debugging session.
 
 ---
 

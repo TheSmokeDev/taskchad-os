@@ -132,6 +132,31 @@ picked. Do not assume the edit took.
 
 ---
 
+## Step 3.5. Identity — should it know you?
+
+The default voice prompt carries **SOUL only**: the behavioral contract, none of
+the personal context. Out of the box the voice will not know the user's name,
+projects, or memory — and it fails SILENTLY (status `ready`, audio fine, just a
+stranger's personality). If the user expects "it opens knowing me", this step is
+what delivers it.
+
+`AskUserQuestion`, header `Identity`:
+
+- **Load my identity on calls (recommended).** The voice opens with SOUL + USER +
+  MEMORY + WORKING already in context — it knows who it's talking to without a
+  single tool call.
+  *Action:* write `TALK_IDENTITY_INCLUDE=SOUL,USER,MEMORY,WORKING` to
+  `.claude/scripts/.env`. Show the exact line and confirm before writing.
+- **Behavioral contract only.** SOUL rules, no personal context. Fine for a
+  shared or demo install.
+  *Action:* nothing (the default).
+
+**The SOUL-drop trap:** the env list REPLACES the default, it does not extend
+it. `TALK_IDENTITY_INCLUDE=USER,MEMORY` ships NO soul. Always list `SOUL`
+explicitly — never write this variable without it.
+
+---
+
 ## Step 4. Dashboard voice
 
 Confirm before starting anything. `AskUserQuestion`, header `Services`, listing
@@ -209,7 +234,15 @@ Do not stop at "no errors". Confirm the loop end to end:
 3. **Speech in**: transcripts show real words, not empty strings or fragments.
    Fragments mean the receive pipeline, not the model.
 4. **Speech out**: an audible reply.
-5. **Memory**: end the session and confirm the debrief landed in the daily log.
+5. **Identity**: if Step 3.5 chose it, ask the voice something only the USER or
+   MEMORY files know ("what am I working on?"). A generic answer means the
+   prompt collapsed — **the knob being set is not proof it arrived.** On
+   Discord, confirm with the receipt the sidecar logs at session start:
+   `grep "identity roots:" <the log /talk status names>` must show
+   `profile=default` and a `memory_dir` that exists on disk. A `profile=custom`
+   you never configured, or a nonexistent `memory_dir`, is the collapse — see
+   `references/troubleshooting.md`.
+6. **Memory**: end the session and confirm the debrief landed in the daily log.
 
 If any step fails, load `references/troubleshooting.md`.
 
@@ -223,7 +256,7 @@ Only offer this if the user asks. Defaults are sane.
 |------|---------|--------|
 | `TALK_OPENAI_VOICE` | `cedar` | alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar. An unknown name raises. |
 | `TALK_OPENAI_MODEL` | `gpt-realtime-2.1` | Realtime model. |
-| `TALK_IDENTITY_INCLUDE` | `SOUL` | Identity files in the voice prompt. **Replaces the default, does not extend it**, so `USER,MEMORY` ships no SOUL and the behavioral contract is gone. List `SOUL` explicitly. |
+| `TALK_IDENTITY_INCLUDE` | `SOUL` | Covered in Step 3.5 (not ask-only — it's the "opens knowing you" switch). **Replaces the default, does not extend it**, so `USER,MEMORY` ships no SOUL. List `SOUL` explicitly. Valid names: SOUL, USER, MEMORY, WORKING, GOALS, SELF. |
 | `TALK_PREFER_CODEX_OAUTH` | off | Pins voice to the Codex subscription ahead of both API keys. Fails closed if the login is unusable rather than falling back to metered billing. Scoped to voice; other `OPENAI_API_KEY` consumers are untouched. |
 | `TALK_ENABLE_CODE_EXEC` | off | Fail-closed opt-in for `run_python` and `run_shell`. |
 | `DISCORD_VOICE_JITTER_FRAMES` | `3` | Input buffer depth, about 60 ms. |

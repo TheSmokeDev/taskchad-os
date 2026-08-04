@@ -324,5 +324,140 @@ class SecretSafetyTests(unittest.TestCase):
         self.assertNotIn(secret, repr(checks))
 
 
+class IdentityIncludeTests(unittest.TestCase):
+    """`_check_identity_include` closes the default-vs-promise gap.
+
+    The code default is SOUL-only, the showcase promises "opens knowing you",
+    and the failure is silent — so the preflight must say it out loud."""
+
+    def setUp(self) -> None:
+        stubs = _StubModules(self)
+        dotenv = types.ModuleType("dotenv")
+        dotenv.load_dotenv = lambda *args, **kwargs: None
+        stubs.set("dotenv", dotenv)
+
+    def _run(self, value: str | None) -> dict:
+        env = {k: v for k, v in os.environ.items() if k != "TALK_IDENTITY_INCLUDE"}
+        if value is not None:
+            env["TALK_IDENTITY_INCLUDE"] = value
+        with mock.patch.dict(os.environ, env, clear=True):
+            return MODULE._check_identity_include()
+
+    def test_unset_warns_soul_only(self) -> None:
+        result = self._run(None)
+        self.assertEqual(result["status"], MODULE.WARN)
+        self.assertIn("SOUL only", result["detail"])
+        self.assertIn("SOUL,USER,MEMORY,WORKING", result["fix"])
+
+    def test_soul_drop_trap_warns(self) -> None:
+        """The list REPLACES the default: USER,MEMORY ships no SOUL."""
+        result = self._run("USER,MEMORY")
+        self.assertEqual(result["status"], MODULE.WARN)
+        self.assertIn("NO soul", result["detail"])
+
+    def test_soul_alone_warns_it_will_not_know_you(self) -> None:
+        result = self._run("SOUL")
+        self.assertEqual(result["status"], MODULE.WARN)
+        self.assertIn("USER/MEMORY", result["detail"])
+
+    def test_full_list_is_ok(self) -> None:
+        result = self._run("SOUL,USER,MEMORY,WORKING")
+        self.assertEqual(result["status"], MODULE.OK)
+
+    def test_case_and_spacing_are_tolerated(self) -> None:
+        result = self._run(" soul , user , memory ")
+        self.assertEqual(result["status"], MODULE.OK)
+
+
+class IdentityRootsTests(unittest.TestCase):
+    """`_check_identity_roots` catches the HOMIE_HOME round-trip collapse.
+
+    The spawn env's HOMIE_HOME must re-derive to the SAME profile in the child;
+    pre-fix builds handed the repo root and collapsed identity silently."""
+
+    def setUp(self) -> None:
+        self.stubs = _StubModules(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.good_root = Path(tmp.name) / "good-root"
+        self.good_memory = Path(tmp.name) / "TheHomie" / "Memory"
+        self.good_memory.mkdir(parents=True)
+        self.bad_root = Path(tmp.name) / "repo-root"  # the pre-fix value
+
+    def _stub_personas(self, *, memory_exists: bool = True) -> None:
+        """Classifier stub: HOMIE_HOME == bad_root -> "custom", else "default"."""
+        memory = self.good_memory if memory_exists else Path(str(self.good_memory) + "-missing")
+
+        personas = types.ModuleType("personas")
+        personas.get_active_profile_name = lambda: (
+            "custom"
+            if os.environ.get("HOMIE_HOME", "") == str(self.bad_root)
+            else "default"
+        )
+        core = types.ModuleType("personas.core")
+        core.get_persona_paths = lambda name: {"memory": memory}
+        personas.core = core
+        self.stubs.set("personas", personas)
+        self.stubs.set("personas.core", core)
+
+    def _stub_lifecycle(self, spawn_home: Path) -> None:
+        module = types.ModuleType("discord_voice_lifecycle")
+        module._active_profile_root = lambda: spawn_home
+        self.stubs.set("discord_voice_lifecycle", module)
+
+    def test_roundtrip_ok(self) -> None:
+        self._stub_personas()
+        self._stub_lifecycle(self.good_root)
+        env = {k: v for k, v in os.environ.items() if k != "HOMIE_HOME"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            result = MODULE._check_identity_roots()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], MODULE.OK)
+
+    def test_pre_fix_repo_root_blocks_and_names_the_collapse(self) -> None:
+        """The shipped bug: spawn value reclassifies the child as "custom"."""
+        self._stub_personas()
+        self._stub_lifecycle(self.bad_root)
+        env = {k: v for k, v in os.environ.items() if k != "HOMIE_HOME"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            result = MODULE._check_identity_roots()
+        self.assertEqual(result["status"], MODULE.BLOCK)
+        self.assertIn("collapse", result["detail"])
+        # The remedy names BOTH halves: the framework update and the spawner
+        # process restart (a bot restart alone leaves the stale spawner alive).
+        self.assertIn("round-trip", result["fix"])
+        self.assertIn("orchestration API", result["fix"])
+
+    def test_missing_memory_dir_blocks(self) -> None:
+        self._stub_personas(memory_exists=False)
+        self._stub_lifecycle(self.good_root)
+        env = {k: v for k, v in os.environ.items() if k != "HOMIE_HOME"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            result = MODULE._check_identity_roots()
+        self.assertEqual(result["status"], MODULE.BLOCK)
+        self.assertIn("does not exist", result["detail"])
+
+    def test_absent_lifecycle_skips_the_check(self) -> None:
+        self._stub_personas()
+        self.stubs.set("discord_voice_lifecycle", None)  # import -> TypeError
+        self.assertIsNone(MODULE._check_identity_roots())
+
+    def test_environment_is_restored_after_the_probe(self) -> None:
+        """The check simulates the child by mutating HOMIE_HOME; it must put
+        the parent's environment back exactly, set or unset."""
+        self._stub_personas()
+        self._stub_lifecycle(self.good_root)
+
+        env = {k: v for k, v in os.environ.items() if k != "HOMIE_HOME"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            MODULE._check_identity_roots()
+            self.assertNotIn("HOMIE_HOME", os.environ)
+
+        env["HOMIE_HOME"] = "sentinel-parent-value"
+        with mock.patch.dict(os.environ, env, clear=True):
+            MODULE._check_identity_roots()
+            self.assertEqual(os.environ["HOMIE_HOME"], "sentinel-parent-value")
+
+
 if __name__ == "__main__":
     unittest.main()

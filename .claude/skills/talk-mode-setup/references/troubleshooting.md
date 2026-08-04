@@ -148,9 +148,36 @@ depth; `DISCORD_VOICE_JITTER_MAX_FRAMES` is the hard ceiling.
 ## Behavior
 
 **The voice replies but doesn't know who I am.**
-`TALK_IDENTITY_INCLUDE` **replaces** the default rather than extending it, so
-`TALK_IDENTITY_INCLUDE=USER,MEMORY` sends **no SOUL**, so the behavioral contract
-is gone. List `SOUL` explicitly: `SOUL,USER,MEMORY`.
+Two distinct causes, and the failure is SILENT either way: `/talk status` still
+says `ready`, audio works, and the debrief still writes. The only symptom is a
+personality change.
+
+*Cause 1 — the SOUL-drop trap.* `TALK_IDENTITY_INCLUDE` **replaces** the default
+rather than extending it, so `TALK_IDENTITY_INCLUDE=USER,MEMORY` sends **no SOUL**
+and the behavioral contract is gone. List `SOUL` explicitly:
+`SOUL,USER,MEMORY,WORKING`.
+
+*Cause 2 — the prompt collapsed to the bare preamble.* If the env var already
+lists the files and the voice still knows nothing (not even SOUL rules), the
+sidecar resolved a DIFFERENT memory root than the parent process, every identity
+file read empty, and `build_talk_instructions()` failed open to the hardcoded
+preamble. Check the receipt the sidecar logs at session start (the log path is
+named by `/talk status`):
+
+```
+grep "identity roots:" <discord-voice.log>
+# healthy:  identity roots: profile=default memory_dir=<install>/vault/memory
+# collapse: profile=custom on a machine you never configured as custom, or a
+#           memory_dir that does not exist on disk
+```
+
+A collapsed receipt means the framework predates the HOMIE_HOME round-trip fix
+(the spawn handed the child a root that reclassified its profile) — update the
+framework. One more trap even after updating: `/talk` is served by the
+orchestration API process (port 4322), so the SPAWNER only picks up a framework
+update when that process restarts — restarting the chat bot alone is not enough.
+Note the receipt is sidecar-only; the dashboard `/talk` surface has no
+equivalent line.
 
 **Session start raises on the voice name.**
 `TALK_OPENAI_VOICE` must be one of: alloy, ash, ballad, coral, echo, sage,

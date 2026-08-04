@@ -262,6 +262,144 @@ def _check_discord_token() -> dict:
     }
 
 
+def _check_identity_include() -> dict:
+    """Whether the voice prompt will carry the operator's identity.
+
+    The code default is SOUL only — the behavioral contract with none of the
+    personal context — and the gap is SILENT: status stays ready, audio works,
+    the voice is just a stranger. This is the live default-vs-promise gap a
+    fresh install actually hits, so it gets a named check instead of a
+    tuning-table footnote.
+    """
+    import os
+
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(SCRIPTS_DIR / ".env", override=True)
+    except Exception:
+        pass
+
+    raw = (os.environ.get("TALK_IDENTITY_INCLUDE") or "").strip()
+    fix = (
+        "Set TALK_IDENTITY_INCLUDE=SOUL,USER,MEMORY,WORKING in "
+        ".claude/scripts/.env (the list REPLACES the default — always keep SOUL)."
+    )
+    label = "Voice identity files"
+
+    if not raw:
+        return {
+            "status": WARN,
+            "label": label,
+            "detail": (
+                "TALK_IDENTITY_INCLUDE is not set, so voice carries SOUL only — "
+                "it will not know who you are or what you're working on"
+            ),
+            "fix": fix,
+        }
+
+    names = {part.strip().upper() for part in raw.split(",") if part.strip()}
+    if "SOUL" not in names:
+        return {
+            "status": WARN,
+            "label": label,
+            "detail": (
+                f"TALK_IDENTITY_INCLUDE={raw} ships NO soul — the list replaces "
+                "the default, so the behavioral contract is gone"
+            ),
+            "fix": fix,
+        }
+    missing = [n for n in ("USER", "MEMORY") if n not in names]
+    if missing:
+        return {
+            "status": WARN,
+            "label": label,
+            "detail": (
+                f"TALK_IDENTITY_INCLUDE={raw} omits {'/'.join(missing)} — voice "
+                "keeps the behavioral contract but will not know who you are"
+            ),
+            "fix": fix,
+        }
+    return {
+        "status": OK,
+        "label": label,
+        "detail": f"identity files in the voice prompt: {raw}",
+    }
+
+
+def _check_identity_roots() -> dict | None:
+    """Whether the sidecar the lifecycle spawns will resolve the SAME profile.
+
+    The spawn forces the child's HOMIE_HOME to ``_active_profile_root()`` and
+    the child re-derives its profile from it. On pre-round-trip-fix builds the
+    default profile handed the child the repo root, which reclassified it as a
+    "custom" profile rooted at a nonexistent ``<repo>/memory`` — collapsing the
+    voice identity prompt to the bare preamble while every status stayed green.
+    Same ask-the-module pattern as ``_check_sidecar``: this asks the installed
+    lifecycle what it would hand the child, then asks personas what that value
+    resolves to, so an old framework build is reported by name.
+
+    Returns ``None`` (check skipped) when the Discord lifecycle is absent —
+    dashboard voice does not spawn through this seam.
+    """
+    import os
+
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import discord_voice_lifecycle
+        from personas import get_active_profile_name
+        from personas.core import get_persona_paths
+
+        parent_profile = get_active_profile_name()
+        spawn_home = discord_voice_lifecycle._active_profile_root()
+
+        saved = os.environ.get("HOMIE_HOME")
+        try:
+            os.environ["HOMIE_HOME"] = str(spawn_home)
+            child_profile = get_active_profile_name()
+            child_memory = get_persona_paths(child_profile)["memory"]
+        finally:
+            if saved is None:
+                os.environ.pop("HOMIE_HOME", None)
+            else:
+                os.environ["HOMIE_HOME"] = saved
+    except Exception:
+        return None  # no Discord lifecycle here; dashboard voice unaffected.
+
+    label = "Voice identity roots (sidecar round-trip)"
+    if child_profile != parent_profile:
+        return {
+            "status": BLOCK,
+            "label": label,
+            "detail": (
+                f"the lifecycle would spawn the sidecar as profile "
+                f"'{child_profile}' but this process is '{parent_profile}' — "
+                "the voice identity prompt will silently collapse to the bare preamble"
+            ),
+            "fix": (
+                "Update the framework to a build with the HOMIE_HOME round-trip "
+                "fix, then restart the orchestration API process (the spawner) — "
+                "restarting the chat bot alone is not enough."
+            ),
+        }
+    if not child_memory.is_dir():
+        return {
+            "status": BLOCK,
+            "label": label,
+            "detail": (
+                f"the sidecar would resolve memory at {child_memory}, which does "
+                "not exist — identity files will read empty"
+            ),
+            "fix": "Fix HOMIE_HOME (or the profile) so the memory dir exists on disk.",
+        }
+    return {
+        "status": OK,
+        "label": label,
+        "detail": f"sidecar round-trips to profile '{child_profile}' with memory at {child_memory}",
+    }
+
+
 def _check_ports() -> list[dict]:
     checks = []
     for label, port in PORTS.items():
@@ -278,7 +416,17 @@ def _check_ports() -> list[dict]:
 
 
 def run() -> list[dict]:
-    return [*_check_auth(), *_check_ports(), _check_discord_token(), _check_sidecar()]
+    checks = [
+        *_check_auth(),
+        _check_identity_include(),
+        *_check_ports(),
+        _check_discord_token(),
+        _check_sidecar(),
+    ]
+    roots = _check_identity_roots()
+    if roots is not None:
+        checks.append(roots)
+    return checks
 
 
 def main() -> int:
