@@ -589,13 +589,30 @@ def _sidecar_python() -> Path:
 
 
 def _active_profile_root() -> Path:
+    """Return the HOMIE_HOME value the sidecar spawn env should carry.
+
+    The returned path is forced into the child's ``HOMIE_HOME`` by
+    ``get_scrubbed_sdk_env``, and the child RE-DERIVES its profile from it
+    (``get_active_profile_name``). For the default profile that value must be
+    ``~/.homie`` — the one path that round-trips back to ``"default"`` (and
+    thus the install-dir ``vault/memory`` paths). The previous value, the
+    repo root, reclassified the child as a ``"custom"`` profile and re-rooted
+    ``config.MEMORY_DIR`` at ``<repo>/memory`` — which does not exist — so
+    ``build_talk_instructions()`` failed open to the bare voice preamble and
+    the live call knew nothing from SOUL/USER/MEMORY.
+    """
     from personas import get_active_profile_name  # noqa: PLC0415
-    from personas.core import get_default_paths  # noqa: PLC0415
+    from personas.core import get_default_homie_root, get_homie_home  # noqa: PLC0415
     from personas.lifecycle import resolve_profile_root  # noqa: PLC0415
 
     active = get_active_profile_name()
     if active == "default":
-        return get_default_paths()["memory"].parent.parent
+        return get_default_homie_root()
+    if active == "custom":
+        # HOMIE_HOME outside ~/.homie (Docker / custom root): hand the child
+        # the SAME root the parent resolved. resolve_profile_root("custom")
+        # would append profiles/custom and re-root the child's paths.
+        return get_homie_home()
     return resolve_profile_root(active)
 
 

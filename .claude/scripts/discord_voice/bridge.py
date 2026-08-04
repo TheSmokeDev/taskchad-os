@@ -605,6 +605,20 @@ class VoiceBridge:
             # This fresh transport covers every re-key up to the snapshot.
             self._healed_gen = gen_at_join
         _log.info("realtime session active (auth=%s)", self.auth_source)
+        # Greppable identity receipt (K3 nit on the HOMIE_HOME round-trip fix):
+        # if the identity prompt ever collapses to the preamble again, this line
+        # says which profile/memory dir the CHILD actually resolved.
+        try:
+            import config  # noqa: PLC0415
+            from personas import get_active_profile_name  # noqa: PLC0415
+
+            _log.info(
+                "identity roots: profile=%s memory_dir=%s",
+                get_active_profile_name(),
+                config.MEMORY_DIR,
+            )
+        except Exception as exc:  # pragma: no cover - diagnostics must not block voice
+            _log.debug("identity-root log skipped: %s", exc)
         await self._mirror_text(f"Joined **#{channel.name}** — talk to me. (auth: {self.auth_source})")
         return self.status()
 

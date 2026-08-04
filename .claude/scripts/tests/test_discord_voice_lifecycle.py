@@ -1270,3 +1270,76 @@ def test_a_broken_directive_check_never_blocks_joining(
     lifecycle._write_state(state)
 
     assert lifecycle.start_session(1, 555)["alreadyJoined"] is True
+
+
+# ─── sidecar profile root — the identity round-trip ────────────────────────
+# get_scrubbed_sdk_env forces the child's HOMIE_HOME to _active_profile_root().
+# The child RE-DERIVES its profile from that value, so for the default profile
+# it must round-trip back to "default" (install-dir vault/memory paths).
+# The pre-fix value (the repo root) reclassified the child as "custom" and
+# re-rooted MEMORY_DIR at <repo>/memory — nonexistent — collapsing the voice
+# identity prompt to the bare preamble ("knows the name, denies everything").
+
+
+def test_active_profile_root_default_roundtrips_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from personas import get_active_profile_name
+    from personas.core import get_default_paths, get_persona_paths
+
+    monkeypatch.delenv("HOMIE_HOME", raising=False)
+    root = lifecycle._active_profile_root()
+
+    assert root == (Path.home() / ".homie").resolve(strict=False)
+
+    # Simulate the child: HOMIE_HOME forced to the spawn value.
+    monkeypatch.setenv("HOMIE_HOME", str(root))
+    child_profile = get_active_profile_name()
+    assert child_profile == "default"
+    # And the child's memory dir is the real install-dir vault, not <repo>/memory.
+    assert (
+        get_persona_paths(child_profile)["memory"]
+        == get_default_paths()["memory"]
+    )
+
+
+def test_repo_root_homie_home_reclassifies_as_custom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Locks the failure mode itself: the OLD spawn value (repo root) makes the
+    child resolve a "custom" profile — proving the round-trip test above
+    guards the real bug, not a tautology."""
+    from personas import get_active_profile_name
+    from personas.core import get_default_paths
+
+    monkeypatch.delenv("HOMIE_HOME", raising=False)
+    old_value = get_default_paths()["memory"].parent.parent
+
+    monkeypatch.setenv("HOMIE_HOME", str(old_value))
+    assert get_active_profile_name() == "custom"
+
+
+def test_active_profile_root_custom_roundtrips_same_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker/custom deployments (HOMIE_HOME outside ~/.homie): the child must
+    receive the SAME root the parent resolved. resolve_profile_root("custom")
+    would append profiles/custom and re-root the child's memory (codex r1)."""
+    from personas import get_active_profile_name
+    from personas.core import get_persona_paths
+
+    custom_root = (tmp_path / "container-homie").resolve()
+    custom_root.mkdir()
+    monkeypatch.setenv("HOMIE_HOME", str(custom_root))
+    assert get_active_profile_name() == "custom"
+    parent_memory = get_persona_paths("custom")["memory"]
+
+    root = lifecycle._active_profile_root()
+    assert root == custom_root
+    assert "profiles" not in root.parts
+
+    # Simulate the child: same HOMIE_HOME -> same profile, same memory dir.
+    monkeypatch.setenv("HOMIE_HOME", str(root))
+    child_profile = get_active_profile_name()
+    assert child_profile == "custom"
+    assert get_persona_paths(child_profile)["memory"] == parent_memory

@@ -151,3 +151,50 @@ def test_start_failure_records_crashed_state(
     assert out["status"] == "crashed"
     assert out["active"] is False
     assert out["lastError"]
+
+
+def test_active_profile_root_default_roundtrips_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same identity round-trip lock as discord_voice_lifecycle: the spawn
+    env's HOMIE_HOME must re-classify as "default" in the child. The repo
+    root (the pre-fix value) reclassifies as "custom" and re-roots
+    MEMORY_DIR at <repo>/memory — nonexistent — collapsing voice identity."""
+    from personas import get_active_profile_name
+    from personas.core import get_default_paths
+
+    monkeypatch.delenv("HOMIE_HOME", raising=False)
+    root = lifecycle._active_profile_root()
+
+    assert root == (Path.home() / ".homie").resolve(strict=False)
+    monkeypatch.setenv("HOMIE_HOME", str(root))
+    assert get_active_profile_name() == "default"
+
+    # Negative lock: the old value classifies as "custom" (the bug).
+    monkeypatch.setenv(
+        "HOMIE_HOME", str(get_default_paths()["memory"].parent.parent)
+    )
+    assert get_active_profile_name() == "custom"
+
+
+def test_active_profile_root_custom_roundtrips_same_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker/custom HOMIE_HOME: the child gets the SAME root, never a
+    profiles/custom re-rooting (codex r1 — mirrors the discord lifecycle)."""
+    from personas import get_active_profile_name
+    from personas.core import get_persona_paths
+
+    custom_root = (tmp_path / "container-homie").resolve()
+    custom_root.mkdir()
+    monkeypatch.setenv("HOMIE_HOME", str(custom_root))
+    assert get_active_profile_name() == "custom"
+    parent_memory = get_persona_paths("custom")["memory"]
+
+    root = lifecycle._active_profile_root()
+    assert root == custom_root
+    assert "profiles" not in root.parts
+
+    monkeypatch.setenv("HOMIE_HOME", str(root))
+    assert get_active_profile_name() == "custom"
+    assert get_persona_paths("custom")["memory"] == parent_memory

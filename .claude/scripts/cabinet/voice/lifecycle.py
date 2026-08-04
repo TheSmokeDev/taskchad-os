@@ -89,13 +89,27 @@ def _start_timeout_s() -> float:
 
 
 def _active_profile_root() -> Path:
+    """Return the HOMIE_HOME value the voice-sidecar spawn env should carry.
+
+    Same contract as ``discord_voice_lifecycle._active_profile_root``: the
+    child re-derives its profile from ``HOMIE_HOME``, so the default profile
+    must hand it ``~/.homie`` (round-trips to ``"default"`` → install-dir
+    ``vault/memory``). The repo root reclassifies the child as ``"custom"``
+    and re-roots ``MEMORY_DIR`` at ``<repo>/memory`` (nonexistent), collapsing
+    identity to the bare preamble.
+    """
     from personas import get_active_profile_name  # noqa: PLC0415
-    from personas.core import get_default_paths  # noqa: PLC0415
+    from personas.core import get_default_homie_root, get_homie_home  # noqa: PLC0415
     from personas.lifecycle import resolve_profile_root  # noqa: PLC0415
 
     active = get_active_profile_name()
     if active == "default":
-        return get_default_paths()["memory"].parent.parent
+        return get_default_homie_root()
+    if active == "custom":
+        # HOMIE_HOME outside ~/.homie (Docker / custom root): hand the child
+        # the SAME root the parent resolved. resolve_profile_root("custom")
+        # would append profiles/custom and re-root the child's paths.
+        return get_homie_home()
     return resolve_profile_root(active)
 
 
