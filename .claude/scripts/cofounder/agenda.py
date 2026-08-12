@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -110,7 +111,43 @@ TASK_TEXT_CAP = 300
 WHY_TEXT_CAP = 200
 SUMMARY_CAP = 600
 
+# Identity/context section caps. Every source is read fail-open and a missing
+# one omits its section ENTIRELY — no header, no placeholder — so the prompt
+# over a bare portfolio stays byte-identical to the pre-T2 shape.
+IDENTITY_SECTION_CAP = 1200
+OPERATOR_MODEL_CAP = 1500
+LIVE_CONTEXT_CAP = 800
+RECENT_SESSIONS_CAP = 1200
+TRACKER_CAP = 600
+
+# Agenda-sized episode digest — the dream cycle's own knobs are far larger.
+EPISODE_LOOKBACK_DAYS = 2
+EPISODE_DIGEST_MAX_FILES = 5
+EPISODE_DIGEST_MAX_CHARS_PER = 300
+EPISODE_DIGEST_MAX_TOTAL_CHARS = 1200
+
+# The cofounder's own SOUL, seeded by cofounder.persona and cabinet-only until
+# now: the scan is his, so he runs it in his own voice instead of a generic
+# "you are a co-founder" opener.
+IDENTITY_SOURCE_FILE = "SOUL.md"
+
+TRACKER_RELPATH = ("PRPs", "active", "TRACKER.md")
+TRACKER_NOW_HEADING = "Now"
+TRACKER_PARENT_HEADING = "Open Items"
+
+GOALS_FILE_NAME = "GOALS.md"
+
 _REPO_PAGE_SECTIONS = ("Identity", "Recent Activity", "Dispatch History")
+
+# Prompt order for the identity/context sections (portfolio and GOALS follow).
+_CONTEXT_SECTIONS = (
+    ("Who you are:", "identity"),
+    ("What you have learned about the operator:", "operator_model"),
+    ("Live context — the operator's working memory right now:", "live_context"),
+    ("Recent sessions — what actually happened in the last two days:",
+     "recent_sessions"),
+    ("Active tracker — what the operator has queued:", "tracker"),
+)
 
 AGENDA_KEYS = ("summary", "items")
 ITEM_KEYS = ("persona", "repo", "task", "why", "priority", "mode")
@@ -119,6 +156,16 @@ ITEM_KEYS = ("persona", "repo", "task", "why", "priority", "mode")
 # no-tools runtime run producing a vault deliverable; code = detached Archon
 # worktree dispatch (repo required).
 ITEM_MODES = frozenset({"draft", "code"})
+
+# The card ships with no buttons (there is no project to steer), so the typed
+# commands ARE the card's affordance — name them or the operator has to
+# remember them. Post-autonomy the affordance inverted: the lines delegate
+# themselves within caps, so the commands to name are the BRAKE and the
+# catch-up, not an approval the autopilot no longer waits for.
+CARD_COMMAND_HINT = (
+    "Self-delegating within caps this morning — /cofounder pause <slug> to "
+    "hold, /cofounder run <n> for anything I skipped."
+)
 
 PROPOSE_ONLY_BANNER = (
     "_PROPOSE-ONLY: nothing below executes without operator approval. "
@@ -327,9 +374,182 @@ def build_portfolio_scan(settings) -> dict[str, Any]:
         "repos": _tracked_repos(),
         "repo_pages": _repo_page_tails(),
         "goals": _goals_text(),
+        "goals_updated": _goals_updated(),
         "projects": _open_projects(settings),
         "personas": _available_personas(),
+        "identity": _identity_text(),
+        "operator_model": _operator_model_text(),
+        "live_context": _live_context_text(),
+        "recent_sessions": _recent_sessions_text(),
+        "tracker": _tracker_now_text(),
     }
+
+
+def _ensure_chat_on_path() -> None:
+    """Put ``.claude/chat`` on ``sys.path`` — the memory-pipeline import
+    pattern (``memory_reflect.py:32-34``) for reaching ``cognition.*`` from a
+    ``.claude/scripts`` module."""
+    import sys
+
+    chat_dir = Path(__file__).resolve().parent.parent.parent / "chat"
+    if str(chat_dir) not in sys.path:
+        sys.path.insert(0, str(chat_dir))
+
+
+def _identity_text() -> str:
+    """The cofounder persona's own SOUL. Fail-open to '' (section omitted)."""
+    try:
+        import repository_memory
+        from personas import core as personas_core
+
+        from cofounder.persona import COFOUNDER_PERSONA_ID
+
+        path = (
+            personas_core.get_persona_paths(COFOUNDER_PERSONA_ID)["memory"]
+            / IDENTITY_SOURCE_FILE
+        )
+        return _cap(
+            repository_memory.read_text_safe(path).strip(), IDENTITY_SECTION_CAP
+        )
+    except Exception:
+        logger.warning("cofounder.agenda: identity read failed", exc_info=True)
+        return ""
+
+
+def _operator_model_text() -> str:
+    """The physical self-model state (Living Self Act 1). Fail-open to ''.
+
+    An empty corpus is an ABSENT source, not a section that says nothing —
+    the renderer's own "no active inferences" line never reaches the prompt.
+    """
+    try:
+        _ensure_chat_on_path()
+
+        import config
+        from cognition.self_model import (
+            build_self_model_state,
+            render_self_model_state_section,
+        )
+
+        state_file = Path(config.INFERENCE_STATE_FILE)
+        if not state_file.is_file():
+            return ""
+        section = render_self_model_state_section(build_self_model_state(state_file))
+        if not any(line.startswith("- ") for line in section.splitlines()):
+            return ""
+        return _cap(section.strip(), OPERATOR_MODEL_CAP)
+    except Exception:
+        logger.warning("cofounder.agenda: self-model read failed", exc_info=True)
+        return ""
+
+
+def _live_context_text() -> str:
+    """WORKING.md through the compact briefing block bootstrap already renders
+    (a second renderer here would be the drift class the identity-payload
+    consolidation exists to prevent). Fail-open to ''."""
+    try:
+        import config
+        import living_memory
+
+        return _cap(
+            living_memory.build_briefing_section(Path(config.MEMORY_DIR)).strip(),
+            LIVE_CONTEXT_CAP,
+        )
+    except Exception:
+        logger.warning("cofounder.agenda: working-memory read failed", exc_info=True)
+        return ""
+
+
+def _recent_sessions_text() -> str:
+    """Open episodes from the last two days at agenda-sized caps. Fail-open."""
+    try:
+        import config
+        import episodes
+
+        paths = episodes.list_open_episodes(
+            Path(config.MEMORY_DIR), days=EPISODE_LOOKBACK_DAYS
+        )
+        if not paths:
+            return ""
+        episode_settings = config.get_episode_settings(
+            dream_max_files=EPISODE_DIGEST_MAX_FILES,
+            dream_max_chars_per=EPISODE_DIGEST_MAX_CHARS_PER,
+            dream_max_total_chars=EPISODE_DIGEST_MAX_TOTAL_CHARS,
+        )
+        return _cap(
+            episodes.render_episodes_digest(
+                paths, settings=episode_settings
+            ).strip(),
+            RECENT_SESSIONS_CAP,
+        )
+    except Exception:
+        logger.warning("cofounder.agenda: episode digest failed", exc_info=True)
+        return ""
+
+
+def _tracker_now_text() -> str:
+    """The tracker's live queue. Fail-open to ''.
+
+    Both shapes resolve: a top-level ``## Now``, or today's ``### Now`` nested
+    under ``## Open Items``.
+    """
+    try:
+        import config
+        import repository_memory
+
+        content = repository_memory.read_text_safe(
+            Path(config.PROJECT_ROOT).joinpath(*TRACKER_RELPATH)
+        )
+        if not content.strip():
+            return ""
+        section = repository_memory.extract_h2_section(content, TRACKER_NOW_HEADING)
+        if not section:
+            section = _h3_section(
+                repository_memory.extract_h2_section(
+                    content, TRACKER_PARENT_HEADING
+                ),
+                TRACKER_NOW_HEADING,
+            )
+        return _cap(section.strip(), TRACKER_CAP)
+    except Exception:
+        logger.warning("cofounder.agenda: tracker read failed", exc_info=True)
+        return ""
+
+
+def _h3_section(content: str, heading: str) -> str:
+    """The body under ``### <heading>...`` up to the next H3 (or the end)."""
+    match = re.search(
+        rf"^### {re.escape(heading)}\b.*?\n(.*?)(?=\n### |\Z)",
+        content,
+        re.DOTALL | re.MULTILINE,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _goals_updated() -> str:
+    """GOALS.md's own frontmatter ``date:`` — the staleness label's source.
+
+    Physical mtime is deliberately NOT the source here: a fresh checkout
+    rewrites it, which would label a two-month-old goals file as updated
+    today. The vault's own claim is the only durable one.
+    """
+    try:
+        import config
+        import repository_memory
+
+        content = repository_memory.read_text_safe(
+            Path(config.MEMORY_DIR) / GOALS_FILE_NAME
+        )
+        if not content.startswith("---"):
+            return ""
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return ""
+        match = re.search(r"^date:\s*(\S+)\s*$", parts[1], re.MULTILINE)
+        return match.group(1) if match else ""
+    except Exception:
+        logger.warning("cofounder.agenda: GOALS date read failed", exc_info=True)
+        return ""
 
 
 def _tracked_repos() -> list[str]:
@@ -407,15 +627,22 @@ def _open_projects(settings) -> list[dict[str, Any]]:
         return []
 
 
-def _available_personas() -> list[dict[str, str]]:
-    """Registered persona profiles: ``{id, name, role}`` (fail-open per one).
+def _available_personas() -> list[dict[str, Any]]:
+    """Delegable persona profiles: ``{id, name, role, repos}`` (fail-open).
 
     The operator's resolution: the cofounder delegates to ANY registered
     persona — the roster IS the registry, never a hardcoded list. A profile
     whose config is unreadable or carries no ``persona:`` section is skipped
     (it cannot be addressed as a delegation target anyway).
+
+    A profile with no ``delegation:`` grant is skipped too: the send-side
+    scope check refuses it fail-closed, so proposing it only burns a line.
+    Each roster entry carries its granted repo slugs for the same reason —
+    the model stops proposing persona x repo pairs the gate will drop. This
+    is a proposal-quality narrowing ONLY; ``delegate._check_persona_scope``
+    stays the authority and re-reads the config live per attempt.
     """
-    found: list[dict[str, str]] = []
+    found: list[dict[str, Any]] = []
     try:
         from personas import core as personas_core
         from personas import services as personas_services
@@ -437,6 +664,14 @@ def _available_personas() -> list[dict[str, str]]:
             persona = cfg.get("persona")
             if not isinstance(persona, dict):
                 continue
+            delegation = cfg.get("delegation")
+            if not isinstance(delegation, dict):
+                logger.debug(
+                    "cofounder.agenda: %s has no delegation grant; off the roster",
+                    entry.name,
+                )
+                continue
+            granted = delegation.get("repos")
             found.append(
                 {
                     "id": entry.name,
@@ -446,6 +681,11 @@ def _available_personas() -> list[dict[str, str]]:
                         or entry.name
                     ),
                     "role": str(persona.get("role") or ""),
+                    "repos": (
+                        [r for r in granted if isinstance(r, str) and r.strip()]
+                        if isinstance(granted, list)
+                        else []
+                    ),
                 }
             )
     except Exception:
@@ -474,8 +714,9 @@ def build_agenda_prompt(scan: dict[str, Any], now: datetime, max_items: int) -> 
     lines = [
         "You are the co-founder of this operator's company doing the morning",
         "portfolio scan. Propose today's agenda: which persona (department",
-        "head) should work on which repo, on what task, and why. You only",
-        "PROPOSE — the operator approves before anything executes. Reply with",
+        "head) should work on which repo, on what task, and why. Your lines",
+        "will be autonomously delegated within caps — propose only work you",
+        "would stake compute on: fewer, concrete, checkable. Reply with",
         "ONE JSON object only. No prose, no code fences, nothing before or",
         "after the object.",
         "",
@@ -488,6 +729,8 @@ def build_agenda_prompt(scan: dict[str, Any], now: datetime, max_items: int) -> 
         "- persona must be one of the registered persona ids listed below.",
         "- repo must be one of the tracked repo slugs below, or null for a",
         "  non-repo task (research, outreach, content).",
+        "- pair a persona ONLY with a repo its roster line grants; anything",
+        "  else is refused at send time. Use repo null otherwise.",
         "- task is one concrete, checkable assignment. why is one sentence.",
         "- priority: 1 = today-critical, 2 = normal, 3 = nice-to-have.",
         '- mode: "draft" for research/checklists/briefs (the default);',
@@ -497,12 +740,23 @@ def build_agenda_prompt(scan: dict[str, Any], now: datetime, max_items: int) -> 
         "  or in flight.",
         "",
         f"Today: {now.date().isoformat()} ({now.strftime('%A')})",
-        "",
-        "Registered personas (id — name — role):",
     ]
+
+    for label, key in _CONTEXT_SECTIONS:
+        body = (scan.get(key) or "").strip()
+        if body:
+            lines += ["", label, body]
+
+    lines += ["", "Delegable personas (id — name — role — granted repos):"]
     for p in scan["personas"]:
         role = f" — {p['role']}" if p["role"] else ""
-        lines.append(f"  {p['id']} — {p['name']}{role}")
+        granted = p.get("repos") or []
+        repos_text = (
+            f" — repos: {', '.join(granted)}"
+            if granted
+            else " — repos: none (non-repo tasks only)"
+        )
+        lines.append(f"  {p['id']} — {p['name']}{role}{repos_text}")
     if not scan["personas"]:
         lines.append("  (none registered)")
 
@@ -528,7 +782,17 @@ def build_agenda_prompt(scan: dict[str, Any], now: datetime, max_items: int) -> 
             )
 
     if scan["goals"]:
-        lines += ["", "Operator goals:", scan["goals"]]
+        # GOALS.md drifts (it is refreshed by weekly synthesis, not by the
+        # day): it goes LAST and says how old it is, so the live context above
+        # wins a conflict instead of a stale quarterly target.
+        updated = (scan.get("goals_updated") or "").strip()
+        label = (
+            f"Operator goals (last updated {updated} — weight the current "
+            "context above these when they conflict):"
+            if updated
+            else "Operator goals:"
+        )
+        lines += ["", label, scan["goals"]]
 
     return "\n".join(lines)
 
@@ -845,6 +1109,7 @@ def _send_card(
                 f"{number}. [P{item['priority']}] {item['persona']}{target}: "
                 f"{item['task']}"
             )
+        lines += ["", CARD_COMMAND_HINT]
         pseudo = SimpleNamespace(slug=f"agenda-{today}", path=None)
         notify(
             pseudo,

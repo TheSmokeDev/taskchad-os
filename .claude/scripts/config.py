@@ -4202,6 +4202,95 @@ def get_cofounder_delegation_settings(
     )
 
 
+class CofounderAutopilotSettings(NamedTuple):
+    """Effective co-founder autopilot budgets (call-time resolved)."""
+
+    max_priority: int | None
+    max_per_day: int
+    code_max_per_day: int | None
+
+
+def get_cofounder_autopilot_settings(
+    max_priority: int | None = None,
+    max_per_day: int | None = None,
+    code_max_per_day: int | None = None,
+) -> CofounderAutopilotSettings:
+    """Resolve the autonomous-delegation budgets at CALL TIME (Rule 1).
+
+    The autopilot pass (``cofounder/autopilot.py``) is the code path
+    ``COFOUNDER_DELEGATION_ENABLED`` has always gated: it selects today's
+    still-proposed agenda lines and sends each through the SAME transport
+    ``/cofounder run <n>`` uses. These knobs are RETREAT LEVERS — they ship
+    wide open so autonomy means autonomy, and the real containment stays
+    where it already is (Rule-4 scope, the daily/in-flight caps, the kill
+    switch, worktick's per-tick cap).
+
+    Knobs:
+        COFOUNDER_AUTO_MAX_PRIORITY (unset) — highest priority NUMBER the
+            autopilot may delegate (1 = most urgent). Unset means no
+            ceiling: P3 lines auto-delegate too.
+        COFOUNDER_AUTO_MAX_PER_DAY (unset) — autopilot-sent lines per local
+            day. Unset FOLLOWS ``COFOUNDER_MAX_ASSIGNMENTS_PER_DAY`` (the
+            global cap the transport enforces anyway), so raising the
+            global cap raises autonomy with it.
+        COFOUNDER_AUTO_CODE_MAX_PER_DAY (unset) — autopilot-sent ``code``
+            mode (Archon dispatch) lines per local day. Unset means
+            unlimited WITHIN the global cap.
+    """
+    if max_priority is None:
+        raw_priority = os.getenv("COFOUNDER_AUTO_MAX_PRIORITY", "").strip()
+        max_priority = int(raw_priority) if raw_priority else None
+    if max_per_day is None:
+        raw_per_day = os.getenv("COFOUNDER_AUTO_MAX_PER_DAY", "").strip()
+        max_per_day = (
+            int(raw_per_day)
+            if raw_per_day
+            else get_cofounder_delegation_settings().max_assignments_per_day
+        )
+    if code_max_per_day is None:
+        raw_code = os.getenv("COFOUNDER_AUTO_CODE_MAX_PER_DAY", "").strip()
+        code_max_per_day = int(raw_code) if raw_code else None
+    return CofounderAutopilotSettings(
+        max_priority=max_priority,
+        max_per_day=max_per_day,
+        code_max_per_day=code_max_per_day,
+    )
+
+
+class CofounderCallbackSettings(NamedTuple):
+    """Effective co-founder conversational-callback knobs (call-time)."""
+
+    enabled: bool
+
+
+def get_cofounder_callback_settings(
+    enabled: bool | None = None,
+) -> CofounderCallbackSettings:
+    """Resolve the co-founder callback knob at CALL TIME (Rule 1).
+
+    The callback (``cognition/cofounder_callback.py``) is how autonomous work
+    reaches the operator's own conversation: on an interactive turn it renders
+    the outcomes a durable watermark says he has not seen yet. It is a READ of
+    physical ledger/agenda state plus a prompt suffix — it never delegates,
+    never mutates a project, and never maps conversation onto an action.
+
+    Ships ON, because a co-founder that works silently and never reports is
+    the starvation this whole slice exists to fix. Turning it OFF leaves
+    autonomy running and mutes only the conversational report (the Telegram
+    cards and ``/cofounder brief`` still surface it).
+
+    Knobs:
+        COFOUNDER_CALLBACK_ENABLED ("true") — set false to mute the
+            conversational callback. ``HOMIE_KILLSWITCH_COFOUNDER`` mutes it
+            too, along with the rest of the slice.
+    """
+    if enabled is None:
+        enabled = (
+            os.getenv("COFOUNDER_CALLBACK_ENABLED", "true").strip().lower() == "true"
+        )
+    return CofounderCallbackSettings(enabled=enabled)
+
+
 class CofounderWorktickSettings(NamedTuple):
     """Effective co-founder work-loop knobs (call-time resolved)."""
 

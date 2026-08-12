@@ -398,7 +398,7 @@ ENGINE_TIMEOUT_SECONDS: float | None = None
 PROGRESS_UPDATE_SECONDS = 8.0
 PROGRESS_RECOVERY_RETRY_SECONDS = 2.0
 PROGRESS_IO_TIMEOUT_SECONDS = 2.0
-PREFETCH_ONLY_INTENTS = {"browserops"}
+PREFETCH_ONLY_INTENTS = {"browserops", "cofounder"}
 VAULT_COMMAND_NAMES = {"vault", "vaults", "vault-ops"}
 VAULT_NAME_ALIASES = {
     "second": "thehomie",

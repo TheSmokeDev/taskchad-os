@@ -721,6 +721,59 @@ class ConversationEngine:
             if trace_decisions is not None:
                 trace_decisions["crypto_plays_callback"] = decision
 
+    async def _maybe_cofounder_callback(
+        self,
+        message: IncomingMessage,
+        *,
+        trace_decisions: dict[str, Any] | None = None,
+    ) -> str:
+        """Un-surfaced co-founder outcomes for this turn (autonomy #414).
+
+        The same gate as its siblings before any state touch: PIV and
+        non-interactive traffic never read the ledger and never advance the
+        watermark. The builder owns eligibility and dedup (a durable watermark
+        it advances on build); the engine only transports an accepted private
+        suffix, inside ``to_thread`` so the ledger/agenda/state file reads
+        cannot wedge the event loop. Whole-body fail-open, with
+        ``trace_decisions["cofounder_callback"]`` written on EVERY turn.
+
+        Deliberately NOT coupled to the #138 session-brief commit token: this
+        surface owns its own watermark, so a brief and a callback can name the
+        same overnight outcome. That overlap is accepted — losing an outcome
+        entirely is the failure that matters.
+        """
+
+        decision: dict[str, Any] = {
+            "fired": False,
+            "reason": "error",
+            "delegations": 0,
+            "completions": 0,
+            "blockers": 0,
+        }
+        try:
+            if getattr(message, "is_piv", False):
+                decision["reason"] = "is_piv"
+                return ""
+            if getattr(message, "source", None) != "interactive":
+                decision["reason"] = "non_interactive"
+                return ""
+
+            from cognition import cofounder_callback as _cofounder_callback
+
+            line, decision = await asyncio.to_thread(
+                _cofounder_callback.build_cofounder_callback
+            )
+            return line
+        except Exception as exc:
+            print(
+                f"[CoFounder] callback non-blocking failure: {exc!r}",
+                flush=True,
+            )
+            return ""
+        finally:
+            if trace_decisions is not None:
+                trace_decisions["cofounder_callback"] = decision
+
     def reset_shots_callback_for_session(
         self, platform_str: str, channel_id: str, thread_id: str | None
     ) -> None:
@@ -2098,8 +2151,8 @@ class ConversationEngine:
         # bet, no challenge — the engine seam enforces it before the region is
         # ever appended). message.text is never mutated; history purity holds.
         # Ordering: monologue -> challenge (born from the monologue) ->
-        # called-shots callback -> crypto-play receipt -> session brief LAST
-        # for recency.
+        # called-shots callback -> crypto-play receipt -> co-founder callback
+        # -> session brief LAST for recency.
         if challenge_directive_text.strip():
             prompt_text = (
                 prompt_text
@@ -2125,6 +2178,17 @@ class ConversationEngine:
         )
         if crypto_callback_text:
             prompt_text = prompt_text + "\n\n" + crypto_callback_text
+        # Co-founder autonomy T6 (#414): outcomes the autopilot produced while
+        # the operator was not asking ride the same private suffix, deduped by
+        # this surface's OWN durable watermark (never the brief's state). The
+        # command echo is the only mutation path — the callback proposes no
+        # action of its own. History still sees the bare turn.
+        cofounder_callback_text = await self._maybe_cofounder_callback(
+            message,
+            trace_decisions=_trace_decisions,
+        )
+        if cofounder_callback_text:
+            prompt_text = prompt_text + "\n\n" + cofounder_callback_text
         # Living Mind Act 4: the session-opening brief rides the SAME turn
         # prompt (stdin on every lane — no win32 argv cap, no region budget),
         # LAST so the open-with-the-brief instruction holds the recency

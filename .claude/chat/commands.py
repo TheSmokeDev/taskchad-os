@@ -465,6 +465,14 @@ CORE_INTENTS: list[tuple[list[str], str, bool]] = [
     (["debate", "discuss this with the team", "open debate"], "discuss", False),
     (["team tick", "team scheduler", "run team scheduler"], "teamtick", False),
     (["team room", "growth boardroom", "boardroom workflow"], "teamroom", False),
+    # Co-founder portfolio — a pure READ (agenda statuses, in-flight counts,
+    # last-24h outcomes), so unlike the cabinet intents above it IS included in
+    # broad queries. The intent path dispatches with args="" (router.py), which
+    # resolves to `/cofounder brief`; run/steer/pause/resume/approve mutate and
+    # stay slash-only. Prefetch-only (router.PREFETCH_ONLY_INTENTS) so the data
+    # reaches the engine as context instead of auto-replying raw.
+    (["what are we building", "project status", "portfolio",
+      "what's the cofounder doing", "whats the cofounder doing"], "cofounder", True),
 ]
 
 

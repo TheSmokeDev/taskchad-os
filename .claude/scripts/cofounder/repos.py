@@ -17,6 +17,7 @@ repo resolution with no new catch logic. Resolution never crashes a pass.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,13 @@ _COL_DEFAULT_BRANCH = 3
 _COL_LOCAL_PATH = 4
 _MIN_COLUMNS = 5
 
+# A vault autolink sweep rewrites plain cell text into wikilinks
+# (``thehomie`` -> ``[[thehomie]]``, ``C:\r\YourProduct`` ->
+# ``C:\r\[[YourProduct]]``), which silently broke every slug match and path
+# resolution for a month. Normalizing here canonicalizes the REPRESENTATION
+# at the one parse boundary — no consumer downstream has to know.
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]|]*?)(?:\\?\|([^\[\]|]*?))?\]\]")
+
 
 class RepoResolutionError(ProjectParseError):
     """A repo slug cannot be resolved through REPOSITORIES.md."""
@@ -49,11 +57,23 @@ class RepoResolution:
     greenfield: bool = False
 
 
+def _strip_wikilinks(text: str) -> str:
+    """``[[target]]`` / ``[[target|alias]]`` -> the text the vault displays."""
+    return _WIKILINK_RE.sub(
+        lambda m: (m.group(2) if m.group(2) is not None else m.group(1)).strip(), text
+    )
+
+
 def _table_rows(section: str) -> list[list[str]]:
-    """Markdown table rows as stripped cell lists, header/separator dropped."""
+    """Markdown table rows as stripped cell lists, header/separator dropped.
+
+    Wikilinks are stripped from the whole LINE before the column split: an
+    aliased link carries the column separator inside itself, so a per-cell
+    strip would run after the split had already shifted every column.
+    """
     rows: list[list[str]] = []
     for line in section.splitlines():
-        line = line.strip()
+        line = _strip_wikilinks(line).strip()
         if not line.startswith("|"):
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]

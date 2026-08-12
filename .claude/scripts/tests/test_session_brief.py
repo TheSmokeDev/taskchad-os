@@ -182,6 +182,71 @@ def _ledger(tmp_path: Path, rows: list[str]) -> Path:
     return ledger
 
 
+def _cofounder_ledger(tmp_path: Path, rows: list[dict] | None = None) -> Path:
+    path = tmp_path / "cofounder_delegation.jsonl"
+    lines = [json.dumps(row) for row in (rows or [])]
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return path
+
+
+def _delegation_row(
+    *,
+    outcome: str = "sent",
+    timestamp: str | None = None,
+    line: int = 2,
+    persona: str = "marketing",
+    approved_by: str | None = "cofounder-autopilot",
+    detail: str = "Draft the lead-delivery acceptance checklist",
+) -> dict:
+    return {
+        "timestamp": timestamp or _utc_iso_for_local(datetime(2026, 6, 12, 3, 15)),
+        "local_date": "2026-06-12",
+        "integration": "cofounder",
+        "action": "delegate",
+        "persona": persona,
+        "line": line,
+        "outcome": outcome,
+        "detail": detail,
+        "convoy_id": 21,
+        "message_id": 701,
+        "approved_by": approved_by,
+    }
+
+
+def _agendas(tmp_path: Path, agendas: dict[str, dict] | None = None) -> Path:
+    agenda_dir = tmp_path / "cofounder" / "agendas"
+    agenda_dir.mkdir(parents=True, exist_ok=True)
+    for day, payload in (agendas or {}).items():
+        (agenda_dir / f"AGENDA-{day}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+    return agenda_dir
+
+
+def _agenda_item(
+    *,
+    n: int = 2,
+    status: str = "done",
+    persona: str = "seo_geo",
+    reported_at: str | None = None,
+    result_summary: str = "deliverable written: GSC indexing plan",
+    task: str = "Prepare a GSC/indexing submission plan",
+) -> dict:
+    item = {
+        "n": n,
+        "persona": persona,
+        "repo": "YourProduct",
+        "task": task,
+        "priority": 1,
+        "mode": "draft",
+        "status": status,
+        "result_summary": result_summary,
+    }
+    if reported_at is not None:
+        item["reported_at"] = reported_at
+    return item
+
+
 def _build(
     tmp_path: Path,
     vault: Path,
@@ -189,16 +254,24 @@ def _build(
     last_activity: datetime | None = LAST_ACTIVITY,
     now: datetime = NOW,
     ledger_file: Path | None = None,
+    delegation_ledger_file: Path | None = None,
+    agenda_dir: Path | None = None,
     settings=None,
 ) -> SessionOpeningBrief:
     if ledger_file is None:
         ledger_file = _ledger(tmp_path, [])
+    if delegation_ledger_file is None:
+        delegation_ledger_file = _cofounder_ledger(tmp_path)
+    if agenda_dir is None:
+        agenda_dir = _agendas(tmp_path)
     return build_session_opening_brief(
         vault,
         last_activity=last_activity,
         now=now,
         settings=settings,
         ledger_file=ledger_file,
+        delegation_ledger_file=delegation_ledger_file,
+        agenda_dir=agenda_dir,
     )
 
 
@@ -576,6 +649,8 @@ class TestGateBoundary:
             last_activity=LAST_ACTIVITY,
             now=NOW,
             ledger_file=tmp_path / "no-ledger.jsonl",
+            delegation_ledger_file=tmp_path / "no-delegations.jsonl",
+            agenda_dir=tmp_path / "no-agendas",
         )
         assert brief.suppressed_reason == "disabled"
         assert brief.prompt_block == ""
@@ -879,6 +954,464 @@ class TestContentContract:
 
 
 # =============================================================================
+# Category 14 — co-founder outcomes as a COUNTED source (#411).
+#
+# Two physical reads, one counted group: the append-only delegation ledger
+# (`outcome=sent`) and terminal agenda-JSON flips (`reported_at`). Overnight
+# outcomes ALONE must be able to wake the brief; still-proposed lines are
+# orientation and must not.
+# =============================================================================
+
+FRESH_SENT_AT = datetime(2026, 6, 12, 3, 15)
+FRESH_FLIP_AT = datetime(2026, 6, 12, 5, 0)
+
+
+class TestCofounderCountedSource:
+    def test_overnight_self_delegation_alone_fires(self, tmp_path, monkeypatch):
+        """THE acceptance path: nothing else fresh in the vault, yet the
+        operator still wakes up to a brief."""
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        ledger = _cofounder_ledger(tmp_path, [_delegation_row()])
+        brief = _build(tmp_path, vault, delegation_ledger_file=ledger)
+        assert brief.fired is True
+        assert brief.fresh_items == 1
+        assert "## What changed while away" in brief.prompt_block
+        assert (
+            "- cofounder: delegated line 2 to marketing (self-assigned): "
+            "Draft the lead-delivery acceptance checklist" in brief.prompt_block
+        )
+
+    def test_human_approver_renders_by_name(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        ledger = _cofounder_ledger(
+            tmp_path, [_delegation_row(approved_by="operator-chat-confirm")]
+        )
+        brief = _build(tmp_path, vault, delegation_ledger_file=ledger)
+        assert brief.fired is True
+        assert "(operator-chat-confirm)" in brief.prompt_block
+        assert "self-assigned" not in brief.prompt_block
+
+    def test_blank_approver_drops_the_parenthetical(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        ledger = _cofounder_ledger(tmp_path, [_delegation_row(approved_by=None)])
+        brief = _build(tmp_path, vault, delegation_ledger_file=ledger)
+        assert brief.fired is True
+        assert "- cofounder: delegated line 2 to marketing: " in brief.prompt_block
+        assert "()" not in brief.prompt_block
+
+    def test_only_sent_outcomes_count(self, tmp_path, monkeypatch):
+        """The ledger records every attempt; only an actual SEND is a change."""
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        ledger = _cofounder_ledger(
+            tmp_path,
+            [
+                _delegation_row(outcome=outcome, detail=f"outcome {outcome}")
+                for outcome in ("worktick-done", "report-done", "refused", "error")
+            ],
+        )
+        brief = _build(tmp_path, vault, delegation_ledger_file=ledger)
+        assert brief.fired is False
+        assert brief.suppressed_reason == "no_fresh_items"
+        assert brief.fresh_items == 0
+
+    def test_sent_freshness_is_strict_after_the_boundary(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        stale = _cofounder_ledger(
+            tmp_path,
+            [
+                _delegation_row(
+                    timestamp=_utc_iso_for_local(LAST_ACTIVITY - timedelta(seconds=1)),
+                    detail="one second too early",
+                ),
+                _delegation_row(
+                    timestamp=_utc_iso_for_local(LAST_ACTIVITY),
+                    detail="exactly the boundary",
+                ),
+            ],
+        )
+        assert _build(tmp_path, vault, delegation_ledger_file=stale).fired is False
+
+        fresh = _cofounder_ledger(
+            tmp_path,
+            [
+                _delegation_row(
+                    timestamp=_utc_iso_for_local(LAST_ACTIVITY + timedelta(seconds=1)),
+                    detail="one second after the boundary",
+                )
+            ],
+        )
+        brief = _build(tmp_path, vault, delegation_ledger_file=fresh)
+        assert brief.fired is True
+        assert "one second after the boundary" in brief.prompt_block
+
+    def test_missing_ledger_contributes_nothing(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        brief = _build(
+            tmp_path, vault, delegation_ledger_file=tmp_path / "never-written.jsonl"
+        )
+        assert brief.fired is False
+        assert brief.fresh_items == 0
+
+    def test_malformed_ledger_lines_skipped(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        path = tmp_path / "cofounder_delegation.jsonl"
+        path.write_text(
+            "\n".join(
+                [
+                    "not json at all",
+                    "{truncated",
+                    "[]",
+                    '"a bare string"',
+                    json.dumps(_delegation_row(detail="the one good row")),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        brief = _build(tmp_path, vault, delegation_ledger_file=path)
+        assert brief.fired is True
+        assert brief.fresh_items == 1
+        assert "the one good row" in brief.prompt_block
+
+    def test_ledger_as_directory_fails_open_other_sources_render(
+        self, tmp_path, monkeypatch
+    ):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(
+            tmp_path, observations="- [2026-06-12] [calendar] busy day: 5 events"
+        )
+        bad = tmp_path / "delegations-as-dir.jsonl"
+        bad.mkdir()
+        brief = _build(tmp_path, vault, delegation_ledger_file=bad)
+        assert brief.fired is True
+        assert "busy day: 5 events" in brief.prompt_block
+        assert "cofounder:" not in brief.prompt_block
+
+    def test_agenda_completion_alone_fires(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        agenda_dir = _agendas(
+            tmp_path,
+            {
+                "2026-06-12": {
+                    "date": "2026-06-12",
+                    "items": [
+                        _agenda_item(
+                            reported_at=_utc_iso_for_local(FRESH_FLIP_AT),
+                            result_summary="deliverable written: GSC indexing plan",
+                        )
+                    ],
+                }
+            },
+        )
+        brief = _build(tmp_path, vault, agenda_dir=agenda_dir)
+        assert brief.fired is True
+        assert brief.fresh_items == 1
+        assert (
+            "- cofounder: line 2 (seo_geo) done: deliverable written: GSC "
+            "indexing plan" in brief.prompt_block
+        )
+
+    def test_failed_flip_counts_too(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        agenda_dir = _agendas(
+            tmp_path,
+            {
+                "2026-06-12": {
+                    "items": [
+                        _agenda_item(
+                            status="failed",
+                            reported_at=_utc_iso_for_local(FRESH_FLIP_AT),
+                            result_summary="archon run 88 failed",
+                        )
+                    ]
+                }
+            },
+        )
+        brief = _build(tmp_path, vault, agenda_dir=agenda_dir)
+        assert brief.fired is True
+        assert "- cofounder: line 2 (seo_geo) failed: archon run 88 failed" in (
+            brief.prompt_block
+        )
+
+    def test_non_terminal_statuses_never_count(self, tmp_path, monkeypatch):
+        """Today's proposed/delegated/dispatched lines are ORIENTATION — they
+        belong to the passive portfolio region, not the counted brief."""
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        agenda_dir = _agendas(
+            tmp_path,
+            {
+                "2026-06-12": {
+                    "items": [
+                        _agenda_item(
+                            n=i,
+                            status=status,
+                            reported_at=_utc_iso_for_local(FRESH_FLIP_AT),
+                            result_summary=f"status {status}",
+                        )
+                        for i, status in enumerate(
+                            ("proposed", "delegated", "dispatched"), start=1
+                        )
+                    ]
+                }
+            },
+        )
+        brief = _build(tmp_path, vault, agenda_dir=agenda_dir)
+        assert brief.fired is False
+        assert brief.fresh_items == 0
+
+    def test_completion_without_reported_at_skipped(self, tmp_path, monkeypatch):
+        """No stamp = no provable flip instant; a legacy row must not claim
+        to be overnight news."""
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        agenda_dir = _agendas(
+            tmp_path,
+            {"2026-06-12": {"items": [_agenda_item(reported_at=None)]}},
+        )
+        brief = _build(tmp_path, vault, agenda_dir=agenda_dir)
+        assert brief.fired is False
+        assert brief.fresh_items == 0
+
+    def test_completion_freshness_strict_and_timezone_normalized(
+        self, tmp_path, monkeypatch
+    ):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        stale_dir = _agendas(
+            tmp_path,
+            {
+                "2026-06-11": {
+                    "items": [
+                        _agenda_item(
+                            reported_at=_utc_iso_for_local(LAST_ACTIVITY),
+                            result_summary="exactly the boundary",
+                        )
+                    ]
+                }
+            },
+        )
+        assert _build(tmp_path, vault, agenda_dir=stale_dir).fired is False
+
+        # Naive-local stamp (report.py writes local time) one hour after.
+        naive_dir = _agendas(
+            tmp_path,
+            {
+                "2026-06-12": {
+                    "items": [
+                        _agenda_item(
+                            reported_at=(
+                                LAST_ACTIVITY + timedelta(hours=1)
+                            ).isoformat(timespec="seconds"),
+                            result_summary="naive local stamp",
+                        )
+                    ]
+                }
+            },
+        )
+        brief = _build(tmp_path, vault, agenda_dir=naive_dir)
+        assert brief.fired is True
+        assert "naive local stamp" in brief.prompt_block
+
+    def test_malformed_agenda_json_skipped_sibling_survives(
+        self, tmp_path, monkeypatch
+    ):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        agenda_dir = _agendas(
+            tmp_path,
+            {
+                "2026-06-12": {
+                    "items": [
+                        _agenda_item(
+                            reported_at=_utc_iso_for_local(FRESH_FLIP_AT),
+                            result_summary="the readable agenda",
+                        )
+                    ]
+                }
+            },
+        )
+        (agenda_dir / "AGENDA-2026-06-13.json").write_text(
+            "{ not json", encoding="utf-8"
+        )
+        (agenda_dir / "AGENDA-2026-06-14.json").write_text("[]", encoding="utf-8")
+        brief = _build(tmp_path, vault, agenda_dir=agenda_dir)
+        assert brief.fired is True
+        assert brief.fresh_items == 1
+        assert "the readable agenda" in brief.prompt_block
+
+    def test_missing_agenda_dir_contributes_nothing(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        brief = _build(tmp_path, vault, agenda_dir=tmp_path / "no-such-agendas")
+        assert brief.fired is False
+        assert brief.fresh_items == 0
+
+    def test_agenda_scan_bounded_to_newest_files(self, tmp_path, monkeypatch):
+        """Only report.py's poll window can still flip a line; older agendas
+        are not re-read on every brief."""
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        days = [f"2026-06-{day:02d}" for day in range(5, 13)]  # 8 files
+        agenda_dir = _agendas(
+            tmp_path,
+            {
+                day: {
+                    "items": [
+                        _agenda_item(
+                            reported_at=_utc_iso_for_local(FRESH_FLIP_AT),
+                            result_summary=f"flip from {day}",
+                        )
+                    ]
+                }
+                for day in days
+            },
+        )
+        brief = _build(tmp_path, vault, agenda_dir=agenda_dir)
+        assert brief.fired is True
+        assert brief.fresh_items == 7  # newest 7 of 8 scanned
+        assert "flip from 2026-06-05" not in brief.prompt_block
+
+    def test_both_sources_combine_newest_first(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        ledger = _cofounder_ledger(
+            tmp_path,
+            [
+                _delegation_row(
+                    timestamp=_utc_iso_for_local(FRESH_SENT_AT),
+                    detail="the 03:15 delegation",
+                )
+            ],
+        )
+        agenda_dir = _agendas(
+            tmp_path,
+            {
+                "2026-06-12": {
+                    "items": [
+                        _agenda_item(
+                            reported_at=_utc_iso_for_local(FRESH_FLIP_AT),
+                            result_summary="the 05:00 completion",
+                        )
+                    ]
+                }
+            },
+        )
+        brief = _build(
+            tmp_path, vault, delegation_ledger_file=ledger, agenda_dir=agenda_dir
+        )
+        assert brief.fired is True
+        assert brief.fresh_items == 2
+        block = brief.prompt_block
+        assert block.index("the 05:00 completion") < block.index("the 03:15 delegation")
+
+    def test_cap_applies_to_the_combined_group(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        monkeypatch.setenv("SESSION_BRIEF_MAX_PER_SECTION", "3")
+        vault = _vault(tmp_path)
+        ledger = _cofounder_ledger(
+            tmp_path,
+            [
+                _delegation_row(
+                    line=i,
+                    timestamp=_utc_iso_for_local(
+                        FRESH_SENT_AT + timedelta(minutes=i)
+                    ),
+                    detail=f"delegation number {i}",
+                )
+                for i in range(1, 6)
+            ],
+        )
+        brief = _build(tmp_path, vault, delegation_ledger_file=ledger)
+        assert brief.fired is True
+        assert brief.fresh_items == 5  # counted in full
+        for i in (5, 4, 3):
+            assert f"delegation number {i}" in brief.prompt_block
+        for i in (2, 1):  # cap 3 — only the newest three render
+            assert f"delegation number {i}" not in brief.prompt_block
+
+    def test_detail_truncated_at_a_word_boundary(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        ledger = _cofounder_ledger(
+            tmp_path, [_delegation_row(detail="wordy " * 40)]
+        )
+        brief = _build(tmp_path, vault, delegation_ledger_file=ledger)
+        assert brief.fired is True
+        rendered = [
+            line
+            for line in brief.prompt_block.splitlines()
+            if line.startswith("- cofounder:")
+        ]
+        assert len(rendered) == 1
+        detail = rendered[0].rsplit(": ", 1)[1]
+        assert len(detail) <= 80
+        assert detail.endswith("wordy")
+
+    def test_stale_cofounder_state_stays_silent(self, tmp_path, monkeypatch):
+        """The boredom contract holds: yesterday's finished work is not news."""
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        ledger = _cofounder_ledger(
+            tmp_path,
+            [
+                _delegation_row(
+                    timestamp=_utc_iso_for_local(datetime(2026, 6, 10, 9, 0)),
+                    detail="yesterday's delegation",
+                )
+            ],
+        )
+        agenda_dir = _agendas(
+            tmp_path,
+            {
+                "2026-06-10": {
+                    "items": [
+                        _agenda_item(
+                            reported_at=_utc_iso_for_local(
+                                datetime(2026, 6, 10, 17, 0)
+                            ),
+                            result_summary="yesterday's completion",
+                        )
+                    ]
+                }
+            },
+        )
+        brief = _build(
+            tmp_path, vault, delegation_ledger_file=ledger, agenda_dir=agenda_dir
+        )
+        assert brief.fired is False
+        assert brief.suppressed_reason == "no_fresh_items"
+        assert brief.prompt_block == ""
+
+    def test_group_reserves_one_item_under_char_pressure(self, tmp_path, monkeypatch):
+        _sweep_brief_env(monkeypatch)
+        monkeypatch.setenv("SESSION_BRIEF_MAX_CHARS", "10")  # deliberately tiny
+        vault = _vault(
+            tmp_path,
+            threads="- [2026-06-10] manual context thread",
+            observations="- [2026-06-12] [calendar] busy day: 5 events",
+        )
+        ledger = _cofounder_ledger(
+            tmp_path, [_delegation_row(detail="reserved cofounder line")]
+        )
+        brief = _build(tmp_path, vault, delegation_ledger_file=ledger)
+        assert brief.fired is True
+        block = brief.prompt_block
+        assert "busy day: 5 events" in block
+        assert "reserved cofounder line" in block
+        assert "manual context thread" not in block  # context drops first
+
+
+# =============================================================================
 # Category 10 (unit) — brief-owed marker IO + note_router_activity seam
 # =============================================================================
 
@@ -1036,7 +1569,12 @@ class TestPartialFailureSeams:
         bad_ledger = tmp_path / "ledger-as-dir.jsonl"
         bad_ledger.mkdir()
         brief = build_session_opening_brief(
-            vault, last_activity=LAST_ACTIVITY, now=NOW, ledger_file=bad_ledger,
+            vault,
+            last_activity=LAST_ACTIVITY,
+            now=NOW,
+            ledger_file=bad_ledger,
+            delegation_ledger_file=_cofounder_ledger(tmp_path),
+            agenda_dir=_agendas(tmp_path),
         )
         assert brief.fired is True
         assert "busy day: 5 events" in brief.prompt_block

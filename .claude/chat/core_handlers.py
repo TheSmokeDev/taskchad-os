@@ -7756,6 +7756,7 @@ def _cofounder_usage_text() -> str:
         "`/cofounder pause <slug>` — park a project as awaiting-human\n"
         "`/cofounder resume <slug>` — restore a paused project's prior status\n"
         "`/cofounder approve <slug>` — human verdict: flip a park to done + archive\n"
+        "`/cofounder brief` — read-only portfolio brief (agenda + in-flight + last 24h)\n"
         "`/cofounder agenda` — today's proposed agenda with delegation status\n"
         "`/cofounder run <n>` — approve agenda line n: delegate it to its persona"
     )
@@ -7811,6 +7812,12 @@ async def handle_cofounder(
     from cofounder import status as status_mod
 
     args = (args or "").strip()
+    # The natural-language intent path dispatches this command with args=""
+    # and collect_only=True (router.py) — a request for DATA, not for the
+    # menu, and structurally unable to name a subcommand. It resolves to the
+    # read-only brief; every mutating subcommand stays slash-only.
+    if collect_only and not args:
+        args = "brief"
     if not args or args.lower() in {"help", "?"}:
         return _cofounder_usage_text()
 
@@ -7821,6 +7828,11 @@ async def handle_cofounder(
     try:
         settings = config.get_cofounder_settings()
         projects_dir = Path(settings.projects_dir)
+
+        if sub == "brief":
+            from cofounder import brief as brief_mod
+
+            return brief_mod.render_cofounder_brief(date=rest or None)
 
         # Cofounder v2 WS3 — the agenda approval surface. `run <n>` is the
         # operator's per-line approval and works while the autonomous flag

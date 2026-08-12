@@ -2757,6 +2757,18 @@ def main() -> None:
     except Exception:
         _log_cofounder_seam_error()
 
+    # Co-founder autonomy: self-approves today's proposed agenda lines through
+    # the SAME gated transport as `/cofounder run <n>`. Own enable flag
+    # (COFOUNDER_DELEGATION_ENABLED) + the shared cofounder_delegation kill
+    # switch inside. Runs BEFORE the work loop so a line proposed, delegated,
+    # executed and reported can complete inside one tick.
+    try:
+        from cofounder.autopilot import run_autopilot_pass
+
+        run_autopilot_pass(dry_run=args.test)
+    except Exception:
+        _log_cofounder_seam_error()
+
     # Co-founder v2 persona work loop (WS4): claims approved assignments and
     # executes them. Own enable flag (COFOUNDER_WORKLOOP_ENABLED) + the
     # shared cofounder_delegation kill switch inside.

@@ -151,6 +151,16 @@ _SECTION_MID = "## Mid-flight (open threads)"
 # do NOT import private helpers cross-module.
 _WM_BULLET_RE = re.compile(r"^- \[(\d{4}-\d{2}-\d{2})\] (.+)$")
 
+_COFOUNDER_LEDGER_NAME = "cofounder_delegation.jsonl"
+# Local mirror of cofounder.agenda.AGENDAS_SUBDIR — importing that module runs
+# the persona boot-shim (env overrides), which the chat path must not trigger.
+_COFOUNDER_AGENDAS_SUBDIR = "agendas"
+_COFOUNDER_AUTOPILOT_APPROVER = "cofounder-autopilot"
+_COFOUNDER_TERMINAL_STATUSES = frozenset({"done", "failed"})
+# Bounds the completion scan to report.py's archon-poll lookback window
+# (COFOUNDER_REPORT_POLL_DAYS default) — older agendas can no longer flip.
+_COFOUNDER_AGENDA_SCAN_FILES = 7
+
 
 def normalize_physical_timestamp(value: datetime | str | None) -> datetime | None:
     """Normalize ANY physical timestamp to naive local time (R1 B3).
@@ -303,6 +313,103 @@ def _bullet_line(bullet: str) -> str:
     return "- " + _sanitize_line(text, 160)
 
 
+def _read_cofounder_delegations(
+    path: Path, last_activity: datetime
+) -> list[dict[str, str]]:
+    """Agenda lines the co-founder actually SENT after the away boundary.
+
+    The append-only delegation ledger is the physical record of a send —
+    an agenda item's own status can be written by other paths.
+    """
+    events: list[dict[str, str]] = []
+    if not path.is_file():
+        return events
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("outcome") != "sent":
+            continue
+        sent_at = normalize_physical_timestamp(row.get("timestamp"))
+        if sent_at is None or sent_at <= last_activity:
+            continue
+        events.append(
+            {
+                "at": sent_at.isoformat(),
+                "kind": "sent",
+                "line": str(row.get("line") if row.get("line") is not None else "?"),
+                "persona": str(row.get("persona") or "?"),
+                "approved_by": str(row.get("approved_by") or ""),
+                "detail": str(row.get("detail") or ""),
+            }
+        )
+    return events
+
+
+def _read_cofounder_completions(
+    agenda_dir: Path, last_activity: datetime
+) -> list[dict[str, str]]:
+    """Agenda lines flipped to a terminal status after the away boundary.
+
+    ``reported_at`` is stamped by report.py's single flip site on every
+    status change, so there is no separate completion clock to read.
+    """
+    events: list[dict[str, str]] = []
+    for path in sorted(agenda_dir.glob("AGENDA-*.json"), reverse=True)[
+        :_COFOUNDER_AGENDA_SCAN_FILES
+    ]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for item in data.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "").strip().lower()
+            if status not in _COFOUNDER_TERMINAL_STATUSES:
+                continue
+            flipped = normalize_physical_timestamp(item.get("reported_at"))
+            if flipped is None or flipped <= last_activity:
+                continue
+            events.append(
+                {
+                    "at": flipped.isoformat(),
+                    "kind": status,
+                    "line": str(item.get("n") if item.get("n") is not None else "?"),
+                    "persona": str(item.get("persona") or "?"),
+                    "approved_by": "",
+                    "detail": str(
+                        item.get("result_summary") or item.get("task") or ""
+                    ),
+                }
+            )
+    return events
+
+
+def _cofounder_line(event: dict[str, str]) -> str:
+    """Render one co-founder outcome as a sanitized single brief line."""
+    line = _sanitize_line(event.get("line", "") or "?", 8)
+    persona = _sanitize_line(event.get("persona", "") or "?", 40)
+    detail = _sanitize_line(event.get("detail", "") or "(no detail)", 80)
+    kind = event.get("kind", "")
+    if kind == "sent":
+        approver = event.get("approved_by", "")
+        who = (
+            "self-assigned"
+            if approver == _COFOUNDER_AUTOPILOT_APPROVER
+            else _sanitize_line(approver, 40)
+        )
+        suffix = f" ({who})" if who else ""
+        return f"- cofounder: delegated line {line} to {persona}{suffix}: {detail}"
+    return f"- cofounder: line {line} ({persona}) {kind}: {detail}"
+
+
 def build_session_opening_brief(
     memory_dir: Path,
     *,
@@ -310,6 +417,8 @@ def build_session_opening_brief(
     now: datetime | None = None,
     settings=None,
     ledger_file: Path | None = None,
+    delegation_ledger_file: Path | None = None,
+    agenda_dir: Path | None = None,
 ) -> SessionOpeningBrief:
     """Build the session-opening brief block (Living Mind Act 4).
 
@@ -321,9 +430,13 @@ def build_session_opening_brief(
     change-source items — fresh observations (day-floor), fresh
     ``[heartbeat]``-tagged thread bullets (Act 1 promotions ARE changes),
     episodes-since (strict instant), applied amendments-since (strict
-    instant). Open threads are CONTEXT ONLY: they render in Mid-flight when
-    the brief already fired and NEVER count, fresh or stale, manual-tagged
-    or not — except the single explicit ``[heartbeat]`` exception above.
+    instant), co-founder outcomes-since (strict instant — sent delegations
+    and terminal agenda flips, so overnight autonomous work ALONE can wake a
+    brief; today's still-proposed lines are orientation, not change, and stay
+    in the passive portfolio region). Open threads are CONTEXT ONLY: they
+    render in Mid-flight when the brief already fired and NEVER count, fresh
+    or stale, manual-tagged or not — except the single explicit
+    ``[heartbeat]`` exception above.
 
     Zero LLM calls, zero writes (the ledger heal inside ``read_all`` is the
     documented exception — the same heal every cron consumer performs, under
@@ -413,11 +526,37 @@ def build_session_opening_brief(
     except Exception:
         fresh_amendments = []
 
+    cofounder_events: list[dict[str, str]] = []
+    try:
+        if delegation_ledger_file is None:
+            from config import DATA_DIR
+
+            delegation_ledger_file = Path(DATA_DIR) / _COFOUNDER_LEDGER_NAME
+        cofounder_events.extend(
+            _read_cofounder_delegations(Path(delegation_ledger_file), last_activity)
+        )
+    except Exception:
+        pass
+    try:
+        if agenda_dir is None:
+            from config import get_cofounder_settings
+
+            agenda_dir = (
+                Path(get_cofounder_settings().projects_dir) / _COFOUNDER_AGENDAS_SUBDIR
+            )
+        cofounder_events.extend(
+            _read_cofounder_completions(Path(agenda_dir), last_activity)
+        )
+    except Exception:
+        pass
+    cofounder_events.sort(key=lambda event: event["at"], reverse=True)
+
     fresh_items = (
         len(fresh_obs)
         + len(fresh_hb_threads)
         + len(episode_entries)
         + len(fresh_amendments)
+        + len(cofounder_events)
     )
     if fresh_items < settings.min_fresh_items:
         return SessionOpeningBrief("", False, away_hours, fresh_items, "no_fresh_items")
@@ -429,6 +568,7 @@ def build_session_opening_brief(
         fresh_hb_threads=fresh_hb_threads,
         episode_entries=episode_entries,
         fresh_amendments=fresh_amendments,
+        cofounder_events=cofounder_events,
         open_threads=open_threads,
         settings=settings,
     )
@@ -443,6 +583,7 @@ def _render_session_brief(
     fresh_hb_threads: list[str],
     episode_entries: list[dict[str, str]],
     fresh_amendments: list,
+    cofounder_events: list[dict[str, str]],
     open_threads: list[str],
     settings,
 ) -> str:
@@ -477,6 +618,7 @@ def _render_session_brief(
             getattr(proposal, "summary", "") or "(no summary)", 160
         )
         amendment_lines.append(f"- {target}: {summary}")
+    cofounder_lines = [_cofounder_line(event) for event in cofounder_events[:cap]]
     # Fresh [heartbeat] threads already render in "What changed" — keep them
     # out of Mid-flight so one bullet never appears twice in one brief.
     promoted = set(fresh_hb_threads)
@@ -496,10 +638,10 @@ def _render_session_brief(
         "conversation wins."
     )
 
-    what_display = obs_lines + hb_lines + episode_lines
+    what_display = obs_lines + hb_lines + episode_lines + cofounder_lines
     what_reserved: list[int] = []
     offset = 0
-    for group in (obs_lines, hb_lines, episode_lines):
+    for group in (obs_lines, hb_lines, episode_lines, cofounder_lines):
         if group:
             what_reserved.append(offset)
         offset += len(group)

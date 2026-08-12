@@ -29,6 +29,13 @@ Path map (one test per distinct path, adversarial first):
   - whole-pass wrap: unexpected failure = error outcome, exit code 1
   Notify seam (additive param)
   - with_buttons=False drops reply_markup; default keeps v1 buttons
+  Identity + operator model + live context (T2)
+  - parity: every new source absent = the pre-T2 prompt, byte for byte
+  - section order; GOALS last, labeled with its own date when it has one
+  - per source (identity / operator model / live context / recent sessions
+    / active tracker): present, absent, capped, broken-fails-open
+  - empty self-model corpus = absent source, never a "nothing here" line
+  - tracker resolves both the documented ## Now and today's nested ### Now
   Config (Rule 1)
   - COFOUNDER_AGENDA_* resolved from env at call time
 """
@@ -288,28 +295,134 @@ def test_list_tracked_repos_reads_table_rows(tmp_path):
     assert repos.list_tracked_repos(memory_dir=tmp_path) == ["YourProduct", "YourBusiness"]
 
 
-def test_available_personas_parses_and_skips_broken(monkeypatch, tmp_path):
-    profiles = tmp_path / "profiles"
-    good = profiles / "sales"
-    good.mkdir(parents=True)
-    (good / "config.yaml").write_text(
-        yaml.safe_dump(
-            {"persona": {"id": "sales", "display_name": "Sales Homie", "role": "closer"}}
-        ),
+def _write_profile(profiles: Path, name: str, config_obj) -> None:
+    directory = profiles / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.yaml").write_text(
+        config_obj if isinstance(config_obj, str) else yaml.safe_dump(config_obj),
         encoding="utf-8",
     )
-    broken = profiles / "outbound"
-    broken.mkdir()
-    (broken / "config.yaml").write_text("persona: [", encoding="utf-8")  # bad yaml
-    no_persona = profiles / "chrome-cdp"
-    no_persona.mkdir()
-    (no_persona / "config.yaml").write_text("ports: {}\n", encoding="utf-8")
+
+
+def _write_index(tmp_path: Path, *rows: str) -> None:
+    (tmp_path / "REPOSITORIES.md").write_text(
+        "# Index\n\n## Active Repositories\n\n"
+        "| Slug | GitHub | Visibility | Default branch | Local path | Archon | Page |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n" + "".join(rows),
+        encoding="utf-8",
+    )
+
+
+def test_table_rows_strip_wikilinks_from_every_cell(tmp_path):
+    """A vault autolink sweep wikilinked slugs and paths in place (2026-07-13)
+    and silently broke every consumer for a month — the parse boundary now
+    canonicalizes the representation so a recurrence is harmless."""
+    _write_index(
+        tmp_path,
+        "| [[thehomie]] | x | private | master "
+        "| C:\\Users\\YourUser\\[[thehomie]] | yes | p |\n",
+    )
+    assert repos.list_tracked_repos(memory_dir=tmp_path) == ["thehomie"]
+    resolved = repos.resolve_repo("thehomie", memory_dir=tmp_path)
+    assert resolved.local_path == Path("C:\\Users\\YourUser\\thehomie")
+    assert resolved.default_branch == "master"
+
+
+def test_table_rows_keep_columns_aligned_through_aliased_wikilinks(tmp_path):
+    """An aliased wikilink carries the column separator INSIDE the cell — a
+    per-cell strip would run after the split had already shifted the row."""
+    _write_index(
+        tmp_path,
+        "| [[repositories/YourProduct\\|YourProduct]] | x | private "
+        "| [[master]] | [[C:\\r\\YourProduct|C:\\r\\YourProduct]] | yes | p |\n",
+    )
+    assert repos.list_tracked_repos(memory_dir=tmp_path) == ["YourProduct"]
+    resolved = repos.resolve_repo("YourProduct", memory_dir=tmp_path)
+    assert resolved.local_path == Path("C:\\r\\YourProduct")
+    assert resolved.default_branch == "master"
+
+
+def test_table_rows_leave_unlinked_cells_untouched(tmp_path):
+    _write_index(tmp_path, "| YourProduct | x | private | master | C:\\r\\t | yes | p |\n")
+    assert repos.list_tracked_repos(memory_dir=tmp_path) == ["YourProduct"]
+    assert repos.resolve_repo("YourProduct", memory_dir=tmp_path).local_path == Path(
+        "C:\\r\\t"
+    )
+
+
+def test_available_personas_parses_and_skips_broken(monkeypatch, tmp_path):
+    profiles = tmp_path / "profiles"
+    _write_profile(
+        profiles,
+        "sales",
+        {
+            "persona": {"id": "sales", "display_name": "Sales Homie", "role": "closer"},
+            "delegation": {"repos": ["YourProduct"]},
+        },
+    )
+    _write_profile(profiles, "outbound", "persona: [")  # bad yaml
+    _write_profile(profiles, "chrome-cdp", {"ports": {}})  # no persona section
 
     from personas import core as personas_core
 
     monkeypatch.setattr(personas_core, "get_default_homie_root", lambda: tmp_path)
     found = agenda_mod._available_personas()
-    assert found == [{"id": "sales", "name": "Sales Homie", "role": "closer"}]
+    assert found == [
+        {
+            "id": "sales",
+            "name": "Sales Homie",
+            "role": "closer",
+            "repos": ["YourProduct"],
+        }
+    ]
+
+
+def test_available_personas_skips_profiles_without_a_delegation_grant(
+    monkeypatch, tmp_path
+):
+    """The send-side scope check refuses an ungranted persona fail-closed, so
+    proposing one only burns an agenda line."""
+    profiles = tmp_path / "profiles"
+    _write_profile(
+        profiles,
+        "granted",
+        {"persona": {"role": "dept head"}, "delegation": {"repos": ["YourProduct"]}},
+    )
+    _write_profile(profiles, "ungranted", {"persona": {"role": "dept head"}})
+    _write_profile(
+        profiles,
+        "malformed-grant",
+        {"persona": {"role": "dept head"}, "delegation": ["YourProduct"]},
+    )
+
+    from personas import core as personas_core
+
+    monkeypatch.setattr(personas_core, "get_default_homie_root", lambda: tmp_path)
+    assert [p["id"] for p in agenda_mod._available_personas()] == ["granted"]
+
+
+def test_available_personas_keeps_draft_only_grants(monkeypatch, tmp_path):
+    """``delegation.repos: []`` is a real grant — non-repo (null-repo) work."""
+    profiles = tmp_path / "profiles"
+    _write_profile(
+        profiles,
+        "operations",
+        {"persona": {"role": "ops"}, "delegation": {"repos": []}},
+    )
+    _write_profile(
+        profiles,
+        "finance_admin",
+        {"persona": {"role": "books"}, "delegation": {"repos": ["", "  "]}},
+    )
+
+    from personas import core as personas_core
+
+    monkeypatch.setattr(personas_core, "get_default_homie_root", lambda: tmp_path)
+    found = agenda_mod._available_personas()
+    assert [(p["id"], p["repos"]) for p in found] == [
+        ("finance_admin", []),
+        ("operations", []),
+    ]
 
 
 # =============================================================================
@@ -589,7 +702,7 @@ def test_unexpected_failure_is_error_outcome(monkeypatch, tmp_path):
     assert result.exit_code == 1
 
 
-def test_prompt_carries_portfolio_and_propose_only_contract(tmp_path):
+def test_prompt_carries_portfolio_and_the_autonomy_contract(tmp_path):
     scan = _scan()
     scan["repo_pages"] = {"YourProduct": {"Recent Activity": "shipped voice demo"}}
     scan["goals"] = "Close 3 clients"
@@ -602,8 +715,38 @@ def test_prompt_carries_portfolio_and_propose_only_contract(tmp_path):
     assert "shipped voice demo" in prompt
     assert "Close 3 clients" in prompt
     assert "mc-ui" in prompt
-    assert "PROPOSE" in prompt
     assert "2026-07-05" in prompt
+    # The prompt must not promise an approval step the autopilot does not
+    # honor — an under-committed proposal is what a lying prompt buys.
+    assert "the operator approves before anything executes" not in prompt
+    assert "autonomously delegated within caps" in prompt
+    assert "stake compute on" in prompt
+
+
+def test_prompt_roster_names_each_persona_s_granted_repos(tmp_path):
+    scan = _scan()
+    scan["personas"] = [
+        {"id": "sales", "name": "Sales", "role": "closer", "repos": ["YourProduct"]},
+        {"id": "operations", "name": "Ops", "role": "ops", "repos": []},
+    ]
+    prompt = agenda_mod.build_agenda_prompt(scan, MORNING, max_items=5)
+    assert "sales — Sales — closer — repos: YourProduct" in prompt
+    assert "operations — Ops — ops — repos: none (non-repo tasks only)" in prompt
+
+
+def test_card_names_the_typed_commands(monkeypatch, tmp_path):
+    """The card is buttonless, and post-autonomy its commands are the brake.
+
+    The propose-era "Approve: /cofounder run <n>" hint promised a gate the
+    autopilot no longer waits on — the card has to name the pause instead.
+    """
+    calls, notify = _recorder()
+    result = _run(tmp_path, monkeypatch, notify=notify)
+    assert result.outcome == agenda_mod.OUTCOME_COMPLETED
+    assert "Self-delegating within caps" in calls[0]["text"]
+    assert "/cofounder pause <slug>" in calls[0]["text"]
+    assert "/cofounder run <n>" in calls[0]["text"]
+    assert "Approve: /cofounder run <n>" not in calls[0]["text"]
 
 
 # =============================================================================
@@ -692,3 +835,381 @@ def test_agenda_settings_resolve_env_at_call_time(monkeypatch):
     assert live == config.CofounderAgendaSettings(
         enabled=True, agenda_hour=5, max_items=9, max_attempts=1, notify=False
     )
+
+
+# =============================================================================
+# Identity + operator model + live context in the prompt (T2)
+#
+# Path map: parity (every new source absent = the pre-T2 prompt, byte for
+# byte) - one test per source for present / absent / capped / broken -
+# section order - the GOALS staleness label.
+# =============================================================================
+
+_CONTEXT_KEYS = (
+    "identity",
+    "operator_model",
+    "live_context",
+    "recent_sessions",
+    "tracker",
+)
+
+
+def test_prompt_parity_when_every_new_source_is_absent():
+    """A scan with no identity/context keys must produce the pre-T2 prompt —
+    an unreadable vault can never change what the model is asked."""
+    old_shape = _scan()
+    baseline = agenda_mod.build_agenda_prompt(old_shape, MORNING, max_items=5)
+
+    empty_shape = {
+        **old_shape,
+        "goals_updated": "",
+        **{key: "" for key in _CONTEXT_KEYS},
+    }
+    assert agenda_mod.build_agenda_prompt(empty_shape, MORNING, max_items=5) == baseline
+    for label, _ in agenda_mod._CONTEXT_SECTIONS:
+        assert label not in baseline
+
+
+def test_prompt_renders_the_sections_in_the_decided_order():
+    scan = {
+        **_scan(),
+        "goals": "Close 3 clients",
+        "goals_updated": "2026-06-26",
+        "identity": "# SOUL — Co-Founder",
+        "operator_model": "- The operator ships daily.",
+        "live_context": "Open threads: ship the agenda",
+        "recent_sessions": "### 2026-07-04-telegram",
+        "tracker": "- [ ] P1 crypto wave",
+    }
+    prompt = agenda_mod.build_agenda_prompt(scan, MORNING, max_items=5)
+    order = [
+        "# SOUL — Co-Founder",
+        "- The operator ships daily.",
+        "Open threads: ship the agenda",
+        "- [ ] P1 crypto wave",
+        "Delegable personas",
+        "Tracked repos:",
+        "Close 3 clients",
+    ]
+    positions = [prompt.index(marker) for marker in order]
+    assert positions == sorted(positions)
+
+
+def test_prompt_labels_goals_with_their_own_date():
+    scan = {**_scan(), "goals": "Close 3 clients", "goals_updated": "2026-06-26"}
+    prompt = agenda_mod.build_agenda_prompt(scan, MORNING, max_items=5)
+    assert "Operator goals (last updated 2026-06-26 — weight the current" in prompt
+
+    undated = {**_scan(), "goals": "Close 3 clients", "goals_updated": ""}
+    assert "Operator goals:" in agenda_mod.build_agenda_prompt(
+        undated, MORNING, max_items=5
+    )
+
+
+def test_scan_exposes_every_context_key(monkeypatch, tmp_path):
+    """build_portfolio_scan is the ONE seam the pass calls — a helper that
+    silently stops being wired would leave the prompt quietly bare."""
+    wiring = {
+        "_identity_text": "identity",
+        "_operator_model_text": "operator_model",
+        "_live_context_text": "live_context",
+        "_recent_sessions_text": "recent_sessions",
+        "_tracker_now_text": "tracker",
+        "_goals_updated": "goals_updated",
+    }
+    for helper, key in wiring.items():
+        monkeypatch.setattr(agenda_mod, helper, lambda key=key: f"<{key}>")
+
+    scan = agenda_mod.build_portfolio_scan(_settings(tmp_path))
+    assert {key: scan[key] for key in wiring.values()} == {
+        key: f"<{key}>" for key in wiring.values()
+    }
+
+
+# --- identity ----------------------------------------------------------------
+
+
+def _cofounder_memory(monkeypatch, tmp_path: Path) -> Path:
+    """Point the cofounder profile's memory dir at tmp_path."""
+    from personas import core as personas_core
+
+    monkeypatch.setattr(
+        personas_core, "get_persona_paths", lambda name: {"memory": tmp_path}
+    )
+    return tmp_path
+
+
+def test_identity_reads_the_cofounder_soul(monkeypatch, tmp_path):
+    _cofounder_memory(monkeypatch, tmp_path)
+    (tmp_path / "SOUL.md").write_text(
+        "# SOUL — Co-Founder\n\nYou run the day.\n", encoding="utf-8"
+    )
+    assert "You run the day." in agenda_mod._identity_text()
+
+
+def test_identity_absent_when_the_profile_is_unseeded(monkeypatch, tmp_path):
+    _cofounder_memory(monkeypatch, tmp_path)
+    assert agenda_mod._identity_text() == ""
+
+
+def test_identity_is_capped(monkeypatch, tmp_path):
+    _cofounder_memory(monkeypatch, tmp_path)
+    (tmp_path / "SOUL.md").write_text("x" * 5000, encoding="utf-8")
+    text = agenda_mod._identity_text()
+    assert text.endswith("[truncated]")
+    assert len(text) < agenda_mod.IDENTITY_SECTION_CAP + 40
+
+
+def test_identity_fails_open_when_the_profile_root_explodes(monkeypatch):
+    from personas import core as personas_core
+
+    def boom(name):
+        raise OSError("homie root gone")
+
+    monkeypatch.setattr(personas_core, "get_persona_paths", boom)
+    assert agenda_mod._identity_text() == ""
+
+
+# --- operator model ----------------------------------------------------------
+
+
+def _inference_state(monkeypatch, tmp_path: Path, inferences: list[str]) -> Path:
+    """Write a real self-model corpus through the tracker's own writer."""
+    agenda_mod._ensure_chat_on_path()
+    from cognition.self_model import InferenceRecord, InferenceTracker
+
+    path = tmp_path / "self-model-inferences.json"
+    InferenceTracker(path).save(
+        [
+            InferenceRecord(
+                id=f"inf-{index}",
+                inference=text,
+                observation="the operator said so",
+                confidence=0.9,
+                source="explicit",
+            )
+            for index, text in enumerate(inferences)
+        ]
+    )
+    monkeypatch.setattr(config, "INFERENCE_STATE_FILE", path)
+    return path
+
+
+def test_operator_model_renders_active_inferences(monkeypatch, tmp_path):
+    _inference_state(monkeypatch, tmp_path, ["The operator ships every day."])
+    assert "The operator ships every day." in agenda_mod._operator_model_text()
+
+
+def test_operator_model_absent_when_the_state_file_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "INFERENCE_STATE_FILE", tmp_path / "nope.json")
+    assert agenda_mod._operator_model_text() == ""
+
+
+def test_operator_model_absent_on_an_empty_corpus(monkeypatch, tmp_path):
+    """An empty corpus is an absent SOURCE — the renderer's own "no active
+    inferences" line must never reach the prompt (the S2 fail-open-empty)."""
+    _inference_state(monkeypatch, tmp_path, [])
+    assert agenda_mod._operator_model_text() == ""
+
+
+def test_operator_model_fails_open_on_a_corrupt_corpus(monkeypatch, tmp_path):
+    path = tmp_path / "self-model-inferences.json"
+    path.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(config, "INFERENCE_STATE_FILE", path)
+    assert agenda_mod._operator_model_text() == ""
+
+
+def test_operator_model_is_capped(monkeypatch, tmp_path):
+    _inference_state(
+        monkeypatch,
+        tmp_path,
+        [f"The operator believes thing {index} " * 20 for index in range(8)],
+    )
+    text = agenda_mod._operator_model_text()
+    assert text.endswith("[truncated]")
+    assert len(text) < agenda_mod.OPERATOR_MODEL_CAP + 40
+
+
+# --- live context ------------------------------------------------------------
+
+
+def test_live_context_reads_working_memory(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    (tmp_path / "WORKING.md").write_text(
+        "---\ntags: [system, memory, working]\ndate: 2026-07-05\n---\n"
+        "# WORKING.md\n\n## Open Threads\n\n- [2026-07-05] ship the agenda — open\n",
+        encoding="utf-8",
+    )
+    assert "ship the agenda" in agenda_mod._live_context_text()
+
+
+def test_live_context_absent_without_working_md(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    assert agenda_mod._live_context_text() == ""
+
+
+def test_live_context_fails_open_when_the_reader_explodes(monkeypatch, tmp_path):
+    import living_memory
+
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.setattr(
+        living_memory,
+        "build_briefing_section",
+        lambda memory_dir: (_ for _ in ()).throw(OSError("vault locked")),
+    )
+    assert agenda_mod._live_context_text() == ""
+
+
+# --- recent sessions ---------------------------------------------------------
+
+
+def _write_episode(memory_dir: Path, name: str, *, date: str, status: str, body: str):
+    episodes_dir = memory_dir / "episodes"
+    episodes_dir.mkdir(parents=True, exist_ok=True)
+    (episodes_dir / f"{name}.md").write_text(
+        "---\n"
+        "tags: [system, memory, living-mind]\n"
+        f"date: {date}\n"
+        f"status: {status}\n"
+        "---\n\n"
+        f"{body}\n",
+        encoding="utf-8",
+    )
+
+
+def test_recent_sessions_digests_open_episodes(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    today = datetime.now().date().isoformat()
+    _write_episode(
+        tmp_path,
+        f"{today}-telegram-abc-090000",
+        date=today,
+        status="open",
+        body="## Summary\n\n- shipped the delegation gate",
+    )
+    _write_episode(
+        tmp_path,
+        f"{today}-telegram-old-080000",
+        date="2020-01-01",
+        status="open",
+        body="## Summary\n\n- ancient history",
+    )
+    text = agenda_mod._recent_sessions_text()
+    assert "shipped the delegation gate" in text
+    assert "ancient history" not in text
+
+
+def test_recent_sessions_absent_without_episodes(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    assert agenda_mod._recent_sessions_text() == ""
+
+
+def test_recent_sessions_uses_agenda_sized_caps(monkeypatch, tmp_path):
+    """The dream cycle's digest caps are far larger; the agenda gets its own."""
+    import episodes as episodes_mod
+
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    seen: dict[str, int] = {}
+
+    def fake_digest(paths, *, settings=None):
+        seen.update(
+            files=settings.dream_max_files,
+            per=settings.dream_max_chars_per,
+            total=settings.dream_max_total_chars,
+        )
+        return "digest"
+
+    monkeypatch.setattr(
+        episodes_mod, "list_open_episodes", lambda memory_dir, days: [tmp_path / "e.md"]
+    )
+    monkeypatch.setattr(episodes_mod, "render_episodes_digest", fake_digest)
+    assert agenda_mod._recent_sessions_text() == "digest"
+    assert seen == {"files": 5, "per": 300, "total": 1200}
+
+
+def test_recent_sessions_fails_open_on_a_broken_episode_dir(monkeypatch, tmp_path):
+    import episodes as episodes_mod
+
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.setattr(
+        episodes_mod,
+        "list_open_episodes",
+        lambda memory_dir, days: (_ for _ in ()).throw(OSError("episodes gone")),
+    )
+    assert agenda_mod._recent_sessions_text() == ""
+
+
+# --- active tracker ----------------------------------------------------------
+
+
+def _write_tracker(monkeypatch, tmp_path: Path, body: str) -> None:
+    tracker = tmp_path.joinpath(*agenda_mod.TRACKER_RELPATH)
+    tracker.parent.mkdir(parents=True, exist_ok=True)
+    tracker.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(config, "PROJECT_ROOT", tmp_path)
+
+
+def test_tracker_reads_the_now_h3_under_open_items(monkeypatch, tmp_path):
+    """Today's TRACKER.md nests Now as an H3 under Open Items."""
+    _write_tracker(
+        monkeypatch,
+        tmp_path,
+        "# Tracker\n\n## Open Items\n\n### Now (next session)\n\n"
+        "- [ ] P1 crypto wave\n\n### Later (backlog)\n\n- [ ] someday\n\n"
+        "## Recently Completed\n\n- shipped last week\n",
+    )
+    text = agenda_mod._tracker_now_text()
+    assert "P1 crypto wave" in text
+    assert "someday" not in text
+    assert "shipped last week" not in text
+
+
+def test_tracker_reads_a_top_level_now_h2(monkeypatch, tmp_path):
+    """The architecture's documented shape still resolves if the tracker is
+    ever restructured."""
+    _write_tracker(
+        monkeypatch,
+        tmp_path,
+        "# Tracker\n\n## Now\n\n- [ ] P1 crypto wave\n\n## Later\n\n- [ ] someday\n",
+    )
+    text = agenda_mod._tracker_now_text()
+    assert "P1 crypto wave" in text
+    assert "someday" not in text
+
+
+def test_tracker_absent_when_the_file_or_the_section_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "PROJECT_ROOT", tmp_path)
+    assert agenda_mod._tracker_now_text() == ""
+
+    _write_tracker(monkeypatch, tmp_path, "# Tracker\n\n## Session Log\n\n- nope\n")
+    assert agenda_mod._tracker_now_text() == ""
+
+
+def test_tracker_is_capped(monkeypatch, tmp_path):
+    _write_tracker(
+        monkeypatch,
+        tmp_path,
+        "# Tracker\n\n## Now\n\n" + ("- [ ] a long queued item\n" * 200),
+    )
+    text = agenda_mod._tracker_now_text()
+    assert text.endswith("[truncated]")
+    assert len(text) < agenda_mod.TRACKER_CAP + 40
+
+
+# --- GOALS staleness ---------------------------------------------------------
+
+
+def test_goals_updated_reads_the_frontmatter_date(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    (tmp_path / "GOALS.md").write_text(
+        "---\ntags: [system, goals]\ndate: 2026-06-26\n---\n\n"
+        "# Goals\n\ndate: 2020-01-01\n",
+        encoding="utf-8",
+    )
+    assert agenda_mod._goals_updated() == "2026-06-26"
+
+
+def test_goals_updated_absent_without_frontmatter(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    (tmp_path / "GOALS.md").write_text("# Goals\n\nno frontmatter\n", encoding="utf-8")
+    assert agenda_mod._goals_updated() == ""
