@@ -240,8 +240,16 @@ def test_flag_off_is_a_structural_noop(monkeypatch, tmp_path, state_file):
     assert not state_file.exists()
 
 
-def test_flag_off_resolves_from_env_when_not_injected(tmp_path, state_file):
-    """The default env (flag absent) is off — autonomy ships dormant."""
+def test_flag_absent_defaults_armed(tmp_path, state_file):
+    """The default env (flag absent) is ARMED — autonomy ships on (v1.4.0)."""
+    assert config.get_cofounder_delegation_settings().enabled is True
+
+
+def test_flag_false_resolves_from_env_when_not_injected(
+    monkeypatch, tmp_path, state_file
+):
+    """An explicit env "false" is the propose-only retreat lever."""
+    monkeypatch.setenv("COFOUNDER_DELEGATION_ENABLED", "false")
     _agenda(tmp_path, [_item()])
 
     result = autopilot_mod.run_autopilot_pass(

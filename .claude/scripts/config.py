@@ -4166,16 +4166,17 @@ def get_cofounder_delegation_settings(
     agenda line into a convoy + typed mailbox assignment for a persona.
     The operator's per-line approval ("run it" / ``/cofounder run <n>``)
     ALWAYS works — ``COFOUNDER_DELEGATION_ENABLED`` gates only AUTONOMOUS
-    (unapproved) delegation, which no shipped code path exercises yet
-    (operator resolution #4, 2026-07-05). The
+    (unapproved) delegation: the autopilot pass (``cofounder/autopilot.py``,
+    epic #408 T5). The
     ``cofounder_delegation`` kill switch
     (``HOMIE_KILLSWITCH_COFOUNDER_DELEGATION``) sits on top of BOTH paths —
     it is the emergency stop for the whole delegation surface.
 
     Knobs:
-        COFOUNDER_DELEGATION_ENABLED ("false") — autonomous-delegation flag.
-            Ships OFF; flipping it is the operator's end-state call after
-            propose-only has earned trust. Approved lines do not need it.
+        COFOUNDER_DELEGATION_ENABLED ("true") — autonomous-delegation flag.
+            Ships ARMED as of v1.4.0 (operator decision 2026-08-12: autonomy
+            means autonomy); set "false" to fall back to propose-only.
+            Approved lines do not need it either way.
         COFOUNDER_MAX_ASSIGNMENTS_PER_DAY ("5") — cap on delegations per
             local day across all personas (approved + autonomous combined).
         COFOUNDER_MAX_INFLIGHT_PER_PERSONA ("1") — cap on un-acked
@@ -4184,7 +4185,7 @@ def get_cofounder_delegation_settings(
     """
     if enabled is None:
         enabled = (
-            os.getenv("COFOUNDER_DELEGATION_ENABLED", "false").strip().lower()
+            os.getenv("COFOUNDER_DELEGATION_ENABLED", "true").strip().lower()
             == "true"
         )
     if max_assignments_per_day is None:

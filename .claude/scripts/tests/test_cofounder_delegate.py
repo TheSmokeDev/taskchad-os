@@ -344,9 +344,12 @@ def test_inbox_failure_refuses_conservatively(
 # =============================================================================
 
 
-def test_happy_path_full_round_trip(tmp_path, services, homie_root, isolated_audit):
-    """Approval executes with COFOUNDER_DELEGATION_ENABLED absent (false):
+def test_happy_path_full_round_trip(
+    monkeypatch, tmp_path, services, homie_root, isolated_audit
+):
+    """Approval executes with COFOUNDER_DELEGATION_ENABLED explicitly false:
     the flag gates autonomy, never operator approvals (resolution #4)."""
+    monkeypatch.setenv("COFOUNDER_DELEGATION_ENABLED", "false")
     assert config.get_cofounder_delegation_settings().enabled is False
 
     _grant_persona(homie_root, "sales", ["YourProduct"])
@@ -496,14 +499,14 @@ def test_agenda_regeneration_refused_over_delegated_lines(tmp_path, monkeypatch)
 def test_delegation_settings_resolve_env_at_call_time(monkeypatch):
     defaults = config.get_cofounder_delegation_settings()
     assert defaults == config.CofounderDelegationSettings(
-        enabled=False, max_assignments_per_day=5, max_inflight_per_persona=1
+        enabled=True, max_assignments_per_day=5, max_inflight_per_persona=1
     )
-    monkeypatch.setenv("COFOUNDER_DELEGATION_ENABLED", "true")
+    monkeypatch.setenv("COFOUNDER_DELEGATION_ENABLED", "false")
     monkeypatch.setenv("COFOUNDER_MAX_ASSIGNMENTS_PER_DAY", "9")
     monkeypatch.setenv("COFOUNDER_MAX_INFLIGHT_PER_PERSONA", "2")
     live = config.get_cofounder_delegation_settings()
     assert live == config.CofounderDelegationSettings(
-        enabled=True, max_assignments_per_day=9, max_inflight_per_persona=2
+        enabled=False, max_assignments_per_day=9, max_inflight_per_persona=2
     )
 
 
