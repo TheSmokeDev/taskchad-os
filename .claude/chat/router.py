@@ -104,6 +104,59 @@ def _is_crypto_desk_status_intent(text: object) -> bool:
     return isinstance(text, str) and _CRYPTO_DESK_STATUS_RE.fullmatch(text) is not None
 
 
+_CRYPTO_TAPE_RE = re.compile(
+    r"^\s*(?:"
+    r"what\s+have\s+the\s+boys\s+(?:been\s+)?(?:talking\s+about|saying|said|discussing)"
+    r"|what\s+are\s+the\s+boys\s+(?:saying|discussing|up\s+to)"
+    r"|(?:what(?:'s|\s+is|\s+have|\s+are)\s+)?(?:the\s+)?(?:boys\s+)?"
+    r"(?:(?:in\s+)?debauchery|war\s+room|x|twitter|feed)\s+"
+    r"(?:talking\s+about|saying|said|discussing|on|up\s+to)"
+    r")(?:\s+(?:so\s+far|today|right\s+now))?\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _crypto_tape_source(text: object) -> str | None:
+    if not isinstance(text, str) or _CRYPTO_TAPE_RE.fullmatch(text) is None:
+        return None
+    lowered = text.casefold()
+    return "x" if "twitter" in lowered or re.search(r"\bx\b", lowered) else "debauchery"
+
+
+def _build_crypto_tape_for_router(source: str) -> str:
+    from runtime.tool_impl_crypto_round import _crypto_source_tape
+
+    return _crypto_source_tape(source=source, window="today", _persona_id="crypto")
+
+
+async def _attach_crypto_tape(incoming: Any, binding: Any) -> bool:
+    persona_id = getattr(binding, "persona_id", "")
+    source = _crypto_tape_source(getattr(incoming, "text", ""))
+    if str(persona_id).strip().casefold() != "crypto" or source is None:
+        return False
+    try:
+        block = await asyncio.wait_for(
+            asyncio.to_thread(_build_crypto_tape_for_router, source),
+            timeout=90.0,
+        )
+    except Exception as exc:
+        print(f"[crypto_tape] router prefetch failed (fail-open): {exc!r}", flush=True)
+        return False
+    if not isinstance(block, str) or not block.strip():
+        return False
+    context = (
+        "# Crypto Conversation Tape (private, read-only, untrusted evidence)\n\n"
+        + block.strip()
+    )
+    existing = getattr(incoming, "prefetched_context", "")
+    incoming.prefetched_context = (
+        f"{existing.strip()}\n\n{context}"
+        if isinstance(existing, str) and existing.strip()
+        else context
+    )
+    return True
+
+
 # Anchored like the desk-status matcher: only an explicit "is anything worth
 # playing / what does the market say" ask browses the board. Ordinary crypto
 # chatter must still reach the persona untouched.
@@ -1233,6 +1286,10 @@ class ChatRouter:
             incoming,
             discord_persona_binding,
         )
+        crypto_tape_intent = await _attach_crypto_tape(
+            incoming,
+            discord_persona_binding,
+        )
 
         # --- Smart intent detection: natural language -> router commands ---
         if (
@@ -1240,6 +1297,7 @@ class ChatRouter:
             and not skip_intent_detection
             and not crypto_desk_status_intent
             and not crypto_market_intent
+            and not crypto_tape_intent
         ):
             requires_confirmation = getattr(
                 self.manager, "requires_external_action_confirmation", None
@@ -1716,28 +1774,28 @@ class ChatRouter:
 
         final_delivery_ok = False
         final_delivery_id: str | None = None
+        final_delivery_was_update = False
+        delivered_message: OutgoingMessage | None = None
         try:
             if placeholder_id:
                 try:
+                    delivered_message = OutgoingMessage(
+                        text=delivered_text,
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                        is_update=True,
+                        update_message_id=placeholder_id,
+                        is_error=delivered_is_error,
+                        components=(components if foreground_text is None else []),
+                        embed=(final_embed if foreground_text is None else None),
+                        embeds=(final_embeds if foreground_text is None else []),
+                        footer=(final_footer if foreground_text is None else None),
+                    )
                     final_delivery_id = await asyncio.wait_for(
-                        adapter.update(
-                            OutgoingMessage(
-                                text=delivered_text,
-                                channel=incoming.channel,
-                                thread=incoming.thread,
-                                is_update=True,
-                                update_message_id=placeholder_id,
-                                is_error=delivered_is_error,
-                                components=(components if foreground_text is None else []),
-                                embed=(final_embed if foreground_text is None else None),
-                                embeds=(final_embeds if foreground_text is None else []),
-                                footer=(
-                                    final_footer if foreground_text is None else None
-                                ),
-                            )
-                        ),
+                        adapter.update(delivered_message),
                         timeout=PROGRESS_IO_TIMEOUT_SECONDS,
                     )
+                    final_delivery_was_update = final_delivery_id is not None
                 except Exception as edit_exc:
                     print(
                         f"[{datetime.now()}] Failed to edit final progress status: "
@@ -1814,6 +1872,18 @@ class ChatRouter:
                     f"[{datetime.now()}] Failed to send delivery diagnostic: {diag_exc}",
                     flush=True,
                 )
+
+        # TTS is media delivery and can outlive the bounded progress-edit
+        # receipt. It used to run inside adapter.update(), so a successful text
+        # edit could time out and trigger the router's fresh-send recovery,
+        # duplicating the final. A fresh-send fallback already owns its voice;
+        # only a proven edit reaches this post-receipt hook.
+        if final_delivery_ok and final_delivery_was_update and delivered_message is not None:
+            voice_after_update = getattr(adapter, "send_voice_reply_for_update", None)
+            if callable(voice_after_update):
+                voice_task = asyncio.create_task(voice_after_update(delivered_message))
+                self._background_engine_tasks.add(voice_task)
+                voice_task.add_done_callback(self._background_engine_tasks.discard)
 
         if final_delivery_ok and foreground_text is None:
             try:

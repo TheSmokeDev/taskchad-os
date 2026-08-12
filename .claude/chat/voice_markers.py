@@ -22,8 +22,8 @@ can map directly to Telegram sendDocument/sendPhoto without reinventing.)
 Path-traversal defense (R3 NM2 / NB5): 5-step validation:
   1. Reject any `..` path-traversal segment
   2. Allow http(s):// URLs (no filesystem access)
-  3. Reject POSIX absolute filesystem paths (`/etc/passwd`)
-  4. Reject Windows absolute paths (`C:/Windows/...`)
+  3. Reject POSIX absolute filesystem paths unless a private extension approves it
+  4. Reject Windows absolute paths unless a private extension approves it
   5. Allow relative paths (`./report.pdf`, `report.pdf`, `./images/x.png`)
 """
 
@@ -63,16 +63,23 @@ _PATTERN_BARE: re.Pattern[str] = re.compile(
 _PATTERNS: tuple[re.Pattern[str], ...] = (_PATTERN_BRACKETED, _PATTERN_BARE)
 
 
-def _is_allowed_absolute(path: str) -> bool:
-    """Allow only paths under workspace dirs — reject /etc/passwd etc.
+def _is_allowed_absolute(path: str, *, channel_id: str | None = None) -> bool:
+    """Allow an absolute path only through an operator-local extension hook.
 
-    Default policy: reject all absolute filesystem paths (only relative paths
-    and http(s) URLs allowed). Defense-in-depth aligned with Phase 7a sanitizer.
+    The public framework remains default-deny and contains no tenant-specific
+    path contract. A private extension must canonicalize and confine the path.
     """
-    return False
+    try:
+        from local_extension_loader import any_local_extension_hook
+
+        return any_local_extension_hook(
+            "allow_absolute_outbound_media", path, channel_id=channel_id
+        )
+    except (ImportError, OSError, ValueError):
+        return False
 
 
-def parse_send_markers(text: str) -> list[SendMarker]:
+def parse_send_markers(text: str, *, channel_id: str | None = None) -> list[SendMarker]:
     """Return list of SendMarker structures found in text.
 
     Port bot.ts:288-317 extractFileMarkers verbatim. Returns parsed markers in
@@ -83,8 +90,8 @@ def parse_send_markers(text: str) -> list[SendMarker]:
     R3 NM2 / NB5 fix: 5-step path validation:
       1. Reject `..` path-traversal segment
       2. http(s):// URLs always allowed
-      3. POSIX absolute paths (`/etc/passwd`) — rejected
-      4. Windows absolute paths (`C:/...`, `C:\\...`) — rejected
+      3. POSIX absolute paths — only an extension-confined artifact is allowed
+      4. Windows absolute paths — only an extension-confined artifact is allowed
       5. Relative paths — allowed
     """
     out: list[SendMarker] = []
@@ -103,11 +110,11 @@ def parse_send_markers(text: str) -> list[SendMarker]:
                 pass  # allowed
             # Step 3: POSIX absolute filesystem paths (/etc/passwd, etc.) — reject
             elif raw_path.startswith("/"):
-                if not _is_allowed_absolute(raw_path):
+                if not _is_allowed_absolute(raw_path, channel_id=channel_id):
                     continue
             # Step 4: Windows absolute paths (C:/Windows/..., C:\\Windows\\...) — reject
             elif len(raw_path) >= 3 and raw_path[1:3] in (":/", ":\\"):
-                if not _is_allowed_absolute(raw_path):
+                if not _is_allowed_absolute(raw_path, channel_id=channel_id):
                     continue
             # Step 5: Relative paths — allowed (./report.pdf, report.pdf, ./images/x.png)
 

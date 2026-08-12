@@ -1310,7 +1310,18 @@ def _validate_learning_section(value: Any, config_path: Path) -> None:
 
 
 _MARKET_ROUND_TOP_LEVEL = frozenset(
-    {"enabled", "domain", "source", "cadence", "budgets", "model", "delivery"}
+    {
+        "enabled",
+        "domain",
+        "source",
+        "cadence",
+        "budgets",
+        "model",
+        "delivery",
+        "source_tape",
+        "visual_desk",
+        "paper_portfolio",
+    }
 )
 _MARKET_ROUND_SOURCE_KEYS = frozenset(
     {"debauchery_alias", "approved_guild_id", "discord_channels", "x_feeds"}
@@ -1336,7 +1347,49 @@ _MARKET_ROUND_BUDGET_KEYS = frozenset(
 )
 _MARKET_ROUND_MODEL_KEYS = frozenset({"tier", "judge_tier", "max_turns"})
 _MARKET_ROUND_DELIVERY_KEYS = frozenset(
-    {"enabled", "binding_file", "ping_on_call"}
+    {"enabled", "binding_file", "ping_on_call", "include_source_tape"}
+)
+_MARKET_ROUND_SOURCE_TAPE_KEYS = frozenset(
+    {
+        "enabled",
+        "discord_primary_scrolls",
+        "discord_secondary_scrolls",
+        "x_scroll_attempts",
+        "x_minimum_scrolls",
+        "x_target_items",
+        "refresh_minutes",
+        "speaker_aliases",
+        "priority_speakers",
+    }
+)
+_MARKET_ROUND_VISUAL_DESK_KEYS = frozenset({"enabled", "timeframe", "bars", "venue"})
+_MARKET_ROUND_PAPER_PORTFOLIO_KEYS = frozenset(
+    {
+        "enabled",
+        "starting_balance_usd_per_sleeve",
+        "probe_risk_fraction",
+        "standard_risk_fraction",
+        "conviction_risk_fraction",
+        "max_total_open_risk_fraction",
+        "max_notional_multiple",
+        "max_open_calls",
+        "min_reward_risk",
+        "daily_loss_limit_fraction",
+        "max_drawdown_fraction",
+        "exploration_calls_per_day",
+        "round_trip_cost_bps",
+        "btc_scalp",
+    }
+)
+_MARKET_ROUND_BTC_SCALP_KEYS = frozenset(
+    {
+        "enabled",
+        "min_leverage_multiple",
+        "max_leverage_multiple",
+        "profit_target_fraction",
+        "profit_target_window_days",
+        "allowed_horizons",
+    }
 )
 
 
@@ -1517,7 +1570,7 @@ def _validate_market_round_section(value: Any, config_path: Path) -> None:
         field="market_round.delivery",
         config_path=config_path,
     )
-    for key in ("enabled", "ping_on_call"):
+    for key in ("enabled", "ping_on_call", "include_source_tape"):
         if key in delivery and not isinstance(delivery[key], bool):
             raise _shape_error(
                 config_path,
@@ -1541,6 +1594,272 @@ def _validate_market_round_section(value: Any, config_path: Path) -> None:
         raise ConfigShapeError(
             "market_round.delivery.binding_file: required when delivery is enabled "
             f"in {config_path}"
+        )
+
+    source_tape = value.get("source_tape", {})
+    if not isinstance(source_tape, dict):
+        raise _shape_error(config_path, "market_round.source_tape", source_tape, "mapping")
+    _reject_unknown_keys(
+        source_tape,
+        _MARKET_ROUND_SOURCE_TAPE_KEYS,
+        field="market_round.source_tape",
+        config_path=config_path,
+    )
+    if "enabled" in source_tape and not isinstance(source_tape["enabled"], bool):
+        raise _shape_error(
+            config_path, "market_round.source_tape.enabled", source_tape["enabled"], "bool"
+        )
+    tape_ranges = {
+        "discord_primary_scrolls": (1, 20),
+        "discord_secondary_scrolls": (1, 20),
+        "x_scroll_attempts": (1, 20),
+        "x_minimum_scrolls": (1, 20),
+        "x_target_items": (1, 250),
+        "refresh_minutes": (1, 120),
+    }
+    for key, (minimum, maximum) in tape_ranges.items():
+        if key in source_tape:
+            raw = source_tape[key]
+            if isinstance(raw, bool) or not isinstance(raw, int) or not minimum <= raw <= maximum:
+                raise ConfigShapeError(
+                    f"market_round.source_tape.{key}: expected {minimum}..{maximum} in {config_path}"
+                )
+    if int(source_tape.get("x_minimum_scrolls", 5)) > int(
+        source_tape.get("x_scroll_attempts", 10)
+    ):
+        raise ConfigShapeError(
+            f"market_round.source_tape.x_minimum_scrolls cannot exceed x_scroll_attempts in {config_path}"
+        )
+    aliases = source_tape.get("speaker_aliases", {})
+    if not isinstance(aliases, dict):
+        raise _shape_error(
+            config_path, "market_round.source_tape.speaker_aliases", aliases, "mapping"
+        )
+    for canonical, values in aliases.items():
+        if not isinstance(canonical, str) or not canonical.strip():
+            raise _shape_error(
+                config_path, "market_round.source_tape.speaker_aliases key", canonical, "non-empty str"
+            )
+        if not isinstance(values, list) or any(
+            not isinstance(item, str) or not item.strip() for item in values
+        ):
+            raise _shape_error(
+                config_path,
+                f"market_round.source_tape.speaker_aliases.{canonical}",
+                values,
+                "list[non-empty str]",
+            )
+    priority = source_tape.get("priority_speakers", [])
+    if not isinstance(priority, list) or any(
+        not isinstance(item, str) or not item.strip() for item in priority
+    ):
+        raise _shape_error(
+            config_path,
+            "market_round.source_tape.priority_speakers",
+            priority,
+            "list[non-empty str]",
+        )
+    if len({item.strip().casefold().lstrip("@") for item in priority}) != len(priority):
+        raise ConfigShapeError(
+            "market_round.source_tape.priority_speakers: duplicate normalized speaker "
+            f"in {config_path}"
+        )
+
+    visual_desk = value.get("visual_desk", {})
+    if not isinstance(visual_desk, dict):
+        raise _shape_error(config_path, "market_round.visual_desk", visual_desk, "mapping")
+    _reject_unknown_keys(
+        visual_desk,
+        _MARKET_ROUND_VISUAL_DESK_KEYS,
+        field="market_round.visual_desk",
+        config_path=config_path,
+    )
+    if "enabled" in visual_desk and not isinstance(visual_desk["enabled"], bool):
+        raise _shape_error(
+            config_path, "market_round.visual_desk.enabled", visual_desk["enabled"], "bool"
+        )
+    if visual_desk.get("timeframe", "4h") not in {"5m", "10m", "15m", "1h", "4h", "1d"}:
+        raise ConfigShapeError(
+            f"market_round.visual_desk.timeframe: unsupported timeframe in {config_path}"
+        )
+    bars = visual_desk.get("bars", 120)
+    if isinstance(bars, bool) or not isinstance(bars, int) or not 40 <= bars <= 200:
+        raise ConfigShapeError(
+            f"market_round.visual_desk.bars: expected 40..200 in {config_path}"
+        )
+    if visual_desk.get("venue", "okx") not in {
+        "okx",
+        "mexc",
+        "bybit",
+        "kraken",
+        "coinbase",
+    }:
+        raise ConfigShapeError(
+            f"market_round.visual_desk.venue: unsupported public venue in {config_path}"
+        )
+
+    paper = value.get("paper_portfolio", {})
+    if not isinstance(paper, dict):
+        raise _shape_error(config_path, "market_round.paper_portfolio", paper, "mapping")
+    _reject_unknown_keys(
+        paper,
+        _MARKET_ROUND_PAPER_PORTFOLIO_KEYS,
+        field="market_round.paper_portfolio",
+        config_path=config_path,
+    )
+    if "enabled" in paper and not isinstance(paper["enabled"], bool):
+        raise _shape_error(
+            config_path, "market_round.paper_portfolio.enabled", paper["enabled"], "bool"
+        )
+
+    numeric_ranges = {
+        "starting_balance_usd_per_sleeve": (1.0, 1_000_000.0),
+        "probe_risk_fraction": (0.001, 0.50),
+        "standard_risk_fraction": (0.001, 0.50),
+        "conviction_risk_fraction": (0.001, 0.50),
+        "max_total_open_risk_fraction": (0.001, 1.0),
+        "max_notional_multiple": (0.1, 100.0),
+        "min_reward_risk": (1.0, 20.0),
+        "daily_loss_limit_fraction": (0.001, 1.0),
+        "max_drawdown_fraction": (0.001, 1.0),
+        "round_trip_cost_bps": (0.0, 500.0),
+    }
+    resolved_numbers: dict[str, float] = {}
+    defaults = {
+        "starting_balance_usd_per_sleeve": 1_000.0,
+        "probe_risk_fraction": 0.025,
+        "standard_risk_fraction": 0.05,
+        "conviction_risk_fraction": 0.075,
+        "max_total_open_risk_fraction": 0.15,
+        "max_notional_multiple": 5.0,
+        "min_reward_risk": 1.5,
+        "daily_loss_limit_fraction": 0.15,
+        "max_drawdown_fraction": 0.30,
+        "round_trip_cost_bps": 15.0,
+    }
+    for key, (minimum, maximum) in numeric_ranges.items():
+        raw = paper.get(key, defaults[key])
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise _shape_error(
+                config_path, f"market_round.paper_portfolio.{key}", raw, "number"
+            )
+        number = float(raw)
+        if not minimum <= number <= maximum:
+            raise ConfigShapeError(
+                f"market_round.paper_portfolio.{key}: expected {minimum}..{maximum} "
+                f"in {config_path}"
+            )
+        resolved_numbers[key] = number
+
+    if not (
+        resolved_numbers["probe_risk_fraction"]
+        <= resolved_numbers["standard_risk_fraction"]
+        <= resolved_numbers["conviction_risk_fraction"]
+        <= resolved_numbers["max_total_open_risk_fraction"]
+    ):
+        raise ConfigShapeError(
+            "market_round.paper_portfolio risk tiers must increase from probe through "
+            f"conviction without exceeding total open risk in {config_path}"
+        )
+    if (
+        resolved_numbers["daily_loss_limit_fraction"]
+        > resolved_numbers["max_drawdown_fraction"]
+    ):
+        raise ConfigShapeError(
+            "market_round.paper_portfolio daily loss limit cannot exceed max drawdown "
+            f"in {config_path}"
+        )
+    for key, minimum, maximum, default in (
+        ("max_open_calls", 1, 20, 3),
+        ("exploration_calls_per_day", 0, 12, 1),
+    ):
+        raw = paper.get(key, default)
+        if isinstance(raw, bool) or not isinstance(raw, int) or not minimum <= raw <= maximum:
+            raise ConfigShapeError(
+                f"market_round.paper_portfolio.{key}: expected {minimum}..{maximum} "
+                f"in {config_path}"
+            )
+
+    btc_scalp = paper.get("btc_scalp", {})
+    if not isinstance(btc_scalp, dict):
+        raise _shape_error(
+            config_path,
+            "market_round.paper_portfolio.btc_scalp",
+            btc_scalp,
+            "mapping",
+        )
+    _reject_unknown_keys(
+        btc_scalp,
+        _MARKET_ROUND_BTC_SCALP_KEYS,
+        field="market_round.paper_portfolio.btc_scalp",
+        config_path=config_path,
+    )
+    if "enabled" in btc_scalp and not isinstance(btc_scalp["enabled"], bool):
+        raise _shape_error(
+            config_path,
+            "market_round.paper_portfolio.btc_scalp.enabled",
+            btc_scalp["enabled"],
+            "bool",
+        )
+    scalp_numbers: dict[str, float] = {}
+    for key, minimum, maximum, default in (
+        ("min_leverage_multiple", 1.0, 20.0, 5.0),
+        ("max_leverage_multiple", 1.0, 20.0, 10.0),
+        ("profit_target_fraction", 0.001, 1.0, 0.10),
+    ):
+        raw = btc_scalp.get(key, default)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise _shape_error(
+                config_path,
+                f"market_round.paper_portfolio.btc_scalp.{key}",
+                raw,
+                "number",
+            )
+        number = float(raw)
+        if not minimum <= number <= maximum:
+            raise ConfigShapeError(
+                f"market_round.paper_portfolio.btc_scalp.{key}: expected "
+                f"{minimum}..{maximum} in {config_path}"
+            )
+        scalp_numbers[key] = number
+    window_days = btc_scalp.get("profit_target_window_days", 3)
+    if (
+        isinstance(window_days, bool)
+        or not isinstance(window_days, int)
+        or not 1 <= window_days <= 30
+    ):
+        raise ConfigShapeError(
+            "market_round.paper_portfolio.btc_scalp.profit_target_window_days: "
+            f"expected 1..30 in {config_path}"
+        )
+    if scalp_numbers["min_leverage_multiple"] > scalp_numbers["max_leverage_multiple"]:
+        raise ConfigShapeError(
+            "market_round.paper_portfolio.btc_scalp minimum leverage cannot exceed "
+            f"maximum leverage in {config_path}"
+        )
+    horizons = btc_scalp.get("allowed_horizons", ["5m", "10m", "15m", "1h"])
+    if (
+        not isinstance(horizons, list)
+        or not horizons
+        or any(not isinstance(item, str) or not item.strip() for item in horizons)
+    ):
+        raise _shape_error(
+            config_path,
+            "market_round.paper_portfolio.btc_scalp.allowed_horizons",
+            horizons,
+            "non-empty list[str]",
+        )
+    normalized_horizons = [item.strip().casefold() for item in horizons]
+    allowed_horizons = {"5m", "10m", "15m", "1h"}
+    if len(set(normalized_horizons)) != len(normalized_horizons):
+        raise ConfigShapeError(
+            "market_round.paper_portfolio.btc_scalp.allowed_horizons contains "
+            f"duplicates in {config_path}"
+        )
+    if not set(normalized_horizons) <= allowed_horizons:
+        raise ConfigShapeError(
+            "market_round.paper_portfolio.btc_scalp.allowed_horizons supports only "
+            f"5m, 10m, 15m, and 1h in {config_path}"
         )
 
 

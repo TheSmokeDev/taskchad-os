@@ -75,7 +75,12 @@ from update_check import check_for_update, get_current_version  # noqa: E402
 def main(ctx):
     """The Homie — personal AI agent framework."""
     ctx.ensure_object(dict)
-    update = check_for_update()
+    quiet_machine_output = "--json" in sys.argv[1:] or "-Q" in sys.argv[1:]
+    update = (
+        None
+        if quiet_machine_output or ctx.invoked_subcommand == "crypto"
+        else check_for_update()
+    )
     if update:
         current, latest = update
         click.echo(
@@ -1424,6 +1429,20 @@ def _emit_crypto_round(payload: dict, *, json_mode: bool) -> None:
         click.echo(f"  failed gates: {', '.join(payload['failed_gates'])}")
 
 
+def _sanitize_crypto_ledger_status(ledger: dict) -> dict:
+    """Strip stored cognition and failure text from operator status surfaces."""
+
+    public = dict(ledger or {})
+    latest = public.get("latest")
+    if isinstance(latest, dict):
+        public["latest"] = {
+            key: value
+            for key, value in latest.items()
+            if key not in {"output_json", "error"}
+        }
+    return public
+
+
 def _crypto_round_status_payload() -> dict:
     try:
         from crypto_round.config import load_market_round_settings
@@ -1431,11 +1450,33 @@ def _crypto_round_status_payload() -> dict:
         from crypto_round.provenance import status as provenance_status
 
         settings = load_market_round_settings()
+        db = CryptoRoundDB(initialize=False)
         return {
             "success": True,
             "enabled": settings.enabled,
             "config": settings.as_public_dict(),
-            "ledger": CryptoRoundDB(initialize=False).status(),
+            "ledger": _sanitize_crypto_ledger_status(db.status()),
+            "tape": db.tape_status(),
+            "source_receipts": [
+                {
+                    "source": row.get("source"),
+                    "updated_at": row.get("updated_at"),
+                    "receipt": {
+                        key: value
+                        for key, value in dict(row.get("receipt") or {}).items()
+                        if key
+                        not in {
+                            "status_ids",
+                            "inserted_ids",
+                            "oldest_status_id",
+                            "newest_status_id",
+                            "channels",
+                        }
+                    },
+                }
+                for row in db.source_receipts()
+            ],
+            "source_receipt_history_count": db.source_receipt_history_count(),
             "dependency_provenance": provenance_status(),
         }
     except Exception as exc:
@@ -1545,6 +1586,65 @@ def crypto_round_promotion(json_mode: bool):
     except Exception as exc:
         payload = {"success": False, "status": "NOT_ELIGIBLE", "error": f"{type(exc).__name__}: {exc}"}
     _emit_crypto_round(payload, json_mode=json_mode)
+    if not payload["success"]:
+        raise SystemExit(1)
+
+
+@crypto_group.group("tape")
+def crypto_tape_group():
+    """Inspect the private attributed Debauchery and X conversation tape."""
+
+
+@crypto_tape_group.command("status")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def crypto_tape_status(json_mode: bool):
+    """Show tape freshness and window counts without raw private evidence."""
+    try:
+        from crypto_round.db import CryptoRoundDB
+
+        payload = {"success": True, "tape": CryptoRoundDB(initialize=False).tape_status()}
+    except Exception as exc:
+        payload = {"success": False, "tape": {}, "error": f"{type(exc).__name__}: {exc}"}
+    _emit_crypto_round(payload, json_mode=json_mode)
+    if not payload["success"]:
+        raise SystemExit(1)
+
+
+@crypto_tape_group.command("show")
+@click.argument(
+    "source", type=click.Choice(["debauchery", "x", "for_you", "following"])
+)
+@click.option(
+    "--window", type=click.Choice(["today", "latest", "2h"]), default="today", show_default=True
+)
+@click.option("--speaker", default="", help="Filter by normalized speaker name.")
+@click.option("--topic", default="", help="Filter by topic text.")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def crypto_tape_show(source: str, window: str, speaker: str, topic: str, json_mode: bool):
+    """Compose persisted two-hour windows into a cited day-to-date brief."""
+    try:
+        from crypto_round.config import load_market_round_settings
+        from crypto_round.conversation_tape import build_tape_brief
+        from crypto_round.db import CryptoRoundDB
+
+        settings = load_market_round_settings()
+        payload = {
+            "success": True,
+            "tape": build_tape_brief(
+                CryptoRoundDB(initialize=False),
+                source=source,
+                window=window,
+                speaker=speaker,
+                topic=topic,
+                timezone=settings.timezone,
+            ),
+        }
+    except Exception as exc:
+        payload = {"success": False, "tape": {}, "error": f"{type(exc).__name__}: {exc}"}
+    if json_mode:
+        click.echo(json_mod.dumps(payload, indent=2, sort_keys=True, default=str))
+    else:
+        click.echo(json_mod.dumps(payload.get("tape", payload), indent=2, sort_keys=True, default=str))
     if not payload["success"]:
         raise SystemExit(1)
 
@@ -2817,6 +2917,18 @@ def _print_crypto_round_status(snapshot: dict[str, object]) -> None:
         click.echo(
             f"  Latest: {latest.get('round_id', 'unknown')} "
             f"({latest.get('state', 'unknown')})"
+        )
+    tape = snapshot.get("conversation_tape")
+    if isinstance(tape, dict):
+        click.echo(f"  Tape windows: {tape.get('windows', 0)}")
+        for source, detail in dict(tape.get("latest_by_source") or {}).items():
+            if isinstance(detail, dict):
+                click.echo(f"  Tape {source}: {detail.get('window_end', 'unknown')}")
+    rate = snapshot.get("x_rate")
+    if isinstance(rate, dict):
+        click.echo(
+            f"  X budget: {rate.get('digests_24h', 0)}/16 digests; "
+            f"breaker={bool(rate.get('breaker_active'))}"
         )
     if snapshot.get("error"):
         click.echo(f"  Error: {snapshot['error']}")

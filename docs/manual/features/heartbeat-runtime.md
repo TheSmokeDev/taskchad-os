@@ -123,6 +123,7 @@ the heartbeat re-discovering it every cycle.
 | `HEARTBEAT_BLOCKER_REPROMOTE_DAYS` | `3` | cooldown before re-promotion |
 | `HEARTBEAT_BLOCKER_MAX_ACTIVE` | `3` | max active `[heartbeat]` Open Threads |
 | `HEARTBEAT_BLOCKER_PROMOTE_ALLOWLIST` | `google:oauth_invalid_grant,asana:auth_failed,slack:auth_failed` | comma-separated signatures allowed to promote |
+| `HEARTBEAT_DISABLED_SOURCES` | `` (empty) | comma-separated source keys the operator does not use (e.g. `asana,slack`, set live 2026-08-11); a disabled source is skipped entirely — no probe, no context section, no sense facts, no blocker candidate — so an unused integration cannot generate daily `token_missing` noise |
 
 All five knobs resolve at call time through
 `config.get_heartbeat_blocker_settings()` — an env override applies on the

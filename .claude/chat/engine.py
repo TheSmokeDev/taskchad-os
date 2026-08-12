@@ -1146,6 +1146,26 @@ class ConversationEngine:
             if trace_decisions is not None:
                 trace_decisions["cognitive_pass"] = decision
                 trace_decisions["called_shots_challenge"] = challenge_decision
+            # Durable receipt — the only restart-surviving proof of whether
+            # the pass fires (stdout truncates per restart; the Langfuse span
+            # is unreadable when the server is down). Whole-body fail-open.
+            try:
+                from config import COGNITIVE_PASS_RECEIPTS_FILE
+
+                COGNITIVE_PASS_RECEIPTS_FILE.parent.mkdir(
+                    parents=True, exist_ok=True,
+                )
+                receipt = dict(
+                    decision,
+                    ts=datetime.now().astimezone().isoformat(),
+                    process=str(getattr(active_process, "value", active_process)),
+                )
+                with COGNITIVE_PASS_RECEIPTS_FILE.open(
+                    "a", encoding="utf-8",
+                ) as fh:
+                    fh.write(json.dumps(receipt) + "\n")
+            except Exception:
+                pass
 
     def note_router_activity(self, message: Any) -> None:
         """Brief-owed marker seam (Living Mind Act 4, R1 B4).

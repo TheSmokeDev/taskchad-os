@@ -512,6 +512,13 @@ def _install_data_fakes(monkeypatch, **overrides):
     blocks populate sense facts. Pass e.g. ``gmail=RuntimeError(...)`` to make
     that integration raise through the REAL except branch instead."""
 
+    # These tests exercise EVERY real gather branch — pin the operator's
+    # HEARTBEAT_DISABLED_SOURCES opt-out (live .env disables asana/slack)
+    # to empty so the branches under test actually run.
+    monkeypatch.setattr(
+        heartbeat, "get_heartbeat_disabled_sources", lambda: frozenset()
+    )
+
     def mod(**attrs):
         return types.SimpleNamespace(**attrs)
 

@@ -187,7 +187,10 @@ def _check_crypto_round(report: DiagnosticsReport) -> None:
         from crypto_round.provenance import status as provenance_status
 
         settings = load_market_round_settings()
-        ledger = CryptoRoundDB(initialize=False).status()
+        db = CryptoRoundDB(initialize=False)
+        ledger = db.status()
+        tape = db.tape_status()
+        from lib import x_rate
         latest = ledger.get("latest")
         if isinstance(latest, dict):
             latest = {
@@ -204,6 +207,14 @@ def _check_crypto_round(report: DiagnosticsReport) -> None:
             "latest": latest,
             "state_counts": ledger.get("state_counts", {}),
             "open_paper_calls": ledger.get("open_paper_calls", 0),
+            "conversation_tape": tape,
+            "source_receipt_count": len(db.source_receipts()),
+            "source_receipt_history_count": db.source_receipt_history_count(),
+            "x_rate": x_rate.status(),
+            "last_failure": bool(
+                isinstance(ledger.get("latest"), dict)
+                and ledger["latest"].get("state") == "failed"
+            ),
             "dependency_provenance": provenance_status(),
         }
     except Exception as exc:

@@ -750,6 +750,13 @@ def _install_fake_integrations(monkeypatch, **raises):
     integrations return benign empties (no candidates).
     """
 
+    # These tests exercise EVERY real gather branch — pin the operator's
+    # HEARTBEAT_DISABLED_SOURCES opt-out (live .env disables asana/slack)
+    # to empty so the branches under test actually run.
+    monkeypatch.setattr(
+        heartbeat, "get_heartbeat_disabled_sources", lambda: frozenset()
+    )
+
     def mod(**attrs):
         return types.SimpleNamespace(**attrs)
 
@@ -850,6 +857,33 @@ class TestGatherPath:
         # And the candidate classifies into the Google OAuth class
         obs = heartbeat.classify_blocker(*gmail_candidates[0])
         assert obs.signature == GOOGLE_SIG
+
+    @pytest.mark.asyncio
+    async def test_disabled_source_skips_probe_section_and_blocker(
+        self, monkeypatch
+    ):
+        """HEARTBEAT_DISABLED_SOURCES: a disabled source must produce no
+        section, no sense facts, and no blocker candidate — even when its
+        integration would raise (the unused-integration noise class,
+        2026-08-11)."""
+        _install_fake_integrations(
+            monkeypatch,
+            asana=RuntimeError("asana token missing"),
+        )
+        # Override the helper's empty pin: operator disables asana + slack.
+        monkeypatch.setattr(
+            heartbeat,
+            "get_heartbeat_disabled_sources",
+            lambda: frozenset({"asana", "slack"}),
+        )
+        context, _source_ids, candidates, facts = (
+            await heartbeat.gather_heartbeat_context()
+        )
+        assert not [c for c in candidates if c[0] in ("asana", "slack")]
+        assert "Asana" not in context
+        assert "Slack" not in context
+        assert "tasks" not in facts
+        assert "slack_important_count" not in facts.get("community", {})
 
     @pytest.mark.asyncio
     async def test_calendar_branch_also_surfaces_google_class(self, monkeypatch):

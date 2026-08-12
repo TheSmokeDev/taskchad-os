@@ -27,7 +27,7 @@ from models import (
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
 import voice as voice_mod
 from voice_markers import parse_send_markers, strip_send_markers
-from voice_preferences import get_voice_reply_mode
+from voice_preferences import get_voice_reply_mode, prepare_voice_reply_text
 
 # PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
 # Module-attribute lookup so monkeypatch propagates (Rule 3). Adapter catches
@@ -666,22 +666,33 @@ class TelegramAdapter:
                 text=text,
                 parse_mode="Markdown",
             )
-            if (
-                get_voice_reply_mode() == "always"
-                and not message.is_error
-                and not message.text.startswith(("Thinking...", "Working...", "\u23f3 ", "\U0001f527 "))
-            ):
-                await self._send_voice_response(
-                    int(message.channel.platform_id),
-                    raw_text,
-                    fallback_to_text=False,
-                )
             return message.update_message_id
         except Exception as e:
             if "is not modified" in str(e):
                 return message.update_message_id
             print(f"[{datetime.now()}] Telegram edit failed: {e}", flush=True)
             return None
+
+    async def send_voice_reply_for_update(self, message: OutgoingMessage) -> None:
+        """Voice a successfully edited final outside the bounded edit call."""
+
+        if (
+            get_voice_reply_mode() != "always"
+            or message.is_error
+            or message.text.startswith(("Thinking...", "Working...", "\u23f3 ", "\U0001f527 "))
+        ):
+            return
+        body_text = message.text
+        footer = getattr(message, "footer", None)
+        if footer:
+            body_text = f"{body_text}\n\n{footer}" if body_text else footer
+        raw_text, _ = self._extract_media_directives(body_text)
+        if raw_text.strip():
+            await self._send_voice_response(
+                int(message.channel.platform_id),
+                raw_text,
+                fallback_to_text=False,
+            )
 
     async def send_typing(self, channel: Channel) -> None:
         """Send typing indicator."""
@@ -1305,23 +1316,7 @@ class TelegramAdapter:
     @staticmethod
     def _clean_for_tts(text: str) -> str:
         """Strip markdown/code/noise so TTS reads clean natural language."""
-        import re
-        # Remove code blocks entirely (they sound terrible read aloud)
-        text = re.sub(r"```[\s\S]*?```", "", text)
-        # Remove inline code backticks
-        text = re.sub(r"`([^`]+)`", r"\1", text)
-        # Remove markdown bold/italic markers
-        text = re.sub(r"\*{1,2}(.+?)\*{1,2}", r"\1", text)
-        text = re.sub(r"_{1,2}(.+?)_{1,2}", r"\1", text)
-        # Remove markdown headers
-        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-        # Remove markdown links — keep display text
-        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-        # Remove bullet markers
-        text = re.sub(r"^[\-\*]\s+", "", text, flags=re.MULTILINE)
-        # Collapse multiple newlines
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
+        return prepare_voice_reply_text(text)
 
     async def _send_voice_response(
         self,

@@ -4,9 +4,8 @@ import asyncio
 import re
 from typing import Any
 
-import pytest
-
 import background_tasks
+import pytest
 import router as router_module
 from adapters.base import ProgressCapabilities
 from adapters.buzz import BuzzAdapter
@@ -50,7 +49,9 @@ class _MultiYieldEngine:
 
     async def handle_message(self, incoming: IncomingMessage, progress: dict[str, Any]):
         yield OutgoingMessage(text="real answer", channel=incoming.channel, thread=incoming.thread)
-        yield OutgoingMessage(text="follow-up nudge", channel=incoming.channel, thread=incoming.thread)
+        yield OutgoingMessage(
+            text="follow-up nudge", channel=incoming.channel, thread=incoming.thread
+        )
 
 
 class _DelayedAnswerEngine:
@@ -101,6 +102,7 @@ class _CaptureAdapter:
         self.updates: list[OutgoingMessage] = []
         self.events: list[tuple[str, str]] = []
         self.typing_calls = 0
+        self.voiced_updates: list[OutgoingMessage] = []
 
     async def send(self, message: OutgoingMessage) -> str:
         self.sent.append(message)
@@ -114,6 +116,9 @@ class _CaptureAdapter:
 
     async def send_typing(self, channel: Channel) -> None:
         self.typing_calls += 1
+
+    async def send_voice_reply_for_update(self, message: OutgoingMessage) -> None:
+        self.voiced_updates.append(message)
 
 
 class _TransientPlaceholderAdapter(_CaptureAdapter):
@@ -424,7 +429,8 @@ async def test_failed_placeholder_recovers_progress_and_keeps_typing(
     await router._handle_inner(adapter, incoming)
 
     progress_sends = [
-        text for event, text in adapter.events
+        text
+        for event, text in adapter.events
         if event == "send" and text.startswith("⏳ Homie is reasoning")
     ]
     assert progress_sends, "the ticker must replace a failed Thinking message"
@@ -568,12 +574,8 @@ def test_merge_incoming_batch_preserves_voice_origin():
 
     merged_text_only = ChatRouter._merge_incoming_batch(
         [
-            IncomingMessage(
-                text="a", user=user, channel=channel, platform=Platform.CLI
-            ),
-            IncomingMessage(
-                text="b", user=user, channel=channel, platform=Platform.CLI
-            ),
+            IncomingMessage(text="a", user=user, channel=channel, platform=Platform.CLI),
+            IncomingMessage(text="b", user=user, channel=channel, platform=Platform.CLI),
         ]
     )
     assert merged_text_only.voice_origin is False
@@ -602,6 +604,30 @@ async def test_final_edit_exception_falls_back_to_fresh_send_and_followup(tmp_pa
         ("send", "real answer"),
         ("send", "follow-up nudge"),
     ]
+    assert adapter.voiced_updates == []
+
+
+@pytest.mark.asyncio
+async def test_successful_final_edit_voices_only_after_receipt(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    channel = Channel(platform=Platform.CLI, platform_id="test-channel")
+    incoming = IncomingMessage(
+        text="tell me once",
+        user=User(platform=Platform.CLI, platform_id="user-1"),
+        channel=channel,
+        platform=Platform.CLI,
+    )
+    adapter = _CaptureAdapter()
+    router = ChatRouter(  # type: ignore[arg-type]
+        _DelayedAnswerEngine(delay=0, session_store=store),
+        _NoopManager(),
+    )
+
+    await router._handle_inner(adapter, incoming)
+    await asyncio.sleep(0)
+
+    assert adapter.events == [("send", "Thinking..."), ("update", "real answer")]
+    assert [message.text for message in adapter.voiced_updates] == ["real answer"]
 
 
 @pytest.mark.asyncio
@@ -703,10 +729,7 @@ async def test_typing_failure_does_not_disable_editable_status(
     await router._handle_inner(adapter, incoming)
 
     assert adapter.typing_calls >= 2
-    assert any(
-        message.text.startswith("⏳ Homie is reasoning")
-        for message in adapter.updates
-    )
+    assert any(message.text.startswith("⏳ Homie is reasoning") for message in adapter.updates)
     assert adapter.updates[-1].text == "real answer"
 
 

@@ -25,6 +25,7 @@ Design rules for anything added here:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 from pathlib import Path
@@ -292,6 +293,16 @@ def register_tools() -> int:
         _logger.warning("eye-tool registration failed", exc_info=True)
 
     try:
+        # SEO/GEO owns its direct, read-only GSC/GA4/Firecrawl/OpenSEO wrappers.
+        # Keeping them out of the generic read set avoids granting research
+        # credentials to unrelated personas.
+        from runtime import tool_impl_seo_geo
+
+        registered += tool_impl_seo_geo.register_tools()
+    except Exception:  # noqa: BLE001
+        _logger.warning("SEO/GEO tool registration failed", exc_info=True)
+
+    try:
         from runtime import tool_impl_crypto
 
         registered += tool_impl_crypto.register_tools()
@@ -309,14 +320,16 @@ def register_tools() -> int:
     except Exception:  # noqa: BLE001
         _logger.warning("crypto-desk-tool registration failed", exc_info=True)
 
-    try:
-        # Profile-private research artifacts and public prediction books only.
-        # The live order module remains a separate, operator-gated boundary.
-        from runtime import tool_impl_crypto_round
+    # Optional private extension: the sanitizer intentionally omits this module.
+    if importlib.util.find_spec("runtime.tool_impl_crypto_round") is not None:
+        try:
+            # Profile-private research artifacts and public prediction books only.
+            # The live order module remains a separate, operator-gated boundary.
+            from runtime import tool_impl_crypto_round
 
-        registered += tool_impl_crypto_round.register_tools()
-    except Exception:  # noqa: BLE001
-        _logger.warning("crypto-round-tool registration failed", exc_info=True)
+            registered += tool_impl_crypto_round.register_tools()
+        except Exception:  # noqa: BLE001
+            _logger.warning("crypto-round-tool registration failed", exc_info=True)
 
     try:
         # The order path — mandate, preflight, bracket submission. Its own
@@ -363,7 +376,10 @@ def describe_registered() -> str:
     from runtime import tool_registry
 
     return json.dumps(
-        {e.name: {"toolset": e.toolset, "effect": e.effect} for e in tool_registry.list_registered()},
+        {
+            e.name: {"toolset": e.toolset, "effect": e.effect}
+            for e in tool_registry.list_registered()
+        },
         indent=2,
         sort_keys=True,
     )

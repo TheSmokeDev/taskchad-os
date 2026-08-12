@@ -1045,7 +1045,10 @@ class TestF2CheapTierAndF4Cwd:
             _vault_sized_wm(), MentalProcess.PLANNING,
             Path("~/thehomie"), settings=s,
         ))
-        assert captured["model"] == "claude-sonnet-4-6"
+        # Family assertion, not a version pin: the knob's contract is tier
+        # selection; the sonnet alias moves with runtime upgrades (was
+        # claude-sonnet-4-6, resolves to claude-sonnet-5 as of 2026-08).
+        assert captured["model"].startswith("claude-sonnet")
 
 
 # ===========================================================================

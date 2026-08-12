@@ -106,7 +106,12 @@ def check_google(check_only: bool = False, headless: bool = False) -> bool:
             return True
         except Exception as e:
             print_status("API validation", False, str(e))
-            return False
+            if check_only:
+                return False
+            # A token that exists but fails validation (invalid_grant: expired or
+            # revoked) can only be replaced by a fresh OAuth flow — returning here
+            # left setup permanently wedged on a dead token. Fall through to re-auth.
+            print("  Stored token is dead (expired/revoked) - starting fresh OAuth flow...")
 
     if check_only:
         print_status("Google OAuth", False, "Not authenticated")
@@ -172,7 +177,7 @@ def check_google(check_only: bool = False, headless: bool = False) -> bool:
             if GSC_SITE_URL and GSC_SITE_URL in site_urls:
                 print_status("Search Console", True, f"Access to {GSC_SITE_URL}")
             else:
-                print_status("Search Console", False, "No matching site — add your-calendar@gmail.com as GSC user")
+                print_status("Search Console", False, "No matching site — sign in as your-calendar@gmail.com (owns the fleet GSC properties)")
         except Exception as e:
             print_status("Search Console", False, str(e))
 

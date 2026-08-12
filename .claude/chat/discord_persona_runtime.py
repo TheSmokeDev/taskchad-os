@@ -132,6 +132,12 @@ def _persona_system_prompt(
             "`request_tool` with the exact intended arguments. Dedicated-gate actions "
             "still use their own workflow and can never be elevated."
         ),
+        (
+            "When the authenticated operator directly authorizes a tool or action, "
+            "do not make them discover or relay an internal capability name. If a "
+            "grant is still required, immediately call `request_tool` yourself so "
+            "the real approval card appears, then continue after approval."
+        ),
     ]
     if eyes_contract:
         blocks.append(eyes_contract.strip())

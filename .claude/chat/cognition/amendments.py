@@ -1146,10 +1146,61 @@ def _coerce_dataclass(cls, record: dict[str, Any]):
         return None
 
 
+_FENCED_BLOCK_RE = re.compile(r"```[a-zA-Z0-9_-]*[ \t]*\r?\n(.*?)```", re.DOTALL)
+
+
+def _parse_json_stream(block: str) -> list[Any]:
+    """Parse a fenced block's content as a stream of JSON values.
+
+    Handles a single pretty-printed object, several concatenated objects, or
+    a JSON list. All-or-nothing: any non-JSON garbage in the block returns []
+    so the whole block falls through to the line-based fallback untouched.
+    """
+    decoder = json.JSONDecoder()
+    text = block.strip()
+    values: list[Any] = []
+    idx = 0
+    while idx < len(text):
+        while idx < len(text) and text[idx] in " \t\r\n":
+            idx += 1
+        if idx >= len(text):
+            break
+        try:
+            value, idx = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            return []
+        values.append(value)
+    out: list[Any] = []
+    for value in values:
+        if isinstance(value, list):
+            out.extend(value)
+        else:
+            out.append(value)
+    return out
+
+
 def _iter_json_records(text: str) -> list[Any]:
+    raw = str(text)
     records: list[Any] = []
+
+    # Fenced blocks first: a pretty-printed object inside ```json fences is
+    # unreadable to the line-based fallback below (its first line is a bare
+    # "{"), yet it is exactly the shape prompts demonstrate. Fully-parsed
+    # blocks are cut from the text so a compact one-liner inside a fence is
+    # not double-counted by the fallback.
+    fenced = [
+        (match, _parse_json_stream(match.group(1)))
+        for match in _FENCED_BLOCK_RE.finditer(raw)
+    ]
+    for _match, parsed in fenced:
+        records.extend(parsed)
+    remaining = raw
+    for match, parsed in reversed(fenced):
+        if parsed:
+            remaining = remaining[: match.start()] + remaining[match.end():]
+
     cleaned_lines = [
-        line.strip() for line in str(text).splitlines()
+        line.strip() for line in remaining.splitlines()
         if line.strip() and not line.strip().startswith("```")
     ]
     joined = "\n".join(cleaned_lines)
@@ -1158,9 +1209,10 @@ def _iter_json_records(text: str) -> list[Any]:
     except json.JSONDecodeError:
         decoded = None
     if isinstance(decoded, list):
-        return decoded
+        return records + decoded
     if isinstance(decoded, dict):
-        return [decoded]
+        records.append(decoded)
+        return records
 
     for line in cleaned_lines:
         if not line.startswith("{"):

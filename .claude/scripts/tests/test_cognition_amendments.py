@@ -1199,3 +1199,51 @@ def test_collapse_lock_order_unchanged(
 
     assert observed["ledger_lock_held_at_target_lock_acquire"] is True
     assert report.blocks_kept == 1
+
+
+# ── _iter_json_records fenced-block parsing (2026-08-11 belief-rail fix) ──
+# Root cause of 21 straight EVOLVE_SILENT nights: the dream prompt showed a
+# pretty-printed object inside a ```json fence, but the parser required each
+# record on a single line — the fenced shape parsed to 0 records, so Phase 5
+# never saw a candidate. These tests pin the fenced path AND legacy parity.
+
+
+_PRETTY_FENCED = """Consolidation prose.
+
+```json
+{
+  "kind": "belief_candidate",
+  "target_file": "SELF.md",
+  "summary": "pretty fenced",
+  "confidence_score": 0.9
+}
+```
+
+Trailing prose."""
+
+
+def test_iter_json_records_parses_pretty_printed_fenced_block() -> None:
+    records = amendments_module._iter_json_records(_PRETTY_FENCED)
+    assert len(records) == 1
+    assert records[0]["summary"] == "pretty fenced"
+
+
+def test_iter_json_records_compact_line_in_fence_not_double_counted() -> None:
+    text = 'x\n```json\n{"kind": "belief_candidate", "summary": "compact"}\n```\ny'
+    records = amendments_module._iter_json_records(text)
+    assert len(records) == 1
+    assert records[0]["summary"] == "compact"
+
+
+def test_iter_json_records_two_fenced_blocks_preserve_order() -> None:
+    text = _PRETTY_FENCED + '\n```json\n{"kind": "belief_candidate", "summary": "second"}\n```'
+    records = amendments_module._iter_json_records(text)
+    assert [r["summary"] for r in records] == ["pretty fenced", "second"]
+
+
+def test_iter_json_records_legacy_shapes_unchanged() -> None:
+    # Whole-text list, bare compact line amid prose, garbage fence.
+    assert len(amendments_module._iter_json_records('[{"a": 1}, {"b": 2}]')) == 2
+    compact = 'prose\n{"kind": "x", "summary": "bare"}\nmore'
+    assert len(amendments_module._iter_json_records(compact)) == 1
+    assert amendments_module._iter_json_records("```json\nnot json\n```") == []

@@ -555,26 +555,24 @@ async def consolidate(
         belief_candidate_section = f"""
 ## Belief Candidates (optional, identity-grade only)
 
-If — and ONLY if — the signal above reveals a genuinely NEW, EVIDENCE-BACKED
+Scan the signal above for identity-grade patterns: a durable, EVIDENCE-BACKED
 belief about the operator or about how The Homie itself works (NOT a routine
-MEMORY.md lesson — those go through the numbered amendments above), emit up to
-{_bs.max_candidates_per_night} belief-candidate JSON block(s), each in its own
-fenced ```json block, shaped EXACTLY:
-{{
-  "kind": "belief_candidate",
-  "target_file": "SELF.md" or "USER.md",
-  "summary": "<short review title>",
-  "rationale": "<why this belief is justified>",
-  "evidence_paths": ["<vault-relative paths to REAL files with real, non-empty content>"],
-  "proposed_content": "<the belief text, under 1200 chars>",
-  "confidence_score": 0.0-1.0
-}}
+MEMORY.md lesson — those go through the numbered amendments above). Your job
+here is GENERATION, not gatekeeping — every block you emit runs through a
+separate evidence-read + LLM judge before anything is written to disk (aim for
+confidence >= {_bs.candidate_min_confidence:.2f}), so when the same operator
+preference, working pattern, or system truth recurs across the window, DO emit
+it and let that gate decide. Zero is still the right answer on a quiet night.
 
-This is a SEPARATE, STRICTER pathway from the amendments above — every block runs
-through an independent evidence-read + LLM judge before anything is written to
-disk (aim for confidence >= {_bs.candidate_min_confidence:.2f}). Do NOT emit a
-block for routine lessons; only for identity-grade claims. If none qualify, emit
-nothing here.
+Emit up to {_bs.max_candidates_per_night} candidate block(s). Each block must
+be a fenced ```json block containing EXACTLY ONE compact JSON object on a
+SINGLE line — no pretty-printing, shaped exactly like this example:
+
+```json
+{{"kind": "belief_candidate", "target_file": "SELF.md", "summary": "<short review title>", "rationale": "<why this belief is justified>", "evidence_paths": ["<vault-relative paths to REAL files with real, non-empty content>"], "proposed_content": "<the belief text, under 1200 chars>", "confidence_score": 0.85}}
+```
+
+`target_file` must be "SELF.md" or "USER.md"; `confidence_score` is 0.0-1.0.
 """
 
     prompt = f"""Memory dream consolidation. Merge recent signal into long-term memory.

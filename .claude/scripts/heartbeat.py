@@ -66,6 +66,7 @@ from config import (  # noqa: E402
     ensure_directories,
     get_background_models,
     get_heartbeat_blocker_settings,
+    get_heartbeat_disabled_sources,
     get_heartbeat_observation_settings,
     is_within_active_hours,
     now_local,
@@ -146,6 +147,7 @@ async def gather_heartbeat_context() -> tuple[
     source_ids: list[str] = []
     blocker_candidates: list[tuple[str, str]] = []
     sense_facts: dict[str, dict[str, Any]] = {}
+    disabled_sources = get_heartbeat_disabled_sources()
 
     # Gmail
     try:
@@ -221,70 +223,76 @@ async def gather_heartbeat_context() -> tuple[
         blocker_candidates.append(("calendar", str(e)))
 
     # Asana
-    try:
-        from integrations.asana_api import (
-            format_tasks_for_context,
-            get_due_soon_tasks,
-            get_overdue_tasks,
-        )
+    if "asana" in disabled_sources:
+        print(f"[{now_local()}] Asana: skipped (HEARTBEAT_DISABLED_SOURCES)")
+    else:
+        try:
+            from integrations.asana_api import (
+                format_tasks_for_context,
+                get_due_soon_tasks,
+                get_overdue_tasks,
+            )
 
-        # raise_on_error=True — credential failures must travel the REAL
-        # except branch below into blocker_candidates instead of being
-        # swallowed into empty task lists (Living Mind Act 2, R1 B5).
-        overdue = get_overdue_tasks(raise_on_error=True)
-        due_soon = get_due_soon_tasks(days=3, raise_on_error=True)
+            # raise_on_error=True — credential failures must travel the REAL
+            # except branch below into blocker_candidates instead of being
+            # swallowed into empty task lists (Living Mind Act 2, R1 B5).
+            overdue = get_overdue_tasks(raise_on_error=True)
+            due_soon = get_due_soon_tasks(days=3, raise_on_error=True)
 
-        asana_section = "## Asana Tasks\n\n"
-        if overdue:
-            overdue_fmt = format_tasks_for_context(overdue)
-            asana_section += f"### OVERDUE ({len(overdue)} tasks)\n{overdue_fmt}\n\n"
-        else:
-            asana_section += "No overdue tasks.\n\n"
-        asana_section += f"### Due Soon (next 3 days)\n{format_tasks_for_context(due_soon)}"
-        for t in overdue:
-            source_ids.append(f"task:{t.gid}")
-        for t in due_soon:
-            source_ids.append(f"task:{t.gid}")
+            asana_section = "## Asana Tasks\n\n"
+            if overdue:
+                overdue_fmt = format_tasks_for_context(overdue)
+                asana_section += f"### OVERDUE ({len(overdue)} tasks)\n{overdue_fmt}\n\n"
+            else:
+                asana_section += "No overdue tasks.\n\n"
+            asana_section += f"### Due Soon (next 3 days)\n{format_tasks_for_context(due_soon)}"
+            for t in overdue:
+                source_ids.append(f"task:{t.gid}")
+            for t in due_soon:
+                source_ids.append(f"task:{t.gid}")
 
-        sections.append(asana_section)
-        sense_facts["tasks"] = {
-            "overdue_count": len(overdue),
-            "due_soon_count": len(due_soon),
-        }
-        print(f"[{now_local()}] Asana: {len(overdue)} overdue, {len(due_soon)} due soon")
-    except Exception as e:
-        sections.append(f"## Asana Tasks\n\n**Error fetching Asana:** {e}")
-        print(f"[{now_local()}] Asana error (non-fatal): {e}")
-        blocker_candidates.append(("asana", str(e)))
+            sections.append(asana_section)
+            sense_facts["tasks"] = {
+                "overdue_count": len(overdue),
+                "due_soon_count": len(due_soon),
+            }
+            print(f"[{now_local()}] Asana: {len(overdue)} overdue, {len(due_soon)} due soon")
+        except Exception as e:
+            sections.append(f"## Asana Tasks\n\n**Error fetching Asana:** {e}")
+            print(f"[{now_local()}] Asana error (non-fatal): {e}")
+            blocker_candidates.append(("asana", str(e)))
 
     # Slack
-    try:
-        from integrations.slack_api import (
-            check_for_important_messages,
-            format_messages_for_context,
-        )
-
-        # raise_on_error=True — a rejected token must reach the except branch
-        # below, not look like "no messages" (Living Mind Act 2, R1 B5).
-        important = check_for_important_messages(hours_ago=2, raise_on_error=True)
-
-        if important:
-            imp_fmt = format_messages_for_context(important)
-            slack_section = (
-                f"## Slack\n\n### Important Messages ({len(important)} found)\n{imp_fmt}"
+    if "slack" in disabled_sources:
+        print(f"[{now_local()}] Slack: skipped (HEARTBEAT_DISABLED_SOURCES)")
+    else:
+        try:
+            from integrations.slack_api import (
+                check_for_important_messages,
+                format_messages_for_context,
             )
-        else:
-            slack_section = "## Slack\n\nNo important messages in monitored channels."
-        for m in important:
-            source_ids.append(f"slack:{m.channel}:{m.ts}")
 
-        sections.append(slack_section)
-        sense_facts.setdefault("community", {})["slack_important_count"] = len(important)
-        print(f"[{now_local()}] Slack: {len(important)} important messages")
-    except Exception as e:
-        sections.append(f"## Slack\n\n**Error fetching Slack:** {e}")
-        print(f"[{now_local()}] Slack error (non-fatal): {e}")
-        blocker_candidates.append(("slack", str(e)))
+            # raise_on_error=True — a rejected token must reach the except branch
+            # below, not look like "no messages" (Living Mind Act 2, R1 B5).
+            important = check_for_important_messages(hours_ago=2, raise_on_error=True)
+
+            if important:
+                imp_fmt = format_messages_for_context(important)
+                slack_section = (
+                    f"## Slack\n\n### Important Messages ({len(important)} found)\n{imp_fmt}"
+                )
+            else:
+                slack_section = "## Slack\n\nNo important messages in monitored channels."
+            for m in important:
+                source_ids.append(f"slack:{m.channel}:{m.ts}")
+
+            sections.append(slack_section)
+            sense_facts.setdefault("community", {})["slack_important_count"] = len(important)
+            print(f"[{now_local()}] Slack: {len(important)} important messages")
+        except Exception as e:
+            sections.append(f"## Slack\n\n**Error fetching Slack:** {e}")
+            print(f"[{now_local()}] Slack error (non-fatal): {e}")
+            blocker_candidates.append(("slack", str(e)))
 
     # Bank Sync — pull latest transactions and balances from Teller/Plaid
     try:

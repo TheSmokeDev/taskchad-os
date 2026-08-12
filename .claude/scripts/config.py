@@ -325,6 +325,7 @@ GSC_SITE_URL = os.getenv("GSC_SITE_URL", "")
 
 # Google Analytics (GA4)
 GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID", "")
+GA4_REPORTING_TOKEN_FILE = os.getenv("GA4_REPORTING_TOKEN_FILE", "")
 
 # === Extension System ===
 # Discovery order: configured paths > bundled repo-local > user-global
@@ -416,6 +417,12 @@ AMENDMENT_LEDGER_FILE = STATE_DIR / "amendment-proposals.jsonl"
 # Rule 2). The cognitive pass queues operator_notification proposals here; the
 # queue is read fresh each call by ProactiveActionQueue. Dispatch/drain is Act 4.
 PROACTIVE_ACTION_QUEUE_FILE = STATE_DIR / "proactive-actions.jsonl"
+
+# Cognitive-pass decision receipts (append-only JSONL). bot.log truncates on
+# every restart and the Langfuse span is unreadable when the server is down,
+# so this file is the only restart-surviving record of whether the pass fires
+# (2026-08-11: zero receipts existed anywhere; the pass was untunable blind).
+COGNITIVE_PASS_RECEIPTS_FILE = STATE_DIR / "cognitive-pass-receipts.jsonl"
 
 # Living Self Act 4 — the scheduled evolve loop's belief-decision artifacts land
 # here (sibling to the recall harness's reports/ dir). `evolve_loop.py
@@ -592,6 +599,19 @@ def is_within_waking_window(now: datetime | None = None) -> bool:
     if start < end:
         return start <= minute < end          # ordinary same-day window
     return minute >= start or minute < end    # wraps midnight
+
+
+def get_heartbeat_disabled_sources() -> frozenset[str]:
+    """Rule-1 call-time resolver for HEARTBEAT_DISABLED_SOURCES.
+
+    Comma-separated source keys (e.g. ``asana,slack``) the operator does not
+    use. A disabled source is skipped entirely: no probe, no context section,
+    no blocker candidate — so an unused integration cannot generate daily
+    token_missing noise (operator confirmed no Asana/Slack, 2026-08-11).
+    """
+
+    raw = os.getenv("HEARTBEAT_DISABLED_SOURCES", "")
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
 
 
 class HeartbeatBlockerSettings(NamedTuple):

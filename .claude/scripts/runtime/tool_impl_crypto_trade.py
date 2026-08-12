@@ -1,42 +1,15 @@
-"""The order path — mandate, pre-trade evaluation, and bracket submission.
+"""The standing paper order path: evaluate and simulate guarded brackets.
 
-This is the half of the desk that can move money, and it is wired LAST and
-deliberately, because the existing slice already got the hard part right and
-the job here is to expose it without weakening it.
-
-THE AUTHORIZATION CHAIN, verified by running it rather than by reading it:
-
-    load_mandate()                 -> MandateLoad(state=ABSENT|VALID|EXPIRED|…)
-    OrderGuard(mode=DRY_RUN)       -> DRY_RUN is the DEFAULT, not a setting
-    ExecutionClient(guard)
-    BracketPlan(...)               -> plain scalars, no object graph needed
-    client.submit_bracket(plan)    -> BracketReport
-
-With no mandate file on disk, a DRY_RUN bracket returns::
-
-    BracketStatus.REFUSED  reasons=('entry-leg-denied', 'mandate-probe-unbound')
-
-That is the whole design in one line. The desk is not authorized by default,
-DRY_RUN is not a safety setting the model can flip, and the refusal names its
-own cause. `mandate.json` is an operator artifact with an expiry — a persona
-cannot write itself one through these tools, and no tool here accepts a
-`mode=live` argument. Going live is an operator act on disk, not a parameter.
-
-WHY THE SUBMIT TOOL EXISTS AT ALL when it currently always refuses: because a
-refusal that names its cause is how the persona LEARNS the shape of the gate.
-A desk that cannot attempt an order cannot discover it is unauthorized, cannot
-report why, and cannot tell the operator what is missing. The alternative —
-withholding the tool — produces "I can't do that" with no diagnosis, which is
-exactly the failure this epic exists to kill.
-
-Read tools here (`crypto_mandate_read`, `crypto_preflight`) are the ones that
-should be used constantly. `crypto_submit_bracket` is the one that proves the
-gate holds.
+Paper trading is a default Crypto Homie capability. The module constructs an
+explicit ``DRY_RUN`` guard with a simulated account and can never reach a
+venue. No tool schema or function argument can select ``LIVE``. Live execution
+remains a separate operator-controlled workflow.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -51,7 +24,7 @@ def _truncate(text: str, limit: int = _MAX_RESULT_CHARS) -> str:
 
 
 def _crypto_mandate_read(**_: Any) -> str:
-    """Is the desk authorized to trade right now, and until when?
+    """Report standing paper access and any separate live mandate artifact.
 
     The first thing a trading persona should ask. Reads the physical mandate
     file (Rule 2 — the authorization is the file on disk, never a cached claim
@@ -70,7 +43,8 @@ def _crypto_mandate_read(**_: Any) -> str:
     state = getattr(load, "state", None)
     authorized = bool(getattr(load, "is_authorized", False))
     lines = [
-        f"Trading authorization: {'AUTHORIZED' if authorized else 'NOT AUTHORIZED'}",
+        "Paper trading: READY — standing default capability; simulation only.",
+        f"Live mandate artifact: {'present' if authorized else 'not active'}",
         f"- state: {getattr(state, 'value', state)}",
     ]
     reason = getattr(load, "reason", "") or ""
@@ -88,48 +62,50 @@ def _crypto_mandate_read(**_: Any) -> str:
             continue
         if value not in (None, ""):
             lines.append(f"- {label}: {value}")
-    if not authorized:
-        lines.append(
-            "\nNo order will execute in this state, including DRY_RUN. A mandate is "
-            "an operator-authored file with an expiry; it cannot be created from here."
-        )
+    lines.append(
+        "\nThe Crypto Homie bracket tool cannot select live mode. Live execution "
+        "remains a separate operator-gated workflow."
+    )
     return _truncate("\n".join(lines))
 
 
-def _build_guard():
-    """Construct the guard with the on-disk mandate bound, if one exists.
+def _build_guard(plan: Any):
+    """Construct the standing paper-only guard for one simulated bracket.
 
-    `OrderGuard()` defaults to `GuardMode.DRY_RUN` and that default is never
-    overridden here — no argument of any tool in this module can reach `mode`.
-    Binding the mandate probe is what lets a VALID mandate actually authorize;
-    with no mandate the probe stays unbound and the guard refuses, which is the
-    correct and desired outcome.
+    This authority is deliberately code-owned rather than an expiring live
+    mandate: paper calls cannot reach a venue, and the persona should be able
+    to create and grade them without repeatedly asking the operator. The
+    submitted symbol and entry price seed a simulated account snapshot so the
+    ordinary geometry, halt, idempotency, exposure, and leverage checks still
+    run. There is still no input path to ``GuardMode.LIVE``.
     """
     from cognition import crypto_order_guard
 
-    guard_kwargs: dict[str, Any] = {}
-    try:
-        # `mandate_probe_from_disk` is the slice's OWN adapter and the only
-        # correct way to bind authorization here. Two reasons it beats
-        # hand-rolling the translation, both learned by getting it wrong first:
-        #
-        #   * `Mandate` (nested on-disk document) and `MandateSnapshot` (the
-        #     flat record the guard evaluates) are DIFFERENT shapes. Passing
-        #     the wrong one produced `mandate-stage-error` — a fail-closed
-        #     refusal that is indistinguishable, from the outside, from an
-        #     unauthorized desk. A mis-wire that looks exactly like the correct
-        #     denial is the worst kind.
-        #   * It re-reads the file on EVERY probe (Rule 2), so an expiry that
-        #     passes mid-session denies immediately. A snapshot captured once
-        #     at construction would keep authorizing against a mandate that had
-        #     already lapsed.
-        guard_kwargs["mandate_probe"] = crypto_order_guard.mandate_probe_from_disk()
-    except Exception:  # noqa: BLE001
-        # Fail CLOSED: leave the probe unbound, which denies at stage 1. There
-        # is no path here that yields a MORE permissive guard than the file.
-        _logger.warning("mandate bind failed; guard stays unauthorized", exc_info=True)
-
-    return crypto_order_guard.OrderGuard(**guard_kwargs)
+    symbol = crypto_order_guard._canonical_symbol(getattr(plan, "symbol", ""))  # noqa: SLF001
+    if not symbol:
+        raise ValueError("paper symbol is invalid")
+    mark = float(getattr(plan, "entry", 0.0))
+    paper_ceiling = 1_000_000_000_000.0
+    mandate = crypto_order_guard.MandateSnapshot(
+        expires_at=datetime.max.replace(tzinfo=UTC),
+        max_order_notional_usd=paper_ceiling,
+        max_position_notional_usd=paper_ceiling,
+        max_exposure_usd=paper_ceiling,
+        max_leverage=1_000.0,
+        max_trades_per_day=1_000_000,
+        allowed_instruments=frozenset({symbol}),
+    )
+    account = crypto_order_guard.AccountSnapshot(
+        available=True,
+        balance_usd=paper_ceiling,
+        positions=(),
+        marks={symbol: mark},
+    )
+    return crypto_order_guard.OrderGuard(
+        mode=crypto_order_guard.GuardMode.DRY_RUN,
+        mandate_probe=crypto_order_guard.static_mandate_probe(mandate),
+        account_probe=lambda: account,
+    )
 
 
 def _plan_from_scalars(
@@ -252,10 +228,11 @@ def _crypto_preflight(
         _logger.warning("risk-gate preflight failed", exc_info=True)
         return f"error: preflight failed: {type(exc).__name__}: {exc}"
 
+    state = getattr(decision, "state", None)
     lines = [
         "PREFLIGHT — risk gate only. Nothing was submitted and no order slot was claimed.",
         f"- allowed: {getattr(decision, 'allowed', '?')}",
-        f"- trading state: {getattr(getattr(decision, 'state', None), 'value', getattr(decision, 'state', '?'))}",
+        f"- trading state: {getattr(state, 'value', state or '?')}",
     ]
     if not getattr(decision, "certain", True):
         # An UNCERTAIN gate has not proven the trade safe; it has failed to
@@ -268,9 +245,8 @@ def _crypto_preflight(
     for reason in getattr(decision, "reasons", ()) or ():
         lines.append(f"- {reason}")
     lines.append(
-        "\nNOTE: this checks trading state and circuit breakers only. Mandate "
-        "caps (notional, leverage, daily count) are enforced at submission — "
-        "use crypto_mandate_read to see what is authorized."
+        "\nNOTE: this checks trading state and circuit breakers only. Paper "
+        "geometry, leverage, and idempotency are enforced at simulation time."
     )
     return _truncate("\n".join(lines))
 
@@ -289,8 +265,6 @@ def _submit(
 ) -> str:
     from cognition import crypto_execution  # noqa: F401 — import-time check
 
-    guard = _build_guard()
-    client = crypto_execution.ExecutionClient(guard)
     plan = _plan_from_scalars(
         symbol=symbol,
         side=side,
@@ -301,6 +275,8 @@ def _submit(
         leverage=leverage,
         request_id=request_id,
     )
+    guard = _build_guard(plan)
+    client = crypto_execution.ExecutionClient(guard)
     return _render_report(client.submit_bracket(plan))
 
 
@@ -354,8 +330,8 @@ _SPECS: tuple[tuple[str, str, str, dict[str, Any], Any, str], ...] = (
     (
         "crypto_mandate_read",
         "crypto",
-        "Check whether the desk is authorized to trade, and for how much longer. Ask "
-        "this FIRST — with no valid mandate nothing executes, not even a dry run.",
+        "Check standing paper-trading readiness and whether a separate live mandate "
+        "artifact exists. Paper simulation is available by default.",
         {"type": "object", "properties": {}},
         _crypto_mandate_read,
         "read",
@@ -384,9 +360,9 @@ _SPECS: tuple[tuple[str, str, str, dict[str, Any], Any, str], ...] = (
     (
         "crypto_submit_bracket",
         "crypto",
-        "Submit an entry + stop (+ optional target) bracket order through the risk "
-        "guard. The guard runs in DRY_RUN unless the operator has authorized live "
-        "trading on disk; a stop is mandatory. Read the returned reasons carefully.",
+        "Submit an entry + stop (+ optional target) bracket through the risk guard "
+        "in hard-coded DRY_RUN mode. It never reaches a venue; a stop is mandatory. "
+        "Read the returned reasons carefully.",
         {
             "type": "object",
             "properties": {

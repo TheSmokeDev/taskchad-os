@@ -93,6 +93,19 @@ _RESEARCH_READ_TOOLS: list[str] = [
     "x_search",
 ]
 
+_SEO_GEO_READ_TOOLS: list[str] = [
+    "gsc_overview",
+    "gsc_top_queries",
+    "gsc_top_pages",
+    "ga4_overview",
+    "ga4_top_pages",
+    "ga4_traffic_sources",
+    "firecrawl_scrape",
+    "firecrawl_map",
+    "openseo_read",
+    "fleet_pulse_latest",
+]
+
 _REPO_READ_TOOLS: list[str] = [
     "gh_issue_view",
     "gh_issue_list",
@@ -133,6 +146,11 @@ TOOLSETS: dict[str, Toolset] = {
     "research_read": {
         "description": "Read-only web, Firecrawl, Exa, and X research",
         "tools": _RESEARCH_READ_TOOLS,
+        "includes": ["safe_core"],
+    },
+    "seo_geo_read": {
+        "description": "Read-only SEO/GEO intelligence: GSC, GA4, Firecrawl, local OpenSEO, and fleet receipts",
+        "tools": _SEO_GEO_READ_TOOLS,
         "includes": ["safe_core"],
     },
     "repo_read": {
@@ -224,6 +242,8 @@ TOOLSETS: dict[str, Toolset] = {
             "crypto_last30days_read",
             "crypto_prediction_markets",
             "crypto_prediction_book",
+            "crypto_source_tape",
+            "crypto_chart",
             # Risk + sizing — read-only maths, no order path
             "crypto_position_size",
             "crypto_liquidation",
@@ -235,9 +255,8 @@ TOOLSETS: dict[str, Toolset] = {
             # The book
             "crypto_plays_read",
             "crypto_paper_read",
-            # The order path. Authorization is an operator FILE with an expiry
-            # (`mandate.json`); with none present the guard refuses every order
-            # including DRY_RUN, and no tool here can set the guard's mode.
+            # The paper order path is a standing persona capability. The guard
+            # mode is hard-coded DRY_RUN; no tool argument can select LIVE.
             "crypto_mandate_read",
             "crypto_preflight",
             "crypto_submit_bracket",

@@ -117,6 +117,15 @@ def test_an_empty_vault_still_yields_a_usable_prompt(
     assert instructions == talk_session._VOICE_PREAMBLE
 
 
+def test_voice_preamble_forbids_reading_syntax_aloud() -> None:
+    preamble = talk_session._VOICE_PREAMBLE
+
+    assert "plain-English bottom line" in preamble
+    assert "Never read formatting or syntax aloud" in preamble
+    assert "Do not recite command syntax, file paths, URLs" in preamble
+    assert "exact text is in the transcript" in preamble
+
+
 # ─── TALK_PREFER_CODEX_OAUTH (voice-scoped billing directive) ─────────────
 
 

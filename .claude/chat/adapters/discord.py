@@ -26,7 +26,7 @@ from models import (
 import voice as voice_mod
 from attachment_context import is_supported_document_attachment
 from voice_markers import parse_send_markers, strip_send_markers
-from voice_preferences import get_voice_reply_mode
+from voice_preferences import get_voice_reply_mode, prepare_voice_reply_text
 
 # PRD-8 Phase 7b WS2 (codex post-build F2) — operator kill-switch handling.
 # Module-attribute lookup (Rule 3); adapter catches KillSwitchDisabled
@@ -901,13 +901,15 @@ class DiscordAdapter:
         return str(sent.id) if sent else None
 
     async def update(self, message: OutgoingMessage) -> str | None:
-        """Edit an existing Discord message."""
+        """Perform one pure Discord message edit and return its receipt."""
         if not message.update_message_id:
             return
         channel = self._client.get_channel(int(message.channel.platform_id))
         if not channel:
             return
-        if parse_send_markers(message.text):
+        if parse_send_markers(
+            message.text, channel_id=str(message.channel.platform_id or "")
+        ):
             # Updates must remain a pure single-message edit. Let the router's
             # fresh-send fallback own file dispatch exactly once.
             return None
@@ -929,19 +931,26 @@ class DiscordAdapter:
                 embed_data = [message.embed]
             kwargs["embeds"] = [self._build_embed(item) for item in embed_data[:10]]
             await msg.edit(**kwargs)
-            if (
-                get_voice_reply_mode() == "always"
-                and not message.is_error
-                and not message.text.startswith(("Thinking...", "Working...", "\u23f3 ", "\U0001f527 "))
-                and text.strip()
-            ):
-                await self._send_voice_response(
-                    channel, text, fallback_to_text=False
-                )
             return message.update_message_id
         except Exception as e:
             print(f"[{datetime.now()}] Discord edit failed: {e}")
             return None
+
+    async def send_voice_reply_for_update(self, message: OutgoingMessage) -> None:
+        """Voice a successfully edited final without delaying edit receipt."""
+
+        if (
+            get_voice_reply_mode() != "always"
+            or message.is_error
+            or message.text.startswith(("Thinking...", "Working...", "\u23f3 ", "\U0001f527 "))
+        ):
+            return
+        text = strip_send_markers(message.text).strip()
+        if not text:
+            return
+        channel = self._client.get_channel(int(message.channel.platform_id))
+        if channel is not None:
+            await self._send_voice_response(channel, text, fallback_to_text=False)
 
     async def send_typing(self, channel: Channel) -> None:
         """Send typing indicator."""
@@ -1166,7 +1175,7 @@ class DiscordAdapter:
             import discord  # type: ignore[import-not-found]
             from io import BytesIO
 
-            audio = await voice_mod.synthesize(text)
+            audio = await voice_mod.synthesize(prepare_voice_reply_text(text))
             await target.send(
                 file=discord.File(BytesIO(audio), filename="upwork-tldr.ogg")
             )
@@ -1188,7 +1197,7 @@ class DiscordAdapter:
             import discord  # type: ignore[import-not-found]
             from io import BytesIO
 
-            audio = await voice_mod.synthesize(text)
+            audio = await voice_mod.synthesize(prepare_voice_reply_text(text))
             # discord.File accepts a file-like object
             buf = BytesIO(audio)
             file = discord.File(buf, filename="response.ogg")
@@ -1216,7 +1225,7 @@ class DiscordAdapter:
 
     async def _dispatch_send_markers(self, channel: Any, text: str) -> None:
         """Phase 4: parse [SEND_FILE]/[SEND_PHOTO] markers, send as files."""
-        markers = parse_send_markers(text)
+        markers = parse_send_markers(text, channel_id=str(getattr(channel, "id", "") or ""))
         if not markers:
             return
         try:

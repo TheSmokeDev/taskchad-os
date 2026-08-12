@@ -116,6 +116,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("learn", "Author a reusable skill from a URL, local dir, this conversation, or pasted notes (staged for /skills)", "router", "operator"),
     ("watch", "Learn from one video, save a sourced note, and compare it with the current work", "router", "operator"),
     ("curriculum", "Persona curriculum - status, sources, run, review, route, grade, enable, disable", "router", "admin"),
+    ("crypto", "Crypto Homie tape - tape debauchery|x today, with attributed cited takes", "engine", "admin"),
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
     ("image", "Generate or edit an image through Codex imagegen", "engine", "admin"),
@@ -181,7 +182,20 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     # Co-Founder (US-015) — autonomous project steering.
     ("Co-Founder", ["cofounder"]),
     ("Communication", ["send", "brief"]),
-    ("Memory", ["search", "vault", "file", "working", "shots", "skills", "learn", "watch", "curriculum"]),
+    (
+        "Memory",
+        [
+            "search",
+            "vault",
+            "file",
+            "working",
+            "shots",
+            "skills",
+            "learn",
+            "watch",
+            "curriculum",
+        ],
+    ),
     (
         "Content Creation",
         ["blog", "image", "generate-image", "owner-image", "quote", "linkedin", "primo", "tweet", "instagram", "yt_script", "shorts", "video"],
@@ -382,7 +396,7 @@ NATIVE_MENU_EXCLUDED: frozenset[str] = frozenset(
         # Mode toggles — session state, not user-facing actions.
         "plan", "go", "execute", "mode", "reload", "cost", "extensions",
         # Raw engine integrations — reached NL-first through the engine, no slash menu.
-        "post", "slack", "sheets", "docs", "drive", "circle",
+        "post", "slack", "sheets", "docs", "drive", "circle", "crypto",
         # Hyphenated names — Telegram command names are lowercase alnum+underscore only.
         "generate-image", "owner-image",
         # Content long-tail — typed on demand, kept off the menu to reduce clutter.

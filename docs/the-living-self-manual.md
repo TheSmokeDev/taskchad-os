@@ -476,6 +476,37 @@ Shipped state of the harness:
 - ✅ Stratified goldens + bootstrap confidence intervals + regression hard-veto, plus a deterministic belief-regression floor
 - 🔄 Broader auto-apply scope for durable identity changes is still expanding behind the same gate
 
+**Regression-corpus freshness (2026-08-11 incident):** `regression_queries.json`
+is derived state over a LIVING vault — its `expected_top_path` entries go stale
+as the vault grows. From ~April to 2026-08-11 all 5 entries expected `MEMORY.md`
+as top hit while dedicated concept pages had legitimately outranked it, so the
+floor hard-vetoed EVERY candidate — including the null candidate — and the
+scheduled `propose` ran `accepted=False` for months (26/26 runs). The floor had
+become a constant-False function. When the daily run shows persistent
+`wrong_top_path` failures whose observed scores are ABOVE their `min_top_score`
+floors, suspect corpus staleness before recall regression: read the observed
+tops from `.claude/data/evolve/reports/decision-evolve-propose-candidate.json`
+→ `verdict.regression_failures` and re-baseline the JSON. Exit code 1 from
+`SecondBrain-Evolve` means "vetoed" (by design), not a crash — `ERROR` is 3.
+
+**Belief-candidate wire format (2026-08-11 incident):** dream Phase 5 saw
+`candidates_seen: 0` for its entire production life because the consolidate
+prompt demonstrated a pretty-printed fenced JSON example that
+`cognition.amendments._iter_json_records` could not parse (line-based fallback
+requires one complete object per line). Both sides are now fixed: the parser
+parses fenced ```json blocks as full JSON streams (pretty-printed, concatenated,
+or list), and the prompt's example is a compact single-line object with the
+model framed as GENERATOR (the evidence-gate/judge downstream is the
+gatekeeper). Pinned by the `_iter_json_records` fenced-block tests in
+`tests/test_cognition_amendments.py`.
+
+**Cognitive-pass receipts (2026-08-11):** every `_maybe_cognitive_pass`
+decision (gate-closed / timeout / fired / error) now appends one line to
+`STATE_DIR/cognitive-pass-receipts.jsonl` (`COGNITIVE_PASS_RECEIPTS_FILE`),
+fail-open, from the method's `finally`. This is the only restart-surviving
+receipt — stdout truncates on every bot restart and the Langfuse span is
+unreadable when the server is down. Read it before tuning the fire gate.
+
 **Two-phase ship rhythm:** every Evolve increment goes through ship →
 adversarial Codex review → harden → claim done. That review caught a recurring
 class of bug across five PRs (tunable config bound in default args,

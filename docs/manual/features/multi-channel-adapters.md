@@ -101,6 +101,11 @@ data, paths, or secrets. Tool-denied personas never invent tool activity.
 Voice-origin turns receive no text progress so the one-shot voice reply remains
 reserved for the final answer.
 
+In `always` voice mode, Telegram and Discord final edits remain pure bounded
+text edits. TTS starts only after the edit returns a valid receipt. This keeps a
+slow synthesis from making the router mistake a successful edit for a timeout
+and sending a duplicate final as recovery.
+
 Reactions, accumulated tool-history rows, `off`/`new`/`all`/`verbose` modes,
 progress cleanup, a separate 180-second heartbeat, and a normalized typed event
 controller are deferred to v1.1.

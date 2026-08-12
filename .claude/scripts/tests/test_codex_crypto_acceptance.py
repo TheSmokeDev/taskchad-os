@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -30,10 +31,22 @@ def crypto_payload():
         tool_registry._REGISTRY.update(saved)
 
 
-def test_real_crypto_scope_is_the_expected_35_tool_snapshot(crypto_payload):
+def test_real_crypto_scope_matches_optional_private_extension(crypto_payload):
     definitions, _dispatch = crypto_payload
     names = {definition["function"]["name"] for definition in definitions}
-    assert len(names) == 35
+    private_tools = {
+        "crypto_last30days_read",
+        "crypto_prediction_markets",
+        "crypto_prediction_book",
+        "crypto_source_tape",
+        "crypto_chart",
+    }
+    has_private_extension = importlib.util.find_spec("runtime.tool_impl_crypto_round") is not None
+    assert len(names) == (40 if has_private_extension else 35)
+    if has_private_extension:
+        assert private_tools <= names
+    else:
+        assert private_tools.isdisjoint(names)
     assert {
         "crypto_desk_snapshot",
         "crypto_candles",

@@ -238,19 +238,59 @@ def archive_emails(msg_ids: list[str]) -> dict[str, int]:
     return {"archived": archived, "skipped": skipped}
 
 
-def send_email(to_email: str, subject: str, body: str) -> bool:
-    """Send an email via Microsoft Graph API."""
+SIGNATURE_PATH_ENV = "OUTREACH_SIGNATURE_HTML"
+_DEFAULT_SIGNATURE_PATH = Path(r"C:\Users\YourUser\YourBusiness\.claude\email-signature.html")
+
+
+def load_signature_html(path: str | Path | None = None) -> str:
+    """Return the branded outreach signature HTML, or '' if unavailable.
+
+    Resolved at call time (never bound as a default arg) so the path can be
+    overridden per run. Fail-open: a missing file yields an empty string and the
+    caller still sends, it just sends unsigned.
+    """
+    if path is None:
+        path = os.getenv(SIGNATURE_PATH_ENV) or _DEFAULT_SIGNATURE_PATH
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def send_email(
+    to_email: str,
+    subject: str,
+    body: str,
+    content_type: str = "Text",
+    append_signature: bool = False,
+) -> bool:
+    """Send an email via Microsoft Graph API.
+
+    Defaults are byte-identical to the original plain-text behavior. Pass
+    ``content_type="HTML"`` with ``append_signature=True`` for branded outreach
+    so the canonical signature block renders instead of a hand-typed stub.
+    """
     require_integration_action(
         "outlook",
         "send_email",
         surface="operator_confirmed",
         caller="integrations.outlook.send_email",
     )
+    if append_signature:
+        sig = load_signature_html()
+        if sig:
+            if content_type == "HTML":
+                body = f"{body}{sig}"
+            else:
+                raise ValueError(
+                    "append_signature=True requires content_type='HTML'; the "
+                    "signature is an HTML table and will not render as text."
+                )
     payload = {
         "message": {
             "subject": subject,
             "body": {
-                "contentType": "Text",
+                "contentType": content_type,
                 "content": body
             },
             "toRecipients": [

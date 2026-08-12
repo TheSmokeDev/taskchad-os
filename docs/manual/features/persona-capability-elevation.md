@@ -64,6 +64,16 @@ human-approved shell, not an OS sandbox; approve only commands you recognize.
 One-time `write_file` and `patch` grants are confined to the current project.
 They cannot write the Homie profile tree.
 
+### Crypto paper trading
+
+Paper trading is a standing Crypto Homie capability and does not require an
+approval card or expiring mandate. The bracket path is hard-coded to dry-run
+mode and cannot reach a venue. Live trading remains a separate dedicated gate.
+For other missing registered tools, Crypto Homie uses the same one-time
+request card as every persona; direct operator authorization should cause the
+persona to request the capability itself instead of asking the operator to
+relay an internal tool name.
+
 ## Persistence, Expiry, And Restart
 
 Pending decisions and their lifecycle live in the private SQLite ledger:

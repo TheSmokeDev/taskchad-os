@@ -3,11 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 import adapters.discord as discord_adapter_module
 import adapters.telegram as telegram_adapter_module
 import core_handlers
+import pytest
 import voice_preferences
 from adapters.discord import DiscordAdapter
 from adapters.telegram import TelegramAdapter
@@ -26,6 +25,21 @@ def test_voice_preference_persists_and_on_aliases_always(tmp_path, monkeypatch) 
     assert voice_preferences.get_voice_reply_mode() == "auto"
     assert voice_preferences.set_voice_reply_mode("on") == "always"
     assert voice_preferences.get_voice_reply_mode() == "always"
+
+
+def test_voice_copy_keeps_exact_syntax_in_text_only() -> None:
+    raw = (
+        "Run `/talk join` against `crypto_mandate_write`. "
+        "See https://example.com/run-book and use paper/dry-run mode."
+    )
+
+    spoken = voice_preferences.prepare_voice_reply_text(raw)
+
+    assert "/" not in spoken
+    assert "_" not in spoken
+    assert "https" not in spoken
+    assert "crypto mandate write" in spoken
+    assert "paper or dry run" in spoken
 
 
 @pytest.mark.asyncio
@@ -89,12 +103,35 @@ async def test_discord_always_mode_sends_voice_and_text(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_discord_update_receipt_does_not_wait_for_tts(monkeypatch) -> None:
+    monkeypatch.setattr(discord_adapter_module, "get_voice_reply_mode", lambda: "always")
+    adapter = DiscordAdapter.__new__(DiscordAdapter)
+    edited = SimpleNamespace(edit=AsyncMock())
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=edited))
+    adapter._client = SimpleNamespace(get_channel=lambda _channel_id: channel)
+    adapter._send_voice_response = AsyncMock()
+    outgoing = OutgoingMessage(
+        text="One final, once.",
+        channel=Channel(Platform.DISCORD, "456", is_dm=True),
+        is_update=True,
+        update_message_id="8",
+    )
+
+    result = await adapter.update(outgoing)
+
+    assert result == "8"
+    adapter._send_voice_response.assert_not_awaited()
+    await adapter.send_voice_reply_for_update(outgoing)
+    adapter._send_voice_response.assert_awaited_once_with(
+        channel, "One final, once.", fallback_to_text=False
+    )
+
+
+@pytest.mark.asyncio
 async def test_always_mode_never_voices_progress_updates(monkeypatch) -> None:
     monkeypatch.setattr(telegram_adapter_module, "get_voice_reply_mode", lambda: "always")
     adapter = TelegramAdapter.__new__(TelegramAdapter)
-    bot = SimpleNamespace(
-        edit_message_text=AsyncMock(return_value=SimpleNamespace(message_id=7))
-    )
+    bot = SimpleNamespace(edit_message_text=AsyncMock(return_value=SimpleNamespace(message_id=7)))
     adapter._app = SimpleNamespace(bot=bot)
     adapter._send_voice_response = AsyncMock()
 
