@@ -123,9 +123,13 @@ def _crypto_polymarket(query: str = "", limit: int = 8, **_: Any) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"error: polymarket lookup failed: {type(exc).__name__}: {exc}"
 
-    quotes = getattr(feed, "quotes", None) or getattr(feed, "markets", None) or []
+    quotes = list(getattr(feed, "quotes", None) or getattr(feed, "markets", None) or [])
+    # The curated board is already lifecycle-filtered by fetch_crypto_markets.
+    # Targeted Gamma search needs the same active-only boundary here.
+    if normalized not in {"crypto", "crypto board", "crypto markets"}:
+        quotes = crypto_polymarket.active_only(quotes)
     if not quotes:
-        return f"No Polymarket markets for {query!r}."
+        return f"No active Polymarket markets for {query!r}."
     return _truncate(
         f"{len(quotes)} market(s) for {query!r}:\n" + "\n".join(str(q) for q in quotes)
     )

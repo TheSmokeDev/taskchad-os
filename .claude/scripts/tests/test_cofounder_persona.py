@@ -56,10 +56,12 @@ def reset_counters():
 
 
 @pytest.fixture
-def homie_root(tmp_path, monkeypatch):
-    root = tmp_path / ".homie"
-    monkeypatch.setenv("HOMIE_HOME", str(root))
-    return root
+def homie_root(seeder_homie_root):
+    """#422 round 4 — delegate to the shared root so the ambient receipt
+    sinks (learning ledger + kill-switch audit DB) are redirected too. A
+    HOMIE_HOME-only redirect isolated the profile tree but let real seeds
+    append to the CHECKOUT's operational state."""
+    return seeder_homie_root
 
 
 def _profile_root(homie_root: Path) -> Path:

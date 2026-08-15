@@ -69,13 +69,33 @@ def _paths(tmp_path: Path) -> ProvisionPaths:
 
 
 @pytest.fixture
-def creation_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ProvisionPaths:
+def creation_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_operator_sinks: Path,
+) -> ProvisionPaths:
     paths = _paths(tmp_path)
     monkeypatch.setattr(
         "personas.provisioning._best_effort_audit",
         lambda *_args, **_kwargs: None,
     )
+    # Issue #422: apply_persona_creation appends a persona-learning audit
+    # row on create, resolved from config.DATA_DIR at CALL time. The shared
+    # ``isolated_operator_sinks`` fixture (conftest.py) redirects that and
+    # the kill-switch audit DB into the tmp tree, so this suite exercises
+    # the real write paths without touching the checkout's live data dir.
     return paths
+
+
+def _learning_audit_rows(persona_id: str) -> list[dict]:
+    """Every persona-learning audit row for ``persona_id`` (call-time read)."""
+    import config as _config
+
+    ledger = Path(_config.DATA_DIR) / "persona_learning_audit.jsonl"
+    if not ledger.is_file():
+        return []
+    rows = (json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines())
+    return [row for row in rows if row["persona_id"] == persona_id]
 
 
 def test_catalog_and_plan_are_deterministic_and_safe(
@@ -160,6 +180,26 @@ def test_apply_returns_typed_receipt_and_persists_every_surface_field(
     assert bindings["channels"][CHANNEL_ID]["enabled"] is False
     assert "test-secret" not in json.dumps(receipt.as_dict())
 
+    # Issue #422 — this IS the shared seam behind `thehomie profile create`
+    # (non-clone) and dashboard `POST /api/agents`: a persona compiled and
+    # applied through `apply_persona_creation` must be born learning with
+    # an audit row, exactly like personas.lifecycle.create_profile's clone
+    # path already was.
+    assert config["learning"]["enabled"] is True
+    rows = _learning_audit_rows("api-engineer")
+    assert len(rows) == 1
+    assert rows[0]["enabled"] is True
+    assert rows[0]["action"] == "enable"
+    assert rows[0]["actor"] == "persona_creation_surface"
+
+    # Reconcile round 2 — this is the shared function BOTH the CLI
+    # non-clone door and the dashboard POST /api/agents door call, so
+    # proving the tick's real admission check accepts its output here
+    # covers the seam both adapters sit on top of.
+    from persona_learning_tick import is_learning_eligible
+
+    assert is_learning_eligible(config) is True
+
 
 def test_stale_preview_refuses_without_creating_profile(
     creation_paths: ProvisionPaths,
@@ -224,6 +264,70 @@ def test_operator_exec_and_hostile_fields_fail_closed(
             ),
             paths=creation_paths,
         )
+
+
+def test_resolver_sentinel_is_refused_at_every_creation_door(
+    creation_paths: ProvisionPaths,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Issue #422 round 3 — ``custom`` is a resolver sentinel, not a persona.
+
+    ``get_persona_paths("custom")`` roots the profile at ``HOMIE_HOME``
+    itself, so the atomic provisioner would stage
+    ``profiles/custom/config.yaml`` while the learning tick keeps reading
+    ``HOMIE_HOME/config.yaml``: create returns success and the newborn's
+    born-learning config is invisible to the runtime that must honor it.
+    Every creation door has to refuse BEFORE staging.
+    """
+    monkeypatch.setattr(
+        ProvisionPaths,
+        "defaults",
+        classmethod(lambda cls: creation_paths),
+    )
+    homie_home = tmp_path / "operator-homie-home"
+    homie_home.mkdir()
+    monkeypatch.setenv("HOMIE_HOME", str(homie_home))
+
+    spec = PersonaCreationSpec(persona_id="custom")
+
+    # The pure compiler seam both atomic doors sit on.
+    with pytest.raises(BlueprintError, match="sentinel"):
+        compile_creation_plan(spec)
+
+    # The dashboard door: POST /api/agents/preview and POST /api/agents call
+    # these two functions verbatim.
+    with pytest.raises(BlueprintError, match="sentinel"):
+        preview_persona_creation(spec, paths=creation_paths)
+    with pytest.raises(BlueprintError, match="sentinel"):
+        apply_persona_creation(
+            spec,
+            actor="test-operator",
+            paths=creation_paths,
+        )
+
+    # The CLI door: plain non-clone `thehomie profile create`.
+    created = CliRunner().invoke(
+        main,
+        ["profile", "create", "custom", "--no-alias"],
+    )
+    assert created.exit_code == 1, created.output
+    assert "sentinel" in created.output
+
+    # No door staged anything.
+    assert not (creation_paths.profiles_root / "custom").exists()
+
+    # This is WHY: the tick's own read path resolves somewhere else entirely,
+    # and no door was allowed to touch the operator's live config either.
+    from personas.services import get_profile_config_path
+
+    runtime_config = get_profile_config_path("custom")
+    assert runtime_config == homie_home / "config.yaml"
+    assert (
+        runtime_config
+        != creation_paths.profiles_root / "custom" / "config.yaml"
+    )
+    assert not runtime_config.exists()
 
 
 def test_readiness_uses_physical_files_and_stays_scoped_to_provisioning(
@@ -358,3 +462,19 @@ def test_cli_blueprint_commands_and_profile_create_share_the_adapter(
     assert default_config["toolsets"] == ["safe_core"]
     assert default_config["persona"]["role"]
     assert default_config["model"]["preferred"]
+
+    # Issue #422 R2 blocker — the ordinary non-clone `thehomie profile
+    # create` door (this exact invocation) bypasses
+    # personas.lifecycle.create_profile entirely and used to leave newborn
+    # personas without learning enabled or an audit row.
+    assert default_config["learning"]["enabled"] is True
+    rows = _learning_audit_rows("safe-default-cli")
+    assert len(rows) == 1
+    assert rows[0]["enabled"] is True
+    assert rows[0]["actor"] == "persona_creation_surface"
+
+    # Reconcile round 2 — prove the tick's REAL admission check (not a
+    # re-derived stand-in) accepts this exact newborn config.
+    from persona_learning_tick import is_learning_eligible
+
+    assert is_learning_eligible(default_config) is True

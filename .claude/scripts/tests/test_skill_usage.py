@@ -19,9 +19,11 @@ from cognition import skill_usage
 from cognition.skill_usage import (
     SkillUsage,
     get_usage,
+    list_all_usage,
     list_eligible,
     mark_state,
     prune_stale,
+    record_persona_assignment,
     record_recurrence,
 )
 
@@ -351,3 +353,99 @@ def test_lock_is_required_for_correctness(sidecar_data_dir, monkeypatch):
     # (lost updates and/or Windows os.replace collisions). This is the negative
     # control for test_concurrent_record_recurrence_no_lost_updates above.
     assert final.recurrence_count < n_threads * 3
+
+
+# === record_persona_assignment / list_all_usage (#429 BLOCKER 3) ===
+
+
+def test_record_persona_assignment_is_a_noop_when_row_absent(sidecar_data_dir):
+    """A hand-authored central skill never has a sidecar row — recording a
+    scope for it must not fabricate one (that would newly RESTRICT a skill
+    that was never linked through the scoped path at all)."""
+    assert record_persona_assignment("never-linked", "sales") is None
+    assert get_usage("never-linked") is None
+
+
+def test_record_persona_assignment_appends_and_dedupes(sidecar_data_dir):
+    record_recurrence("acme-crm", threshold=3)
+
+    u1 = record_persona_assignment("acme-crm", "sales")
+    assert u1 is not None
+    assert u1.assigned_personas == ["sales"]
+
+    u2 = record_persona_assignment("acme-crm", "marketing")
+    assert u2.assigned_personas == ["sales", "marketing"]
+
+    # Re-recording the same persona is a no-op, not a duplicate entry.
+    u3 = record_persona_assignment("acme-crm", "sales")
+    assert u3.assigned_personas == ["sales", "marketing"]
+
+    # Physically persisted (Rule 2) — a fresh read sees the same scope.
+    reread = get_usage("acme-crm")
+    assert reread is not None
+    assert reread.assigned_personas == ["sales", "marketing"]
+
+
+def test_record_persona_assignment_blank_persona_is_a_noop(sidecar_data_dir):
+    record_recurrence("acme-crm", threshold=3)
+    assert record_persona_assignment("acme-crm", "   ") is None
+    assert get_usage("acme-crm").assigned_personas == []
+
+
+def test_list_all_usage_returns_the_full_map(sidecar_data_dir):
+    record_recurrence("alpha", threshold=3)
+    record_recurrence("beta", threshold=3)
+    record_persona_assignment("beta", "sales")
+
+    all_usage = list_all_usage()
+    assert set(all_usage) == {"alpha", "beta"}
+    assert all_usage["beta"].assigned_personas == ["sales"]
+    assert all_usage["alpha"].assigned_personas == []
+
+
+def test_list_all_usage_empty_sidecar(sidecar_data_dir):
+    assert list_all_usage() == {}
+
+
+# === scope rollback + the unrestricted sentinel (#429 design gate B1/B2) ===
+
+
+def test_remove_persona_assignment_takes_a_scope_back(sidecar_data_dir):
+    """A link that recorded a scope and then failed to publish must be able to
+    un-record it, or the sidecar goes on claiming a persona was given a skill
+    that was rolled back."""
+    record_recurrence("acme-crm", threshold=3)
+    record_persona_assignment("acme-crm", "sales")
+    record_persona_assignment("acme-crm", "marketing")
+
+    usage = skill_usage.remove_persona_assignment("acme-crm", "marketing")
+
+    assert usage.assigned_personas == ["sales"]
+    assert get_usage("acme-crm").assigned_personas == ["sales"]
+    # Absent persona / absent row are no-ops, not errors.
+    assert skill_usage.remove_persona_assignment("acme-crm", "nobody") is not None
+    assert skill_usage.remove_persona_assignment("never-linked", "sales") is None
+
+
+def test_mark_scope_unrestricted_stamps_the_sentinel(sidecar_data_dir):
+    record_recurrence("global-skill", threshold=3)
+
+    usage = skill_usage.mark_scope_unrestricted("global-skill")
+
+    assert usage.assigned_personas == [skill_usage.SCOPE_UNRESTRICTED]
+    assert get_usage("global-skill").assigned_personas == ["*"]
+
+
+def test_mark_scope_unrestricted_never_widens_an_existing_scope(sidecar_data_dir):
+    """A promote driven BY a linked-skill intake must not turn that intake's
+    one-persona scope into "everyone" on its way through."""
+    record_recurrence("sales-skill", threshold=3)
+    record_persona_assignment("sales-skill", "sales")
+
+    usage = skill_usage.mark_scope_unrestricted("sales-skill")
+
+    assert usage.assigned_personas == ["sales"]
+
+
+def test_mark_scope_unrestricted_is_a_noop_without_a_row(sidecar_data_dir):
+    assert skill_usage.mark_scope_unrestricted("never-staged") is None

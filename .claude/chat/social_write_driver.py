@@ -7,7 +7,7 @@ orchestration `BrowserExecutor` stays free of agent-browser imports — the
 handler injects an instance of this class.
 
 Hard invariants this driver upholds:
-  - Visible-Chrome only (CDP 9222). `readiness` returns the physical
+  - Visible-Chrome only (CDP 18222). `readiness` returns the physical
     `browser_readiness` envelope; the executor refuses when `enabled` is False.
     There is no launch/headless/fresh-profile path anywhere in `browser_control`.
   - Screenshots are PII-bearing (LinkedIn DOM/names/post body). `screenshot`

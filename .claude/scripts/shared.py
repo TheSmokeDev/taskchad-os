@@ -527,6 +527,23 @@ def atomic_write_text(path: Path, content: str) -> int:
     return len(data)
 
 
+def safe_exc_text(exc: BaseException) -> str:
+    """Format a caught exception for a fail-open receipt without ever raising.
+
+    ``f"{type(exc).__name__}: {exc}"`` calls ``str(exc)``, which can itself
+    raise when the exception type overrides ``__str__`` (or wraps a hostile
+    value in ``.args``) — turning a fail-open ``except Exception`` block into
+    a NEW unhandled exception that escapes the very contract it exists to
+    protect. ``type(exc).__name__`` is always safe (plain attribute access,
+    never a method call), so it anchors every fallback layer here.
+    """
+    try:
+        return f"{type(exc).__name__}: {exc}"
+    except Exception:
+        pass
+    return f"{type(exc).__name__}: <error formatting exception>"
+
+
 # =============================================================================
 # PID FILE MANAGEMENT
 # =============================================================================

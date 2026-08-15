@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 import bridge
+import speaker_auth
 import talk_session
 from runtime import openai_platform_auth
 
@@ -113,6 +114,7 @@ def harness(monkeypatch: pytest.MonkeyPatch):
     vb._mic_task = None
     vb._mic_queue = asyncio.Queue(maxsize=200)
     vb._mic_sent = 0
+    vb._speaker_ledger = speaker_auth.DiscordSpeakerLedger()
     vb._heal_count = 0
     vb._heal_task = None
     vb._rekey_gen = 0

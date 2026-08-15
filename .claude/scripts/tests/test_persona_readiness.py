@@ -134,47 +134,6 @@ def _activate_persona(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _install_ready_safe_core_handlers() -> dict[str, object | None]:
-    from runtime import persona_tools, tool_registry
-
-    persona_tools.ensure_tools_registered()
-    previous: dict[str, object | None] = {}
-    for name in ("recall", "todo"):
-        entry = tool_registry.get_entry(name)
-        if entry is not None and entry.handler is not None:
-            continue
-        previous[name] = entry
-        tool_registry.register_tool(
-            name,
-            entry.description if entry is not None else f"Test handler for {name}.",
-            toolset=entry.toolset if entry is not None else "safe_core",
-            handler=lambda **_kwargs: {},
-            effect=entry.effect if entry is not None else "read",
-            integration_action=(
-                entry.integration_action if entry is not None else None
-            ),
-            schema=entry.schema if entry is not None else None,
-        )
-    return previous
-
-
-def _restore_tool_entries(previous: dict[str, object | None]) -> None:
-    from runtime import tool_registry
-
-    for name, entry in previous.items():
-        tool_registry.unregister_tool(name)
-        if entry is not None:
-            tool_registry.register_tool(
-                entry.name,
-                entry.description,
-                toolset=entry.toolset,
-                handler=entry.handler,
-                effect=entry.effect,
-                integration_action=entry.integration_action,
-                schema=entry.schema,
-            )
-
-
 def test_snapshot_keeps_six_axes_and_exact_declared_handler_gaps(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -204,18 +163,18 @@ def test_snapshot_keeps_six_axes_and_exact_declared_handler_gaps(
     assert snapshot.surfaces["scheduled"].caller_tools is False
 
     capabilities = {row.id: row for row in snapshot.capabilities}
-    for tool_name in ("firecrawl_scrape", "gh_issue_view"):
-        row = capabilities[tool_name]
-        assert row.status == "PARTIAL"
-        assert row.axes["declared"] == "READY"
-        assert row.axes["callable"] == "BLOCKED"
-        assert row.axes["scheduler-safe"] == "NOT_APPLICABLE"
-        assert row.surfaces["web"] == "NOT_APPLICABLE"
-        assert row.surfaces["scheduled"] == "NOT_APPLICABLE"
-        assert any(
-            f"declared tool {tool_name!r} has no registered handler" in reason
-            for reason in row.reasons
-        )
+    tool_name = "gh_issue_view"
+    row = capabilities[tool_name]
+    assert row.status == "PARTIAL"
+    assert row.axes["declared"] == "READY"
+    assert row.axes["callable"] == "BLOCKED"
+    assert row.axes["scheduler-safe"] == "NOT_APPLICABLE"
+    assert row.surfaces["web"] == "NOT_APPLICABLE"
+    assert row.surfaces["scheduled"] == "NOT_APPLICABLE"
+    assert any(
+        f"declared tool {tool_name!r} has no registered handler" in reason
+        for reason in row.reasons
+    )
     sheets = capabilities["sheets.read"]
     assert sheets.kind == "integration"
     assert sheets.axes["configured"] == "READY"
@@ -240,11 +199,7 @@ def test_fully_provisioned_persona_can_reach_ready(
     )
     _select_runtime(monkeypatch, provider="claude")
 
-    previous = _install_ready_safe_core_handlers()
-    try:
-        snapshot = build_persona_readiness_snapshot(persona_id, paths=paths)
-    finally:
-        _restore_tool_entries(previous)
+    snapshot = build_persona_readiness_snapshot(persona_id, paths=paths)
 
     assert snapshot.status == "READY"
     assert snapshot.surfaces["web"].status == "NOT_APPLICABLE"
@@ -274,11 +229,7 @@ def test_direct_chat_readiness_is_selectability_not_active_profile(
     _select_runtime(monkeypatch, provider="claude")
     monkeypatch.setattr(activity, "get_active_profile_name", lambda: "smoke")
 
-    previous = _install_ready_safe_core_handlers()
-    try:
-        snapshot = build_persona_readiness_snapshot(persona_id, paths=paths)
-    finally:
-        _restore_tool_entries(previous)
+    snapshot = build_persona_readiness_snapshot(persona_id, paths=paths)
 
     assert snapshot.surfaces["direct_chat"].status == "READY"
     assert all(

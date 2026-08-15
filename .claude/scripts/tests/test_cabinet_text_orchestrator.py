@@ -446,7 +446,14 @@ async def test_handle_text_turn_audience_all_runs_roster_in_order(tmp_dashboard_
         return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
 
     opts = HandleTurnOptions(roster=_test_roster(), audience="all")
-    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_orchestrator.schedule_title_generation"):
+        # Title generation fires as an unawaited background asyncio task on a
+        # fresh meeting's first turn (entry_count == 0) and shares the SAME
+        # patched `run_with_runtime_lanes` above, so its own call would
+        # otherwise land in `captured_personas` too — this test is about
+        # audience dispatch order, not title generation, so the background
+        # task is a no-op here (real behavior is covered in test_cabinet_title.py).
         result = await handle_text_turn(
             meeting_id=meeting_id,
             user_text="what is everyone seeing?",
@@ -471,7 +478,11 @@ async def test_handle_text_turn_audience_mentions_runs_all_mentions(tmp_dashboar
         return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
 
     opts = HandleTurnOptions(roster=_test_roster(), audience="mentions")
-    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_orchestrator.schedule_title_generation"):
+        # See test_handle_text_turn_audience_all_runs_roster_in_order — same
+        # unawaited-background-task race against the shared mock, unrelated
+        # to what this test is about (audience dispatch order).
         result = await handle_text_turn(
             meeting_id=meeting_id,
             user_text="@ops @seo compare notes",
@@ -502,7 +513,11 @@ async def test_handle_text_turn_audience_targets_bypasses_router(tmp_dashboard_d
         target_agent_ids=["ops", "seo"],
     )
     with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
-         patch("cabinet.text_orchestrator.route_message", side_effect=AssertionError("router should not run")):
+         patch("cabinet.text_orchestrator.route_message", side_effect=AssertionError("router should not run")), \
+         patch("cabinet.text_orchestrator.schedule_title_generation"):
+        # See test_handle_text_turn_audience_all_runs_roster_in_order — same
+        # unawaited-background-task race against the shared mock, unrelated
+        # to what this test is about (audience dispatch order).
         result = await handle_text_turn(
             meeting_id=meeting_id,
             user_text="compare notes",
@@ -512,3 +527,137 @@ async def test_handle_text_turn_audience_targets_bypasses_router(tmp_dashboard_d
 
     assert result.accepted is True
     assert captured_personas == ["seo", "ops"]
+
+
+# ── Persona toolset counter-offers (#428 round-2 MAJOR) ─────────────────
+#
+# Round-2 confirmed: "The live Cabinet persona runtime cannot counter-offer"
+# — a named participant missing a toolset had no path to ask for one. These
+# lock the fix end-to-end: the briefing reaches a named persona's system
+# prompt, a real `<<GRANT_REQUEST: ...>>` reply tees up a REAL proposal row
+# (not a mock), the marker never reaches the transcript, and voice turns /
+# the default persona are excluded on purpose (matching engine.py and
+# discord_persona_runtime.py's own exclusions).
+
+
+@pytest.mark.asyncio
+async def test_named_persona_counter_offer_flow_end_to_end(
+    tmp_dashboard_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A named Cabinet participant's marker reply becomes a real, approvable proposal.
+
+    Non-vacuous by construction: `grant_proposals.list_pending("sales")`
+    reads the REAL sqlite store this test's own `HOMIE_HOME` points at — a
+    build that skips the tee-up (the pre-fix state) leaves that store empty
+    and this assertion fails, it does not pass by coincidence.
+    """
+    monkeypatch.setenv("HOMIE_HOME", str(tmp_path / ".homie"))
+
+    meeting_id = _make_meeting()
+    captured_prompts: dict[str, str] = {}
+
+    async def fake_run(req):
+        persona_id = req.metadata.get("persona_id") if req.metadata else ""
+        captured_prompts[persona_id] = req.system_prompt or ""
+        if persona_id == "sales":
+            return RuntimeResult(
+                text="I can't reach the web from here.\n\n<<GRANT_REQUEST: research_read>>",
+                runtime_lane="claude_native", provider="claude", model="haiku",
+            )
+        return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
+
+    roster = [
+        RosterAgent(id="default", name="Main", description="host"),
+        RosterAgent(id="sales", name="Sales", description="pipeline"),
+    ]
+    opts = HandleTurnOptions(roster=roster, audience="mentions")
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_orchestrator.schedule_title_generation"):
+        result = await handle_text_turn(
+            meeting_id=meeting_id,
+            user_text="@sales can you pull the competitor pages?",
+            client_msg_id="grant-1",
+            opts=opts,
+        )
+
+    assert result.accepted is True
+    # The briefing reached the named persona's prompt...
+    assert "<<GRANT_REQUEST:" in captured_prompts["sales"]
+
+    from personas import grant_proposals as proposals
+
+    # ...and a REAL proposal exists, with full provenance.
+    pending = proposals.list_pending("sales")
+    assert len(pending) == 1
+    assert pending[0].toolset == "research_read"
+    assert pending[0].requested_by == "cabinet"
+    assert pending[0].trigger_text == "@sales can you pull the competitor pages?"
+    assert pending[0].surface == "cabinet"
+    assert pending[0].channel_id == str(meeting_id)
+
+    # The marker never reached the persisted transcript; the approve/deny
+    # card did.
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT text FROM cabinet_transcripts WHERE meeting_id = ? AND speaker = 'sales'",
+            (meeting_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert "GRANT_REQUEST" not in row["text"]
+    assert f"/grant approve sales {pending[0].short_code}" in row["text"]
+    # R3 MAJOR 3: the room prints the command but cannot run it, so the card
+    # must not frame it as an in-room action (it did, and the paste fell
+    # through to the LLM as meeting text while the proposal expired). The
+    # room ALSO claims `/grant` server-side now — see
+    # tests/test_cabinet_room_commands.py.
+    assert "This room cannot decide it" in row["text"]
+    assert "Approve: `/grant approve" not in row["text"]
+
+
+@pytest.mark.asyncio
+async def test_default_persona_and_voice_turns_never_get_the_briefing(
+    tmp_dashboard_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The main homie (executor refuses it — #426 Q6) and voice turns (no
+    surface for a typed-command approve card) are excluded from the
+    counter-offer briefing, matching engine.py's own exclusions."""
+    monkeypatch.setenv("HOMIE_HOME", str(tmp_path / ".homie"))
+
+    meeting_id = _make_meeting()
+    captured_prompts: dict[str, str] = {}
+
+    async def fake_run(req):
+        persona_id = req.metadata.get("persona_id") if req.metadata else ""
+        captured_prompts[persona_id] = req.system_prompt or ""
+        return RuntimeResult(text="ok", runtime_lane="claude_native", provider="claude", model="haiku")
+
+    roster = [
+        RosterAgent(id="default", name="Main", description="host"),
+        RosterAgent(id="sales", name="Sales", description="pipeline"),
+    ]
+
+    # Text turn, default persona — no briefing.
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_orchestrator.schedule_title_generation"):
+        await handle_text_turn(
+            meeting_id=meeting_id,
+            user_text="@default status check",
+            client_msg_id="grant-default",
+            opts=HandleTurnOptions(roster=roster, audience="mentions"),
+        )
+    assert "<<GRANT_REQUEST:" not in captured_prompts["default"]
+
+    # Voice turn, named persona — still no briefing.
+    captured_prompts.clear()
+    with patch("cabinet.text_orchestrator.lane_router.run_with_runtime_lanes", side_effect=fake_run), \
+         patch("cabinet.text_orchestrator.schedule_title_generation"):
+        await handle_text_turn(
+            meeting_id=meeting_id,
+            user_text="@sales status check",
+            client_msg_id="grant-voice",
+            opts=HandleTurnOptions(roster=roster, audience="mentions", is_voice=True),
+        )
+    assert "<<GRANT_REQUEST:" not in captured_prompts["sales"]

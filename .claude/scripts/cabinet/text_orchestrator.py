@@ -262,6 +262,7 @@ def _profile_execution_context(persona_id: str) -> _ProfileExecutionContext:
             config.PROJECT_ROOT / ".claude" / "skills",
             allowlist=resolve_skill_allowlist(canonical_id),
             extra_skill_dirs=[paths["skills"]],
+            reader_persona=canonical_id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug(
@@ -957,16 +958,46 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
         role=args.role,
         is_voice=args.is_voice,
     )
+    # Counter-offer guidance (#428 round-2 MAJOR) — named Cabinet participants
+    # only, text turns only. Cabinet is a canonical live multi-persona surface
+    # that already resolves the same persona toolsets (scoped_tools above), so
+    # a sales persona missing `research_read` here deserves the same
+    # counter-offer path the main 1:1 homie and Discord persona channels get
+    # (engine.py, discord_persona_runtime.py), not a silent dead end. Voice
+    # turns are excluded on purpose — a spoken reply has no surface for a
+    # "/grant approve ..." typed-command card, matching the existing
+    # scoped_tools voice exclusion above. Additive prompt text only; the
+    # marker it teaches is parsed server-side into a proposal row that
+    # mutates nothing.
+    counter_offer_capable = (
+        not args.is_voice and args.persona_id not in (None, "", "default", "main")
+    )
+    counter_offer_system_prompt = None
+    if counter_offer_capable:
+        try:
+            from personas import grant_proposals as _grant_proposals
+
+            counter_offer_system_prompt = _grant_proposals.counter_offer_briefing()
+        except Exception as exc:  # noqa: BLE001 — guidance is additive
+            logger.debug(
+                "cabinet counter-offer briefing unavailable (non-blocking) for %s: %s",
+                args.persona_id,
+                _redact(str(exc)),
+            )
+
     persona_system_prompt = _merge_system_prompts(
         identity_system_prompt,
         profile_context.system_prompt,
         voice_system_prompt,
+        counter_offer_system_prompt,
     )
     system_prompt_sources = ["cabinet_room_identity"]
     if profile_context.system_prompt:
         system_prompt_sources.append("profile_context")
     if voice_system_prompt:
         system_prompt_sources.append("voice_persona_prompt")
+    if counter_offer_system_prompt:
+        system_prompt_sources.append("counter_offer_briefing")
 
     request = RuntimeRequest(
         prompt=runtime_prompt,
@@ -1057,6 +1088,40 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
             "recoverable": True,
         })
         return ""
+
+    # Counter-offer tee-up (#428 round-2 MAJOR). Strip the persona's
+    # `<<GRANT_REQUEST: ...>>` marker, tee up a pending proposal, and append
+    # the approve/deny card BEFORE the reply is persisted to the transcript
+    # or emitted — so a `<<GRANT_REQUEST>>` never reaches the operator raw
+    # and the same marker can never be teed up twice. `requested_by="cabinet"`
+    # matches the existing Cabinet audit-actor convention (`_audit_cabinet`
+    # above): a Cabinet turn is not attributable to one external chat user
+    # the way a Discord/Telegram message is, and this whole call only runs
+    # inside the API-authenticated Cabinet turn path — never off model output.
+    # Sync sqlite rides `to_thread`; text-turns only (voice is excluded above).
+    if counter_offer_capable and text:
+        try:
+            from personas import grant_proposals as _grant_proposals
+
+            counter_offer = await asyncio.to_thread(
+                _grant_proposals.tee_up_from_reply,
+                args.persona_id,
+                text,
+                requested_by="cabinet",
+                trigger_text=args.user_text,
+                surface="cabinet",
+                channel_id=str(args.meeting_id),
+            )
+            if counter_offer is not None:
+                text = (
+                    counter_offer.reply_text.rstrip() + "\n\n" + counter_offer.card_text
+                ).strip()
+        except Exception as exc:  # noqa: BLE001 — never cost the turn its answer
+            logger.warning(
+                "cabinet counter-offer tee-up failed (non-blocking) for %s: %s",
+                args.persona_id,
+                _redact(str(exc)),
+            )
 
     # Persist agent reply to transcript (durable). Capture the rowid for
     # the agent_done event so the UI can correlate.

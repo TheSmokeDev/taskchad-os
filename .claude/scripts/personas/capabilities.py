@@ -668,6 +668,9 @@ def render_profile_env(plan: EnvSyncPlan) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+_KILLSWITCH_ENV_PREFIX = "HOMIE_KILLSWITCH_"
+
+
 def build_capability_scoped_env(
     profile_name: str,
     *,
@@ -676,7 +679,14 @@ def build_capability_scoped_env(
     matrix_path: str | Path | None = None,
     master_env_path: str | Path | None = None,
 ) -> dict[str, str]:
-    """Return a subprocess env containing only base OS keys plus delegated keys."""
+    """Return a subprocess env containing only base OS keys plus delegated keys.
+
+    ``HOMIE_KILLSWITCH_*`` always survives the scrub regardless of the matrix,
+    so an operator's ``HOMIE_KILLSWITCH_<NAME>=disabled`` propagates to every
+    capability-scoped child (persona dream/learning/curriculum ticks, cabinet).
+    Kill switches gate REFUSAL, not access to a new capability — omitting one
+    is a safety regression (absent env == enabled), never a leak.
+    """
 
     from runtime.subprocess_env import get_scrubbed_sdk_env
 
@@ -690,8 +700,24 @@ def build_capability_scoped_env(
         key: value
         for key, value in scrubbed.items()
         if key.upper() in _BASE_RUNTIME_ENV_KEYS
+        or key.upper().startswith(_KILLSWITCH_ENV_PREFIX)
     }
     out.update(plan.values)
+
+    # Kill switches are FAIL-CLOSED across this merge, and so they merge LAST.
+    # A capability group may legitimately delegate a HOMIE_KILLSWITCH_* key
+    # from the master .env; without this pass that delegated value (typically
+    # "enabled") lands on top of the operator's live "disabled" and hands the
+    # child back the capability the operator just pulled the plug on. The two
+    # directions are not symmetric — absent/enabled is the permissive state and
+    # "disabled" is the refusal — so re-applying only the DISABLED parent
+    # values last can never grant anything, only withhold it.
+    from security.kill_switches import is_disabled_value
+
+    for key, value in scrubbed.items():
+        if key.upper().startswith(_KILLSWITCH_ENV_PREFIX) and is_disabled_value(value):
+            out[key] = value
+
     out["HOMIE_HOME"] = str(profile_root)
     return out
 

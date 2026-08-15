@@ -28,6 +28,73 @@ Most commands require the `admin` role; a few are `operator` or `viewer`.
 Mutating "write to the outside world" commands are **default-denied** and need an
 explicit, exact approval phrase (see [Approval-gated writes](#approval-gated-writes)).
 
+### Where the role comes from
+
+The role is **stamped at ingress by the adapter that authenticated the sender**,
+never inferred later. `IncomingMessage.user_role` defaults to `viewer`
+(fail-closed) in `.claude/chat/models.py`, so a surface that forgets to stamp
+gets the least privilege instead of silently inheriting `admin`.
+
+| Surface | Role source | Empty allowlist |
+|---------|-------------|-----------------|
+| Telegram | `TELEGRAM_ALLOWED_USER_IDS` — the same list and int compare the `_on_*` auth checks use | Admits anyone, grants nobody: `viewer` |
+| Discord | `DISCORD_ALLOWED_USERS` — the same set and `str()` compare as `_is_allowed` | Admits anyone, grants nobody: `viewer` |
+| Slack | `CHAT_ALLOWED_USERS` — the same list `_is_allowed` uses | Admits anyone, grants nobody: `viewer` |
+| WhatsApp | `WHATSAPP_ALLOWED_NUMBERS` — the same list as the webhook auth check | Admits anyone, grants nobody: `viewer` |
+| Buzz | Signed NIP-42 pubkey resolved through its per-user role map | Unknown pubkey → `viewer` |
+| CLI | Operator by definition — whoever runs `thehomie chat` owns the box | n/a |
+| Webhook / retired web relay | Fail-closed | `viewer` |
+
+**An empty allowlist grants nothing.** These adapters *admit* everyone when
+their list is unset, so an empty list is not a statement that the sender is the
+operator — it is the absence of any statement at all. Deriving `admin` from it
+made every stranger who found the bot an admin on a default install: an unknown
+Telegram id could reach `@persona learn` and spend provider budget. Identity is
+only ever granted by an explicit allowlist entry — on the list → `admin`, off it
+(or no list at all) → `viewer`.
+
+> **Set your allowlist.** Until you do, chat works but every role-gated command
+> (most of this catalog) is refused. Each adapter logs one line at startup naming
+> the env var to set, so this surfaces in the log rather than as a mystery
+> "Permission denied" mid-session. It is one `.env` line per surface.
+
+**Internal producers carry a named authority too.** Some code builds an
+`IncomingMessage` and hands it to the same gates without any remote sender to
+authenticate. Each one states whose authority it carries:
+
+| Producer | Authority it carries |
+|----------|----------------------|
+| `/talk` Discord voice (`talk_tools`) | **The speaker, per utterance** — see below |
+| Browser Talk (`talk_api`) | `admin` — every `/api/talk/*` route is `admin` in `orchestration/route_policy.py`, so minting a session is itself an admin-authorized act, and exactly one operator holds it |
+| Dashboard chat (`dashboard_api`) | `admin` — the loopback operator control plane |
+| Elevation resume (`router`) | Replays the role persisted from the ORIGINAL turn, so approving an elevation cannot mint privilege |
+| Blog scheduler (cron) | `viewer` — unattended, no operator present, and it drives the engine rather than the admin-gated dispatch |
+
+A test enforces this rather than convention: `test_ingress_role_seam.py`
+fails if any non-test `IncomingMessage(...)` omits an explicit `user_role=`.
+
+**A voice channel is a room, so `/talk` authorizes per speaker.** `/talk join`
+is admin-gated, which authorizes the SESSION's *existence* — but once the bot is
+live in the channel, anyone in it can talk to it. So the opener's role is never
+what runs a command. The sidecar carries each speaker's real Discord id off the
+audio packet, records it on the same boundary the resampler already treats as a
+speaker change, and sends it with every relayed tool call.
+
+The resolving happens in the **main API process**, not the sidecar: those are
+separate processes (py-cord and discord.py cannot share an interpreter), so the
+speaker only exists on the authorizing side if it rides the request. The sidecar
+sends the raw id rather than a role on purpose — it can say who spoke, but never
+what they are allowed to do. The main process checks that id against
+`DISCORD_ALLOWED_USERS`, the same seam the Discord chat adapter stamps from.
+
+- Allowlisted speaker → their role (so the operator's own voice still works).
+- Anyone else, or a speaker the sink could not identify → `viewer`.
+- Leaving the channel drops the session's authority entirely.
+
+Consequence worth knowing: with `DISCORD_ALLOWED_USERS` unset, voice commands
+are viewer-only for everyone, including you. That is the same one-line fix as
+every other surface — list your id.
+
 ### Native menu vs text-only
 
 Every command in this catalog works when typed. A curated subset also shows up
@@ -42,7 +109,8 @@ are kept off the menu on purpose (`NATIVE_MENU_EXCLUDED` in `commands.py`).
   `/reddit`, the LinkedIn commands, `/video`), analytics (`/gsc`, `/analytics`,
   `/signal`), finance (`/budget`), cabinet/team (`/cabinet`, `/standup`,
   `/discuss`, `/teamroom`, `/team`, `/teamtick`, `/cofounder`), memory
-  (`/search`, `/vault`, `/file`, `/skills`, `/working`), content (`/blog`,
+  (`/search`, `/vault`, `/file`, `/skills`, `/working`), personas
+  (`/curriculum`, `/persona`), content (`/blog`,
   `/image`, `/tweet`, `/quote`, `/instagram`, `/design`), and automation
   (`/recap`, `/blueprints`, `/suggestions`).
 - **Text-only families:** mode toggles (`/plan`, `/go`, `/mode`, `/reload`,
@@ -97,7 +165,23 @@ Deep dive: **[Memory And Recall System](memory-and-recall-system.md)** · [Nativ
 | `/skills` | Review / promote / reject self-authored skill drafts | `review` / `promote <name>` / `reject <name>` |
 | `/learn` | Author a staged reusable skill from a URL, path, conversation, or notes | source plus optional focus |
 | `/watch` | Learn from one video, compare it with current context, and save a sourced note | `status` / `retry` / `cancel` / `apply` / `approve` |
-| `/curriculum` | Operate one persona's approved source curriculum | `status` / `sources` / `run` / `review` / `route` / `grade` / `enable` / `disable` |
+| `/curriculum` | Operate one persona's approved source curriculum | `status` / `sources` / `run` / `learn <url>` / `review` / `route` / `grade` / `enable` / `disable` |
+| `@<persona> learn <url>` | Drop one YouTube link into that persona's curriculum and study it now (not a slash command — parsed server-side) | admin only |
+
+## Personas
+
+Deep dive: **[Persona Self-Provisioning](persona-self-provisioning.md)**
+
+| Command | What it does | Sub-commands |
+|---|---|---|
+| `/persona` | Grant or take back a homie's toolset bundles — audited, live on that homie's next turn | `grant [<persona>] <toolset>` / `revoke [<persona>] <toolset>` |
+| `/grant` | Decide a persona's pending toolset counter-offer (Telegram cards also carry one-tap Approve/Deny buttons) | `list` / `approve <persona> <code>` / `deny <persona> <code>` |
+
+Admin-only. The role comes from the canonical role-ingress seam: each adapter
+stamps `user_role` at ingress from its OWN authenticated identity data (its
+operator allowlist, or a signature-verified pubkey on Buzz), and this command
+trusts that stamp rather than re-deriving it — see the feature page's Safety
+Boundaries. Inside a persona channel the persona argument is optional.
 
 The `/vault-ops` skill chains the atomic vault operations and drives the recall
 stack (see [Memory And Recall System](memory-and-recall-system.md) → "How The

@@ -10,6 +10,7 @@ store, adapters) is via the _ctx module-level dict, set by the router at startup
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import shlex
@@ -39,6 +40,8 @@ from runtime.selection import (
     provider_display_name,
     resolve_runtime_selection,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Shared context — set once by router at startup via set_context()
@@ -99,7 +102,7 @@ async def handle_help(adapter: Any, incoming: Any, args: str, *, collect_only: b
     """Show available commands."""
     from extension_manager import get_manager
 
-    user_role = getattr(incoming, "user_role", "admin")
+    user_role = getattr(incoming, "user_role", "viewer")
     return get_manager().get_help_text(user_role=user_role)
 
 
@@ -109,7 +112,7 @@ async def handle_commands(adapter: Any, incoming: Any, args: str, *, collect_onl
     from extension_manager import get_manager
 
     view = (args or "native").strip().lower()
-    user_role = getattr(incoming, "user_role", "admin")
+    user_role = getattr(incoming, "user_role", "viewer")
 
     if view in {"", "native", "menu", "telegram"}:
         menu, hidden_count = get_telegram_command_menu()
@@ -598,6 +601,13 @@ async def handle_talk(adapter: Any, incoming: Any, args: str, *, collect_only: b
         if guild_id is None or channel is None:
             return "Join a voice channel first, then run /talk join."
         payload: dict[str, Any] = {"guildId": guild_id, "channelId": int(channel.id)}
+        # The live session runs with THIS operator's authority. `/talk join` is
+        # admin-gated, so reaching here means the Discord adapter stamped a role
+        # that cleared that gate — carry it to the sidecar rather than letting
+        # the voice surface's tool calls fall back to the fail-closed default
+        # (which denies every admin command) or assume a blanket admin (which
+        # would lend the operator's privileges to everyone else in the channel).
+        payload["operatorRole"] = str(getattr(incoming, "user_role", "viewer") or "viewer")
         text_channel_id = getattr(getattr(incoming, "channel", None), "platform_id", None)
         try:
             payload["textChannelId"] = int(text_channel_id)
@@ -2713,7 +2723,7 @@ def _import_x_scout() -> Any:
 async def handle_x(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """X scout - read-only timeline/search/scout via the visible Chrome CDP session.
 
-    Cookie-free: drives the EXISTING logged-in browser on CDP 9222 (no cookie
+    Cookie-free: drives the EXISTING logged-in browser on CDP 18222 (no cookie
     read/seed/export). Every subcommand is gated through the browser workflow
     registry (x.scout / x.timeline / x.search are read-classification) and
     audited via append_browser_audit_record. The scout NEVER posts.
@@ -4256,8 +4266,51 @@ _SKILLS_USAGE = (
     "  `/skills review` — list promotion-eligible drafts (with scan preview)\n"
     "  `/skills promote <name>` — promote an eligible, scan-passed draft\n"
     "  `/skills promote <name> --override-caution` — promote despite a `caution` scan\n"
-    "  `/skills reject <name> [| reason]` — archive a draft so it stops being surfaced"
+    "  `/skills reject <name> [| reason]` — archive a draft so it stops being surfaced\n"
+    "  `/skills link <url | path>` — ingest a linked skill, scan it, and add it to "
+    "this channel's homie (operator only)"
 )
+
+
+def resolve_requesting_persona(incoming: Any) -> str:
+    """The persona whose channel carried this turn — the intake's install target.
+
+    A slash command is dispatched by the MAIN chat process, so the ambient
+    ``get_active_profile_name()`` is that process's profile (``default``),
+    NOT the persona whose Discord channel the operator typed in — the router
+    only resolves a persona binding for non-command turns
+    (``router.py:1276``). Keying the install off the ambient profile would
+    install every linked skill into the main homie regardless of where it was
+    asked for: the target-vs-ambient class of bug.
+
+    So the channel binding is checked FIRST and the ambient profile is only
+    the fallback (correct for a CLI/Telegram turn, and for a persona bot
+    running as its own process). Fail-open to ``""`` — the caller refuses
+    when no persona can be resolved rather than guessing one.
+    """
+    try:
+        from discord_channel_bindings import resolve_discord_channel_binding
+
+        binding = resolve_discord_channel_binding(incoming)
+        if binding is not None and getattr(binding, "persona_id", ""):
+            return str(binding.persona_id).strip()
+    except Exception as exc:  # noqa: BLE001 - binding is optional context
+        logger.warning(
+            "resolve_requesting_persona: channel binding unavailable (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+    try:
+        import personas
+
+        return str(personas.get_active_profile_name() or "").strip()
+    except Exception as exc:  # noqa: BLE001 - never break the turn
+        logger.warning(
+            "resolve_requesting_persona: active profile unavailable (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return ""
 
 _SKILL_PROMOTE_STATUS_TEXT = {
     "promoted": "promoted — it is now live in the prompt",
@@ -4266,6 +4319,8 @@ _SKILL_PROMOTE_STATUS_TEXT = {
     "not_eligible": "refused — not eligible yet (needs more recurrences, or already handled)",
     "not_found": "refused — could not locate the generated draft on disk",
     "promote_target_invalid": "refused — a promoted/<name> dir already exists but is empty or invalid (partial prior run); remove it and retry",
+    "promoted_name_collision": "refused — a DIFFERENT skill is already promoted under this canonical name with different content; rename the draft and retry",
+    "draft_changed": "refused — the draft changed on disk between the security scan and the move; re-run to rescan the current content",
     "scan_dangerous": "refused — the security scan flagged it DANGEROUS",
     "scan_caution": "refused — the scan returned CAUTION (re-run with --override-caution to force)",
     "not_approved": "refused — operator approval missing",
@@ -4274,12 +4329,16 @@ _SKILL_PROMOTE_STATUS_TEXT = {
 
 
 async def handle_skills(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
-    """Review / promote / reject self-authored skill drafts (WS4 operator gate).
+    """Review / promote / reject / link self-authored skill drafts (WS4 gate).
 
     Subcommands:
       /skills review                       — list eligible drafts + scan preview
       /skills promote <name> [--override-caution]   (name may contain spaces)
       /skills reject <name> [| reason]              (name may contain spaces)
+      /skills link <url | path>            — linked-skill intake (#429): ingest
+          the link through the existing /learn rails, run the security scan +
+          promote gate, and install the result into THIS channel's homie only.
+          Admin-only and verified server-side; no scan bypass exists here.
     """
     try:
         from cognition import skill_promotion
@@ -4357,6 +4416,64 @@ async def handle_skills(adapter: Any, incoming: Any, args: str, *, collect_only:
         except Exception as exc:  # noqa: BLE001 - never break the turn
             return f"Reject failed for `{name}`: {exc}"
         return f"*/skills reject {name}* — {result.get('status', 'rejected')} (reason: {reason})"
+
+    # --- link: operator-dropped skill -> scan -> promote -> assign (#429) ---
+    if verb == "link":
+        source = remainder.strip()
+        if not source:
+            return (
+                "Usage: `/skills link <url | path>`\n"
+                "Ingests the link, security-scans it, and adds it to this "
+                "channel's homie. Operator only."
+            )
+        try:
+            from cognition import skill_intake
+        except Exception as exc:  # noqa: BLE001 - optional outside the scripts env
+            return f"Linked-skill intake is unavailable: {exc}"
+
+        # The role comes straight off the STAMPED ``incoming.user_role`` — the
+        # canonical role-ingress seam (#424/#449) makes every adapter the sole
+        # authority for that field: each remote adapter resolves it at ingress
+        # via ``models.resolve_ingress_role()`` against ITS OWN configured
+        # allowlist (Telegram/Discord/Slack/WhatsApp/webhook all do this now),
+        # the CLI stamps its own operator constant, and Buzz resolves signed
+        # pubkeys. Re-deriving a second, bespoke role check here — as this
+        # used to, keyed only to Telegram/Discord's config vars — duplicates
+        # that authority and had NO knowledge of Slack/WhatsApp/webhook, so it
+        # never even inspected the field those adapters correctly downgrade to
+        # "viewer". The model defaults to "viewer" (fail-closed, R3): an
+        # ingress path that forgets to stamp a role gets the least privilege,
+        # never admin. The persona is the channel's, never the ambient profile
+        # the command process happens to run as.
+        role = str(getattr(incoming, "user_role", "") or "viewer").strip().lower()
+        # Off-loop (#429 codex R4 MAJOR): the channel-binding read hits a JSON
+        # file and parse_source's path probe can block on an SMB share — a
+        # Windows timeout there would stall every coroutine on this loop.
+        persona = await asyncio.to_thread(resolve_requesting_persona, incoming)
+        channel = getattr(getattr(incoming, "channel", None), "platform_id", "") or ""
+        platform = getattr(incoming, "platform", None)
+        surface = str(getattr(platform, "value", platform) or "chat")
+        who = (
+            str(getattr(getattr(incoming, "user", None), "platform_id", "") or "")
+            or str(getattr(getattr(incoming, "user", None), "display_name", "") or "")
+        )
+
+        try:
+            result = await skill_intake.intake_linked_skill(
+                source,
+                persona_id=persona,
+                actor=who,
+                actor_role=role,
+                # The operator's verbatim turn is what authorized this; the
+                # ledger carries it so "zero installs without a matching live
+                # operator turn" stays greppable.
+                trigger_text=getattr(incoming, "text", "") or f"/skills link {source}",
+                surface=surface,
+                channel_id=str(channel),
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the turn
+            return f"Linked-skill intake failed for `{source}`: {exc}"
+        return result.message
 
     return _SKILLS_USAGE
 
@@ -8350,6 +8467,51 @@ async def handle_debrief(adapter: Any, incoming: Any, args: str, *, collect_only
     return await _persona_channel_turn(incoming, instruction)
 
 
+#: Payload keys a REMOTE party controls, and where each one comes from:
+#: `title`/`channel` are yt-dlp catalog metadata for a video anyone can upload
+#: (`curriculum/discovery.py` describe_video); `error`/`last_error` wrap provider
+#: stderr; `reason` carries skip text derived from the same. Everything else in
+#: a curriculum payload is server-generated (ids, counts, states, paths).
+_UNTRUSTED_CURRICULUM_KEYS = frozenset({"title", "channel", "error", "last_error", "reason"})
+
+
+def _neutralize_untrusted(value: object, *, limit: int | None = None) -> str:
+    """The ONE untrusted-metadata neutralizer, shared with the `@persona learn`
+    receipt (`router._render_learn_drop_reply`) — not a second copy."""
+    from cognition.injection import neutralize_untrusted_metadata
+
+    if limit is None:
+        return neutralize_untrusted_metadata(value)
+    return neutralize_untrusted_metadata(value, limit=limit)
+
+
+def _neutralize_curriculum_payload(payload: Any) -> Any:
+    """Render remote-controlled fields inert anywhere in a curriculum payload.
+
+    Same reason as the `@persona learn` receipt: this reply is persisted as an
+    assistant transcript row (`router._persist_router_turn_off_loop` on the
+    slash path) and replayed into the next turn's `recent_conversation` SYSTEM
+    region. `json.dumps` escapes quotes and newlines but NOT backticks — a title
+    carrying a fence breaks out of its own code block in the stored text, and a
+    single-line instruction survives the dump intact.
+
+    Walks nested lists/dicts because rows live under `sources`, `proposals`,
+    and `results`.
+    """
+    if isinstance(payload, dict):
+        return {
+            key: (
+                _neutralize_untrusted(value, limit=200)
+                if key in _UNTRUSTED_CURRICULUM_KEYS and isinstance(value, str)
+                else _neutralize_curriculum_payload(value)
+            )
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_neutralize_curriculum_payload(item) for item in payload]
+    return payload
+
+
 async def handle_curriculum(
     adapter: Any,
     incoming: Any,
@@ -8359,7 +8521,9 @@ async def handle_curriculum(
 ) -> str:
     """Operate the active persona's private curriculum through one strict parser."""
     from cognition import shots_callback as persona_callback
+    from curriculum.drop import UnsupportedDropURLError
     from curriculum.service import get_curriculum_service
+    from security import kill_switches
 
     try:
         parts = shlex.split(args or "")
@@ -8388,6 +8552,13 @@ async def handle_curriculum(
         elif action == "run":
             full_inventory = "--full-inventory" in parts
             payload = await service.run_once(full_inventory=full_inventory)
+        elif action == "learn":
+            if not parts:
+                return (
+                    "Usage: `/curriculum learn <youtube-url> [persona=<id>]` — "
+                    "pre-admits one video and studies it now."
+                )
+            payload = await service.learn_url(parts[0])
         elif action == "review":
             payload = await asyncio.to_thread(service.review)
         elif action == "route":
@@ -8412,14 +8583,229 @@ async def handle_curriculum(
             payload = await asyncio.to_thread(service.disable)
         else:
             return (
-                "Usage: `/curriculum status|sources|run|review|route|grade|"
-                "enable|disable [persona=<id>]`"
+                "Usage: `/curriculum status|sources|run|learn <url>|review|route|"
+                "grade|enable|disable [persona=<id>]`"
             )
+    except kill_switches.KillSwitchDisabled:
+        return (
+            "Persona curriculum is disabled by the operator kill switch "
+            "(HOMIE_KILLSWITCH_PERSONA_CURRICULUM). Nothing was enqueued."
+        )
+    except UnsupportedDropURLError as exc:
+        return str(exc)
     except Exception as exc:
-        return f"Curriculum {action} failed: {type(exc).__name__}: {exc}"
+        # Remote text reaches here too — a yt-dlp failure carries the provider's
+        # stderr into `exc` — and this reply is persisted like any other.
+        detail = _neutralize_untrusted(f"{type(exc).__name__}: {exc}", limit=200)
+        return f"Curriculum {action} failed: {detail}"
     return "```json\n" + __import__("json").dumps(
-        payload, indent=2, sort_keys=True
+        _neutralize_curriculum_payload(payload), indent=2, sort_keys=True
     ) + "\n```"
+
+
+# ── /grant — decide a persona's pending toolset counter-offer (#428) ──────
+#
+# This command decides PROPOSALS; it does not create grants from nothing. The
+# executor's own operator surface is `/persona grant|revoke` (#427) — if that
+# ticket ever wants a `/grant` alias it must fold its verbs in HERE rather
+# than register a second handler for this name, which ExtensionManager would
+# reject as a collision at startup.
+
+
+def _grant_usage_text() -> str:
+    return (
+        "**Toolset counter-offers**\n"
+        "`/grant list [<persona>]` — pending counter-offers\n"
+        "`/grant approve <persona> <code>` — grant the toolset (admin only)\n"
+        "`/grant deny <persona> <code>` — decline it\n"
+        "A persona proposes; only you can approve. Approving expands what it "
+        "can REACH — every per-tool gate still applies."
+    )
+
+
+async def decide_grant_proposal_with_receipt(
+    incoming: Any,
+    *,
+    persona_id: str,
+    code: str,
+    approve: bool,
+) -> tuple[Any, tuple[str, str]]:
+    """Decide one counter-offer; return the decision AND its transcript receipt.
+
+    Two return values because the two surfaces need different halves. A typed
+    ``/grant approve`` already persists an honest transcript turn (the
+    operator's own command text plus the reply) through the router's command
+    path. A BUTTON TAP has neither: no operator text, and a reply that is not
+    transcript-safe. So the tap persists ``grant_proposals.decision_receipt``
+    — fixed server-generated fields — and this seam hands both halves back
+    from the one place that has the decided proposal.
+
+    The single seam both surfaces use — the typed command below and the
+    router's approve/deny button tap — so a button can never do more than the
+    command, and neither can do anything ``decide_proposal`` would refuse.
+
+    The role comes straight off ``incoming.user_role`` — the canonical
+    role-ingress seam (models.resolve_ingress_role, #424/#449) is the sole
+    authority now: every remotely-reachable adapter stamps this field from
+    its OWN authenticated identity check at message construction, the
+    dataclass default is fail-closed ``"viewer"``, and a static guard
+    (test_ingress_role_seam.py) fails the build if any non-test construction
+    site omits it. Re-deriving the role here (the pre-seam #428 fix) was a
+    bespoke duplicate of that authority covering only two platforms; every
+    other adapter (WhatsApp, Slack, main.py CLI/webhook sites) still trusted
+    a bare ``getattr(..., "admin")`` fallback and stayed exploitable — this
+    is the round-2 BLOCKER, and it dissolves by construction now that the
+    stamp itself is trustworthy everywhere. The decision does synchronous
+    sqlite plus the executor's config read-modify-write, so it rides
+    ``asyncio.to_thread`` — every argument is resolved here, on the loop,
+    before the hop.
+    """
+    from personas import grant_proposals
+
+    role = str(getattr(incoming, "user_role", "viewer") or "viewer").strip().lower()
+    actor = str(getattr(getattr(incoming, "user", None), "platform_id", "") or "")
+    platform_value = getattr(
+        getattr(incoming, "platform", None), "value", None
+    ) or str(getattr(incoming, "platform", ""))
+    channel_id = str(
+        getattr(getattr(incoming, "channel", None), "platform_id", "") or ""
+    )
+    try:
+        decision = await asyncio.to_thread(
+            grant_proposals.decide_proposal,
+            persona_id,
+            code,
+            approve=approve,
+            actor=actor,
+            actor_role=role,
+            surface=str(platform_value),
+            channel_id=channel_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — never leave the operator on read
+        decision = grant_proposals.ProposalDecision(
+            grant_proposals.DECISION_ERROR,
+            None,
+            f"Grant decision failed: {type(exc).__name__}: {exc}",
+        )
+    return decision, grant_proposals.decision_receipt(
+        decision,
+        approve=approve,
+        persona_id=persona_id,
+        code=code,
+        actor=actor,
+        actor_role=role,
+    )
+
+
+async def decide_grant_proposal(
+    incoming: Any,
+    *,
+    persona_id: str,
+    code: str,
+    approve: bool,
+) -> str:
+    """Decide one counter-offer and return only the operator-facing reply."""
+    decision, _receipt = await decide_grant_proposal_with_receipt(
+        incoming, persona_id=persona_id, code=code, approve=approve
+    )
+    return decision.message
+
+
+async def handle_grant(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
+    """`/grant list|approve|deny` — the typed half of the counter-offer flow.
+
+    The exact command string this parses is printed on every counter-offer
+    card, so an adapter without inline buttons is a first-class approve
+    surface rather than a dead end.
+    """
+    from personas import grant_proposals
+
+    try:
+        parts = shlex.split(args or "")
+    except ValueError as exc:
+        return f"Grant argument error: {exc}"
+    action = parts.pop(0).casefold() if parts else "list"
+
+    if action == "list":
+        persona_id = parts[0] if parts else ""
+        if not persona_id:
+            persona_id = await asyncio.to_thread(_resolve_active_persona_id)
+        if not persona_id:
+            return "Usage: `/grant list <persona>` — no persona is active here."
+        pending = await asyncio.to_thread(grant_proposals.list_pending, persona_id)
+        if not pending:
+            return f"No pending counter-offers for `{persona_id}`."
+        lines = [f"**Pending counter-offers — `{persona_id}`**"]
+        lines.extend(
+            f"`{p.short_code}` · `{p.toolset}` · asked on {p.surface or 'unknown'}"
+            for p in pending
+        )
+        lines.append(f"Approve with `/grant approve {persona_id} <code>`.")
+        return "\n".join(lines)
+
+    if action in {grant_proposals.ACTION_APPROVE, grant_proposals.ACTION_DENY}:
+        if len(parts) < 2:
+            return f"Usage: `/grant {action} <persona> <code>`"
+        return await decide_grant_proposal(
+            incoming,
+            persona_id=parts[0],
+            code=parts[1],
+            approve=action == grant_proposals.ACTION_APPROVE,
+        )
+
+    return _grant_usage_text()
+
+
+def _resolve_active_persona_id() -> str:
+    """Best-effort active persona for a bare ``/grant list``. Never raises.
+
+    Blocking import + physical-state read, so callers hop a thread. A failure
+    means the operator names the persona explicitly — never a wrong default.
+    """
+    try:
+        import personas
+
+        name = str(personas.get_active_profile_name() or "").strip()
+    except Exception:  # noqa: BLE001 — an unresolved persona is a usage hint
+        return ""
+    return "" if name == "default" else name
+
+
+async def handle_persona(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
+    """Persona toolset self-provisioning — `/persona grant|revoke` (issue #427).
+
+    A thin seam on purpose. Parsing, server-side role resolution, and
+    channel-persona defaulting live in ``persona_grant_commands`` so they are
+    testable without an adapter, and the mutation itself only ever happens in
+    the #426 executor.
+
+    ``collect_only`` is the natural-language auto-dispatch path (a keyword
+    match, not a typed command). No ``IntentSpec`` registers this command, so
+    that path is currently unreachable — the guard exists so it STAYS
+    unreachable: a keyword in ordinary conversation must never mutate a
+    persona's tool surface. Talking about a grant is not authorization to
+    perform one.
+    """
+    if collect_only:
+        from persona_grant_commands import USAGE
+
+        return USAGE
+
+    from persona_grant_commands import run_persona_command
+
+    return await run_persona_command(incoming, args)
 
 
 CORE_HANDLERS: dict[str, Any] = {
@@ -8492,6 +8878,12 @@ CORE_HANDLERS: dict[str, Any] = {
     "learn": handle_learn,
     "watch": handle_watch,
     "curriculum": handle_curriculum,
+    # Persona self-provisioning (issue #427) — typed, admin-gated toolset
+    # grants; every mutation goes through the #426 executor + its ledger.
+    "persona": handle_persona,
+    # Persona toolset counter-offers (#428) — decide, never conjure. Distinct
+    # surface from /persona grant: this decides PROPOSALS, never creates one.
+    "grant": handle_grant,
     "extensions": handle_extensions,
     # Native design — Open Design power, no daemon (brief -> artifact -> critique).
     "design": handle_design,

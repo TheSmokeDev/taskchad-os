@@ -245,6 +245,35 @@ def test_safe_core_memory_tools_use_each_personas_private_index(
     ]
 
 
+def test_safe_core_memory_search_dispatches_to_the_private_index_without_type_error(
+    tmp_path,
+    monkeypatch,
+):
+    import memory_search
+    from runtime import tool_impl
+
+    monkeypatch.setenv("HOMIE_HOME", str(tmp_path / "homie"))
+    observed = []
+
+    def fake_keyword(query, limit, *, path_prefix="", memory_dir=None):
+        observed.append((query, limit, path_prefix, memory_dir))
+        return []
+
+    monkeypatch.setattr(memory_search, "search_keyword", fake_keyword)
+    tool_impl.register_tools()
+    _defs, dispatch = persona_tools.build_persona_tool_payload(
+        "seo_geo",
+        {"toolsets": ["safe_core"]},
+    )
+
+    result = dispatch("memory_search", {"query": "fleet measurement", "mode": "keyword"})
+
+    assert result == "No vault results for 'fleet measurement'."
+    assert observed == [
+        ("fleet measurement", 5, "", tmp_path / "homie" / "profiles" / "seo_geo" / "memory")
+    ]
+
+
 def test_persona_scoped_handler_that_omits_identity_fails_loudly(monkeypatch):
     tool_registry.register_tool(
         "broken_private_tool",

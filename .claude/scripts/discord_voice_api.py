@@ -22,11 +22,20 @@ router = APIRouter()
 
 
 class DiscordVoiceJoinBody(BaseModel):
-    """Join target; ``textChannelId`` opts into transcript mirroring."""
+    """Join target; ``textChannelId`` opts into transcript mirroring.
+
+    ``operatorRole`` is the role the Discord adapter stamped on the operator
+    who ran the admin-gated ``/talk join``. It is an AUDIT RECEIPT of who
+    opened the session, logged by the sidecar — it is deliberately NOT what
+    authorizes tool calls. A voice channel is multi-speaker, so each relayed
+    call carries the speaker who actually talked and the main API process
+    resolves that id against ``DISCORD_ALLOWED_USERS`` itself.
+    """
 
     guildId: int
     channelId: int
     textChannelId: int | None = None
+    operatorRole: str = "viewer"
 
 
 @router.get("/api/discord/voice/status")
@@ -46,6 +55,7 @@ def join_voice(body: DiscordVoiceJoinBody) -> dict:
             guild_id=body.guildId,
             channel_id=body.channelId,
             text_channel_id=body.textChannelId,
+            operator_role=body.operatorRole,
         )
     except kill_switches.KillSwitchDisabled as exc:
         raise HTTPException(

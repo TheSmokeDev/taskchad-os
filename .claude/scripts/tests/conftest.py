@@ -139,7 +139,11 @@ def tmp_env_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def tmp_homie_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def tmp_homie_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_operator_sinks: Path,
+) -> Path:
     """Build a fake ``~/.homie`` root for persona-resolver tests.
 
     Layout:
@@ -156,6 +160,12 @@ def tmp_homie_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     so callers exercising the named-profile resolution path read the right
     value. Tests that need a different ``HOMIE_HOME`` shape (custom, unset,
     root-equal-default) override via their own ``monkeypatch`` calls.
+
+    Composed with ``isolated_operator_sinks`` (#422 round 4): this fixture is
+    a resolver fixture, but tests DO run real creations on top of it —
+    ``test_create_clone_all_from_named_profile_still_uses_copytree`` clones
+    ``sales`` into ``ops`` — and that creation's learning receipt resolves
+    from ``config.DATA_DIR``, not from ``HOMIE_HOME``.
     """
     homie_root = tmp_path / ".homie"
     profile_dir = homie_root / "profiles" / "sales"
@@ -315,8 +325,66 @@ def legacy_install_paths() -> dict[str, str]:
 
 
 @pytest.fixture
-def empty_homie_root(
+def isolated_operator_sinks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Redirect the process-AMBIENT operator sinks into the test tmp tree.
+
+    Issue #422 round 4 — the #426 target-vs-ambient class in fixture form.
+    A fixture that redirects only ``HOMIE_HOME`` isolates the profile TREE,
+    but two receipt sinks resolve from module-level ``config`` globals at
+    CALL time, not from the profile root. A real creation under such a
+    fixture therefore writes into the CHECKOUT's operational state while
+    every assertion about the profile still passes:
+
+      - ``config.DATA_DIR`` -> ``persona_learning_audit.jsonl``. Every
+        creation now appends a learning receipt
+        (``personas/services.append_persona_learning_audit``).
+      - ``config.DASHBOARD_DB_PATH`` -> ``dashboard.db`` ``audit_log``. Every
+        kill-switch refusal writes a row (``security.kill_switches`` ->
+        ``dashboard_api._audit_write`` -> ``dashboard_db.get_connection``),
+        so the seeders' refusal tests hit this one even though they create
+        nothing.
+
+    Both consumers resolve their target inside the function body (Rule 1),
+    so patching the ``config`` attributes is enough — and assertions that
+    read the sinks back resolve ``config.X`` at call time too, so they
+    follow the redirect automatically.
+
+    Returns the redirected data dir.
+    """
+    import config as _config
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(_config, "DATA_DIR", data_dir)
+    monkeypatch.setattr(_config, "DASHBOARD_DB_PATH", data_dir / "dashboard.db")
+    return data_dir
+
+
+@pytest.fixture
+def seeder_homie_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_operator_sinks: Path,
+) -> Path:
+    """A bare ``<tmp>/.homie`` root for the persona SEEDER suites.
+
+    Distinct from ``empty_homie_root``: the seeders assert on
+    ``not homie_root.exists()`` in their refuse/dry-run cases, so this root
+    must NOT be pre-created. Composed with ``isolated_operator_sinks`` so a
+    real seed keeps the checkout's ledger and audit DB byte-clean.
+    """
+    root = tmp_path / ".homie"
+    monkeypatch.setenv("HOMIE_HOME", str(root))
+    return root
+
+
+@pytest.fixture
+def empty_homie_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_operator_sinks: Path,
 ) -> Path:
     """R1 B5 — truly empty ``<tmp>/.homie/`` root.
 
@@ -355,6 +423,12 @@ def empty_homie_root(
         "_best_effort_audit",
         lambda *_args, **_kwargs: None,
     )
+    # Issue #422: every ``create_profile`` now appends a persona-learning
+    # audit row, and every kill-switch refusal writes an audit_log row —
+    # both resolved from module-level ``config`` globals at CALL time.
+    # ``isolated_operator_sinks`` redirects them into the test tmp tree so
+    # the suite exercises the real write paths without touching the
+    # checkout's live data dir.
     return homie
 
 

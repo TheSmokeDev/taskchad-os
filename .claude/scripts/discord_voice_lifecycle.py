@@ -662,8 +662,18 @@ def _directive_violated_by(bridge: dict[str, Any]) -> bool:
         return False
 
 
-def start_session(guild_id: int, channel_id: int, text_channel_id: int | None = None) -> dict[str, Any]:
-    """Ensure the sidecar is running and joined to the given voice channel."""
+def start_session(
+    guild_id: int,
+    channel_id: int,
+    text_channel_id: int | None = None,
+    operator_role: str = "viewer",
+) -> dict[str, Any]:
+    """Ensure the sidecar is running and joined to the given voice channel.
+
+    ``operator_role`` is the stamped role of the operator who ran the
+    admin-gated ``/talk join``; it rides the sidecar's ``/join`` so the live
+    session's tool calls run with that authority. Fail-closed default.
+    """
 
     with shared.file_lock(_lock_path()):
         state = _read_state()
@@ -689,7 +699,12 @@ def start_session(guild_id: int, channel_id: int, text_channel_id: int | None = 
 
         result = _control_post(
             "/join",
-            {"guildId": guild_id, "channelId": channel_id, "textChannelId": text_channel_id},
+            {
+                "guildId": guild_id,
+                "channelId": channel_id,
+                "textChannelId": text_channel_id,
+                "operatorRole": operator_role,
+            },
             timeout=_JOIN_TIMEOUT_S,
         )
         if not result.get("ok", False) and result.get("error"):

@@ -47,7 +47,25 @@ _paths = personas.get_persona_paths(personas.get_active_profile_name())
 ENV_FILE: Path = _paths["env_file"]
 
 # Load environment variables from the active profile's .env file.
+#
+# Kill switches survive this load. The dotenv is applied with override=True, so
+# without the capture/restore below a profile's own .env could set
+# HOMIE_KILLSWITCH_<X>=enabled and quietly undo an operator's emergency stop in
+# every process that loads this profile. Absent/enabled is the permissive
+# direction and "disabled" is the refusal, so restoring only the DISABLED
+# values can never grant a capability back — it can only keep one withheld.
+from security.kill_switches import is_disabled_value  # noqa: E402
+
+_operator_disabled_switches = {
+    key: value
+    for key, value in os.environ.items()
+    if key.upper().startswith("HOMIE_KILLSWITCH_") and is_disabled_value(value)
+}
+
 load_dotenv(ENV_FILE, override=True)
+
+if _operator_disabled_switches:
+    os.environ.update(_operator_disabled_switches)
 
 # Repo / install-dir locations — kept for back-compat (``runtime/bootstrap.py``,
 # hooks, etc. import ``PROJECT_ROOT`` and ``SCRIPTS_DIR`` from config).
@@ -501,6 +519,14 @@ DISCORD_WATCH_ALL_GUILD_CHANNELS: bool = (
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
+# Sender allowlist, same shape and semantics as the Telegram/Discord lists:
+# empty = accept anyone (the adapter's documented behavior, and what shipped
+# before this var existed). Set it and WhatsApp becomes fail-closed — off-list
+# senders are refused at ingress AND stamped `viewer` rather than `admin`.
+_whatsapp_numbers_raw = os.getenv("WHATSAPP_ALLOWED_NUMBERS", "")
+WHATSAPP_ALLOWED_NUMBERS: list[str] = [
+    number.strip() for number in _whatsapp_numbers_raw.split(",") if number.strip()
+]
 # WHATSAPP_WEBHOOK_PORT and HEALTH_CHECK_PORT are profile-aware and resolved
 # lazily through ``personas.services`` via the module-level ``__getattr__``
 # at the bottom of this file (PRP-7c Phase 3 / R2 NB1).
@@ -3745,18 +3771,230 @@ def get_persona_learning_settings(
     """
     if enabled is None:
         enabled = os.getenv("PERSONA_LEARNING_ENABLED", "true").lower() == "true"
+    # Both windows feed ``timedelta``. A bare ``float()`` accepted garbage
+    # ("12h" -> ValueError out of the resolver) AND accepted NaN/inf, which
+    # parse cleanly and then raise ValueError/OverflowError inside
+    # ``_resolve_since_boundary`` — a boundary owner the tick calls OUTSIDE
+    # either counter's fail-open, so one environment typo aborted the whole
+    # persona fan-out rather than degrading this persona to zero.
     if tick_interval_hours is None:
-        tick_interval_hours = float(
-            os.getenv("PERSONA_LEARNING_TICK_INTERVAL", "12")
+        tick_interval_hours = _finite_or_default(
+            _safe_float_env("PERSONA_LEARNING_TICK_INTERVAL", 12.0), 12.0
         )
     if silent_skip_window_hours is None:
-        silent_skip_window_hours = float(
-            os.getenv("PERSONA_LEARNING_SILENT_SKIP_WINDOW", "24")
+        silent_skip_window_hours = _finite_or_default(
+            _safe_float_env("PERSONA_LEARNING_SILENT_SKIP_WINDOW", 24.0), 24.0
         )
     return PersonaLearningSettings(
         enabled=enabled,
         tick_interval_hours=tick_interval_hours,
         silent_skip_window_hours=silent_skip_window_hours,
+    )
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    """``int(os.getenv(name))`` that degrades to *default* on garbage input.
+
+    A knob resolver reading an operator-editable env var must never let a
+    typo (``PERSONA_NOTES_WINDOW_HOURS=garbage``) raise ``ValueError`` out of
+    a call-time settings resolver and abort the caller — that is a fail-open
+    contract violation, not a configuration error worth crashing over.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float_env(name: str, default: float) -> float:
+    """``float(os.getenv(name))`` that degrades to *default* on garbage input."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _finite_or_default(value: float, default: float) -> float:
+    """Reject NaN/inf, which parse cleanly and only explode downstream.
+
+    ``float("nan")`` and ``float("1e309")`` are not the garbage
+    ``_safe_float_env`` catches — they are valid floats that raise
+    ``ValueError``/``OverflowError`` the moment something builds a
+    ``timedelta`` from them, far from the typo that produced them and after
+    the fail-open boundary that would have contained it.
+    """
+    return value if math.isfinite(value) else default
+
+
+def _positive_or_default(value: int, default: int) -> int:
+    """A non-positive cap is invalid; degrade to the documented default.
+
+    "Uncapped" is an explicit ``None`` everywhere in this file, never a number,
+    so 0 or a negative here can only be a typo — and clamping it to 0 turns a
+    typo into a silent, permanent data loss (zero admitted, run reported clean,
+    watermark consumed).
+    """
+    return value if value > 0 else default
+
+
+class PersonaNotesSettings(NamedTuple):
+    """Effective persona note-corpus knobs (call-time resolved)."""
+
+    max_files: int
+    max_chars_per_file: int
+    max_total_chars: int
+    window_hours: float
+
+
+def get_persona_notes_settings(
+    max_files: int | None = None,
+    max_chars_per_file: int | None = None,
+    max_total_chars: int | None = None,
+    window_hours: float | None = None,
+) -> PersonaNotesSettings:
+    """Resolve persona note-corpus knobs at CALL TIME (Rule 1) — issue #425.
+
+    Bounds the distiller corpus assembled from a persona's OWN work notes
+    (``PERSONA_NOTE_DIRS`` = ``experience/`` + ``market/``). Caps mirror the
+    episode-digest prior art (``get_episode_settings``): a newest-first file
+    cap, a per-file excerpt cap, and a total-chars budget — so a persona that
+    logged 200 assignments overnight cannot blow the reflection prompt.
+
+    Knobs:
+        PERSONA_NOTES_MAX_FILES (10) — newest-first cap on note files fed to
+            one reflection.
+        PERSONA_NOTES_MAX_CHARS_PER_FILE (4000) — per-file excerpt cap. The
+            excerpt keeps the FRESHEST END of the file (the ``get_recent_logs``
+            truncate shape), because sections are appended chronologically.
+        PERSONA_NOTES_MAX_TOTAL_CHARS (12000) — total corpus budget.
+        PERSONA_NOTES_WINDOW_HOURS (24) — fallback freshness window when the
+            tick did not pass ``--notes-since`` (cold start, manual run).
+
+    None-sentinel pattern: explicit values pass through; ``None`` resolves the
+    matching env var inside the body so ``monkeypatch.setenv`` takes effect on
+    the next call with no module reload.
+
+    Bounded call-time parsing: a garbage env value (``PERSONA_NOTES_WINDOW_
+    HOURS=garbage``) must degrade to the documented default, never raise
+    ``ValueError`` out of this resolver and abort the reflection run. Every
+    resolved value is also clamped to a safe minimum — a negative or zero
+    cap is not a valid "uncapped" signal here (``list_fresh_notes`` and the
+    corpus truncation both treat "uncapped" as an explicit ``None``, never a
+    number).
+    """
+    # A non-positive cap is INVALID here, not "uncapped" (uncapped is an
+    # explicit ``None``) — and clamping it to 0 was worse than rejecting it:
+    # zero admits zero notes, the distiller then reports a clean empty run, and
+    # the parent stamps its watermark past notes nothing ever read. One typo
+    # (`PERSONA_NOTES_MAX_FILES=-5`) silently and permanently lost a persona's
+    # backlog. Degrade to the documented default instead, the same shape the
+    # non-finite window below uses.
+    if max_files is None:
+        max_files = _positive_or_default(
+            _safe_int_env("PERSONA_NOTES_MAX_FILES", 10), 10
+        )
+    if max_chars_per_file is None:
+        max_chars_per_file = _positive_or_default(
+            _safe_int_env("PERSONA_NOTES_MAX_CHARS_PER_FILE", 4000), 4000
+        )
+    if max_total_chars is None:
+        max_total_chars = _positive_or_default(
+            _safe_int_env("PERSONA_NOTES_MAX_TOTAL_CHARS", 12000), 12000
+        )
+    if window_hours is None:
+        # NaN/inf reach here as valid floats and only explode downstream, where
+        # ``timedelta(hours=inf)`` raises out of the boundary resolver.
+        window_hours = _finite_or_default(
+            max(0.0, _safe_float_env("PERSONA_NOTES_WINDOW_HOURS", 24.0)), 24.0
+        )
+    return PersonaNotesSettings(
+        max_files=max_files,
+        max_chars_per_file=max_chars_per_file,
+        max_total_chars=max_total_chars,
+        window_hours=window_hours,
+    )
+
+
+class PersonaDreamSettings(NamedTuple):
+    """Effective persona-dream-tick knobs (call-time resolved)."""
+
+    enabled: bool
+    tick_interval_hours: float
+    timeout_seconds: float
+    max_wall_clock_seconds: float
+    days: int
+
+
+def get_persona_dream_settings(
+    enabled: bool | None = None,
+    tick_interval_hours: float | None = None,
+    timeout_seconds: float | None = None,
+    max_wall_clock_seconds: float | None = None,
+    days: int | None = None,
+) -> PersonaDreamSettings:
+    """Resolve persona-dream-tick knobs at CALL TIME (Rule 1).
+
+    The persona dream tick (``persona_dream_tick.py``) is the sibling of the
+    persona LEARNING tick: it fans the FULL dream cycle out over every named
+    profile by spawning ``memory_dream.py -p <name>``. Cadences differ
+    (nightly dream vs 12h-interval reflect), so the knobs are separate —
+    ``PERSONA_LEARNING_*`` never gates the dream fan-out and vice versa.
+
+    Knobs:
+        PERSONA_DREAM_ENABLED ("true") — global kill switch for the fan-out.
+            Per-persona spend is already gated by the child's own
+            ``DREAM_SILENT`` fast path (zero LLM calls without signal), so
+            this is a fire-extinguisher, not a routine cost lever.
+        PERSONA_DREAM_TICK_INTERVAL ("20") — minimum hours between fan-out
+            attempts FOR ONE persona (parent-side recency guard). 20 rather
+            than 24 so an early/late nightly trigger is never swallowed; the
+            child keeps its own ``DREAM_MIN_INTERVAL_HOURS`` guard on top.
+        PERSONA_DREAM_TIMEOUT ("900") — seconds a single persona's dream
+            subprocess may run before it is killed (consolidate + prune +
+            belief-evolve is a 3-LLM-call chain; the main dream's scheduled
+            task allows 30 min for the same work).
+        PERSONA_DREAM_MAX_WALL_CLOCK ("0" = unlimited) — seconds the whole
+            serial fan-out may consume. Defaults to UNLIMITED because the
+            doctrine is every named persona every night: with a 3600s cap and a
+            28-persona roster, a night where each child takes a few minutes
+            silently drops the tail, and "rotate the tail tomorrow" is not a
+            nightly cadence. This is an operator override for a box that must
+            hard-stop, not a routine lever — the child's DREAM_SILENT fast path
+            (zero LLM calls, seconds) is what actually bounds a normal night.
+            When a cap DOES truncate, the personas it never reached are named
+            in the tick output and counted in its summary, never silently
+            dropped, and they are retried oldest-first the next night.
+        PERSONA_DREAM_DAYS ("7") — days of the persona's own daily logs the
+            child dream scans (mirrors ``memory_dream.py --days``).
+
+    None-sentinel pattern: explicit values pass through; ``None`` resolves
+    the matching env var inside the body so ``monkeypatch.setenv`` takes
+    effect on the next call with no module reload.
+    """
+    if enabled is None:
+        enabled = os.getenv("PERSONA_DREAM_ENABLED", "true").lower() == "true"
+    if tick_interval_hours is None:
+        tick_interval_hours = float(os.getenv("PERSONA_DREAM_TICK_INTERVAL", "20"))
+    if timeout_seconds is None:
+        timeout_seconds = float(os.getenv("PERSONA_DREAM_TIMEOUT", "900"))
+    if max_wall_clock_seconds is None:
+        max_wall_clock_seconds = float(
+            os.getenv("PERSONA_DREAM_MAX_WALL_CLOCK", "0")
+        )
+    if days is None:
+        days = int(os.getenv("PERSONA_DREAM_DAYS", "7"))
+    return PersonaDreamSettings(
+        enabled=enabled,
+        tick_interval_hours=tick_interval_hours,
+        timeout_seconds=timeout_seconds,
+        max_wall_clock_seconds=max_wall_clock_seconds,
+        days=days,
     )
 
 

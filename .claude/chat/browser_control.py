@@ -18,7 +18,7 @@ from urllib import error, parse, request
 
 import adb_control
 
-DEFAULT_CDP_PORT = 9222
+DEFAULT_CDP_PORT = 18222
 DEFAULT_TIMEOUT_SECONDS = 20
 _HTTP_URL_PATTERN = re.compile(r"https?://[^\s]+")
 

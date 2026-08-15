@@ -850,6 +850,7 @@ _CONTEXT_KEYS = (
     "operator_model",
     "live_context",
     "recent_sessions",
+    "recent_journals",
     "tracker",
 )
 
@@ -879,6 +880,7 @@ def test_prompt_renders_the_sections_in_the_decided_order():
         "operator_model": "- The operator ships daily.",
         "live_context": "Open threads: ship the agenda",
         "recent_sessions": "### 2026-07-04-telegram",
+        "recent_journals": "- journal (2026-07-05): shipped the live proof",
         "tracker": "- [ ] P1 crypto wave",
     }
     prompt = agenda_mod.build_agenda_prompt(scan, MORNING, max_items=5)
@@ -886,6 +888,7 @@ def test_prompt_renders_the_sections_in_the_decided_order():
         "# SOUL — Co-Founder",
         "- The operator ships daily.",
         "Open threads: ship the agenda",
+        "shipped the live proof",
         "- [ ] P1 crypto wave",
         "Delegable personas",
         "Tracked repos:",
@@ -914,6 +917,7 @@ def test_scan_exposes_every_context_key(monkeypatch, tmp_path):
         "_operator_model_text": "operator_model",
         "_live_context_text": "live_context",
         "_recent_sessions_text": "recent_sessions",
+        "_recent_journals_text": "recent_journals",
         "_tracker_now_text": "tracker",
         "_goals_updated": "goals_updated",
     }

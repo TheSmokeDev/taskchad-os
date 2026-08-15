@@ -29,14 +29,34 @@ def is_injection_attempt(text: str) -> bool:
 
 
 def escape_html(text: str) -> str:
-    """Layer 2: HTML entity escaping. Order matters — & first."""
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&#39;")
-    )
+    """Layer 2: HTML entity escaping. Order matters — & first.
+
+    Delegates to `security.untrusted` so there is ONE escaping implementation:
+    the curriculum slice needs the same primitive for its synthesis prompt and
+    cannot import the chat slice.
+    """
+    from security.untrusted import escape_markup
+
+    return escape_markup(text)
+
+
+#: The untrusted-metadata neutralizer lives in `security.untrusted` because
+#: BOTH slices need it — the chat receipts here, and the curriculum synthesis
+#: prompt in `.claude/scripts/curriculum/study.py`, which cannot import the
+#: chat slice. Re-exported so chat-side callers keep one obvious import.
+from security.untrusted import (  # noqa: E402
+    UNTRUSTED_METADATA_MAX_CHARS,
+    neutralize_untrusted_metadata,
+)
+
+__all__ = [
+    "UNTRUSTED_METADATA_MAX_CHARS",
+    "escape_html",
+    "is_injection_attempt",
+    "neutralize_untrusted_metadata",
+    "sanitize_recalled_content",
+    "wrap_recalled_memory",
+]
 
 
 def wrap_recalled_memory(sanitized_items: list[str]) -> str:

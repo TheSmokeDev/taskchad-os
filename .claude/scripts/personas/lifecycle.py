@@ -147,11 +147,20 @@ _REQUIRED_IDENTITY_FILES: tuple[str, ...] = (
 _IDENTITY_LOCK_FILES: tuple[str, ...] = ("LOG.md.lock", "WORKING.md.lock")
 
 # Memory subdirectories seeded under ``<profile>/memory/`` (PRD §3.1, §8.1).
+#
+# ``experience`` (issue #422) is the deterministic work-experience note tree
+# the persona's own learning loop reads and writes. It mirrors
+# ``personas.experience.NOTES_SUBDIR`` — the writer still mkdirs defensively,
+# but a persona is BORN with the substrate rather than growing it on first
+# write. The two are pinned together by
+# ``tests/test_persona_lifecycle.py::test_experience_dir_matches_writer_constant``
+# (a literal here keeps this constant import-free, matching every sibling).
 _REQUIRED_MEMORY_DIRS: tuple[str, ...] = (
     "concepts",
     "connections",
     "daily",
     "episodes",
+    "experience",
     "weekly",
     "drafts/active",
     "drafts/sent",
@@ -538,6 +547,23 @@ def create_profile(
         ``validate_persona_name(clone_from)`` runs (validate would reject
         ``"default"`` because it's in ``_RESERVED``).
 
+    Always-on contract (issue #422 / epic #418 — "there shouldn't be no off
+    button"):
+      - Every profile this function returns carries
+        ``learning: {enabled: true}`` in its ``config.yaml`` and has
+        ``memory/experience/`` on disk. The write runs AFTER the clone
+        copies, so a source profile's surgical ``enabled: false`` cannot
+        survive into the newborn.
+      - Enablement failure is FATAL: the rollback block removes the partial
+        profile rather than returning a persona that silently never learns.
+      - The audit row is written on COMMIT (after the destructive block
+        succeeds), so a rolled-back create leaves no row claiming a profile
+        that does not exist.
+      - The per-persona ``thehomie profile learning disable`` verb still
+        exists for surgical debugging; ``PERSONA_LEARNING_ENABLED`` remains
+        the framework-wide switch. Absent-``learning`` semantics for
+        pre-existing profiles are UNCHANGED.
+
     Returns a ``ProfileInfo`` for the freshly-created profile.
 
     PRD-8 Phase 7b WS4.1 — operator kill-switch ("persona_mutation"). Module-
@@ -581,6 +607,26 @@ def create_profile(
     if profile_dir.exists():
         raise FileExistsError(
             f"Profile '{name}' already exists at {profile_dir}"
+        )
+
+    # --- Step 2b: config-path containment (issue #422) ------------------
+    # Step 5b writes the newborn's ``learning`` block through
+    # ``set_persona_learning(name, ...)``, which resolves the config path
+    # from the NAME via ``get_persona_paths`` — a different resolution path
+    # than ``_profile_root(name)``. The two agree for every ordinary name,
+    # but NOT for ``"custom"``: ``get_persona_paths("custom")`` roots at
+    # ``HOMIE_HOME`` itself, so the write would land OUTSIDE the dir the
+    # rollback block deletes and would mutate the operator's live config.
+    # Rule 2 — resolve the REAL target and refuse when it escapes the
+    # profile dir, before any filesystem work exists to roll back.
+    from .services import get_profile_config_path
+
+    newborn_config_path = get_profile_config_path(name)
+    if newborn_config_path.parent != profile_dir:
+        raise LifecycleError(
+            f"Cannot create profile '{name}': its config.yaml resolves to "
+            f"{newborn_config_path}, outside the profile dir {profile_dir}. "
+            f"No profile created."
         )
 
     # --- Step 3: resolve clone source (R1 M1 — special-case "default") --
@@ -714,6 +760,34 @@ def create_profile(
         # ensures a partial source's missing identity files get seeded.
         _seed_missing_identity_files(profile_dir, name)
 
+        # Step 5b: born learning (issue #422 / epic #418).
+        # Doctrine: "There shouldn't be no off button. You're using this,
+        # it's gonna be running on." Step 4 already seeded the substrate
+        # (``memory/experience/`` is in ``_REQUIRED_MEMORY_DIRS``); this
+        # writes the flag the learning tick reads.
+        #
+        # Placement is load-bearing in two directions:
+        #   - AFTER the clone copies, so a cloned ``enabled: false`` (a
+        #     source profile someone disabled for debugging) cannot survive
+        #     into the newborn.
+        #   - INSIDE the destructive block, so the R1 B4 rollback removes
+        #     this write along with the rest of the partial profile.
+        #
+        # Routed through ``set_persona_learning``'s strict-read RMW so a
+        # cloned config.yaml keeps every other authored section, and so a
+        # malformed one raises instead of being silently overwritten.
+        # Failure is FATAL by design: rolling back beats returning a
+        # persona that silently never learns.
+        from .services import set_persona_learning
+
+        try:
+            set_persona_learning(name, True)
+        except Exception as exc:
+            raise LifecycleError(
+                f"Learning enablement failed for profile '{name}': {exc} "
+                f"(rolled back partial profile dir at {profile_dir})"
+            ) from exc
+
         # Step 6: create wrapper alias unless suppressed (R1 B3).
         if not no_alias:
             from .wrappers import create_wrapper_alias
@@ -763,6 +837,17 @@ def create_profile(
         if profile_dir.exists():
             shutil.rmtree(profile_dir, ignore_errors=True)
         raise
+
+    # --- Step 6b: audit the enablement ON COMMIT (issue #422) -----------
+    # Deliberately OUTSIDE the destructive block: a rolled-back create must
+    # not leave a row claiming a profile that no longer exists. The ledger
+    # write is fail-open (a receipt, not the invariant) — it can never undo
+    # a profile that is already fully on disk.
+    from .services import append_persona_learning_audit
+
+    append_persona_learning_audit(
+        name, enabled=True, actor="lifecycle_create_profile"
+    )
 
     # --- Step 7: build and return ProfileInfo ---------------------------
     return ProfileInfo(

@@ -92,20 +92,38 @@ def resolve_project_root(start: Path | str | None = None) -> Path:
     return candidate
 
 
-def discover_skills(project_root: Path | str) -> list[SkillEntry]:
-    """Discover `.claude/skills/**/SKILL.md` entries."""
+def discover_skills(project_root: Path | str, *, fenced: bool = True) -> list[SkillEntry]:
+    """Discover `.claude/skills/**/SKILL.md` entries.
+
+    ``fenced=True`` (every runtime caller): persona-scoped promoted skills are
+    excluded — this discovery feeds generic-lane tool maps, and a skill scoped
+    to one persona must never enter another's runtime context (#429 codex R5).
+    ``fenced=False`` is for the operator's OWN management surfaces (the
+    dashboard browse list), which must see the whole inventory to manage it.
+    """
 
     root = Path(project_root)
     skills_root = root / ".claude" / "skills"
     if not skills_root.is_dir():
         return []
 
+    # The framework registry feeds GENERIC runtime lanes — the whole-pool,
+    # default-profile context. A persona-scoped promoted skill must never
+    # enter it (#429 codex R5 BLOCKER): build_skill_index fences by reader,
+    # but this discovery path used to return every promoted SKILL.md
+    # regardless, and the tool map then handed any runtime a readable path to
+    # a skill scoped to somebody else — invisible only while the rendering cap
+    # happened to hide it. One bulk sidecar read; fail closed.
+    scope_map, scope_readable = _framework_scope_map() if fenced else ({}, True)
+
     entries: list[SkillEntry] = []
     for skill_file in sorted(skills_root.rglob("SKILL.md")):
         # Default-deny: exclude auto-drafted skills under generated/ — unvetted
         # (no scan, no operator gate) skills must not enter the generic-lane tool map.
+        relative_parts: tuple[str, ...] = ()
         try:
-            if "generated" in skill_file.relative_to(skills_root).parts:
+            relative_parts = skill_file.relative_to(skills_root).parts
+            if "generated" in relative_parts:
                 continue
         except ValueError:
             pass
@@ -116,6 +134,10 @@ def discover_skills(project_root: Path | str) -> list[SkillEntry]:
         metadata = _parse_skill_frontmatter(content)
         relative = skill_file.relative_to(root).as_posix()
         name = metadata.get("name") or skill_file.parent.name
+        if "promoted" in relative_parts and not _framework_scope_allows(
+            name, scope_map, scope_readable
+        ):
+            continue
         description = metadata.get("description") or _first_markdown_sentence(content)
         entries.append(
             SkillEntry(
@@ -125,6 +147,49 @@ def discover_skills(project_root: Path | str) -> list[SkillEntry]:
             )
         )
     return entries
+
+
+def _framework_scope_map() -> tuple[dict[str, frozenset[str]], bool]:
+    """Bulk-read the persona-scope sidecar for the generic-lane fence.
+
+    ``({}, False)`` when the scope machinery is unavailable — the caller then
+    hides EVERY promoted skill from generic lanes (fail closed; hand-authored
+    skills are unaffected, they never went through the promotion gate).
+    """
+    try:
+        from cognition.skills import _load_persona_scope_map
+    except Exception:
+        return {}, False
+    try:
+        return _load_persona_scope_map()
+    except Exception:
+        return {}, False
+
+
+def _framework_scope_allows(
+    name: str, scope_map: dict[str, frozenset[str]], scope_readable: bool
+) -> bool:
+    """May a promoted skill enter the GENERIC (default-profile) tool map?"""
+    if not scope_readable:
+        return False
+    assigned = scope_map.get(name)
+    if assigned is None:
+        return False  # promoted with no scope row = un-vouched-for
+    if not assigned:
+        return True  # legacy/global migration row
+    try:
+        from cognition import skill_usage
+
+        sentinel = str(getattr(skill_usage, "SCOPE_UNRESTRICTED", "*") or "*")
+    except Exception:
+        sentinel = "*"
+    try:
+        from cognition import skills as _skills_mod
+
+        unrestricted = str(getattr(_skills_mod, "_UNRESTRICTED_PROFILE", "default"))
+    except Exception:
+        unrestricted = "default"
+    return bool(assigned & {unrestricted, sentinel})
 
 
 def resolve_mcp_config_path(

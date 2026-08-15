@@ -199,15 +199,140 @@ def _normalize_skill_allowlist(allowlist: Iterable[str] | None) -> frozenset[str
     return normalized
 
 
+#: The one profile whose skill allowlist is unrestricted (``skill_groups:
+#: ["*"]`` in ``persona-capability-matrix.yaml``) — the only reader of the
+#: whole shared central pool, and therefore the only reader persona scoping
+#: has to gate.
+_UNRESTRICTED_PROFILE = "default"
+
+
+def _load_persona_scope_map() -> tuple[dict[str, frozenset[str]], bool]:
+    """Read the persona scope of every skill-usage row (#429 Q5).
+
+    Returns ``(name -> assigned persona ids, readable)``. ``readable`` is
+    False when the sidecar could not be consulted AT ALL — the caller must
+    then treat every promoted skill as un-vouched-for and HIDE it, because a
+    read failure tells us nothing about who a skill was scoped to and the
+    permissive reading of "nothing" is exactly the leak (#429 design gate B2,
+    seam 3: one blanket ``except: return {}`` used to unscope every
+    persona-scoped skill at once).
+
+    A row with an EMPTY scope is present in the map as an empty set and reads
+    as "no restriction" — that is the legacy/global shape (anything promoted
+    before the sentinel existed; every ``/skills promote`` now stamps
+    ``skill_usage.SCOPE_UNRESTRICTED`` positively).
+    """
+    try:
+        from cognition import skill_usage
+    except Exception:
+        return {}, False
+    try:
+        usage_map = skill_usage.list_all_usage()
+    except Exception:
+        return {}, False
+    return (
+        {
+            name: frozenset(getattr(usage, "assigned_personas", None) or ())
+            for name, usage in usage_map.items()
+        },
+        True,
+    )
+
+
+def _reader_scope_markers(reader: str) -> frozenset[str]:
+    """Scope values that permit THIS reader — resolved once per build.
+
+    The reader's own persona id, or the ``skill_usage`` sentinel a global
+    promote stamps. An explicit assignment to the ``default`` profile permits
+    the default reader only — it is NOT a wildcard for named personas (#429
+    codex R4: the fence is keyed on the reader, not on the whole-pool scan).
+    """
+    sentinel = "*"
+    try:
+        from cognition import skill_usage
+
+        sentinel = str(getattr(skill_usage, "SCOPE_UNRESTRICTED", "*") or "*")
+    except Exception:
+        pass
+    return frozenset({reader, sentinel})
+
+
+def _is_promoted_path(skill_md: Path, skills_dir: Path) -> bool:
+    """True iff *skill_md* sits under the central ``promoted/`` tree.
+
+    Rule 2 — the path is what says a skill came through the promotion gate,
+    and therefore whether it is a skill that CAN carry a persona scope. A
+    hand-authored central skill never went through that gate, so a missing
+    sidecar row for it is normal rather than suspicious; a promoted one with
+    no row is the case that must fail closed.
+    """
+    try:
+        return "promoted" in skill_md.relative_to(skills_dir).parts
+    except ValueError:
+        return "promoted" in skill_md.parts
+
+
+def _permitted_by_scope(
+    name: str,
+    skill_md: Path,
+    skills_dir: Path,
+    *,
+    scope_map: dict[str, frozenset[str]],
+    scope_readable: bool,
+    allow_markers: frozenset[str],
+) -> bool:
+    """May THIS reader index this central skill? (#429 Q5 + codex R4)
+
+    Only skills under ``promoted/`` are gated: a skill linked at ONE persona
+    physically lands in the SHARED ``promoted/`` tree, so every reader must
+    point at a positive permission — its own id in the row, or the
+    unrestricted sentinel. No permission available — an unreadable sidecar, or
+    a promoted skill with no row at all — hides the skill instead of exposing
+    it (fail closed).
+
+    A hand-authored central skill never went through the promotion gate, so it
+    carries no persona scope at all — and must not inherit one from a
+    same-NAMED promoted skill (#429 codex R4: the name-keyed map used to hide
+    an unrelated hand-authored skill from the default reader).
+    """
+    if not _is_promoted_path(skill_md, skills_dir):
+        return True
+    assigned = scope_map.get(name)
+    if not scope_readable or assigned is None:
+        return False
+    if assigned:
+        return bool(assigned & allow_markers)
+    # Empty scope = legacy/global row (the one migration read) = unrestricted.
+    return True
+
+
 def _collect_index_entries(
     skills_dir: Path,
     *,
     allowlist: frozenset[str] | None = None,
+    enforce_persona_scope: bool = False,
+    reader: str = _UNRESTRICTED_PROFILE,
 ) -> list[tuple[str, str]]:
     entries: list[tuple[str, str]] = []
 
     if not skills_dir.exists():
         return entries
+
+    # Only the CENTRAL-tree scan needs this; a persona's own `extra_skill_dirs`
+    # copy is already scoped by construction (it is that persona's own
+    # directory) and must never be filtered by this. The gate is keyed on the
+    # READER (#429 codex R4): the old `allowlist is None` condition scoped only
+    # the whole-pool default scan, so a named persona with a concrete allowlist
+    # could see a promoted skill scoped to somebody else whenever its allowlist
+    # happened to name it. Rule 2 — one bulk sidecar read, not one locked read
+    # per candidate skill on every turn.
+    scope_map: dict[str, frozenset[str]] = {}
+    scope_readable = True
+    allow_markers: frozenset[str] = frozenset()
+    scoping = enforce_persona_scope
+    if scoping:
+        scope_map, scope_readable = _load_persona_scope_map()
+        allow_markers = _reader_scope_markers(reader)
 
     for skill_md in skills_dir.rglob("SKILL.md"):
         # Default-deny: skip auto-drafted skills under generated/ — they are
@@ -225,6 +350,15 @@ def _collect_index_entries(
             description = fm.get("description", "")
             if allowlist is not None and name not in allowlist:
                 continue
+            if scoping and not _permitted_by_scope(
+                name,
+                skill_md,
+                skills_dir,
+                scope_map=scope_map,
+                scope_readable=scope_readable,
+                allow_markers=allow_markers,
+            ):
+                continue
             if name and description:
                 entries.append((name, description))
         except Exception:
@@ -239,6 +373,7 @@ def build_skill_index(
     *,
     allowlist: Iterable[str] | None = None,
     extra_skill_dirs: Iterable[Path] | None = None,
+    reader_persona: str | None = None,
 ) -> str:
     """Scan skills/ for hand-authored SKILL.md files (procedural_memory region).
 
@@ -247,29 +382,51 @@ def build_skill_index(
     until the skill-from-experience rails promote them out of ``generated/``.
     Return names + descriptions as formatted text for the procedural_memory region.
     CRITICAL: Names and one-line descriptions ONLY — no full body.
+
+    ``reader_persona`` is the persona this index is being built FOR (#429 codex
+    R4): a promoted skill scoped to one persona is indexed only for that
+    persona (or for every reader when globally promoted). None means the
+    unrestricted ``default`` profile — the fail-closed reader.
     """
+    reader = (reader_persona or "").strip() or _UNRESTRICTED_PROFILE
     allowed = _normalize_skill_allowlist(allowlist)
-    entries = _collect_index_entries(skills_dir, allowlist=allowed)
+    central_entries = _collect_index_entries(
+        skills_dir, allowlist=allowed, enforce_persona_scope=True, reader=reader
+    )
+    local_entries: list[tuple[str, str]] = []
     for extra_dir in extra_skill_dirs or []:
         # Profile-local skills are explicitly installed into that persona's
         # brain, so they are surfaced without requiring central allowlist edits.
-        entries.extend(_collect_index_entries(extra_dir, allowlist=None))
+        local_entries.extend(_collect_index_entries(extra_dir, allowlist=None))
 
-    if not entries:
+    if not central_entries and not local_entries:
         return ""
 
-    # De-duplicate by name, preferring the last entry so profile-local skills
-    # can override a central skill description with the same name.
-    deduped: dict[str, str] = {}
-    for name, description in entries:
-        deduped[name] = description
-    entries = list(deduped.items())
+    # De-duplicate by name, profile-local wins on collision (an explicit
+    # install overrides the central description of the same name).
+    deduped: dict[str, str] = dict(central_entries)
+    deduped.update(dict(local_entries))
 
-    # Sort by name, cap at max_entries.
-    entries.sort(key=lambda e: e[0])
-    entries = entries[:max_entries]
+    # Profile-local (explicitly installed) entries are RESERVED ahead of the
+    # cap (M1): a skill an operator just linked for THIS persona must be live
+    # on the next turn regardless of where its name sorts against a large
+    # central pool. Capping the already-combined, already-sorted list — the
+    # old behavior — could silently drop a same-name-sorted-late linked
+    # skill out of the index the moment the central pool alone reached the
+    # cap, contradicting the "live on that homie's next turn" promise
+    # ``skill_intake`` makes on a successful install.
+    #
+    # The reservation does NOT exempt locals from the cap itself (#429 codex
+    # R3 MINOR): when the local set alone meets or exceeds ``max_entries``,
+    # unioning it in whole would emit MORE than the cap (21 entries under a
+    # 20-entry budget). The cap bounds the TOTAL — locals first, sorted, up
+    # to the cap; central entries fill whatever budget remains.
+    local_names = set(sorted(name for name, _ in local_entries)[:max_entries])
+    remaining = max(0, max_entries - len(local_names))
+    central_names = sorted(n for n in deduped if n not in local_names)[:remaining]
+    kept = sorted(local_names | set(central_names))
 
-    return "\n".join(f"- **{name}**: {desc}" for name, desc in entries)
+    return "\n".join(f"- **{name}**: {deduped[name]}" for name in kept)
 
 
 async def propose_skill(

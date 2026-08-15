@@ -56,6 +56,15 @@ def test_founder_operator_builtin_is_safe_and_has_no_scheduled_curriculum():
     assert CapabilityClass.OPERATOR_EXEC.value not in plan.capability_classes
 
 
+def test_seo_geo_builtin_scopes_only_the_read_only_search_pack():
+    plan = compile_blueprint(build_builtin_blueprint("seo-geo", persona_id="seo_geo"))
+
+    assert plan.applied_toolsets == ("safe_core", "seo_geo_read")
+    assert plan.integration_requirements == ("analytics.overview", "search_console.overview")
+    assert "firecrawl_map" in plan.declared_tools
+    assert "operator_exec" not in plan.applied_toolsets
+
+
 def test_general_specialist_never_compiles_to_empty_scope():
     plan = compile_blueprint(
         build_builtin_blueprint(

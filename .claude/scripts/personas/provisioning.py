@@ -8,6 +8,7 @@ rollback when a commit step fails.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -22,6 +23,10 @@ from typing import Any, Literal
 
 import yaml
 
+# Rule 3: reached through the module so a test patching
+# ``personas.toolset_grants.active_grants`` (or the ledger path behind it)
+# propagates into the render below.
+from personas import toolset_grants as _toolset_grants
 from personas.blueprints import (
     BlueprintPlan,
     ProvisionMode,
@@ -42,6 +47,7 @@ from personas.discord_bindings import (
 from personas.lifecycle import initialize_staged_profile_inventory
 from personas.services import (
     ConfigShapeError,
+    append_persona_learning_audit,
     dump_config_yaml,
     merge_config_patch,
     validate_config_yaml_text,
@@ -132,6 +138,15 @@ class ProvisionPreview:
     changed_paths: tuple[str, ...]
     env_summary: dict[str, Any]
     warnings: tuple[str, ...]
+    # Executor-owned grants the render carried through a template rewrite
+    # (#426 round 4). Empty on the common path; named in the provisioning
+    # receipt and audit row when a reconcile would otherwise have erased one.
+    preserved_grants: tuple[str, ...] = ()
+    # The negative half (#426 round 7): blueprint-recommended bundles this
+    # render held OFF because an effective revoke tombstoned them. A removal
+    # is at least as reportable as a preservation, so it rides the same
+    # receipt and audit row.
+    revoked_grants: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -153,6 +168,12 @@ _PROFILE_MANAGED = (
     "data/persona-provisioning-readiness.json",
     ".persona-provision-transaction",
 )
+# How long a reconcile waits for the toolset executor's canonical per-config
+# lock. Generous relative to the executor's own 10s bound: a grant's critical
+# section is milliseconds, so anything approaching this is a wedged holder,
+# and a reconcile is an operator-initiated batch that can afford to queue.
+_CONFIG_COMMIT_LOCK_TIMEOUT_S = 30.0
+
 _WINDOWS_DEVICES = {
     "con",
     "prn",
@@ -199,7 +220,7 @@ def preview_provision(
         callable_tools=callable_tools,
     )
     plan_sha = _canonical_hash(plan.as_dict())
-    rendered, env_summary = _render_managed_files(
+    rendered, env_summary, preserved_grants, revoked_grants = _render_managed_files(
         raw_blueprint,
         plan,
         current_config,
@@ -232,6 +253,8 @@ def preview_provision(
         changed_paths=tuple(changed),
         env_summary=env_summary,
         warnings=plan.warnings,
+        preserved_grants=preserved_grants,
+        revoked_grants=revoked_grants,
     )
 
 
@@ -276,47 +299,79 @@ def apply_provision(
                 resolved_paths,
                 blueprint.persona_id,
             )
-        preview = preview_provision(
-            raw_blueprint,
-            mode=resolved_mode,
-            paths=resolved_paths,
-            callable_tools=callable_tools,
-        )
-        _require_preview_match(
-            preview,
-            expected_plan_sha256=expected_plan_sha256,
-            expected_state_sha256=expected_state_sha256,
-        )
-        _require_create_is_idempotent(preview)
-        binding_changed = str(resolved_paths.bindings_file) in set(
-            preview.changed_paths
-        )
-        if binding_changed:
-            with file_lock(binding_lock):
-                locked_preview = preview_provision(
-                    raw_blueprint,
-                    mode=resolved_mode,
-                    paths=resolved_paths,
-                    callable_tools=callable_tools,
+        # ── The persona lock above is provisioning's OWN lock; the toolset
+        # executor never takes it. Without this second acquisition the two
+        # writers were serialized by nothing: a reconcile could hash-check
+        # config.yaml, lose the CPU, watch a concurrent grant commit under the
+        # executor's lock, and then atomically replace the file with its own
+        # stale render — physically erasing an audited grant (round 6).
+        #
+        # So the config-affecting span ALSO takes the canonical
+        # `<profile>/config.yaml.lock` — the exact path
+        # `personas.services._mutate_persona_toolset` locks. Holding it across
+        # render -> hash -> precondition -> replace means the bytes we commit
+        # were re-merged with `active_grants()` inside the same lock that
+        # would have to be released for any grant to land, so there is no
+        # window left to lose. A grant that beat us to the lock changes the
+        # physical state hash and comes back as the existing
+        # ProvisionConflictError, which is the honest answer — never an
+        # erasure.
+        #
+        # RECONCILE only. Under CREATE the profile directory does not exist
+        # yet, so `add_persona_toolset` refuses outright and there is nothing
+        # to race; taking the lock there would also mkdir the profile root
+        # (file_lock creates its parent) and trip the create-time
+        # "already exists and was not created by the provisioner" guard.
+        with contextlib.ExitStack() as stack:
+            if resolved_mode is ProvisionMode.RECONCILE:
+                stack.enter_context(
+                    file_lock(
+                        _profile_root(resolved_paths, blueprint.persona_id)
+                        / "config.yaml",
+                        timeout=_CONFIG_COMMIT_LOCK_TIMEOUT_S,
+                    )
                 )
-                _require_preview_match(
-                    locked_preview,
-                    expected_plan_sha256=expected_plan_sha256,
-                    expected_state_sha256=expected_state_sha256,
-                )
-                _require_create_is_idempotent(locked_preview)
-                return _commit_preview(
-                    raw_blueprint,
-                    locked_preview,
-                    actor=actor,
-                    paths=resolved_paths,
-                )
-        return _commit_preview(
-            raw_blueprint,
-            preview,
-            actor=actor,
-            paths=resolved_paths,
-        )
+            preview = preview_provision(
+                raw_blueprint,
+                mode=resolved_mode,
+                paths=resolved_paths,
+                callable_tools=callable_tools,
+            )
+            _require_preview_match(
+                preview,
+                expected_plan_sha256=expected_plan_sha256,
+                expected_state_sha256=expected_state_sha256,
+            )
+            _require_create_is_idempotent(preview)
+            binding_changed = str(resolved_paths.bindings_file) in set(
+                preview.changed_paths
+            )
+            if binding_changed:
+                with file_lock(binding_lock):
+                    locked_preview = preview_provision(
+                        raw_blueprint,
+                        mode=resolved_mode,
+                        paths=resolved_paths,
+                        callable_tools=callable_tools,
+                    )
+                    _require_preview_match(
+                        locked_preview,
+                        expected_plan_sha256=expected_plan_sha256,
+                        expected_state_sha256=expected_state_sha256,
+                    )
+                    _require_create_is_idempotent(locked_preview)
+                    return _commit_preview(
+                        raw_blueprint,
+                        locked_preview,
+                        actor=actor,
+                        paths=resolved_paths,
+                    )
+            return _commit_preview(
+                raw_blueprint,
+                preview,
+                actor=actor,
+                paths=resolved_paths,
+            )
 
 
 def _commit_preview(
@@ -340,7 +395,7 @@ def _commit_preview(
     )
     profile_root = _profile_root(paths, preview.plan.persona_id)
     current_config = _read_config(profile_root / "config.yaml")
-    rendered, _summary = _render_managed_files(
+    rendered, _summary, _preserved, _revoked = _render_managed_files(
         raw_blueprint,
         preview.plan,
         current_config,
@@ -486,6 +541,13 @@ def _finalize_result(
         "changed_paths": list(preview.changed_paths),
         "created_at": datetime.now(UTC).isoformat(),
         "env": preview.env_summary,
+        # Names this run carried through the template rewrite instead of
+        # erasing. Empty is the normal case; non-empty is the receipt that a
+        # reconcile met an executor-owned grant and respected it.
+        "preserved_grants": list(preview.preserved_grants),
+        # And the names it held OFF because an operator revoked them, even
+        # though the blueprint recommends them.
+        "revoked_grants": list(preview.revoked_grants),
     }
     receipt_path = (
         paths.receipts_root
@@ -495,6 +557,20 @@ def _finalize_result(
     _validate_physical_targets(paths, preview.plan.persona_id)
     _write_json(receipt_path, receipt)
     _best_effort_audit(actor, preview.plan.persona_id, outcome, receipt)
+    if outcome == "created":
+        # Same audit-row shape as personas.lifecycle.create_profile's
+        # born-learning write (issue #422) — the atomic blueprint
+        # provisioner is the OTHER door a persona is born through
+        # (plain `thehomie profile create`, dashboard `POST /api/agents`).
+        # Written on COMMIT only: `outcome == "created"` is set by
+        # `_commit_preview` after the transaction is already durable, so a
+        # rolled-back create (which raises before `_finalize_result` runs)
+        # never reaches this call.
+        append_persona_learning_audit(
+            preview.plan.persona_id,
+            enabled=True,
+            actor="persona_creation_surface",
+        )
     return ProvisionResult(
         persona_id=preview.plan.persona_id,
         outcome=outcome,
@@ -507,13 +583,68 @@ def _finalize_result(
     )
 
 
+def _preserve_ledger_grants(
+    merged: dict[str, Any], persona_id: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Apply the operator's ledger to *merged* in place.
+
+    Returns ``(preserved, removed)`` — grants carried through the template
+    rewrite, and blueprint-recommended bundles held off by a tombstone.
+
+    The blueprint patch replaces ``toolsets:`` wholesale, which broke the
+    operator's turns in BOTH directions:
+
+    * a granted toolset was silently ERASED, with its ``granted`` row still
+      in the append-only ledger describing reach the persona no longer had
+      (round 4);
+    * a successfully REVOKED toolset came back, if the blueprint happened to
+      recommend it — the ledger said revoked while live reach returned, and
+      the positive-only replay had no way to say "keep this off" (round 7).
+
+    So the resolution is the ledger applied as a whole:
+    ``(blueprint ∪ ledger-active) − ledger-tombstoned``, with event order
+    deciding both sets, so a re-grant after a revoke lands and holds.
+
+    The template still owns everything the operator never touched: a toolset
+    the blueprint drops that no turn ever granted still goes, and a bundle it
+    recommends that no turn ever revoked still arrives.
+
+    Deliberately NOT full delta routing: blueprint-driven ADDS still land
+    without an operator-turn ledger row. Routing every reconcile delta through
+    the executor is issue #435.
+    """
+    existing = merged.get("toolsets")
+    current = [str(item).strip() for item in existing] if isinstance(existing, list) else []
+    scope = _toolset_grants.ledger_scope(persona_id)
+
+    preserved: list[str] = []
+    for name in scope.active:
+        if name not in current:
+            current.append(name)
+            preserved.append(name)
+    removed = [name for name in scope.tombstoned if name in current]
+    if removed:
+        current = [name for name in current if name not in set(removed)]
+    if preserved or removed:
+        merged["toolsets"] = current
+    return tuple(preserved), tuple(removed)
+
+
 def _render_managed_files(
     raw_blueprint: dict[str, Any],
     plan: BlueprintPlan,
     current_config: dict[str, Any],
     paths: ProvisionPaths,
-) -> tuple[dict[str, str], dict[str, Any]]:
+) -> tuple[dict[str, str], dict[str, Any], tuple[str, ...], tuple[str, ...]]:
     merged = merge_config_patch(current_config, plan.config_patch)
+    # Before rendering, not after: preview and apply both come through here,
+    # so the ledger is applied inside the bytes that changed_paths, the state
+    # hashes, and the transaction snapshot are all computed from. A preview
+    # that showed the erasure and an apply that quietly re-added it would be
+    # two different truths.
+    preserved_grants, revoked_grants = _preserve_ledger_grants(
+        merged, plan.persona_id
+    )
     config_text = dump_config_yaml(merged)
     validate_config_yaml_text(config_text)
     env_plan = build_env_sync_plan(
@@ -557,6 +688,8 @@ def _render_managed_files(
             ),
         },
         safe_env_sync_summary(env_plan),
+        preserved_grants,
+        revoked_grants,
     )
 
 
@@ -1099,6 +1232,8 @@ def _best_effort_audit(
                 "transaction_id": receipt["transaction_id"],
                 "plan_sha256": receipt["plan_sha256"],
                 "changed_paths": receipt["changed_paths"],
+                "preserved_grants": receipt.get("preserved_grants", []),
+                "revoked_grants": receipt.get("revoked_grants", []),
             },
         )
     except Exception:

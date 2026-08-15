@@ -64,6 +64,7 @@ from config import (  # noqa: E402
     VOICE_TTS_VOICE_EDGE,
     VOICE_TTS_VOICE_OPENAI,
     WHATSAPP_ACCESS_TOKEN,
+    WHATSAPP_ALLOWED_NUMBERS,
     WHATSAPP_PHONE_NUMBER_ID,
     WHATSAPP_VERIFY_TOKEN,
     WHATSAPP_WEBHOOK_PORT,
@@ -741,6 +742,7 @@ def main() -> None:
             wa = WhatsAppAdapter(
                 WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID,
                 WHATSAPP_VERIFY_TOKEN, WHATSAPP_WEBHOOK_PORT,
+                allowed_numbers=WHATSAPP_ALLOWED_NUMBERS,
             )
             router.register(wa)
             print("  WhatsApp adapter OK")
@@ -801,6 +803,7 @@ def main() -> None:
         wa = WhatsAppAdapter(
             WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID,
             WHATSAPP_VERIFY_TOKEN, WHATSAPP_WEBHOOK_PORT,
+            allowed_numbers=WHATSAPP_ALLOWED_NUMBERS,
         )
         router.register(wa)
 

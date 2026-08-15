@@ -7,6 +7,7 @@ Runtime consumers must NOT import from cognition.recall directly.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from dataclasses import dataclass, field
@@ -226,7 +227,15 @@ async def recall(
 
     # Explicit keyword mode — always available, no cognition needed
     if search_mode == SearchMode.KEYWORD:
-        result = _keyword_only_recall(query, caller, max_results, memory_dir=memory_dir)
+        # R7 MAJOR: this branch is SYNCHRONOUS SQLite — it opens, queries and
+        # closes the memory index, and a real connection carries a 30s busy
+        # timeout. `recall()` is awaited straight from the chat event loop
+        # (engine, heartbeat, curriculum study), so a locked or slow index
+        # froze Telegram, Discord and /health together. Offloaded at the
+        # source so every caller gets it, not just the one that was caught.
+        result = await asyncio.to_thread(
+            _keyword_only_recall, query, caller, max_results, memory_dir=memory_dir
+        )
         _persist_log(result.log)
         _update_span(result.log, result.results)
         return result
@@ -256,8 +265,12 @@ async def recall(
         return RecallResponse(results=results, formatted_text=formatted, log=log)
 
     else:
-        # FALLBACK: keyword-only when cognition unavailable
-        result = _keyword_only_recall(query, caller, max_results, memory_dir=memory_dir)
+        # FALLBACK: keyword-only when cognition unavailable. Same synchronous
+        # SQLite as the KEYWORD branch above and the same offload — a degraded
+        # install is exactly when the loop can least afford a 30s busy timeout.
+        result = await asyncio.to_thread(
+            _keyword_only_recall, query, caller, max_results, memory_dir=memory_dir
+        )
         _persist_log(result.log)
         _update_span(result.log, result.results)
         return result

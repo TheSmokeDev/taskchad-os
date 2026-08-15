@@ -1477,6 +1477,7 @@ def _crypto_round_status_payload() -> dict:
                 for row in db.source_receipts()
             ],
             "source_receipt_history_count": db.source_receipt_history_count(),
+            "discord_collection": db.discord_observability_status(),
             "dependency_provenance": provenance_status(),
         }
     except Exception as exc:
@@ -1612,7 +1613,7 @@ def crypto_tape_status(json_mode: bool):
 
 @crypto_tape_group.command("show")
 @click.argument(
-    "source", type=click.Choice(["debauchery", "x", "for_you", "following"])
+    "source", type=str
 )
 @click.option(
     "--window", type=click.Choice(["today", "latest", "2h"]), default="today", show_default=True
@@ -5084,26 +5085,105 @@ def profile_learning_disable(name):
 
 
 def _write_persona_learning_audit(persona_id: str, *, enabled: bool) -> None:
-    """Append audit row for a learning toggle."""
-    import json as json_mod
-    from datetime import datetime, timezone
-    try:
-        import config as _config
-        audit_path = _config.DATA_DIR / "persona_learning_audit.jsonl"
-    except Exception:
-        return
-    audit_path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "persona_id": persona_id,
-        "action": "enable" if enabled else "disable",
-        "enabled": enabled,
-    }
-    try:
-        with open(audit_path, "a", encoding="utf-8") as f:
-            f.write(json_mod.dumps(record) + "\n")
-    except OSError:
-        pass
+    """Append audit row for a learning toggle.
+
+    Thin delegate — the row shape lives in the personas slice so the
+    operator toggle and ``create_profile``'s born-learning write (issue
+    #422) can never drift apart. Fail-open behavior is unchanged; the
+    helper swallows and logs its own failures.
+    """
+    from personas.services import append_persona_learning_audit
+    append_persona_learning_audit(
+        persona_id, enabled=enabled, actor="cli_profile_learning"
+    )
+
+
+# ── Persona experience ingest (issue #420) ──────────────────────────────────
+#
+# The ad-hoc "learn this" surface for files and text — the second caller of
+# the deterministic experience writer. A dropped article lands as a sourced
+# section in the persona's OWN memory/experience/ tree and is reindexed into
+# that persona's memory.db, so the nightly distiller picks it up like any
+# other note. YouTube links ride the curriculum engine instead (`/curriculum
+# learn`) — two surfaces, one pipeline each, never a forked extractor.
+#
+# Business logic lives in `personas/experience.py` (the personas slice owns
+# profile trees); this handler stays thin.
+
+
+@main.group("persona")
+def persona():
+    """Persona-scoped operator surfaces (experience ingest)."""
+
+
+@persona.command("ingest")
+@click.argument("name")
+@click.argument("source")
+@click.option("--label", default=None, help="Section label (default: file stem).")
+@click.option("--note", default=None, help="Operator note recorded with the source.")
+@click.option(
+    "--text",
+    "force_text",
+    is_flag=True,
+    help="Treat SOURCE as literal text, never as a path.",
+)
+@click.option("--no-reindex", is_flag=True, help="Skip the recall reindex.")
+@click.option("--json", "json_mode", is_flag=True, help="Emit quiet JSON.")
+def persona_ingest(
+    name: str,
+    source: str,
+    label: str | None,
+    note: str | None,
+    force_text: bool,
+    no_reindex: bool,
+    json_mode: bool,
+):
+    """Append a file or text to persona NAME's experience notes."""
+    import contextlib
+    import io
+
+    from personas.experience import ingest_source
+
+    def _run() -> dict:
+        return ingest_source(
+            name,
+            source,
+            label=label,
+            note=note,
+            force_text=force_text,
+            reindex=not no_reindex,
+        )
+
+    if json_mode:
+        # Quiet-JSON contract: reindex_file() prints operator-receipt lines
+        # to stdout on its embedding-dim-drift rebuild path (by design — see
+        # test_reindex_file_detects_drift_and_rebuilds). Those lines would
+        # land BEFORE this command's JSON payload and break any parser
+        # reading stdout, so capture (and drop) stdout for the duration of
+        # the ingest call rather than changing reindex_file's own contract,
+        # which other non-JSON callers rely on for operator visibility.
+        with contextlib.redirect_stdout(io.StringIO()):
+            payload = _run()
+        click.echo(json_mod.dumps(payload, indent=2, sort_keys=True))
+    else:
+        payload = _run()
+        status = payload.get("status", "error")
+        click.echo(f"Ingest [{name}]: {status}")
+        if payload.get("label"):
+            click.echo(
+                f"  {payload.get('source_kind', 'text')} '{payload['label']}' "
+                f"({payload.get('chars', 0)} chars)"
+            )
+        if payload.get("path"):
+            click.echo(f"  note: {payload['path']}")
+        if "reindexed" in payload:
+            click.echo(f"  reindexed: {payload['reindexed']}")
+        if payload.get("reindex_error"):
+            click.echo(f"  reindex error: {payload['reindex_error']}")
+        if payload.get("detail"):
+            click.echo(f"  detail: {payload['detail']}")
+    if payload.get("status") not in ("written", "duplicate"):
+        raise SystemExit(1)
 
 
 # ── Archon runner subgroup (PRP-7e Phase 5 — R4 ARCHON_HOME pivot) ───────────

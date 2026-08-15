@@ -37,9 +37,16 @@ without paying that cost on the kill-switch import path.
 
 import importlib
 
-from . import kill_switches, patterns
+from . import kill_switches, patterns, ssrf, untrusted
 
-__all__ = ["kill_switches", "patterns", "redact"]
+# ``untrusted`` and ``ssrf`` are eager like ``patterns``: all three are pure,
+# dependency-free primitives (no ``config`` import, no provider state), so
+# none pays the profile-boot cost that made ``redact`` lazy. Also like
+# ``patterns``, their members may be imported directly — the Rule 3
+# module-attribute discipline exists so monkeypatch keeps propagating through
+# STATEFUL callables, and these are pure functions and constants that nothing
+# patches.
+__all__ = ["kill_switches", "patterns", "redact", "ssrf", "untrusted"]
 
 
 def __getattr__(name: str):

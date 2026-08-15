@@ -520,6 +520,13 @@ def _button_incoming(code: str, *, own: bool = True) -> IncomingMessage:
         channel=Channel(Platform.DISCORD, "222222222222222222"),
         platform=Platform.DISCORD,
         thread=Thread("222222222222222222"),
+        # What the canonical ingress seam (models.resolve_ingress_role,
+        # #424/#449) stamps for a configured operator's own authenticated
+        # Discord button tap — the fail-closed dataclass default is now
+        # "viewer", and _handle_capability_decision trusts this field
+        # verbatim (router.py:3098), so the pre-seam implicit "admin" must
+        # be stated explicitly here to reproduce production shape.
+        user_role="admin",
         raw_event={
             "interaction_type": "button",
             "source_message_is_own": own,
@@ -675,6 +682,9 @@ async def test_request_bound_voice_phrase_approves_telegram_and_resumes(
         channel=Channel(Platform.TELEGRAM, "telegram-operator-1", is_dm=True),
         platform=Platform.TELEGRAM,
         thread=Thread("telegram-operator-1"),
+        # See _button_incoming above — the seam's fail-closed default is
+        # "viewer"; this reproduces a configured operator's stamped role.
+        user_role="admin",
         voice_origin=True,
     )
     await router._handle_inner(adapter, incoming)

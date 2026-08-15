@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime
+from pathlib import Path
 
 # Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
 from personas import apply_persona_override

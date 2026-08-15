@@ -16,10 +16,12 @@ Disposition coverage:
 from __future__ import annotations
 
 import ast
+import json
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from personas.lifecycle import (
     LifecycleError,
@@ -522,6 +524,218 @@ def test_init_archon_creates_skeleton(tmp_homie_home, monkeypatch):
     for sub in ("workflows", "commands", "artifacts", "ralph", "worktrees"):
         assert (archon / sub).is_dir()
     assert (archon / "config.yaml").exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue #422 — born learning (always-on at create)
+# ---------------------------------------------------------------------------
+
+
+def _read_config(profile_dir: Path) -> dict:
+    """Parse a profile's config.yaml (physical read — Rule 2)."""
+    return yaml.safe_load(
+        (profile_dir / "config.yaml").read_text(encoding="utf-8")
+    )
+
+
+def _audit_rows() -> list[dict]:
+    """Every persona-learning audit row written so far.
+
+    ``config.DATA_DIR`` is redirected into the test tmp tree by the
+    ``empty_homie_root`` fixture, and the helper resolves it at CALL time,
+    so this reads the redirected ledger — never the checkout's live one.
+    """
+    import config
+
+    ledger = Path(config.DATA_DIR) / "persona_learning_audit.jsonl"
+    if not ledger.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_create_profile_is_born_learning_enabled(empty_homie_root):
+    """#422 — a newborn carries ``learning: {enabled: true}`` on disk.
+
+    The doctrine is "no off button": the persona does not wait for an
+    operator to opt it into the learning loop.
+    """
+    info = create_profile("sales", no_alias=True)
+
+    config_path = info.path / "config.yaml"
+    assert config_path.is_file(), "newborn has no config.yaml"
+    config = _read_config(info.path)
+    assert config["learning"]["enabled"] is True
+
+    # Reconcile round 2 — prove the tick's REAL admission check (not a
+    # re-derived stand-in) accepts this door's newborn too, same as the
+    # CLI and dashboard doors in test_persona_creation_surfaces.py /
+    # test_dashboard_api.py.
+    from persona_learning_tick import is_learning_eligible
+
+    assert is_learning_eligible(config) is True
+
+
+def test_create_profile_seeds_experience_note_dir(empty_homie_root):
+    """#422 — the loop's substrate exists at birth, not on first write."""
+    info = create_profile("sales", no_alias=True)
+    assert (info.path / "memory" / "experience").is_dir()
+
+
+def test_experience_dir_matches_writer_constant():
+    """The inventory literal is pinned to the writer's own constant.
+
+    ``lifecycle`` keeps a literal (every sibling entry is one, and importing
+    ``personas.experience`` there would add an import edge for one string),
+    so this test is what stops the two from drifting apart.
+    """
+    from personas.experience import NOTES_SUBDIR
+
+    assert NOTES_SUBDIR in _REQUIRED_MEMORY_DIRS
+
+
+def test_create_profile_writes_learning_audit_row(empty_homie_root):
+    """#422 — enablement leaves an audit row naming the creating door."""
+    create_profile("sales", no_alias=True)
+
+    rows = [r for r in _audit_rows() if r["persona_id"] == "sales"]
+    assert len(rows) == 1, f"expected exactly one row, got {rows}"
+    row = rows[0]
+    assert row["action"] == "enable"
+    assert row["enabled"] is True
+    assert row["actor"] == "lifecycle_create_profile"
+    assert row["timestamp"]
+
+
+def test_clone_does_not_carry_disabled_learning_into_newborn(
+    empty_homie_root,
+):
+    """#422 ordering — the write runs AFTER the clone copy.
+
+    A source profile that was surgically disabled for debugging must not
+    hand its ``enabled: false`` to a child. The RMW shape is asserted too:
+    the source's other authored sections survive into the newborn, which
+    proves this is a read-modify-write and not a blind overwrite.
+    """
+    source = create_profile("sales", no_alias=True)
+    (source.path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "persona": {"display_name": "Sales"},
+                "learning": {"enabled": False},
+            },
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    child = create_profile(
+        "ops", clone=True, clone_from="sales", no_alias=True
+    )
+
+    data = _read_config(child.path)
+    assert data["learning"]["enabled"] is True, (
+        "cloned learning:false survived into the newborn — the enablement "
+        "write must run after the clone copies"
+    )
+    assert data["persona"]["display_name"] == "Sales", (
+        "strict-read RMW lost an authored section from the cloned config"
+    )
+
+
+def test_learning_write_failure_rolls_back_profile(
+    empty_homie_root, monkeypatch
+):
+    """#422 — a failed enablement rolls back rather than shipping a
+    persona that silently never learns."""
+    from personas import services as services_mod
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("config.yaml is a directory")
+
+    monkeypatch.setattr(services_mod, "set_persona_learning", _boom)
+
+    with pytest.raises(LifecycleError, match="Learning enablement failed"):
+        create_profile("sales", no_alias=True)
+
+    assert not (empty_homie_root / "profiles" / "sales").exists()
+
+
+def test_wrapper_failure_rollback_removes_learning_config(
+    empty_homie_root, monkeypatch
+):
+    """R1 B4 still holds with the new write — rollback takes config.yaml too.
+
+    Masked-test fix (R2 round-2 gate finding): the pre-existing R1 B4
+    rollback already deletes the whole partial profile, so a wrapper-failure
+    test that only asserts post-rollback absence would still pass if the
+    born-learning write were deleted outright. The injected wrapper failure
+    now asserts the write landed BEFORE it raises, so this test actually
+    fails without the Step 5b write.
+    """
+    from personas import wrappers as wrappers_mod
+
+    profile_dir = empty_homie_root / "profiles" / "sales"
+
+    def _disk_full(*args, **kwargs):
+        # Wrapper creation runs after Step 5b (learning enablement) in
+        # create_profile — the config write must already be on disk here.
+        config = _read_config(profile_dir)
+        assert config["learning"]["enabled"] is True, (
+            "config.yaml was not born-learning before wrapper creation ran"
+        )
+        raise OSError("disk full")
+
+    monkeypatch.setattr(wrappers_mod, "create_wrapper_alias", _disk_full)
+
+    with pytest.raises(LifecycleError):
+        create_profile("sales")
+
+    assert not profile_dir.exists()
+    assert not (profile_dir / "config.yaml").exists()
+
+
+def test_rolled_back_create_writes_no_audit_row(empty_homie_root, monkeypatch):
+    """#422 — the audit row is written on COMMIT.
+
+    A create that rolled back must not leave a row claiming enablement for
+    a profile that no longer exists on disk.
+    """
+    from personas import wrappers as wrappers_mod
+
+    monkeypatch.setattr(
+        wrappers_mod,
+        "create_wrapper_alias",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(LifecycleError):
+        create_profile("sales")
+
+    assert [r for r in _audit_rows() if r["persona_id"] == "sales"] == []
+
+
+def test_create_rejects_name_whose_config_escapes_profile_dir(
+    empty_homie_root,
+):
+    """#422 containment — refuse before any filesystem work.
+
+    ``get_persona_paths("custom")`` roots at ``HOMIE_HOME`` itself, so the
+    enablement write for a profile literally named ``custom`` would land
+    outside the dir the rollback deletes — on the operator's live config.
+    The guard refuses the create instead, leaving zero disk trace.
+    """
+    with pytest.raises(LifecycleError, match="outside the profile dir"):
+        create_profile("custom", no_alias=True)
+
+    assert not (empty_homie_root / "profiles" / "custom").exists()
+    assert not (empty_homie_root / "config.yaml").exists(), (
+        "the enablement write escaped onto the operator's live config"
+    )
 
 
 # ---------------------------------------------------------------------------

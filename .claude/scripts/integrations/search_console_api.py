@@ -51,6 +51,18 @@ class SearchPage:
     position: float
 
 
+@dataclass
+class SearchQueryPage:
+    """One Search Analytics query/page row with no implied exhaustiveness."""
+
+    query: str
+    page: str
+    clicks: int
+    impressions: int
+    ctr: float
+    position: float
+
+
 def get_search_console_service() -> Any:
     """Build authenticated Search Console API service."""
     from googleapiclient.discovery import build  # type: ignore[import-untyped]
@@ -65,7 +77,7 @@ def get_search_console_service() -> Any:
 def _date_range(days: int) -> tuple[str, str]:
     """Return (start_date, end_date) strings for the last N days."""
     end = datetime.now() - timedelta(days=3)  # GSC data has ~3 day lag
-    start = end - timedelta(days=days)
+    start = end - timedelta(days=max(1, days) - 1)
     return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
 
@@ -139,6 +151,87 @@ def get_top_pages(
             )
         )
     return pages
+
+
+def get_query_page_slice(
+    site_url: str | None = None,
+    days: int = 28,
+    max_results: int = 100,
+    start_row: int = 0,
+    query: str | None = None,
+    page_url: str | None = None,
+) -> dict[str, Any]:
+    """Return a bounded, finalized GSC query/page evidence slice.
+
+    Search Analytics returns top rows subject to Google-side limits.  The
+    response therefore carries explicit pagination and ``at_limit`` metadata
+    instead of presenting any slice as a complete query inventory.
+
+    ``page_url`` must be an explicit canonical URL when a page is filtered.
+    This intentionally avoids converting a YourBusiness-relative path onto the
+    apex host, which would make URL-inspection and cannibalization evidence
+    misleading for the canonical ``www`` site.
+    """
+    service = get_search_console_service()
+    url = site_url or GSC_SITE_URL
+    start_date, end_date = _date_range(days)
+    row_limit = max(1, min(int(max_results), 250))
+    row_start = max(0, int(start_row))
+
+    filters: list[dict[str, str]] = []
+    normalized_query = str(query or "").strip()
+    normalized_page = str(page_url or "").strip()
+    if normalized_query:
+        filters.append({
+            "dimension": "query",
+            "operator": "equals",
+            "expression": normalized_query[:800],
+        })
+    if normalized_page:
+        filters.append({
+            "dimension": "page",
+            "operator": "equals",
+            "expression": normalized_page[:2_000],
+        })
+
+    body: dict[str, Any] = {
+        "startDate": start_date,
+        "endDate": end_date,
+        "dimensions": ["query", "page"],
+        "rowLimit": row_limit,
+        "startRow": row_start,
+        "dataState": "final",
+    }
+    if filters:
+        body["dimensionFilterGroups"] = [{"filters": filters}]
+
+    result: dict[str, Any] = with_retry(
+        lambda: service.searchanalytics().query(siteUrl=url, body=body).execute()
+    )
+    rows: list[dict[str, Any]] = []
+    for row in result.get("rows", []):
+        keys = row.get("keys", [])
+        rows.append({
+            "query": str(keys[0]) if len(keys) > 0 else "",
+            "page": str(keys[1]) if len(keys) > 1 else "",
+            "clicks": int(row.get("clicks", 0)),
+            "impressions": int(row.get("impressions", 0)),
+            "ctr": float(row.get("ctr", 0.0)),
+            "position": float(row.get("position", 0.0)),
+        })
+
+    return {
+        "site_url": url,
+        "data_state": "final",
+        "requested_period": {"start_date": start_date, "end_date": end_date, "days": days},
+        "filters": {"query": normalized_query or None, "page_url": normalized_page or None},
+        "row_limit": row_limit,
+        "start_row": row_start,
+        "returned_rows": len(rows),
+        "at_limit": len(rows) >= row_limit,
+        "rows": rows,
+        "note": "Search Analytics responses are bounded top rows and are not an exhaustive inventory.",
+    }
 
 
 def get_overall_stats(

@@ -208,17 +208,18 @@ def search(
     limit: int | None = None,
     min_score: float | None = None,
     path_prefix: str = "",
+    memory_dir: "Path | str | None" = None,
 ) -> list[SearchResult]:
-    """Main search entry point. Dispatches to mode function."""
+    """Main search entry point. Dispatches to a (possibly persona-scoped) index."""
     import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
     if limit is None:
         limit = _cfg.SEARCH_DEFAULT_LIMIT
     if mode == "keyword":
-        return search_keyword(query, limit, path_prefix=path_prefix)
+        return search_keyword(query, limit, path_prefix=path_prefix, memory_dir=memory_dir)
     elif mode == "semantic":
-        return search_semantic(query, limit, min_score, path_prefix=path_prefix)
+        return search_semantic(query, limit, min_score, path_prefix=path_prefix, memory_dir=memory_dir)
     elif mode == "hybrid":
-        return search_hybrid(query, limit, min_score, path_prefix=path_prefix)
+        return search_hybrid(query, limit, min_score, path_prefix=path_prefix, memory_dir=memory_dir)
     else:
         print(f"Unknown search mode: {mode}")
         return []

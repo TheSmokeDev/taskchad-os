@@ -63,14 +63,17 @@ def _drive(
         vb._mic_drops = 0
         sent: list[bytes] = []
 
-        async def send_audio(chunk: bytes) -> None:
+        async def send_audio(chunk: bytes, speaker: dict | None = None) -> None:
             sent.append(chunk)
 
         vb.session = SimpleNamespace(send_audio=send_audio)
         task = asyncio.create_task(vb._pump_mic())
         await real_sleep(0)
         for item in chunks:
-            vb._mic_queue.put_nowait(item)
+            # The real queue carries (pcm, ssrc, speaker_id) — these gate tests
+            # are about audio timing, so the speaker is None. Appended at the
+            # driver boundary so every case below keeps its 2-tuple data.
+            vb._mic_queue.put_nowait((item[0], item[1], None))
         # The paced jitter buffer drains the whole queue into its input buffer
         # on the first iteration, so "queue empty" no longer means "done
         # emitting" — the pump paces each buffered frame out one per virtual
@@ -132,7 +135,8 @@ class _ScriptedQueue:
         if self._i < len(self._items) and self._items[self._i][0] <= self._clock.t - 1000.0:
             item = self._items[self._i][1]
             self._i += 1
-            return item
+            # Same (pcm, ssrc, speaker_id) contract as the real _mic_queue.
+            return (item[0], item[1], None)
         raise asyncio.QueueEmpty
 
     def qsize(self) -> int:
@@ -168,7 +172,7 @@ def _drive_virtual(
         vb._mic_drops = 0
         sends: list[tuple[float, bytes]] = []
 
-        async def send_audio(chunk: bytes) -> None:
+        async def send_audio(chunk: bytes, speaker: dict | None = None) -> None:
             sends.append((clock.t - 1000.0, chunk))
             if send_stall is not None and len(sends) == send_stall[0]:
                 clock.t += send_stall[1]  # a blocking send: wall time jumps

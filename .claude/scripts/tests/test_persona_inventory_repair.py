@@ -170,6 +170,29 @@ def test_ensure_repairs_missing_memory_dir_and_seeds_files(empty_homie_root):
     _assert_full_prd_inventory(profile_dir)
 
 
+def test_ensure_backfills_experience_dir_on_a_pre_422_profile(
+    empty_homie_root,
+):
+    """Issue #422 rollout — a profile created before ``experience`` joined
+    the inventory is reported missing exactly that dir, and repair
+    backfills it.
+
+    This is the path every already-existing profile takes: the runtime
+    ``ensure_profile_inventory`` callers (cabinet room boot, dashboard bot
+    lifecycle) and ``thehomie profile repair`` all land here.
+    """
+    profile_dir = _make_profile()
+    shutil.rmtree(profile_dir / "memory" / "experience")
+
+    rep = inspect_profile_inventory("sales")
+    assert rep.healthy is False
+    assert rep.missing_memory_dirs == ("experience",)
+
+    ensure_profile_inventory("sales")
+    assert (profile_dir / "memory" / "experience").is_dir()
+    assert inspect_profile_inventory("sales").healthy is True
+
+
 def test_ensure_is_idempotent_second_call_reports_repaired_false(
     empty_homie_root,
 ):
@@ -266,7 +289,7 @@ def test_list_profiles_populates_inventory_fields(empty_homie_root):
     shutil.rmtree(profile_dir / "memory")
     infos = {i.name: i for i in list_profiles()}
     assert infos["sales"].inventory_ok is False
-    # memory profile-dir + 19 memory dirs + 15 identity files.
+    # memory profile-dir + 20 memory dirs + 15 identity files.
     assert infos["sales"].inventory_missing == (
         1 + len(_REQUIRED_MEMORY_DIRS) + len(_REQUIRED_IDENTITY_FILES)
     )

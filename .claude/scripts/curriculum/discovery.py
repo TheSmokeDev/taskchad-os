@@ -38,6 +38,49 @@ def discover_source(
     return _discover_playlist(source, timeout_s=timeout_s)
 
 
+def describe_video(
+    url: str,
+    *,
+    source_id: str,
+    expected_video_id: str = "",
+    timeout_s: int = 120,
+) -> dict[str, Any]:
+    """Resolve ONE video's catalog metadata without downloading media.
+
+    Returns the same row shape `discover_source` produces so an operator drop
+    enters the ledger through the existing discovery contract instead of a
+    second, forked extractor.
+    """
+    result = _run_ytdlp(
+        ["--no-playlist", "--skip-download", "--dump-single-json", url],
+        timeout_s=timeout_s,
+    )
+    raw = json.loads(result.stdout)
+    if not isinstance(raw, dict):
+        raise RuntimeError("yt-dlp returned no video metadata.")
+    entry_type = str(raw.get("_type") or "video")
+    if entry_type not in {"video", ""}:
+        raise RuntimeError(f"The link resolves to a {entry_type}, not a single video.")
+    video_id = str(raw.get("id") or "")
+    if not video_id:
+        raise RuntimeError("yt-dlp returned no video id.")
+    if expected_video_id and video_id != expected_video_id:
+        raise RuntimeError(
+            f"Resolved video id {video_id!r} does not match the dropped "
+            f"link {expected_video_id!r}."
+        )
+    duration = raw.get("duration")
+    return {
+        "video_id": video_id,
+        "source_id": source_id,
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+        "title": str(raw.get("title") or "Untitled video"),
+        "channel": str(raw.get("channel") or raw.get("uploader") or ""),
+        "upload_date": str(raw.get("upload_date") or ""),
+        "duration_s": float(duration) if isinstance(duration, (int, float)) else None,
+    }
+
+
 def resolve_channel_id(url: str, *, timeout_s: int = 60) -> str:
     result = _run_ytdlp(
         ["--flat-playlist", "--playlist-end", "1", "--dump-single-json", url],

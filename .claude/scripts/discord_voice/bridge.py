@@ -38,6 +38,7 @@ if str(MAIN_SCRIPTS_DIR) not in sys.path:
 import patches  # noqa: E402
 from audio import QueueAudioSource, pcm24mono_to_48stereo, pcm48stereo_to_24mono  # noqa: E402
 from realtime import RealtimeConfig, RealtimeSession  # noqa: E402
+from speaker_auth import DiscordSpeakerLedger  # noqa: E402
 from sinks import RealtimeSink  # noqa: E402
 from transcript import TranscriptWriter  # noqa: E402
 
@@ -109,21 +110,56 @@ def _api_run_reader(run_id: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def _api_tool_executor(name: str, arguments: dict) -> str:
+def _api_tool_executor(
+    name: str,
+    arguments: dict,
+    speaker_id: object = None,
+    binding: object = None,
+) -> str:
     """Execute a talk tool via the main process's /api/talk/tool route.
 
     The sidecar venv deliberately lacks the integrations/orchestration deps
     (py-cord shares the `discord` namespace with discord.py — the two can
     never cohabit). The main process owns the real tool surface; we relay
     over loopback with stdlib only.
+
+    That relay is a PROCESS BOUNDARY, so the speaker only exists on the other
+    side if it rides the request. We send the raw id, not a role: the main
+    process owns the allowlist and resolves it there, which means this sidecar
+    can say who talked but can never claim what they are allowed to do.
+
+    `binding` is the interval-bound verdict from `speaker_auth` — whether this
+    sidecar can prove WHICH utterance produced this call, and why not when it
+    cannot. It rides the same request so the main process authorizes from what
+    it was handed rather than from any live state on either side. An untrusted
+    verdict carries no `speakerId` at all, so a main process that ignored the
+    verdict entirely would still resolve `viewer`.
     """
 
     import urllib.error
     import urllib.request
 
+    trusted = bool(getattr(binding, "trusted", False))
+    # Enforced here rather than assumed of the caller, so the invariant above
+    # holds for every path into this function and not just the one the bridge
+    # happens to use today.
+    if binding is not None and not trusted:
+        speaker_id = None
+    payload = {
+        "name": name,
+        "arguments": arguments,
+        "transport": "discord_voice",
+        "speakerId": str(speaker_id) if speaker_id is not None else None,
+    }
+    if binding is not None:
+        payload["speakerBinding"] = {
+            "token": getattr(binding, "token", None),
+            "trusted": trusted,
+            "reason": str(getattr(binding, "reason", "") or ""),
+        }
     req = urllib.request.Request(
         f"{TALK_API_BASE}/api/talk/tool",
-        data=json.dumps({"name": name, "arguments": arguments}).encode("utf-8"),
+        data=json.dumps(payload).encode("utf-8"),
         headers=_api_headers(),
         method="POST",
     )
@@ -160,6 +196,16 @@ class VoiceBridge:
         self.started_at: float | None = None
         self._mic_task: asyncio.Task | None = None
         self._mic_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        # Whoever is speaking right now. A LIVE value, overwritten by the next
+        # speaker's first packet — NEVER read it to authorize anything. Its
+        # only job is to label the PCM being appended, which the ledger below
+        # then resolves at the utterance boundary.
+        self._current_speaker: int | None = None
+        # Interval-bound speaker authorization (ported from hermes-talk's
+        # `talk_operator_auth`). Owns response creation while a session is up:
+        # the utterance's resolved speaker rides its response's opaque token,
+        # and a tool call resolves only through the response ID it came from.
+        self._speaker_ledger = DiscordSpeakerLedger()
         self._mic_sent = 0
         # DAVE re-key self-heal (2026-08-03): any membership change in the
         # bot's voice channel re-keys the E2EE group (a new MLS epoch), and
@@ -566,12 +612,17 @@ class VoiceBridge:
                         model=talk_session.talk_openai_model(),
                         voice=talk_session.talk_openai_voice(),
                         tools=talk_tools.default_talk_tools(),
-                        tool_executor=_api_tool_executor,
+                        tool_executor=self._bound_tool_executor,
                         run_reader=_api_run_reader,
+                        # We mint every response so it can carry the speaker
+                        # binding; a server-auto-created one has no metadata we
+                        # control, so nothing later could be correlated to it.
+                        automatic_response=False,
                     ),
                     on_audio=self._on_assistant_audio,
                     on_transcript=self._on_transcript,
                     on_barge_in=self._on_barge_in,
+                    ledger=self._speaker_ledger,
                 )
                 await self.session.connect()
             except Exception:
@@ -685,11 +736,17 @@ class VoiceBridge:
     # -- audio + transcript flow ------------------------------------------------
 
     def _on_mic_pcm(self, pcm48stereo: bytes, user_id: int | None, ssrc: int | None = None) -> None:
-        """Sink callback (router thread) — hand off to the asyncio queue."""
+        """Sink callback (router thread) — hand off to the asyncio queue.
+
+        `user_id` is the REAL Discord speaker. It rides the queue alongside the
+        audio because a voice channel is a room: the pump uses it to authorize
+        each utterance against that speaker's own identity, instead of letting
+        whoever opened the session lend their role to everyone else in it.
+        """
 
         def _enqueue() -> None:
             try:
-                self._mic_queue.put_nowait((pcm48stereo, ssrc))
+                self._mic_queue.put_nowait((pcm48stereo, ssrc, user_id))
             except asyncio.QueueFull:
                 pass  # backpressure — drop by design, inside the loop
 
@@ -697,6 +754,36 @@ class VoiceBridge:
             self.client.loop.call_soon_threadsafe(_enqueue)
         except Exception as exc:  # noqa: BLE001 — surface the real failure
             _log.warning("mic handoff failed: %s: %s", type(exc).__name__, exc)
+
+    def _publish_speaker(self, user_id: int | None) -> None:
+        """Record which speaker's stream the pump is currently draining.
+
+        BRIDGE state, deliberately — this is a separate process from the one
+        that authorizes tool calls, so a module global here would never be seen
+        there (the mistake this replaced).
+
+        It is NOT authorization data and must never be read as such: by the
+        time a function call arrives, another member's packet may already have
+        overwritten it (codex R7 BLOCKER — a stranger authors the command, an
+        operator's stray packet signs it). Its only consumer is the per-frame
+        label the pump attaches to outgoing PCM.
+        """
+        self._current_speaker = user_id
+
+    def _bound_tool_executor(self, name: str, arguments: dict, bound: dict) -> str:
+        """Relay a tool call tagged with the speaker the LEDGER resolved.
+
+        `bound` came from `speaker_auth` at the moment the call was admitted,
+        keyed by the Realtime response ID. Resolving it here consumes its
+        single-use permit, so a replayed event can never authorize twice, and
+        an ambiguous or unattributable utterance yields no speaker at all —
+        the main process then resolves `viewer`, which costs a refusal rather
+        than lending someone else's identity.
+        """
+        verdict = self._speaker_ledger.resolve_for_wire(bound or {})
+        return _api_tool_executor(
+            name, arguments, speaker_id=verdict.user_id, binding=verdict
+        )
 
     async def _pump_mic(self) -> None:
         from collections import deque
@@ -707,6 +794,7 @@ class VoiceBridge:
         state = None
         speech_tail = 0
         current_ssrc: int | None = None
+        current_speaker: int | None = None
         # Debug tap: dump the exact pcm24 stream sent to OpenAI for offline
         # analysis (whisper/RMS). Enable with DISCORD_VOICE_DEBUG_PCM=<path>.
         tap_path = os.environ.get("DISCORD_VOICE_DEBUG_PCM", "").strip()
@@ -814,11 +902,11 @@ class VoiceBridge:
                 if not primed and len(jbuf) >= jitter_frames:
                     primed = True
                 if primed and jbuf:
-                    pcm, ssrc = jbuf.popleft()
+                    pcm, ssrc, speaker = jbuf.popleft()
                 else:
                     if primed:
                         primed = False  # buffer underran — concede one zero
-                    pcm, ssrc = None, current_ssrc
+                    pcm, ssrc, speaker = None, current_ssrc, current_speaker
 
                 if self.session is not None:
                     if ssrc != current_ssrc:
@@ -828,6 +916,11 @@ class VoiceBridge:
                         state = None
                         ring.clear()
                         current_ssrc = ssrc
+                        # Same boundary the resampler resets on IS the speaker
+                        # boundary: publish who is talking now so any tool call
+                        # this utterance triggers is authorized as THEM.
+                        current_speaker = speaker
+                        self._publish_speaker(speaker)
                     if pcm is None:
                         pcm24, level = zeros24, -96.0
                     else:
@@ -839,13 +932,22 @@ class VoiceBridge:
                         speech_tail -= 1
                     ring.append(pcm24)
                     if len(ring) >= lookahead:
-                        out = ring.popleft() if speech_tail > 0 else zeros24
-                        if speech_tail <= 0:
+                        gate_open = speech_tail > 0
+                        out = ring.popleft() if gate_open else zeros24
+                        if not gate_open:
                             ring.popleft()  # discard gated chunk, keep the line moving
+                        # Label the EXACT bytes going upstream — this is where
+                        # attribution becomes authorization data. A gated frame
+                        # is synthesized silence (speaker=None): it fills the
+                        # VAD interval's coverage without claiming an author,
+                        # so a mid-sentence pause cannot taint the turn around
+                        # it. A real frame whose Discord user never resolved is
+                        # an explicit unknown, and that DOES taint.
+                        speaker_tag = {"user_id": current_speaker} if gate_open else None
                         try:
                             if tap is not None:
                                 tap.write(out)
-                            await self.session.send_audio(out)
+                            await self.session.send_audio(out, speaker_tag)
                             self._mic_sent += 1
                             if self._mic_sent % 250 == 1:
                                 _log.info(
@@ -938,6 +1040,20 @@ async def _run() -> None:
                 int(body["channelId"]),
                 int(body["textChannelId"]) if body.get("textChannelId") else None,
             )
+            # The join authorizes the SESSION's existence (`/talk join` is
+            # admin-gated) — it does NOT hand the opener's identity to the room.
+            # Nothing about that role is stored: authorization happens in the
+            # MAIN process, per tool call, from the speaker id we send with it.
+            bridge._current_speaker = None
+            # A fresh session inherits no attribution: response IDs, VAD items
+            # and call permits from the previous one are all revoked, so a
+            # bound event held anywhere can never come back to life.
+            bridge._speaker_ledger.clear()
+            _log.info(
+                "voice session live; opener role %s — commands authorize per "
+                "speaker in the main process",
+                str(body.get("operatorRole") or "viewer"),
+            )
             return web.json_response(result)
         except Exception as exc:  # noqa: BLE001
             _log.warning("join failed: %s", exc)
@@ -945,6 +1061,9 @@ async def _run() -> None:
 
     async def leave(_req: web.Request) -> web.Response:
         result = await bridge.leave()
+        # No stale speaker or attribution for whatever session comes next.
+        bridge._current_speaker = None
+        bridge._speaker_ledger.clear()
         return web.json_response(result)
 
     async def tone(_req: web.Request) -> web.Response:

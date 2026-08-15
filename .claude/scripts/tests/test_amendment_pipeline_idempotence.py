@@ -198,7 +198,10 @@ def test_producer_call_sites_pass_limits() -> None:
                 "ledger mutations)"
             )
         total_call_sites += len(positions)
-    assert total_call_sites == 4
+    # memory_reflect: 2 (the daily-log call + the persona notes-distillation
+    # hybrid leg, issue #425 reconcile — _run_persona_notes_distillation),
+    # memory_dream: 2 (consolidate + prune), memory_weekly: 1.
+    assert total_call_sites == 5
 
 
 def test_gate_sections_pass_ledger() -> None:

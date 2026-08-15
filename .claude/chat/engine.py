@@ -408,6 +408,7 @@ class ConversationEngine:
                 central_skills,
                 allowlist=allowlist,
                 extra_skill_dirs=extra_dirs,
+                reader_persona=profile_name,
             )
         except Exception:
             try:
@@ -1501,7 +1502,7 @@ class ConversationEngine:
             "When the user asks for authenticated browser work, use the framework browser surface.\n"
             "First check readiness with /browser status or the shared browser helper. The browser contract is:\n"
             "- one persistent visible Chrome/Chromium session per deployment\n"
-            "- attach through CDP, normally port 9222\n"
+            "- attach through CDP, normally port 18222\n"
             "- no Playwright/headless/test browser fallback for authenticated operator workflows\n"
             "- no raw cookies, browser profiles, tokens, or secrets copied or printed\n"
             "- no external writes such as posts, DMs, connection requests, purchases, or profile edits unless explicitly requested\n"
@@ -1667,6 +1668,26 @@ class ConversationEngine:
                 print(
                     f"[{datetime.now()}] [Coordinator] "
                     f"Failed to load contract (non-blocking): {e}"
+                )
+
+        # Counter-offer guidance (#428) — named personas only. The main homie
+        # is excluded for the same reason the executor refuses it: its tool
+        # surface is DEFAULT_AGENT_TOOLSET, not config `toolsets:`, so a
+        # counter-offer there would promise a grant that cannot land (#426 Q6).
+        # Additive prompt text only; the marker it teaches is parsed
+        # server-side into a proposal row that mutates nothing.
+        if persona_elevation_context is not None:
+            try:
+                from personas import grant_proposals as _grant_proposals
+
+                system_prompt["append"] += (
+                    "\n\n" + _grant_proposals.counter_offer_briefing()
+                )
+            except Exception as e:  # noqa: BLE001 — guidance is additive
+                print(
+                    f"[{datetime.now()}] [GrantProposals] briefing unavailable "
+                    f"(non-blocking): {e}",
+                    flush=True,
                 )
 
         # --- Move 2: Session reset logic + continuity state ---
@@ -2396,6 +2417,55 @@ class ConversationEngine:
             )
         except Exception as e:
             print(f"[{datetime.now()}] [Drafter] Failed (non-blocking): {e}", flush=True)
+
+        # Counter-offer (#428). Strip the persona's `<<GRANT_REQUEST: …>>`
+        # marker, tee up a pending proposal, and attach the approve card. The
+        # persona is the ACTIVE PROFILE resolved server-side, never anything
+        # the reply asserted, so a persona can only propose for itself — and a
+        # proposal changes no config at all. Sync sqlite rides `to_thread`.
+        if persona_elevation_context is not None:
+            try:
+                from personas import grant_proposals as _grant_proposals
+
+                _counter_offer = await asyncio.to_thread(
+                    _grant_proposals.tee_up_from_reply,
+                    str(persona_elevation_context["persona_id"]),
+                    response_text,
+                    requested_by=str(
+                        getattr(getattr(message, "user", None), "platform_id", "") or ""
+                    ),
+                    trigger_text=_incoming_display_text(message),
+                    surface=platform_str,
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                )
+                if _counter_offer is not None:
+                    response_text = (
+                        _counter_offer.reply_text.rstrip()
+                        + "\n\n"
+                        + _counter_offer.card_text
+                    ).strip()
+                    if _counter_offer.approve_custom_id:
+                        draft_components.extend(
+                            [
+                                MessageComponent(
+                                    label="Approve grant",
+                                    custom_id=_counter_offer.approve_custom_id,
+                                    style="success",
+                                ),
+                                MessageComponent(
+                                    label="Deny",
+                                    custom_id=_counter_offer.deny_custom_id,
+                                    style="danger",
+                                ),
+                            ]
+                        )
+            except Exception as e:
+                print(
+                    f"[{datetime.now()}] [GrantProposals] counter-offer card "
+                    f"failed (non-blocking): {e}",
+                    flush=True,
+                )
 
         if persona_elevation_context is not None:
             try:

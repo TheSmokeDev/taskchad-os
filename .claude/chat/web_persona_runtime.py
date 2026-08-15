@@ -129,6 +129,7 @@ async def run_web_persona_turn(
             project_root / ".claude" / "skills",
             allowlist=resolve_skill_allowlist(persona_id),
             extra_skill_dirs=[paths["skills"]],
+            reader_persona=persona_id,
         )
     except Exception:
         skill_index = ""

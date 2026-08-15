@@ -239,7 +239,7 @@ def test_tool_route_executes_and_returns_output(
     monkeypatch.setattr(
         talk_api.talk_tools,
         "execute_talk_tool",
-        lambda name, arguments: f"ran {name} with {arguments}",
+        lambda name, arguments, **_identity: f"ran {name} with {arguments}",
     )
 
     r = talk_client.post(
@@ -256,7 +256,7 @@ def test_tool_route_unknown_tool_is_400(
     import talk_api  # noqa: PLC0415
     import talk_tools  # noqa: PLC0415
 
-    def raise_unknown(name, arguments):
+    def raise_unknown(name, arguments, **_identity):
         raise talk_tools.TalkToolError(f"unknown talk tool: {name!r}")
 
     monkeypatch.setattr(talk_api.talk_tools, "execute_talk_tool", raise_unknown)
@@ -478,7 +478,7 @@ def test_a_per_tool_kill_switch_is_503_not_500(
     import talk_tools
     from security import kill_switches
 
-    def boom(_name, _args):
+    def boom(_name, _args, **_identity):
         raise kill_switches.KillSwitchDisabled(
             switch_name="archon_dispatch",
             reason="kill-switch 'archon_dispatch' is disabled by operator",

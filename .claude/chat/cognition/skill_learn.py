@@ -24,6 +24,7 @@ Reuses: ``cognition.skills.write_skill`` / ``ScanResult`` via
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -94,6 +95,23 @@ def _extract_focus(text: str) -> tuple[str, str]:
     return text.strip(), ""
 
 
+_DRIVE_OR_UNC_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def _quoted_path(body: str) -> tuple[str, str] | None:
+    """Split a leading quoted string into ``(path, rest)`` — or None.
+
+    `/skills link "C:\\Program Files\\linked skill\\SKILL.md"` — the quotes
+    are the operator saying "this whole thing is one path, spaces included".
+    """
+    if len(body) < 2 or body[0] not in {'"', "'"}:
+        return None
+    end = body.find(body[0], 1)
+    if end <= 1:
+        return None
+    return body[1:end], body[end + 1 :].strip()
+
+
 def parse_source(args: str) -> LearnSource:
     """Classify a ``/learn`` argument into a :class:`LearnSource`.
 
@@ -105,6 +123,17 @@ def parse_source(args: str) -> LearnSource:
 
     if not body or any(h in low for h in _CONVERSATION_HINTS) or low in {"this", "."}:
         return LearnSource(kind="conversation", raw="", focus=focus)
+
+    # Quoted or drive-letter/UNC paths may contain SPACES (#429 codex R4
+    # MAJOR): the first-token split below classified `C:\Program Files\linked
+    # skill\SKILL.md` as notes and `/skills link` answered not_a_link. Detect
+    # them on the whole body BEFORE tokenizing.
+    quoted = _quoted_path(body)
+    if quoted is not None:
+        raw_path, rest = quoted
+        return LearnSource(kind="path", raw=raw_path, focus=focus or rest)
+    if _DRIVE_OR_UNC_RE.match(body) and _looks_like_path(body):
+        return LearnSource(kind="path", raw=body, focus=focus)
 
     first = body.split()[0] if body.split() else ""
     if first.lower().startswith(("http://", "https://")):
@@ -150,21 +179,112 @@ async def gather_source(
         if src.kind == "url":
             return (await _fetch_url(src.raw))[:MAX_SOURCE_CHARS]
         if src.kind == "path":
-            return _read_path(src.raw, cwd=cwd)[:MAX_SOURCE_CHARS]
+            # M4 (#429 round-2 MAJOR): a directory walk over MAX_SOURCE_CHARS
+            # worth of files (potentially network-backed) is blocking disk
+            # IO — calling it inline on the router's event loop stalls every
+            # OTHER chat surface for the duration of the read.
+            text = await asyncio.to_thread(_read_path, src.raw, cwd=cwd)
+            return text[:MAX_SOURCE_CHARS]
     except Exception as exc:  # noqa: BLE001 - never break the turn on gather
         logger.warning("gather_source(%s) failed: %s", src.kind, exc)
     return ""
 
 
 async def _fetch_url(url: str) -> str:
-    """Fetch ``url`` and extract readable text (httpx + trafilatura)."""
+    """Fetch ``url`` and extract readable text (httpx + trafilatura).
+
+    SSRF guard (house pattern, ``security.ssrf``) — applies REGARDLESS of who
+    is allowed to call ``/learn``/``/skills link``: a role gate on the caller
+    is not a defense against the fetch itself reaching an internal address.
+    The URL and EVERY redirect hop are resolve-and-verified against
+    private/loopback/link-local/reserved ranges, and each hop then CONNECTS TO
+    THE VALIDATED ADDRESS rather than to the hostname
+    (``resolve_pinned_target``): the hostname rides along as the ``Host``
+    header and the TLS SNI, so virtual hosting and certificate verification
+    are unchanged, but httpx never gets a name to resolve a SECOND time — that
+    second lookup is the DNS-rebinding window a pre-fetch check cannot close.
+    Redirects are followed BY HAND (``follow_redirects=False``) so a hostile
+    server cannot walk a validated public host to an internal one via a
+    ``Location`` header the guard never re-checks; the ``Location`` is joined
+    against the HOSTNAME url, never the pinned one, so a relative redirect
+    still resolves the way the origin server meant it. The body is read via a
+    streaming, size-capped read rather than buffered whole, so a hostile
+    server cannot exhaust memory by sending an unbounded response.
+
+    #429 codex R3 MAJOR (event loop + deadline):
+      * Resolution is BLOCKING (``socket.getaddrinfo``) — it runs via
+        ``asyncio.to_thread`` so a resolver stall cannot freeze the router's
+        event loop for every other channel.
+      * ``httpx.Timeout`` is PER-OPERATION: a server that dribbles one byte
+        just inside each read timeout would keep this fetch alive forever.
+        ``TOTAL_TIMEOUT_S`` is therefore enforced as a genuine TOTAL deadline
+        (``asyncio.wait_for`` around the ENTIRE operation — every redirect
+        hop, the streaming body, and the extraction), not merely handed to
+        httpx as a per-read budget.
+    """
+    from security import ssrf  # Rule 3 — module-attr lookup, never `from ... import CONST`
+
+    try:
+        return await asyncio.wait_for(
+            _fetch_url_guarded(url), timeout=ssrf.TOTAL_TIMEOUT_S
+        )
+    except TimeoutError as exc:
+        raise ValueError(
+            f"refused: fetching {url!r} exceeded the total "
+            f"{ssrf.TOTAL_TIMEOUT_S:.0f}s deadline"
+        ) from exc
+
+
+async def _fetch_url_guarded(url: str) -> str:
+    """The fetch proper — always wrapped in the total deadline by ``_fetch_url``."""
     import httpx
 
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        resp = await client.get(url, headers={"User-Agent": "YourProduct-learn/1.0"})
-        resp.raise_for_status()
-        html = resp.text
+    from security import ssrf  # Rule 3 — module-attr lookup
 
+    current = str(url or "").strip()
+    timeout = httpx.Timeout(ssrf.TOTAL_TIMEOUT_S, connect=ssrf.CONNECT_TIMEOUT_S)
+    html = ""
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        for _hop in range(ssrf.MAX_REDIRECTS + 1):
+            try:
+                # Off the event loop (#429 codex R3 MAJOR): the resolve-and-pin
+                # does a blocking getaddrinfo; the house pattern is
+                # ``asyncio.to_thread`` with arguments resolved before the hop.
+                target = await asyncio.to_thread(ssrf.resolve_pinned_target, current)
+            except ssrf.SSRFBlocked as exc:
+                raise ValueError(str(exc)) from exc
+            async with client.stream(
+                "GET",
+                target.url,
+                headers={"User-Agent": "YourProduct-learn/1.0", **target.headers},
+                extensions=target.extensions,
+            ) as resp:
+                if resp.is_redirect:
+                    location = resp.headers.get("location", "")
+                    if not location:
+                        resp.raise_for_status()
+                    current = str(httpx.URL(current).join(location))
+                    continue
+                resp.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total >= ssrf.MAX_RESPONSE_BYTES:
+                        break
+                body = b"".join(chunks)[: ssrf.MAX_RESPONSE_BYTES]
+                html = body.decode(resp.encoding or "utf-8", errors="replace")
+            break
+        else:
+            raise ValueError(f"refused: too many redirects fetching {url!r}")
+
+    return await asyncio.to_thread(_extract_readable_text, html)
+
+
+def _extract_readable_text(html: str) -> str:
+    """trafilatura extraction (blocking CPU — off-loop) with a tag-strip fallback."""
     try:
         import trafilatura
 
@@ -360,7 +480,10 @@ async def learn_skill(
     from cognition.skill_guard import scan_skill
     from cognition.skills import write_skill
 
-    src = parse_source(args)
+    # Off-loop (#429 codex R4 MAJOR): parse_source's path classification can
+    # probe Path.exists() on a network share, and a Windows SMB timeout would
+    # otherwise stall every chat coroutine on this loop.
+    src = await asyncio.to_thread(parse_source, args)
     source_text = await gather_source(src, transcript=transcript, cwd=cwd)
 
     if not source_text:
@@ -382,8 +505,12 @@ async def learn_skill(
 
     target_dir = skills_dir if skills_dir is not None else _resolve_skills_dir()
 
+    # M4 (#429 round-2 MAJOR): draft write, recurrence-sidecar I/O (a locked
+    # RMW), and the scan all touch disk synchronously. Left inline on an
+    # async function, they still run ON the router's event loop — off-loop
+    # them the same way promotion/assignment already are.
     try:
-        path = write_skill(spec, target_dir)
+        path = await asyncio.to_thread(write_skill, spec, target_dir)
     except ValueError as exc:  # path-traversal / YAML-injection guard fired
         logger.warning("write_skill rejected /learn draft: %s", exc)
         return LearnResult(
@@ -393,9 +520,14 @@ async def learn_skill(
             message=f"Refused to write skill draft (guard): {exc}",
         )
 
-    _seed_reuse_eligibility(spec.name, path=str(path), source_session=spec.source_session)
+    await asyncio.to_thread(
+        _seed_reuse_eligibility,
+        spec.name,
+        path=str(path),
+        source_session=spec.source_session,
+    )
 
-    scan = scan_skill(path)
+    scan = await asyncio.to_thread(scan_skill, path)
     findings = [f"{f.severity}:{f.category} {f.description}" for f in scan.findings]
     return LearnResult(
         ok=True,

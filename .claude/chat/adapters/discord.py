@@ -20,6 +20,8 @@ from models import (
     Platform,
     Thread,
     User,
+    ingress_allowlist_warning,
+    resolve_ingress_role,
 )
 
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
@@ -261,6 +263,7 @@ class DiscordAdapter:
                 channel=channel,
                 platform=Platform.DISCORD,
                 thread=Thread(thread_id=ch_id),
+                user_role=self._ingress_role(interaction.user.id),
                 raw_event={
                     "interaction_id": str(interaction.id),
                     "interaction_type": "button",
@@ -312,6 +315,12 @@ class DiscordAdapter:
 
     async def connect(self) -> None:
         """Start the Discord gateway connection as a background task."""
+        # Loud once at startup: with no allowlist this surface admits anyone,
+        # and everyone it admits is stamped `viewer`, so role-gated commands are
+        # off. An operator should learn that here, not from a refusal mid-chat.
+        _warning = ingress_allowlist_warning("discord", self.allowed_users, "DISCORD_ALLOWED_USERS")
+        if _warning:
+            print(f"[{datetime.now()}] {_warning}", flush=True)
         self._task = asyncio.create_task(self._client.start(self.bot_token))
 
     async def disconnect(self) -> None:
@@ -716,6 +725,7 @@ class DiscordAdapter:
             platform=Platform.DISCORD,
             thread=Thread(thread_id=ch_id),
             attachments=queued_attachments,
+            user_role=self._ingress_role(interaction.user.id),
             raw_event={
                 "interaction_id": str(interaction.id),
                 "interaction_type": "slash_command",
@@ -1031,6 +1041,18 @@ class DiscordAdapter:
             embed.set_thumbnail(url=embed_data.thumbnail_url)
         return embed
 
+    def _ingress_role(self, author_id: Any) -> str:
+        """Role stamped on a message/interaction this adapter just authenticated.
+
+        Uses the SAME `self.allowed_users` set (and the same `str(...)` compare)
+        as `_is_allowed` and the interaction gates, so the stamp can never
+        disagree with the gate that admitted the event. An unset
+        `DISCORD_ALLOWED_USERS` keeps this adapter's documented accept-anyone
+        behavior (`.env.example`: "empty = anyone"), so the operator's role is
+        unchanged on a single-operator install.
+        """
+        return resolve_ingress_role(str(author_id), self.allowed_users)
+
     def _is_allowed(self, msg: Any) -> bool:
         """Check guild and user allowlists."""
         import discord
@@ -1096,6 +1118,7 @@ class DiscordAdapter:
             thread=thread,
             platform_message_id=str(msg.id),
             attachments=attachments,
+            user_role=self._ingress_role(msg.author.id),
             raw_event={
                 "author": str(msg.author),
                 "guild": str(getattr(msg.guild, "id", "")),

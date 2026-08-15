@@ -273,3 +273,139 @@ def test_promote_status_text_covers_all_statuses() -> None:
     }
     missing = contract_statuses - set(core_handlers._SKILL_PROMOTE_STATUS_TEXT)
     assert not missing, f"promote statuses missing friendly text: {sorted(missing)}"
+
+
+# --- #429: /skills link — linked-skill intake surface ---
+#
+# The role and the target persona are RESOLVED SERVER-SIDE here, not taken
+# from the message. Post-#449 (the canonical role-ingress seam), the role is
+# read straight off `IncomingMessage.user_role` — every remote adapter is now
+# the SOLE authority that stamps it, at ingress, from its own authenticated
+# identity data (Telegram/Discord/Slack/WhatsApp/webhook all call
+# `models.resolve_ingress_role()` against their own configured allowlist; the
+# CLI stamps its own operator constant). `handle_skills` no longer re-derives
+# a second, bespoke role check — it trusts the stamp. The dataclass default is
+# "viewer" (fail-closed): an ingress path that forgets to stamp a role gets
+# the least privilege, never admin.
+
+
+def _discord_turn(text: str, *, user_id: str, channel_id: str, user_role: str = "viewer"):
+    """A real IncomingMessage — no stand-in objects.
+
+    `user_role` defaults to "viewer" (the model default, fail-closed) rather
+    than being left unset, so a caller must EXPLICITLY opt a turn into
+    "admin" — mirroring what the real Discord adapter does at ingress via
+    `resolve_ingress_role()` before this handler ever sees the turn.
+    """
+    from models import Channel, IncomingMessage, Platform, User
+
+    return IncomingMessage(
+        text=text,
+        user=User(Platform.DISCORD, user_id, "Some User"),
+        channel=Channel(Platform.DISCORD, channel_id, is_dm=False),
+        platform=Platform.DISCORD,
+        user_role=user_role,
+    )
+
+
+def test_incoming_message_user_role_defaults_to_viewer() -> None:
+    """Fail-closed model default (R3): an ingress path that forgets to stamp
+    a role must never hand out admin."""
+    turn = _discord_turn("/skills link https://x", user_id="222", channel_id="c1")
+    assert turn.user_role == "viewer"
+
+
+def test_resolve_requesting_persona_prefers_the_channel_binding(
+    tmp_path, monkeypatch
+) -> None:
+    """A slash command is dispatched by the MAIN process, so the ambient profile
+    is `default` — the install target must come from the CHANNEL."""
+    import json
+
+    bindings = tmp_path / "bindings.json"
+    bindings.write_text(
+        json.dumps({"channels": {"c1": {"kind": "persona", "persona": "sales"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DISCORD_CHANNEL_BINDINGS_FILE", str(bindings))
+
+    bound = _discord_turn("/skills link https://x", user_id="111", channel_id="c1")
+    unbound = _discord_turn("/skills link https://x", user_id="111", channel_id="c9")
+
+    assert core_handlers.resolve_requesting_persona(bound) == "sales"
+    # No binding -> falls back to the ambient profile (correct for CLI/Telegram
+    # and for a persona bot running as its own process).
+    assert core_handlers.resolve_requesting_persona(unbound) != "sales"
+
+
+def test_skills_link_passes_the_resolved_role_and_persona_to_intake(
+    tmp_path, monkeypatch
+) -> None:
+    """`handle_skills` reads `incoming.user_role` STRAIGHT off the stamp — no
+    second, platform-specific config lookup. Post-#449 the adapter is the
+    sole role authority: it stamps "admin" only after verifying its own
+    allowlist (e.g. Discord's `resolve_ingress_role()` against
+    `DISCORD_ALLOWED_USERS`), so a handler-level test only needs to prove the
+    stamp flows straight through — not re-derive the adapter's own check."""
+    import asyncio
+    import json
+
+    from cognition import skill_intake
+
+    bindings = tmp_path / "bindings.json"
+    bindings.write_text(
+        json.dumps({"channels": {"c1": {"kind": "persona", "persona": "sales"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DISCORD_CHANNEL_BINDINGS_FILE", str(bindings))
+
+    seen: dict[str, object] = {}
+
+    async def _fake_intake(source, **kwargs):
+        seen["source"] = source
+        seen.update(kwargs)
+        return skill_intake.SkillIntakeResult(
+            ok=True, outcome="assigned", message="Added *x* to *sales*'s kit."
+        )
+
+    monkeypatch.setattr(skill_intake, "intake_linked_skill", _fake_intake)
+    handler = core_handlers.CORE_HANDLERS["skills"]
+
+    turn = _discord_turn(
+        "/skills link https://example.com/skill",
+        user_id="111",
+        channel_id="c1",
+        user_role="admin",
+    )
+    out = asyncio.run(handler(None, turn, "link https://example.com/skill"))
+
+    assert seen["source"] == "https://example.com/skill"
+    assert seen["persona_id"] == "sales"
+    assert seen["actor_role"] == "admin"
+    assert seen["actor"] == "111"
+    assert seen["surface"] == "discord"
+    assert seen["channel_id"] == "c1"
+    assert seen["trigger_text"] == "/skills link https://example.com/skill"
+    assert "sales" in out
+
+    # A turn the adapter never verified (left at the fail-closed "viewer"
+    # default) reaches intake as viewer, so the executor refuses it — the
+    # handler applies NO config lookup of its own that could upgrade it.
+    stranger = _discord_turn(
+        "/skills link https://example.com/skill", user_id="222", channel_id="c1"
+    )
+    asyncio.run(handler(None, stranger, "link https://example.com/skill"))
+    assert seen["actor_role"] == "viewer"
+
+
+def test_skills_link_without_a_source_returns_usage() -> None:
+    import asyncio
+
+    handler = core_handlers.CORE_HANDLERS["skills"]
+    out = asyncio.run(handler(None, None, "link"))
+    assert "/skills link" in out
+    assert "Operator only" in out
+
+
+def test_skills_usage_advertises_link() -> None:
+    assert "link" in core_handlers._SKILLS_USAGE

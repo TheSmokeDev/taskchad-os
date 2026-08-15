@@ -381,3 +381,77 @@ class TestSearchModeEnum:
     def test_string_comparison(self):
         """SearchMode is a str enum, can compare to strings."""
         assert SearchMode.AUTO == "auto"
+
+
+# ---------------------------------------------------------------------------
+# Event loop: the recall DB must never be opened on the chat loop
+# ---------------------------------------------------------------------------
+
+
+class TestRecallStaysOffTheEventLoop:
+    """Codex R7 MAJOR: keyword recall opened, queried and closed SQLite
+    synchronously while being awaited straight from the chat event loop
+    (engine, heartbeat, `/curriculum learn`). A real connection carries a 30s
+    busy timeout, so a locked or slow index froze Telegram, Discord, `/health`
+    and every other ingress at once — the same class as the 2026-07-13 browser
+    wedge, where the smoke detector was in the burning room.
+
+    The gate also found the ticket's own regression test vacuous: it patched
+    `_recall_doctrine` to a no-op, so the blocking path was never entered.
+    These assert on THREAD IDENTITY through the real `recall()` — deterministic,
+    and it fails the instant someone removes the offload.
+    """
+
+    @staticmethod
+    def _thread_recording_search(seen: list[int]):
+        import threading
+
+        def search_keyword(query, limit=5, memory_dir=None):
+            seen.append(threading.get_ident())
+            return []
+
+        return search_keyword
+
+    @pytest.mark.asyncio
+    async def test_keyword_mode_runs_the_db_off_the_loop_thread(self, monkeypatch, tmp_path):
+        import threading
+
+        import memory_search
+
+        seen: list[int] = []
+        monkeypatch.setattr(
+            memory_search, "search_keyword", self._thread_recording_search(seen)
+        )
+        loop_thread = threading.get_ident()
+
+        await recall("a real query about leads", tmp_path, search_mode=SearchMode.KEYWORD)
+
+        assert seen, "the keyword search never ran — the test proves nothing"
+        assert loop_thread not in seen, (
+            "keyword recall opened SQLite on the event loop thread"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cognition_unavailable_fallback_also_runs_off_the_loop(
+        self, monkeypatch, tmp_path
+    ):
+        """The second call site the gate cited. A degraded install is exactly
+        when the loop can least afford a 30s busy timeout."""
+        import threading
+
+        import memory_search
+        import recall_service
+
+        seen: list[int] = []
+        monkeypatch.setattr(
+            memory_search, "search_keyword", self._thread_recording_search(seen)
+        )
+        monkeypatch.setattr(recall_service, "_COGNITION_AVAILABLE", False)
+        loop_thread = threading.get_ident()
+
+        await recall("a real query about leads", tmp_path, search_mode=SearchMode.AUTO)
+
+        assert seen, "the fallback search never ran — the test proves nothing"
+        assert loop_thread not in seen, (
+            "the cognition-unavailable fallback blocked the event loop"
+        )

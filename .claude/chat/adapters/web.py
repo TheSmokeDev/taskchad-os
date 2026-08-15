@@ -334,6 +334,9 @@ class WebAdapter:
                         user=__import__("models").User(Platform.WEB, "web", "web"),
                         channel=Channel(Platform.WEB, "web", is_dm=True),
                         platform=Platform.WEB,
+                        # Retired relay placeholder: this ingress authenticates
+                        # nobody, so it carries nobody's authority.
+                        user_role="viewer",
                     )
                     self._enqueue(placeholder)
                 except Exception as e:
@@ -350,5 +353,8 @@ class WebAdapter:
                 user=__import__("models").User(Platform.WEB, "web", "web"),
                 channel=Channel(Platform.WEB, "web", is_dm=True),
                 platform=Platform.WEB,
+                # Retired relay placeholder: this ingress authenticates nobody,
+                # so it carries nobody's authority.
+                user_role="viewer",
             )
             self._enqueue(placeholder)

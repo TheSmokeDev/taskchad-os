@@ -34,12 +34,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 import os
 import re
 import socket
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -51,11 +53,19 @@ import yaml  # M1 lock 2026-05-04 — replaces hand-rolled mini-parser
 # would patch a name we no longer reference. Same enforcement Rule 3 already
 # requires for ``runtime.langfuse_setup``.
 from . import activity as _activity
+
+# Rule 3 again: the grant ledger, the refusal type, and the live-registry
+# lookup are reached through the module so a test patching
+# ``personas.toolset_grants.audit_attempt`` (or the registry behind it)
+# propagates into the executor below.
+from . import toolset_grants as _toolset_grants
 from .core import (
     get_default_homie_root,
     get_default_paths,
     get_homie_home,
     get_persona_paths,
+    reject_sentinel_persona_name,
+    validate_persona_name,
 )
 
 _logger = logging.getLogger(__name__)
@@ -696,6 +706,56 @@ def set_persona_learning(persona_id: str, enabled: bool) -> None:
     _minimal_yaml_write(config_path, data)
 
 
+def append_persona_learning_audit(
+    persona_id: str,
+    *,
+    enabled: bool,
+    actor: str,
+) -> None:
+    """Append one row to the persona-learning audit ledger (fail-open).
+
+    Single source of truth for the row shape, so every door that flips
+    ``learning.enabled`` writes the SAME record: the operator CLI verbs
+    (``thehomie profile learning enable|disable``) and profile creation
+    (``personas.lifecycle.create_profile``, issue #422). ``actor`` is what
+    tells them apart — ``"cli_profile_learning"`` vs
+    ``"lifecycle_create_profile"``.
+
+    The ledger lives at ``<active-profile data dir>/persona_learning_audit
+    .jsonl``: it records what the OPERATOR's process did, so it stays in
+    the calling profile's data dir rather than the subject persona's.
+
+    Fail-open by contract — this is a receipt, not the invariant. A ledger
+    failure must never undo a config write that already landed or fail a
+    profile creation that is already fully on disk; every swallow logs a
+    warning receipt.
+
+    ``config`` is imported INSIDE the body: ``config.py`` imports
+    ``personas``, so a module-level import would close that cycle.
+    """
+    try:
+        import config as _config  # noqa: PLC0415 — cycle-safe lazy import
+
+        audit_path = Path(_config.DATA_DIR) / "persona_learning_audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+            "persona_id": persona_id,
+            "action": "enable" if enabled else "disable",
+            "enabled": enabled,
+            "actor": actor,
+        }
+        with open(audit_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+    except Exception as exc:
+        _logger.warning(
+            "persona learning audit row not written for %r (actor=%r): %s",
+            persona_id,
+            actor,
+            exc,
+        )
+
+
 def set_persona_curriculum(
     persona_id: str,
     curriculum: dict[str, Any],
@@ -727,6 +787,733 @@ def set_persona_curriculum_enabled(persona_id: str, enabled: bool) -> None:
     _validate_curriculum_section(curriculum, config_path)
     data["curriculum"] = curriculum
     _minimal_yaml_write(config_path, data)
+
+
+# ── TOOLSET SELF-PROVISIONING EXECUTOR (issue #426) ─────────────────────
+#
+# The only path that GRANTS a toolset from an operator turn. Command
+# surfaces, a counter-offer approve tap, and any future skill intake all
+# come through here, because this is where the four things that make a
+# grant safe sit together: the operator turn that ordered it is recorded,
+# the role is checked, the name is verified against the LIVE registry, and
+# the write is a strict-read RMW that refuses to clobber a malformed file.
+#
+# It is NOT the only writer of the ``toolsets:`` key, and the comment used
+# to claim it was. Blueprint provisioning renders the whole config from a
+# template (``personas/blueprints.py`` -> ``personas/provisioning.py``).
+# What is true post-#426-round-4: a reconcile can no longer ERASE an
+# executor-owned grant — ``_render_managed_files`` unions
+# ``toolset_grants.active_grants()`` (the ledger replayed: grants minus
+# revokes) into the rendered config, so a granted toolset survives a
+# blueprint rewrite and the provisioning receipt names what it preserved.
+# Routing every blueprint toolset delta THROUGH this executor, so template
+# adds/removes also carry operator-turn provenance, is issue #435.
+#
+# What it deliberately does NOT touch: a single per-tool gate. A grant
+# widens which tools a persona can REACH; social writes, sends, spends,
+# browser writes and integration actions keep their own default-deny gates
+# unchanged. Reach is not action.
+#
+# ``persona_mutation`` is the existing operator kill-switch for persona
+# persistent-state writes (dashboard soft/hard delete, avatar writes,
+# curriculum bootstrap, cofounder persona seed). A toolset grant writes
+# persona config state, so it honors the same switch rather than minting a
+# new one — the switch only turns the surface OFF, never on.
+#
+# Two things a caller must know. (1) Both entrypoints do synchronous file
+# IO; an async surface calls them through ``asyncio.to_thread`` so a slow
+# disk cannot wedge the event loop. (2) ``actor_role`` is TRUSTED here — the
+# executor checks it, it does not establish it. Resolve the role server-side
+# from the authenticated surface and never from anything the caller (or a
+# model) asserted; passing through a claimed role turns the admin gate into
+# a formality (#427).
+_TOOLSET_GRANT_KILL_SWITCH = "persona_mutation"
+
+# How long a grant waits for another writer's read-modify-write to finish.
+# The critical section is one small YAML read, one appended ledger line, and
+# one small YAML write — milliseconds — so this is queue headroom, not a
+# working budget. Bounded rather than infinite because the executor is called
+# from a chat turn: a wedged holder must surface as an audited error, not a
+# hung reply.
+_TOOLSET_GRANT_LOCK_TIMEOUT_S = 10.0
+
+
+def add_persona_toolset(
+    persona_id: str,
+    toolset: str,
+    *,
+    actor: str,
+    actor_role: str,
+    trigger_text: str,
+    surface: str,
+    channel_id: str,
+    audit_path: Path | str | None = None,
+) -> _toolset_grants.ToolsetGrantResult:
+    """Grant one registered toolset to a named persona. Live next turn.
+
+    Pattern-copy of ``set_persona_learning``: strict-read RMW via
+    ``_read_yaml_strict`` + ``_minimal_yaml_write``, so a malformed
+    config.yaml surfaces as ``ConfigShapeError`` instead of being silently
+    wiped, and the write itself is atomic.
+
+    ``actor``, ``trigger_text``, ``surface``, and ``channel_id`` are
+    REQUIRED, not optional context. The epic's metric is "zero grants
+    without a matching live operator turn"; making the turn — including the
+    channel that carried it — part of the signature means a grant nobody
+    ordered, or one nothing can trace back to a channel, cannot be
+    expressed, and the ledger proves it by construction.
+
+    ``actor_role`` MUST be resolved server-side by the caller from the
+    authenticated surface — never trust a caller-asserted role (#427). This
+    executor CHECKS the role; it cannot establish it. A surface that
+    forwards a role claimed in a payload (or produced by a model) has
+    reduced the admin gate to a formality.
+
+    No cache invalidation, no runtime nudge: ``resolve_toolset()`` resolves
+    from the registry on every call and ``resolve_persona_tool_scope()``
+    re-reads the config, so the grant is live on the persona's next turn.
+
+    Raises:
+        ToolsetGrantRefusedError: unknown toolset (with nearest matches), unknown
+            or invalid persona, missing operator turn, non-admin role, or
+            the unsupported default profile. Nothing is written.
+        ToolsetGrantAuditError: a REQUIRED ledger row could not be written —
+            a refusal that could not be recorded (nothing was written), or a
+            completed mutation whose outcome row failed (the config DID
+            change; the correlation id is on disk as intent-only).
+        ConfigShapeError: the persona's config.yaml is malformed, or its
+            existing ``toolsets`` value is not a clean list of names. The
+            file is left untouched.
+        KillSwitchDisabled: the operator disabled ``persona_mutation``.
+    """
+    return _mutate_persona_toolset(
+        _toolset_grants.OPERATION_GRANT,
+        persona_id,
+        toolset,
+        actor=actor,
+        actor_role=actor_role,
+        trigger_text=trigger_text,
+        surface=surface,
+        channel_id=channel_id,
+        audit_path=audit_path,
+    )
+
+
+def remove_persona_toolset(
+    persona_id: str,
+    toolset: str,
+    *,
+    actor: str,
+    actor_role: str,
+    trigger_text: str,
+    surface: str,
+    channel_id: str,
+    audit_path: Path | str | None = None,
+) -> _toolset_grants.ToolsetGrantResult:
+    """Revoke one toolset from a named persona — same executor, same ledger.
+
+    Reversibility is the safety argument for the whole feature, so removal
+    ships alongside the grant rather than behind it.
+
+    One deliberate asymmetry: a revoke does NOT check the live registry.
+    Removing a name only ever shrinks the persona's reach, and a toolset
+    that was granted and later unregistered must still be removable — a
+    registry check there would strand the declaration forever. The config's
+    own contents are the authority: a name the persona does not hold comes
+    back as ``not_granted`` with what it does hold, not as a silent success.
+
+    ``actor_role`` carries the same rule as the grant side: resolve it
+    server-side from the authenticated surface, never from a caller-asserted
+    claim (#427).
+    """
+    return _mutate_persona_toolset(
+        _toolset_grants.OPERATION_REVOKE,
+        persona_id,
+        toolset,
+        actor=actor,
+        actor_role=actor_role,
+        trigger_text=trigger_text,
+        surface=surface,
+        channel_id=channel_id,
+        audit_path=audit_path,
+    )
+
+
+def describe_grant_failure(
+    exc: Exception,
+    *,
+    persona_id: str = "",
+    identity_reason: str = "",
+) -> str:
+    """One canonical mapping from a grant/revoke failure to operator text.
+
+    Downstream convention flagged for #427-#429 (issue #435): every calling
+    surface — a chat command, a future dashboard PATCH, a CLI — used to
+    invent its own phrasing per exception type, which meant the SAME
+    ``REASON_*`` code could read differently depending on which door raised
+    it. This is the one place that decides the words; a caller just catches
+    the three exception types this executor raises and hands the exception
+    here.
+
+    ``identity_reason`` is the extra clause a caller's own server-side
+    authentication check produced (e.g. "this surface stamped you 'viewer',
+    not admin") — appended only to a :data:`toolset_grants.REASON_NOT_AUTHORIZED`
+    refusal, because that is the one reason the executor's own message
+    ("requires the admin role") does not already explain.
+
+    ``persona_id`` is only used for the :class:`ConfigShapeError` branch,
+    which names the persona whose config.yaml is malformed; every other
+    branch speaks from the exception's own message.
+    """
+    grants = _toolset_grants
+    if isinstance(exc, grants.ToolsetGrantRefusedError):
+        text = str(exc)
+        if exc.reason == grants.REASON_NOT_AUTHORIZED and identity_reason:
+            return f"{text} ({identity_reason})"
+        return text
+    if isinstance(exc, grants.ToolsetGrantAuditError):
+        if getattr(exc, "applied", False):
+            # The mutation already landed — only its ledger confirmation
+            # failed. Never say "refused" about a change that is live.
+            return str(exc)
+        return f"refused: {exc}"
+    if isinstance(exc, ConfigShapeError):
+        return (
+            f"refused: {persona_id}'s config.yaml is malformed, so nothing "
+            f"was written. {exc}"
+        )
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _mutate_persona_toolset(
+    operation: str,
+    persona_id: str,
+    toolset: str,
+    *,
+    actor: str,
+    actor_role: str,
+    trigger_text: str,
+    surface: str,
+    channel_id: str,
+    audit_path: Path | str | None,
+) -> _toolset_grants.ToolsetGrantResult:
+    """Shared grant/revoke body.
+
+    Ledger contract (round-4 correction — the old "exactly one row per exit"
+    was false on the success path and could label a precondition as the
+    completed outcome):
+
+    * a NON-mutating exit (refusal, already-granted, not-granted, config
+      shape, lock timeout) writes exactly ONE row and never touches the file;
+    * a MUTATING exit writes TWO rows sharing a ``correlation_id`` — an
+      ``intent`` row appended BEFORE the atomic replace, and the
+      ``granted`` / ``revoked`` row appended only AFTER it returned. A failed
+      replace therefore leaves ``intent`` + ``error``, never a false success;
+    * the intent row is still the mutation's PRECONDITION: it uses the strict
+      ``append_audit_record``, so an unwritable ledger aborts before the
+      config is touched.
+
+    An intent row with no matching outcome row reads as "authorized, started,
+    never confirmed" — which is exactly what a torn write is.
+    """
+    grants = _toolset_grants
+    persona = str(persona_id or "").strip()
+    name = str(toolset or "").strip()
+    who = str(actor or "").strip()
+    role = str(actor_role or "").strip().lower()
+    trigger = grants.normalize_trigger_text(trigger_text)
+    surface = str(surface or "").strip()
+    channel_id = str(channel_id or "").strip()
+
+    correlation_id = grants.new_correlation_id()
+
+    def _row_fields(
+        outcome: str,
+        *,
+        reason: str,
+        toolsets_after: tuple[str, ...],
+        suggestions: tuple[str, ...],
+        config_path: Path | str,
+        error: str,
+        correlation: str = "",
+        audit_path_override: Path | str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "operation": operation,
+            "persona_id": persona,
+            "toolset": name,
+            "outcome": outcome,
+            "reason": reason,
+            "actor": who,
+            "actor_role": role,
+            "surface": surface,
+            "channel_id": channel_id,
+            "trigger_text": trigger,
+            "toolsets_after": toolsets_after,
+            "suggestions": suggestions,
+            "config_path": config_path,
+            "error": error,
+            # A repair row belongs to the TORN attempt it settles, not to
+            # this one, so it can carry that attempt's correlation id.
+            "correlation_id": correlation or correlation_id,
+            # An explicitly injected ``audit_path`` from the CALLER always
+            # wins; the override only fills in when the caller passed none.
+            "audit_path": audit_path if audit_path is not None else audit_path_override,
+        }
+
+    def _audit(
+        outcome: str,
+        *,
+        reason: str = "",
+        toolsets_after: tuple[str, ...] = (),
+        suggestions: tuple[str, ...] = (),
+        config_path: Path | str = "",
+        error: str = "",
+        correlation: str = "",
+    ) -> str:
+        return grants.audit_attempt(
+            **_row_fields(
+                outcome,
+                reason=reason,
+                toolsets_after=toolsets_after,
+                suggestions=suggestions,
+                config_path=config_path,
+                error=error,
+                correlation=correlation,
+            )
+        )
+
+    def _audit_strict(
+        outcome: str,
+        *,
+        reason: str = "",
+        toolsets_after: tuple[str, ...] = (),
+        suggestions: tuple[str, ...] = (),
+        config_path: Path | str = "",
+        error: str = "",
+        audit_path_override: Path | str | None = None,
+    ) -> str:
+        return grants.append_audit_record(
+            **_row_fields(
+                outcome,
+                reason=reason,
+                toolsets_after=toolsets_after,
+                suggestions=suggestions,
+                config_path=config_path,
+                error=error,
+                audit_path_override=audit_path_override,
+            )
+        )
+
+    def _refuse(
+        reason: str,
+        message: str,
+        *,
+        suggestions: tuple[str, ...] = (),
+        config_path: Path | str = "",
+        audit_path_override: Path | str | None = None,
+    ) -> None:
+        # A refusal row is REQUIRED, not best-effort. The acceptance criterion
+        # is "unknown toolset -> refusal audited", and a caller that catches
+        # ToolsetGrantRefusedError has no way to tell an audited refusal from
+        # a swallowed one — so an unwritable ledger must NOT come back as a
+        # polished "no". It comes back as a distinct audit failure instead.
+        try:
+            _audit_strict(
+                grants.OUTCOME_REFUSED,
+                reason=reason,
+                suggestions=suggestions,
+                config_path=config_path,
+                error=message,
+                audit_path_override=audit_path_override,
+            )
+        except Exception as exc:  # noqa: BLE001 — re-raised as a distinct type
+            _logger.error(
+                "persona toolset %s: refusal (%s) could not be audited: %s: %s",
+                operation,
+                reason,
+                type(exc).__name__,
+                exc,
+            )
+            raise grants.ToolsetGrantAuditError(
+                f"refusal could not be audited ({reason}): "
+                f"{type(exc).__name__}: {exc}. Nothing was written.",
+                reason=reason,
+            ) from exc
+        raise grants.ToolsetGrantRefusedError(message, reason=reason, suggestions=suggestions)
+
+    # ── Contract gates. All BEFORE any read or write; none can partially
+    # apply, and each leaves a refusal row naming what was missing.
+    if not persona:
+        _refuse(
+            grants.REASON_INVALID_PERSONA,
+            "refused: no persona named — say which homie the toolset is for.",
+        )
+    if not name:
+        _refuse(
+            grants.REASON_INVALID_TOOLSET,
+            f"refused: no toolset named — say which bundle to {operation}.",
+        )
+    if not who or not trigger or not surface or not channel_id:
+        _refuse(
+            grants.REASON_MISSING_OPERATOR_TURN,
+            "refused: a toolset change needs the live operator turn that "
+            "ordered it (actor + trigger_text + surface + channel_id). A "
+            "grant nobody ordered, or one with no channel to trace it back "
+            "to, is not expressible.",
+        )
+    if role != grants.ADMIN_ROLE:
+        _refuse(
+            grants.REASON_NOT_AUTHORIZED,
+            f"refused: toolset {operation} requires the "
+            f"{grants.ADMIN_ROLE} role, got {role or 'none'!r}.",
+        )
+
+    try:
+        from security import kill_switches  # noqa: PLC0415 — Rule 3 module attr
+    except Exception as exc:  # noqa: BLE001 — see comment
+        # Precedent: runtime/persona_tools.py:152-156. The switch is an
+        # operator OFF control, not the thing that grants capability, so its
+        # absence must not silently disable a working feature. Receipt only.
+        _logger.warning(
+            "persona toolset %s: kill-switch module unavailable (%s: %s)",
+            operation,
+            type(exc).__name__,
+            exc,
+        )
+    else:
+        try:
+            kill_switches.requireEnabled(
+                _TOOLSET_GRANT_KILL_SWITCH,
+                caller=f"personas.toolset_{operation}",
+            )
+        except kill_switches.KillSwitchDisabled as exc:
+            _audit(
+                grants.OUTCOME_REFUSED,
+                reason=grants.REASON_KILL_SWITCH,
+                error=str(exc),
+            )
+            raise
+
+    # ── Q6 spike verdict (2026-08-12, verified against this tree).
+    # chat/engine.py resolves persona tools ONLY when the active profile is
+    # not "default" (`if _active_profile and _active_profile != "default"`),
+    # so the main homie's chat surface never calls
+    # build_persona_tool_payload and never reads config `toolsets:` — its
+    # tools come from config.DEFAULT_AGENT_TOOLSET. Writing the grant would
+    # change a file nothing reads. Per the architecture's decision rule,
+    # v1 is scoped to named personas and main-homie self-grant is a filed
+    # follow-up. tests/test_persona_toolset_grants.py pins the engine gate,
+    # so this refusal fails loudly the day the gate goes away.
+    if persona == "default":
+        _refuse(
+            grants.REASON_DEFAULT_PROFILE_UNSUPPORTED,
+            "refused: the default profile's chat surface does not read "
+            "config `toolsets:` — chat/engine.py resolves persona tools only "
+            "for a non-default active profile, so the main homie's tools "
+            "come from DEFAULT_AGENT_TOOLSET. Granting here would write a "
+            "file nothing reads. Self-provisioning v1 covers named personas; "
+            "main-homie self-grant is a filed follow-up.",
+        )
+
+    try:
+        validate_persona_name(persona)
+        # ``custom`` clears validate_persona_name on purpose — it is a legal
+        # ACTIVE-profile value, so boot/readiness/inventory must keep
+        # accepting it (core.py:62-66). It is NOT a legal grant TARGET:
+        # ``get_persona_paths("custom")`` roots at the AMBIENT get_homie_home()
+        # instead of <root>/profiles/<name>/, so a grant keyed to it writes
+        # config.yaml and the ledger into whichever profile THIS process runs
+        # as, under an id that belongs to no persona. ("default" never reaches
+        # here — the gate above refuses it with a more specific reason.)
+        # Guarding at the EXECUTOR, not at the chat command, is what makes
+        # this hold for every current and future door: the #422 creation-door
+        # rejection is the same guard on the provisioning side.
+        reject_sentinel_persona_name(persona)
+    except ValueError as exc:
+        _refuse(grants.REASON_INVALID_PERSONA, f"refused: {exc}")
+
+    # Rule 2: the persona exists iff its profile directory is on disk. A
+    # typo'd name must not conjure a ghost profile — _atomic_write_text
+    # mkdirs its parent, so without this guard "sles" would provision a new
+    # profile tree out of a misspelling.
+    config_path = _resolve_profile_config_path(persona)
+    if not config_path.parent.is_dir():
+        # Codex R3 MAJOR 2: this refusal used to CREATE the persona it was
+        # refusing. The ledger is target-keyed, so it resolved to
+        # ``profiles/<name>/data`` and ``append_audit_record`` mkdir'd that
+        # parent — after which THIS very gate saw a real directory and the
+        # second identical command wrote config.yaml. Two refused grants
+        # provisioned a persona outside the lifecycle provisioner.
+        #
+        # A persona with no profile has no ledger of its own to write to, so
+        # the row goes to the ambient ledger — precisely the "no target
+        # persona to key on" case ``resolve_ledger_path``'s fallback already
+        # exists for. The row is relocated, never dropped, and the resolver
+        # itself stays pure (a physical-existence check inside it would make
+        # the same call return different paths before and after provisioning,
+        # which breaks callers that resolve the path up front).
+        _refuse(
+            grants.REASON_UNKNOWN_PERSONA,
+            f"refused: no profile directory for {persona!r} at "
+            f"{config_path.parent} — create the persona first.",
+            config_path=config_path,
+            audit_path_override=grants.resolve_ledger_path(None, ""),
+        )
+
+    if operation == grants.OPERATION_GRANT:
+        known = grants.known_toolset_names()
+        if not known:
+            # An OUTAGE, not a bad name. ``known_toolset_names()`` fails closed
+            # to () when ``runtime.toolsets`` will not import or TOOLSETS is
+            # not a mapping, and every name misses an empty registry — so
+            # without this branch a registry outage refuses a perfectly good
+            # toolset as "'research_read' is not in the live toolset registry
+            # (0 registered)", blaming the operator for a broken import and
+            # sending them to fix a name that was never wrong. Revoke is
+            # deliberately NOT gated here: taking reach BACK must keep working
+            # while the registry is down.
+            _refuse(
+                grants.REASON_REGISTRY_UNAVAILABLE,
+                "refused: the toolset registry is unavailable, so no grant can "
+                "be validated right now — this is not a problem with "
+                f"{name!r}. Nothing was written; try again once it loads. "
+                "(Revoking still works.)",
+                config_path=config_path,
+            )
+        if name not in known:
+            suggestions = grants.nearest_names(name, names=known)
+            hint = f" Nearest: {', '.join(suggestions)}." if suggestions else ""
+            _refuse(
+                grants.REASON_UNKNOWN_TOOLSET,
+                f"refused: {name!r} is not in the live toolset registry "
+                f"({len(known)} registered).{hint}",
+                suggestions=suggestions,
+                config_path=config_path,
+            )
+
+    # Function-local by necessity: ``shared`` imports ``personas.services`` at
+    # module level, so a top-level ``from shared import file_lock`` here would
+    # close an import cycle. Same shape as ``crypto_round.market_notes``. The
+    # module-attribute read also keeps Rule 3 — a test patching
+    # ``shared.file_lock`` propagates into this call.
+    from shared import file_lock  # noqa: PLC0415 — see comment
+
+    # ── Serialized read-modify-write, keyed on the config file itself.
+    #
+    # ``os.replace`` makes ONE write atomic; it does nothing for the
+    # read → decide → append → write sequence around it. Two concurrent
+    # executor calls against the same persona would each read the same base
+    # list, each append a truthful-looking success row, and the second
+    # replace would drop the first grant — an accepted grant that is NOT
+    # live on the next turn, with an append-only ledger swearing it is.
+    # That race is reachable by design: this executor is documented for
+    # ``asyncio.to_thread`` callers, so two channel turns land here at once.
+    #
+    # The lock covers the ledger append too, not just the file write, so the
+    # audit-before-mutation ordering the success row depends on survives
+    # concurrency. ``shared.file_lock`` is msvcrt/fcntl on a real ``.lock``
+    # sibling, so this serializes ACROSS PROCESSES — required, because each
+    # persona bot is its own process.
+    acquired = False
+    try:
+        with file_lock(config_path, timeout=_TOOLSET_GRANT_LOCK_TIMEOUT_S):
+            acquired = True
+
+            # ── Strict-read RMW. A parse failure or a non-list `toolsets:` raises
+            # rather than replacing the operator's file with our own shape.
+            try:
+                data = _read_yaml_strict(config_path)
+                # An absent key defaults to empty; an explicit ``toolsets: null`` is
+                # a malformed declaration and must raise, not get normalized away —
+                # collapsing both to ``[]`` here would let a bad file silently heal
+                # itself into whatever the caller happens to grant next.
+                existing = data["toolsets"] if "toolsets" in data else []
+                _validate_toolsets_section(existing, config_path)
+            except ConfigShapeError as exc:
+                _audit(
+                    grants.OUTCOME_ERROR,
+                    reason=grants.REASON_CONFIG_SHAPE,
+                    config_path=config_path,
+                    error=str(exc),
+                )
+                raise
+
+            current = tuple(str(item).strip() for item in existing)
+
+            # ── Ledger repair, run BEFORE the "nothing to do" row is written.
+            #
+            # Either operation can tear the same way: intent row lands, config
+            # mutation lands, outcome append fails and raises WITHOUT rolling
+            # the config back. The retry is the moment that becomes
+            # observable, because physical state now proves which way the
+            # attempt actually went — a revoke retry finds the name ABSENT, a
+            # grant retry finds it PRESENT. Record the effective row that
+            # never landed, correlated to that torn attempt, so the ledger
+            # stops disagreeing with the file it describes. Rule 2: the config
+            # is the truth, the replay is derived from it.
+            #
+            # Best-effort by design. For a revoke the safety property is
+            # already enforced in `active_grants` (a revoke intent drops the
+            # name). For a grant the stake is the opposite and milder — an
+            # unhealed grant is INVISIBLE to the replay, so a reconcile simply
+            # does not preserve it — and neither case may turn an honest
+            # already_granted / not_granted into an exception.
+            def _heal_torn_attempt(effective_outcome: str, reason: str) -> None:
+                torn = grants.orphan_intent_correlation(
+                    persona, name, operation, audit_path
+                )
+                if torn:
+                    _audit(
+                        effective_outcome,
+                        reason=reason,
+                        toolsets_after=current,
+                        config_path=config_path,
+                        correlation=torn,
+                    )
+
+            if operation == grants.OPERATION_GRANT:
+                if name in current:
+                    _heal_torn_attempt(
+                        grants.OUTCOME_GRANTED,
+                        grants.REASON_REPAIR_CONFIG_PRESENT,
+                    )
+                    audit_id = _audit(
+                        grants.OUTCOME_ALREADY_GRANTED,
+                        toolsets_after=current,
+                        config_path=config_path,
+                    )
+                    return grants.ToolsetGrantResult(
+                        persona_id=persona,
+                        toolset=name,
+                        operation=operation,
+                        outcome=grants.OUTCOME_ALREADY_GRANTED,
+                        changed=False,
+                        toolsets=current,
+                        config_path=config_path,
+                        audit_id=audit_id,
+                    )
+                # Authored entries are preserved verbatim; only the new name is ours.
+                updated = [*existing, name]
+                success_outcome = grants.OUTCOME_GRANTED
+            else:
+                if name not in current:
+                    _heal_torn_attempt(
+                        grants.OUTCOME_REVOKED,
+                        grants.REASON_REPAIR_CONFIG_ABSENT,
+                    )
+                    # Honest miss, not a silent success: hand back what the persona
+                    # actually holds so a typo gets a useful reply.
+                    audit_id = _audit(
+                        grants.OUTCOME_NOT_GRANTED,
+                        toolsets_after=current,
+                        suggestions=current,
+                        config_path=config_path,
+                    )
+                    return grants.ToolsetGrantResult(
+                        persona_id=persona,
+                        toolset=name,
+                        operation=operation,
+                        outcome=grants.OUTCOME_NOT_GRANTED,
+                        changed=False,
+                        toolsets=current,
+                        config_path=config_path,
+                        audit_id=audit_id,
+                        suggestions=current,
+                    )
+                # Every occurrence goes. A hand-edited duplicate left behind would
+                # be a revoke that silently did not revoke.
+                updated = [item for item in existing if str(item).strip() != name]
+                success_outcome = grants.OUTCOME_REVOKED
+
+            _validate_toolsets_section(updated, config_path)
+            data["toolsets"] = updated
+            effective = tuple(str(item).strip() for item in updated)
+
+            # ── Intent row: the mutation's PRECONDITION. Epic metric 5 ("zero
+            # grants without a matching live operator turn") has to be
+            # greppable by construction, so an unwritable ledger aborts here,
+            # BEFORE config.yaml is touched. Strict `append_audit_record`, not
+            # the best-effort `_audit`.
+            #
+            # It says "authorized and starting", NOT "done". Writing the
+            # success outcome here instead is what round 4 caught: a failed
+            # atomic replace left a `granted` row for a grant that never
+            # landed, and an append-only safety ledger cannot call a
+            # precondition the completed outcome.
+            _audit_strict(
+                grants.OUTCOME_INTENT,
+                toolsets_after=effective,
+                config_path=config_path,
+            )
+
+            try:
+                _minimal_yaml_write(config_path, data)
+            except OSError as exc:
+                # Correlated to the intent row above, so the pair reads as
+                # "authorized, attempted, failed" instead of a bare error.
+                _audit(
+                    grants.OUTCOME_ERROR,
+                    reason=grants.REASON_WRITE_FAILED,
+                    toolsets_after=effective,
+                    config_path=config_path,
+                    error=str(exc),
+                )
+                raise
+
+            # ── Outcome row. Physical state HAS moved; only now may the
+            # ledger say so. A failure here is not swallowed: the caller must
+            # not be told a grant is recorded when it is not. The intent row
+            # already on disk makes the state legible (started, unconfirmed),
+            # and a retry is idempotent — it comes back `already_granted`.
+            try:
+                audit_id = _audit_strict(
+                    success_outcome,
+                    toolsets_after=effective,
+                    config_path=config_path,
+                )
+            except Exception as exc:  # noqa: BLE001 — re-raised as a distinct type
+                _logger.error(
+                    "persona toolset %s: config written but outcome row failed "
+                    "(correlation %s): %s: %s",
+                    operation,
+                    correlation_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise grants.ToolsetGrantAuditError(
+                    f"{success_outcome} applied to {persona!r} but its ledger "
+                    f"row could not be written ({type(exc).__name__}: {exc}). "
+                    f"Correlation {correlation_id} is on disk as intent-only.",
+                    reason=grants.REASON_WRITE_FAILED,
+                    applied=True,
+                ) from exc
+
+            return grants.ToolsetGrantResult(
+                persona_id=persona,
+                toolset=name,
+                operation=operation,
+                outcome=success_outcome,
+                changed=True,
+                toolsets=effective,
+                config_path=config_path,
+                audit_id=audit_id,
+            )
+    except TimeoutError as exc:
+        # Only an ACQUISITION timeout is ours to label. ``TimeoutError`` is an
+        # ``OSError`` subclass, so a timeout raised from inside the critical
+        # section has already been audited by the branch that owns it — the
+        # `acquired` flag keeps this from writing a second, wrong row and
+        # breaking "every exit writes exactly one ledger row".
+        if acquired:
+            raise
+        _audit(
+            grants.OUTCOME_ERROR,
+            reason=grants.REASON_LOCK_TIMEOUT,
+            config_path=config_path,
+            error=str(exc),
+        )
+        raise
 
 
 def _read_persisted_port(config_path: Path, service: str) -> int | None:
@@ -818,9 +1605,24 @@ def _read_yaml_strict(path: Path) -> dict[str, Any]:
         return {}
     try:
         text = path.read_text(encoding="utf-8")
-        result = yaml.safe_load(text) or {}
+        result = yaml.safe_load(text)
+    except UnicodeDecodeError as exc:
+        # A config with a corrupt byte is a malformed config, and the whole
+        # point of this reader is that malformed means "raise, do not touch".
+        # UnicodeDecodeError is a ValueError, not an OSError, so it used to
+        # escape BOTH handlers below — past ConfigShapeError and therefore
+        # past the executor's refusal audit, which only catches
+        # ConfigShapeError. The exit was unaudited (round 7).
+        raise ConfigShapeError(f"encoding: {path}: {exc}") from exc
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigShapeError(f"yaml: {path}: {exc}") from exc
+    # ONLY a None parse is "empty". `... or {}` collapsed every FALSEY root —
+    # `[]`, `false`, `0`, `''` — into an empty mapping that sailed through the
+    # isinstance check below, so a caller would write its own shape over a
+    # file it never understood. That is exactly the clobber this function
+    # exists to prevent, and it defeated it for four root types (round 6).
+    if result is None:
+        return {}
     if not isinstance(result, dict):
         raise ConfigShapeError(
             f"shape: {path}: top-level must be mapping, got {type(result).__name__}"
@@ -1457,7 +2259,7 @@ def _validate_market_round_section(value: Any, config_path: Path) -> None:
             raise _shape_error(config_path, field, channel, "mapping")
         _reject_unknown_keys(
             channel,
-            frozenset({"id", "name", "tier"}),
+            frozenset({"id", "name", "tier", "guild_id", "community", "community_name"}),
             field=field,
             config_path=config_path,
         )
@@ -1473,6 +2275,29 @@ def _validate_market_round_section(value: Any, config_path: Path) -> None:
             )
         if "name" in channel and not isinstance(channel["name"], str):
             raise _shape_error(config_path, f"{field}.name", channel["name"], "str")
+        if "guild_id" in channel and (
+            not isinstance(channel["guild_id"], str) or not channel["guild_id"].isdigit()
+        ):
+            raise _shape_error(
+                config_path, f"{field}.guild_id", channel["guild_id"], "digit string"
+            )
+        if "community" in channel and (
+            not isinstance(channel["community"], str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", channel["community"].strip())
+        ):
+            raise ConfigShapeError(
+                f"{field}.community: use a lowercase source slug in {config_path}"
+            )
+        if "community_name" in channel and (
+            not isinstance(channel["community_name"], str)
+            or not channel["community_name"].strip()
+        ):
+            raise _shape_error(
+                config_path,
+                f"{field}.community_name",
+                channel["community_name"],
+                "non-empty str",
+            )
     x_feeds = source.get("x_feeds", ["for_you", "following"])
     if not isinstance(x_feeds, list) or not x_feeds:
         raise _shape_error(config_path, "market_round.source.x_feeds", x_feeds, "non-empty list")

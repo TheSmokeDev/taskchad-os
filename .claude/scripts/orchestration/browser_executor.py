@@ -2,7 +2,7 @@
 
 Turns an operator-approved-PER-ACTION social-write request (already gated by
 the chat HANDLER) into ONE audited agent-browser action on the existing visible
-Chrome (CDP 9222), with a screenshot receipt and a redacted audit row.
+Chrome (CDP 18222), with a screenshot receipt and a redacted audit row.
 
 Approval is NOT this executor's job. The chat handler is the sole approval
 authority (it gates on the operator's verbatim message via

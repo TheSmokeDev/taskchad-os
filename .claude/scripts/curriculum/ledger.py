@@ -404,7 +404,42 @@ class CurriculumLedger:
             )
         return cursor.rowcount == 1
 
-    def claim_study(self, video_id: str) -> bool:
+    def pre_admit_operator_drop(
+        self,
+        video_id: str,
+        *,
+        topic: str,
+        reason: str,
+        method: str,
+    ) -> bool:
+        """Force one row to deep-study admission on the operator's imperative.
+
+        Unlike `set_admission` this overrides a prior automatic decision — an
+        operator drop must beat a metadata reject or a skim deferral. It never
+        touches an in-flight claim or immutable studied evidence; the WHERE
+        clause is the physical guard (Rule 2), so a concurrent claim wins and
+        the caller sees `False`.
+        """
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE videos
+                SET state='admitted', decision='deep', score=100, topic=?,
+                    reason=?, decision_method=?, updated_at=?, error=''
+                WHERE video_id=?
+                  AND state IN ('discovered', 'rejected', 'skimmed', 'admitted', 'failed')
+                """,
+                (topic, reason, method, _now(), video_id),
+            )
+        return cursor.rowcount == 1
+
+    def claim_study(self, video_id: str) -> int | None:
+        """Claim for deep study. Returns a FENCING TOKEN (the attempt id) or None.
+
+        The token identifies THIS claim. Hold it and pass it to `release_claim`
+        so a worker that resumed after its lease expired cannot release a claim
+        that now belongs to someone else.
+        """
         return self._claim_operation(
             video_id,
             operation="study",
@@ -413,7 +448,8 @@ class CurriculumLedger:
             decision="deep",
         )
 
-    def claim_skim(self, video_id: str) -> bool:
+    def claim_skim(self, video_id: str) -> int | None:
+        """Claim for skim. Returns a FENCING TOKEN (the attempt id) or None."""
         return self._claim_operation(
             video_id,
             operation="skim",
@@ -430,7 +466,7 @@ class CurriculumLedger:
         in_progress_state: str,
         ready_state: str,
         decision: str,
-    ) -> bool:
+    ) -> int | None:
         now = datetime.now(UTC)
         now_text = now.isoformat(timespec="seconds")
         retry_cutoff = (now - timedelta(hours=RETRY_BACKOFF_HOURS)).isoformat(timespec="seconds")
@@ -440,12 +476,12 @@ class CurriculumLedger:
                 (video_id,),
             ).fetchone()
             if row is None:
-                return False
+                return None
             if not (
                 row["state"] == ready_state
                 or (row["state"] == "failed" and row["decision"] == decision)
             ):
-                return False
+                return None
             history = connection.execute(
                 """
                 SELECT COUNT(*) AS count, MAX(started_at) AS last_started
@@ -467,9 +503,9 @@ class CurriculumLedger:
                         video_id,
                     ),
                 )
-                return False
+                return None
             if row["state"] == "failed" and last_started > retry_cutoff:
-                return False
+                return None
             cursor = connection.execute(
                 """
                 UPDATE videos SET state=?, updated_at=?, error='',
@@ -485,15 +521,17 @@ class CurriculumLedger:
                 ),
             )
             if cursor.rowcount != 1:
-                return False
-            connection.execute(
+                return None
+            inserted = connection.execute(
                 """
                 INSERT INTO attempts(video_id, operation, status, started_at)
                 VALUES (?, ?, 'running', ?)
                 """,
                 (video_id, operation, now_text),
             )
-            return True
+            # The attempt id IS the fencing token — unique per claim, so a
+            # later claim can never be mistaken for this one.
+            return int(inserted.lastrowid)
 
     def complete_skim(
         self,
@@ -580,6 +618,65 @@ class CurriculumLedger:
                 self._complete_latest_attempt(connection, video_id, "study")
         if cursor.rowcount != 1:
             raise RuntimeError("Study state changed before completion.")
+
+    def release_claim(
+        self,
+        video_id: str,
+        *,
+        operation: str,
+        in_progress_state: str,
+        ready_state: str,
+        attempt_id: int | None,
+    ) -> bool:
+        """Undo MY claim so the item stays retryable with NO attempt consumed.
+
+        For a refusal that is not the item's fault — an operator kill switch
+        that turned the capability off AFTER the row was claimed. `fail_video`
+        is the wrong shape there: it burns one of `MAX_OPERATION_ATTEMPTS` and
+        parks the row in `failed` behind a retry backoff, so an operator who
+        flips the switch back on finds a budget the refusal already spent.
+
+        `attempt_id` is the FENCING TOKEN the claim returned, and it is what
+        makes this safe under lease expiry. State is not ownership: a worker
+        whose lease expired, whose claim `recover_stale_claims` reaped, and
+        whose row a SECOND worker then re-claimed would still see
+        `state == in_progress_state` on its way out — and would release the new
+        worker's claim, decrementing their counter and deleting their running
+        attempt. Matching the token means only the claim that took the row can
+        give it back.
+
+        Restores the pre-claim state exactly: the row returns to `ready_state`,
+        the counter is decremented, and the `attempts` row THIS claim inserted
+        is deleted so it never counts against the cap.
+        """
+        if attempt_id is None:
+            return False
+        with self._connection() as connection:
+            owner = connection.execute(
+                """
+                SELECT id FROM attempts
+                WHERE video_id=? AND operation=? AND status='running'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (video_id, operation),
+            ).fetchone()
+            if owner is None or int(owner["id"]) != int(attempt_id):
+                # The running claim belongs to someone else, or is already done.
+                return False
+            cursor = connection.execute(
+                """
+                UPDATE videos
+                SET state=?, updated_at=?, error='',
+                    attempts=CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END
+                WHERE video_id=? AND state=?
+                """,
+                (ready_state, _now(), video_id, in_progress_state),
+            )
+            if cursor.rowcount != 1:
+                # Not ours to release — already completed, failed, or reclaimed.
+                return False
+            connection.execute("DELETE FROM attempts WHERE id=?", (int(attempt_id),))
+            return True
 
     def fail_video(self, video_id: str, error: str) -> None:
         with self._connection() as connection:

@@ -98,6 +98,9 @@ async def test_connect_registers_curated_menu_with_telegram() -> None:
     )
     adapter = TelegramAdapter.__new__(TelegramAdapter)
     adapter._app = app
+    # The real constructor always sets this; connect() reads it to decide
+    # whether to warn that no allowlist is configured.
+    adapter.allowed_user_ids = []
 
     await adapter.connect()
 
@@ -507,3 +510,197 @@ async def test_fresh_send_raises_when_markdown_and_plain_delivery_fail() -> None
         "send_message",
         "send_message",
     ]
+
+
+@pytest.mark.asyncio
+async def test_callback_tap_on_a_reply_thread_card_keeps_the_thread_session() -> None:
+    """#428 codex R4: a tap on a card living in a reply-thread must enqueue
+    with THAT thread's identity, not the chat-wide one.
+
+    ``_on_message`` keys a reply's thread as ``{chat}:{parent_message_id}``,
+    and the counter-offer card is sent with ``reply_to_message_id`` set, so
+    the card's session is the thread-keyed one. ``_on_callback`` used to
+    hard-code ``Thread(thread_id=chat_id)``, which made the tap's
+    ``build_session_key`` resolve to ``telegram:{chat}:{chat}`` — the
+    chat-wide transcript — so the persisted approve/deny receipt rows (and
+    the operator-facing decision reply, which sends with
+    ``thread=incoming.thread``) split away from the card's thread transcript.
+    This asserts the enqueued tap resolves to the thread-keyed session id —
+    the exact key ``_persist_router_turn`` writes under — and carries
+    ``parent_message_id`` so the decision reply threads visually too.
+    Pre-fix this fails: the thread came out chat-wide.
+    """
+    from session_keys import build_session_key
+
+    adapter = _adapter_with_fake_bot(FakeTelegramBot())
+    enqueued: list = []
+
+    async def _capture(message) -> None:
+        enqueued.append(message)
+
+    adapter._enqueue = _capture
+
+    # The card the button rides on: message 888 in chat 555, itself a reply
+    # to operator message 777 — exactly how the counter-offer card is sent.
+    card = SimpleNamespace(
+        chat_id=555,
+        chat=SimpleNamespace(type="group"),
+        message_id=888,
+        reply_to_message=SimpleNamespace(message_id=777),
+        reply_markup=None,
+    )
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=42, first_name="owner"),
+        data="pgrant:approve:sales:abc123",
+        message=card,
+        answer=AsyncMock(),
+    )
+
+    await adapter._on_callback(SimpleNamespace(callback_query=query), None)
+
+    assert len(enqueued) == 1
+    incoming = enqueued[0]
+    assert incoming.thread.thread_id == "555:777"
+    assert incoming.thread.parent_message_id == "777"
+    # The durable identity: the tap's persist must land in the thread's
+    # session, not the chat-wide one.
+    assert (
+        build_session_key("telegram", "555", incoming.thread.thread_id)
+        == "telegram:555:555:777"
+    )
+    assert build_session_key("telegram", "555", "555") == "telegram:555:555"
+
+
+@pytest.mark.asyncio
+async def test_callback_tap_on_a_chat_wide_card_stays_chat_wide() -> None:
+    """Companion guard: a card that was NOT a reply keeps the chat-wide
+    thread — the R4 fix must not invent a thread where none exists."""
+    adapter = _adapter_with_fake_bot(FakeTelegramBot())
+    enqueued: list = []
+
+    async def _capture(message) -> None:
+        enqueued.append(message)
+
+    adapter._enqueue = _capture
+
+    card = SimpleNamespace(
+        chat_id=555,
+        chat=SimpleNamespace(type="private"),
+        message_id=888,
+        reply_to_message=None,
+        reply_markup=None,
+    )
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=42, first_name="owner"),
+        data="pgrant:deny:sales:abc123",
+        message=card,
+        answer=AsyncMock(),
+    )
+
+    await adapter._on_callback(SimpleNamespace(callback_query=query), None)
+
+    assert len(enqueued) == 1
+    assert enqueued[0].thread.thread_id == "555"
+    assert enqueued[0].thread.parent_message_id is None
+
+
+def _install_fake_telegram_keyboards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the absent ``telegram`` package's keyboard classes.
+
+    The two pre-existing failures in this file are exactly that missing
+    package; the passing tests never touch an import path. This shim lets
+    the REAL ``_build_reply_markup`` run so the assertions cover the real
+    callback_data wiring, not a mocked builder.
+    """
+    import sys
+    import types
+
+    fake = types.ModuleType("telegram")
+
+    class InlineKeyboardButton:
+        def __init__(self, text, callback_data=None):
+            self.text = text
+            self.callback_data = callback_data
+
+    class InlineKeyboardMarkup:
+        def __init__(self, inline_keyboard):
+            self.inline_keyboard = inline_keyboard
+
+    fake.InlineKeyboardButton = InlineKeyboardButton
+    fake.InlineKeyboardMarkup = InlineKeyboardMarkup
+    monkeypatch.setitem(sys.modules, "telegram", fake)
+
+
+@pytest.mark.asyncio
+async def test_update_edit_carries_component_buttons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#428 codex R5 MAJOR: the progress-placeholder edit must carry markup.
+
+    A normal Telegram text turn sends "Thinking...", the persona emits the
+    grant-request marker, and the router replaces the placeholder through
+    ``adapter.update()`` with the counter-offer card (router.py:1891-1907
+    passes the engine's components into the update-path OutgoingMessage).
+    ``update()`` used to call ``edit_message_text`` with no ``reply_markup``
+    — and still return a success receipt — so the operator saw the card text
+    with NO Approve/Deny buttons and the router never took the fresh-send
+    fallback (which DOES attach markup on the last chunk). Pre-fix this
+    fails: the edit call carries no reply_markup at all.
+    """
+    _install_fake_telegram_keyboards(monkeypatch)
+    bot = FakeTelegramBot()
+    adapter = _adapter_with_fake_bot(bot)
+
+    delivered = await adapter.update(
+        OutgoingMessage(
+            text="I can do that with web research.\n\nApprove the grant?",
+            channel=_channel(),
+            is_update=True,
+            update_message_id="55",
+            components=[
+                MessageComponent(
+                    label="Approve grant",
+                    custom_id="pgrant:approve:sales:abc123",
+                    style="success",
+                ),
+                MessageComponent(
+                    label="Deny",
+                    custom_id="pgrant:deny:sales:abc123",
+                    style="danger",
+                ),
+            ],
+        )
+    )
+
+    assert delivered == "55"
+    edits = [kw for name, kw in bot.calls if name == "edit_message_text"]
+    assert len(edits) == 1
+    markup = edits[0].get("reply_markup")
+    assert markup is not None, "edit_message_text dropped the approval buttons"
+    callback_ids = [
+        btn.callback_data for row in markup.inline_keyboard for btn in row
+    ]
+    assert "pgrant:approve:sales:abc123" in callback_ids
+    assert "pgrant:deny:sales:abc123" in callback_ids
+
+
+@pytest.mark.asyncio
+async def test_update_edit_without_components_sends_no_markup() -> None:
+    """Companion guard: a plain final edit passes NO markup, so an edit
+    never clears a keyboard it is not replacing."""
+    bot = FakeTelegramBot()
+    adapter = _adapter_with_fake_bot(bot)
+
+    delivered = await adapter.update(
+        OutgoingMessage(
+            text="Done.",
+            channel=_channel(),
+            is_update=True,
+            update_message_id="55",
+        )
+    )
+
+    assert delivered == "55"
+    edits = [kw for name, kw in bot.calls if name == "edit_message_text"]
+    assert len(edits) == 1
+    assert edits[0].get("reply_markup") is None

@@ -20,7 +20,12 @@ from typing import Any
 # Add parent dir for config imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import GOOGLE_CREDENTIALS_FILE, GOOGLE_SCOPES, GOOGLE_TOKEN_FILE
+from config import (
+    GA4_REPORTING_TOKEN_FILE,
+    GOOGLE_CREDENTIALS_FILE,
+    GOOGLE_SCOPES,
+    GOOGLE_TOKEN_FILE,
+)
 
 
 def get_google_credentials() -> Any:
@@ -66,6 +71,50 @@ def get_google_credentials() -> Any:
         "No valid Google OAuth token found.\n"
         "Run 'uv run python setup_auth.py' to authenticate."
     )
+
+
+def get_ga4_reporting_credentials() -> Any:
+    """Load the dedicated, refreshable GA4 reporting token when configured.
+
+    The optional ``GA4_REPORTING_TOKEN_FILE`` keeps website reporting separate
+    from the shared Gmail/Calendar token. Existing installations without that
+    setting retain the legacy shared-token behavior.
+    """
+    if not GA4_REPORTING_TOKEN_FILE:
+        return get_google_credentials()
+
+    from google.auth.exceptions import RefreshError
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+
+    token_path = Path(GA4_REPORTING_TOKEN_FILE).expanduser()
+    scope = "https://www.googleapis.com/auth/analytics.readonly"
+    if not token_path.exists():
+        raise RuntimeError(
+            f"GA4 reporting token not found: {token_path}\n"
+            "Set GA4_REPORTING_TOKEN_FILE to a dedicated Analytics OAuth token."
+        )
+
+    creds: Credentials = Credentials.from_authorized_user_file(  # type: ignore[no-untyped-call]
+        str(token_path), [scope]
+    )
+    if creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            token_path.write_text(creds.to_json(), encoding="utf-8")
+        except RefreshError as exc:
+            raise RuntimeError(
+                f"GA4 reporting token refresh failed: {exc}\n"
+                "Re-authorize the dedicated Analytics OAuth token."
+            ) from exc
+
+    granted = set(creds.scopes or [])
+    if scope not in granted or not creds.valid:
+        raise RuntimeError(
+            "GA4 reporting token is invalid or lacks analytics.readonly; "
+            "re-authorize the dedicated Analytics OAuth token."
+        )
+    return creds
 
 
 def run_initial_auth(headless: bool = False) -> Any:

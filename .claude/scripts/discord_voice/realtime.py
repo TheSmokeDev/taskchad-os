@@ -18,8 +18,11 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 import websockets
+
+from speaker_auth import TRUSTED_CONTINUATION_EVENT_KEY as _CONTINUATION_KEY
 
 _log = logging.getLogger(__name__)
 
@@ -30,7 +33,10 @@ INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 OnAudio = Callable[[bytes], None]
 OnTranscript = Callable[[str, str, bool], None]  # role, text, final
 OnBargeIn = Callable[[], None]
-ToolExecutor = Callable[[str, dict], str]  # (name, arguments) -> spoken output
+#: (name, arguments, bound_event) -> spoken output. `bound_event` carries the
+#: response-correlated speaker binding when a ledger is active, and is the ONLY
+#: thing an executor may read to decide who authored the call.
+ToolExecutor = Callable[[str, dict, dict], str]
 RunReader = Callable[[str], dict]  # run_id -> {"status", "output", "kind"}
 
 # A tool (or a finished run) announcing async work — the same sentinel the
@@ -60,6 +66,12 @@ class RealtimeConfig:
     tools: list[dict] | None = None  # Realtime function-tool schemas
     tool_executor: ToolExecutor | None = None
     run_reader: RunReader | None = None  # polls /api/talk/runs/<id>; None = no polling
+    #: Let server VAD auto-create the response. MUST be False when a speaker
+    #: ledger is active: the response then has to be minted by US so it can
+    #: carry that utterance's opaque binding token in `response.metadata`,
+    #: which is the only thing that makes a later function call resolvable to
+    #: exactly one speaker.
+    automatic_response: bool = True
 
 
 class RealtimeError(Exception):
@@ -84,7 +96,7 @@ def build_session_update(config: RealtimeConfig) -> dict:
                     "threshold": config.vad_threshold,
                     "prefix_padding_ms": config.prefix_padding_ms,
                     "silence_duration_ms": config.silence_duration_ms,
-                    "create_response": True,
+                    "create_response": config.automatic_response,
                     "interrupt_response": True,
                 },
             },
@@ -110,15 +122,24 @@ class RealtimeSession:
         on_audio: OnAudio,
         on_transcript: OnTranscript | None = None,
         on_barge_in: OnBargeIn | None = None,
+        ledger: Any | None = None,
     ) -> None:
         self.config = config
         self._on_audio = on_audio
         self._on_transcript = on_transcript
         self._on_barge_in = on_barge_in
+        # The speaker-authorization ledger (`speaker_auth.DiscordSpeakerLedger`)
+        # or None. When present it owns response creation: server VAD does not
+        # auto-create, we mint the response at the commit boundary carrying the
+        # utterance's binding token, and every tool call resolves through it.
+        self._ledger = ledger
         self._ws = None
         self._recv_task: asyncio.Task | None = None
         self._closed = False
         self._response_active = False
+        # Response IDs that produced at least one tool call, so teardown knows
+        # whether a continuation token is still owed a response.
+        self._continued_responses: set[str] = set()
         self.appends_sent = 0
         self.events_received = 0
 
@@ -138,9 +159,18 @@ class RealtimeSession:
             raise RealtimeError(f"expected session.updated, got {event.get('type')}: {event}")
         self._recv_task = asyncio.create_task(self._recv_loop())
 
-    async def send_audio(self, pcm24: bytes) -> None:
-        """Append one PCM16 24kHz chunk to the input buffer."""
+    async def send_audio(self, pcm24: bytes, speaker: dict | None = None) -> None:
+        """Append one PCM16 24kHz chunk to the input buffer.
 
+        `speaker` is recorded against the EXACT bytes being appended, which is
+        what lets a VAD interval later resolve to one immutable Discord user.
+        `None` means synthesized silence (the pump's paced zeros), not an
+        unknown person — the distinction is what keeps a gated pause from
+        tainting the utterance around it.
+        """
+
+        if self._ledger is not None:
+            self._ledger.record_packet(speaker, pcm24)
         await self._send(
             {
                 "type": "input_audio_buffer.append",
@@ -237,16 +267,59 @@ class RealtimeSession:
             if transcript and self._on_transcript:
                 self._on_transcript("assistant", transcript, True)
         elif etype == "input_audio_buffer.speech_started":
+            if self._ledger is not None:
+                self._ledger.note_speech_started(event)
             if self._response_active and self._on_barge_in:
                 self._on_barge_in()
+        elif etype == "input_audio_buffer.speech_stopped":
+            # The VAD interval closes HERE. Attribution is frozen against the
+            # PCM that actually fell inside [audio_start_ms, audio_end_ms) —
+            # not against whoever happens to be speaking later.
+            if self._ledger is not None:
+                self._ledger.note_speech_stopped(event)
+        elif etype == "input_audio_buffer.committed":
+            self._mint_bound_response(event)
         elif etype == "response.function_call_arguments.done":
             self._schedule_tool_call(event)
         elif etype == "response.created":
+            if self._ledger is not None:
+                self._ledger.note_response_created(event)
             self._response_active = True
         elif etype in ("response.done", "response.cancelled"):
             self._response_active = False
+            self._release_response(event)
         elif etype == "error":
             _log.warning("realtime error event: %s", event.get("error"))
+
+    def _mint_bound_response(self, event: dict) -> None:
+        """Create this utterance's response ourselves, carrying its token.
+
+        With a ledger active, server VAD does NOT auto-create the response
+        (`automatic_response=False`), because a server-created response has no
+        metadata we control and therefore nothing a later function call could
+        be correlated against. Minting it here is what binds the response ID to
+        exactly one resolved speaker.
+        """
+
+        if self._ledger is None:
+            return
+        message = self._ledger.response_for_commit(event)
+        if message is None:
+            return  # duplicate commit — one utterance gets exactly one response
+        asyncio.get_running_loop().create_task(self._send(message))
+
+    def _release_response(self, event: dict) -> None:
+        """Drop finished response state, keeping a continued chain's token."""
+
+        if self._ledger is None:
+            return
+        response = event.get("response")
+        response_id = (
+            response.get("id") if isinstance(response, dict) else None
+        ) or event.get("response_id")
+        continued = response_id in self._continued_responses
+        self._continued_responses.discard(response_id)
+        self._ledger.complete_response(response_id, continued=continued)
 
     def _schedule_tool_call(self, event: dict) -> None:
         """Run a model function call and feed the output back (fire-and-forget)."""
@@ -262,14 +335,28 @@ class RealtimeSession:
                 arguments = {}
         except (TypeError, ValueError):
             arguments = {}
+        # Bind BEFORE the call is scheduled — on this loop, in event order, so
+        # the binding is the one belonging to the response that emitted the
+        # call rather than whatever the session looks like once the task runs.
+        bound = event
+        if self._ledger is not None:
+            bound = self._ledger.bind_tool_event(event)
+            response_id = event.get("response_id")
+            if response_id:
+                self._continued_responses.add(response_id)
         asyncio.get_running_loop().create_task(
-            self._run_tool_call(str(call_id), str(name), arguments)
+            self._run_tool_call(str(call_id), str(name), arguments, bound)
         )
 
-    async def _run_tool_call(self, call_id: str, name: str, arguments: dict) -> None:
+    async def _run_tool_call(
+        self, call_id: str, name: str, arguments: dict, bound: dict | None = None
+    ) -> None:
         _log.info("tool call: %s(%s)", name, json.dumps(arguments)[:200])
+        bound = bound if bound is not None else {}
         try:
-            output = await asyncio.to_thread(self.config.tool_executor, name, arguments)
+            output = await asyncio.to_thread(
+                self.config.tool_executor, name, arguments, bound
+            )
         except Exception as exc:  # noqa: BLE001 — the model speaks the failure
             output = f"Tool {name} failed: {exc}"
         await self._send(
@@ -282,7 +369,16 @@ class RealtimeSession:
                 },
             }
         )
-        await self._send({"type": "response.create"})
+        # The continuation carries a FRESH token on the same authority chain,
+        # so the speaker survives into the response that speaks the result and
+        # a second tool call from it is still attributable. An unbound call
+        # continues the conversation with no binding at all.
+        continuation = bound.get(_CONTINUATION_KEY)
+        await self._send(
+            continuation
+            if isinstance(continuation, dict) and continuation
+            else {"type": "response.create"}
+        )
         self._watch_for_run(output or "")
 
     def _watch_for_run(self, text: str) -> None:

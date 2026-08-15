@@ -19,6 +19,7 @@ import yaml
 from personas.services import (
     ConfigShapeError,
     _validate_learning_section,
+    append_persona_learning_audit,
     load_persona_config,
     set_persona_learning,
     validate_config_dict,
@@ -143,6 +144,95 @@ class TestSetPersonaLearning:
         assert config.exists()
         data = yaml.safe_load(config.read_text(encoding="utf-8"))
         assert data["learning"]["enabled"] is True
+
+
+# ── append_persona_learning_audit (issue #422 — one row shape) ────────────
+
+
+class TestAppendPersonaLearningAudit:
+    """The ledger every learning-toggle door writes through.
+
+    ``create_profile``'s birth write and the operator CLI verbs share this
+    helper so their rows can never drift apart; ``actor`` is what tells the
+    doors apart.
+    """
+
+    @pytest.fixture()
+    def ledger(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        import config
+
+        data_dir = tmp_path / "data"
+        monkeypatch.setattr(config, "DATA_DIR", data_dir)
+        return data_dir / "persona_learning_audit.jsonl"
+
+    @staticmethod
+    def _rows(ledger: Path) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in ledger.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_enable_row_carries_actor_and_shape(self, ledger: Path) -> None:
+        append_persona_learning_audit(
+            "sales", enabled=True, actor="lifecycle_create_profile"
+        )
+        rows = self._rows(ledger)
+        assert len(rows) == 1
+        assert rows[0]["persona_id"] == "sales"
+        assert rows[0]["action"] == "enable"
+        assert rows[0]["enabled"] is True
+        assert rows[0]["actor"] == "lifecycle_create_profile"
+        assert rows[0]["timestamp"].endswith("+00:00")
+
+    def test_disable_row_records_the_disable_action(self, ledger: Path) -> None:
+        append_persona_learning_audit(
+            "sales", enabled=False, actor="cli_profile_learning"
+        )
+        rows = self._rows(ledger)
+        assert rows[0]["action"] == "disable"
+        assert rows[0]["enabled"] is False
+
+    def test_rows_append_never_replace(self, ledger: Path) -> None:
+        append_persona_learning_audit("sales", enabled=True, actor="a")
+        append_persona_learning_audit("ops", enabled=False, actor="b")
+        rows = self._rows(ledger)
+        assert [r["persona_id"] for r in rows] == ["sales", "ops"]
+
+    def test_resolves_data_dir_at_call_time(
+        self, ledger: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rule 1 — the ledger path is NOT bound at import/def time."""
+        import config
+
+        moved = tmp_path / "moved-data"
+        monkeypatch.setattr(config, "DATA_DIR", moved)
+        append_persona_learning_audit("sales", enabled=True, actor="a")
+        assert not ledger.exists()
+        assert (moved / "persona_learning_audit.jsonl").is_file()
+
+    def test_unwritable_ledger_is_fail_open_with_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        """A receipt is not the invariant — it must never raise upward.
+
+        A failure here would otherwise abort a profile creation that is
+        already fully on disk. ``DATA_DIR`` pointing at a FILE makes the
+        ledger's own ``mkdir`` fail for real (no mocked writer).
+        """
+        import config
+
+        blocker = tmp_path / "data"
+        blocker.write_text("not a directory\n", encoding="utf-8")
+        monkeypatch.setattr(config, "DATA_DIR", blocker)
+
+        with caplog.at_level("WARNING", logger="personas.services"):
+            append_persona_learning_audit(
+                "sales", enabled=True, actor="lifecycle_create_profile"
+            )
+
+        assert "audit row not written" in caplog.text
+        assert "sales" in caplog.text
 
 
 # ── Wiring: load_persona_config validates learning ────────────────────────

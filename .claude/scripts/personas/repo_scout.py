@@ -10,8 +10,10 @@ profile implicitly.  Config values are filled only when missing.  SOUL.md and
 MEMORY.md are authored only when missing, empty, or still byte-equal to the
 generic lifecycle scaffold; operator-authored identity is never overwritten.
 
-Registration grants no external authority.  Channel turns remain no-tools,
-learning starts disabled, and evaluations run as detached read-only jobs
+Registration grants no external authority.  Channel turns remain no-tools and
+learning is ON from birth (issue #422 — ``create_profile`` writes the flag; the
+merge below only fills it when the key is missing entirely), because learning
+grants MEMORY, never capabilities.  Evaluations run as detached read-only jobs
 through the /stars command surface — never from the channel itself.
 """
 
@@ -82,7 +84,8 @@ manifests, commit recency, README claims — and you say "skip" as readily as
 REPO_SCOUT_MEMORY = """\
 # MEMORY.md — Repo Scout
 
-_Operator-curated facts for this specialist. Learning is disabled initially._
+_Operator-curated facts for this specialist. Learning is ON from birth
+(issue #422); `thehomie profile learning disable repo-scout` turns it off._
 
 ## Standing Orientation
 

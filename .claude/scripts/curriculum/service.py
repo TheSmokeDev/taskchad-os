@@ -14,6 +14,7 @@ from security import kill_switches
 from video_learning.extract import extract_video
 
 from .admission import (
+    TOPIC_KEYWORDS,
     AdmissionBatchResult,
     AdmissionDecision,
     cognitive_admission_batch,
@@ -21,7 +22,16 @@ from .admission import (
 )
 from .bundle import CurriculumBundle
 from .config import CurriculumSettings, get_curriculum_settings
-from .discovery import DiscoveryResult, discover_source
+from .discovery import DiscoveryResult, describe_video, discover_source
+from .drop import (
+    OPERATOR_DROP_METHOD,
+    OPERATOR_DROP_REASON,
+    OPERATOR_DROP_SOURCE_ID,
+    OPERATOR_DROP_SOURCE_KIND,
+    OPERATOR_DROP_SOURCE_POLICY,
+    OPERATOR_DROP_SOURCE_URL,
+    parse_youtube_drop,
+)
 from .ledger import CurriculumLedger
 from .paths import CurriculumPaths, resolve_curriculum_paths
 from .study import (
@@ -60,11 +70,28 @@ class CurriculumService:
         settings = self.settings
         return resolve_curriculum_paths(self.persona_id, settings.domain)
 
-    def _ledger(self, *, create: bool) -> CurriculumLedger | None:
-        path = self.paths.ledger_path
+    def _resolve_config(self) -> tuple[CurriculumSettings, CurriculumPaths]:
+        """Resolve settings AND paths together, for ONE `asyncio.to_thread` hop.
+
+        Both are filesystem-backed properties: each access re-reads the
+        persona's `config.yaml` (Rule 2 — no caching). On an async path that
+        means evaluating `self.settings` or `self.paths` anywhere outside a
+        worker thread — including while building the ARGUMENTS to
+        `asyncio.to_thread(...)`, which Python evaluates eagerly on the calling
+        thread — puts a blocking disk read back on the chat event loop.
+        """
+        settings = self.settings
+        return settings, resolve_curriculum_paths(self.persona_id, settings.domain)
+
+    def _ledger_at(self, paths: CurriculumPaths, *, create: bool) -> CurriculumLedger | None:
+        """Open the ledger from ALREADY-resolved paths (no config read)."""
+        path = paths.ledger_path
         if not create and not path.exists():
             return None
         return CurriculumLedger(path, self.persona_id)
+
+    def _ledger(self, *, create: bool) -> CurriculumLedger | None:
+        return self._ledger_at(self.paths, create=create)
 
     def status(self) -> dict[str, Any]:
         """Read status without creating a DB or invoking a model."""
@@ -308,7 +335,8 @@ class CurriculumService:
         kill_switches.requireEnabled("persona_curriculum", caller="curriculum_skim")
         ledger = self._ledger(create=True)
         assert ledger is not None
-        if not ledger.claim_skim(video_id):
+        skim_token = ledger.claim_skim(video_id)
+        if skim_token is None:
             return {
                 "success": False,
                 "persona_id": self.persona_id,
@@ -366,6 +394,18 @@ class CurriculumService:
                 "reason": skim.reason,
                 "runtime": runtime,
             }
+        except kill_switches.KillSwitchDisabled:
+            # Same class as the study path below: a kill switch is not a skim
+            # failure, so release the claim instead of burning an attempt, and
+            # let it propagate (house rule — never swallowed).
+            ledger.release_claim(
+                video_id,
+                operation="skim",
+                in_progress_state="skimming",
+                ready_state="skimmed",
+                attempt_id=skim_token,
+            )
+            raise
         except Exception as exc:
             ledger.fail_video(video_id, f"{type(exc).__name__}: {exc}")
             return {
@@ -377,13 +417,45 @@ class CurriculumService:
             }
 
     async def study_video(self, video_id: str) -> dict[str, Any]:
-        settings = self.settings
+        # Off-loop: reading `enabled` reads the profile config from disk.
+        settings, _paths = await asyncio.to_thread(self._resolve_config)
         if not settings.enabled:
             return self._skipped("curriculum disabled")
-        kill_switches.requireEnabled("persona_curriculum", caller="curriculum_study")
-        ledger = self._ledger(create=True)
+        return await self._study_video(video_id)
+
+    async def _study_video(self, video_id: str) -> dict[str, Any]:
+        """Run one bounded deep study.
+
+        The `curriculum.enabled` flag gates the SCHEDULER, so the caller owns
+        that check; an explicit operator drop is not the scheduler. The kill
+        switch is checked here because it turns the capability itself off.
+
+        R2 MAJOR 3: this method now also runs on the chat event loop (the
+        operator learn-drop path), not just the scheduler's own process, so
+        every ledger/file/recall-index call below runs behind
+        `asyncio.to_thread` — a busy curriculum.db (30s SQLite busy_timeout)
+        or a slow reindex must never freeze Telegram/Discord/health for the
+        whole bot.
+
+        R3 MAJOR: `settings` and `paths` are themselves disk reads, so they are
+        resolved in ONE worker-thread hop up front and then reused. Nothing
+        below may re-touch `self.settings` / `self.paths` — see
+        `_resolve_config`.
+        """
+        settings, paths = await asyncio.to_thread(self._resolve_config)
+        # R5 MAJOR: a REFUSAL is not free — `requireEnabled` writes an audit row
+        # to SQLite before raising, so the disabled path did blocking DB I/O on
+        # the chat event loop. Off-loop, but still the FIRST operation and still
+        # propagating (to_thread re-raises in the awaiting task).
+        await asyncio.to_thread(
+            kill_switches.requireEnabled, "persona_curriculum", caller="curriculum_study"
+        )
+        ledger = await asyncio.to_thread(self._ledger_at, paths, create=True)
         assert ledger is not None
-        if not ledger.claim_study(video_id):
+        # The claim hands back a fencing token; hold it so a release can prove
+        # the claim is still ours (see `release_claim`).
+        claim_token = await asyncio.to_thread(ledger.claim_study, video_id)
+        if claim_token is None:
             return {
                 "success": False,
                 "persona_id": self.persona_id,
@@ -391,24 +463,32 @@ class CurriculumService:
                 "error": "video is not in an admissible study state",
                 "runtime": _empty_runtime(),
             }
-        video = ledger.get_video(video_id)
+        video = await asyncio.to_thread(ledger.get_video, video_id)
         if video is None:
-            ledger.fail_video(video_id, "video disappeared after claim")
+            await asyncio.to_thread(
+                ledger.fail_video, video_id, "video disappeared after claim"
+            )
             return {
                 "success": False,
                 "video_id": video_id,
                 "error": "video not found",
                 "runtime": _empty_runtime(),
             }
-        paths = self.paths
         try:
-            artifact_dir = paths.confine_data(paths.artifacts_root / video_id)
+            # R4 MAJOR: `confine_data` calls Path.resolve() twice, which is a
+            # filesystem syscall — on a network share, a junction, or behind an
+            # AV scanner that is not free. Path ARITHMETIC below is pure, but
+            # the resolution goes to a worker like every other file call here.
+            artifact_dir = await asyncio.to_thread(
+                paths.confine_data, paths.artifacts_root / video_id
+            )
             bundle = CurriculumBundle(paths, settings.domain)
             cached_raw_path: Path | None = None
             cached_transcript: str | None = None
             cached_transcript_source = str(video.get("transcript_source") or "")
             if str(video.get("raw_path") or "") and cached_transcript_source:
-                cached_raw_path, cached_transcript = bundle.load_raw(
+                cached_raw_path, cached_transcript = await asyncio.to_thread(
+                    bundle.load_raw,
                     video=video,
                     raw_path=str(video["raw_path"]),
                     transcript_source=cached_transcript_source,
@@ -422,7 +502,8 @@ class CurriculumService:
                 transcript_override=cached_transcript,
                 transcript_source_override=cached_transcript_source,
             )
-            raw_path = cached_raw_path or bundle.write_raw(
+            raw_path = cached_raw_path or await asyncio.to_thread(
+                bundle.write_raw,
                 source_id=str(video["source_id"]),
                 video_id=video_id,
                 title=str(video["title"]),
@@ -431,15 +512,17 @@ class CurriculumService:
                 transcript=extraction.transcript,
             )
             doctrine = await self._recall_doctrine(video)
+            persona_context = await asyncio.to_thread(self._persona_context)
             study = await study_extraction(
                 extraction,
                 persona_id=self.persona_id,
-                persona_context=self._persona_context(),
+                persona_context=persona_context,
                 recalled_doctrine=doctrine,
                 workspace=paths.profile_root,
                 study_model_tier=settings.study_model_tier,
             )
-            dossier = bundle.write_source_dossier(
+            dossier = await asyncio.to_thread(
+                bundle.write_source_dossier,
                 video=video,
                 transcript_source=extraction.transcript_source,
                 analysis_markdown=study.markdown,
@@ -451,12 +534,18 @@ class CurriculumService:
                     extraction.transcript.strip().encode("utf-8")
                 ).hexdigest(),
             )
-            validation_errors = bundle.validate()
+            validation_errors = await asyncio.to_thread(bundle.validate)
             if validation_errors:
                 raise ValueError("OKF validation failed: " + "; ".join(validation_errors[:10]))
-            self._reindex(bundle.recall_paths_for_video(video, dossier))
-            proposal_ids = self._capture_proposals(ledger, video_id, study.markdown)
-            ledger.complete_study(
+            # R4 MAJOR: `recall_paths_for_video` runs two more `confine_memory`
+            # resolutions, and to_thread ARGUMENTS are evaluated on the calling
+            # thread — so resolve and reindex inside ONE worker hop.
+            await asyncio.to_thread(self._reindex_recall_paths, bundle, video, dossier)
+            proposal_ids = await asyncio.to_thread(
+                self._capture_proposals, ledger, video_id, study.markdown
+            )
+            await asyncio.to_thread(
+                ledger.complete_study,
                 video_id,
                 transcript_source=extraction.transcript_source,
                 raw_path=str(raw_path),
@@ -467,7 +556,9 @@ class CurriculumService:
                 cost_usd=study.cost_usd,
             )
             runtime = _runtime(study)
-            ledger.record_runtime_receipt("study", runtime, video_id=video_id)
+            await asyncio.to_thread(
+                ledger.record_runtime_receipt, "study", runtime, video_id=video_id
+            )
             return {
                 "success": True,
                 "persona_id": self.persona_id,
@@ -478,8 +569,29 @@ class CurriculumService:
                 "proposal_ids": proposal_ids,
                 "runtime": runtime,
             }
+        except kill_switches.KillSwitchDisabled:
+            # House rule: KillSwitchDisabled PROPAGATES, never swallowed. It is
+            # also not a study failure — the operator turned a capability off
+            # (e.g. HOMIE_KILLSWITCH_LLM) AFTER this row was claimed, which is
+            # not the video's fault. `fail_video` would burn one of
+            # MAX_OPERATION_ATTEMPTS and park the row behind a retry backoff, so
+            # retrying while the switch is off would exhaust the budget and the
+            # operator would find it spent once they switched back on. Put the
+            # claim back exactly as it was, then re-raise so the surface can say
+            # plainly that a switch is off.
+            await asyncio.to_thread(
+                ledger.release_claim,
+                video_id,
+                operation="study",
+                in_progress_state="studying",
+                ready_state="admitted",
+                attempt_id=claim_token,
+            )
+            raise
         except Exception as exc:
-            ledger.fail_video(video_id, f"{type(exc).__name__}: {exc}")
+            await asyncio.to_thread(
+                ledger.fail_video, video_id, f"{type(exc).__name__}: {exc}"
+            )
             return {
                 "success": False,
                 "persona_id": self.persona_id,
@@ -487,6 +599,139 @@ class CurriculumService:
                 "error": f"{type(exc).__name__}: {exc}",
                 "runtime": _empty_runtime(),
             }
+
+    async def learn_url(self, url: str) -> dict[str, Any]:
+        """Study one operator-dropped video now, as a pre-admitted catalog item.
+
+        The operator's imperative replaces cognitive admission and ONLY that.
+        The link still rides the existing pipeline — yt-dlp metadata, the same
+        transcript extraction, untrusted-evidence wrapping, bounded deep study,
+        and evidence-citation validation — and lands in the persona's own
+        `memory/curricula/<domain>/` doctrine pages.
+
+        `curriculum.enabled` is not consulted: it gates the six-hour scheduler,
+        not a link the operator dropped by hand. The kill switch and the
+        surface's role gate are the ones that can refuse.
+        """
+        # R5 MAJOR: off-loop for the same reason as `_study_video` — the audit
+        # write on refusal is SQLite I/O, and this runs on the chat loop. Still
+        # first, still before any URL parsing or ledger touch.
+        await asyncio.to_thread(
+            kill_switches.requireEnabled, "persona_curriculum", caller="curriculum_learn"
+        )
+        drop = parse_youtube_drop(url)
+        ledger = await asyncio.to_thread(self._open_drop_ledger)
+        video = await asyncio.to_thread(ledger.get_video, drop.video_id)
+        if video is None:
+            try:
+                discovered = await asyncio.to_thread(
+                    describe_video,
+                    drop.canonical_url,
+                    source_id=OPERATOR_DROP_SOURCE_ID,
+                    expected_video_id=drop.video_id,
+                )
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "persona_id": self.persona_id,
+                    "operator_drop": True,
+                    "video_id": drop.video_id,
+                    "url": drop.canonical_url,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "runtime": _empty_runtime(),
+                }
+            await asyncio.to_thread(ledger.discover_video, discovered)
+            video = await asyncio.to_thread(ledger.get_video, drop.video_id)
+        if video is None:
+            return {
+                "success": False,
+                "persona_id": self.persona_id,
+                "operator_drop": True,
+                "video_id": drop.video_id,
+                "url": drop.canonical_url,
+                "error": "the dropped video disappeared from the ledger",
+                "runtime": _empty_runtime(),
+            }
+        state = str(video["state"])
+        if state == "studied":
+            # R2 MAJOR 4 (Rule 2): the ledger row is meta, not proof. A restored
+            # curriculum.db without its memory bundle, or a deleted dossier,
+            # must not be reported as an "existing dossier" — verify the
+            # physical evidence before trusting the DB state.
+            dossier_path = str(video["dossier_path"] or "")
+            # R3 MAJOR: `self.paths` reads config.yaml from disk, and to_thread
+            # arguments are evaluated on the CALLING thread — so it is resolved
+            # inside the worker, not passed into it.
+            if dossier_path and await asyncio.to_thread(
+                self._dossier_evidence_intact_off_loop, dossier_path
+            ):
+                return {
+                    "success": True,
+                    "persona_id": self.persona_id,
+                    "operator_drop": True,
+                    "already_studied": True,
+                    "video_id": drop.video_id,
+                    "url": str(video["url"]),
+                    "title": str(video["title"]),
+                    "dossier_path": dossier_path,
+                    "runtime": _empty_runtime(),
+                }
+            return {
+                "success": False,
+                "persona_id": self.persona_id,
+                "operator_drop": True,
+                "video_id": drop.video_id,
+                "url": str(video["url"]),
+                "title": str(video["title"]),
+                "error": (
+                    "the ledger says this video is studied but the doctrine "
+                    f"dossier is missing on disk ({dossier_path or '<empty>'}) — "
+                    "repair required before it can be dropped again"
+                ),
+                "runtime": _empty_runtime(),
+            }
+        admitted = await asyncio.to_thread(
+            ledger.pre_admit_operator_drop,
+            drop.video_id,
+            topic=_drop_topic(video),
+            reason=OPERATOR_DROP_REASON,
+            method=OPERATOR_DROP_METHOD,
+        )
+        if not admitted:
+            return {
+                "success": False,
+                "persona_id": self.persona_id,
+                "operator_drop": True,
+                "video_id": drop.video_id,
+                "url": str(video["url"]),
+                "title": str(video["title"]),
+                "error": f"the video is already in flight (state={state})",
+                "runtime": _empty_runtime(),
+            }
+        result = await self._study_video(drop.video_id)
+        return {**result, "operator_drop": True, "url": str(video["url"])}
+
+    def _dossier_evidence_intact_off_loop(self, dossier_path: str) -> bool:
+        """Resolve paths and check the dossier INSIDE one worker thread."""
+        return _dossier_evidence_intact(self.paths, dossier_path)
+
+    def _open_drop_ledger(self) -> CurriculumLedger:
+        """Open the ledger and register the synthetic operator-drop source.
+
+        One unit, one worker thread: resolving `self.paths` reads the profile
+        config from disk, so passing it as an `asyncio.to_thread` argument
+        would put that read back on the event loop.
+        """
+        ledger = self._ledger(create=True)
+        assert ledger is not None
+        ledger.upsert_source(
+            OPERATOR_DROP_SOURCE_ID,
+            kind=OPERATOR_DROP_SOURCE_KIND,
+            url=OPERATOR_DROP_SOURCE_URL,
+            policy=OPERATOR_DROP_SOURCE_POLICY,
+            metadata={"operator_drop": True},
+        )
+        return ledger
 
     def review(self, *, status: str | None = "pending") -> dict[str, Any]:
         ledger = self._ledger(create=False)
@@ -662,6 +907,11 @@ class CurriculumService:
         return [decision_by_id[str(video["video_id"])] for video in videos], runtimes
 
     async def _recall_doctrine(self, video: dict[str, Any]) -> str:
+        # R3 MAJOR: `_study_video` awaits this directly (not via to_thread), so
+        # `self.settings` / `self.paths` here would be config.yaml reads on the
+        # chat event loop — resolve them in a worker first. Signature stays
+        # single-arg: the curriculum suites patch this method by name.
+        settings, paths = await asyncio.to_thread(self._resolve_config)
         if str(_CHAT_DIR) not in sys.path:
             sys.path.insert(0, str(_CHAT_DIR))
         try:
@@ -670,16 +920,22 @@ class CurriculumService:
             response = await recall(
                 (
                     f"{video.get('title', '')} {video.get('topic', '')} "
-                    f"{self.settings.domain} doctrine"
+                    f"{settings.domain} doctrine"
                 ),
-                memory_dir=self.paths.memory_root,
+                memory_dir=paths.memory_root,
                 search_mode=SearchMode.KEYWORD,
                 caller="curriculum_study",
                 max_results=8,
             )
             return response.formatted_text
         except Exception:
-            return self._doctrine_index()
+            return await asyncio.to_thread(self._doctrine_index)
+
+    def _reindex_recall_paths(
+        self, bundle: CurriculumBundle, video: dict[str, Any], dossier: Path
+    ) -> None:
+        """Resolve the recall paths AND index them inside one worker thread."""
+        self._reindex(bundle.recall_paths_for_video(video, dossier))
 
     def _reindex(self, paths: tuple[Path, ...]) -> None:
         if str(_CHAT_DIR) not in sys.path:
@@ -776,6 +1032,37 @@ def get_curriculum_service(persona_id: str) -> CurriculumService:
         service = CurriculumService(persona_id)
         _SERVICE_CACHE[persona_id] = service
     return service
+
+
+def _dossier_evidence_intact(paths: CurriculumPaths, dossier_path: str) -> bool:
+    """Rule 2 guard: confirm the doctrine dossier physically exists.
+
+    The ledger's `state='studied'` row is meta/cache, not proof — a restored
+    `curriculum.db` without its memory bundle, or a hand-deleted dossier, must
+    not be reported as an existing study. Confines the stored path under the
+    persona's own bundle root before trusting it, then checks the file itself.
+    """
+    if not paths.bundle_root.is_dir():
+        return False
+    try:
+        confined = paths.confine_memory(dossier_path)
+    except Exception:
+        return False
+    return confined.is_file()
+
+
+def _drop_topic(video: dict[str, Any]) -> str:
+    """Place an operator drop on a concept page without spending a model call.
+
+    Reuses the deterministic classifier for its topic only — the admission
+    DECISION is the operator's. With no keyword signal at all the classifier
+    would return its first topic by dict order, which files an unrelated video
+    under `harnesses-evals`; an honest `other` is the right answer there.
+    """
+    folded = str(video.get("title") or "").casefold()
+    if not any(term in folded for terms in TOPIC_KEYWORDS.values() for term in terms):
+        return "other"
+    return deterministic_admission(video).topic
 
 
 def _curate_precomputed(

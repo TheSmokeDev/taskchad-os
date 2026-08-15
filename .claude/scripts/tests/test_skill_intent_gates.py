@@ -29,12 +29,19 @@ def _build_manager() -> ExtensionManager:
 
 
 def _incoming(text: str, platform: Platform = Platform.CLI) -> IncomingMessage:
+    # Mirror the role the REAL adapter stamps at ingress rather than the
+    # dataclass default: that default is deliberately fail-closed (`viewer`)
+    # and models an UNSTAMPED surface, while this fixture is the operator
+    # driving their own bot. Reading the adapter's constant avoids drift.
+    from adapters.cli_adapter import _CLI_INGRESS_ROLE
+
     platform_id = platform.value
     return IncomingMessage(
         text=text,
         user=User(platform, f"{platform_id}-user", "Tester"),
         channel=Channel(platform, f"{platform_id}-test", is_dm=True),
         platform=platform,
+        user_role=_CLI_INGRESS_ROLE,
     )
 
 

@@ -15,7 +15,7 @@ def _ready() -> dict[str, object]:
     return {
         "enabled": True,
         "status": "ready",
-        "cdp_port": 9222,
+        "cdp_port": 18222,
         "cdp_reachable": True,
         "browser": "Chrome/126",
         "visible_guard": "visible",
@@ -26,7 +26,7 @@ def _ready() -> dict[str, object]:
 
 
 def _stream(*, port: int) -> dict[str, object]:
-    assert port == 9222
+    assert port == 18222
     return {
         "enabled": True,
         "connected": True,
@@ -58,7 +58,7 @@ def test_capability_pack_is_safe_and_policy_rich(monkeypatch) -> None:
     dumped = json.dumps(pack)
 
     assert pack["specialist"]["name"] == "Browser Homie"
-    assert pack["readiness"]["cdp_port"] == 9222
+    assert pack["readiness"]["cdp_port"] == 18222
     assert pack["stream"]["port"] == 31137
     assert pack["controls"]["headless_fallback"] is False
     assert pack["linkedin_operator"]["mode"] == "draft_approve_execute"

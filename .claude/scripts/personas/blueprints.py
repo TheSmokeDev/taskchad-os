@@ -34,7 +34,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
-from personas.core import validate_persona_name
+from personas.core import reject_sentinel_persona_name, validate_persona_name
 
 SCHEMA_VERSION = 1
 MANIFEST_FILENAME = "blueprint.yaml"
@@ -84,6 +84,19 @@ DOMAIN_PACKS: dict[str, DomainPack] = {
         env_groups=("runtime_core", "vault_memory", "business_profile"),
         integration_requirements=("sheets.read",),
     ),
+    "seo_geo": DomainPack(
+        id="seo_geo",
+        toolsets=("seo_geo_read",),
+        env_groups=(
+            "runtime_core",
+            "vault_memory",
+            "search_analytics",
+            "business_profile",
+            "seo_research",
+        ),
+        skills=("direct-integrations",),
+        integration_requirements=("analytics.overview", "search_console.overview"),
+    ),
 }
 
 
@@ -127,6 +140,15 @@ BUILTIN_TEMPLATES: dict[str, BuiltinTemplate] = {
         default_model="claude-sonnet-4-7",
         domain="founder-operations",
         domain_packs=("founder_operations",),
+    ),
+    "seo-geo": BuiltinTemplate(
+        id="seo-geo",
+        display_name="SEO/GEO",
+        description="A read-only SEO, GEO, and AI-visibility specialist for evidence-backed fleet operations.",
+        default_role="Analyze GSC, GA4, fleet receipts, technical crawl evidence, and AI-visibility signals; produce approval-only SEO/GEO actions.",
+        default_model="claude-sonnet-4-7",
+        domain="seo-geo",
+        domain_packs=("seo_geo",),
     ),
 }
 
@@ -422,6 +444,26 @@ def compile_blueprint(
     except ValueError as exc:
         raise BlueprintError(f"unknown provision mode {mode!r}") from exc
 
+    # Issue #422 round 3 — refuse resolver sentinels on the CREATE door.
+    # ``get_persona_paths("custom")`` roots that profile at ``HOMIE_HOME``
+    # itself, so the atomic provisioner would stage
+    # ``profiles/custom/config.yaml`` while every runtime reader keeps
+    # reading ``HOMIE_HOME/config.yaml`` — a create that returns success and
+    # yields a persona the learning tick can never configure. This is the
+    # seam BOTH atomic doors reach (``thehomie profile create`` non-clone and
+    # dashboard ``POST /api/agents``, via preview_provision/apply_provision),
+    # so both refuse here, before anything is staged.
+    #
+    # CREATE only: RECONCILE/MIGRATE operate on a profile that already
+    # exists, and rejecting them would strand it instead of repairing it.
+    # The clone door refuses the same class in
+    # ``personas.lifecycle.create_profile`` Step 2b (physical containment).
+    if resolved_mode is ProvisionMode.CREATE:
+        try:
+            reject_sentinel_persona_name(blueprint.persona_id)
+        except ValueError as exc:
+            raise BlueprintError(str(exc)) from exc
+
     recommended = ["safe_core"]
     env_groups: set[str] = {"runtime_core", "vault_memory"}
     skills: set[str] = set()
@@ -512,6 +554,17 @@ def compile_blueprint(
     }
     if blueprint.model is not None:
         config_patch["model"] = {"preferred": blueprint.model}
+    if resolved_mode is ProvisionMode.CREATE:
+        # Always-on at creation (issue #422 / epic #418 doctrine — "there
+        # shouldn't be no off button"). This is the shared compiler seam
+        # for BOTH creation doors (personas.lifecycle.create_profile's
+        # clone path and the atomic blueprint provisioner used by plain
+        # `thehomie profile create` + dashboard `POST /api/agents`), so a
+        # persona compiled with mode=CREATE is born learning regardless of
+        # which door it came through. RECONCILE/MIGRATE never touch this
+        # key — an operator's later `learning.enabled: false` toggle on a
+        # live profile must survive reconcile untouched.
+        config_patch["learning"] = {"enabled": True}
 
     return BlueprintPlan(
         schema_version=blueprint.schema_version,

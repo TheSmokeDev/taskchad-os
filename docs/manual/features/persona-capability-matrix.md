@@ -76,7 +76,7 @@ use the separate [Persona Capability Elevation](persona-capability-elevation.md)
 path. That path binds approval to one persona, channel, request, tool, and exact
 argument payload; it never edits this matrix or the profile's derived `.env`.
 
-## Learning Opt-In
+## Learning Switch
 
 Persona learning (the scheduled belief-extraction loop) is controlled by a
 per-profile `config.yaml` field, NOT the capability matrix:
@@ -84,12 +84,18 @@ per-profile `config.yaml` field, NOT the capability matrix:
 ```yaml
 # <profile>/config.yaml
 learning:
-  enabled: true   # default: false
+  enabled: true   # written at creation since #422; absent key still means OFF
 ```
 
-Enable via `thehomie profile learning enable <name>`. This is separate from
-capability scoping — learning controls whether the persona forms beliefs from
-its interactions, not which env keys or skills it can access.
+Every persona created since 2026-08-13 is born with this key set `true`.
+Turn it off per-persona with `thehomie profile learning disable <name>`, or
+framework-wide with `PERSONA_LEARNING_ENABLED=false`;
+`thehomie profile learning enable <name>` is the migration verb for profiles
+created before #422, which have no `learning` key and are therefore still OFF.
+
+This is separate from capability scoping — learning controls whether the
+persona forms beliefs from its interactions, not which env keys or skills it
+can access. A persona is born learning and still born locked down.
 
 See [Persona Learning Loop](persona-learning-loop.md) for full details.
 

@@ -19,6 +19,18 @@ Usage:
     uv run python memory_dream.py --test       # Dry run (no file edits)
     uv run python memory_dream.py --force      # Skip recency guard
     uv run python memory_dream.py --days 14    # Scan 14 days of logs
+
+``--test`` means NO FILE EDITS, and that is a contract, not a description: no
+dream-state write, no daily-log line, no belief decision artifact, no lock
+sidecar, no directory creation. It is the only reason ``persona_dream_tick.py
+--child-test`` is a safe probe, and the only reason a --test run cannot make
+the 20-hour recency guard swallow that night's real dream.
+
+``--test`` is still a real dry run: it CALLS the LLM so an operator can see what
+the dream would write. Add ``--no-llm`` (requires ``--test``) to stop after the
+free phases instead — same no-edit contract, zero tokens. That is what a
+fan-out probe across a whole roster wants: proof the plumbing works, not a
+night's bill.
 """
 
 from __future__ import annotations
@@ -87,6 +99,21 @@ from shared import append_to_daily_log, file_lock, load_state, save_state
 # =============================================================================
 
 DREAM_SILENT = "DREAM_SILENT"
+# A --test --no-llm probe that found signal and stopped before Phase 3. Distinct
+# from DREAM_SILENT: silence means "nothing to consolidate", this means "there
+# WAS something and we deliberately did not spend a token on it".
+DREAM_NO_LLM = "DREAM_NO_LLM"
+# Recorded in dream-state.json when there were no daily logs to scan. An honest
+# "nothing to look at" is a completed cycle and still owes a receipt: without
+# one, a persona fan-out cannot tell this apart from a child that died before
+# writing anything, and the safe reading of "no receipt" is failure. NOT
+# returned to callers — memory_reflect/memory_weekly treat any non-DREAM_SILENT
+# truthy return as "consolidation ran", so this path still returns None.
+DREAM_SKIPPED = "DREAM_SKIPPED"
+# Env var by which a persona-dream parent hands this process a per-spawn nonce,
+# echoed into dream-state.json so the parent can prove the receipt it reads back
+# was written by the child it just launched (and not left over from last night).
+SPAWN_ID_ENV = "HOMIE_DREAM_SPAWN_ID"
 MAX_SIGNAL_CHARS = 5_000
 MAX_LOG_CHARS_PER_FILE = 8_000
 
@@ -832,6 +859,10 @@ async def _run_belief_evolution_phase(
     disabled switch skips ONLY this phase, leaving the overall dream ``result``
     untouched (distinct from the Phase-3/4 ``llm`` kill-switch, which aborts the
     whole dream). Returns a receipt dict for the daily log / vault log / state file.
+
+    Under ``test_mode`` the phase harvests (reads only) and reports what it WOULD
+    propose as ``dry_run_preview``, then stops before ``propose_belief`` — which
+    writes a decision artifact on every path, dry run included.
     """
     receipt: dict[str, Any] = {
         "result": "not_run",
@@ -886,6 +917,21 @@ async def _run_belief_evolution_phase(
         if not combined:
             # EVOLVE_SILENT — mirrors DREAM_SILENT: zero extra LLM calls, one line.
             receipt["result"] = "EVOLVE_SILENT"
+            return receipt
+
+        if test_mode:
+            # --test = no file edits, and propose_belief writes a decision
+            # artifact on EVERY path including its own dry-run preview (that
+            # preview is deliberate — it belongs to the `evolve propose-belief
+            # --dry-run` CLI, which is not bound by this file's contract). A
+            # dream dry run reports what it WOULD propose and stops, the same
+            # shape Phase 3 uses for the episode flip.
+            print(
+                f"[{now_local()}]   DRY RUN - would propose "
+                f"{len(combined)} belief candidate(s) "
+                f"({len(retry_queue)} retried, {len(fresh)} fresh)"
+            )
+            receipt["result"] = "dry_run_preview"
             return receipt
 
         adopted = 0
@@ -968,17 +1014,24 @@ async def run_dream(
     force: bool = False,
     days: int = 7,
     post_weekly: bool = False,
+    no_llm: bool = False,
 ) -> str | None:
     """Run dream consolidation cycle with concurrency guard.
 
     Returns:
         "DREAM_SILENT" if no signal found.
+        "DREAM_NO_LLM" if ``no_llm`` stopped a signal-bearing run before Phase 3.
         Response text if consolidation ran.
         None if skipped (recency guard or lock).
     """
+    if test_mode:
+        # The lock is a physical write (a .lock sidecar plus its parent dirs) in
+        # the profile tree, and --test promises none. A preview that mutates
+        # nothing also needs no mutual exclusion, so it simply runs unlocked.
+        return await _run_dream_inner(test_mode, force, days, post_weekly, no_llm)
     try:
         with file_lock(DREAM_STATE_FILE, timeout=5.0):
-            return await _run_dream_inner(test_mode, force, days, post_weekly)
+            return await _run_dream_inner(test_mode, force, days, post_weekly, no_llm)
     except TimeoutError:
         print(f"[{now_local()}] Another dream cycle is already running, skipping")
         return None
@@ -989,9 +1042,29 @@ async def _run_dream_inner(
     force: bool = False,
     days: int = 7,
     post_weekly: bool = False,
+    no_llm: bool = False,
 ) -> str | None:
     """Inner dream cycle — all 4 phases."""
     print(f"[{now_local()}] Starting dream cycle (days={days}, test={test_mode}, force={force})...")
+
+    # --test = no file edits. Every state/daily-log write in this function goes
+    # through these two so a dry run cannot advance last_run (which would let
+    # the recency guard swallow the next REAL dream) or leave a log line
+    # claiming a cycle that never mutated anything.
+    def _persist_state(payload: dict[str, Any]) -> None:
+        if test_mode:
+            return
+        # Echo the parent's per-spawn nonce into every receipt this cycle
+        # writes. One chokepoint, so no state-writing path can forget it and
+        # look — correctly, from the parent's side — like a leftover file.
+        spawn_id = os.environ.get(SPAWN_ID_ENV, "").strip()
+        if spawn_id:
+            payload["spawn_id"] = spawn_id
+        save_state(payload, DREAM_STATE_FILE)
+
+    def _log_daily(content: str, section: str = "Dream Cycle") -> None:
+        if not test_mode:
+            append_to_daily_log(content, section)
 
     # --- Recency guard ---
     if not force:
@@ -1024,7 +1097,21 @@ async def _run_dream_inner(
 
     if not orientation.daily_logs:
         print(f"[{now_local()}] No daily logs found for last {days} days, skipping dream")
-        append_to_daily_log(f"DREAM_SKIPPED - no logs for last {days} days", "Dream Cycle")
+        # An honest receipt for an honest non-event. This path used to write
+        # nothing at all, so a brand-new persona produced a clean exit and an
+        # empty profile tree — which the fan-out could only read as "no proof
+        # this ran". Saying so explicitly is what lets the parent record a real
+        # outcome instead of guessing, and keeps a persona from being charged
+        # for a night it cannot show a receipt for.
+        state = load_state(DREAM_STATE_FILE)
+        state["last_run"] = now_local().isoformat()
+        state["days_scanned"] = days
+        state["signal_found"] = False
+        state["result"] = DREAM_SKIPPED
+        state["phases_completed"] = ["orient"]
+        state.pop("error", None)
+        _persist_state(state)
+        _log_daily(f"{DREAM_SKIPPED} - no logs for last {days} days")
         return None
 
     # === PHASE 2: Gather Signal ===
@@ -1040,43 +1127,52 @@ async def _run_dream_inner(
         f"{len(signal.episode_paths)} open episodes"
     )
 
-    # === PHASE 2.5: Age working memory (always — maintenance, not signal-gated) ===
+    # === PHASE 2.5: Age working memory (always when live — maintenance, not
+    # signal-gated, but still test_mode-gated like every other side-effecting
+    # phase in this file) ===
     # Living Mind Phase 1: move stale bullets from WORKING.md active sections to
     # Archived (Cold). Insert-only — never deletes. Non-fatal on failure.
-    try:
-        from living_memory import archive_stale_working_items  # noqa: WPS433
+    # --test must mean "no file edits" (this file's own usage doc, and the
+    # persona --child-test contract that promises "no vault edits") — a vault
+    # mutation here would break that for both the main homie and any persona.
+    if not test_mode:
+        try:
+            from living_memory import archive_stale_working_items  # noqa: WPS433
 
-        _age_threshold = int(os.getenv("WORKING_MEMORY_AGE_DAYS", "7"))
-        _archive_report = archive_stale_working_items(MEMORY_DIR, days=_age_threshold)
-        if _archive_report.archived_count > 0:
-            print(
-                f"[{now_local()}]   Archived {_archive_report.archived_count} stale "
-                f"working-memory items (>{_archive_report.days}d old) "
-                f"across {len(_archive_report.sections_touched)} sections"
-            )
-    except Exception as _wm_exc:  # noqa: BLE001
-        # Dream cycle continues even if archiving fails.
-        print(f"[{now_local()}]   WARNING: working memory archive failed: {_wm_exc}")
+            _age_threshold = int(os.getenv("WORKING_MEMORY_AGE_DAYS", "7"))
+            _archive_report = archive_stale_working_items(MEMORY_DIR, days=_age_threshold)
+            if _archive_report.archived_count > 0:
+                print(
+                    f"[{now_local()}]   Archived {_archive_report.archived_count} stale "
+                    f"working-memory items (>{_archive_report.days}d old) "
+                    f"across {len(_archive_report.sections_touched)} sections"
+                )
+        except Exception as _wm_exc:  # noqa: BLE001
+            # Dream cycle continues even if archiving fails.
+            print(f"[{now_local()}]   WARNING: working memory archive failed: {_wm_exc}")
 
-    # === PHASE 2.5b: Archive stale self-authored skill drafts (always) ===
+    # === PHASE 2.5b: Archive stale self-authored skill drafts (always when
+    # live) ===
     # Skill-From-Experience loop (WS3): staged drafts that never recurred past
     # SKILL_STALE_DAYS are flipped to archived (+ one audit row each). This is
     # the production rail for skill_promotion.archive_stale() — same dream-prune
     # seam as working-memory archival. Lazy import via the chat-slice cognition
     # path (already on sys.path above). Fire-and-forget: a failure here NEVER
-    # breaks the dream run.
-    try:
-        from cognition import skill_promotion  # noqa: WPS433
+    # breaks the dream run. test_mode-gated for the same "--test = no file
+    # edits" reason as Phase 2.5 above.
+    if not test_mode:
+        try:
+            from cognition import skill_promotion  # noqa: WPS433
 
-        _archived_skills = skill_promotion.archive_stale()
-        if _archived_skills:
-            print(
-                f"[{now_local()}]   Archived {len(_archived_skills)} stale skill "
-                f"draft(s): {', '.join(_archived_skills)}"
-            )
-    except Exception as _skill_exc:  # noqa: BLE001
-        # Dream cycle continues even if skill archival fails.
-        print(f"[{now_local()}]   WARNING: skill draft archive failed: {_skill_exc}")
+            _archived_skills = skill_promotion.archive_stale()
+            if _archived_skills:
+                print(
+                    f"[{now_local()}]   Archived {len(_archived_skills)} stale skill "
+                    f"draft(s): {', '.join(_archived_skills)}"
+                )
+        except Exception as _skill_exc:  # noqa: BLE001
+            # Dream cycle continues even if skill archival fails.
+            print(f"[{now_local()}]   WARNING: skill draft archive failed: {_skill_exc}")
 
     if not signal.found:
         print(f"[{now_local()}] No signal found — {DREAM_SILENT}")
@@ -1093,12 +1189,24 @@ async def _run_dream_inner(
             "stalls": 0,
             "repeated_entities": 0,
         }
-        save_state(state, DREAM_STATE_FILE)
-        append_to_daily_log(
-            f"DREAM_SILENT - scanned {signal.files_scanned} files, no consolidation signal",
-            "Dream Cycle",
+        _persist_state(state)
+        _log_daily(
+            f"DREAM_SILENT - scanned {signal.files_scanned} files, no consolidation signal"
         )
         return DREAM_SILENT
+
+    if no_llm:
+        # The free half of the cycle just proved everything a fan-out probe
+        # needs: the boot-shim re-rooted, this profile's own daily logs were
+        # found and scanned, and the signal scorer ran on them. Phases 3-5 are
+        # the only ones that cost money, and a probe run across a whole roster
+        # must not bill a real night's tokens to prove the plumbing.
+        print(
+            f"[{now_local()}] {DREAM_NO_LLM} — signal found "
+            f"(score {signal.signal_score}, {signal.files_scanned} file(s) scanned) but "
+            f"--no-llm stops before Phase 3; no LLM call, nothing written"
+        )
+        return DREAM_NO_LLM
 
     # --- Crash-safe: advance state BEFORE LLM phases ---
     state = load_state(DREAM_STATE_FILE)
@@ -1111,7 +1219,7 @@ async def _run_dream_inner(
         "stalls": len(signal.stalls),
         "repeated_entities": len(signal.repeated_entities),
     }
-    save_state(state, DREAM_STATE_FILE)
+    _persist_state(state)
 
     phases_completed = ["orient", "gather"]
     consolidation_result = ""
@@ -1197,7 +1305,7 @@ async def _run_dream_inner(
             state["result"] = "skipped_killswitch"  # NOT "failed"
             state["phases_completed"] = phases_completed
             state["killswitch"] = switch_name
-            save_state(state, DREAM_STATE_FILE)
+            _persist_state(state)
             print(f"[{now_local()}] Dream skipped: kill-switch '{switch_name}' disabled")
             return  # CLEAN exit — recency guard treats this as a successful skip
 
@@ -1205,7 +1313,7 @@ async def _run_dream_inner(
         state["result"] = "failed"
         state["phases_completed"] = phases_completed
         state["error"] = str(exc)[:200]
-        save_state(state, DREAM_STATE_FILE)
+        _persist_state(state)
         print(f"[{now_local()}] Dream LLM phase failed: {exc}")
         raise
 
@@ -1219,7 +1327,7 @@ async def _run_dream_inner(
     state["result"] = "consolidated"
     state["belief_evolve"] = belief_receipt  # #170 — machine-readable Phase-5 receipt
     state.pop("error", None)  # Clear any previous error
-    save_state(state, DREAM_STATE_FILE)
+    _persist_state(state)
 
     # Log summary
     summary_parts = [
@@ -1247,7 +1355,7 @@ async def _run_dream_inner(
     if belief_line:
         summary_parts.append(belief_line)
 
-    append_to_daily_log("\n".join(summary_parts), "Dream Cycle")
+    _log_daily("\n".join(summary_parts))
     print(f"[{now_local()}] Dream cycle finished.")
 
     # --- Vault log append (chronological wiki timeline, non-silent only) ---
@@ -1298,7 +1406,19 @@ def main() -> None:
     parser.add_argument("--vault", type=Path, default=None, help="Override vault root for validation probe")
     parser.add_argument("--force", action="store_true", help="Skip recency guard")
     parser.add_argument("--days", type=int, default=7, help="Days of logs to scan (default: 7)")
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="With --test: run the free phases and stop before Phase 3 (zero LLM calls)",
+    )
     args = parser.parse_args()
+
+    if args.no_llm and not args.test:
+        # Without --test the free phases still advance last_run on their way
+        # past, so a bare --no-llm run would spend the night's recency budget
+        # on a cycle that never consolidated anything. The flag is a probe
+        # modifier, not a cheap dream.
+        parser.error("--no-llm requires --test (it is a probe, not a dream)")
 
     if args.json:
         from cognitive_loop_test_harness import build_scheduled_entrypoint_report
@@ -1311,16 +1431,28 @@ def main() -> None:
         print(json.dumps(report, indent=2))
         return
 
-    ensure_directories()
+    if not args.test:
+        # Directory creation is a file edit too — a --test probe against a
+        # persona profile must not leave a scaffolded tree behind.
+        ensure_directories()
 
     if args.test:
         print("Running in TEST MODE (dry run, no file edits)")
         print(f"Project root: {PROJECT_ROOT}")
         print(f"Scanning last {args.days} day(s) of logs")
 
-    result = asyncio.run(run_dream(test_mode=args.test, force=args.force, days=args.days))
+    result = asyncio.run(
+        run_dream(
+            test_mode=args.test,
+            force=args.force,
+            days=args.days,
+            no_llm=args.no_llm,
+        )
+    )
 
-    if result == DREAM_SILENT:
+    if result == DREAM_NO_LLM:
+        print(f"\nDream result: {DREAM_NO_LLM} (signal found, stopped before Phase 3)")
+    elif result == DREAM_SILENT:
         print(f"\nDream result: {DREAM_SILENT} (no signal, no LLM calls)")
     elif result:
         try:

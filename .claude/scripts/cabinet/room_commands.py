@@ -18,6 +18,7 @@ CommandName = Literal[
     "unpin",
     "voice",
     "end",
+    "grant",
 ]
 
 _COMMAND_RE = re.compile(r"^/([a-z][a-z0-9_-]*)(?:\s+([\s\S]*))?$", re.IGNORECASE)
@@ -52,6 +53,17 @@ def parse_room_command(text: str) -> RoomCommand | None:
         return RoomCommand(name="voice", args=args)
     if name == "end":
         return RoomCommand(name="end", args=args)
+    if name == "grant":
+        # Recognized, never executed here — the `voice` precedent. A #428
+        # counter-offer card raised inside a room prints `/grant approve
+        # <persona> <code>`; before this branch that exact string parsed as
+        # NOTHING and fell through to the LLM as ordinary meeting text, so a
+        # persona could answer as though the grant had landed while the
+        # proposal quietly expired. The room answers it honestly instead and
+        # the command text never reaches a prompt. This adds no approval
+        # surface: the decision stays admin-gated on the chat adapters, where
+        # an authenticated identity stamps the role.
+        return RoomCommand(name="grant", args=args)
     return None
 
 

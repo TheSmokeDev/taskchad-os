@@ -62,7 +62,12 @@ def _paths(tmp_path: Path) -> ProvisionPaths:
 def creation_api(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_operator_sinks: Path,
 ) -> tuple[TestClient, ProvisionPaths]:
+    # #422 round 4: substituting ProvisionPaths isolates the profile tree,
+    # but the learning receipt resolves from config.DATA_DIR and the
+    # kill-switch audit row from config.DASHBOARD_DB_PATH — both ambient.
+    # ``isolated_operator_sinks`` redirects them into the tmp tree.
     paths = _paths(tmp_path)
     monkeypatch.delenv("HOMIE_KILLSWITCH_PERSONA_MUTATION", raising=False)
     monkeypatch.setattr(

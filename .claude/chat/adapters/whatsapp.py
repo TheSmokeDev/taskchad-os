@@ -9,7 +9,16 @@ from datetime import datetime
 from typing import Any
 
 from adapters.base import ProgressCapabilities
-from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, User
+from models import (
+    Channel,
+    IncomingMessage,
+    OutgoingMessage,
+    Platform,
+    Thread,
+    User,
+    ingress_allowlist_warning,
+    resolve_ingress_role,
+)
 
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
 import voice as voice_mod
@@ -54,6 +63,12 @@ class WhatsAppAdapter:
 
     async def connect(self) -> None:
         """Start the webhook HTTP server."""
+        # Loud once at startup: with no allowlist this surface admits anyone,
+        # and everyone it admits is stamped `viewer`, so role-gated commands are
+        # off. An operator should learn that here, not from a refusal mid-chat.
+        _warning = ingress_allowlist_warning("whatsapp", self.allowed_numbers, "WHATSAPP_ALLOWED_NUMBERS")
+        if _warning:
+            print(f"[{datetime.now()}] {_warning}", flush=True)
         from aiohttp import web
 
         app = web.Application()
@@ -400,6 +415,9 @@ class WhatsAppAdapter:
                         platform=Platform.WHATSAPP,
                         thread=Thread(thread_id=phone),
                         platform_message_id=msg.get("id", ""),
+                        # Same `allowed_numbers` list (and same compare) the
+                        # auth check above used; empty keeps allow-all.
+                        user_role=resolve_ingress_role(phone, self.allowed_numbers),
                         raw_event=msg,
                     )
                     await self._queue.put(incoming)

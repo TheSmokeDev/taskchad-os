@@ -10,7 +10,16 @@ from datetime import datetime
 from typing import Any
 
 from adapters.base import ProgressCapabilities
-from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, User
+from models import (
+    Channel,
+    IncomingMessage,
+    OutgoingMessage,
+    Platform,
+    Thread,
+    User,
+    ingress_allowlist_warning,
+    resolve_ingress_role,
+)
 
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
 import voice as voice_mod
@@ -86,6 +95,12 @@ class SlackAdapter:
         """Start the Socket Mode connection."""
         from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
+        # Loud once at startup: with no allowlist this surface admits anyone,
+        # and everyone it admits is stamped `viewer`, so role-gated commands are
+        # off. An operator should learn that here, not from a refusal mid-chat.
+        _warning = ingress_allowlist_warning("slack", self.allowed_users, "CHAT_ALLOWED_USERS")
+        if _warning:
+            print(f"[{datetime.now()}] {_warning}", flush=True)
         self._handler = AsyncSocketModeHandler(self.app, self.app_token)
         await self._handler.connect_async()
         bot_id = await self._get_bot_user_id()
@@ -425,6 +440,9 @@ class SlackAdapter:
             platform=Platform.SLACK,
             thread=thread,
             platform_message_id=ts,
+            # Same allowlist (and same compare) `_is_allowed` used to admit this
+            # event; an empty allowlist keeps its documented allow-all behavior.
+            user_role=resolve_ingress_role(user_id, self.allowed_users),
             raw_event=event,
         )
 

@@ -112,10 +112,17 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("file", "File the last answer as a vault note with entity compilation", "engine", "admin"),
     ("working", "Show cross-session scratchpad — open threads, hypotheses, questions", "router", "admin"),
     ("shots", "Called-shots ledger — list open bets, decided <id> <who>, resolve <id> <outcome>", "router", "admin"),
-    ("skills", "Review/promote/reject self-authored skill drafts", "router", "operator"),
+    ("skills", "Review/promote/reject skill drafts, or link a skill to this homie", "router", "operator"),
     ("learn", "Author a reusable skill from a URL, local dir, this conversation, or pasted notes (staged for /skills)", "router", "operator"),
     ("watch", "Learn from one video, save a sourced note, and compare it with the current work", "router", "operator"),
-    ("curriculum", "Persona curriculum - status, sources, run, review, route, grade, enable, disable", "router", "admin"),
+    ("curriculum", "Persona curriculum - status, sources, run, learn <url>, review, route, grade, enable, disable", "router", "admin"),
+    # -- Personas (issue #427) — audited, admin-gated toolset self-provisioning --
+    ("persona", "Persona toolsets - grant|revoke <persona> <toolset> (audited, live next turn)", "router", "admin"),
+    # Persona toolset counter-offers (#428). Admin-only: approving one expands
+    # a persona's tool reach. The handler re-gates the role server-side too,
+    # so this row is defense in depth, not the authority. Decides PROPOSALS —
+    # direct grants live on /persona grant above.
+    ("grant", "Persona toolset counter-offers — list, approve <persona> <code>, deny", "router", "admin"),
     ("crypto", "Crypto Homie tape - tape debauchery|x today, with attributed cited takes", "engine", "admin"),
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
@@ -194,8 +201,11 @@ CATEGORIES: list[tuple[str, list[str]]] = [
             "learn",
             "watch",
             "curriculum",
+            "grant",
         ],
     ),
+    # Personas — the operator's persona-capability surface (issue #427).
+    ("Personas", ["persona"]),
     (
         "Content Creation",
         ["blog", "image", "generate-image", "owner-image", "quote", "linkedin", "primo", "tweet", "instagram", "yt_script", "shorts", "video"],
@@ -263,6 +273,8 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "learn",
     "watch",
     "curriculum",
+    "persona",
+    "grant",
     "blog",
     "image",
     "tweet",

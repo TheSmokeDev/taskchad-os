@@ -20,6 +20,34 @@ MAX_CONTEXT_CHARS = 20_000
 RESUME_MAX_CHARS = 20_000
 MAX_BRIEFING_CHARS = 6000
 
+# Degraded-path mirror of ``cognition.amendments._SECTION_HEADER``. Used ONLY
+# when that module cannot be imported at all, so the machine-authored tail can
+# still be cut off rather than pasted into a system prompt unfenced. A test
+# asserts the two stay equal — if the owner renames its header this must move
+# with it, or the degraded path silently stops cutting.
+AMENDMENT_SECTION_HEADER = "## Autonomous Amendments"
+
+# Header for the fenced machine-authored block in assembled context. Named so
+# an operator reading a prompt dump can see WHY that half is quarantined.
+MACHINE_MEMORY_HEADING = (
+    "### Machine-Written Memory (untrusted — model-authored amendments)"
+)
+
+# ``cognition.injection.wrap_recalled_memory``'s delimiters. Needed here because
+# both builders truncate to a char budget AFTER assembling, and a cut landing
+# inside the fence would drop the closing tag — leaving quarantined text reading
+# as bare prompt, which is the whole failure the fence exists to prevent. A test
+# asserts these still match what the wrapper emits.
+_FENCE_OPEN = '<recalled-memory safety="untrusted">'
+_FENCE_CLOSE = "</recalled-memory>"
+
+
+def _repair_untrusted_fence(text: str) -> str:
+    """Re-close an untrusted-data fence that a char-budget cut left open."""
+    if text.count(_FENCE_OPEN) <= text.count(_FENCE_CLOSE):
+        return text
+    return text.rstrip() + "\n" + _FENCE_CLOSE
+
 
 def read_file_safe(path: Path) -> str:
     """Read a file, returning empty string if it doesn't exist."""
@@ -30,6 +58,61 @@ def read_file_safe(path: Path) -> str:
     except Exception:
         return ""
     return ""
+
+
+def read_durable_memory(memory_dir: Path) -> tuple[str, str]:
+    """Read MEMORY.md as (operator-authored text, FENCED machine-authored text).
+
+    THE composition-layer trust boundary. Every official persona surface —
+    Discord (`chat/discord_persona_runtime.py`), web/dashboard
+    (`chat/web_persona_runtime.py`), and Cabinet
+    (`scripts/cabinet/text_orchestrator.py`) — builds its system context through
+    `build_session_start_context`, so segregating HERE is what makes the
+    property hold on all of them at once. Per-consumer was the shape the #425
+    round-4 gate rejected: `cofounder/worktick.py` had a fence and the three
+    bootstrap-backed surfaces did not.
+
+    What changed under this code: durable memory used to be entirely
+    operator-authored, so pasting MEMORY.md into a system prompt was pasting the
+    operator's own words. The amendment ledger already made part of it
+    model-authored, and #425 made that part carry content distilled from work
+    notes that quote external research. A hostile "lesson" surviving the
+    rejection-only screen therefore reached a TOOL-BEARING system prompt as
+    authoritative memory. The head stays authoritative; the machine-written tail
+    becomes fenced untrusted data the model is told not to take instructions
+    from.
+
+    Fail-open: no amendments (the common case) returns the file unchanged with
+    an empty second value, and any failure degrades to "operator head only" —
+    never to an unfenced dump.
+    """
+    memory = read_file_safe(memory_dir / "MEMORY.md")
+    if not memory:
+        return "", ""
+
+    try:
+        from cognition.amendments import split_autonomous_amendments
+
+        head, machine = split_autonomous_amendments(memory)
+    except Exception:
+        # Cannot tell the halves apart, so cannot prove the tail is absent.
+        # Dropping machine-written context is a loss; emitting it unfenced is a
+        # trust-boundary hole. Lose the context.
+        return memory.split(AMENDMENT_SECTION_HEADER)[0].rstrip(), ""
+
+    if not machine:
+        return memory, ""
+
+    try:
+        from cognition.injection import (
+            sanitize_recalled_content,
+            wrap_recalled_memory,
+        )
+
+        safe = sanitize_recalled_content(machine)
+    except Exception:
+        return head, ""
+    return head, (wrap_recalled_memory([safe]) if safe else "")
 
 
 def get_recent_daily_log(
@@ -334,7 +417,11 @@ def build_session_briefing(
         parts.append("### User\n" + user_model)
 
     # 4. Rules (Global Rules + Preferences from MEMORY.md)
-    memory = read_file_safe(memory_dir / "MEMORY.md")
+    #
+    # ``memory`` is the OPERATOR-authored half only. Every section extractor
+    # below reads it, so splitting once here means no extractor can ever pull
+    # model-authored amendment text into an authoritative briefing section.
+    memory, machine_memory = read_durable_memory(memory_dir)
     rules = _extract_section(memory, "Global Rules") if memory else ""
     prefs = _extract_section(memory, "Preferences") if memory else ""
     rules_block = ""
@@ -347,7 +434,12 @@ def build_session_briefing(
 
     # --- Fail-open guard: required sections must be present ---
     if not identity or not capabilities or not rules_block:
-        # Fall back to full dump — extractor failure
+        # Fall back to full dump — extractor failure. Kept (not narrowed to the
+        # sections we did get) because persona profiles routinely lack the
+        # capsule structure this briefing wants, so for them the dump IS the
+        # normal path — degrading to "whatever extracted" would silently strip a
+        # persona's identity. It is safe to keep because the dump now applies
+        # the SAME trust split, not because the fallback is rare.
         return _build_full_dump(memory_dir=memory_dir, daily_dir=daily_dir)
 
     # --- Optional sections (graceful degradation) ---
@@ -406,6 +498,11 @@ def build_session_briefing(
             + index
         )
 
+    # 12. Machine-written memory — LAST, and fenced. Model-authored amendments
+    # are context, never standing instructions.
+    if machine_memory:
+        parts.append(MACHINE_MEMORY_HEADING + "\n" + machine_memory)
+
     briefing = "## The Homie — Session Briefing\n\n" + "\n\n".join(parts)
 
     if len(briefing) > MAX_BRIEFING_CHARS:
@@ -413,6 +510,7 @@ def build_session_briefing(
         last_nl = briefing.rfind("\n")
         if last_nl > 0:
             briefing = briefing[:last_nl]
+        briefing = _repair_untrusted_fence(briefing)
 
     return briefing
 
@@ -422,10 +520,16 @@ def _build_full_dump(
     memory_dir: Path = MEMORY_DIR,
     daily_dir: Path = DAILY_DIR,
 ) -> str:
-    """Legacy full-dump context builder. Used as fail-open fallback."""
+    """Legacy full-dump context builder. Used as fail-open fallback.
+
+    This is the path a named persona profile actually takes (its MEMORY.md has
+    no capsule structure for the briefing extractors), and
+    `discord_persona_runtime` puts the result in a TOOL-BEARING system prompt —
+    so the trust split matters MORE here than in the briefing, not less.
+    """
     parts: list[str] = []
 
-    memory = read_file_safe(memory_dir / "MEMORY.md")
+    memory, machine_memory = read_durable_memory(memory_dir)
     if memory:
         parts.append("## Long-Term Memory\n" + memory.strip())
 
@@ -449,12 +553,16 @@ def _build_full_dump(
     if daily:
         parts.append("## Recent Daily Log\n" + daily.strip())
 
+    if machine_memory:
+        parts.append(MACHINE_MEMORY_HEADING + "\n" + machine_memory)
+
     context = "\n\n---\n\n".join(parts)
     if len(context) > MAX_CONTEXT_CHARS:
         context = context[:MAX_CONTEXT_CHARS]
         last_newline = context.rfind("\n")
         if last_newline > 0:
             context = context[:last_newline]
+        context = _repair_untrusted_fence(context)
     return context
 
 

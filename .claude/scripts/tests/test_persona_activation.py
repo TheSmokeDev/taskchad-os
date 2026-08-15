@@ -7,6 +7,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
+import cli
 from cli import main
 from personas.blueprints import BlueprintError
 from personas.creation import (
@@ -298,6 +299,10 @@ def test_cli_reconcile_requires_reviewed_hashes_and_explicit_approval(
     activation_paths: ProvisionPaths,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The reconciliation contract is machine-readable JSON.  Keep this test
+    # independent of the process-wide release-check cache, whose banner is
+    # intentionally written to stderr by the real CLI.
+    monkeypatch.setattr(cli, "check_for_update", lambda: None)
     monkeypatch.setattr(
         ProvisionPaths,
         "defaults",
@@ -323,7 +328,7 @@ def test_cli_reconcile_requires_reviewed_hashes_and_explicit_approval(
         "founder_operations",
     ]
     assert "operator_exec" not in plan["plan"]["applied_toolsets"]
-    assert "recall" in plan["plan"]["missing_tools"]
+    assert "recall" not in plan["plan"]["missing_tools"]
 
     config_path = (
         activation_paths.profiles_root
@@ -406,7 +411,7 @@ def test_reconcile_refuses_to_restore_missing_identity_from_template(
     assert config_path.read_bytes() == before
 
 
-def test_declared_unavailable_tool_reports_exact_readiness_failure(
+def test_declared_unavailable_repo_tool_reports_exact_readiness_failure(
     activation_paths: ProvisionPaths,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -432,13 +437,13 @@ def test_declared_unavailable_tool_reports_exact_readiness_failure(
     )
 
     snapshot = build_persona_readiness_snapshot("ai-engineer", paths=paths)
-    recall = next(row for row in snapshot.capabilities if row.id == "recall")
+    github_tool = next(row for row in snapshot.capabilities if row.id == "gh_issue_view")
 
     assert snapshot.axes["channel-bound"].status == "READY"
-    assert recall.axes["declared"] == "READY"
-    assert recall.axes["callable"] == "BLOCKED"
-    assert recall.reasons == (
-        "declared tool 'recall' has no registered handler",
+    assert github_tool.axes["declared"] == "READY"
+    assert github_tool.axes["callable"] == "BLOCKED"
+    assert github_tool.reasons == (
+        "declared tool 'gh_issue_view' has no registered handler",
     )
     assert "test-only-secret" not in json.dumps(snapshot.as_dict())
 

@@ -270,6 +270,63 @@ uv run python memory_dream.py --days 14    # Scan 14 days of logs
 **State:** `.claude/data/state/dream-state.json`
 **Trigger:** Nightly ~3 AM (`SecondBrain-Dream`, `setup_dream_scheduler.ps1` / `run_dream.sh`) + post-step of weekly synthesis (Sunday 8 PM) + standalone CLI + `/vault-dream` skill (planned)
 
+### Persona Dream Tick (equality doctrine — nightly, ~3:30 AM)
+
+Every named persona gets the SAME 5-phase dream cycle the main homie gets, scoped to its own vault. `persona_dream_tick.py` is a sibling of `persona_learning_tick.py` (NOT an extension — cadences differ): it runs as the DEFAULT profile, enumerates named profiles, and serially spawns `memory_dream.py -p <name>` per persona via `build_capability_scoped_env`.
+
+**No dream internals were ported.** `memory_dream.py:38-41` already calls `apply_persona_override()` ABOVE its config import, so every path constant re-roots into the profile tree under `-p` — verified physically: `dream-state.json`, `MEMORY.md`/`SELF.md`, `amendment-proposals.jsonl`, and `data/evolve/belief/decision-*.json` all land under `~/.homie/profiles/<name>/`, while `PROJECT_ROOT` correctly stays the code checkout.
+
+| Surface | Where |
+|---------|-------|
+| Tick | `.claude/scripts/persona_dream_tick.py` |
+| Fan-out stamp (parent) | MAIN `STATE_DIR/persona-dream-<name>-state.json` |
+| Dream state (child) | `~/.homie/profiles/<name>/state/dream-state.json` |
+| Runners / installer | `run_persona_dream.bat` / `.sh`, `setup_persona_dream_scheduler.ps1` (`SecondBrain-PersonaDream`) |
+| Config resolver | `config.get_persona_dream_settings()` (Rule 1, call-time) |
+
+```bash
+uv run python persona_dream_tick.py              # nightly fan-out
+uv run python persona_dream_tick.py --test       # dry run, no spawn
+uv run python persona_dream_tick.py --child-test # real spawn, child --test --no-llm (writes nothing, costs nothing)
+uv run python persona_dream_tick.py --once       # first eligible persona only
+```
+
+**Key design decisions:**
+- **No per-persona opt-in.** Unlike the learning tick (which gates on config.yaml `learning.enabled`), the dream fans out to EVERY named profile — "the full dream cycle on everybody… not some sub-homie." Affordable because the child's `DREAM_SILENT` fast path costs zero LLM calls without signal: the nightly bill is bounded by SIGNAL, not roster size. The only switch is the framework-wide `PERSONA_DREAM_ENABLED` fire-extinguisher.
+- **The receipt contract is ONE truth table** — `RECEIPT_CONTRACT` in `persona_dream_tick.py`. Every way a persona's turn can end resolves to exactly one status, and that status alone decides all three downstream answers; nothing re-derives them at a call site. The **budget** column is the load-bearing one: `last_run` is the field the recency guard reads, so writing it SPENDS that persona's night (~20h). It is written only when THIS spawn produced a trustworthy receipt saying the child ran. Everything else records `last_attempt` instead (full evidence, no budget) and is retried on the next tick — a persona must never lose its dream to a receipt nobody can vouch for.
+
+  | status | stamped `result` | spends budget | exit≠0 | when |
+  |--------|------------------|---------------|--------|------|
+  | `consolidated` | `success` | yes | no | child dreamed and said so |
+  | `silent` | `success_silent` | yes | no | honest `DREAM_SILENT` |
+  | `no_logs` | `success_no_logs` | yes | no | honest `DREAM_SKIPPED` — nothing to scan |
+  | `killswitch` | `skipped_killswitch` | yes | no | child refused; operator intent |
+  | `spawn_failed` | `failed` | no | yes | nonzero exit / timeout / env build failure |
+  | `child_failed` | `child_failed` | no | yes | child recorded `result=failed` |
+  | `missing` | `no_receipt` | no | yes | clean exit, no state file at all |
+  | `unreadable` | `invalid_receipt` | no | yes | present but not parseable JSON |
+  | `invalid` | `invalid_receipt` | no | yes | no recognised `result` / unusable `last_run` |
+  | `future_dated` | `corrupt_receipt` | no | yes | `last_run` in the future — broken clock |
+  | `refused_collision` | `refused_state_collision` | no | yes | would clobber the main profile's state |
+  | `state_path_error` | `state_path_error` | no | yes | child state path did not resolve |
+  | `stamp_io_error` | `stamp_io_error` | no | yes | the parent's own bookkeeping failed |
+  | `stale` | `stale_receipt` | no | **no** | a real receipt, but not from this spawn — the child skipped on its own guard/lock |
+
+- **Change proof is a nonce, not a timestamp.** The parent generates a per-spawn id, passes it as `HOMIE_DREAM_SPAWN_ID` (set AFTER the capability scrub, so no matrix entry can drop it), and the child echoes it into `dream-state.json` through the single `_persist_state` chokepoint. A receipt is this spawn's iff it carries this spawn's id. A timestamp can only say a file *claims* a recent moment: an untouched file keeps whatever it already said, and a future-dated one clears any lower bound forever — which is how a `2099` `last_run` was laundered into "fresh", suppressing a persona's dream indefinitely while every nightly run reported success. The timestamp is still read for the one thing it does prove: a future date is a broken clock, so it classifies `corrupt` even when the nonce matches.
+- **A persona with nothing to scan says so.** The child's no-daily-logs path writes a real `DREAM_SKIPPED` receipt into its own profile tree instead of exiting 0 having written nothing — that silence was indistinguishable from a child that died before writing, so the only safe reading was "no proof", and reading it as success spent the persona's budget on a dream with no receipt.
+- **One bad persona is one bad persona.** Fan-out stamps are read once up front with every read's failure contained (`load_state` only catches `JSONDecodeError`; an ACL-denied file or a directory raises `OSError`, which used to escape *inside the sort key* and cost the whole roster its night before the loop even started). A persona whose stamp cannot be read is skipped and counted failed — never spawned, because without the stamp there is no way to know whether it already ran tonight or to record the result afterwards. Stamp writes are contained the same way.
+- **`--child-test` writes nothing and costs nothing.** It spawns each child as `memory_dream.py -p <name> --test --no-llm`. `--test` is side-effect-free by contract — no state, no daily-log line, no belief decision artifact, no lock sidecar, no directory creation — so a probe cannot advance `last_run` and make the recency guard swallow that night's real dream. `--no-llm` (requires `--test`; a bare one is rejected by argparse) stops after the free Phase 1-2 and returns `DREAM_NO_LLM`, so probing the whole roster does not bill a real night's tokens — a plain `--test` is still a real dry run and calls the LLM twice per signal-bearing persona. The parent records the probe under `last_test_*` only and skips the read-back (a run that wrote nothing has no receipt).
+- **Non-zero exit on failure.** The tick catches per-persona failures so one bad child cannot starve the roster, then reports them: `run_tick()` returns a `TickOutcome` and the entrypoint exits 1 when any persona's row says `exit≠0` in the table above. Silent skips — recency guard, `DREAM_SILENT`, `DREAM_SKIPPED`, kill switch, stale receipt — stay exit 0. Both wrappers key their FAILED log branch off it.
+- **Kill switches are fail-closed across every env merge.** A capability group may delegate a `HOMIE_KILLSWITCH_*` key from the master `.env`; that delegated value used to merge last and overwrite an operator's live `disabled`, handing the child back the capability the operator had just pulled the plug on. Now the parent's `disabled` values re-apply last in `build_capability_scoped_env`, and `config.py` re-asserts them after the profile `.env` loads (`override=True` could otherwise let a profile re-enable a switch). The directions are not symmetric — absent/enabled is permissive, `disabled` is the refusal — so restoring only `disabled` can never grant a capability, only withhold one. Sentinel owner: `security.kill_switches.is_disabled_value`.
+- **Shared-state collision guard.** Before spawning, the child's resolved `dream-state.json` path is compared to the MAIN `DREAM_STATE_FILE`; on equality the tick REFUSES to spawn (`result: refused_state_collision`) rather than let a persona clobber the default profile's recency guard and belief receipt.
+- **Full roster by default.** `PERSONA_DREAM_MAX_WALL_CLOCK` defaults to unlimited: the doctrine is every named persona every night, and a finite cap silently drops the tail of a large roster (28 personas × a few minutes each blows through an hour). The knob remains as an operator override for a box that must hard-stop; when a cap DOES truncate, the personas it never reached are named in the output, counted in the summary, and returned in `TickOutcome.truncated`. Ordering is oldest-attempted-first so a truncation rotates its tail instead of starving the same personas nightly. The scheduled task's ceiling is 8h — clear of the 28 × `PERSONA_DREAM_TIMEOUT` worst case — as a backstop against a wedged run, not a budget.
+- **Phase 5 is ON for personas** (spike-gated, issue #423). The evidence gate confines reads to the PERSONA's vault (a cited `.env` or absolute main-vault path resolves outside the only root → rejected, never read), the deterministic `belief_regression` floor is module-sibling and claim-shaped (vault-agnostic), and the judge returns real verdicts. Kill switch unchanged: `HOMIE_KILLSWITCH_BELIEF_AUTONOMY`.
+- **Per-persona spend rides the child's own background tier** (`get_background_models()["quality"]`, default `sonnet`); the parent cannot inject it because `SECOND_BRAIN_BACKGROUND_QUALITY_MODEL` is not in the capability delegation matrix.
+
+**Env vars:** `PERSONA_DREAM_ENABLED` (true), `PERSONA_DREAM_TICK_INTERVAL` (20h, parent-side per-persona recency guard), `PERSONA_DREAM_TIMEOUT` (900s per child), `PERSONA_DREAM_MAX_WALL_CLOCK` (0 = unlimited, the default; a positive value is an operator hard-stop), `PERSONA_DREAM_DAYS` (7).
+
+**Tests:** `tests/test_persona_dream_tick.py` (87) — one parametrized cell per row of the receipt truth table (asserting all three columns end to end, and that the observed behavior matches the declared row rather than merely sitting beside it), plus a real-subprocess acceptance test that drives the actual `memory_dream.py -p <A>` entrypoint through all five phases (only the LLM lane and the two non-blocking post-steps are stubbed) and asserts A's receipt landed while sibling B and the main tree stayed byte-identical. A guard test fails if any contract row has no cell.
+
 ### Working Memory (Living Mind Phase 1)
 
 Cross-session scratchpad — open threads, hypotheses, unresolved questions. Solves amnesia between sessions: a file-based curated middle tier between per-session continuity and long-term MEMORY.md. Gary Tan "LLM Memory Unsolved" thesis implementation.

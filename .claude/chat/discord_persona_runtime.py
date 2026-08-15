@@ -110,6 +110,7 @@ def _persona_system_prompt(
     skill_index: str,
     channel_name: str,
     eyes_contract: str = "",
+    counter_offer_briefing: str = "",
 ) -> str:
     blocks = [
         "# Discord Persona Channel Contract",
@@ -139,6 +140,11 @@ def _persona_system_prompt(
             "the real approval card appears, then continue after approval."
         ),
     ]
+    if counter_offer_briefing:
+        # Issue #428 — the counter-offer. Prompt guidance only: the marker
+        # this teaches is parsed server-side into a PROPOSAL row, and no
+        # reply the model can write reaches a config mutation.
+        blocks.append(counter_offer_briefing.strip())
     if eyes_contract:
         blocks.append(eyes_contract.strip())
     if role:
@@ -435,9 +441,23 @@ async def run_discord_persona_channel_turn(
             project_root / ".claude" / "skills",
             allowlist=resolve_skill_allowlist(persona_id),
             extra_skill_dirs=[paths["skills"]],
+            reader_persona=persona_id,
         )
     except Exception:
         skill_index = ""
+    # Issue #428 — teach the counter-offer. Reads the live toolset registry, so
+    # it fails open to no guidance rather than costing the turn its prompt.
+    try:
+        from personas import grant_proposals as _grant_proposals
+
+        counter_offer_briefing = _grant_proposals.counter_offer_briefing()
+    except Exception as exc:  # noqa: BLE001 — guidance is additive
+        print(
+            f"[{datetime.now()}] [GrantProposals] briefing unavailable "
+            f"(non-blocking): {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        counter_offer_briefing = ""
     system_prompt = _persona_system_prompt(
         persona_id=persona_id,
         display_name=display_name,
@@ -448,6 +468,7 @@ async def run_discord_persona_channel_turn(
         skill_index=skill_index,
         channel_name=binding.name,
         eyes_contract=eyes_contract,
+        counter_offer_briefing=counter_offer_briefing,
     )
 
     platform_str = incoming.platform.value
@@ -654,6 +675,52 @@ async def run_discord_persona_channel_turn(
     if tools_degraded:
         response_text += "\n\n_(Scoped tools were unavailable; no tool action was performed.)_"
 
+    # ── Counter-offer (#428). The persona may end its reply with one
+    # `<<GRANT_REQUEST: …>>` marker naming a toolset it lacks. The marker is
+    # stripped here — before persistence, so the transcript shows the reply
+    # the operator saw — and becomes a PENDING PROPOSAL plus an approve card.
+    # `persona_id` comes from the channel binding, never from the reply, so a
+    # persona can only ever propose for itself. Sync sqlite, so it rides
+    # `to_thread`: the bot never does blocking IO on its event loop.
+    counter_offer_components: list[MessageComponent] = []
+    try:
+        from personas import grant_proposals as _grant_proposals
+
+        counter_offer = await asyncio.to_thread(
+            _grant_proposals.tee_up_from_reply,
+            persona_id,
+            response_text,
+            requested_by=str(getattr(incoming.user, "platform_id", "") or ""),
+            trigger_text=_incoming_display_text(incoming),
+            surface=platform_str,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — an affordance never costs the answer
+        print(
+            f"[{datetime.now()}] [GrantProposals] counter-offer failed "
+            f"(non-blocking): {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        counter_offer = None
+    if counter_offer is not None:
+        response_text = (
+            counter_offer.reply_text.rstrip() + "\n\n" + counter_offer.card_text
+        ).strip()
+        if counter_offer.approve_custom_id:
+            counter_offer_components = [
+                MessageComponent(
+                    label="Approve grant",
+                    custom_id=counter_offer.approve_custom_id,
+                    style="success",
+                ),
+                MessageComponent(
+                    label="Deny",
+                    custom_id=counter_offer.deny_custom_id,
+                    style="danger",
+                ),
+            ]
+
     elevation_components: list[MessageComponent] = []
     pending_elevation = persona_elevation.pending_request_for_turn(
         persona_id,
@@ -704,7 +771,7 @@ async def run_discord_persona_channel_turn(
         text=response_text,
         channel=incoming.channel,
         thread=incoming.thread,
-        components=elevation_components,
+        components=counter_offer_components + elevation_components,
     )
     try:
         from local_extension_loader import apply_local_extension_hook

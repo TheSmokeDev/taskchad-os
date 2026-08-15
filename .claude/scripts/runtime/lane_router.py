@@ -223,13 +223,54 @@ def _adapter_supports_model_only(adapter: object) -> bool:
     return False
 
 
-def _resolve_lane_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
-    lane = resolve_runtime_lane(request)
+def _lane_profiles(lane: str, request: RuntimeRequest) -> list[RuntimeProfile]:
+    """Configured profiles for ONE lane, in that lane's own preference order."""
     if lane == RUNTIME_LANE_CLAUDE_NATIVE:
         profile = build_profile_for_provider("claude", key_prefix="primary", request=request)
         return [profile] if profile else []
 
-    return resolve_generic_runtime_profiles(request)
+    return list(resolve_generic_runtime_profiles(request))
+
+
+def _resolve_lane_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
+    lane = resolve_runtime_lane(request)
+    profiles = _lane_profiles(lane, request)
+    if not request.model_only:
+        return profiles
+
+    # Capability-constrained widening for the model_only contract.
+    #
+    # Lane selection is an OPERATOR PREFERENCE ("run this persona on Codex");
+    # `model_only=True` is a HARD REQUIREMENT ("no provider tool surface may
+    # exist for this turn"). Resolving preference first and requirement second
+    # made the requirement unsatisfiable whenever the preferred lane's adapters
+    # cannot prove it: the run loop below skips every incapable adapter (which
+    # is correct — never weaken the contract to satisfy a preference) and the
+    # request then had nowhere left to go. The shipped `crypto` profile pins
+    # generic_runtime/openai-codex, and `openai_codex.supports_model_only()` is
+    # False, so its scheduled zero-tool work deferred every single night.
+    #
+    # So for a model_only request the candidate set is the preferred lane's
+    # profiles FOLLOWED BY the other configured lane's. Preference still wins:
+    # if the preferred lane has a capable adapter the loop succeeds on it and
+    # never reaches the appended candidates, so behavior there is unchanged.
+    # Nothing is weakened either — appended candidates pass through the exact
+    # same `supports_model_only` gate. When NO configured lane can prove the
+    # contract the list is simply exhausted and the caller gets its deferral,
+    # which is the only case that receipt should ever describe.
+    #
+    # Non-model_only requests return above, untouched.
+    other = (
+        RUNTIME_LANE_GENERIC
+        if lane == RUNTIME_LANE_CLAUDE_NATIVE
+        else RUNTIME_LANE_CLAUDE_NATIVE
+    )
+    seen = {profile.key for profile in profiles}
+    for extra in _lane_profiles(other, request):
+        if extra.key not in seen:
+            seen.add(extra.key)
+            profiles.append(extra)
+    return profiles
 
 
 def probe_caller_tool_transport(request: RuntimeRequest) -> CallerToolTransportProbe:

@@ -128,15 +128,22 @@ CATALOG: list[AutomationBlueprint] = [
     AutomationBlueprint(
         key="morning-brief",
         title="Morning briefing",
-        description="A short daily briefing: today's calendar, weather, and "
-        "anything urgent waiting on you.",
+        description="A grounded daily operator briefing: recent work, current "
+        "priorities, calendar, cash/revenue pressure, and urgent items.",
         category="daily",
         schedule_template="{minute} {hour} * * *",
         prompt_template=(
-            "Produce a concise morning briefing for the user: today's calendar "
-            "events, the local weather, and any urgent items. Keep it short and "
-            "scannable. If no data sources are connected, give a brief "
-            "good-morning with the date and offer to connect calendar/email."
+            "Produce a concise operator morning briefing. First run the "
+            "vault-ops orient/context routine over MEMORY.md, WORKING.md, the "
+            "last four daily MDs, the latest vault-ops receipt, active project "
+            "state, and recent git activity. Then reconcile live calendar/email "
+            "and other connected integration state. Lead with what the user has "
+            "actually been working on, current cash/revenue or deadline pressure, "
+            "and the 3-5 decisions or actions that matter now. Newer verified "
+            "evidence beats stale blockers. Clearly distinguish drafts, generated "
+            "documents, delegated work, commits, deployments, sends, payments, "
+            "and provider-verified outcomes. Keep it short and scannable; mark "
+            "unavailable sources instead of guessing."
         ),
         slots=[_TIME("08:00"), _DELIVER],
         tags=("daily", "briefing"),

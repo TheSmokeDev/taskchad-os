@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
@@ -94,6 +95,59 @@ def _make_chat_db(path: Path) -> None:
     )
     conn.commit()
     conn.close()
+
+
+def _isolated_provision_paths(tmp_path: Path):
+    """Build a real ``ProvisionPaths`` rooted in ``tmp_path`` (issue #422).
+
+    Same minimal shape as ``tests/test_persona_creation_surfaces.py``'s
+    ``_paths()`` helper — no Discord channel intent, no capability groups.
+    Used to drive the dashboard ``POST /api/agents`` route through the
+    REAL ``apply_persona_creation`` pipeline (not mocked) so a regression
+    in the shared blueprint/provisioning seam surfaces here too, not just
+    behind the CLI door.
+    """
+    from personas.provisioning import ProvisionPaths
+
+    matrix = tmp_path / "matrix.yaml"
+    matrix.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "env_groups": {
+                    "runtime_core": ["OPENAI_API_KEY"],
+                    "vault_memory": ["HOMIE_VAULT_DIR"],
+                    "business_profile": ["BUSINESS_EMAIL"],
+                },
+                "skill_groups": {},
+                "profile_defaults": {
+                    "env_groups": ["runtime_core", "vault_memory"],
+                    "skill_groups": [],
+                    "skills": [],
+                },
+                "profiles": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    master_env = tmp_path / "master.env"
+    master_env.write_text(
+        "OPENAI_API_KEY=test-secret\n"
+        "HOMIE_VAULT_DIR=C:/vault\n"
+        "BUSINESS_EMAIL=ops@example.com\n",
+        encoding="utf-8",
+    )
+    bindings = tmp_path / "discord-bindings.json"
+    bindings.write_text(
+        json.dumps({"guild_id": "test", "channels": {}}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return ProvisionPaths(
+        homie_root=tmp_path / "homie",
+        bindings_file=bindings,
+        capability_matrix_file=matrix,
+        master_env_file=master_env,
+    )
 
 
 def _make_memory_db(path: Path) -> None:
@@ -1159,6 +1213,65 @@ def test_post_agent_calls_canonical_creation_service(isolated_app, tmp_path):
         assert r.json()["receipt"]["transaction_id"] == "tx-dashboard-test"
 
 
+def test_post_agent_real_pipeline_born_learning_and_tick_eligible(
+    isolated_app, tmp_path, monkeypatch
+):
+    """Issue #422 reconcile round 2 — the dashboard is the OTHER normal
+    creation door (alongside the CLI's ``thehomie profile create``,
+    covered in test_persona_creation_surfaces.py). Both route through
+    ``personas.creation.apply_persona_creation``, but the test above mocks
+    that function entirely, so it can never catch a regression in the
+    shared blueprint/provisioning seam. This drives the REAL route with
+    the REAL creation pipeline (not mocked) and proves the newborn is
+    born learning with an audit row, and clears the tick's real admission
+    check — the same three assertions the CLI and lifecycle doors prove.
+    """
+    from personas.provisioning import ProvisionPaths
+
+    paths = _isolated_provision_paths(tmp_path)
+    monkeypatch.setattr(
+        ProvisionPaths,
+        "defaults",
+        classmethod(lambda cls: paths),
+    )
+    monkeypatch.setattr(
+        "personas.provisioning._best_effort_audit",
+        lambda *_args, **_kwargs: None,
+    )
+    import config as _config
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(_config, "DATA_DIR", data_dir)
+
+    r = isolated_app.post(
+        "/api/agents", json={"persona_id": "dashboard-newhomie"}
+    )
+    assert r.status_code == 200, r.text
+
+    config = yaml.safe_load(
+        (paths.profiles_root / "dashboard-newhomie" / "config.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert config["learning"]["enabled"] is True
+
+    ledger = data_dir / "persona_learning_audit.jsonl"
+    rows = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    persona_rows = [r for r in rows if r["persona_id"] == "dashboard-newhomie"]
+    assert len(persona_rows) == 1
+    assert persona_rows[0]["enabled"] is True
+    assert persona_rows[0]["actor"] == "persona_creation_surface"
+
+    from persona_learning_tick import is_learning_eligible
+
+    assert is_learning_eligible(config) is True
+
+
 def test_post_agent_400_on_validation_error(isolated_app):
     """Reserved name 'default' rejected by validate_persona_name (422)."""
     r = isolated_app.post("/api/agents", json={"persona_id": "default"})
@@ -1168,6 +1281,19 @@ def test_post_agent_400_on_validation_error(isolated_app):
 def test_post_agent_422_on_invalid_id_regex(isolated_app):
     r = isolated_app.post("/api/agents", json={"persona_id": "BadName!"})
     assert r.status_code in (400, 422)
+
+
+def test_post_agent_rejects_resolver_sentinel_custom(isolated_app):
+    """Issue #422 round 3 — 'custom' passes validate_persona_name but
+    ``get_persona_paths`` roots it at HOMIE_HOME, so provisioning it would
+    stage a config.yaml the runtime never reads. The blueprint CREATE seam
+    refuses; the route must surface that as an honest client error rather
+    than a 500 or a success.
+    """
+    for route in ("/api/agents/preview", "/api/agents"):
+        r = isolated_app.post(route, json={"persona_id": "custom"})
+        assert r.status_code in (400, 422), (route, r.status_code, r.text)
+        assert "sentinel" in r.text
 
 
 def test_delete_agent_400_on_default_profile(isolated_app):

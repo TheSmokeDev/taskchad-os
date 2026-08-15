@@ -605,6 +605,30 @@ def expire_old_drafts() -> int:
     return expired_count
 
 
+def expire_stale_grant_proposals() -> int:
+    """Expire every persona's un-actioned #428 counter-offers. Returns count.
+
+    The proposal store expires lazily — on every read and on the decision
+    path — which keeps an expired proposal un-approvable but never fires for
+    a proposal nobody looks at: the row stays physically ``pending`` forever
+    and its expiry audit row is never written. This is the periodic caller
+    that closes that gap, riding the existing heartbeat cadence exactly like
+    ``expire_old_drafts`` above, so expiry lands within one heartbeat interval
+    of the TTL instead of never.
+
+    Zero LLM cost (pure sqlite + an audit append) and whole-body fail-open:
+    the heartbeat's job is the operator's morning, and a proposal sweep must
+    never be the reason it dies.
+    """
+    try:
+        from personas import grant_proposals
+
+        return len(grant_proposals.sweep_expired())
+    except Exception as e:  # noqa: BLE001 — a sweep never fails the heartbeat
+        print(f"[{now_local()}] Grant-proposal sweep failed (non-blocking): {e}")
+        return 0
+
+
 def gather_active_drafts_context() -> str:
     """Read all files in drafts/active/ and return summary for Claude."""
     if not DRAFTS_ACTIVE_DIR.exists():
@@ -2389,6 +2413,12 @@ async def run_heartbeat(test_mode: bool = False) -> str | None:
     expired_count = expire_old_drafts()
     if expired_count:
         print(f"[{now_local()}] Expired {expired_count} drafts older than {DRAFT_EXPIRY_HOURS}h")
+
+    # Same rule for persona counter-offers (#428): un-actioned proposals must
+    # expire and audit at TTL without waiting for someone to read them.
+    expired_proposals = expire_stale_grant_proposals()
+    if expired_proposals:
+        print(f"[{now_local()}] Expired {expired_proposals} stale grant counter-offers")
 
     # Re-gather active drafts AFTER reconciliation + expiry so Claude only sees remaining ones
     active_drafts_ctx = gather_active_drafts_context()

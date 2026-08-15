@@ -160,6 +160,10 @@ _COFOUNDER_TERMINAL_STATUSES = frozenset({"done", "failed"})
 # Bounds the completion scan to report.py's archon-poll lookback window
 # (COFOUNDER_REPORT_POLL_DAYS default) — older agendas can no longer flip.
 _COFOUNDER_AGENDA_SCAN_FILES = 7
+_OPS_HISTORY_RELPATH = ("_ops", "history.md")
+_JOURNAL_MAX_FILES = 4
+_JOURNAL_LINES_PER_FILE = 2
+_JOURNAL_LINE_CAP = 320
 
 
 def normalize_physical_timestamp(value: datetime | str | None) -> datetime | None:
@@ -410,6 +414,110 @@ def _cofounder_line(event: dict[str, str]) -> str:
     return f"- cofounder: line {line} ({persona}) {kind}: {detail}"
 
 
+def read_recent_operator_journal_lines(
+    memory_dir: Path,
+    *,
+    since: datetime,
+    max_files: int = _JOURNAL_MAX_FILES,
+    lines_per_file: int = _JOURNAL_LINES_PER_FILE,
+) -> list[str]:
+    """Read the operator's recent daily journals plus the latest ops receipt.
+
+    This is the deterministic floor for morning orientation. It deliberately
+    reads physical notes instead of inferring project state from an agenda
+    label. Each source is bounded and fail-open; returned lines are sanitized
+    before they enter a runtime prompt.
+    """
+
+    root = Path(memory_dir)
+    earliest = since.date()
+    rendered: list[str] = []
+    try:
+        candidates: list[tuple[_date, Path]] = []
+        for path in (root / "daily").glob("*.md"):
+            try:
+                day = _date.fromisoformat(path.stem[:10])
+            except ValueError:
+                continue
+            if day >= earliest:
+                candidates.append((day, path))
+        for day, path in sorted(candidates, reverse=True)[:max_files]:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            bullets = _recent_note_bullets(text, lines_per_file)
+            for bullet in bullets:
+                rendered.append(
+                    f"- journal ({day.isoformat()}): "
+                    f"{_sanitize_line(bullet, _JOURNAL_LINE_CAP)}"
+                )
+    except OSError:
+        pass
+
+    # The ops ledger records what vault-ops actually checked and what it
+    # changed. Its latest dated block is often the best reconciliation signal
+    # when a stale WORKING.md bullet conflicts with a verified context pass.
+    ops_rendered: list[str] = []
+    try:
+        ops_path = root.joinpath(*_OPS_HISTORY_RELPATH)
+        ops_text = ops_path.read_text(encoding="utf-8")
+        for bullet in _recent_ops_bullets(ops_text[-6000:], since.date(), 2):
+            ops_rendered.append(
+                "- vault-ops receipt: "
+                + _sanitize_line(bullet, _JOURNAL_LINE_CAP)
+            )
+    except OSError:
+        pass
+    return ops_rendered + rendered
+
+
+def _recent_note_bullets(text: str, limit: int) -> list[str]:
+    """Newest meaningful markdown bullets, preserving their source wording."""
+
+    lines = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line.startswith("- "):
+            continue
+        body = line[2:].strip()
+        if not body or body.startswith("[["):
+            continue
+        lines.append(body)
+    return lines[-max(0, int(limit)):][::-1]
+
+
+def _recent_ops_bullets(text: str, earliest: _date, limit: int) -> list[str]:
+    """Bullets from the newest dated ops block, only when it is in range."""
+
+    matches = list(
+        re.finditer(r"^#{2,3}\s+(\d{4}-\d{2}-\d{2})\b.*$", text, re.MULTILINE)
+    )
+    for match in reversed(matches):
+        try:
+            day = _date.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        if day < earliest:
+            return []
+        bullets = _recent_note_bullets(text[match.end():], 50)
+        preferred: list[str] = []
+        for label in (
+            "**Impact**:",
+            "**Observed state**:",
+            "**Actions**:",
+            "**Gap found**:",
+            "**Files**:",
+            "**Flags**:",
+        ):
+            newest = next((b for b in bullets if b.startswith(label)), None)
+            if newest is not None:
+                preferred.append(newest)
+        chosen = preferred or bullets
+        return chosen[:max(0, int(limit))]
+    return []
+
+
 def build_session_opening_brief(
     memory_dir: Path,
     *,
@@ -551,12 +659,21 @@ def build_session_opening_brief(
         pass
     cofounder_events.sort(key=lambda event: event["at"], reverse=True)
 
+    journal_lines: list[str] = []
+    try:
+        journal_lines = read_recent_operator_journal_lines(
+            Path(memory_dir), since=last_activity
+        )
+    except Exception:
+        journal_lines = []
+
     fresh_items = (
         len(fresh_obs)
         + len(fresh_hb_threads)
         + len(episode_entries)
         + len(fresh_amendments)
         + len(cofounder_events)
+        + len(journal_lines)
     )
     if fresh_items < settings.min_fresh_items:
         return SessionOpeningBrief("", False, away_hours, fresh_items, "no_fresh_items")
@@ -569,6 +686,7 @@ def build_session_opening_brief(
         episode_entries=episode_entries,
         fresh_amendments=fresh_amendments,
         cofounder_events=cofounder_events,
+        journal_lines=journal_lines,
         open_threads=open_threads,
         settings=settings,
     )
@@ -584,6 +702,7 @@ def _render_session_brief(
     episode_entries: list[dict[str, str]],
     fresh_amendments: list,
     cofounder_events: list[dict[str, str]],
+    journal_lines: list[str],
     open_threads: list[str],
     settings,
 ) -> str:
@@ -619,6 +738,7 @@ def _render_session_brief(
         )
         amendment_lines.append(f"- {target}: {summary}")
     cofounder_lines = [_cofounder_line(event) for event in cofounder_events[:cap]]
+    journal_lines = journal_lines[:cap]
     # Fresh [heartbeat] threads already render in "What changed" — keep them
     # out of Mid-flight so one bullet never appears twice in one brief.
     promoted = set(fresh_hb_threads)
@@ -632,16 +752,28 @@ def _render_session_brief(
         f"The operator is opening a new working session after ~{away_hours:.1f}h "
         f"away (last activity {last_activity:%Y-%m-%d %H:%M}). OPEN your reply "
         "with a short first-person brief — you kept watch while they were out — "
-        "covering ONLY the items below. Lead with what changed; keep it tight; "
-        "do not pad or repeat old news. After the brief, answer the operator's "
+        "using the items below as evidence. Reconcile the recent journals and "
+        "vault-ops receipt against older thread or agenda labels. Lead with "
+        "what the operator has actually been working on and what needs attention "
+        "now; keep it tight and do not repeat stale news. Never describe a draft, "
+        "generated document, delegated line, or healthy status as executed work. "
+        "After the brief, answer the operator's "
         "message. If anything here conflicts with the live conversation, the "
         "conversation wins."
     )
 
-    what_display = obs_lines + hb_lines + episode_lines + cofounder_lines
+    what_display = (
+        journal_lines + obs_lines + hb_lines + episode_lines + cofounder_lines
+    )
     what_reserved: list[int] = []
     offset = 0
-    for group in (obs_lines, hb_lines, episode_lines, cofounder_lines):
+    for group in (
+        journal_lines,
+        obs_lines,
+        hb_lines,
+        episode_lines,
+        cofounder_lines,
+    ):
         if group:
             what_reserved.append(offset)
         offset += len(group)
@@ -705,6 +837,7 @@ __all__ = (
     "build_proactive_brief_section",
     "SessionOpeningBrief",
     "build_session_opening_brief",
+    "read_recent_operator_journal_lines",
     "normalize_physical_timestamp",
     "read_brief_owed",
     "write_brief_owed",

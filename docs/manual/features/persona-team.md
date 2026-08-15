@@ -8,7 +8,8 @@ Last updated: 2026-07-04
 
 The Homie runs as a **team of scoped AI employees**, not one assistant wearing
 hats. Each persona is an independent Homie with its own brain, its own tools,
-its own optional learning loop, and its own operator channel. You stand up a
+its own learning loop (on from birth since #422), and its own operator channel.
+You stand up a
 department — sales, support, finance, outbound — where every member is scoped to
 its lane, talks to you in its own channel, and gets sharper over time from its
 own conversations.
@@ -27,7 +28,7 @@ A persona is the sum of the layers below, each owned by an existing slice:
 | **Identity (the brain)** | Its own `SOUL` / `USER` / `MEMORY` / `SELF` files under its profile root — who it is, what it believes, its boundaries | [persona-lifecycle-files](persona-lifecycle-files.md) |
 | **Capabilities (tools + secrets)** | A lane-scoped `.env` and skill set delegated from the capability matrix — it can only touch its lane's keys | [persona-capability-matrix](persona-capability-matrix.md) |
 | **Elevation (bounded exceptions)** | An authenticated operator can approve one exact out-of-scope tool call without widening the profile | [persona-capability-elevation](persona-capability-elevation.md) |
-| **Learning (getting sharper)** | Opt-in scheduled belief extraction from its OWN attributed turns — the compounding engine | [persona-learning-loop](persona-learning-loop.md) |
+| **Learning (getting sharper)** | Scheduled belief extraction from its OWN attributed turns, on from birth — the compounding engine | [persona-learning-loop](persona-learning-loop.md) |
 | **Curriculum (domain mastery)** | Approved external feeds compiled into private, cited doctrine; applications remain proposal-only | [persona-curriculum-engine](persona-curriculum-engine.md) |
 | **Channel (where you talk to it)** | A chat channel (e.g. a Discord channel) bound to the persona | [multi-channel-adapters](multi-channel-adapters.md) |
 | **Collaboration (meetings)** | Multi-persona Cabinet rooms — standups, discussions, a roster that answers together | [cabinet-rooms](cabinet-rooms.md) |
@@ -104,8 +105,11 @@ drawers. Four invariants enforce that:
 - Named-profile `.env` files are **derived artifacts** of the master
   `.claude/scripts/.env`, not hand-maintained secret sheets. Re-derive with
   `env-sync`, never edit by hand.
-- Learning is **opt-in per profile** (`config.yaml` `learning.enabled`, default
-  `false`) and independent of capability scoping.
+- Learning is **on from birth per profile** (`config.yaml` `learning.enabled`,
+  written `true` at creation since #422) and independent of capability scoping.
+  `thehomie profile learning disable <name>` is the per-persona off switch;
+  `PERSONA_LEARNING_ENABLED=false` is the framework-wide one. A profile created
+  before #422 with no `learning` key is still OFF.
 - Generated/unpromoted skills under `generated/` stay excluded from a persona's
   prompt index until the skill-promotion rails approve them.
 
@@ -115,9 +119,13 @@ drawers. Four invariants enforce that:
 cd <repo>\.claude\scripts
 uv run thehomie profile create outbound --clone
 uv run thehomie profile env-sync outbound --write
-uv run thehomie profile learning enable outbound
 uv run thehomie profile list
 ```
+
+`profile create` already writes `learning.enabled: true` and its audit row
+(#422), so there is no enable step. Run
+`uv run thehomie profile learning disable outbound` only if you deliberately
+want this persona not to learn.
 
 ## How To Test It
 

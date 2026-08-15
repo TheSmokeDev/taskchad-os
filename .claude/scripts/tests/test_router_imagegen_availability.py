@@ -68,12 +68,19 @@ class _FakeEngine:
 
 
 def _incoming(text: str) -> IncomingMessage:
+    # Mirror the role the REAL adapter stamps at ingress rather than the
+    # dataclass default: that default is deliberately fail-closed (`viewer`)
+    # and models an UNSTAMPED surface, while this fixture is the operator
+    # driving their own bot. Reading the adapter's constant avoids drift.
+    from adapters.cli_adapter import _CLI_INGRESS_ROLE
+
     return IncomingMessage(
         text=text,
         user=User(Platform.CLI, "cli-user", "User"),
         channel=Channel(Platform.CLI, "cli-test", is_dm=True),
         platform=Platform.CLI,
         timestamp=datetime.now(),
+        user_role=_CLI_INGRESS_ROLE,
     )
 
 

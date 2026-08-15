@@ -45,17 +45,23 @@ CATALOG: list[CatalogEntry] = [
     CatalogEntry(
         key="catalog:daily-briefing",
         title="Daily briefing",
-        description="Every morning at 8am, a short briefing: today's calendar, "
-        "weather, and anything urgent waiting on you.",
+        description="Every morning at 8am, a grounded operator briefing from "
+        "recent work, current priorities, integrations, and urgent items.",
         job_spec={
             "persona_id": "default",
             "prompt": (
-                "Produce a concise morning briefing for the user: today's "
-                "calendar events, the local weather, and any urgent items "
-                "(unread important email, due tasks). Keep it short and "
-                "scannable. If you have no connected data sources, give a brief "
-                "general good-morning with the date and offer to connect "
-                "calendar/email."
+                "Produce a concise operator morning briefing. First run the "
+                "vault-ops orient/context routine over MEMORY.md, WORKING.md, "
+                "the last four daily MDs, the latest vault-ops receipt, active "
+                "project state, and recent git activity. Reconcile that with "
+                "live calendar/email and other connected integration state. "
+                "Lead with what the user actually worked on, current cash/revenue "
+                "or deadline pressure, and the 3-5 decisions or actions that "
+                "matter now. Newer verified evidence beats stale blockers. "
+                "Clearly distinguish drafts, generated documents, delegated "
+                "work, commits, deployments, sends, payments, and provider-"
+                "verified outcomes. Keep it short; mark unavailable sources "
+                "instead of guessing."
             ),
             "schedule": "0 8 * * *",
             "next_run": None,

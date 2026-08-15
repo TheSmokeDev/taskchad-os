@@ -41,6 +41,7 @@ from cognition.proactive_brief import (  # noqa: E402
     build_session_opening_brief,
     clear_brief_owed,
     normalize_physical_timestamp,
+    read_recent_operator_journal_lines,
     read_brief_owed,
     write_brief_owed,
 )
@@ -754,6 +755,48 @@ class TestBoredomDiscriminator:
 
 
 class TestContentContract:
+    def test_recent_daily_journals_and_vault_ops_receipt_ground_the_brief(
+        self, tmp_path, monkeypatch
+    ):
+        _sweep_brief_env(monkeypatch)
+        vault = _vault(tmp_path)
+        daily = vault / "daily"
+        daily.mkdir()
+        (daily / "2026-06-12.md").write_text(
+            "# Daily\n\n- Restored Google OAuth with live Gmail proof.\n"
+            "- YourBusiness queue is a draft, not proof of calls.\n",
+            encoding="utf-8",
+        )
+        ops = vault / "_ops"
+        ops.mkdir()
+        (ops / "history.md").write_text(
+            "## 2026-06-12\n\n"
+            "- **Actions**: Read daily logs and verified Gmail live.\n"
+            "- **Impact**: Removed the stale OAuth blocker.\n",
+            encoding="utf-8",
+        )
+
+        brief = _build(tmp_path, vault)
+
+        assert brief.fired is True
+        assert "journal (2026-06-12)" in brief.prompt_block
+        assert "Restored Google OAuth" in brief.prompt_block
+        assert "vault-ops receipt" in brief.prompt_block
+        assert "Removed the stale OAuth blocker" in brief.prompt_block
+        assert "Never describe a draft" in brief.prompt_block
+
+    def test_journal_reader_ignores_notes_older_than_away_boundary(self, tmp_path):
+        vault = _vault(tmp_path)
+        daily = vault / "daily"
+        daily.mkdir()
+        (daily / "2026-06-10.md").write_text(
+            "- old item that must not resurface\n", encoding="utf-8"
+        )
+
+        lines = read_recent_operator_journal_lines(vault, since=LAST_ACTIVITY)
+
+        assert lines == []
+
     def test_per_source_cap_and_newest_first(self, tmp_path, monkeypatch):
         _sweep_brief_env(monkeypatch)
         monkeypatch.setenv("SESSION_BRIEF_MAX_PER_SECTION", "3")

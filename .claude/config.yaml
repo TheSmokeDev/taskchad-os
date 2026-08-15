@@ -1,0 +1,4 @@
+ports:
+  health_check: 9658
+  whatsapp_webhook: 9314
+  orchestration_api: 5193

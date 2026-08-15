@@ -435,6 +435,209 @@ def test_promote_block_verdict_is_configurable(promo_env, monkeypatch):
     assert not (skills_dir / "promoted" / "cfgblock").exists()
 
 
+def test_promote_moves_the_exact_bytes_it_scanned(promo_env, monkeypatch):
+    """#429 codex R4 BLOCKER (the R3 fix's remaining window): the digest
+    recheck narrowed the scan/move race, but the move still happened by
+    PATHNAME — a rewrite landing between the recheck and the move slid
+    unverified bytes under it. promote() now takes POSSESSION of the draft
+    (canonical -> staging under generated/) before the scan and moves the
+    STAGED copy, so the bytes scanned are the bytes moved by construction. A
+    hostile rewrite of the canonical path mid-promote lands as an inert NEW
+    draft under generated/ — it is never what reaches the prompt.
+
+    Non-vacuity: pre-possession this exact scenario ended in a
+    ``draft_changed`` refusal (the R3 behavior), so asserting ``promoted``
+    with the ORIGINAL bytes fails on the old code.
+    """
+    data_dir, skills_dir = promo_env
+    draft = _seed_draft(skills_dir, "toctou", _SAFE_SKILL)
+    _make_eligible("toctou", draft, count=3)
+
+    real_record_scope = skill_promotion._record_scope_before_publication
+
+    def _hostile_rewrite(name: str) -> bool:
+        # A concurrent same-name intake lands its (scan-failing) bytes AFTER
+        # our scan but BEFORE our move — the exact R4 window.
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_text(
+            _DANGEROUS_SKILL.format(name="toctou", cat="ops"), encoding="utf-8"
+        )
+        return real_record_scope(name)
+
+    monkeypatch.setattr(
+        skill_promotion, "_record_scope_before_publication", _hostile_rewrite
+    )
+
+    out = skill_promotion.promote("toctou", operator_approved=True)
+
+    # The promote still succeeds — for the bytes IT scanned, not the rewrite.
+    assert out["status"] == "promoted"
+    promoted_body = (skills_dir / "promoted" / "toctou" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Read the file, summarize it." in promoted_body
+    assert "rm -rf" not in promoted_body
+    # The hostile bytes sit inert at the canonical generated path — inspectable
+    # by the operator, reachable by no index.
+    assert "rm -rf" in draft.read_text(encoding="utf-8")
+    assert "toctou" in build_skill_index(skills_dir, allowlist=None)
+    # No staging debris is left behind on the success path.
+    assert not list((skills_dir / "generated").glob("**/.promote-staging-*"))
+
+
+def test_promote_restores_the_draft_exactly_after_a_scan_refusal(promo_env):
+    """Possession must never eat the operator's draft: a refused promote puts
+    the SAME bytes back at the canonical generated path and leaves no staging
+    debris, so the operator can inspect the refusal and re-decide on the
+    existing `/skills` surface."""
+    data_dir, skills_dir = promo_env
+    draft = _seed_draft(skills_dir, "restored", _DANGEROUS_SKILL)
+    _make_eligible("restored", draft, count=3)
+    original = draft.read_bytes()
+
+    out = skill_promotion.promote("restored", operator_approved=True)
+
+    assert out["status"] == "scan_dangerous"
+    assert draft.read_bytes() == original
+    assert not (skills_dir / "promoted" / "restored").exists()
+    assert not list((skills_dir / "generated").glob("**/.promote-staging-*"))
+
+
+def test_a_concurrent_recreate_never_nests_the_refused_draft(promo_env, monkeypatch):
+    """#429 codex R5 BLOCKER: while promote holds a draft in staging, a
+    concurrent intake can RECREATE the canonical directory. The old finally
+    moved staging back onto it — shutil.move NESTS the (scan-refused) bytes
+    inside the newer draft, and a later promote of that tree would carry them
+    into promoted/ and the persona's install. The restore now PARKS the
+    refused bytes under a distinct .refused- name and audits the divergence.
+
+    Non-vacuity: pre-fix, the staging tree lands INSIDE the recreated
+    canonical dir, so the no-nesting glob and the parked-dir assertions both
+    fail.
+    """
+    data_dir, skills_dir = promo_env
+    draft = _seed_draft(skills_dir, "nestcase", _DANGEROUS_SKILL)
+    _make_eligible("nestcase", draft, count=3)
+
+    real_scan = skill_promotion.scan_skill
+
+    def _scan_with_concurrent_recreate(skill_md):
+        verdict = real_scan(skill_md)
+        # A concurrent intake rewrites the canonical draft while we scan the
+        # staged copy — the scan still judges OUR (dangerous) bytes.
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_text(
+            _SAFE_SKILL.format(name="nestcase", cat="ops"), encoding="utf-8"
+        )
+        return verdict
+
+    monkeypatch.setattr(
+        skill_promotion, "scan_skill", _scan_with_concurrent_recreate
+    )
+
+    out = skill_promotion.promote("nestcase", operator_approved=True)
+
+    assert out["status"] == "scan_dangerous"
+    # The recreated (safe) draft is intact and UNCONTAMINATED — no nesting.
+    canonical = (draft.parent / "SKILL.md").read_text(encoding="utf-8")
+    assert "rm -rf" not in canonical
+    assert "Read the file, summarize it." in canonical
+    assert not list(draft.parent.glob("**/.promote-staging-*"))
+    # The refused bytes are parked beside it, inert, and audited.
+    parked = list((skills_dir / "generated" / "ops").glob("nestcase.refused-*"))
+    assert len(parked) == 1
+    assert "rm -rf" in (parked[0] / "SKILL.md").read_text(encoding="utf-8")
+    assert not (skills_dir / "promoted" / "nestcase").exists()
+    rows = _rows_for(_read_audit_rows(data_dir), "promote")
+    assert any("restore_parked" in (r["reason"] or "") for r in rows)
+
+
+def test_promote_refuses_a_canonical_path_collision_with_different_content(promo_env):
+    """#429 codex R3 BLOCKER (auth grain == storage grain): sales' "Daily
+    Spend" and marketing's "daily-spend" both slug to ``promoted/daily-spend``.
+    A VALID target is not proof it is THIS skill — the target-exists branch
+    must reconcile content identity, or the second caller is handed (and goes
+    on to install) an artifact built from the FIRST persona's bytes."""
+    _, skills_dir = promo_env
+    first_draft = _seed_draft(skills_dir, "Daily Spend", _SAFE_SKILL)
+    _make_eligible("Daily Spend", first_draft, count=3)
+    first = skill_promotion.promote("Daily Spend", operator_approved=True)
+    assert first["status"] == "promoted"
+    promoted_md = skills_dir / "promoted" / "daily-spend" / "SKILL.md"
+    original_bytes = promoted_md.read_bytes()
+
+    # A DIFFERENT safe skill whose name slugs onto the same canonical dir.
+    other_text = (
+        "---\n"
+        "name: daily-spend\n"
+        "description: Categorize transactions against a budget\n"
+        "version: 1.0.0\n"
+        "category: finance\n"
+        "generated: true\n"
+        "---\n\n"
+        "# daily-spend\n\n"
+        "Group each transaction by budget line.\n"
+    )
+    other_dir = skills_dir / "generated" / "finance" / "daily-spend"
+    other_dir.mkdir(parents=True)
+    other_draft = other_dir / "SKILL.md"
+    other_draft.write_text(other_text, encoding="utf-8")
+    _make_eligible("daily-spend", other_draft, count=3)
+
+    out = skill_promotion.promote("daily-spend", operator_approved=True)
+
+    assert out["status"] == "promoted_name_collision"
+    # The first persona's artifact is byte-for-byte untouched...
+    assert promoted_md.read_bytes() == original_bytes
+    # ...the colliding draft was NOT moved over it...
+    assert other_draft.exists()
+    # ...and the colliding row was never marked promoted.
+    assert skill_usage.get_usage("daily-spend").state == "eligible"
+
+
+def test_promote_already_promoted_target_with_identical_content_is_a_legit_no_op(
+    promo_env,
+):
+    """The positive half of the collision gate: content identity ignores the
+    per-ingest stamps (``created_at``/``source_session``/the generated->
+    promoted flip), so a genuine "same skill, promoted before" still reports
+    ``already_promoted`` instead of a phantom collision."""
+    _, skills_dir = promo_env
+    draft_text = (
+        "---\n"
+        "name: relink\n"
+        "description: A perfectly safe helper skill\n"
+        "version: 1.0.0\n"
+        "category: ops\n"
+        "generated: true\n"
+        "created_at: 2026-08-01T00:00:00+00:00\n"
+        "---\n\n"
+        "# relink\n\n"
+        "Read the file, summarize it.\n"
+    )
+    draft_dir = skills_dir / "generated" / "ops" / "relink"
+    draft_dir.mkdir(parents=True)
+    draft = draft_dir / "SKILL.md"
+    draft.write_text(draft_text, encoding="utf-8")
+    _make_eligible("relink", draft, count=3)
+    # The prior promote's artifact: SAME identity, fresh per-ingest stamps.
+    target_dir = skills_dir / "promoted" / "relink"
+    target_dir.mkdir(parents=True)
+    (target_dir / "SKILL.md").write_text(
+        draft_text.replace("generated: true", "promoted: true").replace(
+            "2026-08-01", "2026-07-01"
+        ),
+        encoding="utf-8",
+    )
+
+    out = skill_promotion.promote("relink", operator_approved=True)
+
+    assert out["status"] == "already_promoted"
+    assert out["path"] == str(target_dir / "SKILL.md")
+    # The candidate draft was NOT moved over the existing artifact.
+    assert draft.exists()
+
+
 def test_promote_not_found_when_draft_missing(promo_env):
     data_dir, skills_dir = promo_env
     # Eligible usage row (meets the pinned threshold of 3) but NO draft on disk.
@@ -444,6 +647,115 @@ def test_promote_not_found_when_draft_missing(promo_env):
     assert out["status"] == "not_found"
     rows = _rows_for(_read_audit_rows(data_dir), "promote")
     assert any(r["outcome"] == "refused" and "not_found" in (r["reason"] or "") for r in rows)
+
+
+# --------------------------------------------------------------------------- #
+# Scope-before-publication + rollback (#429 design gate B1)
+# --------------------------------------------------------------------------- #
+
+
+def test_promote_marks_an_unscoped_row_positively_unrestricted(promo_env):
+    """A global ``/skills promote`` says WHO may read the result — everyone —
+    and says it BEFORE the move. That positive mark is what lets the index
+    fail closed on a promoted skill carrying no scope at all."""
+    _, skills_dir = promo_env
+    draft = _seed_draft(skills_dir, "global-skill", _SAFE_SKILL)
+    _make_eligible("global-skill", draft, count=3)
+
+    assert skill_promotion.promote("global-skill", operator_approved=True)["status"] == (
+        "promoted"
+    )
+
+    usage = skill_usage.get_usage("global-skill")
+    assert usage is not None
+    assert usage.assigned_personas == [skill_usage.SCOPE_UNRESTRICTED]
+    assert "global-skill" in build_skill_index(skills_dir, allowlist=None)
+
+
+def test_promote_leaves_a_caller_recorded_scope_alone(promo_env):
+    """The scope linked-skill intake recorded before calling ``promote`` must
+    survive it — a promote driven BY an intake must not widen that skill to
+    everyone."""
+    _, skills_dir = promo_env
+    draft = _seed_draft(skills_dir, "sales-skill", _SAFE_SKILL)
+    _make_eligible("sales-skill", draft, count=3)
+    skill_usage.record_persona_assignment("sales-skill", "sales")
+
+    assert skill_promotion.promote("sales-skill", operator_approved=True)["status"] == (
+        "promoted"
+    )
+
+    assert skill_usage.get_usage("sales-skill").assigned_personas == ["sales"]
+    assert "sales-skill" not in build_skill_index(skills_dir, allowlist=None)
+
+
+def test_promote_refuses_without_moving_when_the_scope_cannot_be_recorded(
+    promo_env, monkeypatch
+):
+    """The write that decides who may read the skill is REQUIRED and comes
+    FIRST: if it cannot be recorded, nothing is published."""
+    data_dir, skills_dir = promo_env
+    draft = _seed_draft(skills_dir, "unscopable", _SAFE_SKILL)
+    _make_eligible("unscopable", draft, count=3)
+
+    monkeypatch.setattr(
+        skill_usage, "mark_scope_unrestricted", lambda *a, **k: None
+    )
+
+    out = skill_promotion.promote("unscopable", operator_approved=True)
+
+    assert out["status"] == "scope_write_failed"
+    assert not (skills_dir / "promoted" / "unscopable").exists()
+    assert draft.exists()  # the draft never left generated/
+    rows = _rows_for(_read_audit_rows(data_dir), "promote")
+    assert any("scope_write_failed" in (r["reason"] or "") for r in rows)
+
+
+def test_rollback_promotion_returns_the_artifact_to_generated(promo_env):
+    data_dir, skills_dir = promo_env
+    draft = _seed_draft(skills_dir, "undo-me", _SAFE_SKILL)
+    _make_eligible("undo-me", draft, count=3)
+    assert skill_promotion.promote("undo-me", operator_approved=True)["status"] == (
+        "promoted"
+    )
+    assert (skills_dir / "promoted" / "undo-me" / "SKILL.md").exists()
+
+    out = skill_promotion.rollback_promotion("undo-me", draft, reason="test")
+
+    assert out["status"] == "rolled_back"
+    assert not (skills_dir / "promoted" / "undo-me").exists()
+    assert draft.exists()
+    content = draft.read_text(encoding="utf-8")
+    assert "generated: true" in content
+    assert "promoted: true" not in content
+    # Back to a state a retry can promote from, and out of every index.
+    assert skill_usage.get_usage("undo-me").state == "eligible"
+    assert "undo-me" not in build_skill_index(skills_dir, allowlist=None)
+    rows = _rows_for(_read_audit_rows(data_dir), "promote")
+    assert any(r["outcome"] == "rolled_back" for r in rows)
+
+
+def test_rollback_promotion_is_a_noop_when_nothing_was_published(promo_env):
+    _, skills_dir = promo_env
+    draft = _seed_draft(skills_dir, "never-promoted", _SAFE_SKILL)
+    assert skill_promotion.rollback_promotion("never-promoted", draft)["status"] == (
+        "absent"
+    )
+    assert draft.exists()
+
+
+def test_rollback_promotion_refuses_a_destination_outside_generated(promo_env, tmp_path):
+    """The rollback moves a real directory; its destination is gated to the
+    draft tree so a bad caller cannot relocate a promoted artifact anywhere."""
+    _, skills_dir = promo_env
+    draft = _seed_draft(skills_dir, "guarded", _SAFE_SKILL)
+    _make_eligible("guarded", draft, count=3)
+    skill_promotion.promote("guarded", operator_approved=True)
+
+    out = skill_promotion.rollback_promotion("guarded", tmp_path / "elsewhere")
+
+    assert out["status"] == "unsafe_target"
+    assert (skills_dir / "promoted" / "guarded" / "SKILL.md").exists()
 
 
 # --------------------------------------------------------------------------- #

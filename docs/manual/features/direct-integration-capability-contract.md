@@ -76,6 +76,14 @@ Declared mutating actions include:
 Personal Gmail, Docs, Drive, Circle, Search Console, and Analytics are
 read-only through the current wrapper policy.
 
+### Dedicated GA4 reporting token
+
+Set `GA4_REPORTING_TOKEN_FILE` in the local `.claude/scripts/.env` to a
+dedicated OAuth token with `analytics.readonly`. `/analytics` then uses that
+token without depending on the shared Gmail/Calendar credential. The reporting
+module refreshes only the dedicated GA4 token when needed; it never replaces
+the shared Google token.
+
 ## How To Run It
 
 List direct wrapper commands:

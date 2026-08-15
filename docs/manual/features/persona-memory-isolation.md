@@ -2,15 +2,21 @@
 
 Status: shipped 2026-07-07
 Owner: personas slice (`personas/lifecycle.py`) with CLI, doctor, and boot-guard surfaces
-Last updated: 2026-07-07
+Last updated: 2026-08-13
 
 ## What It Does
 
 Every named persona profile owns an isolated memory vault at
 `<profiles-root>/<name>/memory/` — 15 identity files (SOUL.md, MEMORY.md,
-GOALS.md, ...) plus 19 memory subdirectories (concepts/, daily/, episodes/,
-...). The persona learning loop, reflection, and episode writers all write
-into that tree; the cabinet/persona turn context is built FROM it.
+GOALS.md, ...) plus 20 memory subdirectories (concepts/, daily/, episodes/,
+experience/, ...). The persona learning loop, reflection, episode, and
+experience-note writers all write into that tree; the cabinet/persona turn
+context is built FROM it.
+
+`experience/` joined the required inventory in #422 (2026-08-13) so a persona
+is BORN with the substrate its learning loop needs. Profiles created before
+that report `inventory_ok: false` until touched — inventory health is
+warn-level, and the repair paths below backfill the directory.
 
 The failure class this feature closes: a profile created before the inventory
 contract existed (or hand-provisioned with just `config.yaml` + `.env`) can be
@@ -87,6 +93,129 @@ cd .claude/scripts && uv run python memory_index.py -p <name>
 Until the index exists, recall correctly returns empty and the turn falls back
 to the briefing — a no-op, not an error.
 
+## Work-Time Read-Back (Co-Founder Worktick Draft Turns)
+
+Shipped 2026-08-12 (issue #421, epic #418). Same read side as above, pointed at
+the OTHER place a persona thinks: the co-founder work loop. Before this, a
+persona wrote experience into its vault but never re-read it while working —
+`build_draft_prompt` assembled SOUL + repo notes + the task and nothing else.
+
+> **The fence is not worktick-only.** Fencing one consumer was the shape the
+> #425 round-4 gate rejected. The trust split lives at the COMPOSITION layer:
+> `runtime/bootstrap.py:read_durable_memory` splits MEMORY.md into the
+> operator-authored head and the machine-authored `## Autonomous Amendments`
+> tail — the split itself owned by
+> `cognition.amendments.split_autonomous_amendments`, which owns the format —
+> and emits the tail fenced under `### Machine-Written Memory`. Every official
+> persona surface (Discord `chat/discord_persona_runtime.py`, web/dashboard
+> `chat/web_persona_runtime.py`, Cabinet `scripts/cabinet/text_orchestrator.py`)
+> builds its system context through `build_session_start_context`, so all three
+> inherit it — in the briefing path AND in the raw full-dump fallback that
+> persona profiles actually take. That fallback is deliberately NOT narrowed: a
+> persona's MEMORY.md has no capsule structure, so for personas the dump IS the
+> normal path and degrading to "whatever extracted" would strip their identity.
+> It is safe because the dump applies the same split, not because it is rare.
+> `worktick.py` keeps its own fence because it reads the profile files directly
+> rather than through bootstrap.
+
+`cofounder/worktick.py` now adds two capped, additive, fail-open blocks to every
+draft-mode work prompt:
+
+1. **Durable memory** — a capped read of the persona's own `memory/MEMORY.md`
+   (`_persona_memory`, the `_persona_soul` shape, `MEMORY_PROMPT_CAP`), fenced
+   by `_fenced_identity_block` before it enters the prompt.
+
+   That fence arrived with #425 and closes the constraint #421 pinned on it.
+   The original premise was "same trust class as SOUL.md: first-party identity
+   memory, injected as-is". #425 invalidated it on BOTH files: the notes
+   distiller now writes model-authored lessons into persona `MEMORY.md`,
+   distilled from work notes that carry external research titles and quoted
+   third-party prose, and a steered amendment could reach `SOUL.md` by the same
+   ledger. So SOUL.md and MEMORY.md now route through the identical
+   `sanitize_recalled_content` + `wrap_recalled_memory` containment
+   `_persona_recall` already uses in this file. Screening is per `## ` section
+   (`_identity_chunks`), because `sanitize_recalled_content` is rejection-only
+   over the whole string it is handed and its patterns include `act as a` — a
+   legitimate hand-written SOUL.md would otherwise vanish from every draft
+   prompt on one false positive. The host-authored framing lines ("speak in
+   this voice") stay OUTSIDE the fence; only file content goes inside.
+2. **Own-index recall** — top-K over the persona's own `data/memory.db`, keyed
+   on the assignment text (`_persona_recall`, `RECALL_MAX_RESULTS`,
+   `RECALL_PROMPT_CAP`).
+
+Properties that differ from the Discord path, each deliberate:
+
+- **KEYWORD mode, not AUTO.** `recall_service` stays the sole entrypoint, but
+  its AUTO/HYBRID path runs `run_recall_pipeline`, whose step 4.5 fires the
+  haiku re-ranker whenever `len(merged) > 3` — and `_merge_and_rank(top_n=…)`
+  reorders without truncating, so `max_results` does not bound that list. AUTO
+  would put a live LLM call on the work-turn path. KEYWORD is pure FTS5 over
+  the persona's own DB: zero LLM, no embedding-model load in the heartbeat
+  process. Semantic work-time recall is a follow-up and needs a per-call
+  re-rank opt-out first.
+- **Every recalled FIELD is re-fenced at the prompt-assembly boundary, not
+  just the body.** `recall_service._keyword_only_recall`'s own
+  `formatted_text` sanitizes only `r.text` before interpolating `r.path` and
+  `r.section_title` raw — a poisoned note heading containing a literal
+  `</recalled-memory>` would close the untrusted-data fence early and let
+  the rest of the heading read as bare prompt instructions. `_persona_recall`
+  therefore ignores `formatted_text` and calls `_sanitized_recall_block`,
+  which rebuilds the block from `response.results` (the raw pre-formatting
+  fields `recall_service` still returns) and routes path, section title, AND
+  body through the identical `sanitize_recalled_content` /
+  `wrap_recalled_memory` pair. This is fixed in `worktick.py` at the call
+  site — not inside `recall_service`, which is the shared entrypoint for
+  chat/heartbeat/reflection/weekly and out of this seam's blast radius — so
+  a future `formatted_text` change upstream cannot silently reopen the hole
+  for this prompt.
+- **The task text is never the query, and one AND query is not enough.**
+  `db._quote_fts_query` quotes every whitespace term and ANDs them, so a whole
+  assignment sentence demands that all ~15 words co-occur in one chunk —
+  structurally zero hits. `_recall_terms` keeps the few most distinctive terms
+  (longest first, ties by first appearance, original order preserved) and
+  tokenizes Unicode-aware (`[^\W_]+`, so accented/non-English words survive
+  whole instead of shredding at the diacritic), so no FTS5 metacharacter from
+  operator- or LLM-authored task text can reach the MATCH expression. Even
+  with good terms, a real note rarely restates every chosen word, so the
+  combined AND query alone still misses relevant-but-not-verbatim notes;
+  `_persona_recall` also runs each term alone. All of those queries run —
+  taking the first one that happened to hit made retrieval depend on TERM
+  ORDER, so an early term's irrelevant note buried a later term's relevant
+  one and the later terms were never queried at all. The results are pooled,
+  deduplicated by CHUNK IDENTITY (path + line range, hashing the body for a
+  degenerate range) keeping each chunk's best score, ranked globally, and
+  capped to `RECALL_MAX_RESULTS`. The dedupe key is deliberately NOT the
+  section title: `memory_index.chunk_markdown` splits a long section at
+  `max_chars` and carries the same `section_title` onto every piece, so
+  section-keying would let an early distractor chunk evict the later relevant
+  chunk sharing its heading. The combined query runs first and the sort is
+  stable, so its higher-precision hits win ties.
+- **The index path is checked before the read (Rule 2) — including the
+  backend, not just the file.** `resolve_db_path` only returns
+  `<profile>/data/memory.db` when the sibling `data/` dir exists; otherwise it
+  falls back to a slug DB in the MAIN vault that every persona would share.
+  The read is gated on the resolved path being the persona's own file, so a
+  half-provisioned profile degrades to a briefing-only prompt instead of
+  reading another mind's memory. That file-path check is meaningless on its
+  own, though: `db.get_memory_db` ignores `db_path` entirely and returns the
+  single shared `PostgresMemoryDB` whenever a Postgres URL is configured, and
+  Postgres has no persona/tenant column. Reading `config.DATABASE_URL` would
+  not settle that either — `db.py` binds its own `DATABASE_URL` at import
+  time, so after any supported config reload/override the two copies disagree
+  and the guard can read "SQLite, safe" while the factory hands the search leg
+  Postgres. `_persona_recall` therefore asks the REAL factory, with the REAL
+  argument the search leg passes, and proceeds only when the object that would
+  actually be queried is a `SQLiteMemoryDB` — until persona-grained Postgres
+  storage exists. Both backend constructors are lazy (they store a path/URL;
+  `_get_conn` does the connecting), so the probe opens no file and no socket,
+  and building a prompt still never creates an empty SQLite DB as a side
+  effect.
+
+Everything fails open: no memory tree, no built index, no hits, or any error at
+all → the exact prompt the loop produced before. The operator's `recall` kill
+switch already covers this seam inside `recall_service` (refusals counted
+there); the read-back adds no second switch.
+
 ## Operator Entry Points
 
 - CLI: `thehomie profile repair [NAME|--all] [--check] [--json]`
@@ -102,7 +231,8 @@ to the briefing — a no-op, not an error.
 | CLI | `.claude/chat/cli.py` (`profile repair`, list/show markers) |
 | Doctor | `.claude/chat/diagnostics.py` (`check_environment` inventory block) |
 | Boot guards | `.claude/scripts/cabinet/text_orchestrator.py` (`_profile_execution_context`), `.claude/scripts/dashboard_bot_lifecycle.py` (`activate`) |
-| Tests | `.claude/scripts/tests/test_persona_inventory_repair.py`, plus cases in `test_persona_cli_handler.py`, `test_diagnostics.py`, `test_dashboard_bot_lifecycle.py` |
+| Work-time read-back | `.claude/scripts/cofounder/worktick.py` (`build_draft_prompt`, `_persona_memory`, `_fenced_identity_block`, `_identity_chunks`, `_persona_recall`, `_recall_query`, `_cap_recall`) |
+| Tests | `.claude/scripts/tests/test_persona_inventory_repair.py`, plus cases in `test_persona_cli_handler.py`, `test_diagnostics.py`, `test_dashboard_bot_lifecycle.py`, `test_cofounder_worktick.py` (read-back) |
 
 ## Safety Boundaries
 

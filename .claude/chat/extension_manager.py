@@ -669,7 +669,7 @@ class ExtensionManager:
             return None
 
         # Role check
-        user_role = getattr(incoming, "user_role", "admin")
+        user_role = getattr(incoming, "user_role", "viewer")
         if ROLE_LEVEL.get(user_role, 0) < ROLE_LEVEL.get(spec.min_role, 0):
             return f"Permission denied: /{command} requires {spec.min_role} role."
 

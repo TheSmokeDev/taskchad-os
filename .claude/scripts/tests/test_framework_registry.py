@@ -178,3 +178,50 @@ def test_registry_records_config_source(tmp_path: Path) -> None:
 
     assert registry.mcp_config_path == config_path
     assert registry.mcp_servers[0].source == ".mcp.json"
+
+
+def test_discover_skills_fences_persona_scoped_promoted_skills(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#429 codex R5 BLOCKER: the generic-lane discovery returned EVERY
+    promoted SKILL.md with no scope check — the tool map then handed any
+    runtime a readable path to a skill scoped to somebody else, hidden only by
+    the incidental rendering cap. Promoted skills now need a positive
+    unrestricted marker to enter the framework registry; hand-authored skills
+    are never gated (they never went through the promotion gate)."""
+    import config
+    from cognition import skill_usage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data", raising=False)
+
+    _write_skill(
+        tmp_path / ".claude" / "skills" / "promoted" / "sales-research" / "SKILL.md",
+        name="sales-research",
+        description="Scoped to sales only.",
+    )
+    _write_skill(
+        tmp_path / ".claude" / "skills" / "promoted" / "global-skill" / "SKILL.md",
+        name="global-skill",
+        description="Globally promoted.",
+    )
+    _write_skill(
+        tmp_path / ".claude" / "skills" / "promoted" / "orphan-skill" / "SKILL.md",
+        name="orphan-skill",
+        description="Promoted with no scope row.",
+    )
+    _write_skill(
+        tmp_path / ".claude" / "skills" / "hand-authored" / "SKILL.md",
+        name="hand-authored",
+        description="Never went through the gate.",
+    )
+
+    skill_usage.record_recurrence("sales-research", path="x")
+    skill_usage.record_persona_assignment("sales-research", "sales")
+    skill_usage.record_recurrence("global-skill", path="x")
+    skill_usage.mark_scope_unrestricted("global-skill")
+
+    names = [skill.name for skill in discover_skills(tmp_path)]
+    assert "hand-authored" in names
+    assert "global-skill" in names
+    assert "sales-research" not in names
+    assert "orphan-skill" not in names  # fail closed: no row, no reach

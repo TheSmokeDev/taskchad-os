@@ -175,6 +175,11 @@ def test_scheduled_allowlist_cannot_expose_interactive_authority():
     assert "x_search" not in agentic_turn.SCHEDULED_TOOL_ALLOWLIST
 
 
+def test_scheduled_allowlist_includes_read_only_mint_discovery():
+    assert "crypto_mintscan" in agentic_turn.SCHEDULED_TOOL_ALLOWLIST
+    assert "crypto_mintscan" not in agentic_turn.SCHEDULED_TOOL_DENYLIST
+
+
 def test_preamble_carries_the_json_contract():
     """The desks parse strict JSON; a prose final turn yields zero plays."""
     text = agentic_turn.tool_preamble()

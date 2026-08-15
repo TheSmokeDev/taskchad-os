@@ -385,7 +385,7 @@ def build_turn_context(
         "turn_id": stable_turn_id,
         "original_user_id": str(getattr(user, "platform_id", "") or ""),
         "original_user_name": str(getattr(user, "display_name", "") or ""),
-        "original_user_role": str(getattr(incoming, "user_role", "admin") or "admin"),
+        "original_user_role": str(getattr(incoming, "user_role", "viewer") or "viewer"),
         "original_text": str(getattr(incoming, "text", "") or "")[:_MAX_ORIGINAL_TEXT_CHARS],
         "has_attachments": bool(getattr(incoming, "attachments", None)),
         "project_root": str(Path(project_root).resolve()) if project_root else "",
@@ -589,7 +589,7 @@ def request_tool(
                 "turn_id": str(context.get("turn_id") or ""),
                 "original_user_id": str(context.get("original_user_id") or ""),
                 "original_user_name": str(context.get("original_user_name") or ""),
-                "original_user_role": str(context.get("original_user_role") or "admin"),
+                "original_user_role": str(context.get("original_user_role") or "viewer"),
                 "original_text": str(context.get("original_text") or ""),
             }
             conn.execute(

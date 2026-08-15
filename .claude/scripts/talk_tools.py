@@ -19,6 +19,7 @@ Outputs are capped and plain-text: the model summarizes them aloud.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -36,6 +37,168 @@ _CODE_EXEC_ENV = "TALK_ENABLE_CODE_EXEC"
 _CODE_EXEC_TIMEOUT_S = 30
 _MAX_OUTPUT_CHARS = 4_000
 _MAX_MEMORY_SNIPPET_CHARS = 280
+
+_VALID_SESSION_ROLES = ("viewer", "operator", "admin")
+
+#: TRANSPORTS this tool surface serves. The distinction is load-bearing: the
+#: Discord voice sidecar is a SEPARATE PROCESS that relays each tool call over
+#: loopback to this one, so nothing it knows is in this interpreter's memory.
+TRANSPORT_BROWSER = "browser"
+TRANSPORT_DISCORD_VOICE = "discord_voice"
+
+#: Authority for the browser `/talk` page ONLY.
+#:
+#: `POST /api/talk/session` is classified `admin` in
+#: `orchestration/route_policy.py`, so minting the session IS the authorization
+#: event, and exactly one participant holds it — the authenticated operator whose
+#: browser has the session. Scoped to that transport BY NAME so it can never be
+#: read for a Discord-originated call: a browser mint must not silently become
+#: the authority for a voice channel full of other people.
+_BROWSER_SESSION_ROLE = "viewer"
+
+#: The role for the tool call being served RIGHT NOW. A ContextVar, not a module
+#: global, because this process serves calls from every transport concurrently —
+#: a global would let one request's identity leak into another's.
+_REQUEST_ROLE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "talk_request_role", default="viewer"
+)
+
+#: Voice tools that only READ. They stay available to anyone in the channel,
+#: including when speaker attribution could not be resolved at all — losing
+#: attribution should cost a refusal on mutation, not silence the assistant.
+READ_ONLY_TALK_TOOLS = frozenset({"memory_search", "calendar_events", "check_work"})
+
+#: Voice tools that spend, mutate, or reach outside this box. On Discord these
+#: require a speaker the sidecar could bind to one utterance; the role gate
+#: downstream then still has to accept that speaker.
+MUTATING_TALK_TOOLS = frozenset(
+    {
+        "homie_command",
+        "delegate_task",
+        "run_skill",
+        "run_archon",
+        "computer",
+        "browse",
+        "manage_run",
+        "run_python",
+        "run_shell",
+    }
+)
+
+#: hermes-talk's denial shape — say what happened AND what still works, rather
+#: than a bare permission error that reads like a bug. Reworded for this split:
+#: the sidecar resolves the speaker and the allowlist lives here, so the honest
+#: failure is "couldn't verify which speaker", not "not a configured operator".
+MUTATION_DENIAL = (
+    "I couldn't verify which speaker this request came from, so the {tool} tool "
+    "was not run. Read-only requests are still available."
+)
+
+#: The other half of a mutating refusal: we DO know who spoke, and they are not
+#: authorized. Kept distinct from MUTATION_DENIAL so the operator can tell an
+#: attribution failure (retry in a clean turn) from an authority one (you are
+#: not on the allowlist) — and deliberately carries no user ids.
+ROLE_DENIAL = (
+    "You're not authorized to run the {tool} tool on this voice channel, so it "
+    "was not run. Read-only requests are still available."
+)
+
+#: Mirrors `chat/extension_manager.py::ROLE_LEVEL`, which is the canonical
+#: ladder. Duplicated rather than imported because that module lives in the
+#: chat slice and is only reachable here through the lazy sys.path join in
+#: `_command_manager()` — an import-time dependency on it would make this gate
+#: fail open whenever the chat slice is not importable, which is exactly
+#: backwards for an authorization check.
+_ROLE_LEVEL: dict[str, int] = {"viewer": 0, "operator": 1, "admin": 2}
+
+
+def set_browser_session_role(role: str | None) -> str:
+    """Record the authenticated operator's role for the BROWSER Talk session.
+
+    Unknown or empty values fail closed to `viewer`; returns the value actually
+    stored so callers can log it.
+    """
+    global _BROWSER_SESSION_ROLE
+    normalized = str(role or "").strip().lower()
+    _BROWSER_SESSION_ROLE = normalized if normalized in _VALID_SESSION_ROLES else "viewer"
+    return _BROWSER_SESSION_ROLE
+
+
+def end_talk_session() -> None:
+    """Drop the browser session's authority (teardown)."""
+    global _BROWSER_SESSION_ROLE
+    _BROWSER_SESSION_ROLE = "viewer"
+
+
+def _binding_is_trusted(binding: object) -> bool:
+    """Did the sidecar prove which utterance produced this call?
+
+    Absent binding fails CLOSED on the voice transport. The sidecar always
+    sends one, so a missing verdict means an unknown or tampered client — the
+    exact case that must not inherit the old "trust the id" behavior.
+    """
+    if binding is None:
+        return False
+    if isinstance(binding, dict):
+        return bool(binding.get("trusted"))
+    return bool(getattr(binding, "trusted", False))
+
+
+def _binding_reason(binding: object) -> str:
+    if isinstance(binding, dict):
+        return str(binding.get("reason") or "no speaker binding on the request")
+    return str(getattr(binding, "reason", "") or "no speaker binding on the request")
+
+
+def resolve_request_role(
+    *,
+    transport: str | None,
+    speaker_id: str | None,
+    binding: object = None,
+) -> str:
+    """THE single resolution authority for one incoming tool call.
+
+    Resolves from the REQUEST, never from what some other process believes.
+    The Discord sidecar sends the raw speaker id rather than a role on purpose:
+    a sidecar can then only assert WHO spoke, and this process independently
+    checks that id against the same `DISCORD_ALLOWED_USERS` seam the Discord
+    chat adapter stamps from. A buggy or tampered sidecar cannot claim `admin`
+    — it can only name a user, and naming one still resolves to whatever the
+    allowlist says about them.
+
+    `binding` is the sidecar's interval-bound verdict (`speaker_auth`): whether
+    the speaker it names was resolved from the audio the model actually
+    answered, rather than from whoever happened to be talking when the call
+    came back. Naming a speaker is not enough — an untrusted or missing verdict
+    resolves `viewer` even when an id is present, so a sidecar bug can never
+    upgrade an ambiguous room into one person's authority.
+
+    - `discord_voice` -> the bound speaker's own role; unbound -> viewer.
+    - `browser`       -> the authenticated browser session's role.
+    - anything else   -> viewer (fail closed on an unrecognized transport).
+    """
+    if transport == TRANSPORT_BROWSER:
+        return _BROWSER_SESSION_ROLE
+    if transport != TRANSPORT_DISCORD_VOICE:
+        return "viewer"
+    if not _binding_is_trusted(binding):
+        _log.warning(
+            "discord voice call has no trusted speaker binding (%s); refusing as viewer",
+            _binding_reason(binding),
+        )
+        return "viewer"
+    speaker = str(speaker_id or "").strip()
+    if not speaker:
+        return "viewer"
+    try:
+        import config  # noqa: PLC0415 — call-time read (Rule 1)
+        from models import resolve_ingress_role  # noqa: PLC0415
+
+        return resolve_ingress_role(speaker, config.DISCORD_ALLOWED_USERS)
+    except Exception:  # noqa: BLE001 — an unresolvable identity is not an admin
+        _log.warning("speaker role resolution failed; refusing as viewer")
+        return "viewer"
+
 
 _TOOL_MEMORY_SEARCH: dict = {
     "type": "function",
@@ -495,8 +658,86 @@ def default_talk_tools() -> list[dict]:
     return copy.deepcopy(tools)
 
 
-def execute_talk_tool(name: str, arguments: dict | None) -> str:
+def talk_tool_denial(
+    name: str,
+    *,
+    transport: str | None,
+    binding: object = None,
+    resolved_role: str = "viewer",
+) -> str | None:
+    """The ONE gate every voice tool passes. `None` = proceed to the handler.
+
+    Codex R8 BLOCKER: resolving the speaker's role was not the same thing as
+    ENFORCING it. Only `_handle_homie_command` ever read `_REQUEST_ROLE` (it
+    hands it to the command registry's own min_role gate); the seven direct
+    mutating handlers — run_python, run_shell, delegate_task, run_skill,
+    run_archon, computer, manage_run — executed unconditionally. A stranger
+    with a perfectly TRUSTED binding resolved to `viewer` and still ran them:
+    the identity chain was intact and simply never consulted.
+
+    So the check lives here, at the dispatch chokepoint, rather than in seven
+    copies that the eighth handler would forget. Four rules, all fail-closed:
+
+    - read-only tools always run, even with no attribution at all — losing
+      attribution costs mutation, not the assistant;
+    - a tool in NEITHER set is unclassified and is treated AS MUTATING, so a
+      new capability inherits the strict bucket instead of a free pass
+      (`test_every_talk_tool_is_classified_read_only_or_mutating` then makes
+      the missing classification loud in CI rather than silent at runtime);
+    - mutating needs a trusted binding — proof of WHICH utterance asked;
+    - mutating needs the resolved role to clear `viewer` — proof that the
+      speaker it names is allowed to. Both, not either.
+
+    Scoped to the Discord transport by name, deliberately. That is the surface
+    where ONE authorized session serves MANY identities, which is the whole
+    reason the role is resolved per call there. The browser surface has a
+    single participant and authorizes at session mint — both
+    `POST /api/talk/session` and `POST /api/talk/tool` are admin-classified in
+    `orchestration/route_policy.py`, so a browser call has already cleared an
+    admin route gate before it reaches this function.
+    """
+    if transport != TRANSPORT_DISCORD_VOICE:
+        return None
+    if name in READ_ONLY_TALK_TOOLS:
+        return None
+    if name not in MUTATING_TALK_TOOLS:
+        _log.error(
+            "unclassified Discord voice tool %s — enforcing it as mutating", name
+        )
+    if not _binding_is_trusted(binding):
+        _log.warning(
+            "denied mutating Discord voice tool %s: %s", name, _binding_reason(binding)
+        )
+        return MUTATION_DENIAL.format(tool=name)
+    if _ROLE_LEVEL.get(resolved_role, 0) < _ROLE_LEVEL["operator"]:
+        # The speaker is known and provable — they are simply not allowed. Say
+        # that, rather than reusing the attribution message, which would claim
+        # we could not identify someone we identified fine. No ids in the text:
+        # a denial must not become an allowlist oracle.
+        _log.warning(
+            "denied mutating Discord voice tool %s: speaker resolved as %s",
+            name,
+            resolved_role,
+        )
+        return ROLE_DENIAL.format(tool=name)
+    return None
+
+
+def execute_talk_tool(
+    name: str,
+    arguments: dict | None,
+    *,
+    transport: str | None = TRANSPORT_BROWSER,
+    speaker_id: str | None = None,
+    binding: object = None,
+) -> str:
     """Dispatch one tool call and return plain text for the model to speak.
+
+    `transport` + `speaker_id` + `binding` are THIS CALL's identity, resolved
+    here and bound for the duration of the handler. Every tool that reaches a
+    role gate reads that bound value, so authority always comes from the
+    request rather than from whatever a previous call — or another process —
+    left behind.
 
     Known tools never raise for execution failures — the error text goes to
     the model so it can say what broke. Unknown names raise TalkToolError.
@@ -505,6 +746,19 @@ def execute_talk_tool(name: str, arguments: dict | None) -> str:
     handler = _HANDLERS.get(name)
     if handler is None:
         raise TalkToolError(f"unknown talk tool: {name!r}")
+    # Resolve BEFORE the gate, not just before the handler: the gate's whole
+    # job is to enforce the resolved role, so it has to be able to see it.
+    resolved_role = resolve_request_role(
+        transport=transport, speaker_id=speaker_id, binding=binding
+    )
+    denial = talk_tool_denial(
+        name, transport=transport, binding=binding, resolved_role=resolved_role
+    )
+    if denial is not None:
+        # Refused BEFORE the handler, so an unauthorized call spends nothing
+        # and mutates nothing — not even the tool's own side effects.
+        return denial
+    role_token = _REQUEST_ROLE.set(resolved_role)
     try:
         output = handler(arguments or {})
     except kill_switches.KillSwitchDisabled:
@@ -518,6 +772,10 @@ def execute_talk_tool(name: str, arguments: dict | None) -> str:
     except Exception as exc:  # noqa: BLE001 — the model speaks the failure
         _log.warning("talk tool %s failed: %s: %s", name, type(exc).__name__, exc)
         return f"{name} failed: {type(exc).__name__}: {exc}"
+    finally:
+        # This call's identity dies with this call — never left bound for the
+        # next one, whatever transport that one arrives on.
+        _REQUEST_ROLE.reset(role_token)
     return output or "(no output)"
 
 
@@ -668,6 +926,12 @@ def _handle_homie_command(arguments: dict) -> str:
         user=User(platform=Platform.CLI, platform_id="voice"),
         channel=Channel(platform=Platform.CLI, platform_id="voice", is_dm=True),
         platform=Platform.CLI,
+        # THIS request's identity, bound by `execute_talk_tool` from the wire:
+        # on Discord voice that is the speaker who actually talked (resolved
+        # here, in the process that owns the allowlist), so the operator who
+        # opened the session cannot lend their admin to anyone else in the
+        # channel. On the browser surface it is that session's own role.
+        user_role=_REQUEST_ROLE.get(),
     )
     reply = asyncio.run(
         manager.dispatch(command, adapter=None, incoming=incoming, args=args, collect_only=True)
@@ -2596,17 +2860,27 @@ _HANDLERS = {
 
 
 __all__ = [
+    "MUTATING_TALK_TOOLS",
+    "MUTATION_DENIAL",
+    "ROLE_DENIAL",
+    "READ_ONLY_TALK_TOOLS",
     "TalkToolError",
     "archon_runs_by_status",
     "code_exec_enabled",
     "default_talk_tools",
     "execute_talk_tool",
+    "TRANSPORT_BROWSER",
+    "TRANSPORT_DISCORD_VOICE",
+    "end_talk_session",
     "get_skill_run",
     "narrate_archon_run",
     "recent_archon_runs",
     "resolve_archon_run",
     "resolve_skill",
     "resolve_workflow",
+    "resolve_request_role",
+    "talk_tool_denial",
+    "set_browser_session_role",
     "start_agent_run",
     "start_archon_run",
     "start_skill_run",

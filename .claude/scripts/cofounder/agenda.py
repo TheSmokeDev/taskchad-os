@@ -61,7 +61,7 @@ import argparse
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -119,6 +119,7 @@ OPERATOR_MODEL_CAP = 1500
 LIVE_CONTEXT_CAP = 800
 RECENT_SESSIONS_CAP = 1200
 TRACKER_CAP = 600
+RECENT_JOURNALS_CAP = 2600
 
 # Agenda-sized episode digest — the dream cycle's own knobs are far larger.
 EPISODE_LOOKBACK_DAYS = 2
@@ -146,6 +147,8 @@ _CONTEXT_SECTIONS = (
     ("Live context — the operator's working memory right now:", "live_context"),
     ("Recent sessions — what actually happened in the last two days:",
      "recent_sessions"),
+    ("Recent operator journals and vault-ops receipts — newest evidence wins:",
+     "recent_journals"),
     ("Active tracker — what the operator has queued:", "tracker"),
 )
 
@@ -381,6 +384,7 @@ def build_portfolio_scan(settings) -> dict[str, Any]:
         "operator_model": _operator_model_text(),
         "live_context": _live_context_text(),
         "recent_sessions": _recent_sessions_text(),
+        "recent_journals": _recent_journals_text(),
         "tracker": _tracker_now_text(),
     }
 
@@ -484,6 +488,24 @@ def _recent_sessions_text() -> str:
         )
     except Exception:
         logger.warning("cofounder.agenda: episode digest failed", exc_info=True)
+        return ""
+
+
+def _recent_journals_text() -> str:
+    """Recent daily MDs plus the latest vault-ops receipt. Fail-open to ''."""
+    try:
+        import config
+
+        _ensure_chat_on_path()
+        from cognition.proactive_brief import read_recent_operator_journal_lines
+
+        lines = read_recent_operator_journal_lines(
+            Path(config.MEMORY_DIR),
+            since=config.now_local() - timedelta(days=4),
+        )
+        return _cap("\n".join(lines), RECENT_JOURNALS_CAP)
+    except Exception:
+        logger.warning("cofounder.agenda: recent journal read failed", exc_info=True)
         return ""
 
 
@@ -736,6 +758,13 @@ def build_agenda_prompt(scan: dict[str, Any], now: datetime, max_items: int) -> 
         '- mode: "draft" for research/checklists/briefs (the default);',
         '  "code" ONLY for substantive coding work in a tracked repo.',
         "- summary is 2-3 sentences of portfolio state for the operator.",
+        "- Ground the summary in the recent journals and vault-ops receipts,",
+        "  including what the operator actually worked on before old queue labels.",
+        "- Newer verified evidence beats stale blockers or old WORKING.md bullets.",
+        "- Distinguish draft/generated/delegated work from executed, provider-",
+        "  verified, deployed, paid, sent, or otherwise completed outcomes.",
+        "- Prioritize cash, revenue, deadlines, replies, and blocked proof paths",
+        "  before internal cleanup unless the evidence says otherwise.",
         "- Do not propose work a repo's recent activity shows is already done",
         "  or in flight.",
         "",

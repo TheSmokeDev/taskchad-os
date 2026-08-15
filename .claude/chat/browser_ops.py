@@ -22,7 +22,7 @@ _CORE_RULES = (
     "Load the current agent-browser guide before CLI browser work: "
     "`agent-browser skills get core`.",
     "Attach to the existing visible Chrome/Chromium CDP session, normally "
-    "`agent-browser --cdp 9222 ...`.",
+    "`agent-browser --cdp 18222 ...`.",
     "Do not silently switch to a headless, Playwright, test-browser, or fresh "
     "profile fallback.",
     "Use the snapshot/ref loop: `snapshot -i -c`, act on refs, then snapshot "

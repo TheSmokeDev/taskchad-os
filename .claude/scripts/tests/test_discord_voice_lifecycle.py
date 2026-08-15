@@ -143,7 +143,17 @@ def test_start_session_join_via_control_post(
 
     result = lifecycle.start_session(1, 222, text_channel_id=333)
 
-    assert posts == [("/join", {"guildId": 1, "channelId": 222, "textChannelId": 333})]
+    assert posts == [
+        (
+            "/join",
+            {
+                "guildId": 1,
+                "channelId": 222,
+                "textChannelId": 333,
+                "operatorRole": "viewer",
+            },
+        )
+    ]
     assert result["status"] == "ready"
     assert result["channelId"] == 222
     assert result["bridge"]["authSource"] == "codex-oauth"
@@ -1179,7 +1189,17 @@ def test_a_live_metered_session_is_rejoined_under_the_directive(
 
     result = lifecycle.start_session(1, 555)
 
-    assert posts == [("/join", {"guildId": 1, "channelId": 555, "textChannelId": None})]
+    assert posts == [
+        (
+            "/join",
+            {
+                "guildId": 1,
+                "channelId": 555,
+                "textChannelId": None,
+                "operatorRole": "viewer",
+            },
+        )
+    ]
     assert result.get("alreadyJoined") is not True
     assert result["bridge"]["authSource"] == "codex-oauth"
 

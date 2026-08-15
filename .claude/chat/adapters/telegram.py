@@ -22,6 +22,8 @@ from models import (
     Platform,
     Thread,
     User,
+    ingress_allowlist_warning,
+    resolve_ingress_role,
 )
 
 # Phase 4 (PRD-8) — voice cascade + marker dispatch.
@@ -143,6 +145,12 @@ class TelegramAdapter:
 
     async def connect(self) -> None:
         """Start polling for updates."""
+        # Loud once at startup: with no allowlist this surface admits anyone,
+        # and everyone it admits is stamped `viewer`, so role-gated commands are
+        # off. An operator should learn that here, not from a refusal mid-chat.
+        _warning = ingress_allowlist_warning("telegram", self.allowed_user_ids, "TELEGRAM_ALLOWED_USER_IDS")
+        if _warning:
+            print(f"[{datetime.now()}] {_warning}", flush=True)
         from commands import get_telegram_bot_commands
         from telegram import BotCommand
         from telegram.ext import CallbackQueryHandler, MessageHandler, filters
@@ -659,12 +667,23 @@ class TelegramAdapter:
         if not text or len(text) > 4096 or media_refs:
             return None
 
+        # A component-bearing final (the #428 counter-offer Approve/Deny
+        # card, concept-draft Accept/Diff) replaces the ONE placeholder, so
+        # the buttons must ride the edit -- same builder send() uses. No
+        # components -> no markup kwarg, so a plain edit never clears a
+        # keyboard it is not replacing (#428 codex R5).
+        reply_markup = (
+            self._build_reply_markup(message.components)
+            if message.components
+            else None
+        )
         try:
             await self._app.bot.edit_message_text(
                 chat_id=int(message.channel.platform_id),
                 message_id=int(message.update_message_id),
                 text=text,
                 parse_mode="Markdown",
+                reply_markup=reply_markup,
             )
             return message.update_message_id
         except Exception as e:
@@ -701,6 +720,17 @@ class TelegramAdapter:
             await self._app.bot.send_chat_action(chat_id=chat_id, action="typing")
         except Exception:
             pass
+
+    def _ingress_role(self, user_id: int) -> str:
+        """Role stamped on a message this adapter just authenticated.
+
+        Uses the SAME `self.allowed_user_ids` list (and the same int compare)
+        as every `_on_*` auth check above, so the stamp can never disagree with
+        the gate that admitted the message. An unset `TELEGRAM_ALLOWED_USER_IDS`
+        keeps this adapter's documented accept-anyone behavior — the operator's
+        role is unchanged on a single-operator install.
+        """
+        return resolve_ingress_role(user_id, self.allowed_user_ids)
 
     # ── Event Handler ──────────────────────────────────────────────
 
@@ -754,6 +784,7 @@ class TelegramAdapter:
             platform=Platform.TELEGRAM,
             thread=thread,
             platform_message_id=str(msg.message_id),
+            user_role=self._ingress_role(user_id),
             raw_event=msg.to_dict(),
         )
 
@@ -888,6 +919,7 @@ class TelegramAdapter:
             platform=Platform.TELEGRAM,
             thread=thread,
             platform_message_id=str(msg.message_id),
+            user_role=self._ingress_role(user_id),
             raw_event=msg.to_dict(),
         )
 
@@ -975,6 +1007,7 @@ class TelegramAdapter:
                 )
             ],
             caption=caption,
+            user_role=self._ingress_role(user_id),
             raw_event=msg.to_dict(),
         )
 
@@ -1172,6 +1205,17 @@ class TelegramAdapter:
 
         # Route through the same __button: pipeline the router already handles
         chat_id = str(query.message.chat_id) if query.message else ""
+        # A tap rides on the card message itself. When that card was sent as a
+        # reply, the tap belongs to that reply-thread -- same convention as
+        # _on_message. Otherwise the decision reply and the persisted receipt
+        # rows land in the chat-wide transcript while the card lives in the
+        # reply-thread one (#428 codex R4).
+        thread_id = chat_id
+        parent_msg_id = None
+        card_parent = getattr(query.message, "reply_to_message", None)
+        if card_parent is not None:
+            thread_id = f"{chat_id}:{card_parent.message_id}"
+            parent_msg_id = str(card_parent.message_id)
         user = User(
             platform=Platform.TELEGRAM,
             platform_id=str(user_id),
@@ -1182,7 +1226,7 @@ class TelegramAdapter:
             platform_id=chat_id,
             is_dm=(query.message.chat.type == "private") if query.message else True,
         )
-        thread = Thread(thread_id=chat_id)
+        thread = Thread(thread_id=thread_id, parent_message_id=parent_msg_id)
 
         incoming = IncomingMessage(
             text=f"__button:{custom_id}",
@@ -1190,6 +1234,7 @@ class TelegramAdapter:
             channel=channel,
             platform=Platform.TELEGRAM,
             thread=thread,
+            user_role=self._ingress_role(user_id),
             raw_event={
                 "interaction_type": "button",
                 "custom_id": custom_id,
@@ -1277,6 +1322,7 @@ class TelegramAdapter:
                     size_bytes=photo.file_size,
                 )
             ],
+            user_role=self._ingress_role(user_id),
             raw_event=msg.to_dict(),
         )
 

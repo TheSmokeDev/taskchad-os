@@ -182,18 +182,120 @@ def _skills_list(**_: Any) -> str:
     return _truncate("\n".join(rows) or "No skills found.")
 
 
-def _skill_view(name: str = "", **_: Any) -> str:
+def _central_skills_dir() -> Path:
+    """The repo's central skills tree — resolved at call time (Rule 1) so
+    tests and embedders never depend on this file's install location."""
+    return Path(__file__).resolve().parents[2] / "skills"
+
+
+def _skill_dir_names(name: str) -> list[str]:
+    """Every directory shape a skill named *name* may physically live under.
+
+    #429 codex R7 MAJOR: the display name, the promotion slug, and the
+    assignment slug are THREE different foldings of the same skill —
+    ``Daily Spend`` indexes by frontmatter name, promotes to
+    ``promoted/daily-spend``, and installs to ``skills/Daily-Spend``. A
+    viewer that joins only the display name can list a skill it can never
+    open. Try the raw name first, then each fold.
+    """
+    names = [name]
+    try:
+        from cognition.skill_guard import sanitize_skill_path_component
+
+        slug = sanitize_skill_path_component(name)
+        if slug and slug not in names:
+            names.append(slug)
+    except Exception:  # noqa: BLE001 — a fold that cannot apply adds nothing
+        pass
+    try:
+        from personas.skill_assignment import safe_skill_dir_name
+
+        aslug = safe_skill_dir_name(name)
+        if aslug and aslug not in names:
+            names.append(aslug)
+    except Exception:  # noqa: BLE001
+        pass
+    return names
+
+
+def _skill_view(name: str = "", *, _persona_id: str | None = None, **_: Any) -> str:
     """Read a skill's body.
 
     THE gap this epic identified: `build_skill_index` emits names and
     one-liners only, so a persona could see a skill existed and never read it.
+
+    Resolution order (#429 codex R5 BLOCKER — a linked skill installed into
+    the persona's OWN tree was invisible here, a catalog card not a book):
+    1. the calling persona's own skills dir (linked skills install there),
+    2. the central top-level tree (hand-authored),
+    3. central promoted/ — ONLY when the caller is inside that skill's
+       scope (the same fence as build_skill_index: a persona must not read
+       another persona's scoped skill through the tool either).
+
+    The name is validated before any join — this string comes from the
+    model, and `..` has no business near a filesystem read.
     """
-    if not name.strip():
+    clean = name.strip()
+    if not clean:
         return "error: name is required"
-    skill_md = Path(__file__).resolve().parents[2] / "skills" / name.strip() / "SKILL.md"
-    if not skill_md.is_file():
-        return f"error: no skill named {name!r} (use skills_list)"
-    return _truncate(skill_md.read_text(encoding="utf-8", errors="replace"), _MAX_FILE_CHARS)
+    if "/" in clean or "\\" in clean or ".." in clean:
+        return "error: skill names are flat identifiers, not paths"
+    central = _central_skills_dir()
+
+    dir_names = _skill_dir_names(clean)
+    candidates: list[Path] = []
+    if _persona_id:
+        try:
+            from personas import get_persona_paths
+
+            persona_root = get_persona_paths(_persona_id)["skills"]
+            candidates.extend(persona_root / d / "SKILL.md" for d in dir_names)
+        except Exception:  # noqa: BLE001 — central fallbacks still apply
+            pass
+    candidates.extend(central / d / "SKILL.md" for d in dir_names)
+
+    for skill_md in candidates:
+        if skill_md.is_file():
+            return _truncate(
+                skill_md.read_text(encoding="utf-8", errors="replace"),
+                _MAX_FILE_CHARS,
+            )
+
+    for d in dir_names:
+        promoted = central / "promoted" / d / "SKILL.md"
+        if promoted.is_file() and _promoted_scope_allows(clean, _persona_id):
+            return _truncate(
+                promoted.read_text(encoding="utf-8", errors="replace"),
+                _MAX_FILE_CHARS,
+            )
+    return f"error: no skill named {clean!r} (use skills_list)"
+
+
+def _promoted_scope_allows(name: str, persona_id: str | None) -> bool:
+    """May THIS caller read a promoted skill's body? (#429 codex R5)
+
+    Mirrors the index fence exactly: fail closed on an unreadable sidecar
+    or a missing row; legacy empty rows and the unrestricted sentinel read
+    as global; otherwise the caller's own persona id must be in the row
+    (None = the default profile, the whole-pool reader).
+    """
+    try:
+        from cognition import skill_usage
+        from cognition.skills import _UNRESTRICTED_PROFILE, _load_persona_scope_map
+    except Exception:
+        return False  # no scope machinery → no promoted body reads
+    scope_map, readable = _load_persona_scope_map()
+    if not readable:
+        return False
+    assigned = scope_map.get(name)
+    if assigned is None:
+        return False
+    if not assigned:
+        return True  # legacy/global migration row
+    reader = (persona_id or "").strip() or _UNRESTRICTED_PROFILE
+    sentinel = str(getattr(skill_usage, "SCOPE_UNRESTRICTED", "*") or "*")
+    return bool(assigned & {reader, sentinel})
+
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +464,11 @@ def register_tools() -> int:
                 parameters=parameters,
                 handler=handler,
                 effect="read",
-                persona_scoped=name in {"memory_search", "search_files"},
+                # skill_view reads the CALLER's own tree first (#429 codex R6:
+                # accepted the identity but was never marked, so the
+                # dispatcher never injected it — dead wiring).
+                persona_scoped=name in {"memory_search", "search_files", "skill_view"},
+
                 elevatable=True,
             )
             registered += 1

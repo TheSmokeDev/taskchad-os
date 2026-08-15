@@ -2,10 +2,59 @@
 
 from __future__ import annotations
 
+from collections.abc import Container, Sized
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
+
+
+def resolve_ingress_role(sender_id: Any, allowlist: Container[Any] | Sized) -> str:
+    """Return the role a REMOTE adapter stamps on a sender it just admitted.
+
+    Pass the SAME sender value and the SAME allowlist the adapter's own auth
+    check uses, so the stamp can never disagree with the gate that admitted the
+    message (Telegram compares ints, Discord/Slack/WhatsApp compare strings).
+
+    **An empty allowlist grants NOTHING.** These adapters ADMIT everyone when
+    their allowlist is unset ("empty = anyone"), so an empty list is not a
+    statement that the sender is the operator — it is the absence of any
+    statement at all. Deriving `admin` from it made every stranger who found the
+    bot an admin on a default install: a Telegram/Discord message from an
+    unknown id reached `@persona learn` and spent provider budget. Identity is
+    only ever granted by an explicit allowlist entry.
+
+    So: empty -> `viewer` (chat still works; role-gated commands are off until
+    the allowlist is set). Configured -> on it `admin`, off it `viewer`. Callers
+    surface `ingress_allowlist_warning` once at startup so an operator learns
+    this from a log line rather than from a refusal.
+
+    Local/authorized surfaces do NOT route through here — the CLI stamps its own
+    operator constant, Buzz resolves signed pubkeys, and a live `/talk` session
+    carries the role of the operator who opened it.
+    """
+    if not allowlist:
+        return "viewer"
+    return "admin" if sender_id in allowlist else "viewer"  # type: ignore[operator]
+
+
+def ingress_allowlist_warning(
+    surface: str, allowlist: Sized, env_var: str
+) -> str | None:
+    """One loud operator line when a remote surface has no allowlist configured.
+
+    Returns None when the allowlist IS configured. Adapters emit this once at
+    startup: without it, an operator who never set an allowlist would discover
+    the new fail-closed behavior as a mystery "Permission denied" mid-session
+    instead of a startup line telling them which env var to set.
+    """
+    if allowlist:
+        return None
+    return (
+        f"[{surface}] {env_var} is not set: every sender is stamped `viewer`, so "
+        f"role-gated commands (admin/operator) are DISABLED. Set {env_var} to "
+        f"your user id(s) to enable them."
+    )
 
 
 class Platform(Enum):
@@ -94,7 +143,11 @@ class IncomingMessage:
     piv_command: str = ""          # Original command name (e.g., "planning", "clutch")
     prefetched_context: str = ""   # Pre-fetched data from router (skip tools in engine)
     agent_type: str = "thehomie"
-    user_role: str = "admin"          # "admin", "operator", or "viewer"
+    # Fail-closed default (R3 BLOCKER): an ingress path that forgets to stamp a
+    # role gets the LEAST privilege, never admin. Every adapter stamps this at
+    # ingress from its own authenticated identity data — see
+    # `resolve_ingress_role` below.
+    user_role: str = "viewer"         # "admin", "operator", or "viewer"
     raw_event: dict[str, Any] = field(default_factory=dict)
     source: str = "interactive"       # PRD-7 §7.10 / Phase 4 (PRP-7d): "interactive"|"tool"|"cron"|"hook"
     # True when this turn originated as a transcribed voice message. The router

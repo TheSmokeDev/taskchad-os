@@ -23,10 +23,12 @@ def clean_persona_mutation_state(monkeypatch):
 
 
 @pytest.fixture
-def homie_root(tmp_path, monkeypatch) -> Path:
-    root = tmp_path / ".homie"
-    monkeypatch.setenv("HOMIE_HOME", str(root))
-    return root
+def homie_root(seeder_homie_root: Path) -> Path:
+    """#422 round 4 — delegate to the shared root so the ambient receipt
+    sinks (learning ledger + kill-switch audit DB) are redirected too. A
+    HOMIE_HOME-only redirect isolated the profile tree but let real seeds
+    append to the CHECKOUT's operational state."""
+    return seeder_homie_root
 
 
 def _profile_root(homie_root: Path) -> Path:
@@ -55,7 +57,15 @@ def test_dry_run_reports_but_writes_nothing(homie_root):
     assert not homie_root.exists()
 
 
-def test_fresh_seed_is_locked_down_and_learning_off(homie_root):
+def test_fresh_seed_is_locked_down_and_learning_on(homie_root):
+    """Authority stays locked down; learning is ON at birth (issue #422).
+
+    The two are separate axes: learning grants MEMORY, never capabilities.
+    ``create_profile`` now writes ``learning: {enabled: true}``, and the
+    seeder's fill-only-when-missing merge correctly leaves an existing key
+    alone — so a specialist persona learns from day one while its
+    no-tools / no-repos authority grant is unchanged.
+    """
     result = persona_mod.seed_repo_scout_persona()
 
     assert result.outcome == persona_mod.OUTCOME_CREATED
@@ -64,7 +74,7 @@ def test_fresh_seed_is_locked_down_and_learning_off(homie_root):
     assert cfg["persona"]["display_name"] == "Repo Scout"
     assert cfg["persona"]["role"] == persona_mod.REPO_SCOUT_ROLE
     assert cfg["cabinet"]["tools"] == []
-    assert cfg["learning"]["enabled"] is False
+    assert cfg["learning"]["enabled"] is True
     assert cfg["delegation"]["repos"] == []
 
     memory = _profile_root(homie_root) / "memory"

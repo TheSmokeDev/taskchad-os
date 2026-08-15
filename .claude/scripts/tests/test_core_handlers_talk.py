@@ -32,12 +32,18 @@ def _incoming(
     guild: str = "123",
     user_id: str = "42",
     channel_id: str = "777",
+    user_role: str = "admin",
 ) -> SimpleNamespace:
-    """Minimal IncomingMessage-shaped double for the /talk handler."""
+    """Minimal IncomingMessage-shaped double for the /talk handler.
+
+    Carries a role because the real Discord adapter stamps one at ingress, and
+    `/talk join` forwards it to the sidecar as the live session's authority.
+    """
     return SimpleNamespace(
         platform=platform,
         user=SimpleNamespace(platform_id=user_id),
         channel=SimpleNamespace(platform_id=channel_id),
+        user_role=user_role,
         raw_event={"guild": guild},
     )
 
@@ -167,7 +173,15 @@ async def test_talk_join_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     reply = await core_handlers.handle_talk(adapter, _incoming(), "join")
 
     assert posts == [
-        ("/api/discord/voice/join", {"guildId": 123, "channelId": 555, "textChannelId": 777})
+        (
+            "/api/discord/voice/join",
+            {
+                "guildId": 123,
+                "channelId": 555,
+                "operatorRole": "admin",
+                "textChannelId": 777,
+            },
+        )
     ]
     assert "#war-room" in reply
     assert "configured" in reply

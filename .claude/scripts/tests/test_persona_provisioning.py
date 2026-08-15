@@ -76,6 +76,23 @@ def _blueprint(channel_id: str | None = DEV_CHANNEL):
     )
 
 
+def _redirect_learning_audit_ledger(monkeypatch, paths: ProvisionPaths) -> None:
+    """Keep the persona-learning audit ledger off the live repo data dir.
+
+    Issue #422: a CREATE-mode apply now appends a row via
+    ``append_persona_learning_audit``, resolved from ``config.DATA_DIR`` at
+    CALL time (same pattern as ``_isolate_runtime_health_file`` in
+    conftest.py for ``RUNTIME_HEALTH_FILE``). Without this, every CREATE
+    test in this suite would append a real row to the checkout's live
+    ``persona_learning_audit.jsonl``.
+    """
+    import config as _config
+
+    data_dir = paths.homie_root.parent / "learning-audit-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_config, "DATA_DIR", data_dir)
+
+
 def _apply(
     blueprint,
     preview,
@@ -89,6 +106,7 @@ def _apply(
         "personas.provisioning._best_effort_audit",
         lambda *_args, **_kwargs: None,
     )
+    _redirect_learning_audit_ledger(monkeypatch, paths)
     return apply_provision(
         blueprint,
         mode=mode,
@@ -253,6 +271,10 @@ def test_reconcile_preserves_authored_sections_and_clears_stale_tools(
     assert config["persona"]["role"] == "authored"
     assert config["curriculum"]["enabled"] is False
     assert config["operator_notes"] == {"keep": True}
+    # Issue #422 — born-learning is a CREATE-only compiler patch. A profile
+    # with no authored `learning` section must stay absent after reconcile,
+    # not retroactively opt an existing profile in.
+    assert "learning" not in config
 
 
 def test_create_refuses_existing_unmanaged_profile(tmp_path: Path) -> None:
@@ -823,6 +845,7 @@ def test_concurrent_personas_never_lose_shared_binding_rows(
         "personas.provisioning._best_effort_audit",
         lambda *_args, **_kwargs: None,
     )
+    _redirect_learning_audit_ledger(monkeypatch, paths)
     blueprints = {
         "ai-engineer": build_builtin_blueprint(
             "ai-engineer",

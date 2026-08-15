@@ -104,6 +104,13 @@ class ResumeTargetMissing(RuntimeError):
     """
 
 
+#: Every turn this adapter yields came from the local shell that launched the
+#: process — whoever runs `thehomie chat` already owns the box, its `.env`, and
+#: the vault. There is no remote sender to authenticate, so the operator role is
+#: stamped explicitly rather than inherited from the (fail-closed) model default.
+_CLI_INGRESS_ROLE = "admin"
+
+
 class CLIAdapter:
     """CLI adapter — stdin/stdout for single-query and interactive modes."""
 
@@ -250,6 +257,7 @@ class CLIAdapter:
                     channel=channel,
                     platform=Platform.CLI,
                     timestamp=datetime.now(),
+                    user_role=_CLI_INGRESS_ROLE,
                     source=self.source,
                 )
                 return
@@ -261,6 +269,7 @@ class CLIAdapter:
                 channel=channel,
                 platform=Platform.CLI,
                 timestamp=datetime.now(),
+                user_role=_CLI_INGRESS_ROLE,
                 source=self.source,
             )
         else:
@@ -285,6 +294,7 @@ class CLIAdapter:
                         channel=channel,
                         platform=Platform.CLI,
                         timestamp=datetime.now(),
+                        user_role=_CLI_INGRESS_ROLE,
                         source=self.source,
                     )
             except (EOFError, KeyboardInterrupt):

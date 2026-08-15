@@ -5289,7 +5289,10 @@ def skills_list(request: Request) -> dict:
     try:
         from runtime.framework_registry import discover_skills  # noqa: PLC0415
 
-        entries = discover_skills(config.PROJECT_ROOT)
+        # fenced=False: this is the OPERATOR's own browse/manage surface, not a
+        # runtime prompt — it must see persona-scoped promoted skills too,
+        # or the operator cannot see (let alone manage) what was linked.
+        entries = discover_skills(config.PROJECT_ROOT, fenced=False)
     except Exception:
         return {"skills": []}
     return {
@@ -6735,6 +6738,24 @@ async def cabinet_send(body: CabinetSendBody) -> dict:
             channel.emit({
                 "type": "system_note",
                 "text": "Voice is available for this Cabinet room from the voice room entrypoint.",
+                "tone": "info",
+                "dismissable": True,
+            })
+            return {"ok": True, "command": True, "name": command.name}
+        if command.name == "grant":
+            # #428 R3 MAJOR 3 — the room prints a counter-offer's
+            # `/grant approve <persona> <code>` but cannot run it. Answer it
+            # here (static text, no echo of the typed args) so the paste never
+            # reaches the LLM as ordinary meeting text and no persona can
+            # narrate a grant that never happened. Deciding stays on the chat
+            # adapters, admin-gated against an authenticated identity.
+            channel.emit({
+                "type": "system_note",
+                "text": (
+                    "Toolset counter-offers are decided where the bot listens "
+                    "(Telegram/Discord/CLI) — tap Approve there, or run "
+                    "/grant approve <persona> <code>. Nothing changed here."
+                ),
                 "tone": "info",
                 "dismissable": True,
             })

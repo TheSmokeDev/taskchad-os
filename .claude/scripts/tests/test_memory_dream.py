@@ -490,6 +490,328 @@ class TestFullDream:
             assert "prune" not in state["phases_completed"]
 
 
+class TestDryRunNeverMutatesTheVault:
+    @pytest.mark.asyncio
+    async def test_test_mode_skips_working_memory_and_skill_archival(
+        self, tmp_path, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        """``--test`` must mean NO file edits — this file's own usage doc says
+        so, and the persona ``--child-test`` contract promises "no vault
+        edits". Phase 2.5 (working-memory archive) and Phase 2.5b (skill-draft
+        archive) run before the signal-found branch and are NOT gated by
+        test_mode like every other side-effecting phase in this file — a real
+        bug that breaks that contract for the main homie AND every persona."""
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("living_memory.archive_stale_working_items") as mock_archive_wm, \
+             patch("cognition.skill_promotion.archive_stale") as mock_archive_skills:
+            from memory_dream import _run_dream_inner
+
+            result = await _run_dream_inner(test_mode=True, force=True, days=7)
+
+        assert result == "DREAM_SILENT"
+        mock_archive_wm.assert_not_called()
+        mock_archive_skills.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_silent_test_run_writes_no_state_and_no_daily_log(
+        self, tmp_path, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        """codex R3 MAJOR 2: the DREAM_SILENT path advanced state and appended a
+        daily-log line even under ``--test``.
+
+        That is what made ``persona_dream_tick --child-test`` unsafe: the state
+        write sets ``last_run``, so the child's own 20-hour recency guard then
+        skips that night's REAL dream — a probe silently costing a persona its
+        dream cycle."""
+        state_file = tmp_path / "dream-state.json"
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("memory_dream.append_to_daily_log") as daily:
+            from memory_dream import _run_dream_inner
+
+            result = await _run_dream_inner(test_mode=True, force=True, days=7)
+
+        assert result == "DREAM_SILENT"
+        assert not state_file.exists(), state_file.read_text(encoding="utf-8")
+        daily.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_test_run_with_signal_writes_no_state_and_no_daily_log(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """Same contract on the signal-bearing path, which advanced state twice
+        (crash-safe pre-LLM write + the final result write) and logged a
+        summary."""
+        state_file = tmp_path / "dream-state.json"
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream.append_to_daily_log") as daily:
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=True, force=True, days=7)
+
+        assert not state_file.exists(), state_file.read_text(encoding="utf-8")
+        daily.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_test_run_takes_no_lock_sidecar(
+        self, tmp_path, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        """The lock is a physical write too — a .lock file plus its parent
+        dirs, landing in whichever profile tree ``-p`` selected."""
+        state_file = tmp_path / "locks" / "dream-state.json"
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("memory_dream.DREAM_STATE_FILE", state_file), \
+             patch("memory_dream.append_to_daily_log"):
+            from memory_dream import run_dream
+
+            result = await run_dream(test_mode=True, force=True, days=7)
+
+        assert result == "DREAM_SILENT"
+        lock_file = state_file.with_suffix(state_file.suffix + ".lock")
+        assert not lock_file.exists()
+        assert not state_file.parent.exists()
+
+    @pytest.mark.asyncio
+    async def test_test_run_proposes_no_belief_and_writes_no_artifact(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """Phase 5 reports what it WOULD propose and stops: propose_belief
+        writes a decision artifact on every path, dry run included (that
+        preview belongs to the ``evolve propose-belief --dry-run`` CLI, which
+        is not bound by this file's no-file-edits contract)."""
+        import evolve.evolve_loop as el
+
+        candidate = json.dumps({
+            "kind": "belief_candidate",
+            "target_file": "SELF.md",
+            "summary": "a candidate the dry run must not act on",
+            "evidence_paths": ["daily/x.md"],
+            "proposed_content": "- something the dream noticed.",
+            "confidence_score": 0.9,
+        })
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal.\n" + candidate),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        decision_dir = tmp_path / "decisions"
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("config.BELIEF_EVOLVE_DECISION_DIR", decision_dir), \
+             patch.object(el, "propose_belief", AsyncMock()) as propose, \
+             patch("memory_dream.append_to_daily_log"):
+            from memory_dream import _run_belief_evolution_phase
+
+            receipt = await _run_belief_evolution_phase(
+                "Merged signal.\n" + candidate, test_mode=True
+            )
+
+        propose.assert_not_called()
+        assert receipt["result"] == "dry_run_preview"
+        assert receipt["candidates_seen"] == 1
+        assert not decision_dir.exists()
+
+
+class TestNoLlmProbe:
+    """codex R3 MAJOR 2, cost half — ``--test --no-llm``.
+
+    ``--test`` makes a run harmless; it does not make it free. It is a real dry
+    run that still calls the LLM twice so an operator can see what the dream
+    WOULD write. ``persona_dream_tick --child-test`` fans that across the whole
+    roster, so the probe an operator is told to run to prove the plumbing was
+    quietly a full night's token bill.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_llm_stops_before_phase_3_and_calls_nothing(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """Signal IS found — the run would otherwise consolidate — and not one
+        LLM call is made."""
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream.append_to_daily_log") as daily:
+            from memory_dream import _run_dream_inner
+
+            result = await _run_dream_inner(
+                test_mode=True, force=True, days=7, no_llm=True
+            )
+
+        assert result == "DREAM_NO_LLM"
+        mock_rwf.assert_not_called()
+        assert not (tmp_path / "dream-state.json").exists()
+        daily.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_same_run_without_no_llm_does_call_the_llm(
+        self, tmp_path, mock_memory_dir, mock_daily_logs
+    ):
+        """Non-vacuity: the fixture above really does reach Phase 3, so the
+        assertion is about the flag and not about a run with nothing to do."""
+        mock_rwf = AsyncMock(side_effect=[
+            _make_llm_result("Merged signal"),
+            _make_llm_result("PRUNE_OK"),
+        ])
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("runtime.lane_router.run_with_runtime_lanes", mock_rwf), \
+             patch("memory_dream.append_to_daily_log"):
+            from memory_dream import _run_dream_inner
+
+            result = await _run_dream_inner(
+                test_mode=True, force=True, days=7, no_llm=False
+            )
+
+        assert result != "DREAM_NO_LLM"
+        # One call, not two: Phase 4 self-skips under 150 MEMORY.md lines in
+        # test mode. The point is that Phase 3 is REACHED — otherwise the
+        # no-llm assertion above would hold for a run that had nothing to do.
+        assert mock_rwf.call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_no_signal_under_no_llm_is_still_silent(
+        self, tmp_path, mock_memory_dir, mock_daily_logs_no_signal
+    ):
+        """The gate sits AFTER the signal check, so a quiet persona keeps
+        reporting the honest DREAM_SILENT rather than being relabelled."""
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("memory_dream.append_to_daily_log"):
+            from memory_dream import _run_dream_inner
+
+            result = await _run_dream_inner(
+                test_mode=True, force=True, days=7, no_llm=True
+            )
+
+        assert result == "DREAM_SILENT"
+
+    def test_no_llm_without_test_is_rejected(self, monkeypatch):
+        """A bare ``--no-llm`` would run the free phases for real, and those
+        advance ``last_run`` on the way past — spending the night's recency
+        budget on a cycle that never consolidated. It is a probe modifier, not
+        a cheap dream."""
+        import memory_dream
+
+        monkeypatch.setattr(
+            sys, "argv", ["memory_dream.py", "--no-llm", "--force"]
+        )
+        with pytest.raises(SystemExit) as exc:
+            memory_dream.main()
+        assert exc.value.code != 0
+
+    def test_no_llm_with_test_is_accepted(self, monkeypatch, tmp_path, mock_memory_dir):
+        """The inverse: the supported combination parses and reaches run_dream
+        with the flag threaded through."""
+        import memory_dream
+
+        monkeypatch.setattr(
+            sys, "argv", ["memory_dream.py", "--test", "--no-llm"]
+        )
+        seen = {}
+
+        async def _fake_run_dream(**kwargs):
+            seen.update(kwargs)
+            return "DREAM_NO_LLM"
+
+        monkeypatch.setattr(memory_dream, "run_dream", _fake_run_dream)
+        memory_dream.main()
+        assert seen["no_llm"] is True
+        assert seen["test_mode"] is True
+
+
+class TestNoLogsWritesAnHonestReceipt:
+    """codex R4 MAJOR 1 — the child half of no-budget-without-proof.
+
+    A persona with no daily logs used to log DREAM_SKIPPED, return None, exit 0
+    and write NOTHING. From the parent that is indistinguishable from a child
+    that died before it could write, so the only safe reading is "no proof" —
+    and reading it as success spent that persona's 20-hour recency budget on a
+    dream nobody could show a receipt for.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_logs_writes_a_profile_scoped_receipt(
+        self, tmp_path, mock_memory_dir
+    ):
+        state_file = tmp_path / "dream-state.json"
+        for stale in (mock_memory_dir / "daily").glob("*.md"):
+            stale.unlink()
+
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("memory_dream.append_to_daily_log"):
+            from memory_dream import _run_dream_inner
+
+            result = await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        assert result is None, "callers must still see None (reflect/weekly contract)"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        assert state["result"] == "DREAM_SKIPPED"
+        assert state["signal_found"] is False
+        assert state["phases_completed"] == ["orient"]
+        assert state["last_run"]
+
+    @pytest.mark.asyncio
+    async def test_no_logs_receipt_still_obeys_the_no_file_edits_contract(
+        self, tmp_path, mock_memory_dir
+    ):
+        state_file = tmp_path / "dream-state.json"
+        for stale in (mock_memory_dir / "daily").glob("*.md"):
+            stale.unlink()
+
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("memory_dream.append_to_daily_log") as daily:
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=True, force=True, days=7)
+
+        assert not state_file.exists()
+        daily.assert_not_called()
+
+
+class TestSpawnNonceEcho:
+    """codex R4 MAJOR 2 — the change proof the parent verifies.
+
+    A timestamp can only say a file CLAIMS a recent moment; an untouched file
+    keeps whatever it already said, and a future-dated one clears any lower
+    bound forever. The nonce says who wrote it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_receipt_carries_the_parents_spawn_id(
+        self, tmp_path, mock_memory_dir, mock_daily_logs_no_signal, monkeypatch
+    ):
+        monkeypatch.setenv("HOMIE_DREAM_SPAWN_ID", "nonce-abc123")
+        state_file = tmp_path / "dream-state.json"
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("memory_dream.append_to_daily_log"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        assert state["spawn_id"] == "nonce-abc123"
+
+    @pytest.mark.asyncio
+    async def test_manual_run_writes_no_spawn_id(
+        self, tmp_path, mock_memory_dir, mock_daily_logs_no_signal, monkeypatch
+    ):
+        """An operator running the dream by hand has no parent to answer to."""
+        monkeypatch.delenv("HOMIE_DREAM_SPAWN_ID", raising=False)
+        state_file = tmp_path / "dream-state.json"
+        with _patch_dream(mock_memory_dir, tmp_path), \
+             patch("memory_dream.append_to_daily_log"):
+            from memory_dream import _run_dream_inner
+
+            await _run_dream_inner(test_mode=False, force=True, days=7)
+
+        assert "spawn_id" not in json.loads(state_file.read_text(encoding="utf-8"))
+
+
 class TestPostWeeklyFlag:
     @pytest.mark.asyncio
     async def test_weekly_post_step_flag(self, tmp_path, mock_memory_dir, mock_daily_logs):
@@ -527,7 +849,12 @@ class TestSignalThreshold:
              patch("memory_dream.DREAM_SIGNAL_THRESHOLD", 4):
             from memory_dream import gather_signal
 
-            result = gather_signal([log], days=1)
+            # memory_dir MUST be passed explicitly (its own None-sentinel
+            # param) — without it gather_signal falls back to the module's
+            # REAL MEMORY_DIR and scans this actual worktree's open
+            # episodes/, whose count is ambient session state, not a fixed
+            # quantity a threshold test can assert against.
+            result = gather_signal([log], days=1, memory_dir=tmp_path)
 
             # 1 stall * 1pt = 1 < 4 threshold
             assert result.found is False
@@ -560,7 +887,7 @@ class TestSignalThreshold:
              patch("memory_dream.DREAM_SIGNAL_THRESHOLD", 4):
             from memory_dream import gather_signal
 
-            result = gather_signal([log], days=1)
+            result = gather_signal([log], days=1, memory_dir=tmp_path)
 
             # "wrong" = 1 correction (2pts)
             # "actually" = 1 correction (2pts)

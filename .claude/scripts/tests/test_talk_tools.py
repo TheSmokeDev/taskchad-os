@@ -185,6 +185,12 @@ def test_homie_command_dispatches_collect_only(monkeypatch: pytest.MonkeyPatch) 
             return "GSC: 12 clicks yesterday"
 
     monkeypatch.setattr(talk_tools, "_command_manager", lambda: FakeManager())
+    # The producer stamps THIS REQUEST's authority, which `execute_talk_tool`
+    # binds from the wire. This call takes the default (browser) transport, so
+    # state that session's role explicitly rather than inheriting whatever a
+    # previously-run test left behind (this assertion used to pass only because
+    # a talk_api test had minted a session first).
+    monkeypatch.setattr(talk_tools, "_BROWSER_SESSION_ROLE", "admin")
 
     output = talk_tools.execute_talk_tool(
         "homie_command", {"command": "/gsc", "args": "yesterday"}

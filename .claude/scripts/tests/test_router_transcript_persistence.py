@@ -605,12 +605,19 @@ def _seed_old_interactive(store, *, hours_ago: float = 10.0) -> datetime:
 
 
 def _cli_incoming(text: str, *, source: str = "interactive") -> IncomingMessage:
+    # Mirror the role the REAL CLI adapter stamps at ingress rather than the
+    # dataclass default: that default is deliberately fail-closed (`viewer`) and
+    # models an UNSTAMPED surface, while `thehomie chat` is the operator's own
+    # shell. Reading the adapter's own constant keeps the two from drifting.
+    from adapters.cli_adapter import _CLI_INGRESS_ROLE
+
     return IncomingMessage(
         text=text,
         user=User(Platform.CLI, "cli-user", "User"),
         channel=Channel(Platform.CLI, "cli-test", is_dm=True),
         platform=Platform.CLI,
         timestamp=datetime.now(),
+        user_role=_CLI_INGRESS_ROLE,
         source=source,
     )
 

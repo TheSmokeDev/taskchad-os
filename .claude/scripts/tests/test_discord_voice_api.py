@@ -62,9 +62,17 @@ def test_status_shape(voice_client: TestClient, monkeypatch: pytest.MonkeyPatch)
 def test_join_happy_path(voice_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict = {}
 
-    def fake_start(guild_id: int, channel_id: int, text_channel_id: int | None = None) -> dict:
+    def fake_start(
+        guild_id: int,
+        channel_id: int,
+        text_channel_id: int | None = None,
+        operator_role: str = "viewer",
+    ) -> dict:
         calls.update(
-            guild_id=guild_id, channel_id=channel_id, text_channel_id=text_channel_id
+            guild_id=guild_id,
+            channel_id=channel_id,
+            text_channel_id=text_channel_id,
+            operator_role=operator_role,
         )
         return {
             "status": "ready",
@@ -86,7 +94,14 @@ def test_join_happy_path(voice_client: TestClient, monkeypatch: pytest.MonkeyPat
     assert body["status"] == "ready"
     assert body["channelId"] == 22
     assert body["bridge"]["authSource"] == "configured"
-    assert calls == {"guild_id": 11, "channel_id": 22, "text_channel_id": 33}
+    # `operatorRole` is absent from the request body here, so the route must
+    # forward the fail-closed default rather than minting admin.
+    assert calls == {
+        "guild_id": 11,
+        "channel_id": 22,
+        "text_channel_id": 33,
+        "operator_role": "viewer",
+    }
 
 
 def test_join_text_channel_id_defaults_to_none(
@@ -94,7 +109,12 @@ def test_join_text_channel_id_defaults_to_none(
 ) -> None:
     calls: dict = {}
 
-    def fake_start(guild_id: int, channel_id: int, text_channel_id: int | None = None) -> dict:
+    def fake_start(
+        guild_id: int,
+        channel_id: int,
+        text_channel_id: int | None = None,
+        operator_role: str = "viewer",
+    ) -> dict:
         calls.update(text_channel_id=text_channel_id)
         return {"status": "ready"}
 

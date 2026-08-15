@@ -743,3 +743,55 @@ def test_repair_all_skips_unrepairable_dir_and_repairs_the_rest(
     assert (broken / "memory" / "SOUL.md").exists(), (
         "siblings must still be repaired when one target is un-repairable"
     )
+
+
+# ---------------------------------------------------------------------------
+# profile learning enable/disable (issue #422 — the surgical escape hatch)
+# ---------------------------------------------------------------------------
+
+
+def _learning_audit_rows(persona_id: str) -> list[dict]:
+    """Rows for *persona_id* from the (tmp-redirected) learning ledger."""
+    import config
+
+    ledger = Path(config.DATA_DIR) / "persona_learning_audit.jsonl"
+    if not ledger.is_file():
+        return []
+    rows = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return [r for r in rows if r["persona_id"] == persona_id]
+
+
+def test_profile_learning_disable_still_works_after_born_on(empty_homie_root):
+    """#422 keeps the per-persona disable for surgical debugging.
+
+    Always-on at birth is a DEFAULT, not a lock: the operator verb must
+    still be able to flip a live persona off, and the row it writes must
+    name the CLI as the actor so the ledger distinguishes an operator
+    toggle from the birth write.
+    """
+    import yaml
+
+    from personas.lifecycle import create_profile
+
+    info = create_profile("sales", no_alias=True)
+    assert _learning_audit_rows("sales")[-1]["actor"] == (
+        "lifecycle_create_profile"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["profile", "learning", "disable", "sales"])
+
+    assert result.exit_code == 0, result.output
+    data = yaml.safe_load(
+        (info.path / "config.yaml").read_text(encoding="utf-8")
+    )
+    assert data["learning"]["enabled"] is False
+
+    row = _learning_audit_rows("sales")[-1]
+    assert row["action"] == "disable"
+    assert row["enabled"] is False
+    assert row["actor"] == "cli_profile_learning"

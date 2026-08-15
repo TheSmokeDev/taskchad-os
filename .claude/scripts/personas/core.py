@@ -50,6 +50,44 @@ _RESERVED = frozenset({
     "sudo",
 })
 
+# Issue #422 round 3 — names ``get_persona_paths`` (below) reserves
+# SEMANTICALLY: each roots a profile somewhere OTHER than
+# ``<root>/profiles/<name>/`` — ``default`` at the legacy install dir,
+# ``custom`` at ``HOMIE_HOME`` itself. Any creation door that stages a tree at
+# ``profiles/<sentinel>/`` writes a ``config.yaml`` the runtime never reads
+# (``load_persona_config`` / ``set_persona_learning`` / the learning tick all
+# resolve through ``get_persona_paths``), so the create "succeeds" and
+# produces a persona whose own config is invisible to it.
+#
+# ``default`` is ALSO in ``_RESERVED`` and therefore already dies in
+# ``validate_persona_name``; ``custom`` deliberately is NOT, because it must
+# stay a legal ACTIVE-profile value (``get_active_profile_name`` returns it,
+# and boot/readiness/inventory helpers validate that name on live custom
+# deployments). Hence a separate, creation-only guard.
+_SENTINEL_PROFILE_NAMES = frozenset({"default", "custom"})
+
+
+def reject_sentinel_persona_name(name: str) -> None:
+    """Raise ``ValueError`` if *name* is a profile-resolver sentinel.
+
+    Creation-only guard — call it from every door that CREATES a profile
+    tree, never from a door that merely reads or activates one (``custom``
+    is a valid active-profile name; it is only invalid as a NEW profile).
+
+    ``personas.lifecycle.create_profile`` refuses the same class through its
+    own physical containment check (Step 2b: does the name's resolved
+    ``config.yaml`` land inside the dir rollback would delete?). This helper
+    is the name-level form for the atomic provisioner, which compiles the
+    plan before any path exists to contain.
+    """
+    if name in _SENTINEL_PROFILE_NAMES:
+        raise ValueError(
+            f"Persona name '{name}' is a profile-resolver sentinel: "
+            f"get_persona_paths('{name}') roots it outside "
+            f"<root>/profiles/{name}/, so the profile's config.yaml would "
+            f"never be read by the runtime. Pick another name."
+        )
+
 # Hermes anchor: hermes_cli/profiles.py:108-113 — The Homie's Click subcommand
 # seed (Phase 1 uses a static set; Phase 2 / PRP-7b will derive this from the
 # live Click registry). Names here mirror ``cli_entry.py`` / ``chat/cli.py`` /

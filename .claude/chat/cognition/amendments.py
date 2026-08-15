@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -563,6 +563,21 @@ class AmendmentPolicy:
     # check is DETERMINISTIC (no provider call) — the LLM judge lives in
     # evolve/judge.py, scheduled-only, never this seam.
     evidence_check: Callable[[AmendmentProposal, Path], tuple[bool, str]] | None = None
+    # #425 design gate — per-SOURCE target confinement. Default None = the EXACT
+    # pre-#425 behavior (every AMENDMENT_TARGETS name is admitted for every
+    # source), so all existing producers stay byte-parity unchanged.
+    #
+    # Keyed by source rather than applied policy-wide on purpose: the apply pass
+    # DRAINS the whole ledger (``apply_policy_approved_amendments`` evaluates
+    # every pending/approved row against the one policy object it was handed),
+    # so a policy-wide target restriction from one producer would collaterally
+    # policy_reject another producer's legitimate SOUL/SELF/USER proposals that
+    # happened to still be pending. A source key confines only its own producer.
+    #
+    # The key is trustworthy because ``parse_amendment_records`` HOST-FORCES
+    # ``source`` (``data["source"] = default_source``) — a model-supplied or
+    # note-quoted source can never select a different allowlist entry.
+    source_target_allowlist: Mapping[str, frozenset[str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -664,6 +679,16 @@ def parse_amendment_records(
     judge + kill-switch) is exclusively responsible for consuming must never
     also be coerced into a regular ``AmendmentProposal`` here and auto-applied
     through this module's weaker default policy.
+
+    ``source`` is HOST-FORCED to ``default_source`` for every record —
+    NEVER a ``setdefault`` that would preserve a model-supplied value. Every
+    caller of this module already passes a hardcoded ``default_source``
+    describing its OWN pipeline (``"memory_reflect"``, ``"memory_dream"``,
+    ``"memory_weekly"``, ...); none of them expect or want to honor a
+    model-reported ``source`` field. Trusting it would let a scheduled-
+    cognition output — or, worse, hostile content quoted inside that output —
+    mint an amendment with forged provenance (e.g. ``"explicit"``, which
+    other consumers treat as a sacrosanct, directly-stated operator claim).
     """
 
     proposals: list[AmendmentProposal] = []
@@ -673,7 +698,7 @@ def parse_amendment_records(
         if record.get("kind") in exclude_kinds:
             continue
         data = dict(record)
-        data.setdefault("source", default_source)
+        data["source"] = default_source
         data.setdefault("status", "pending")
         proposal = _coerce_dataclass(AmendmentProposal, data)
         if proposal is not None:
@@ -1111,6 +1136,9 @@ def evaluate_amendment_policy(
     content = proposal.proposed_content.strip()
     if proposal.target_file not in AMENDMENT_TARGETS:
         return False, "target_not_allowed"
+    source_allowlist = (active_policy.source_target_allowlist or {}).get(proposal.source)
+    if source_allowlist is not None and proposal.target_file not in source_allowlist:
+        return False, "target_not_allowed_for_source"
     if not content:
         return False, "empty_content"
     if len(content) > active_policy.max_content_chars:
@@ -1335,6 +1363,32 @@ def _amendment_already_present(target_text: str, proposal: AmendmentProposal) ->
     )
 
 
+def split_autonomous_amendments(text: str) -> tuple[str, str]:
+    """Split durable-memory text into (operator-authored head, machine-authored tail).
+
+    The two halves are DIFFERENT TRUST CLASSES and prompt composition has to be
+    able to tell them apart. Everything under ``## Autonomous Amendments`` was
+    written by a model through the policy gate — and since #425 some of it is
+    distilled from work notes that carry external research titles and quoted
+    third-party prose. The head is what a human wrote.
+
+    This module owns the section header and the ``HOMIE_AUTO_AMENDMENT`` block
+    marker, so it owns the split: a consumer that re-derived the boundary from a
+    hardcoded heading would silently stop segregating the moment either format
+    changed.
+
+    A file with no amendments returns ``(text, "")`` — byte-identical head for
+    every caller, so the common case is unchanged.
+    """
+    head, blocks = _split_amendment_section(text)
+    if not blocks:
+        return text, ""
+    header_idx = head.find(_SECTION_HEADER)
+    if header_idx == -1:
+        return text, ""
+    return head[:header_idx].rstrip(), (head[header_idx:] + "".join(blocks)).strip()
+
+
 def _split_amendment_section(text: str) -> tuple[str, list[str]]:
     """Split into (head, amendment blocks); ``head + "".join(blocks) == text``."""
 
@@ -1422,5 +1476,6 @@ __all__ = (
     "normalize_target_file",
     "parse_amendment_records",
     "process_amendment_output",
+    "split_autonomous_amendments",
     "target_file_lock",
 )

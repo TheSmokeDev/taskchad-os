@@ -48,8 +48,7 @@ class Toolset(TypedDict):
 # grant, so ``core`` remains as a compatibility wrapper. New persona blueprints
 # compile against the two explicit classes below instead:
 #
-# * ``safe_core`` — profile-scoped recall, indexed search, skill reading, and
-#   a private planning scratchpad.
+# * ``safe_core`` — profile-scoped indexed memory search and skill reading.
 # * ``operator_exec`` — broad file reads, shell/process access, writes, patching,
 #   and draft-skill mutation. It is never implied by persona creation.
 #
@@ -58,12 +57,10 @@ class Toolset(TypedDict):
 # study does not use either class; it keeps its existing ``model_only`` runtime.
 _HOMIE_SAFE_CORE_TOOLS: list[str] = [
     "memory_search",
-    "recall",
     "search_files",
     "skills_list",
     "skill_view",
     "request_tool",
-    "todo",
 ]
 
 _HOMIE_OPERATOR_EXEC_TOOLS: list[str] = [
@@ -97,13 +94,19 @@ _SEO_GEO_READ_TOOLS: list[str] = [
     "gsc_overview",
     "gsc_top_queries",
     "gsc_top_pages",
+    "gsc_query_page_slice",
     "ga4_overview",
     "ga4_top_pages",
     "ga4_traffic_sources",
     "firecrawl_scrape",
     "firecrawl_map",
+    "seo_exa_search",
+    "seo_exa_fetch",
     "openseo_read",
     "fleet_pulse_latest",
+    "fleet_measurement_registry_latest",
+    "fleet_control_review_latest",
+    "fleet_paid_research_latest",
 ]
 
 _REPO_READ_TOOLS: list[str] = [
@@ -134,7 +137,7 @@ TOOLSETS: dict[str, Toolset] = {
     # Blueprint-safe classes and domain packs.
     # -----------------------------------------------------------------------
     "safe_core": {
-        "description": "Safe persona floor: scoped memory/search, skill reads, and todo",
+        "description": "Safe persona floor: scoped memory search, skill reads, and request-tool escalation",
         "tools": _HOMIE_SAFE_CORE_TOOLS,
         "includes": [],
     },
@@ -238,6 +241,7 @@ TOOLSETS: dict[str, Toolset] = {
             "crypto_bar_clock",
             "crypto_desk_snapshot",
             "crypto_dexscreener",
+            "crypto_mintscan",
             "crypto_polymarket",
             "crypto_last30days_read",
             "crypto_prediction_markets",

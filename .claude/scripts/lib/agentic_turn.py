@@ -55,6 +55,7 @@ SCHEDULED_TOOL_ALLOWLIST: frozenset[str] = frozenset(
         "crypto_bar_clock",
         "crypto_desk_snapshot",
         "crypto_dexscreener",
+        "crypto_mintscan",
         "crypto_polymarket",
         "crypto_last30days_read",
         "crypto_prediction_markets",

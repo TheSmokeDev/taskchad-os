@@ -226,6 +226,12 @@ class BlogAutoScheduler:
             is_piv=True,
             piv_command="blog",
             source="cron",
+            # Unattended cron: no operator is present to authorize anything, so
+            # this turn carries no one's authority. It drives a skill through
+            # the ENGINE (which does not gate on role), never the admin-gated
+            # router dispatch — so least privilege costs it nothing and keeps a
+            # scheduled job from ever becoming a privilege source.
+            user_role="viewer",
         )
 
         # Run through engine

@@ -222,7 +222,7 @@ def test_session_update_includes_tools_when_configured() -> None:
         token="tok",
         instructions="inst",
         tools=[{"type": "function", "name": "memory_search", "parameters": {}}],
-        tool_executor=lambda name, args: "ok",
+        tool_executor=lambda name, args, bound=None: "ok",
     )
 
     update = realtime.build_session_update(config)
@@ -248,7 +248,7 @@ def test_function_call_executes_and_feeds_output(monkeypatch: pytest.MonkeyPatch
     _patch_connect(monkeypatch, ws)
     executed: list[tuple[str, dict]] = []
 
-    def executor(name: str, arguments: dict) -> str:
+    def executor(name: str, arguments: dict, bound: dict | None = None) -> str:
         executed.append((name, arguments))
         return "Top 1 memory note: lane-first is the contract"
 
@@ -294,7 +294,7 @@ def test_function_call_failure_is_spoken_not_fatal(monkeypatch: pytest.MonkeyPat
     ])
     _patch_connect(monkeypatch, ws)
 
-    def executor(name: str, arguments: dict) -> str:
+    def executor(name: str, arguments: dict, bound: dict | None = None) -> str:
         raise RuntimeError("vault exploded")
 
     async def main() -> None:

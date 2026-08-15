@@ -1,7 +1,8 @@
 """
 Google Analytics (GA4) Direct Integration for The Homie.
 
-Read-only access to GA4 data via the Analytics Data API. Shares OAuth token with Gmail.
+Read-only access to GA4 data via the Analytics Data API. When configured,
+uses a dedicated GA4 reporting token instead of the shared Gmail token.
 
 Usage:
     uv run python -m integrations.analytics_api overview
@@ -53,9 +54,9 @@ def _get_analytics_service() -> Any:
     """Build authenticated Analytics Data API service."""
     from googleapiclient.discovery import build  # type: ignore[import-untyped]
 
-    from integrations.auth import get_google_credentials
+    from integrations.auth import get_ga4_reporting_credentials
 
-    creds = get_google_credentials()
+    creds = get_ga4_reporting_credentials()
     service: Any = build("analyticsdata", "v1beta", credentials=creds)
     return service
 

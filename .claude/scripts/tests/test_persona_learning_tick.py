@@ -286,6 +286,37 @@ class TestNoEnabledParity:
         assert "no learning-enabled personas" in captured.out
 
 
+# ── Eligibility check (issue #422) ───────────────────────────────────────────
+
+
+class TestIsLearningEligible:
+    """Unit coverage for the extracted admission check every creation-door
+    regression test (CLI, dashboard, lifecycle) drives against a real
+    newborn config — see ``tests/test_persona_creation_surfaces.py``,
+    ``tests/test_dashboard_api.py``, and ``tests/test_persona_lifecycle.py``.
+    """
+
+    def test_enabled_true_is_eligible(self) -> None:
+        from persona_learning_tick import is_learning_eligible
+
+        assert is_learning_eligible({"learning": {"enabled": True}}) is True
+
+    def test_enabled_false_is_ineligible(self) -> None:
+        from persona_learning_tick import is_learning_eligible
+
+        assert is_learning_eligible({"learning": {"enabled": False}}) is False
+
+    def test_absent_learning_key_is_ineligible(self) -> None:
+        from persona_learning_tick import is_learning_eligible
+
+        assert is_learning_eligible({}) is False
+
+    def test_non_dict_learning_is_ineligible(self) -> None:
+        from persona_learning_tick import is_learning_eligible
+
+        assert is_learning_eligible({"learning": "oops"}) is False
+
+
 # ── Grep gates ──────────────────────────────────────────────────────────────
 
 
@@ -541,6 +572,283 @@ class TestRealNormalizerEndToEnd:
         assert count == 1
 
 
+# ── Composed gate: chat rows OR fresh notes (issue #425) ───────────────────
+
+
+def _seed_note(profile_root: Path, rel: str, *, age_hours: float = 1.0) -> Path:
+    """Write a note under the profile's memory tree with a controlled mtime."""
+    path = profile_root / "memory" / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntags: [system, persona, experience]\n---\n"
+        "# Experience Notes\n\n## 09:14 - a-1 (build -> done)\n\n- Outcome: shipped\n",
+        encoding="utf-8",
+    )
+    when = (datetime.now() - timedelta(hours=age_hours)).timestamp()
+    os.utime(path, (when, when))
+    return path
+
+
+class TestFreshNoteCount:
+    def test_counts_notes_newer_than_stamp(self, tmp_path: Path) -> None:
+        from persona_learning_tick import _count_fresh_notes_since
+
+        _seed_note(tmp_path, "experience/2026-08-13.md", age_hours=1)
+        _seed_note(tmp_path, "market/2026-08-13.md", age_hours=2)
+        stamp = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+
+        count = _count_fresh_notes_since(
+            "crypto", stamp, tmp_path, silent_skip_window_hours=24.0
+        )
+
+        assert count == 2
+
+    def test_notes_older_than_stamp_are_not_counted(self, tmp_path: Path) -> None:
+        from persona_learning_tick import _count_fresh_notes_since
+
+        _seed_note(tmp_path, "experience/old.md", age_hours=48)
+        stamp = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+
+        count = _count_fresh_notes_since(
+            "crypto", stamp, tmp_path, silent_skip_window_hours=24.0
+        )
+
+        assert count == 0
+
+    def test_cold_start_uses_the_silent_skip_window(self, tmp_path: Path) -> None:
+        """No stamp: the notes half shares the row half's cold-start boundary,
+        so a first-ever tick cannot distil an unbounded backlog."""
+        from persona_learning_tick import _count_fresh_notes_since
+
+        _seed_note(tmp_path, "experience/recent.md", age_hours=2)
+        _seed_note(tmp_path, "experience/ancient.md", age_hours=100)
+
+        assert (
+            _count_fresh_notes_since(
+                "crypto", None, tmp_path, silent_skip_window_hours=24.0
+            )
+            == 1
+        )
+
+    def test_dirs_outside_the_registry_are_not_counted(self, tmp_path: Path) -> None:
+        """episodes/ and daily/ have their own consumers — counting them would
+        trigger a distillation on a corpus this gate does not feed."""
+        from persona_learning_tick import _count_fresh_notes_since
+
+        _seed_note(tmp_path, "episodes/2026-08-13-x.md", age_hours=1)
+        _seed_note(tmp_path, "daily/2026-08-13.md", age_hours=1)
+
+        count = _count_fresh_notes_since(
+            "crypto", None, tmp_path, silent_skip_window_hours=24.0
+        )
+
+        assert count == 0
+
+    def test_fail_open_on_internal_exception(self, tmp_path: Path) -> None:
+        from persona_learning_tick import _count_fresh_notes_since
+
+        with patch(
+            "personas.experience.count_fresh_notes", side_effect=RuntimeError("boom")
+        ):
+            count = _count_fresh_notes_since(
+                "crypto", None, tmp_path, silent_skip_window_hours=24.0
+            )
+
+        assert count == 0
+
+
+class TestSharedBoundary:
+    def test_stamp_wins_over_window(self) -> None:
+        from persona_learning_tick import _resolve_since_boundary
+
+        stamp = "2026-08-12T00:00:00"
+
+        assert _resolve_since_boundary(
+            stamp, silent_skip_window_hours=24.0
+        ) == datetime(2026, 8, 12, 0, 0, 0)
+
+    def test_absent_and_corrupt_stamps_share_the_window_fallback(self) -> None:
+        from persona_learning_tick import _resolve_since_boundary
+
+        absent = _resolve_since_boundary(None, silent_skip_window_hours=24.0)
+        corrupt = _resolve_since_boundary(
+            "not-a-timestamp", silent_skip_window_hours=24.0
+        )
+
+        assert abs((absent - corrupt).total_seconds()) < 5
+        assert timedelta(hours=23) < (datetime.now() - absent) < timedelta(hours=25)
+
+    def test_rows_and_notes_halves_share_one_boundary(self, tmp_path: Path) -> None:
+        """The two halves must never disagree about 'fresh': a note written at
+        the same instant as the boundary the row count used is excluded by
+        both, not one."""
+        from persona_learning_tick import (
+            _count_fresh_notes_since,
+            _resolve_since_boundary,
+        )
+
+        boundary = _resolve_since_boundary(None, silent_skip_window_hours=24.0)
+        note = _seed_note(tmp_path, "experience/edge.md")
+        os.utime(note, (boundary.timestamp(), boundary.timestamp()))
+
+        assert (
+            _count_fresh_notes_since(
+                "crypto", None, tmp_path, silent_skip_window_hours=24.0
+            )
+            == 0
+        )
+
+
+class TestComposedGate:
+    """The ticket's headline behaviour change, driven through run_tick."""
+
+    def _run(
+        self,
+        tmp_path: Path,
+        *,
+        row_count: int,
+        seed_notes: bool,
+        test_mode: bool = False,
+    ):
+        profile_root = tmp_path / "crypto"
+        profile_root.mkdir()
+        if seed_notes:
+            _seed_note(profile_root, "market/2026-08-13.md", age_hours=1)
+
+        install = tmp_path / "install"
+        install.mkdir()
+        (install / "chat.db").touch()
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        p = MagicMock()
+        p.name = "crypto"
+        p.path = profile_root
+        p.is_default = False
+        default_p = MagicMock()
+        default_p.is_default = True
+
+        spawn = MagicMock(return_value=(True, "success"))
+
+        with patch("persona_learning_tick.is_active_default_profile", return_value=True), \
+             patch("persona_learning_tick.get_default_paths", return_value={"data": install}), \
+             patch("persona_learning_tick.list_profiles", return_value=[default_p, p]), \
+             patch("persona_learning_tick.load_persona_config",
+                   return_value={"learning": {"enabled": True}}), \
+             patch("persona_learning_tick._count_attributed_rows_since",
+                   return_value=row_count), \
+             patch("persona_learning_tick._spawn_persona_pipeline", spawn), \
+             patch("persona_learning_tick.STATE_DIR", state_dir), \
+             patch("persona_learning_tick._persona_state_file",
+                   side_effect=lambda n: state_dir / f"persona-learning-{n}-state.json"):
+            import io
+            from contextlib import redirect_stdout
+
+            from persona_learning_tick import run_tick
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                run_tick(test_mode=test_mode)
+        return spawn, buf.getvalue(), state_dir / "persona-learning-crypto-state.json"
+
+    def test_fresh_notes_with_zero_chat_rows_no_longer_silent_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """FAIL-WITHOUT-FIX lock. A persona whose work leaves NOTES but who
+        never held a chat turn (worktick assignments, crypto market rounds)
+        used to be skipped forever with a rich corpus unread on disk."""
+        spawn, out, state_file = self._run(tmp_path, row_count=0, seed_notes=True)
+
+        assert "PERSONA_REFLECT_SILENT" not in out
+        assert "0 attributed rows, 1 fresh notes" in out
+        assert spawn.call_count == 1
+        assert json.loads(state_file.read_text(encoding="utf-8"))["notes_found"] == 1
+
+    def test_no_rows_and_no_notes_still_silent_with_no_spawn(
+        self, tmp_path: Path
+    ) -> None:
+        """The gate only ADDS a trigger — the zero-cost skip is preserved."""
+        spawn, out, _state = self._run(tmp_path, row_count=0, seed_notes=False)
+
+        assert "PERSONA_REFLECT_SILENT" in out
+        assert "0 new rows, 0 fresh notes" in out
+        assert spawn.call_count == 0
+
+    def test_chat_rows_alone_still_trigger(self, tmp_path: Path) -> None:
+        spawn, out, _state = self._run(tmp_path, row_count=3, seed_notes=False)
+
+        assert "3 attributed rows, 0 fresh notes" in out
+        assert spawn.call_count == 1
+
+    def test_child_receives_the_same_boundary_the_gate_used(
+        self, tmp_path: Path
+    ) -> None:
+        """Parent and child STATE_DIRs differ — the child cannot read the
+        parent's last_run stamp, so the boundary MUST be threaded explicitly or
+        the child distils notes the gate never counted."""
+        from persona_learning_tick import _resolve_since_boundary
+
+        spawn, _out, _state = self._run(tmp_path, row_count=0, seed_notes=True)
+
+        notes_since = spawn.call_args.kwargs["notes_since"]
+        expected = _resolve_since_boundary(None, silent_skip_window_hours=24.0)
+
+        assert notes_since, "--notes-since boundary was not passed to the child"
+        assert abs(
+            (datetime.fromisoformat(notes_since) - expected).total_seconds()
+        ) < 5
+
+    def test_notes_since_reaches_the_child_argv(self, tmp_path: Path) -> None:
+        """The boundary is a real CLI arg on the spawned memory_reflect.py."""
+        import persona_learning_tick as tick
+
+        captured: dict[str, list[str]] = {}
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return _Result()
+
+        with patch.object(tick.subprocess, "run", _fake_run), \
+             patch.object(tick, "build_capability_scoped_env", return_value={}):
+            ok, msg = tick._spawn_persona_pipeline(
+                "crypto", tmp_path, notes_since="2026-08-12T00:00:00"
+            )
+
+        assert ok, msg
+        cmd = captured["cmd"]
+        assert "--notes-since" in cmd
+        assert cmd[cmd.index("--notes-since") + 1] == "2026-08-12T00:00:00"
+        assert cmd[cmd.index("-p") + 1] == "crypto"
+
+    def test_absent_boundary_omits_the_flag(self, tmp_path: Path) -> None:
+        """No boundary -> no flag, so the child falls back to its configured
+        window instead of receiving an empty string."""
+        import persona_learning_tick as tick
+
+        captured: dict[str, list[str]] = {}
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return _Result()
+
+        with patch.object(tick.subprocess, "run", _fake_run), \
+             patch.object(tick, "build_capability_scoped_env", return_value={}):
+            tick._spawn_persona_pipeline("crypto", tmp_path, notes_since=None)
+
+        assert "--notes-since" not in captured["cmd"]
+
+
 class TestFailOpenRowCount:
     def test_fail_open_on_internal_exception(self, tmp_path: Path) -> None:
         """An exception raised inside the try-block (e.g. store construction
@@ -603,3 +911,135 @@ class TestSilentSkipWindowWiring:
                 run_tick(test_mode=True)
 
         assert mock_count.call_args.kwargs["silent_skip_window_hours"] == 48.0
+
+
+# ── Reconcile round: shared boundary reaches BOTH counters (MAJOR) ─────────
+
+
+class TestSharedBoundaryReachesBothCounters:
+    """FAIL-WITHOUT-FIX lock. run_tick used to pass the RAW last_run stamp
+    to both counters; each one independently recomputes its own fallback
+    boundary via _resolve_since_boundary, so on a cold start (last_run=None)
+    or a corrupted stamp the two calls to datetime.now() land at different
+    instants. The fix threads the ALREADY-RESOLVED boundary (notes_since)
+    into both calls instead."""
+
+    def test_both_counters_receive_the_identical_resolved_boundary(
+        self, tmp_path: Path
+    ) -> None:
+        import persona_learning_tick as tick
+
+        profile_root = tmp_path / "crypto"
+        profile_root.mkdir()
+        install = tmp_path / "install"
+        install.mkdir()
+        (install / "chat.db").touch()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        p = MagicMock()
+        p.name = "crypto"
+        p.path = profile_root
+        p.is_default = False
+        default_p = MagicMock()
+        default_p.is_default = True
+
+        real_rows = tick._count_attributed_rows_since
+        real_notes = tick._count_fresh_notes_since
+        captured: dict[str, list] = {"rows": [], "notes": []}
+
+        def _spy_rows(persona_id, since_iso, *a, **k):
+            captured["rows"].append(since_iso)
+            return real_rows(persona_id, since_iso, *a, **k)
+
+        def _spy_notes(persona_id, since_iso, *a, **k):
+            captured["notes"].append(since_iso)
+            return real_notes(persona_id, since_iso, *a, **k)
+
+        with patch("persona_learning_tick.is_active_default_profile", return_value=True), \
+             patch("persona_learning_tick.get_default_paths", return_value={"data": install}), \
+             patch("persona_learning_tick.list_profiles", return_value=[default_p, p]), \
+             patch("persona_learning_tick.load_persona_config",
+                   return_value={"learning": {"enabled": True}}), \
+             patch("persona_learning_tick._count_attributed_rows_since", _spy_rows), \
+             patch("persona_learning_tick._count_fresh_notes_since", _spy_notes), \
+             patch("persona_learning_tick._spawn_persona_pipeline",
+                   return_value=(True, "success")), \
+             patch("persona_learning_tick.STATE_DIR", state_dir), \
+             patch("persona_learning_tick._persona_state_file",
+                   side_effect=lambda n: state_dir / f"persona-learning-{n}-state.json"):
+            tick.run_tick()
+
+        assert captured["rows"], "row counter was never called"
+        assert captured["notes"], "note counter was never called"
+        assert captured["rows"][0] is not None, (
+            "counter received the raw (None) last_run instead of the "
+            "already-resolved boundary — the cold-start case the bug hit"
+        )
+        assert captured["rows"][0] == captured["notes"][0], (
+            "row and note counters received DIFFERENT since_iso boundaries — "
+            f"rows={captured['rows'][0]!r} notes={captured['notes'][0]!r}"
+        )
+
+
+# ── Reconcile round: dry-run must not advance the watermark (MAJOR) ────────
+
+
+class TestDryRunDoesNotAdvanceWatermark:
+    """A --test tick must report what it saw without mutating persistent
+    state — writing last_run here would make a subsequent REAL tick treat
+    the dry run's timestamp as the last real run, silently and permanently
+    skipping notes/rows the dry run only reported on."""
+
+    def test_test_mode_leaves_no_state_file(self, tmp_path: Path) -> None:
+        spawn, out, state_file = TestComposedGate()._run(
+            tmp_path, row_count=0, seed_notes=True, test_mode=True
+        )
+
+        assert spawn.call_count == 0
+        assert "--test mode" in out
+        assert not state_file.exists(), (
+            "a --test run wrote a persona-learning state file — the "
+            "production watermark was advanced by a dry run"
+        )
+
+
+# ── Reconcile round: fail-open handlers survive a hostile __str__ (MINOR) ──
+
+
+class _HostileStrError(Exception):
+    """An exception whose ``__str__`` itself raises — the pathological case
+    a plain ``f"...{exc}..."`` cannot survive."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("str() itself raises")
+
+
+class TestFailOpenSurvivesHostileExceptionStr:
+    def test_count_fresh_notes_survives_hostile_exception_str(
+        self, tmp_path: Path
+    ) -> None:
+        from persona_learning_tick import _count_fresh_notes_since
+
+        with patch(
+            "personas.experience.count_fresh_notes",
+            side_effect=_HostileStrError("boom"),
+        ):
+            count = _count_fresh_notes_since(
+                "crypto", None, tmp_path, silent_skip_window_hours=24.0
+            )
+        assert count == 0
+
+    def test_count_attributed_rows_survives_hostile_exception_str(
+        self, tmp_path: Path
+    ) -> None:
+        from persona_learning_tick import _count_attributed_rows_since
+
+        with patch(
+            "persona_learning_tick.get_session_store",
+            side_effect=_HostileStrError("boom"),
+        ):
+            count = _count_attributed_rows_since(
+                "sales", None, tmp_path / "chat.db", silent_skip_window_hours=24.0
+            )
+        assert count == 0

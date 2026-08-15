@@ -31,11 +31,46 @@ class TalkSessionBody(BaseModel):
     model: str | None = None
 
 
+class TalkSpeakerBinding(BaseModel):
+    """The sidecar's verdict on WHICH utterance produced this call.
+
+    `trusted` is the whole contract: the sidecar resolved the speaker from the
+    audio interval server VAD selected, and correlated it to this call through
+    the Realtime response ID. `reason` explains a refusal (ambiguous speakers,
+    unresolved attribution, a recycled response id) so the denial can be honest
+    instead of a bare permission error. `token` is the binding's opaque id,
+    carried for audit correlation only — it grants nothing.
+    """
+
+    token: str | None = None
+    trusted: bool = False
+    reason: str = ""
+
+
 class TalkToolBody(BaseModel):
-    """One Realtime function call relayed by the browser transport."""
+    """One Realtime function call, plus WHO it came from.
+
+    The Discord voice sidecar is a separate process, so its speaker identity
+    only exists here if it rides the wire. It sends the raw `speakerId` rather
+    than a role: this process owns the allowlist and does the resolving, so a
+    sidecar can name a speaker but can never assert an authority.
+
+    `speakerBinding` is the other half of that: naming a speaker is not enough,
+    the sidecar must also be able to prove the name belongs to the utterance
+    the model answered. A body with no binding fails CLOSED on the voice
+    transport — the sidecar always sends one, so its absence means an unknown
+    client rather than an older trusted one.
+
+    Defaults are the browser transport with no speaker, which resolves to the
+    browser session's own role — so the browser client, which has no utterances
+    to attribute, behaves exactly as before.
+    """
 
     name: str
     arguments: dict = {}
+    transport: str = "browser"
+    speakerId: str | None = None
+    speakerBinding: TalkSpeakerBinding | None = None
 
 
 class TalkFlushItem(BaseModel):
@@ -85,6 +120,14 @@ def create_session(body: TalkSessionBody | None = None) -> dict:
     except talk_session.TalkSessionError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
+    # Minting the session IS this process's authorization event. Every
+    # /api/talk/* route is classified `admin` in orchestration/route_policy.py,
+    # so reaching here means an admin-authorized caller opened the session, and
+    # the BROWSER tool surface it just unlocked runs with that authority. Scoped
+    # to that transport by name: a Discord-originated call resolves its own
+    # speaker and never reads this.
+    talk_tools.set_browser_session_role("admin")
+
     return {"ok": True, **descriptor.to_wire()}
 
 
@@ -107,7 +150,13 @@ def execute_tool(body: TalkToolBody) -> dict:
             },
         ) from exc
     try:
-        output = talk_tools.execute_talk_tool(body.name, body.arguments)
+        output = talk_tools.execute_talk_tool(
+            body.name,
+            body.arguments,
+            transport=body.transport,
+            speaker_id=body.speakerId,
+            binding=body.speakerBinding,
+        )
     except kill_switches.KillSwitchDisabled as exc:
         # A PER-TOOL switch (e.g. archon_dispatch) fires inside the handler,
         # after the voice-switch guard above has already passed. Without this

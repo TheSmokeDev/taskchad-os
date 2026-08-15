@@ -220,7 +220,7 @@ class RelayWSClient:
 
         # Extract agent type and user role from relay data
         agent_type = data.get("agent_type", "thehomie")
-        user_role = user_data.get("role", "admin")
+        user_role = user_data.get("role", "viewer")
 
         # Dual-ID: session_key = durable conversation identity,
         # request_id = ephemeral transport correlation for WS routing.

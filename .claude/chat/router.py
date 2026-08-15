@@ -21,11 +21,15 @@ from discord_channel_bindings import resolve_discord_channel_binding
 from discord_persona_runtime import run_discord_persona_channel_turn
 from engine import ConversationEngine
 from extension_manager import ExtensionManager
+from learn_drop import LearnDrop, parse_learn_drop
 from local_extension_loader import (
     any_local_extension_hook,
     dispatch_local_extension_hook,
 )
 from models import Channel, IncomingMessage, OutgoingMessage, Platform, Thread, User
+# Rule 3: imported as a MODULE so a test patching
+# ``personas.grant_proposals.decide_proposal`` propagates into the button path.
+from personas import grant_proposals as _grant_proposals
 from session import Session, get_persist_lock
 from session_keys import build_session_key, resolve_thread_id
 
@@ -399,6 +403,38 @@ PROGRESS_UPDATE_SECONDS = 8.0
 PROGRESS_RECOVERY_RETRY_SECONDS = 2.0
 PROGRESS_IO_TIMEOUT_SECONDS = 2.0
 PREFETCH_ONLY_INTENTS = {"browserops", "cofounder"}
+def _sanitized_router_user_text(pairs: list[tuple[str, str]]) -> str | None:
+    """Transcript text for router commands that must never replay verbatim.
+
+    The generic router persist path stores ``incoming.text`` as the user row,
+    and ``engine.py`` replays stored user rows into
+    ``# Recent Conversation Context`` on the next engine turn. A command whose
+    own contract says its text must not reach an LLM therefore needs a
+    server-generated substitute — the ``@persona learn`` precedent below.
+
+    Returns ``None`` when no command in *pairs* declares a sanitizer, which
+    keeps persistence byte-identical for every other command. When one does,
+    the WHOLE user row is replaced: the raw text is a single string holding
+    every chained command, so it cannot be partially redacted.
+    """
+    receipts: list[str] = []
+    sanitize = False
+    for command, args in pairs:
+        if command == "persona":
+            from persona_grant_commands import (  # noqa: PLC0415 — lazy, chat slice
+                transcript_receipt,
+            )
+
+            receipts.append(transcript_receipt(args))
+            sanitize = True
+        else:
+            # Args dropped, not kept: this branch only ever runs on a turn that
+            # ALREADY contains a sanitized command, and the sibling's args are
+            # the same untrusted string.
+            receipts.append(f"[server command] /{command}")
+    return " ; ".join(receipts) if sanitize else None
+
+
 VAULT_COMMAND_NAMES = {"vault", "vaults", "vault-ops"}
 VAULT_NAME_ALIASES = {
     "second": "thehomie",
@@ -551,6 +587,55 @@ def _incoming_display_text(incoming: Any) -> str:
         if isinstance(candidate, str) and candidate.strip():
             return candidate
     return getattr(incoming, "text", "") or ""
+
+
+def _named_persona_exists(persona_id: str) -> bool:
+    """Physical-state roster check (Rule 2 — a filesystem walk, no registry).
+
+    The default profile is excluded on purpose: `default` is a reserved
+    persona name, so a curriculum controller can never be built for it.
+    """
+    from personas.lifecycle import list_profiles
+
+    return any(
+        profile.name == persona_id and not profile.is_default
+        for profile in list_profiles()
+    )
+
+
+def _render_learn_drop_reply(persona_id: str, payload: dict[str, Any]) -> str:
+    """Render one learn-drop result as an operator line, never as raw JSON.
+
+    R3 MAJOR: this line is not only shown, it is PERSISTED as the assistant
+    transcript row and replayed into the next turn's `recent_conversation`
+    system region. Every field a video uploader or a provider's stderr can
+    control — the yt-dlp title, the error text — is neutralized here, at
+    composition, so the stored receipt is inert whatever the remote metadata
+    said. `persona_id` is validated upstream; counts and the dossier filename
+    are server-generated.
+    """
+    from cognition.injection import neutralize_untrusted_metadata
+
+    title = neutralize_untrusted_metadata(payload.get("title")) or "that video"
+    if not payload.get("success", False):
+        # Errors carry remote text too (`f"{type(exc).__name__}: {exc}"` around a
+        # yt-dlp failure embeds provider stderr), so they get the same treatment
+        # with a longer cap — an operator still needs a usable diagnostic.
+        error = neutralize_untrusted_metadata(payload.get("error"), limit=200) or "unknown error"
+        return f"Learn drop failed for `{persona_id}`: {error}"
+    if payload.get("skipped"):
+        reason = neutralize_untrusted_metadata(payload.get("reason"), limit=200) or "skipped"
+        return f"Learn drop skipped for `{persona_id}`: {reason}"
+    dossier = neutralize_untrusted_metadata(Path(str(payload.get("dossier_path") or "")).name)
+    if payload.get("already_studied"):
+        suffix = f" Doctrine: `{dossier}`." if dossier else ""
+        return f"`{persona_id}` already studied '{title}'.{suffix}"
+    proposals = len(payload.get("proposal_ids") or [])
+    return (
+        f"`{persona_id}` studied '{title}'. Doctrine page: `{dossier}`. "
+        f"{proposals} application proposal(s) — review with "
+        f"`/curriculum review persona={persona_id}`."
+    )
 
 
 def _linkedin_profile_natural_action(text: str) -> str | None:
@@ -720,7 +805,12 @@ class ChatRouter:
             "__button:social:"
         ) or text.startswith("__button:linkedin_flow:") or text.startswith(
             "__button:primo_flow:"
-        ) or text.startswith("__button:capability:") or any_local_extension_hook(
+        ) or text.startswith("__button:capability:") or text.startswith(
+            # #428 counter-offer decisions are deterministic Python and must
+            # not queue behind an engine turn — the operator taps approve and
+            # expects the grant, or the refusal, right there.
+            f"__button:{_grant_proposals.CUSTOM_ID_PREFIX}:"
+        ) or any_local_extension_hook(
             "is_immediate_button", incoming
         )
 
@@ -1034,6 +1124,20 @@ class ChatRouter:
             )
             return
 
+        # --- Persona learn drop: `@<persona> learn <url>` is a SERVER-SIDE
+        # command (the cabinet room_commands.py precedent) — the link rides the
+        # curriculum pipeline as a pre-admitted item and the command text never
+        # enters an LLM prompt. Anything that is not exactly this shape falls
+        # through unchanged. MUST run before every plain-text guided-workflow
+        # consumer below (R2 MAJOR 1): a pending /video|linkedin|primo wizard
+        # would otherwise swallow this command as wizard input and bypass the
+        # role gate entirely.
+        stripped_text = text.strip()
+        learn_drop = parse_learn_drop(stripped_text)
+        if learn_drop is not None:
+            await self._handle_learn_drop(adapter, incoming, learn_drop)
+            return
+
         # --- Guided /video wizard: a pending wizard consumes typed input
         # stage-gated (pickers are match-only; the input step takes the
         # brief; the vision step takes redo feedback). State set by
@@ -1056,7 +1160,6 @@ class ChatRouter:
         # not a router command, so parsed[0] would never reach the router_commands
         # registry). Plain text fall-through preserves the existing skill flow
         # for file-path inputs.
-        stripped_text = text.strip()
         m = _VAULT_INGEST_URL_RE.match(stripped_text)
         if m:
             url = m.group(1)
@@ -1132,7 +1235,11 @@ class ChatRouter:
                         )
                     )
                     if not any(cmd in self._transcript_reset_commands for cmd, _ in router_cmds):
-                        await self._persist_router_turn_off_loop(incoming, combined)
+                        await self._persist_router_turn_off_loop(
+                            incoming,
+                            combined,
+                            user_text=_sanitized_router_user_text(router_cmds),
+                        )
                     return
 
         # --- /file accept|diff <id> — gap-6 conversational compounding ---
@@ -1160,7 +1267,7 @@ class ChatRouter:
         if parsed:
             command, args = parsed
             if command in VAULT_COMMAND_NAMES:
-                user_role = getattr(incoming, "user_role", "admin")
+                user_role = getattr(incoming, "user_role", "viewer")
                 min_role = get_command_min_role("vault")
                 role_level = {"viewer": 0, "operator": 1, "admin": 2}
                 if role_level.get(user_role, 0) < role_level.get(min_role, 0):
@@ -1189,12 +1296,16 @@ class ChatRouter:
                         )
                     )
                     if command not in self._transcript_reset_commands:
-                        await self._persist_router_turn_off_loop(incoming, reply)
+                        await self._persist_router_turn_off_loop(
+                            incoming,
+                            reply,
+                            user_text=_sanitized_router_user_text([(command, args)]),
+                        )
                 return
 
             if not skip_intent_detection:
                 # Role check for engine commands
-                user_role = getattr(incoming, "user_role", "admin")
+                user_role = getattr(incoming, "user_role", "viewer")
                 min_role = get_command_min_role(command)
                 role_level = {"viewer": 0, "operator": 1, "admin": 2}
                 if role_level.get(user_role, 0) < role_level.get(min_role, 0):
@@ -1328,7 +1439,7 @@ class ChatRouter:
 
             linkedin_profile_action = _linkedin_profile_natural_action(text)
             if linkedin_profile_action and "linkedin_profile" in router_commands:
-                user_role = getattr(incoming, "user_role", "admin")
+                user_role = getattr(incoming, "user_role", "viewer")
                 min_role = get_command_min_role("linkedin_profile")
                 role_level = {"viewer": 0, "operator": 1, "admin": 2}
                 if role_level.get(user_role, 0) < role_level.get(min_role, 0):
@@ -2334,6 +2445,136 @@ class ChatRouter:
         preview = result.get("preview", "")
         return f"Draft preview (`{auto_id}`):\n\n{preview}"
 
+    async def _handle_learn_drop(
+        self,
+        adapter: Any,
+        incoming: Any,
+        drop: LearnDrop,
+    ) -> None:
+        """Study one operator-dropped video for a named persona.
+
+        Default-deny and deterministic: the role gate fires BEFORE any profile
+        lookup or ledger write, so a stranger's drop never enqueues anything.
+        The reply is rendered here — no engine turn, no LLM sees the command.
+        """
+        user_role = getattr(incoming, "user_role", "viewer")
+        min_role = get_command_min_role("curriculum")
+        role_level = {"viewer": 0, "operator": 1, "admin": 2}
+        if role_level.get(user_role, 0) < role_level.get(min_role, 0):
+            await self._send_learn_drop_reply(
+                adapter,
+                incoming,
+                f"Permission denied: a learn drop requires {min_role} role.",
+                persona_id=drop.persona_id,
+                is_error=True,
+            )
+            return
+
+        try:
+            known = await asyncio.to_thread(_named_persona_exists, drop.persona_id)
+        except Exception as exc:
+            await self._send_learn_drop_reply(
+                adapter,
+                incoming,
+                f"Could not read the persona roster: {type(exc).__name__}: {exc}",
+                persona_id=drop.persona_id,
+                is_error=True,
+            )
+            return
+        if not known:
+            await self._send_learn_drop_reply(
+                adapter,
+                incoming,
+                f"`{drop.persona_id}` is not a registered persona, so nothing was "
+                "enqueued. Try `/curriculum learn <url> persona=<id>`.",
+                persona_id=drop.persona_id,
+                is_error=True,
+            )
+            return
+
+        try:
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Dropping that video into `{drop.persona_id}`'s curriculum...",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                )
+            )
+        except Exception:
+            # Best-effort ack, exactly like the URL-ingest placeholder: a send
+            # failure must not cancel the study the operator asked for.
+            pass
+
+        from curriculum.drop import UnsupportedDropURLError
+        from curriculum.service import get_curriculum_service
+        from security import kill_switches
+
+        try:
+            service = get_curriculum_service(drop.persona_id)
+            payload = await service.learn_url(drop.url)
+        except kill_switches.KillSwitchDisabled:
+            await self._send_learn_drop_reply(
+                adapter,
+                incoming,
+                "Persona curriculum is disabled by the operator kill switch "
+                "(HOMIE_KILLSWITCH_PERSONA_CURRICULUM). Nothing was enqueued.",
+                persona_id=drop.persona_id,
+                is_error=True,
+            )
+            return
+        except UnsupportedDropURLError as exc:
+            await self._send_learn_drop_reply(
+                adapter, incoming, str(exc), persona_id=drop.persona_id, is_error=True
+            )
+            return
+        except Exception as exc:
+            await self._send_learn_drop_reply(
+                adapter,
+                incoming,
+                f"Learn drop failed for `{drop.persona_id}`: {type(exc).__name__}: {exc}",
+                persona_id=drop.persona_id,
+                is_error=True,
+            )
+            return
+
+        await self._send_learn_drop_reply(
+            adapter,
+            incoming,
+            _render_learn_drop_reply(drop.persona_id, payload),
+            persona_id=drop.persona_id,
+            is_error=not payload.get("success", False),
+        )
+
+    async def _send_learn_drop_reply(
+        self,
+        adapter: Any,
+        incoming: Any,
+        reply: str,
+        *,
+        persona_id: str,
+        is_error: bool = False,
+    ) -> None:
+        await adapter.send(
+            OutgoingMessage(
+                text=reply,
+                channel=incoming.channel,
+                thread=incoming.thread,
+                is_error=is_error,
+            )
+        )
+        # R2 MAJOR 2: the raw `@persona learn <url>` command text (which can
+        # carry an attacker-controlled query string) must never enter an LLM
+        # prompt — but the generic router persist path stores incoming.text
+        # verbatim as an ordinary user transcript row, which recent_conversation
+        # later replays into the system prompt. Persist a sanitized, fully
+        # server-generated receipt instead — no raw URL, no user-controlled
+        # content beyond the already-validated persona_id.
+        await self._persist_router_turn_off_loop(
+            incoming,
+            reply,
+            user_text=f"[server command] learn drop -> persona={persona_id}",
+        )
+
     async def _handle_vault_ingest_url(
         self,
         adapter: Any,
@@ -2762,6 +3003,8 @@ class ChatRouter:
             await self._handle_social_button(adapter, incoming, custom_id)
         elif custom_id.startswith("cofounder:"):
             await self._handle_cofounder_button(adapter, incoming, custom_id)
+        elif custom_id.startswith(f"{_grant_proposals.CUSTOM_ID_PREFIX}:"):
+            await self._handle_grant_proposal_button(adapter, incoming, custom_id)
         elif custom_id.startswith("capability:"):
             parts = custom_id.split(":")
             if len(parts) != 3 or parts[1] not in {"approve", "deny"}:
@@ -2793,6 +3036,96 @@ class ChatRouter:
                 # Unknown button — log and ignore
                 print(f"[{datetime.now()}] Unknown button: {custom_id}")
 
+    async def _handle_grant_proposal_button(
+        self, adapter: Any, incoming: Any, custom_id: str
+    ) -> None:
+        """Decide one #428 counter-offer from an authenticated button tap.
+
+        Three gates, in order, all server-side:
+
+        1. **Provenance.** The tap must carry this bot's own button markers.
+           Telegram and Discord both stamp ``interaction_type`` and
+           ``source_message_is_own`` after checking the sender; a typed
+           ``__button:pgrant:…`` through the CLI or a relay has neither, so
+           text can never synthesize an approval (the social/capability
+           precedent, verbatim).
+        2. **Shape.** ``parse_custom_id`` validates the action, the persona
+           name, and the code before anything is looked up.
+        3. **Role + decision.** ``decide_proposal`` is the authority: it
+           re-checks the admin role, writes the refusal row when the role is
+           wrong, CAS-flips the pending row, and only then calls the #426
+           executor — which checks the role a second time. This handler never
+           mutates config itself and has no path that could.
+        """
+        raw_event = getattr(incoming, "raw_event", None)
+        raw_event = raw_event if isinstance(raw_event, dict) else {}
+        if (
+            raw_event.get("interaction_type") != "button"
+            or raw_event.get("source_message_is_own") is not True
+        ):
+            await adapter.send(
+                OutgoingMessage(
+                    text=(
+                        "Toolset grants only run from this bot's own approval "
+                        "buttons. Use `/grant approve <persona> <code>` instead."
+                    ),
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        parsed = _grant_proposals.parse_custom_id(custom_id)
+        if parsed is None:
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Malformed grant decision: {custom_id}",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        action, persona_id, code = parsed
+        # Same code path as the typed `/grant approve|deny`, for the reason the
+        # co-founder buttons route through `manager.dispatch`: a button must
+        # never be able to do more than the command it mirrors.
+        import core_handlers
+
+        decision, (receipt_user, receipt_assistant) = (
+            await core_handlers.decide_grant_proposal_with_receipt(
+                incoming,
+                persona_id=persona_id,
+                code=code,
+                approve=action == _grant_proposals.ACTION_APPROVE,
+            )
+        )
+        await adapter.send(
+            OutgoingMessage(
+                text=decision.message,
+                channel=incoming.channel,
+                thread=incoming.thread,
+            )
+        )
+        # R3 MAJOR 1: a tap used to leave NOTHING durable. The transcript went
+        # straight from the counter-offer card to the next task turn, so the
+        # authenticated approval and the grant it caused existed only in the
+        # ledger — the session's own history claimed the persona's reach grew
+        # for no reason. Persist through the SAME router-turn path every other
+        # router surface uses (session bump, brief-owed marker, both rows), and
+        # persist the SANITIZED receipt rather than the reply: transcript rows
+        # are replayed into later prompts by `recent_conversation`, and the
+        # operator-facing reply can carry an executor exception or a stored
+        # status detail. Fail-open like every other persist — the operator
+        # already has their answer.
+        await self._persist_router_turn_off_loop(
+            incoming,
+            receipt_assistant,
+            user_text=receipt_user,
+        )
+
     async def _handle_capability_decision(
         self,
         adapter: Any,
@@ -2820,7 +3153,7 @@ class ChatRouter:
             )
             return
 
-        role = str(getattr(incoming, "user_role", "admin") or "admin")
+        role = str(getattr(incoming, "user_role", "viewer") or "viewer")
         if role not in {"operator", "admin"}:
             await adapter.send(
                 OutgoingMessage(
@@ -3098,7 +3431,9 @@ class ChatRouter:
         except Exception as e:  # noqa: BLE001
             return f"Error loading draft #{pid}: {type(e).__name__}: {e}"
 
-    async def _persist_router_turn_off_loop(self, incoming: Any, reply: str) -> None:
+    async def _persist_router_turn_off_loop(
+        self, incoming: Any, reply: str, *, user_text: str | None = None
+    ) -> None:
         """Serialize + offload the sync router persist off the event loop (#131).
 
         Shares the per-conversation lock with the engine + persona persist paths
@@ -3108,6 +3443,10 @@ class ChatRouter:
         2× add_message) runs in one thread hop, preserving its internal ordering.
         Whole-body fail-open: a persistence failure never breaks a turn that
         already replied.
+
+        ``user_text``, when given, overrides what gets stored as the "user" row
+        instead of the raw ``incoming`` text (R2 MAJOR 2) — for surfaces whose
+        own contract says the command text must never enter an LLM prompt.
         """
         try:
             platform_str = incoming.platform.value
@@ -3118,11 +3457,15 @@ class ChatRouter:
             )
             key = build_session_key(platform_str, channel_id, thread_id)
             async with get_persist_lock(key):
-                await asyncio.to_thread(self._persist_router_turn, incoming, reply)
+                await asyncio.to_thread(
+                    self._persist_router_turn, incoming, reply, user_text
+                )
         except Exception as e:
             print(f"[{datetime.now()}] [Router] Persist failed (non-blocking): {e}")
 
-    def _persist_router_turn(self, incoming: Any, reply: str) -> None:
+    def _persist_router_turn(
+        self, incoming: Any, reply: str, user_text: str | None = None
+    ) -> None:
         """Persist direct router-path turns into the transcript store."""
 
         # Living Mind Act 4 (R1 B4): capture the brief-owed marker BEFORE the
@@ -3174,7 +3517,10 @@ class ChatRouter:
             store.create(session)
 
         timestamp = getattr(incoming, "timestamp", now)
-        store.add_message(session_id, "user", _incoming_display_text(incoming), timestamp)
+        display_text = (
+            user_text if user_text is not None else _incoming_display_text(incoming)
+        )
+        store.add_message(session_id, "user", display_text, timestamp)
         store.add_message(session_id, "assistant", reply, now)
 
     def _apply_router_runtime_metadata(self, incoming: Any, session: Session) -> None:

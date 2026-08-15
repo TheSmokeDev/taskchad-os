@@ -77,8 +77,20 @@ def is_disabled(switch_name: str) -> bool:
     derived from the operator's current setting, not a snapshot).
     """
     env_key = f"HOMIE_KILLSWITCH_{switch_name.upper()}"
-    raw = os.environ.get(env_key, "").strip().lower()
-    return raw == "disabled"
+    return is_disabled_value(os.environ.get(env_key))
+
+
+def is_disabled_value(raw: str | None) -> bool:
+    """Return True iff a RAW env value is the 'disabled' sentinel.
+
+    The single owner of what "disabled" LOOKS like. Env-plumbing code that has
+    to keep a switch fail-closed while merging environments (capability
+    delegation, profile dotenv loading) asks here rather than re-spelling the
+    comparison: those merges decide whether an operator's emergency stop
+    survives into a child process, and a second spelling of the sentinel is a
+    second way to lose one.
+    """
+    return (raw or "").strip().lower() == "disabled"
 
 
 def requireEnabled(switch_name: str, *, caller: str = "") -> None:

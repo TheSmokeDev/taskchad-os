@@ -29,7 +29,7 @@ import json
 import os
 import tempfile
 from collections.abc import Iterator
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -46,6 +46,14 @@ except Exception:  # pragma: no cover - optional when imported outside scripts e
 
 
 SIDECAR_FILE_NAME = "skill_usage.json"
+
+#: Positive marker for "this promoted skill carries NO persona restriction".
+#: ``skill_promotion.promote`` stamps it on a global promotion whose row has no
+#: scope yet, which makes scope ADDITIVE going forward: the index asks "is this
+#: positively permitted for the reader" rather than "was it subtracted from
+#: everyone". An EMPTY ``assigned_personas`` is the pre-sentinel legacy shape
+#: and is still read as unrestricted — that is the one migration read.
+SCOPE_UNRESTRICTED = "*"
 
 USAGE_STATES = frozenset(
     {
@@ -74,6 +82,15 @@ class SkillUsage:
     scan_verdict: str = ""
     promoted_at: str | None = None
     path: str = ""  # disambiguates duplicate draft names (PRP minor / ConflictMatch.path)
+    # #429 Q5 — personas this skill has been EXPLICITLY linked/assigned to via
+    # linked-skill intake. Empty means "never went through that path" (every
+    # pre-existing hand-authored central skill, and anything promoted the old
+    # way via `/skills promote`) — those carry NO scope restriction. Populated
+    # ONLY by `record_persona_assignment`; `cognition.skills` reads it to keep
+    # a persona-scoped promotion out of the unrestricted-allowlist central
+    # scan (only the `default` profile gets one) until `default` is itself
+    # among the assigned personas.
+    assigned_personas: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -317,6 +334,146 @@ def mark_state(
         _write_map_atomic(sidecar, data)
 
 
+def record_persona_assignment(
+    name: str,
+    persona_id: str,
+    *,
+    sidecar_path: Path | str | None = None,
+) -> SkillUsage | None:
+    """Append *persona_id* to a skill's explicit-assignment scope (#429 Q5).
+
+    Returns ``None`` when the row is absent, and the CALLER must treat that as
+    a failed scope write, not as "no restriction needed" (#429 design gate B2,
+    seam 1). Only skills that came through the draft path (``/learn`` /
+    ``/skills link``) have a row at all, so a caller that is about to PUBLISH a
+    persona-scoped skill and finds no row cannot record the restriction —
+    ``skill_intake`` refuses there rather than publishing unscoped. A
+    hand-authored central skill is a different case entirely: nothing ever
+    tries to scope it, so its absent row is never read as a failure.
+
+    RMW under the shared lock (M4) so concurrent links to the same skill name
+    from different personas never lose an append.
+    """
+    persona = str(persona_id or "").strip()
+    if not persona:
+        return None
+    sidecar = _resolve_sidecar_path(sidecar_path)
+    with _sidecar_lock(sidecar):
+        data = _read_map(sidecar)
+        usage = data.get(name)
+        if usage is None:
+            return None
+        if persona not in usage.assigned_personas:
+            usage.assigned_personas = [*usage.assigned_personas, persona]
+            _write_map_atomic(sidecar, data)
+        return usage
+
+
+def claim_persona_assignment(
+    name: str,
+    persona_id: str,
+    *,
+    sidecar_path: Path | str | None = None,
+) -> tuple[SkillUsage | None, bool]:
+    """Atomically claim a persona scope slot for *name* — ``(usage, added)``.
+
+    #429 codex R3 BLOCKER: the split ``get_usage`` -> ``record_persona_assignment``
+    check-then-act let TWO concurrent same-persona intakes both observe the
+    persona as absent and BOTH return ``added=True``. The loser's post-failure
+    rollback (``remove_persona_assignment``) then removed the scope the WINNER
+    was still relying on — the artifact stayed live while its restriction row
+    was silently gone. Here the membership check AND the append run under ONE
+    lock acquisition, so exactly one claimant ever gets ``added=True`` and a
+    losing caller (``added=False``) never has anything to undo.
+
+    Returns ``(None, False)`` when the row is absent — the caller must treat
+    that as a failed scope write, not as "no restriction needed" (same
+    contract as :func:`record_persona_assignment`).
+    """
+    persona = str(persona_id or "").strip()
+    if not persona:
+        return None, False
+    sidecar = _resolve_sidecar_path(sidecar_path)
+    with _sidecar_lock(sidecar):
+        data = _read_map(sidecar)
+        usage = data.get(name)
+        if usage is None:
+            return None, False
+        if persona in usage.assigned_personas:
+            return usage, False
+        usage.assigned_personas = [*usage.assigned_personas, persona]
+        _write_map_atomic(sidecar, data)
+        return usage, True
+
+
+def remove_persona_assignment(
+    name: str,
+    persona_id: str,
+    *,
+    sidecar_path: Path | str | None = None,
+) -> SkillUsage | None:
+    """Drop *persona_id* from a skill's scope — the inverse write (#429).
+
+    Used when a scope was recorded for an intake that then FAILED to publish:
+    the sidecar must not go on claiming a persona was given a skill that was
+    rolled back. Absent row / absent persona is a no-op.
+    """
+    persona = str(persona_id or "").strip()
+    if not persona:
+        return None
+    sidecar = _resolve_sidecar_path(sidecar_path)
+    with _sidecar_lock(sidecar):
+        data = _read_map(sidecar)
+        usage = data.get(name)
+        if usage is None:
+            return None
+        if persona in usage.assigned_personas:
+            usage.assigned_personas = [
+                p for p in usage.assigned_personas if p != persona
+            ]
+            _write_map_atomic(sidecar, data)
+        return usage
+
+
+def mark_scope_unrestricted(
+    name: str,
+    *,
+    sidecar_path: Path | str | None = None,
+) -> SkillUsage | None:
+    """Positively mark a skill as carrying no persona restriction (#429).
+
+    Stamps :data:`SCOPE_UNRESTRICTED`. Deliberately a NO-OP when a scope
+    already exists: a skill an intake scoped to one persona must not be
+    widened to everyone by the promote that intake itself is driving. Absent
+    row is a no-op (nothing was staged here to mark).
+    """
+    sidecar = _resolve_sidecar_path(sidecar_path)
+    with _sidecar_lock(sidecar):
+        data = _read_map(sidecar)
+        usage = data.get(name)
+        if usage is None:
+            return None
+        if not usage.assigned_personas:
+            usage.assigned_personas = [SCOPE_UNRESTRICTED]
+            _write_map_atomic(sidecar, data)
+        return usage
+
+
+def list_all_usage(
+    *,
+    sidecar_path: Path | str | None = None,
+) -> dict[str, SkillUsage]:
+    """Return the full physical sidecar map (Rule 2), in ONE read.
+
+    Used by the skill-index build (``cognition.skills``) to check persona
+    scoping for every candidate central skill WITHOUT re-opening and
+    re-locking the sidecar file once per skill on every turn.
+    """
+    sidecar = _resolve_sidecar_path(sidecar_path)
+    with _sidecar_lock(sidecar):
+        return _read_map(sidecar)
+
+
 def list_eligible(
     threshold: int | None = None,
     *,
@@ -374,11 +531,17 @@ def prune_stale(
 
 
 __all__ = (
+    "SCOPE_UNRESTRICTED",
     "SIDECAR_FILE_NAME",
     "USAGE_STATES",
     "SkillUsage",
     "record_recurrence",
+    "record_persona_assignment",
+    "claim_persona_assignment",
+    "remove_persona_assignment",
+    "mark_scope_unrestricted",
     "get_usage",
+    "list_all_usage",
     "mark_state",
     "list_eligible",
     "prune_stale",
