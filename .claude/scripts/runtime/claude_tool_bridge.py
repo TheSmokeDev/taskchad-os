@@ -26,6 +26,7 @@ directions.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -109,7 +110,16 @@ def _make_sdk_tool(
         import inspect
 
         try:
-            outcome = dispatch(name, args or {})
+            # Sync dispatchers do blocking work (SQLite, filesystem, browser
+            # subprocesses — e.g. the persona action gate's proposal write).
+            # Running one directly on this async handler would stall the SDK's
+            # event loop for the full duration (Codex R1), so sync dispatch
+            # hops a thread; an async dispatcher is awaited in place. Mirrors
+            # the codex_app_server_gate carrier.
+            if inspect.iscoroutinefunction(dispatch):
+                outcome = dispatch(name, args or {})
+            else:
+                outcome = await asyncio.to_thread(dispatch, name, args or {})
             if inspect.isawaitable(outcome):
                 outcome = await outcome
             text = outcome if isinstance(outcome, str) else json.dumps(outcome, default=str)

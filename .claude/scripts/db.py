@@ -141,10 +141,11 @@ def _quote_fts_query(query: str) -> str:
 class SQLiteMemoryDB:
     """SQLite + sqlite-vec + FTS5 backend."""
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(self, db_path: str | None = None, read_only: bool = False) -> None:
         from pathlib import Path
 
         self._db_path = Path(db_path) if db_path else DATABASE_PATH
+        self._read_only = read_only
         self._conn: sqlite3.Connection | None = None
 
     @_retry_on_locked
@@ -152,23 +153,45 @@ class SQLiteMemoryDB:
         if self._conn is None:
             import sqlite_vec
 
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            # 30s lock wait — plenty for concurrent heartbeat/chat bot/recall
-            # readers during a reindex. Default would be 5s which is not enough
-            # when another process holds a rollback-journal exclusive lock.
-            conn = sqlite3.connect(str(self._db_path), timeout=30.0)
+            if self._read_only:
+                # mode=ro (uri) so a missing file RAISES instead of being
+                # silently created — a read-only vault must never gain a
+                # single byte from this side. No mkdir either. immutable=1 is
+                # load-bearing, not an optimization: the vault's OWN writer
+                # left the DB header in WAL mode, and a plain mode=ro open of
+                # a WAL database still CREATES -wal/-shm sidecars in the
+                # vault's tree (and a ro connection cannot delete them on
+                # close). immutable reads the main file only — zero filesystem
+                # footprint. Trade-off: a read racing a live writer in that
+                # vault may error or read stale-as-of-last-checkpoint data;
+                # recall is fail-open, so that surfaces as an empty sweep of
+                # this vault, never corruption of it.
+                conn = sqlite3.connect(
+                    self._db_path.resolve().as_uri() + "?mode=ro&immutable=1",
+                    uri=True,
+                    timeout=30.0,
+                )
+            else:
+                self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                # 30s lock wait — plenty for concurrent heartbeat/chat bot/recall
+                # readers during a reindex. Default would be 5s which is not enough
+                # when another process holds a rollback-journal exclusive lock.
+                conn = sqlite3.connect(str(self._db_path), timeout=30.0)
             try:
                 conn.enable_load_extension(True)
                 sqlite_vec.load(conn)
                 conn.enable_load_extension(False)
                 conn.row_factory = sqlite3.Row
-                # WAL mode allows concurrent readers + single writer (no mutual
-                # exclusion between them). journal_mode persists in the DB header
-                # once set — safe to re-assert on every connection. synchronous
-                # NORMAL is the sweet spot with WAL (no durability regression vs
-                # rollback journal, ~2-3x faster writes).
-                conn.execute("PRAGMA journal_mode = WAL")
-                conn.execute("PRAGMA synchronous = NORMAL")
+                if not self._read_only:
+                    # WAL mode allows concurrent readers + single writer (no mutual
+                    # exclusion between them). journal_mode persists in the DB header
+                    # once set — safe to re-assert on every connection. synchronous
+                    # NORMAL is the sweet spot with WAL (no durability regression vs
+                    # rollback journal, ~2-3x faster writes). SKIPPED read-only:
+                    # the WAL pragma writes the DB header and spawns -wal/-shm
+                    # sidecars even for a pure-read workload.
+                    conn.execute("PRAGMA journal_mode = WAL")
+                    conn.execute("PRAGMA synchronous = NORMAL")
                 conn.execute("PRAGMA busy_timeout = 30000")
             except Exception:
                 # Setup failed partway through (e.g. a PRAGMA hit a transient
@@ -841,7 +864,9 @@ class PostgresMemoryDB:
 # ---------------------------------------------------------------------------
 
 def get_memory_db(
-    database_url: str = "", db_path: "str | Path | None" = None
+    database_url: str = "",
+    db_path: "str | Path | None" = None,
+    read_only: bool = False,
 ) -> SQLiteMemoryDB | PostgresMemoryDB:
     """Return the appropriate backend based on DATABASE_URL.
 
@@ -851,8 +876,15 @@ def get_memory_db(
     ``db_path`` selects a specific SQLite file (per-vault recall); None keeps the
     default DATABASE_PATH (byte-identical legacy behavior). Ignored for Postgres,
     which is single-instance.
+
+    ``read_only`` opens the SQLite file mode=ro (no create, no mkdir, no WAL)
+    and pins the backend to SQLite regardless of DATABASE_URL: the shared
+    Postgres has no persona column, so a read-only persona-vault recall must
+    stay on its own per-persona file (issue #466).
     """
     url = database_url or DATABASE_URL
-    if url:
+    if url and not read_only:
         return PostgresMemoryDB(url)
-    return SQLiteMemoryDB(db_path=str(db_path) if db_path else None)
+    return SQLiteMemoryDB(
+        db_path=str(db_path) if db_path else None, read_only=read_only
+    )

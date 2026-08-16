@@ -276,6 +276,27 @@ TOOLSETS: dict[str, Toolset] = {
         "tools": [],
         "includes": ["browser"],
     },
+    "x_social_write": {
+        "description": (
+            "X write verbs (follow accounts, enable notifications). Membership "
+            "grants REACH only: every write tool here creates an operator-approval "
+            "proposal, and execution requires the dedicated action gate "
+            "(/act approve) — writes are never reachable from this grant alone."
+        ),
+        "tools": ["x_follow_accounts", "x_enable_notifications"],
+        "includes": ["browser_read"],
+    },
+    "ga4_fleet_write": {
+        "description": (
+            "GA4 fleet write verbs (provision a brand's property/stream, deploy "
+            "its tag to Vercel + verify). Membership grants REACH only: every "
+            "write tool here creates an operator-approval proposal, and execution "
+            "requires the dedicated action gate (/act approve) — writes are "
+            "never reachable from this grant alone."
+        ),
+        "tools": ["ga4_provision_site", "ga4_deploy_tag"],
+        "includes": ["seo_geo_read"],
+    },
     "chat_commands": {
         "description": "All registered chat commands (auto-discovered from extension manager)",
         # No hand-listed tools — auto-discovery via live_source.

@@ -249,6 +249,30 @@ def get_default_paths() -> dict[str, Path]:
     }
 
 
+def list_persona_profile_ids() -> list[str]:
+    """Physically enumerate named profile ids under ``<root>/profiles/`` (Rule 2).
+
+    Dirs only, filtered through ``_PERSONA_ID_RE``. No caching at module
+    scope: a persona created moments ago must appear on the very next call,
+    and a deleted one must drop out immediately. Every filesystem read is
+    contained — an ACL-denied or vanished dir yields "no personas" rather
+    than an escaping ``OSError`` (matches ``lifecycle.list_profiles``).
+    """
+    profiles_root = get_default_homie_root() / "profiles"
+    try:
+        entries = sorted(profiles_root.iterdir())
+    except OSError:
+        return []
+    ids: list[str] = []
+    for entry in entries:
+        try:
+            if entry.is_dir() and _PERSONA_ID_RE.match(entry.name):
+                ids.append(entry.name)
+        except OSError:
+            continue
+    return ids
+
+
 def get_persona_paths(name: str) -> dict[str, Path]:
     """Return the path map for a given profile name.
 

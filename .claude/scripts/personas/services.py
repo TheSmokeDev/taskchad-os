@@ -939,6 +939,75 @@ def remove_persona_toolset(
     )
 
 
+def add_persona_tool(
+    persona_id: str,
+    tool: str,
+    *,
+    actor: str,
+    actor_role: str,
+    trigger_text: str,
+    surface: str,
+    channel_id: str,
+    audit_path: Path | str | None = None,
+) -> _toolset_grants.ToolsetGrantResult:
+    """Grant one registered TOOL to a named persona (epic #465 1c).
+
+    The single-capability grain of :func:`add_persona_toolset`: same executor,
+    same gates, same ledger — only the config key (``tools:``), the registry
+    it validates against (``runtime.tool_registry``, not the toolset
+    registry), and the ledger operation differ.
+
+    Grant = reach-only: a ``dedicated_gate`` tool CAN be granted here,
+    because granting it lets the persona PROPOSE actions through its
+    dedicated approval gate — execution stays behind that gate either way.
+
+    ``actor_role`` carries the same rule as the toolset side: resolved
+    server-side by the caller, checked here, never established here.
+    """
+    return _mutate_persona_toolset(
+        _toolset_grants.OPERATION_GRANT_TOOL,
+        persona_id,
+        tool,
+        actor=actor,
+        actor_role=actor_role,
+        trigger_text=trigger_text,
+        surface=surface,
+        channel_id=channel_id,
+        audit_path=audit_path,
+        kind=_toolset_grants.KIND_TOOL,
+    )
+
+
+def remove_persona_tool(
+    persona_id: str,
+    tool: str,
+    *,
+    actor: str,
+    actor_role: str,
+    trigger_text: str,
+    surface: str,
+    channel_id: str,
+    audit_path: Path | str | None = None,
+) -> _toolset_grants.ToolsetGrantResult:
+    """Revoke one tool from a named persona — same executor, same ledger.
+
+    Same deliberate asymmetry as the toolset revoke: NO registry check, so a
+    tool that was granted and later unregistered is still removable.
+    """
+    return _mutate_persona_toolset(
+        _toolset_grants.OPERATION_REVOKE_TOOL,
+        persona_id,
+        tool,
+        actor=actor,
+        actor_role=actor_role,
+        trigger_text=trigger_text,
+        surface=surface,
+        channel_id=channel_id,
+        audit_path=audit_path,
+        kind=_toolset_grants.KIND_TOOL,
+    )
+
+
 def describe_grant_failure(
     exc: Exception,
     *,
@@ -996,8 +1065,19 @@ def _mutate_persona_toolset(
     surface: str,
     channel_id: str,
     audit_path: Path | str | None,
+    kind: str = "toolset",
 ) -> _toolset_grants.ToolsetGrantResult:
-    """Shared grant/revoke body.
+    """Shared grant/revoke body, over BOTH grant grains (#465 1c).
+
+    ``kind="toolset"`` (the default, and every pre-1c call) mutates config
+    ``toolsets:`` under ``grant``/``revoke``; ``kind="tool"`` mutates config
+    ``tools:`` under ``grant_tool``/``revoke_tool``. Every gate below is
+    shared verbatim — admin role, persona_mutation kill switch, default
+    profile refusal, cross-process file lock, strict-read RMW, atomic write,
+    intent/outcome ledger pair, torn-write healing — because a capability
+    grant is a scope mutation with exactly the same stakes as a bundle grant;
+    only the config key, the registry it validates against, and the ledger
+    operation differ.
 
     Ledger contract (round-4 correction — the old "exactly one row per exit"
     was false on the success path and could label a precondition as the
@@ -1024,6 +1104,15 @@ def _mutate_persona_toolset(
     trigger = grants.normalize_trigger_text(trigger_text)
     surface = str(surface or "").strip()
     channel_id = str(channel_id or "").strip()
+    kind = str(kind or "").strip() or grants.KIND_TOOLSET
+    is_grant = operation in {grants.OPERATION_GRANT, grants.OPERATION_GRANT_TOOL}
+    # The one noun that changes per grain — used in refusal text so an
+    # operator is never told a "toolset" was at fault when they named a tool.
+    word = "tool" if kind == grants.KIND_TOOL else "toolset"
+    config_key = "tools" if kind == grants.KIND_TOOL else "toolsets"
+    validate_section = (
+        _validate_tools_section if kind == grants.KIND_TOOL else _validate_toolsets_section
+    )
 
     correlation_id = grants.new_correlation_id()
 
@@ -1042,6 +1131,7 @@ def _mutate_persona_toolset(
             "operation": operation,
             "persona_id": persona,
             "toolset": name,
+            "kind": kind,
             "outcome": outcome,
             "reason": reason,
             "actor": who,
@@ -1144,20 +1234,25 @@ def _mutate_persona_toolset(
 
     # ── Contract gates. All BEFORE any read or write; none can partially
     # apply, and each leaves a refusal row naming what was missing.
+    if kind not in {grants.KIND_TOOLSET, grants.KIND_TOOL}:
+        _refuse(
+            grants.REASON_INVALID_TOOLSET,
+            f"refused: unknown grant kind {kind!r} — expected toolset or tool.",
+        )
     if not persona:
         _refuse(
             grants.REASON_INVALID_PERSONA,
-            "refused: no persona named — say which homie the toolset is for.",
+            "refused: no persona named — say which homie the grant is for.",
         )
     if not name:
         _refuse(
             grants.REASON_INVALID_TOOLSET,
-            f"refused: no toolset named — say which bundle to {operation}.",
+            f"refused: no {word} named — say which one to {operation}.",
         )
     if not who or not trigger or not surface or not channel_id:
         _refuse(
             grants.REASON_MISSING_OPERATOR_TURN,
-            "refused: a toolset change needs the live operator turn that "
+            f"refused: a {word} {operation} needs the live operator turn that "
             "ordered it (actor + trigger_text + surface + channel_id). A "
             "grant nobody ordered, or one with no channel to trace it back "
             "to, is not expressible.",
@@ -1165,7 +1260,7 @@ def _mutate_persona_toolset(
     if role != grants.ADMIN_ROLE:
         _refuse(
             grants.REASON_NOT_AUTHORIZED,
-            f"refused: toolset {operation} requires the "
+            f"refused: {word} {operation} requires the "
             f"{grants.ADMIN_ROLE} role, got {role or 'none'!r}.",
         )
 
@@ -1185,7 +1280,7 @@ def _mutate_persona_toolset(
         try:
             kill_switches.requireEnabled(
                 _TOOLSET_GRANT_KILL_SWITCH,
-                caller=f"personas.toolset_{operation}",
+                caller=f"personas.{kind}_{operation}",
             )
         except kill_switches.KillSwitchDisabled as exc:
             _audit(
@@ -1261,8 +1356,17 @@ def _mutate_persona_toolset(
             audit_path_override=grants.resolve_ledger_path(None, ""),
         )
 
-    if operation == grants.OPERATION_GRANT:
-        known = grants.known_toolset_names()
+    if is_grant:
+        # Grant = reach-only. The name must be REGISTERED — an unknown name
+        # is a refusal with nearest matches — but a registered
+        # ``dedicated_gate`` tool is NOT refused: the grant expands reach,
+        # and its dedicated action gate still authorizes every execution
+        # downstream (the 1a doctrine).
+        known = (
+            grants.known_tool_names()
+            if kind == grants.KIND_TOOL
+            else grants.known_toolset_names()
+        )
         if not known:
             # An OUTAGE, not a bad name. ``known_toolset_names()`` fails closed
             # to () when ``runtime.toolsets`` will not import or TOOLSETS is
@@ -1275,8 +1379,8 @@ def _mutate_persona_toolset(
             # while the registry is down.
             _refuse(
                 grants.REASON_REGISTRY_UNAVAILABLE,
-                "refused: the toolset registry is unavailable, so no grant can "
-                "be validated right now — this is not a problem with "
+                f"refused: the {word} registry is unavailable, so no grant can "
+                f"be validated right now — this is not a problem with "
                 f"{name!r}. Nothing was written; try again once it loads. "
                 "(Revoking still works.)",
                 config_path=config_path,
@@ -1284,9 +1388,14 @@ def _mutate_persona_toolset(
         if name not in known:
             suggestions = grants.nearest_names(name, names=known)
             hint = f" Nearest: {', '.join(suggestions)}." if suggestions else ""
+            reason = (
+                grants.REASON_UNKNOWN_TOOL
+                if kind == grants.KIND_TOOL
+                else grants.REASON_UNKNOWN_TOOLSET
+            )
             _refuse(
-                grants.REASON_UNKNOWN_TOOLSET,
-                f"refused: {name!r} is not in the live toolset registry "
+                reason,
+                f"refused: {name!r} is not in the live {word} registry "
                 f"({len(known)} registered).{hint}",
                 suggestions=suggestions,
                 config_path=config_path,
@@ -1328,8 +1437,8 @@ def _mutate_persona_toolset(
                 # a malformed declaration and must raise, not get normalized away —
                 # collapsing both to ``[]`` here would let a bad file silently heal
                 # itself into whatever the caller happens to grant next.
-                existing = data["toolsets"] if "toolsets" in data else []
-                _validate_toolsets_section(existing, config_path)
+                existing = data[config_key] if config_key in data else []
+                validate_section(existing, config_path)
             except ConfigShapeError as exc:
                 _audit(
                     grants.OUTCOME_ERROR,
@@ -1361,7 +1470,7 @@ def _mutate_persona_toolset(
             # already_granted / not_granted into an exception.
             def _heal_torn_attempt(effective_outcome: str, reason: str) -> None:
                 torn = grants.orphan_intent_correlation(
-                    persona, name, operation, audit_path
+                    persona, name, operation, audit_path, kind=kind
                 )
                 if torn:
                     _audit(
@@ -1372,7 +1481,7 @@ def _mutate_persona_toolset(
                         correlation=torn,
                     )
 
-            if operation == grants.OPERATION_GRANT:
+            if is_grant:
                 if name in current:
                     _heal_torn_attempt(
                         grants.OUTCOME_GRANTED,
@@ -1426,8 +1535,8 @@ def _mutate_persona_toolset(
                 updated = [item for item in existing if str(item).strip() != name]
                 success_outcome = grants.OUTCOME_REVOKED
 
-            _validate_toolsets_section(updated, config_path)
-            data["toolsets"] = updated
+            validate_section(updated, config_path)
+            data[config_key] = updated
             effective = tuple(str(item).strip() for item in updated)
 
             # ── Intent row: the mutation's PRECONDITION. Epic metric 5 ("zero
@@ -2123,6 +2232,7 @@ _MARKET_ROUND_TOP_LEVEL = frozenset(
         "source_tape",
         "visual_desk",
         "paper_portfolio",
+        "nft_intelligence",
     }
 )
 _MARKET_ROUND_SOURCE_KEYS = frozenset(
@@ -2165,6 +2275,24 @@ _MARKET_ROUND_SOURCE_TAPE_KEYS = frozenset(
     }
 )
 _MARKET_ROUND_VISUAL_DESK_KEYS = frozenset({"enabled", "timeframe", "bars", "venue"})
+_MARKET_ROUND_NFT_INTELLIGENCE_KEYS = frozenset(
+    {
+        "enabled",
+        "chains",
+        "candidate_limit",
+        "deep_verify_limit",
+        "max_logs_per_candidate",
+        "max_rpc_calls_per_candidate",
+        "max_provider_calls_per_round",
+        "provider_wall_clock_budget_seconds",
+        "max_log_chunks_per_candidate",
+        "max_block_search_calls",
+        "confirmation_depth",
+        "mint_recency_hours",
+        "verification_ttl_minutes",
+        "provider_timeout_seconds",
+    }
+)
 _MARKET_ROUND_PAPER_PORTFOLIO_KEYS = frozenset(
     {
         "enabled",
@@ -2445,15 +2573,21 @@ def _validate_market_round_section(value: Any, config_path: Path) -> None:
     for key, (minimum, maximum) in tape_ranges.items():
         if key in source_tape:
             raw = source_tape[key]
-            if isinstance(raw, bool) or not isinstance(raw, int) or not minimum <= raw <= maximum:
+            if (
+                isinstance(raw, bool)
+                or not isinstance(raw, int)
+                or not minimum <= raw <= maximum
+            ):
                 raise ConfigShapeError(
-                    f"market_round.source_tape.{key}: expected {minimum}..{maximum} in {config_path}"
+                    f"market_round.source_tape.{key}: expected "
+                    f"{minimum}..{maximum} in {config_path}"
                 )
     if int(source_tape.get("x_minimum_scrolls", 5)) > int(
         source_tape.get("x_scroll_attempts", 10)
     ):
         raise ConfigShapeError(
-            f"market_round.source_tape.x_minimum_scrolls cannot exceed x_scroll_attempts in {config_path}"
+            "market_round.source_tape.x_minimum_scrolls cannot exceed "
+            f"x_scroll_attempts in {config_path}"
         )
     aliases = source_tape.get("speaker_aliases", {})
     if not isinstance(aliases, dict):
@@ -2463,7 +2597,10 @@ def _validate_market_round_section(value: Any, config_path: Path) -> None:
     for canonical, values in aliases.items():
         if not isinstance(canonical, str) or not canonical.strip():
             raise _shape_error(
-                config_path, "market_round.source_tape.speaker_aliases key", canonical, "non-empty str"
+                config_path,
+                "market_round.source_tape.speaker_aliases key",
+                canonical,
+                "non-empty str",
             )
         if not isinstance(values, list) or any(
             not isinstance(item, str) or not item.strip() for item in values
@@ -2521,6 +2658,94 @@ def _validate_market_round_section(value: Any, config_path: Path) -> None:
     }:
         raise ConfigShapeError(
             f"market_round.visual_desk.venue: unsupported public venue in {config_path}"
+        )
+
+    nft = value.get("nft_intelligence", {})
+    if not isinstance(nft, dict):
+        raise _shape_error(
+            config_path, "market_round.nft_intelligence", nft, "mapping"
+        )
+    _reject_unknown_keys(
+        nft,
+        _MARKET_ROUND_NFT_INTELLIGENCE_KEYS,
+        field="market_round.nft_intelligence",
+        config_path=config_path,
+    )
+    if "enabled" in nft and not isinstance(nft["enabled"], bool):
+        raise _shape_error(
+            config_path,
+            "market_round.nft_intelligence.enabled",
+            nft["enabled"],
+            "bool",
+        )
+    chains = nft.get("chains", ["robinhood"])
+    if (
+        not isinstance(chains, list)
+        or not chains
+        or any(not isinstance(item, str) or not item for item in chains)
+    ):
+        raise _shape_error(
+            config_path,
+            "market_round.nft_intelligence.chains",
+            chains,
+            "non-empty list[str]",
+        )
+    if len(set(chains)) != len(chains):
+        raise ConfigShapeError(
+            "market_round.nft_intelligence.chains: duplicates are not allowed "
+            f"in {config_path}"
+        )
+    if chains != ["robinhood"]:
+        raise ConfigShapeError(
+            "market_round.nft_intelligence.chains: Phase 1 requires exactly "
+            f"[robinhood] in {config_path}"
+        )
+    nft_integer_ranges = {
+        "candidate_limit": (1, 25),
+        "deep_verify_limit": (1, 10),
+        "max_logs_per_candidate": (1, 500),
+        "max_rpc_calls_per_candidate": (1, 64),
+        "max_provider_calls_per_round": (1, 128),
+        "provider_wall_clock_budget_seconds": (60, 720),
+        "max_log_chunks_per_candidate": (1, 16),
+        "max_block_search_calls": (1, 24),
+        "confirmation_depth": (1, 256),
+        "mint_recency_hours": (1, 168),
+        "verification_ttl_minutes": (1, 1_440),
+        "provider_timeout_seconds": (1, 30),
+    }
+    nft_defaults = {
+        "candidate_limit": 12,
+        "deep_verify_limit": 5,
+        "max_logs_per_candidate": 200,
+        "max_rpc_calls_per_candidate": 32,
+        "max_provider_calls_per_round": 64,
+        "provider_wall_clock_budget_seconds": 600,
+        "max_log_chunks_per_candidate": 8,
+        "max_block_search_calls": 12,
+        "confirmation_depth": 12,
+        "mint_recency_hours": 72,
+        "verification_ttl_minutes": 120,
+        "provider_timeout_seconds": 8,
+    }
+    for key, (minimum, maximum) in nft_integer_ranges.items():
+        raw = nft.get(key, nft_defaults[key])
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise _shape_error(
+                config_path,
+                f"market_round.nft_intelligence.{key}",
+                raw,
+                "int",
+            )
+        if not minimum <= raw <= maximum:
+            raise ConfigShapeError(
+                f"market_round.nft_intelligence.{key}: expected "
+                f"{minimum}..{maximum} in {config_path}"
+            )
+    if nft.get("deep_verify_limit", 5) > nft.get("candidate_limit", 12):
+        raise ConfigShapeError(
+            "market_round.nft_intelligence.deep_verify_limit cannot exceed "
+            f"candidate_limit in {config_path}"
         )
 
     paper = value.get("paper_portfolio", {})

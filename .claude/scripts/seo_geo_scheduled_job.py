@@ -45,6 +45,7 @@ JOB_COMMANDS: dict[str, tuple[list[str], Path]] = {
         PROFILE_ROOT / "data" / "fleet-paid-research" / "latest.json",
     ),
 }
+JOB_TIMEOUT_SECONDS = {"daily": 600, "weekly": 360, "monthly": 360, "paid": 360}
 
 
 def _stamp(path: Path) -> tuple[int, str] | None:
@@ -59,6 +60,7 @@ def run_job(*, job: str, dry_run: bool = False) -> tuple[int, dict[str, Any]]:
     before = _stamp(receipt_path)
     return_code = 1
     failure_reason: str | None = None
+    timeout_seconds = JOB_TIMEOUT_SECONDS[job]
     if dry_run:
         return_code = 0
     else:
@@ -68,12 +70,12 @@ def run_job(*, job: str, dry_run: bool = False) -> tuple[int, dict[str, Any]]:
                 cwd=SCRIPTS_DIR,
                 text=True,
                 capture_output=True,
-                timeout=360,
+                timeout=timeout_seconds,
                 check=False,
             )
             return_code = child.returncode
         except subprocess.TimeoutExpired:
-            failure_reason = "child timeout after 360 seconds"
+            failure_reason = f"child timeout after {timeout_seconds} seconds"
         except OSError as exc:
             failure_reason = f"child failed to start ({type(exc).__name__})"
     after = _stamp(receipt_path)

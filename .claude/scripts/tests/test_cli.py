@@ -1002,6 +1002,71 @@ class TestCognitiveLoopCLI:
         assert "Keep WorkingMemory shadow-only until production cutover." in message
 
 
+def test_crypto_round_quiet_status_reports_enabled_unavailable_nft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    import crypto_round.config as round_config
+    import crypto_round.db as round_db
+    from crypto_round.config import NFTIntelligenceSettings
+
+    db = round_db.CryptoRoundDB(tmp_path / "rounds.db")
+    db.ensure_round("round-status", "crypto", "2026-08-15T16:00:00+00:00")
+    db.record_source(
+        "round-status", "nft:mintscan", status="partial", evidence_count=0
+    )
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE market_rounds SET state='complete' WHERE round_id='round-status'"
+        )
+    nft = NFTIntelligenceSettings(enabled=True)
+    settings = SimpleNamespace(
+        enabled=True,
+        nft_intelligence=nft,
+        as_public_dict=lambda: {"nft_intelligence": nft.as_public_dict()},
+    )
+    monkeypatch.setattr(round_db, "private_data_root", lambda: tmp_path)
+    monkeypatch.setattr(round_config, "load_market_round_settings", lambda: settings)
+
+    payload = cli_module._crypto_round_status_payload()
+    status = payload["ledger"]["nft_intelligence"]
+    assert payload["success"] is True
+    assert status == {
+        "schema_present": False,
+        "healthy": False,
+        "error_code": "unavailable",
+        "candidate_count": 0,
+        "watch_count": 0,
+        "reject_count": 0,
+        "latest_state": "unavailable",
+        "provider_health": {},
+    }
+    assert "deterministic compiler" not in json.dumps(payload)
+
+
+def test_doctor_crypto_renderer_uses_only_allowlisted_nft_status() -> None:
+    from click.testing import CliRunner
+
+    runner = CliRunner()
+    with runner.isolation() as streams:
+        cli_module._print_crypto_round_status(
+            {
+                "available": True,
+                "enabled": True,
+                "nft_intelligence": {
+                    "latest_state": "provider exploded at secret endpoint",
+                    "healthy": False,
+                    "error_code": "raw exception text",
+                },
+            }
+        )
+    rendered = streams[0].getvalue().decode()
+    assert "NFT intelligence: unavailable; healthy=False; code=unavailable" in rendered
+    assert "secret endpoint" not in rendered
+    assert "raw exception" not in rendered
+
+
 class TestCLISubprocess:
     """Subprocess tests — validates installed command (CLI-Anything pattern)."""
 

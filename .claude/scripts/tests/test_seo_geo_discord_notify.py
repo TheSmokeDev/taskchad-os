@@ -74,7 +74,7 @@ def test_notification_posts_only_the_configured_operator_mention(tmp_path, monke
         "content_sha256": result["delivery"]["content_sha256"],
     }
     assert captured["target"] == target
-    assert "GA4 tag receipts=0" in str(captured["content"])
+    assert "GA4 events are not terminal leads" in str(captured["content"])
     assert "terminal lead receipts=0" in str(captured["content"])
     assert (tmp_path / "out" / "daily-latest.json").is_file()
 
@@ -91,10 +91,20 @@ def test_daily_message_reports_gsc_movement_and_concrete_update_candidates(tmp_p
     }), encoding="utf-8")
     current_path.write_text(json.dumps({
         "ranges": {"primary": {"start": "2026-07-13", "end": "2026-08-09", "days": 28}},
+        "fleet_window_comparisons": {
+            "28d": {
+                "current": {"impressions": 140, "clicks": 8, "ctr": 8 / 140, "position": 8.6},
+                "previous": {"impressions": 100, "clicks": 5, "ctr": 0.05, "position": 9.2},
+                "delta": {"impressions": 40, "clicks": 3},
+                "current_range": {"start": "2026-07-13", "end": "2026-08-09"},
+                "previous_range": {"start": "2026-06-15", "end": "2026-07-12"},
+            }
+        },
         "brands": [{
             "brand_id": "YourBusiness", "display_name": "YourBusiness",
             "analytics": {
                 "totals": {"impressions": 140, "clicks": 8},
+                "window_comparisons": {"7d": {"delta": {"impressions": 40}}},
                 "top_queries": [{"keys": ["dmv sr22 form"], "categories": ["sr22_dui_highrisk"]}],
                 "top_query_pages": [{"keys": ["dmv sr22 form", "https://www.your-business.example.com/guide"], "impressions": 22, "clicks": 2, "position": 8.6}],
             },
@@ -113,10 +123,27 @@ def test_daily_message_reports_gsc_movement_and_concrete_update_candidates(tmp_p
         daily_context=notify._daily_context(receipt),
     )
 
-    assert "140 impressions (+40 (+40.0%))" in message
-    assert "8 clicks (+3 (+60.0%))" in message
+    assert "GSC 28d: 140 imp (+40, +40.0%)" in message
+    assert "8 clicks (+3, +60.0%)" in message
     assert "dmv sr22 form" in message
     assert "approval required; no page changed" in message
+
+
+def test_daily_sitemap_alert_names_error_owner_and_counts_warning_brands():
+    snapshot = {
+        "brands": [
+            {
+                "display_name": "SR22 Filing California",
+                "sitemaps": [{"errors": 2, "warnings": 0}],
+            },
+            {"display_name": "Carnal Seguro", "sitemaps": [{"errors": 0, "warnings": 100}]},
+            {"display_name": "YourBusiness", "sitemaps": [{"errors": 0, "warnings": 3}]},
+        ]
+    }
+
+    assert notify._sitemap_alert_line(snapshot) == (
+        "Sitemap alert: SR22 Filing California 2 errors · warnings on 2 brands (103 total)"
+    )
 
 
 def test_scheduled_wrapper_does_not_report_an_old_receipt_as_new(tmp_path, monkeypatch):

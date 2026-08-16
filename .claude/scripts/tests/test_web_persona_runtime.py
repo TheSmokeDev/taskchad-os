@@ -4,11 +4,18 @@ The dashboard/mobile `/api/conversation/{persona_id}/send` must answer AS the
 named persona (web_persona_runtime), persist with persona_id attribution
 (Act 5 corpus-safety class), and keep the default persona on the untouched
 router path. Mirrors tests/test_discord_persona_persist_turn.py.
+
+Epic #465 1b: the web persona turn runs the SAME scoped tool loop as the
+Discord persona path. The old unconditional `max_turns=1` invariant is
+deliberately revoked: deny-all single turn when NO tool scope resolves,
+multi-turn caller-tool loop when the persona config grants one — with SDK
+built-ins (`allowed_tools=[]` / `disallowed_tools=["*"]`) denied either way.
 """
 
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import time
 from pathlib import Path
@@ -21,8 +28,12 @@ CHAT_DIR = Path(__file__).resolve().parents[2] / "chat"
 if str(CHAT_DIR) not in sys.path:
     sys.path.insert(0, str(CHAT_DIR))
 
+from discord_persona_runtime import _persona_turn_max_turns  # noqa: E402
 from models import Channel, IncomingMessage, Platform, Thread, User  # noqa: E402
 from runtime.base import RuntimeResult  # noqa: E402
+from runtime.errors import RuntimeCallerToolTransportError  # noqa: E402
+from runtime.persona_tools import PERSONA_CHAT_BASE_TOOLS  # noqa: E402
+from runtime.toolsets import TOOLSETS  # noqa: E402
 from session import get_session_store  # noqa: E402
 from web_persona_runtime import run_web_persona_turn  # noqa: E402
 
@@ -50,14 +61,14 @@ def _fake_result(**overrides):
     return RuntimeResult(**defaults)
 
 
-def _write_profile(homie_root: Path, persona_id: str) -> Path:
+def _write_profile(homie_root: Path, persona_id: str, extra_config: str = "") -> Path:
     profile_root = homie_root / "profiles" / persona_id
     memory_dir = profile_root / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     (profile_root / "run").mkdir(parents=True, exist_ok=True)
     (profile_root / "skills").mkdir(parents=True, exist_ok=True)
     (profile_root / "config.yaml").write_text(
-        f"persona:\n  display_name: {persona_id.title()}\n  role: test\n",
+        f"persona:\n  display_name: {persona_id.title()}\n  role: test\n" + extra_config,
         encoding="utf-8",
     )
     (memory_dir / "SOUL.md").write_text("# Soul\ntest", encoding="utf-8")
@@ -75,6 +86,13 @@ def persona_env(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("HOMIE_PERSONA_CAPABILITY_MATRIX", str(matrix_path))
+    # The tool loop reaches two call-time-bound stores that must stay hermetic:
+    # the elevation DB (config.DATA_DIR) and the per-call dispatch audit write
+    # (config.DASHBOARD_DB_PATH via dashboard_db._resolve_db_path).
+    import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data", raising=False)
+    monkeypatch.setattr(config, "DASHBOARD_DB_PATH", tmp_path / "dashboard.db", raising=False)
     _write_profile(homie_root, "sales")
     return tmp_path
 
@@ -110,7 +128,13 @@ async def test_web_turn_persists_persona_id_under_web_session_key(persona_env):
 
 @pytest.mark.asyncio
 async def test_web_turn_prompt_identifies_persona(persona_env):
-    """The RuntimeRequest system prompt binds the persona identity, no tools."""
+    """The RuntimeRequest system prompt binds the persona identity.
+
+    The REAL payload builder runs here: with no declared scope, a named
+    persona on a chat surface assembles only the safe bridge
+    (skills_list/skill_view/request_tool) — never an operational tool — and
+    SDK built-ins stay deny-all regardless.
+    """
     store = get_session_store(persona_env / "chat.db")
     seen = {}
 
@@ -131,16 +155,188 @@ async def test_web_turn_prompt_identifies_persona(persona_env):
     assert "Answer as this persona only" in req.system_prompt
     assert req.allowed_tools == []
     assert req.disallowed_tools == ["*"]
-    assert req.max_turns == 1
+    assert req.tool_defs is not None
+    names = {(d.get("function") or {}).get("name") for d in req.tool_defs}
+    assert names <= set(PERSONA_CHAT_BASE_TOOLS)
+    # The bridge still needs loop room (ask, read the refusal, answer).
+    assert req.max_turns == _persona_turn_max_turns()
     assert req.metadata["persona_id"] == "sales"
+
+
+@pytest.mark.asyncio
+async def test_web_turn_without_tool_scope_stays_single_turn(persona_env):
+    """No resolved scope → the old deny-all single-turn shape, verbatim."""
+    store = get_session_store(persona_env / "chat.db")
+    seen = {}
+
+    async def fake_run(req):
+        seen["req"] = req
+        return _fake_result()
+
+    with (
+        patch("runtime.persona_tools.build_persona_tool_payload", return_value=None),
+        patch("runtime.lane_router.run_with_runtime_lanes", side_effect=fake_run),
+    ):
+        text = await run_web_persona_turn(
+            incoming=_incoming(),
+            persona_id="sales",
+            session_store=store,
+            project_root=persona_env,
+        )
+
+    assert text == "sales answer"
+    req = seen["req"]
+    assert req.max_turns == 1
+    assert req.tool_defs is None
+    assert req.tool_dispatch is None
+    assert req.tool_scope_version is None
+    assert req.allowed_tools == []
+    assert req.disallowed_tools == ["*"]
+    assert "tool_scope_version" not in req.metadata
+
+
+@pytest.mark.asyncio
+async def test_web_turn_with_granted_toolset_runs_the_scoped_loop(persona_env, monkeypatch):
+    """Anti-vacuity anchor: the REAL build_persona_tool_payload with a real tmp
+    persona config granting safe_core — the builder is never mocked."""
+    monkeypatch.delenv("HOMIE_KILLSWITCH_PERSONA_TOOLS", raising=False)
+    profile_root = persona_env / ".homie" / "profiles" / "sales"
+    (profile_root / "config.yaml").write_text(
+        "persona:\n  display_name: Sales\n  role: test\ntoolsets:\n  - safe_core\n",
+        encoding="utf-8",
+    )
+    store = get_session_store(persona_env / "chat.db")
+    seen = {}
+
+    async def fake_run(req):
+        seen["req"] = req
+        # The loop driving dispatch: one granted base tool runs for real, one
+        # out-of-scope name is refused at the persona grant boundary.
+        seen["skills_result"] = req.tool_dispatch("skills_list", {})
+        seen["refused"] = req.tool_dispatch("terminal", {})
+        return _fake_result()
+
+    with patch("runtime.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        text = await run_web_persona_turn(
+            incoming=_incoming(),
+            persona_id="sales",
+            session_store=store,
+            project_root=persona_env,
+        )
+
+    assert text == "sales answer"
+    req = seen["req"]
+    names = {(d.get("function") or {}).get("name") for d in req.tool_defs}
+    assert set(TOOLSETS["safe_core"]["tools"]) <= names
+    assert "terminal" not in names
+    assert req.max_turns == _persona_turn_max_turns()
+    assert req.max_turns > 1
+    assert req.tool_scope_version and req.tool_scope_version.startswith("sha256:")
+    assert req.metadata["tool_scope_version"] == req.tool_scope_version
+    assert req.allowed_tools == []
+    assert req.disallowed_tools == ["*"]
+    assert '"error"' not in seen["skills_result"]
+    refused = json.loads(seen["refused"])
+    assert "not in this persona's granted scope" in refused["error"]
+
+
+@pytest.mark.asyncio
+async def test_web_turn_tool_transport_failure_retries_text_only(persona_env):
+    """RuntimeCallerToolTransportError → exactly one declared text-only retry."""
+    store = get_session_store(persona_env / "chat.db")
+    captured = []
+    dispatched = []
+    definition = {
+        "type": "function",
+        "function": {
+            "name": "safe_lookup",
+            "description": "Read a harmless scoped value.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+    async def fake_run(request):
+        captured.append(request)
+        if len(captured) == 1:
+            raise RuntimeCallerToolTransportError("no safe caller-tool lane")
+        return _fake_result(text="I can still talk, but I did not run anything.")
+
+    with (
+        patch(
+            "runtime.persona_tools.build_persona_tool_payload",
+            return_value=(
+                [definition],
+                lambda name, arguments: dispatched.append((name, arguments)),
+            ),
+        ),
+        patch("runtime.lane_router.run_with_runtime_lanes", side_effect=fake_run),
+    ):
+        text = await run_web_persona_turn(
+            incoming=_incoming(),
+            persona_id="sales",
+            session_store=store,
+            project_root=persona_env,
+        )
+
+    assert len(captured) == 2
+    assert captured[0].tool_defs == [definition]
+    assert captured[0].max_turns == _persona_turn_max_turns()
+    assert captured[1].tool_defs is None
+    assert captured[1].tool_dispatch is None
+    assert captured[1].tool_scope_version is None
+    assert captured[1].max_turns == 1
+    assert captured[1].metadata["caller_tools_degraded"] is True
+    assert "Do not claim" in captured[1].prompt
+    assert dispatched == []
+    assert "no tool action was performed" in text
+
+
+@pytest.mark.asyncio
+async def test_web_turn_counter_offer_marker_becomes_pending_proposal(persona_env, monkeypatch):
+    """`<<GRANT_REQUEST: …>>` is stripped, the approve/deny card text is
+    appended (this surface has no buttons), and a PENDING row physically
+    exists in the persona's real proposal store."""
+    monkeypatch.delenv("HOMIE_KILLSWITCH_PERSONA_GRANT_PROPOSALS", raising=False)
+    monkeypatch.delenv("HOMIE_KILLSWITCH_PERSONA_MUTATION", raising=False)
+    store = get_session_store(persona_env / "chat.db")
+
+    async def fake_run(req):
+        return _fake_result(
+            text="I can't pull that without web research. <<GRANT_REQUEST: research_read>>"
+        )
+
+    with patch("runtime.lane_router.run_with_runtime_lanes", side_effect=fake_run):
+        text = await run_web_persona_turn(
+            incoming=_incoming(),
+            persona_id="sales",
+            session_store=store,
+            project_root=persona_env,
+        )
+
+    assert "<<GRANT_REQUEST" not in text
+    assert "Counter-offer" in text
+    assert "/grant approve sales" in text
+    assert "main chat" in text
+
+    from personas import grant_proposals
+
+    pending = grant_proposals.list_pending("sales")
+    assert len(pending) == 1
+    assert pending[0].toolset == "research_read"
+    assert pending[0].surface == "web"
 
 
 # ── Grep gates (same invariants as the Discord persona path) ─────────
 
 
-def test_web_persona_turn_stays_no_tools_max_turns_1() -> None:
+def test_web_persona_turn_keeps_deny_all_builtins_with_conditional_loop() -> None:
+    """#465 1b revoked the unconditional `max_turns=1`: the loop bound moves
+    only when a scoped payload exists, and SDK built-ins stay deny-all either
+    way (scoped tools ride caller-tools, never the SDK-native surface)."""
     src = (CHAT_DIR / "web_persona_runtime.py").read_text(encoding="utf-8")
-    assert "max_turns=1" in src
+    assert "max_turns=_persona_turn_max_turns() if persona_tool_defs else 1" in src
+    assert "tool_defs=persona_tool_defs" in src
+    assert "tool_dispatch=persona_tool_dispatch" in src
     assert "allowed_tools=[]" in src
     assert 'disallowed_tools=["*"]' in src
 
@@ -148,7 +344,8 @@ def test_web_persona_turn_stays_no_tools_max_turns_1() -> None:
 def test_web_persona_runtime_reuses_discord_persist_helper() -> None:
     """One Act-5-safe persistence implementation, not a divergent copy."""
     src = (CHAT_DIR / "web_persona_runtime.py").read_text(encoding="utf-8")
-    assert "from discord_persona_runtime import _persist_turn" in src
+    assert "from discord_persona_runtime import (" in src
+    assert "    _persist_turn,\n" in src
 
 
 # ── conversation_send routing (dashboard_api) ────────────────────────

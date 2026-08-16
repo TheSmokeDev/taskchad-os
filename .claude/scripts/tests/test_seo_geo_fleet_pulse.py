@@ -60,3 +60,22 @@ def test_budget_status_reads_existing_local_policy_only(tmp_path, monkeypatch):
         "root": str(tmp_path),
         "summary": {"remaining_usd": 24.99},
     }
+
+
+def test_ai_visibility_marks_legacy_classifier_receipt_preliminary(tmp_path, monkeypatch):
+    (tmp_path / "latest.json").write_text(json.dumps({
+        "generated_at": "2026-08-12T00:00:00+00:00",
+        "provider": {"status": "completed"},
+        "results": [
+            {"ai_overview_present": True, "owner_domain_cited": False, "fleet_cited_domains": []},
+            {"ai_overview_present": False, "owner_domain_cited": False, "fleet_cited_domains": []},
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(pulse, "PAID_RESEARCH_ROOT", tmp_path)
+
+    result = pulse._ai_visibility_state()
+
+    assert result["provider_calls"] == 0
+    assert result["metrics"]["ai_overview_present"] == 1
+    assert result["comparison"]["status"] == "preliminary_not_comparable"
+    assert result["platform_coverage"]["chatgpt"] == "unmeasured"

@@ -66,7 +66,8 @@ _logger = logging.getLogger(__name__)
 USAGE = (
     "*Persona toolsets*\n"
     "`/persona grant <persona> <toolset>` — add a toolset bundle\n"
-    "`/persona revoke <persona> <toolset>` — take it back\n"
+    "`/persona grant <persona> tool:<name>` — add ONE capability (no bundle)\n"
+    "`/persona revoke <persona> <toolset|tool:name>` — take it back\n"
     "In a persona channel the persona is optional: `/persona grant research_read`.\n"
     "Grants are audited and live on that homie's next turn."
 )
@@ -113,6 +114,12 @@ _UNAUTHENTICATED_ROLE = "unauthenticated"
 # turn could put arbitrary text into a ledger field.
 _TOOLSET_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
+# Single-capability grants (epic #465 1c): the `tool:` prefix names ONE
+# registered tool instead of a bundle. Tool names are underscore identifiers
+# (`memory_search`), a different shape from toolset keys.
+_TOOL_KIND_PREFIX = "tool:"
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
 # The operator-facing env var behind the executor's kill switch
 # (``services._TOOLSET_GRANT_KILL_SWITCH = "persona_mutation"``, resolved by
 # ``kill_switches.is_disabled`` as ``HOMIE_KILLSWITCH_<NAME>``). Named in the
@@ -145,11 +152,15 @@ class ParsedCommand:
 
     ``error`` non-empty means nothing should run: it is the operator-facing
     reply, already formatted. A parse never mutates and never raises.
+
+    ``kind`` is the grant's grain (#465 1c): ``toolset`` (default) or
+    ``tool``, with ``toolset`` holding the bare name either way.
     """
 
     operation: str = ""
     persona_id: str = ""
     toolset: str = ""
+    kind: str = "toolset"
     error: str = ""
 
 
@@ -222,15 +233,27 @@ def parse_persona_command(args: str) -> ParsedCommand:
         )
 
     persona_id = rest[0] if len(rest) == 2 else ""
-    toolset = rest[-1]
-    if not _TOOLSET_NAME_RE.match(toolset):
+    target = rest[-1]
+    kind = "toolset"
+    name = target
+    if target.casefold().startswith(_TOOL_KIND_PREFIX):
+        kind = "tool"
+        name = target[len(_TOOL_KIND_PREFIX):]
+        if not _TOOL_NAME_RE.match(name):
+            # Not echoed, same reason as the subcommand rejection above: a
+            # token that failed this shape check is arbitrary operator text.
+            return ParsedCommand(
+                error="That is not a tool name. Tools are identifiers like "
+                "`memory_search` or `browser_snapshot`."
+            )
+    elif not _TOOLSET_NAME_RE.match(target):
         # Not echoed, same reason as the subcommand rejection above: a token
         # that failed this shape check is arbitrary operator text.
         return ParsedCommand(
             error="That is not a toolset name. Toolsets are identifiers like "
-            "`research_read` or `repo_read`."
+            "`research_read` or `repo_read`; one capability is `tool:<name>`."
         )
-    return ParsedCommand(operation=action, persona_id=persona_id, toolset=toolset)
+    return ParsedCommand(operation=action, persona_id=persona_id, toolset=name, kind=kind)
 
 
 def transcript_receipt(args: str) -> str:
@@ -278,7 +301,7 @@ def transcript_receipt(args: str) -> str:
 
     return (
         f"[server command] /persona {parsed.operation} "
-        f"persona={persona} toolset={parsed.toolset}"
+        f"persona={persona} {parsed.kind}={parsed.toolset}"
     )
 
 
@@ -445,6 +468,10 @@ def _success_reply(result: Any) -> str:
 
     persona_id = result.persona_id
     toolset = result.toolset
+    # The noun follows the grant's grain (#465 1c): a tool grant moves one
+    # capability, not a bundle, and the reply should say so.
+    is_tool = result.operation in {grants.OPERATION_GRANT_TOOL, grants.OPERATION_REVOKE_TOOL}
+    holding_noun = "tools" if is_tool else "toolsets"
     if result.outcome == grants.OUTCOME_GRANTED:
         return f"`{toolset}` added to {persona_id} — live next turn."
     if result.outcome == grants.OUTCOME_REVOKED:
@@ -453,7 +480,7 @@ def _success_reply(result: Any) -> str:
         return f"{persona_id} already has `{toolset}` — nothing changed."
     if result.outcome == grants.OUTCOME_NOT_GRANTED:
         held = ", ".join(f"`{name}`" for name in result.suggestions)
-        holding = f" It holds: {held}." if held else " It holds no toolsets."
+        holding = f" It holds: {held}." if held else f" It holds no {holding_noun}."
         return f"{persona_id} does not have `{toolset}`.{holding}"
     # Unreachable through the current executor; report rather than invent.
     return f"{persona_id}: `{toolset}` -> {result.outcome}."
@@ -520,6 +547,14 @@ def execute_persona_command(incoming: Any, args: str) -> str:
         if parsed.operation == grants.OPERATION_GRANT
         else persona_services.remove_persona_toolset
     )
+    # The single-capability grain swaps the executor entry point, never the
+    # gates: same admin role, same kill switch, same ledger.
+    if parsed.kind == "tool":
+        runner = (
+            persona_services.add_persona_tool
+            if parsed.operation == grants.OPERATION_GRANT
+            else persona_services.remove_persona_tool
+        )
     try:
         result = runner(
             persona_id,

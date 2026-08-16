@@ -117,6 +117,78 @@ def get_ga4_reporting_credentials() -> Any:
     return creds
 
 
+# The GA4 WRITE token (epic #465 1a PR 2). Deliberately a different file from
+# the reporting token: a read credential must never be quietly promoted into
+# an edit credential. The default path matches the ga4-ops skill's contract.
+GA4_EDIT_SCOPE = "https://www.googleapis.com/auth/analytics.edit"
+GA4_READONLY_SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
+GA4_EDIT_DEFAULT_TOKEN = "~/.config/YourBusiness/ga4-edit-token.json"
+
+
+def get_ga4_admin_credentials() -> Any:
+    """Load the dedicated GA4 EDIT token, failing CLOSED without analytics.edit.
+
+    Mirrors the reporting-token discipline above with one sharper edge: a
+    token that lacks ``analytics.edit`` is an error, never a fallback to a
+    readonly token — the caller is a WRITE path (property/stream creation),
+    and downgrading scopes would fail later, deeper, and less honestly.
+
+    ``GA4_EDIT_TOKEN_FILE`` is read at call time (Rule 1) so an operator (or
+    a test) re-pointing it takes effect on the next call.
+    """
+    import json
+    import os
+
+    raw = os.getenv("GA4_EDIT_TOKEN_FILE", "").strip() or GA4_EDIT_DEFAULT_TOKEN
+    token_path = Path(raw).expanduser()
+
+    from google.auth.exceptions import RefreshError
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+
+    if not token_path.exists():
+        raise RuntimeError(
+            f"GA4 edit token not found: {token_path}\n"
+            "Authorize a dedicated token with analytics.edit (see the ga4-ops "
+            "skill), or set GA4_EDIT_TOKEN_FILE to one."
+        )
+
+    # The GRANTED scopes live in the file, not on the Credentials object:
+    # from_authorized_user_file(path, scopes) would happily REPORT the scopes
+    # we asked for over the ones the token actually carries, which would make
+    # this check vacuous. Read the grant physically (Rule 2), fail closed.
+    try:
+        granted = set(json.loads(token_path.read_text(encoding="utf-8")).get("scopes") or [])
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(f"GA4 edit token unreadable: {token_path}: {exc}") from exc
+    if GA4_EDIT_SCOPE not in granted:
+        raise RuntimeError(
+            f"GA4 edit token at {token_path} lacks analytics.edit — refusing "
+            "to run a write path on a readonly credential. Re-authorize with "
+            "the analytics.edit scope."
+        )
+
+    creds: Credentials = Credentials.from_authorized_user_file(  # type: ignore[no-untyped-call]
+        str(token_path), sorted(granted)
+    )
+    if creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            token_path.write_text(creds.to_json(), encoding="utf-8")
+        except RefreshError as exc:
+            raise RuntimeError(
+                f"GA4 edit token refresh failed: {exc}\n"
+                "Re-authorize the dedicated Analytics edit token."
+            ) from exc
+
+    if not creds.valid:
+        raise RuntimeError(
+            "GA4 edit token is invalid; re-authorize the dedicated Analytics "
+            "edit token."
+        )
+    return creds
+
+
 def run_initial_auth(headless: bool = False) -> Any:
     """
     Run the interactive OAuth flow (one-time setup).

@@ -104,13 +104,15 @@ def _resolve_vault_memory_dir(vault: str) -> Path:
     the per-vault DB (``config.resolve_db_path``). A vault whose env path is unset
     raises a friendly error so the shelling skill's ``|| true`` fails open.
     """
-    from config import resolve_vault
+    from config import list_vault_names, resolve_vault
 
     memory_dir, _db_path = resolve_vault(vault)
     if memory_dir is None:
+        known = ", ".join(list_vault_names())
         raise click.ClickException(
-            f"vault '{vault}' is not configured — set HOMIE_CODING_VAULT_DIR "
-            "in .env (thehomie is always available)"
+            f"vault '{vault}' is not configured — known vaults: {known} "
+            "(coding-vault needs HOMIE_CODING_VAULT_DIR in .env; persona "
+            "vaults appear under their plain profile id)"
         )
     return Path(memory_dir)
 
@@ -153,9 +155,10 @@ def _render_brief_results(resp) -> str:
 @click.argument("query", required=False, default="")
 @click.option(
     "--vault",
-    type=click.Choice(["thehomie", "coding-vault"]),
     default="thehomie",
-    help="Which vault to recall over (each has its own BGE index; coding-vault needs HOMIE_CODING_VAULT_DIR set).",
+    help="Which vault to recall over (each has its own BGE index): thehomie, "
+    "coding-vault (needs HOMIE_CODING_VAULT_DIR), a live persona id (read-only), "
+    "or all/apartments to sweep every registered vault (keyword fan-out).",
 )
 @click.option(
     "--memory-dir",
@@ -203,10 +206,21 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, with_proactiv
     False -- do NOT set it True, or classify_tier would SKIP and return empty.
     """
     ensure_directories()
-    from recall_service import recall as recall_fn, SearchMode
+    from recall_service import (
+        FANOUT_VAULT_ALIASES,
+        SearchMode,
+        recall as recall_fn,
+        recall_all as recall_all_fn,
+    )
 
+    # --vault all|apartments = the #466 fan-out (keyword pass per vault, merged
+    # with attribution). No single memory_dir exists for it; --memory-dir still
+    # bypasses --vault entirely, exactly as before.
+    fanout = vault.strip().lower() in FANOUT_VAULT_ALIASES and not memory_dir_opt
     if memory_dir_opt:
         memory_dir = Path(memory_dir_opt)
+    elif fanout:
+        memory_dir = None
     else:
         memory_dir = _resolve_vault_memory_dir(vault)
 
@@ -218,14 +232,21 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, with_proactiv
     search_mode = mode_map[mode]
 
     async def _run():
-        resp = await recall_fn(
-            query=query,
-            memory_dir=memory_dir,
-            search_mode=search_mode,
-            caller=caller,
-            max_results=max_results,
-            is_slash_command=False,  # keep AUTO/HYBRID reachable to TIER_1 -- do NOT flip
-        )
+        if memory_dir is None:
+            resp = await recall_all_fn(
+                query=query,
+                caller=caller,
+                max_results=max_results,
+            )
+        else:
+            resp = await recall_fn(
+                query=query,
+                memory_dir=memory_dir,
+                search_mode=search_mode,
+                caller=caller,
+                max_results=max_results,
+                is_slash_command=False,  # keep AUTO/HYBRID reachable to TIER_1 -- do NOT flip
+            )
         # Give the rerank SDK subprocess transport a beat to close before the
         # loop tears down (Windows Proactor "Event loop is closed" mitigation).
         await asyncio.sleep(0.15)
@@ -264,7 +285,7 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, with_proactiv
                     {
                         "query": query,
                         "vault": vault,
-                        "memory_dir": str(memory_dir),
+                        "memory_dir": str(memory_dir) if memory_dir is not None else "",
                         "mode": mode,
                         "brief": brief_text,
                         "formatted_text": "",
@@ -282,7 +303,7 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, with_proactiv
         payload = {
             "query": query,
             "vault": vault,
-            "memory_dir": str(memory_dir),
+            "memory_dir": str(memory_dir) if memory_dir is not None else "",
             "mode": mode,
             "brief": brief_text,
             "formatted_text": resp.formatted_text,
@@ -294,6 +315,7 @@ def recall(query, vault, memory_dir_opt, mode, max_results, brief, with_proactiv
                     "score": getattr(r, "score", 0.0),
                     "match_type": getattr(r, "match_type", ""),
                     "section_title": getattr(r, "section_title", ""),
+                    "vault": getattr(r, "vault", ""),
                     "text": getattr(r, "text", ""),
                 }
                 for r in resp.results
@@ -1455,7 +1477,9 @@ def _crypto_round_status_payload() -> dict:
             "success": True,
             "enabled": settings.enabled,
             "config": settings.as_public_dict(),
-            "ledger": _sanitize_crypto_ledger_status(db.status()),
+            "ledger": _sanitize_crypto_ledger_status(
+                db.status(nft_enabled=settings.nft_intelligence.enabled)
+            ),
             "tape": db.tape_status(),
             "source_receipts": [
                 {
@@ -2930,6 +2954,36 @@ def _print_crypto_round_status(snapshot: dict[str, object]) -> None:
         click.echo(
             f"  X budget: {rate.get('digests_24h', 0)}/16 digests; "
             f"breaker={bool(rate.get('breaker_active'))}"
+        )
+    nft = snapshot.get("nft_intelligence")
+    if isinstance(nft, dict):
+        state = str(nft.get("latest_state") or "unavailable")
+        if state not in {
+            "disabled",
+            "pending",
+            "empty",
+            "inflight",
+            "complete",
+            "failed",
+            "indeterminate_after_send",
+            "unavailable",
+            "unhealthy",
+        }:
+            state = "unavailable"
+        error_code = str(nft.get("error_code") or "none")
+        if error_code not in {
+            "none",
+            "not_initialized",
+            "unavailable",
+            "config_unavailable",
+            "schema_incomplete",
+            "schema_mismatch",
+            "query_failed",
+        }:
+            error_code = "unavailable"
+        click.echo(
+            f"  NFT intelligence: {state}; healthy={bool(nft.get('healthy'))}; "
+            f"code={error_code}"
         )
     if snapshot.get("error"):
         click.echo(f"  Error: {snapshot['error']}")

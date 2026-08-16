@@ -7,6 +7,7 @@ than dropping them silently. See ``supports_caller_tool_defs``.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -357,7 +358,16 @@ class OpenAICompatibleRuntime:
             return record, json.dumps({"error": f"tool {name!r} was not offered for this turn"})
 
         try:
-            outcome = request.tool_dispatch(name, arguments)
+            # Sync dispatchers do blocking work (SQLite, filesystem, browser
+            # subprocesses — e.g. the persona action gate's proposal write).
+            # Running one directly here would stall this runtime's event loop
+            # for the full duration (Codex R1), so sync dispatch hops a
+            # thread; an async dispatcher is awaited in place. Mirrors the
+            # codex_app_server_gate carrier.
+            if inspect.iscoroutinefunction(request.tool_dispatch):
+                outcome = request.tool_dispatch(name, arguments)
+            else:
+                outcome = await asyncio.to_thread(request.tool_dispatch, name, arguments)
             if inspect.isawaitable(outcome):
                 outcome = await outcome
             record.status = "completed"

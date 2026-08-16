@@ -89,6 +89,7 @@ class RecallResult:
     section_title: str = ""
     graph_hops: int = 0
     source_query: str = ""
+    vault: str = ""  # #466 fan-out attribution; "" on single-vault recall
 
 
 # Tier 0: short greetings/acks that don't need recall
@@ -501,8 +502,9 @@ def format_recall_results(results: list[RecallResult]) -> str:
 
         title = f" ({r.section_title})" if r.section_title else ""
         hop_info = f" [graph:{r.graph_hops}hop]" if r.graph_hops > 0 else ""
+        vault_tag = f" [vault:{r.vault}]" if getattr(r, "vault", "") else ""
         sanitized_items.append(
-            f"**{source}{title}** (score: {r.score:.2f}{hop_info}):\n{safe_text}"
+            f"**{source}{title}**{vault_tag} (score: {r.score:.2f}{hop_info}):\n{safe_text}"
         )
 
     return wrap_recalled_memory(sanitized_items)

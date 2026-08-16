@@ -30,6 +30,7 @@ from runtime.openai_codex_app_server import (  # noqa: E402
     CodexAppServerClient,
     CodexAppServerProtocolError,
     OpenAICodexAppServerRuntime,
+    _subprocess_creation_flags,
     convert_openai_tool_defs,
     least_authority_args,
     resolve_codex_executable,
@@ -126,6 +127,13 @@ def test_malformed_dynamic_tool_definitions_fail_before_spawn(definition):
 def test_duplicate_dynamic_tool_definitions_fail_closed():
     with pytest.raises(ValueError, match="duplicate"):
         convert_openai_tool_defs([GET_MARKER, GET_MARKER])
+
+
+def test_windows_app_server_is_detached_from_the_scheduled_console(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    expected = int(getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0x08000000))
+    assert _subprocess_creation_flags() == expected
+    assert _subprocess_creation_flags() != 0
 
 
 def test_least_authority_profile_disables_every_native_surface():

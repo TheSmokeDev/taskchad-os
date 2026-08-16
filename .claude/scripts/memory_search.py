@@ -46,6 +46,29 @@ class SearchResult:
     section_title: str = ""
 
 
+def _open_search_db(_cfg, memory_dir):
+    """Open the per-vault DB for a search; None means "no index, empty results".
+
+    A read-only persona vault (issue #466) is opened mode=ro with
+    ``init_schema()`` SKIPPED — init_schema is a WRITE (DDL + self-committing
+    meta upserts), and the read path must never put a byte into a persona's
+    tree. ``read_only=True`` also pins the backend to the persona's own SQLite
+    file: a configured shared DATABASE_URL Postgres has no persona column. A
+    persona DB that does not physically exist is NOT created (Rule 2) — the
+    caller returns empty results instead.
+    """
+    from pathlib import Path
+
+    db_path = _cfg.resolve_db_path(memory_dir)
+    read_only = _cfg.is_readonly_vault(memory_dir)
+    if read_only and not Path(db_path).exists():
+        return None
+    db = get_memory_db(db_path=db_path, read_only=read_only)
+    if not read_only:
+        db.init_schema()
+    return db
+
+
 def search_keyword(
     query: str,
     limit: int | None = None,
@@ -59,8 +82,9 @@ def search_keyword(
     if not query.strip():
         return []
 
-    db = get_memory_db(db_path=_cfg.resolve_db_path(memory_dir))
-    db.init_schema()
+    db = _open_search_db(_cfg, memory_dir)
+    if db is None:
+        return []
     rows = db.keyword_search(query, limit, path_prefix=path_prefix)
     db.close()
 
@@ -98,8 +122,9 @@ def search_semantic(
 
     query_embedding = embed_text(query)
 
-    db = get_memory_db(db_path=_cfg.resolve_db_path(memory_dir))
-    db.init_schema()
+    db = _open_search_db(_cfg, memory_dir)
+    if db is None:
+        return []
     rows = db.vector_search(query_embedding, limit, path_prefix=path_prefix)
     db.close()
 
@@ -145,8 +170,9 @@ def search_hybrid(
 
     query_embedding = embed_text(query)
 
-    db = get_memory_db(db_path=_cfg.resolve_db_path(memory_dir))
-    db.init_schema()
+    db = _open_search_db(_cfg, memory_dir)
+    if db is None:
+        return []
     keyword_rows = db.keyword_search(query, limit * 2, path_prefix=path_prefix)
     semantic_rows = db.vector_search(query_embedding, limit * 2, path_prefix=path_prefix)
     db.close()

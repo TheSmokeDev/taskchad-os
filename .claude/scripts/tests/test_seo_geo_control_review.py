@@ -24,11 +24,26 @@ def test_weekly_review_reads_saved_receipts_without_provider_calls(tmp_path):
     paid_research_dir.mkdir()
     snapshot.write_text(json.dumps({
         "ranges": {"primary": {"start": "2026-07-12", "end": "2026-08-08", "data_state": "final"}},
+        "fleet_window_comparisons": {"7d": {"current": {"impressions": 10}}},
         "brands": [{"brand_id": "YourBusiness", "status": "ok", "sitemaps": [{"errors": 0, "warnings": 4}]}],
         "recommendations": [{"brand_id": "YourBusiness", "domain": "your-business.example.com", "score": 75, "top_nonbrand_query": "sr22", "reasons": ["demand"]}],
     }), encoding="utf-8")
+    ga4_receipt = tmp_path / "ga4.json"
+    ga4_receipt.write_text("{}", encoding="utf-8")
     (pulse_dir / "latest.json").write_text(json.dumps({
-        "sources": {"gsc": {"stdout": f"SNAPSHOT_JSON={snapshot}\n"}},
+        "sources": {
+            "gsc": {"stdout": f"SNAPSHOT_JSON={snapshot}\n"},
+            "ga4": {
+                "status": "ok",
+                "receipt_json": str(ga4_receipt),
+                "summary": {"expected_properties": 27, "properties_ok": 27},
+                "fleet_window_comparisons": {"7d": {"current": {"organic_sessions": 9}}},
+            },
+            "ai_visibility": {
+                "status": "ok",
+                "metrics": {"prompt_count": 4, "ai_overview_present": 2},
+            },
+        },
     }), encoding="utf-8")
     (registry_dir / "latest.json").write_text(json.dumps({"summary": {"brand_count": 27}}), encoding="utf-8")
     (paid_research_dir / "latest.json").write_text(json.dumps({
@@ -59,4 +74,7 @@ def test_weekly_review_reads_saved_receipts_without_provider_calls(tmp_path):
     assert result["paid_research"]["receipt"]["provider"]["status"] == "settled"
     assert result["paid_research"]["receipt"]["cohort"]["accepted_count"] == 1
     assert result["paid_research"]["receipt"]["cohort"]["candidate_count"] == 2
+    assert result["gsc"]["window_comparisons"]["7d"]["current"]["impressions"] == 10
+    assert result["ga4"]["summary"]["properties_ok"] == 27
+    assert result["ai_visibility"]["metrics"]["ai_overview_present"] == 2
     assert "approved budget broker" in result["approval_gates"][2]

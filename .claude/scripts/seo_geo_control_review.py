@@ -170,12 +170,20 @@ def build_review(
     registry = _read_json(registry_path) if registry_path else {}
     paid_research_path = _paid_research_path(paid_research_dir)
     paid_research = _read_json(paid_research_path) if paid_research_path else {}
+    pulse_sources = pulse.get("sources") if isinstance(pulse.get("sources"), dict) else {}
+    ga4_source = pulse_sources.get("ga4") if isinstance(pulse_sources.get("ga4"), dict) else {}
+    ai_source = (
+        pulse_sources.get("ai_visibility")
+        if isinstance(pulse_sources.get("ai_visibility"), dict)
+        else {}
+    )
 
     sources = {
         "daily_pulse": str(pulse_path) if pulse_path.is_file() else None,
         "gsc_snapshot": str(snapshot_path) if snapshot_path else None,
         "measurement_registry": str(registry_path) if registry_path else None,
         "paid_research_receipt": str(paid_research_path) if paid_research_path else None,
+        "ga4_fleet_receipt": ga4_source.get("receipt_json"),
     }
     source_status = {
         name: "ok" if path else "unavailable"
@@ -183,7 +191,7 @@ def build_review(
     }
     ranges = snapshot.get("ranges", {}) if isinstance(snapshot, dict) else {}
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": mode,
         "generated_at": datetime.now(UTC).isoformat(),
         "read_only": True,
@@ -193,6 +201,7 @@ def build_review(
         "source_status": source_status,
         "gsc": {
             "finalized_window": ranges.get("primary"),
+            "window_comparisons": snapshot.get("fleet_window_comparisons", {}),
             "brand_count": len(snapshot.get("brands", [])) if isinstance(snapshot.get("brands"), list) else 0,
             "queue": _queue(snapshot, max_candidates),
             "alerts": _alerts(snapshot),
@@ -209,6 +218,13 @@ def build_review(
                 "A persisted lead is not a contacted, qualified, or sold lead without terminal receipts.",
             ],
         },
+        "ga4": {
+            "status": ga4_source.get("status", "unavailable"),
+            "summary": ga4_source.get("summary", {}),
+            "window_comparisons": ga4_source.get("fleet_window_comparisons", {}),
+            "evidence_boundary": ga4_source.get("evidence_boundary"),
+        },
+        "ai_visibility": ai_source,
         "paid_research": {
             "receipt": _paid_research_summary(paid_research),
             "limitations": [

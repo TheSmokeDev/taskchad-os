@@ -56,6 +56,14 @@ OPERATION_REVOKE = "revoke"
 # approved proposal's actual mutation still arrives as a normal
 # ``grant``/``intent`` pair written by the executor.
 OPERATION_PROPOSE = "propose"
+# Epic #465 ticket 1c: single-capability grants. A tool grant moves one TOOL
+# name through the same ledger and the same executor gates as a toolset
+# grant. The ``kind`` row field keeps a tool and a toolset that share a name
+# from ever aliasing in replay.
+OPERATION_GRANT_TOOL = "grant_tool"
+OPERATION_REVOKE_TOOL = "revoke_tool"
+KIND_TOOLSET = "toolset"
+KIND_TOOL = "tool"
 
 OUTCOME_GRANTED = "granted"
 OUTCOME_REVOKED = "revoked"
@@ -103,6 +111,10 @@ REASON_KILL_SWITCH = "kill_switch"
 # has to name the thing that actually failed.
 REASON_REGISTRY_UNAVAILABLE = "registry_unavailable"
 REASON_DEFAULT_PROFILE_UNSUPPORTED = "default_profile_unsupported"
+# The name asked for was a TOOL (``tool:<name>``) that the live tool
+# registry does not carry. Distinct from REASON_UNKNOWN_TOOLSET so the
+# epic's metrics can tell bundle misses from capability misses.
+REASON_UNKNOWN_TOOL = "unknown_tool"
 REASON_CONFIG_SHAPE = "config_shape"
 REASON_WRITE_FAILED = "write_failed"
 # Another writer held the per-persona read-modify-write lock past the
@@ -187,16 +199,20 @@ class ToolsetGrantRefusedError(ValueError):
 class LedgerScope:
     """What the operator's turns added and removed, replayed from the ledger.
 
-    ``active`` — grants to PRESERVE through a template rewrite.
-    ``tombstoned`` — names to keep OFF even when the blueprint recommends
-    them, because an effective revoke took them away.
-
-    The two are disjoint by construction: every row that adds to one removes
-    from the other, so a name is never simultaneously preserved and removed.
+    ``active`` — toolset grants to PRESERVE through a template rewrite.
+    ``tombstoned`` — toolset names to keep OFF even when the blueprint
+    recommends them, because an effective revoke took them away.
+    ``active_tools`` / ``tombstoned_tools`` — the same two sets for
+    single-capability TOOL grants (epic #465 1c). The pairs are disjoint by
+    construction within each kind, and the kinds never share a set: a tool
+    and a toolset that share a name ride different rows (the ``kind``
+    field), so neither replay can alias the other.
     """
 
     active: tuple[str, ...] = ()
     tombstoned: tuple[str, ...] = ()
+    active_tools: tuple[str, ...] = ()
+    tombstoned_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -322,6 +338,60 @@ def known_toolset_names() -> tuple[str, ...]:
     return tuple(sorted(str(name) for name in registry))
 
 
+def known_tool_names() -> tuple[str, ...]:
+    """Return the LIVE registered TOOL names, sorted. Empty means refuse.
+
+    Mirrors :func:`known_toolset_names` against the other registry —
+    ``runtime.toolsets`` owns structure, ``runtime.tool_registry`` owns
+    substance, and a tool grant names substance. Registration hangs off
+    ASSEMBLY in this codebase, so the read converges the registry first: a
+    fresh process that never built a persona payload would otherwise refuse
+    every name as unknown. Fail-closed with a receipt, exactly like the
+    toolset read.
+    """
+    try:
+        from runtime import persona_tools  # noqa: PLC0415 — Rule 3
+
+        persona_tools.ensure_tools_registered()
+        from runtime import tool_registry  # noqa: PLC0415 — Rule 3
+    except Exception as exc:  # noqa: BLE001 — fail closed, with a receipt
+        _logger.warning(
+            "personas.toolset_grants: tool registry unavailable (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return ()
+    return tuple(sorted(entry.name for entry in tool_registry.list_registered()))
+
+
+def describe_tool(name: str) -> str:
+    """One-line description of a registered tool, or ``""``.
+
+    Same live-read contract as :func:`describe_toolset`: the approval card
+    must describe what the registry holds RIGHT NOW. A miss is a blank
+    description, never a raise — the card is legible without it.
+    """
+    wanted = str(name or "").strip()
+    if not wanted:
+        return ""
+    try:
+        from runtime import persona_tools  # noqa: PLC0415 — Rule 3
+
+        persona_tools.ensure_tools_registered()
+        from runtime import tool_registry  # noqa: PLC0415 — Rule 3
+
+        entry = tool_registry.get_entry(wanted)
+        description = entry.description if entry is not None else ""
+    except Exception as exc:  # noqa: BLE001 — a blank description is survivable
+        _logger.warning(
+            "personas.toolset_grants: tool description unavailable (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return ""
+    return str(description or "").strip()
+
+
 def describe_toolset(name: str) -> str:
     """One-line description of a registered toolset, or ``""``.
 
@@ -400,6 +470,7 @@ def append_audit_record(
     persona_id: str,
     toolset: str,
     outcome: str,
+    kind: str = KIND_TOOLSET,
     actor: str = "",
     actor_role: str = "",
     surface: str = "",
@@ -443,6 +514,10 @@ def append_audit_record(
         "integration": INTEGRATION,
         "action": f"toolset_{operation}",
         "operation": operation,
+        # The grant's grain (#465 1c): "toolset" for bundle rows, "tool" for
+        # single-capability rows. The NAME rides the existing ``toolset``
+        # field either way — kind is what stops a same-named pair aliasing.
+        "kind": kind if kind in {KIND_TOOLSET, KIND_TOOL} else KIND_TOOLSET,
         "persona_id": persona_id,
         "toolset": toolset,
         "outcome": outcome,
@@ -537,19 +612,24 @@ def _has_provenance(row: dict[str, Any]) -> bool:
     return all(_row_text(row, field) for field in _PROVENANCE_FIELDS)
 
 
-def _attempt_key(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
-    """``(correlation, persona, toolset, operation)`` identifying one attempt.
+def _attempt_key(row: dict[str, Any]) -> tuple[str, str, str, str, str] | None:
+    """``(correlation, persona, kind, name, operation)`` identifying one attempt.
+
+    ``kind`` is part of the key (#465 1c): a tool grant and a toolset grant
+    over the same NAME are different attempts, and old rows predate the field
+    — they read as ``toolset``, which is what they were.
 
     ``None`` when any component is missing, which disqualifies the row — an
     attempt that cannot be identified cannot be correlated to its intent.
     """
     correlation = _row_text(row, "correlation_id")
     persona = _row_text(row, "persona_id")
+    kind = _row_text(row, "kind") or KIND_TOOLSET
     toolset = _row_text(row, "toolset")
     operation = _row_text(row, "operation")
     if not (correlation and persona and toolset and operation):
         return None
-    return (correlation, persona, toolset, operation)
+    return (correlation, persona, kind, toolset, operation)
 
 
 def _read_ledger_rows(path: Path) -> list[dict[str, Any]]:
@@ -665,6 +745,19 @@ def active_grants(
     return ledger_scope(persona_id, audit_path).active
 
 
+def active_tool_grants(
+    persona_id: str,
+    audit_path: Path | str | None = None,
+) -> tuple[str, ...]:
+    """Replay the ledger into the single TOOLS *persona_id* holds by grant.
+
+    The ``kind="tool"`` slice of :func:`ledger_scope` (#465 1c) — same
+    admission rules, same fail-toward-less-reach asymmetry, disjoint from the
+    toolset replay even when a tool and a toolset share a name.
+    """
+    return ledger_scope(persona_id, audit_path).active_tools
+
+
 def ledger_scope(
     persona_id: str,
     audit_path: Path | str | None = None,
@@ -724,9 +817,9 @@ def ledger_scope(
     persona = str(persona_id or "").strip()
     if not persona:
         return LedgerScope((), ())
-    held: list[str] = []
-    tombstoned: list[str] = []
-    seen_intents: set[tuple[str, str, str, str]] = set()
+    held: dict[str, list[str]] = {KIND_TOOLSET: [], KIND_TOOL: []}
+    gone: dict[str, list[str]] = {KIND_TOOLSET: [], KIND_TOOL: []}
+    seen_intents: set[tuple[str, str, str, str, str]] = set()
     rejected = 0
     # Keyed to the persona being replayed, never to the ambient profile —
     # otherwise a reconcile running as the default profile reads a different
@@ -740,6 +833,10 @@ def ledger_scope(
             continue
         if outcome not in (OUTCOME_GRANTED, OUTCOME_REVOKED, OUTCOME_INTENT):
             continue
+        # Rows predate the field read as toolset rows — that is what they were.
+        kind = _row_text(row, "kind") or KIND_TOOLSET
+        if kind not in held:
+            continue
         # ── Admission. A row only moves the replay if it looks like something
         # this executor actually wrote: complete schema, real operator-turn
         # provenance, and — for an effective row — a PRECEDING intent for the
@@ -749,12 +846,14 @@ def ledger_scope(
         if key is None or not _has_provenance(row):
             rejected += 1
             continue
+        active = held[kind]
+        tombstones = gone[kind]
         if outcome == OUTCOME_INTENT:
             seen_intents.add(key)
-            if key[3] == OPERATION_REVOKE and name in held:
+            if key[4] in (OPERATION_REVOKE, OPERATION_REVOKE_TOOL) and name in active:
                 # Drops the grant without waiting for the outcome row (round
                 # 5), but deliberately does NOT tombstone — see the docstring.
-                held.remove(name)
+                active.remove(name)
             continue
         if key not in seen_intents:
             # No intent for this attempt. The executor cannot produce that
@@ -765,15 +864,15 @@ def ledger_scope(
             rejected += 1
             continue
         if outcome == OUTCOME_GRANTED:
-            if name not in held:
-                held.append(name)
-            if name in tombstoned:
-                tombstoned.remove(name)
+            if name not in active:
+                active.append(name)
+            if name in tombstones:
+                tombstones.remove(name)
         else:
-            if name in held:
-                held.remove(name)
-            if name not in tombstoned:
-                tombstoned.append(name)
+            if name in active:
+                active.remove(name)
+            if name not in tombstones:
+                tombstones.append(name)
     if rejected:
         _logger.warning(
             "personas.toolset_grants: ignored %d ledger row(s) for %s with "
@@ -781,7 +880,12 @@ def ledger_scope(
             rejected,
             persona,
         )
-    return LedgerScope(tuple(held), tuple(tombstoned))
+    return LedgerScope(
+        tuple(held[KIND_TOOLSET]),
+        tuple(gone[KIND_TOOLSET]),
+        tuple(held[KIND_TOOL]),
+        tuple(gone[KIND_TOOL]),
+    )
 
 
 def orphan_intent_correlation(
@@ -789,6 +893,8 @@ def orphan_intent_correlation(
     toolset: str,
     operation: str,
     audit_path: Path | str | None = None,
+    *,
+    kind: str = KIND_TOOLSET,
 ) -> str:
     """Correlation id of an *operation* that mutated the config but never recorded it.
 
@@ -822,6 +928,10 @@ def orphan_intent_correlation(
             continue
         if _row_text(row, "toolset") != name:
             continue
+        # The torn-write reader is kind-scoped too: a tool grant and a
+        # toolset grant over one name tear independently.
+        if (_row_text(row, "kind") or KIND_TOOLSET) != kind:
+            continue
         if _row_text(row, "operation") != wanted:
             continue
         # Same admission rule as the replay. Without it a forged intent row
@@ -848,10 +958,14 @@ def orphan_intent_correlation(
 __all__ = [
     "ADMIN_ROLE",
     "INTEGRATION",
+    "KIND_TOOL",
+    "KIND_TOOLSET",
     "LEDGER_FILENAME",
     "OPERATION_GRANT",
+    "OPERATION_GRANT_TOOL",
     "OPERATION_PROPOSE",
     "OPERATION_REVOKE",
+    "OPERATION_REVOKE_TOOL",
     "OUTCOME_ALREADY_GRANTED",
     "OUTCOME_APPROVED",
     "OUTCOME_DENIED",
@@ -874,6 +988,7 @@ __all__ = [
     "REASON_LOCK_TIMEOUT",
     "REASON_REPAIR_CONFIG_ABSENT",
     "REASON_REPAIR_CONFIG_PRESENT",
+    "REASON_UNKNOWN_TOOL",
     "REASON_UNKNOWN_TOOLSET",
     "REASON_WRITE_FAILED",
     "LedgerScope",
@@ -881,9 +996,12 @@ __all__ = [
     "ToolsetGrantRefusedError",
     "ToolsetGrantResult",
     "active_grants",
+    "active_tool_grants",
     "append_audit_record",
     "audit_attempt",
+    "describe_tool",
     "describe_toolset",
+    "known_tool_names",
     "known_toolset_names",
     "ledger_scope",
     "nearest_names",

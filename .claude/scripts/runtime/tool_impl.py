@@ -395,6 +395,26 @@ def register_tools() -> int:
         _logger.warning("eye-tool registration failed", exc_info=True)
 
     try:
+        # The X hands (epic #465 1a): dedicated-gate WRITE tools whose handlers
+        # only ever PROPOSE — execution rides the personas.action_proposals
+        # gate. Own module for the same reason the trade path has one.
+        from runtime import tool_impl_x_write
+
+        registered += tool_impl_x_write.register_tools()
+    except Exception:  # noqa: BLE001 — one dead group must not deny the rest
+        _logger.warning("x-write-tool registration failed", exc_info=True)
+
+    try:
+        # The GA4 fleet hands (epic #465 1a PR 2): dedicated-gate WRITE tools
+        # whose handlers only ever PROPOSE — execution rides the
+        # personas.action_proposals gate into integrations/ga4_admin_api.
+        from runtime import tool_impl_ga4_write
+
+        registered += tool_impl_ga4_write.register_tools()
+    except Exception:  # noqa: BLE001 — one dead group must not deny the rest
+        _logger.warning("ga4-write-tool registration failed", exc_info=True)
+
+    try:
         # SEO/GEO owns its direct, read-only GSC/GA4/Firecrawl/OpenSEO wrappers.
         # Keeping them out of the generic read set avoids granting research
         # credentials to unrelated personas.

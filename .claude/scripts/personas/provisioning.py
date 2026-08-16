@@ -147,6 +147,9 @@ class ProvisionPreview:
     # is at least as reportable as a preservation, so it rides the same
     # receipt and audit row.
     revoked_grants: tuple[str, ...] = ()
+    # The single-capability grain of both (#465 1c).
+    preserved_tool_grants: tuple[str, ...] = ()
+    revoked_tool_grants: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -220,11 +223,13 @@ def preview_provision(
         callable_tools=callable_tools,
     )
     plan_sha = _canonical_hash(plan.as_dict())
-    rendered, env_summary, preserved_grants, revoked_grants = _render_managed_files(
-        raw_blueprint,
-        plan,
-        current_config,
-        resolved_paths,
+    rendered, env_summary, preserved_grants, revoked_grants, preserved_tools, revoked_tools = (
+        _render_managed_files(
+            raw_blueprint,
+            plan,
+            current_config,
+            resolved_paths,
+        )
     )
     binding_document = load_binding_document(
         resolved_paths.bindings_file, strict=True
@@ -255,6 +260,8 @@ def preview_provision(
         warnings=plan.warnings,
         preserved_grants=preserved_grants,
         revoked_grants=revoked_grants,
+        preserved_tool_grants=preserved_tools,
+        revoked_tool_grants=revoked_tools,
     )
 
 
@@ -395,11 +402,13 @@ def _commit_preview(
     )
     profile_root = _profile_root(paths, preview.plan.persona_id)
     current_config = _read_config(profile_root / "config.yaml")
-    rendered, _summary, _preserved, _revoked = _render_managed_files(
-        raw_blueprint,
-        preview.plan,
-        current_config,
-        paths,
+    rendered, _summary, _preserved, _revoked, _preserved_tools, _revoked_tools = (
+        _render_managed_files(
+            raw_blueprint,
+            preview.plan,
+            current_config,
+            paths,
+        )
     )
     current_binding = load_binding_document(paths.bindings_file, strict=True)
     binding_text = dump_binding_document(
@@ -548,6 +557,9 @@ def _finalize_result(
         # And the names it held OFF because an operator revoked them, even
         # though the blueprint recommends them.
         "revoked_grants": list(preview.revoked_grants),
+        # The single-capability grain of both halves (#465 1c).
+        "preserved_tool_grants": list(preview.preserved_tool_grants),
+        "revoked_tool_grants": list(preview.revoked_tool_grants),
     }
     receipt_path = (
         paths.receipts_root
@@ -585,11 +597,12 @@ def _finalize_result(
 
 def _preserve_ledger_grants(
     merged: dict[str, Any], persona_id: str
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """Apply the operator's ledger to *merged* in place.
 
-    Returns ``(preserved, removed)`` — grants carried through the template
-    rewrite, and blueprint-recommended bundles held off by a tombstone.
+    Returns ``(preserved, removed, preserved_tools, removed_tools)`` — grants
+    carried through the template rewrite, and blueprint-recommended bundles
+    held off by a tombstone, per grant grain.
 
     The blueprint patch replaces ``toolsets:`` wholesale, which broke the
     operator's turns in BOTH directions:
@@ -600,6 +613,11 @@ def _preserve_ledger_grants(
     * a successfully REVOKED toolset came back, if the blueprint happened to
       recommend it — the ledger said revoked while live reach returned, and
       the positive-only replay had no way to say "keep this off" (round 7).
+
+    Single-capability TOOL grants (#465 1c) ride the same resolution over
+    ``merged["tools"]``: the reconcile path that re-renders the config would
+    otherwise erase every tool the operator ever granted, one ledger row at a
+    time swearing the reach exists.
 
     So the resolution is the ledger applied as a whole:
     ``(blueprint ∪ ledger-active) − ledger-tombstoned``, with event order
@@ -627,7 +645,25 @@ def _preserve_ledger_grants(
         current = [name for name in current if name not in set(removed)]
     if preserved or removed:
         merged["toolsets"] = current
-    return tuple(preserved), tuple(removed)
+
+    existing_tools = merged.get("tools")
+    current_tools = (
+        [str(item).strip() for item in existing_tools]
+        if isinstance(existing_tools, list)
+        else []
+    )
+    preserved_tools: list[str] = []
+    for name in scope.active_tools:
+        if name not in current_tools:
+            current_tools.append(name)
+            preserved_tools.append(name)
+    removed_tools = [name for name in scope.tombstoned_tools if name in current_tools]
+    if removed_tools:
+        drop = set(removed_tools)
+        current_tools = [name for name in current_tools if name not in drop]
+    if preserved_tools or removed_tools:
+        merged["tools"] = current_tools
+    return tuple(preserved), tuple(removed), tuple(preserved_tools), tuple(removed_tools)
 
 
 def _render_managed_files(
@@ -635,15 +671,22 @@ def _render_managed_files(
     plan: BlueprintPlan,
     current_config: dict[str, Any],
     paths: ProvisionPaths,
-) -> tuple[dict[str, str], dict[str, Any], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[
+    dict[str, str],
+    dict[str, Any],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
     merged = merge_config_patch(current_config, plan.config_patch)
     # Before rendering, not after: preview and apply both come through here,
     # so the ledger is applied inside the bytes that changed_paths, the state
     # hashes, and the transaction snapshot are all computed from. A preview
     # that showed the erasure and an apply that quietly re-added it would be
     # two different truths.
-    preserved_grants, revoked_grants = _preserve_ledger_grants(
-        merged, plan.persona_id
+    preserved_grants, revoked_grants, preserved_tools, revoked_tools = (
+        _preserve_ledger_grants(merged, plan.persona_id)
     )
     config_text = dump_config_yaml(merged)
     validate_config_yaml_text(config_text)
@@ -690,6 +733,8 @@ def _render_managed_files(
         safe_env_sync_summary(env_plan),
         preserved_grants,
         revoked_grants,
+        preserved_tools,
+        revoked_tools,
     )
 
 

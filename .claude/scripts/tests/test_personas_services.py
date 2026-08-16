@@ -26,7 +26,6 @@ from personas.services import (
     validate_config_yaml_text,
 )
 
-
 # ── validate_config_dict ─────────────────────────────────────────────────
 
 
@@ -122,6 +121,45 @@ model:
     with pytest.raises(ConfigShapeError) as exc_info:
         validate_config_yaml_text(text)
     assert "model.fallback" in str(exc_info.value)
+
+
+def test_nft_intelligence_config_is_exact_robinhood_only() -> None:
+    section = {
+        "enabled": True,
+        "chains": ["robinhood"],
+        "candidate_limit": 12,
+        "deep_verify_limit": 5,
+        "max_logs_per_candidate": 200,
+        "max_rpc_calls_per_candidate": 32,
+        "max_provider_calls_per_round": 64,
+        "provider_wall_clock_budget_seconds": 600,
+        "max_log_chunks_per_candidate": 8,
+        "max_block_search_calls": 12,
+        "confirmation_depth": 12,
+        "mint_recency_hours": 72,
+        "verification_ttl_minutes": 120,
+        "provider_timeout_seconds": 8,
+    }
+    validate_config_dict({"market_round": {"nft_intelligence": section}})
+
+    for key, value, error in (
+        ("chains", ["ethereum"], "exactly"),
+        ("chains", ["robinhood", "robinhood"], "duplicates"),
+        ("candidate_limit", True, "int"),
+        ("max_rpc_calls_per_candidate", 65, "expected 1..64"),
+        ("max_provider_calls_per_round", 129, "expected 1..128"),
+        ("provider_wall_clock_budget_seconds", 721, "expected 60..720"),
+        ("rpc_url", "https://example.invalid", "unknown field"),
+    ):
+        invalid = {**section, key: value}
+        with pytest.raises(ConfigShapeError, match=error):
+            validate_config_dict({"market_round": {"nft_intelligence": invalid}})
+
+    cross_field = {**section, "candidate_limit": 2, "deep_verify_limit": 3}
+    with pytest.raises(ConfigShapeError, match="cannot exceed"):
+        validate_config_dict(
+            {"market_round": {"nft_intelligence": cross_field}}
+        )
 
 
 # ── public API exposure ──────────────────────────────────────────────────

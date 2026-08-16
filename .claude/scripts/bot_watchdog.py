@@ -344,7 +344,7 @@ def _find_bash() -> str | None:
     Under Task Scheduler, ``shutil.which("bash")`` resolves to
     ``C:\\Windows\\System32\\bash.exe`` (WSL) when the feature is installed.
     WSL bash treats backslashes in a Windows script path as escapes and dies
-    with ``/bin/bash: ~...run_chat.sh: No such file or directory``.
+    with ``/bin/bash: ~/...run_chat.sh: No such file or directory``.
     Captured live 2026-07-14: every watchdog restart of the morning outage
     failed exactly here — invisibly, until the launcher log existed. Prefer
     the known-good Git Bash installs; fall back to PATH only if it is not

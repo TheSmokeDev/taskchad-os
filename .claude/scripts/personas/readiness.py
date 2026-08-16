@@ -343,6 +343,7 @@ def _declared_axis(
     plan: Any,
     config: dict[str, Any],
 ) -> tuple[AxisReadiness, set[str], set[str]]:
+    from personas import toolset_grants as _toolset_grants  # noqa: PLC0415 — late, Rule 3
     from runtime import capabilities as runtime_capabilities
     from runtime import toolsets as runtime_toolsets
 
@@ -359,13 +360,25 @@ def _declared_axis(
             )
         )
     expected_names = set(plan.applied_declared_tools)
+    # Ledger-granted single tools (#465 1c) are legitimate reach, not
+    # blueprint drift: an operator turn put them in `tools:` through the
+    # grant executor, and the compiled plan predates that turn. They join the
+    # EXPECTED side here so readiness stays READY over an honest grant.
+    persona_id = str((config.get("persona") or {}).get("id") or "").strip()
+    ledger_tools = (
+        set(_toolset_grants.active_tool_grants(persona_id)) if persona_id else set()
+    )
+    expected_names |= ledger_tools
     reasons: list[str] = []
     if tuple(scope.toolsets) != tuple(plan.applied_toolsets):
         reasons.append(
             "physical config toolsets do not match the compiled blueprint "
             f"(expected {list(plan.applied_toolsets)}, found {list(scope.toolsets)})"
         )
-    if tuple(scope.tools) != tuple(plan.applied_tools):
+    expected_tools = set(plan.applied_tools) | ledger_tools
+    # Set compare, not tuple: the written order carries no meaning here, and
+    # the ledger union is sorted while the config keeps grant order.
+    if set(scope.tools) != expected_tools:
         reasons.append(
             "physical individual-tool grants do not match the compiled blueprint"
         )

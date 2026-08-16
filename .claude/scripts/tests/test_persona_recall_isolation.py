@@ -170,3 +170,69 @@ async def test_recall_keyword_mode_is_vault_scoped(
     assert _TOKEN_A not in main_resp.formatted_text, (
         "Main recall must NOT return a persona-only fact"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. #466 apartments — the fence holds INSIDE a persona process. The main
+#    homie gained a read path over persona vaults; a persona process must
+#    gain nothing: no sibling vaults on its shelf, and `all` = its own vault.
+# ---------------------------------------------------------------------------
+
+
+def _fake_homie_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    import personas.core as personas_core
+
+    monkeypatch.delenv("HOMIE_HOME", raising=False)
+    root = tmp_path / "homie-root"
+    (root / "profiles").mkdir(parents=True)
+    monkeypatch.setattr(personas_core, "get_default_homie_root", lambda: root)
+    return root / "profiles"
+
+
+def test_persona_process_sees_no_estate_vaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import config as _cfg
+    from personas import activity
+
+    profiles_root = _fake_homie_root(tmp_path, monkeypatch)
+    (profiles_root / "sales" / "memory").mkdir(parents=True)
+    (profiles_root / "sales" / "data").mkdir(parents=True)
+
+    # Default (main) profile sees the persona vault on the shelf...
+    assert "sales" in _cfg.list_vault_names()
+
+    # ...a persona process sees NONE of the estate — by name or otherwise.
+    monkeypatch.setattr(activity, "get_active_profile_name", lambda: "crypto")
+    assert "sales" not in _cfg.list_vault_names()
+    assert _cfg.resolve_vault("sales")[0] is None
+    assert _cfg.is_readonly_vault("sales") is False
+
+
+@pytest.mark.asyncio
+async def test_persona_process_fanout_stays_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A persona-bot process asking for `all` gets its own vault, not the estate."""
+    from recall_service import recall_all
+
+    import config as _cfg
+    from personas import activity
+
+    monkeypatch.setattr(_cfg, "RECALL_ENABLED", True, raising=False)
+    profiles_root = _fake_homie_root(tmp_path, monkeypatch)
+    a_mem = _make_profile_vault(profiles_root / "crypto", _FACT_A)
+    _make_profile_vault(profiles_root / "sales", _FACT_B)
+
+    # Simulate the re-rooted persona process: active profile = crypto and
+    # MEMORY_DIR = its own vault (what apply_persona_override produces).
+    monkeypatch.setattr(activity, "get_active_profile_name", lambda: "crypto")
+    monkeypatch.setattr(_cfg, "MEMORY_DIR", a_mem, raising=False)
+
+    own = await recall_all(_TOKEN_A, max_results=5)
+    assert _TOKEN_A in own.formatted_text, "own-vault recall must survive the fence"
+
+    leak = await recall_all(_TOKEN_B, max_results=5)
+    assert _TOKEN_B not in leak.formatted_text, (
+        "`all` from a persona process must NOT sweep sibling vaults"
+    )

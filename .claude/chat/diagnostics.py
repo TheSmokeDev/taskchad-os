@@ -188,7 +188,7 @@ def _check_crypto_round(report: DiagnosticsReport) -> None:
 
         settings = load_market_round_settings()
         db = CryptoRoundDB(initialize=False)
-        ledger = db.status()
+        ledger = db.status(nft_enabled=settings.nft_intelligence.enabled)
         tape = db.tape_status()
         from lib import x_rate
         latest = ledger.get("latest")
@@ -207,6 +207,10 @@ def _check_crypto_round(report: DiagnosticsReport) -> None:
             "latest": latest,
             "state_counts": ledger.get("state_counts", {}),
             "open_paper_calls": ledger.get("open_paper_calls", 0),
+            "nft_intelligence": {
+                **settings.nft_intelligence.as_public_dict(),
+                **dict(ledger.get("nft_intelligence") or {}),
+            },
             "conversation_tape": tape,
             "source_receipt_count": len(db.source_receipts()),
             "source_receipt_history_count": db.source_receipt_history_count(),

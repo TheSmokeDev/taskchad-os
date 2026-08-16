@@ -110,6 +110,62 @@ class TestDiagnosticsReport:
         assert isinstance(report.runtime_lanes, dict)
         assert isinstance(report.runtime_providers, dict)
 
+    def test_crypto_round_passes_nft_gate_to_ledger_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        import diagnostics as diagnostics_module
+
+        import crypto_round.config as round_config
+        import crypto_round.db as round_db
+        from lib import x_rate
+
+        calls: list[bool] = []
+
+        class FakeDB:
+            def __init__(self, *, initialize: bool = False) -> None:
+                assert initialize is False
+
+            def status(self, *, nft_enabled: bool | None = None) -> dict:
+                calls.append(bool(nft_enabled))
+                return {
+                    "latest": None,
+                    "state_counts": {},
+                    "nft_intelligence": {
+                        "schema_present": False,
+                        "healthy": True,
+                        "error_code": "not_initialized",
+                        "latest_state": "pending",
+                    },
+                }
+
+            def tape_status(self) -> dict:
+                return {}
+
+            def source_receipts(self) -> list:
+                return []
+
+            def source_receipt_history_count(self) -> int:
+                return 0
+
+        nft = SimpleNamespace(enabled=True, as_public_dict=lambda: {"enabled": True})
+        settings = SimpleNamespace(
+            enabled=True,
+            every_hours=2,
+            max_turns=1,
+            nft_intelligence=nft,
+            as_public_dict=lambda: {"discord_channel_counts": {}},
+        )
+        monkeypatch.setattr(round_config, "load_market_round_settings", lambda: settings)
+        monkeypatch.setattr(round_db, "CryptoRoundDB", FakeDB)
+        monkeypatch.setattr(x_rate, "status", lambda: {})
+        report = DiagnosticsReport(timestamp="now", uptime_seconds=0.0)
+        diagnostics_module._check_crypto_round(report)
+        assert calls == [True]
+        assert report.crypto_round["nft_intelligence"]["latest_state"] == "pending"
+        assert report.crypto_round["nft_intelligence"]["error_code"] == "not_initialized"
+
     def test_persona_readiness_keeps_full_vector(
         self, monkeypatch: pytest.MonkeyPatch,
     ):

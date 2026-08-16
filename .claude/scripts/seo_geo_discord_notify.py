@@ -116,6 +116,7 @@ def _source_states(receipt: Mapping[str, Any]) -> str:
     labels = (
         ("gsc", "GSC"),
         ("ga4", "GA4"),
+        ("ai_visibility", "AI"),
         ("measurement_registry", "measurement"),
         ("budget_broker", "budget"),
     )
@@ -169,8 +170,91 @@ def _fleet_totals(snapshot: Mapping[str, Any] | None) -> dict[str, float]:
 def _format_change(current: float, previous: float) -> str:
     delta = current - previous
     sign = "+" if delta >= 0 else ""
-    percent = (delta / previous * 100) if previous else 0.0
-    return f"{sign}{delta:,.0f} ({sign}{percent:.1f}%)"
+    if previous:
+        percent = delta / previous * 100
+        return f"{sign}{delta:,.0f}, {sign}{percent:.1f}%"
+    return f"{sign}{delta:,.0f}, new" if current else "0"
+
+
+def _window_line(prefix: str, key: str, comparison: Mapping[str, Any]) -> str:
+    current = comparison.get("current")
+    previous = comparison.get("previous")
+    if not isinstance(current, Mapping) or not isinstance(previous, Mapping):
+        return f"{prefix} {key}: comparison unavailable."
+    impressions = float(current.get("impressions") or 0)
+    prior_impressions = float(previous.get("impressions") or 0)
+    clicks = float(current.get("clicks") or 0)
+    prior_clicks = float(previous.get("clicks") or 0)
+    ctr = float(current.get("ctr") or 0) * 100
+    prior_ctr = float(previous.get("ctr") or 0) * 100
+    return (
+        f"{prefix} {key}: {impressions:,.0f} imp ({_format_change(impressions, prior_impressions)}) · "
+        f"{clicks:,.0f} clicks ({_format_change(clicks, prior_clicks)}) · "
+        f"CTR {ctr:.2f}% ({ctr - prior_ctr:+.2f} pp)"
+    )
+
+
+def _brand_window_movers(snapshot: Mapping[str, Any] | None, key: str = "7d") -> list[str]:
+    brands = snapshot.get("brands") if isinstance(snapshot, Mapping) else None
+    if not isinstance(brands, list):
+        return []
+    rows: list[tuple[float, str]] = []
+    for brand in brands:
+        if not isinstance(brand, Mapping):
+            continue
+        analytics = brand.get("analytics")
+        comparisons = analytics.get("window_comparisons") if isinstance(analytics, Mapping) else None
+        comparison = comparisons.get(key) if isinstance(comparisons, Mapping) else None
+        delta = comparison.get("delta") if isinstance(comparison, Mapping) else None
+        if not isinstance(delta, Mapping):
+            continue
+        impressions = float(delta.get("impressions") or 0)
+        if impressions:
+            name = str(brand.get("display_name") or brand.get("brand_id") or "Unknown")
+            rows.append((impressions, name))
+    if not rows:
+        return []
+    rows.sort()
+    output = [f"best {rows[-1][1]} {rows[-1][0]:+,.0f} imp"]
+    if rows[0][0] < 0:
+        output.append(f"watch {rows[0][1]} {rows[0][0]:+,.0f} imp")
+    return output
+
+
+def _sitemap_alert_line(snapshot: Mapping[str, Any] | None) -> str | None:
+    brands = snapshot.get("brands") if isinstance(snapshot, Mapping) else None
+    if not isinstance(brands, list):
+        return None
+    error_rows: list[tuple[int, str]] = []
+    warning_brands = 0
+    warning_total = 0
+    for brand in brands:
+        if not isinstance(brand, Mapping):
+            continue
+        sitemaps = brand.get("sitemaps")
+        if not isinstance(sitemaps, list):
+            continue
+        errors = sum(
+            int(float(row.get("errors") or 0)) for row in sitemaps if isinstance(row, Mapping)
+        )
+        warnings = sum(
+            int(float(row.get("warnings") or 0)) for row in sitemaps if isinstance(row, Mapping)
+        )
+        name = str(brand.get("display_name") or brand.get("brand_id") or "Unknown")
+        if errors:
+            error_rows.append((errors, name))
+        if warnings:
+            warning_brands += 1
+            warning_total += warnings
+    if not error_rows and not warning_total:
+        return None
+    parts: list[str] = []
+    if error_rows:
+        errors, name = sorted(error_rows, reverse=True)[0]
+        parts.append(f"{name} {errors} errors")
+    if warning_total:
+        parts.append(f"warnings on {warning_brands} brands ({warning_total} total)")
+    return "Sitemap alert: " + " · ".join(parts)
 
 
 def _brand_movers(
@@ -259,10 +343,12 @@ def _route_opportunities(snapshot: Mapping[str, Any] | None) -> list[str]:
                 continue
             candidates.append((impressions, clicks, position, str(brand.get("display_name") or brand.get("brand_id")), query, url))
     lines: list[str] = []
-    for impressions, clicks, position, name, query, url in sorted(candidates, reverse=True)[:3]:
+    for impressions, clicks, position, name, query, url in sorted(candidates, reverse=True)[:1]:
         action = "CTR/title candidate" if position <= 10 else "on-page/internal-link candidate"
+        parsed = urllib.parse.urlparse(url)
+        route = parsed.path or "/"
         lines.append(
-            f"{name} — `{query}` → {url} | {impressions:,.0f} impressions, "
+            f"{name} — `{query}` → {route} | {impressions:,.0f} impressions, "
             f"{clicks:,.0f} clicks, position {position:.1f}; {action}."
         )
     return lines
@@ -321,59 +407,90 @@ def _daily_body(
     if not receipt:
         return ["No fresh receipt was produced. Check the scheduled job log."]
     current = context.get("current") if isinstance(context, Mapping) else None
-    previous = context.get("previous") if isinstance(context, Mapping) else None
-    current_totals = _fleet_totals(current)
-    previous_totals = _fleet_totals(previous)
     lines: list[str] = []
-    ranges = current.get("ranges") if isinstance(current, Mapping) else None
-    primary = ranges.get("primary") if isinstance(ranges, Mapping) else None
-    if isinstance(primary, Mapping):
-        lines.append(
-            f"Final GSC window: {primary.get('start')}–{primary.get('end')} "
-            f"({primary.get('days')} days)."
-        )
-    if current_totals["impressions"]:
-        ctr = current_totals["clicks"] / current_totals["impressions"] * 100
-        if previous_totals["impressions"]:
-            prior_ctr = previous_totals["clicks"] / previous_totals["impressions"] * 100
-            lines.append(
-                "Fleet: "
-                f"{current_totals['impressions']:,.0f} impressions ({_format_change(current_totals['impressions'], previous_totals['impressions'])}) · "
-                f"{current_totals['clicks']:,.0f} clicks ({_format_change(current_totals['clicks'], previous_totals['clicks'])}) · "
-                f"CTR {ctr:.3f}% ({ctr - prior_ctr:+.3f} pp)."
-            )
-            lines.append("Note: these are overlapping 28-day rolling windows, so this is directional movement—not a confirmed one-day ranking win.")
-        else:
-            lines.append(
-                f"Fleet: {current_totals['impressions']:,.0f} impressions · {current_totals['clicks']:,.0f} clicks · CTR {ctr:.3f}%.")
-        lines.append(f"Properties read: 27/27; brands with at least one click: {current_totals['brands_with_clicks']:,.0f}/27.")
-        movers = _brand_movers(current, previous)
+    action_lines: list[str] = []
+    comparisons = current.get("fleet_window_comparisons") if isinstance(current, Mapping) else None
+    if isinstance(comparisons, Mapping) and comparisons:
+        finalized = comparisons.get("3d")
+        current_range = finalized.get("current_range") if isinstance(finalized, Mapping) else None
+        if isinstance(current_range, Mapping):
+            lines.append(f"GSC finalized through {current_range.get('end')}; equal non-overlapping comparisons:")
+        for key in ("3d", "7d", "14d", "28d", "90d"):
+            comparison = comparisons.get(key)
+            if isinstance(comparison, Mapping):
+                lines.append(_window_line("GSC", key, comparison))
+        movers = _brand_window_movers(current)
         if movers:
-            lines.append("Drivers: " + " | ".join(movers))
+            lines.append("7d drivers: " + " · ".join(movers))
+        sitemap_alert = _sitemap_alert_line(current)
+        if sitemap_alert:
+            lines.append(sitemap_alert)
         opportunities = _route_opportunities(current)
         if opportunities:
-            lines.append("Best sampled update candidates (approval required; no page changed):")
-            lines.extend(opportunities)
+            action_lines.append("Best sampled update candidate (approval required; no page changed):")
+            action_lines.extend(opportunities)
         fragmented = _fragmented_intent(current)
         if fragmented:
-            lines.append(fragmented)
+            action_lines.append(fragmented)
     else:
         lines.append(_source_states(receipt))
     sources = receipt.get("sources")
     if isinstance(sources, Mapping):
+        ga4 = sources.get("ga4")
+        ga4_summary = ga4.get("summary") if isinstance(ga4, Mapping) else None
+        ga4_windows = ga4.get("fleet_window_comparisons") if isinstance(ga4, Mapping) else None
+        if isinstance(ga4_summary, Mapping):
+            lines.append(
+                f"GA4 fleet: {ga4_summary.get('properties_ok', 0)}/{ga4_summary.get('expected_properties', 27)} properties readable."
+            )
+        if isinstance(ga4_windows, Mapping):
+            organic_parts: list[str] = []
+            submit_parts: list[str] = []
+            for key in ("3d", "7d", "14d", "28d", "90d"):
+                comparison = ga4_windows.get(key)
+                current_ga4 = comparison.get("current") if isinstance(comparison, Mapping) else None
+                previous_ga4 = comparison.get("previous") if isinstance(comparison, Mapping) else None
+                if not isinstance(current_ga4, Mapping) or not isinstance(previous_ga4, Mapping):
+                    continue
+                current_funnel = current_ga4.get("funnel_events")
+                previous_funnel = previous_ga4.get("funnel_events")
+                current_funnel = current_funnel if isinstance(current_funnel, Mapping) else {}
+                previous_funnel = previous_funnel if isinstance(previous_funnel, Mapping) else {}
+                organic = float(current_ga4.get("organic_sessions") or 0)
+                prior_organic = float(previous_ga4.get("organic_sessions") or 0)
+                submits = float(current_funnel.get("quote_or_lead_submit") or 0)
+                prior_submits = float(previous_funnel.get("quote_or_lead_submit") or 0)
+                organic_parts.append(
+                    f"{key} {organic:,.0f} ({_format_change(organic, prior_organic)})"
+                )
+                submit_parts.append(
+                    f"{key} {submits:,.0f} ({_format_change(submits, prior_submits)})"
+                )
+            if organic_parts:
+                lines.append("GA4 organic sessions: " + " · ".join(organic_parts))
+                lines.append("GA4 quote/lead submit events: " + " · ".join(submit_parts))
+        ai = sources.get("ai_visibility")
+        ai_metrics = ai.get("metrics") if isinstance(ai, Mapping) else None
+        ai_comparison = ai.get("comparison") if isinstance(ai, Mapping) else None
+        if isinstance(ai_metrics, Mapping):
+            lines.append(
+                "AI visibility (saved Google AIO receipt): "
+                f"AIO {ai_metrics.get('ai_overview_present', 0)}/{ai_metrics.get('prompt_count', 0)} · "
+                f"owner citations {ai_metrics.get('owner_domain_cited', 0)} · "
+                f"fleet citations {ai_metrics.get('fleet_domain_cited', 0)} · "
+                f"trend {ai_comparison.get('status') if isinstance(ai_comparison, Mapping) else 'unknown'}. "
+                "ChatGPT/Gemini/Claude/Perplexity unmeasured."
+            )
         registry = sources.get("measurement_registry")
         summary = registry.get("summary") if isinstance(registry, Mapping) else None
         if isinstance(summary, Mapping):
             expected = summary.get("expected_public_brands")
             fresh = summary.get("gsc_verified_access_or_fresh_data_receipts")
-            ga4 = summary.get("ga4_deployed_tag_proofs")
             leads = summary.get("terminal_lead_receipts")
-            if any(value is not None for value in (expected, fresh, ga4, leads)):
+            if any(value is not None for value in (expected, fresh, leads)):
                 lines.append(
-                    "Measurement gap: "
-                    f"GA4 tag receipts={ga4 if ga4 is not None else '?'} · "
-                    f"terminal lead receipts={leads if leads is not None else '?'}. "
-                    "Visibility is real; lead attribution is still unproven."
+                    "Proof boundary: GA4 events are not terminal leads; "
+                    f"terminal lead receipts={leads if leads is not None else '?'}."
                 )
         paid = sources.get("paid_research")
         if isinstance(paid, Mapping):
@@ -381,6 +498,7 @@ def _daily_body(
             provider_status = provider.get("status") if isinstance(provider, Mapping) else None
             if provider_status:
                 lines.append(f"Last paid research: {provider_status}; this daily job spent $0.")
+    lines.extend(action_lines)
     return lines
 
 
@@ -395,7 +513,47 @@ def _control_body(receipt: Mapping[str, Any] | None, *, status: str) -> list[str
     queue = receipt.get("gsc")
     candidates = queue.get("queue") if isinstance(queue, Mapping) else None
     candidate_count = len(candidates) if isinstance(candidates, list) else 0
-    return [states, f"Evidence queue candidates: {candidate_count}. This control review spent $0 and made no site changes."]
+    lines = [states]
+    mode = str(receipt.get("mode") or "weekly")
+    keys = ("7d", "14d", "90d") if mode == "weekly" else ("28d", "90d")
+    gsc_windows = queue.get("window_comparisons") if isinstance(queue, Mapping) else None
+    if isinstance(gsc_windows, Mapping):
+        for key in keys:
+            comparison = gsc_windows.get(key)
+            if isinstance(comparison, Mapping):
+                lines.append(_window_line("GSC", key, comparison))
+    ga4 = receipt.get("ga4")
+    ga4_summary = ga4.get("summary") if isinstance(ga4, Mapping) else None
+    ga4_windows = ga4.get("window_comparisons") if isinstance(ga4, Mapping) else None
+    if isinstance(ga4_summary, Mapping):
+        lines.append(
+            f"GA4 fleet: {ga4_summary.get('properties_ok', 0)}/{ga4_summary.get('expected_properties', 27)} properties readable."
+        )
+    if isinstance(ga4_windows, Mapping):
+        parts: list[str] = []
+        for key in keys:
+            comparison = ga4_windows.get(key)
+            current = comparison.get("current") if isinstance(comparison, Mapping) else None
+            previous = comparison.get("previous") if isinstance(comparison, Mapping) else None
+            if isinstance(current, Mapping) and isinstance(previous, Mapping):
+                value = float(current.get("organic_sessions") or 0)
+                prior = float(previous.get("organic_sessions") or 0)
+                parts.append(f"{key} {value:,.0f} ({_format_change(value, prior)})")
+        if parts:
+            lines.append("GA4 organic sessions: " + " · ".join(parts))
+    ai = receipt.get("ai_visibility")
+    metrics = ai.get("metrics") if isinstance(ai, Mapping) else None
+    comparison = ai.get("comparison") if isinstance(ai, Mapping) else None
+    if isinstance(metrics, Mapping):
+        lines.append(
+            f"Google AIO: {metrics.get('ai_overview_present', 0)}/{metrics.get('prompt_count', 0)} · "
+            f"owner citations {metrics.get('owner_domain_cited', 0)} · "
+            f"trend {comparison.get('status') if isinstance(comparison, Mapping) else 'unknown'}."
+        )
+    lines.append(
+        f"Evidence queue candidates: {candidate_count}. This control review spent $0 and made no site changes."
+    )
+    return lines
 
 
 def _paid_body(receipt: Mapping[str, Any] | None, *, status: str) -> list[str]:
@@ -409,10 +567,24 @@ def _paid_body(receipt: Mapping[str, Any] | None, *, status: str) -> list[str]:
     budget = budget if isinstance(budget, Mapping) else {}
     accepted = cohort.get("accepted")
     rejected = cohort.get("rejected")
+    results = receipt.get("results")
+    results = results if isinstance(results, list) else []
+    aio_present = sum(
+        bool(row.get("ai_overview_present")) for row in results if isinstance(row, Mapping)
+    )
+    owner_cited = sum(
+        bool(row.get("owner_domain_cited")) for row in results if isinstance(row, Mapping)
+    )
+    fleet_cited = sum(
+        bool(row.get("fleet_cited_domains")) for row in results if isinstance(row, Mapping)
+    )
+    classifier = provider.get("feature_classifier")
+    trend_state = "corrected-classifier baseline" if classifier else "preliminary classifier; not trendable"
     return [
         f"Google AI Overview research: {provider.get('status') or 'unknown'} ({provider.get('operation') or 'unknown operation'}).",
         f"Cohort: accepted={len(accepted) if isinstance(accepted, list) else 0} · rejected={len(rejected) if isinstance(rejected, list) else 0} · charged=${budget.get('charged_usd', 0)}.",
-        "This is Google AI Overview evidence only; no site, GSC, or social changes were made.",
+        f"Results: AIO {aio_present}/{len(results)} · owner citations {owner_cited} · fleet citations {fleet_cited} · {trend_state}.",
+        "Google AIO only; ChatGPT, Gemini, Claude, and Perplexity are unmeasured. No site, GSC, or social changes were made.",
     ]
 
 

@@ -442,7 +442,17 @@ VAULT_NAME_ALIASES = {
     "thehomie": "thehomie",
     "coding": "coding-vault",
     "coding-vault": "coding-vault",
+    "all": "all",
+    "apartments": "all",
 }
+# #466 — the positional vault sniff stays FROZEN to the pre-apartments alias
+# keys. Persona ids are short common words ("sales", "geo") and all/apartments
+# are ordinary query words; letting the sniff match them would hijack query
+# tails. Persona vaults and the fan-out are reachable only via an explicit
+# --vault, which always wins (the sniff never runs then).
+_VAULT_SNIFF_NAMES = frozenset(
+    {"second", "thehomie", "thehomie", "coding", "coding-vault"}
+)
 VAULT_RECALL_MODES = {"auto", "hybrid", "keyword"}
 VAULT_OPS_ROUTINES = {
     "orient": "Medium (~1-2 min)",
@@ -2052,7 +2062,7 @@ class ChatRouter:
                 await self._send_vault_reply(
                     adapter,
                     incoming,
-                    "Usage: `/vault search <query> [--vault thehomie|coding-vault] [--mode auto|hybrid|keyword] [--limit N]`",
+                    "Usage: `/vault search <query> [--vault name] [--mode auto|hybrid|keyword] [--limit N]`",
                     is_error=True,
                 )
                 return True
@@ -2060,7 +2070,7 @@ class ChatRouter:
                 await self._send_vault_reply(
                     adapter,
                     incoming,
-                    "Usage: `/vault context <topic> [--vault thehomie|coding-vault]`",
+                    "Usage: `/vault context <topic> [--vault name]`",
                     is_error=True,
                 )
                 return True
@@ -2194,6 +2204,7 @@ class ChatRouter:
             "url": "",
         }
         positionals: list[str] = []
+        vault_explicit = False
         index = 0
         while index < len(rest):
             token = rest[index]
@@ -2203,6 +2214,7 @@ class ChatRouter:
                 value = rest[index + 1]
                 if token == "--vault":
                     options["vault"] = value
+                    vault_explicit = True
                 elif token == "--mode":
                     options["mode"] = value.lower()
                 elif token in {"--limit", "-n"}:
@@ -2213,6 +2225,7 @@ class ChatRouter:
                 continue
             if token.startswith("--vault="):
                 options["vault"] = token.split("=", 1)[1]
+                vault_explicit = True
             elif token.startswith("--mode="):
                 options["mode"] = token.split("=", 1)[1].lower()
             elif token.startswith("--limit="):
@@ -2223,23 +2236,26 @@ class ChatRouter:
                 positionals.append(token)
             index += 1
 
-        if options["vault"] == "thehomie" and positionals:
+        if not vault_explicit and positionals:
             if subcommand in {"status", "db"}:
-                maybe_vault = self._normalize_vault_name(positionals[0])
+                maybe_vault = self._sniff_vault_name(positionals[0])
                 if maybe_vault:
                     options["vault"] = maybe_vault
                     positionals = positionals[1:]
             elif subcommand in {"search", "context", "contacts", "ingest", "ops"}:
-                maybe_vault = self._normalize_vault_name(positionals[-1])
+                maybe_vault = self._sniff_vault_name(positionals[-1])
                 if maybe_vault and len(positionals) > 1:
                     options["vault"] = maybe_vault
                     positionals = positionals[:-1]
 
         normalized = self._normalize_vault_name(options["vault"])
         if not normalized:
+            from config import list_vault_names
+
+            known = ", ".join(f"`{name}`" for name in list_vault_names())
             return (
                 f"Unknown vault `{options['vault']}`. "
-                "Use `thehomie` or `coding-vault`."
+                f"Use one of: {known}, or `all`/`apartments` to sweep every vault."
             )
         options["vault"] = normalized
 
@@ -2255,12 +2271,25 @@ class ChatRouter:
     @staticmethod
     def _normalize_vault_name(raw: str) -> str | None:
         key = str(raw or "").strip().lower().replace("_", "-")
-        return VAULT_NAME_ALIASES.get(key)
+        hit = VAULT_NAME_ALIASES.get(key)
+        if hit:
+            return hit
+        # #466 — fall through to a live persona vault id (bare name, no prefix).
+        from config import list_vault_names
+
+        return key if key in list_vault_names() else None
+
+    @staticmethod
+    def _sniff_vault_name(raw: str) -> str | None:
+        # Positional sniff — deliberately narrower than _normalize_vault_name;
+        # see the _VAULT_SNIFF_NAMES comment.
+        key = str(raw or "").strip().lower().replace("_", "-")
+        return VAULT_NAME_ALIASES.get(key) if key in _VAULT_SNIFF_NAMES else None
 
     def _resolve_vault(self, vault_name: str) -> tuple[Path | None, Path, str | None]:
-        from config import VAULT_NAMES, resolve_vault
+        from config import list_vault_names, resolve_vault
 
-        if vault_name not in VAULT_NAMES:
+        if vault_name not in list_vault_names():
             return None, Path(""), f"Unknown vault `{vault_name}`."
         memory_dir, db_path = resolve_vault(vault_name)
         if memory_dir is None:
@@ -2307,27 +2336,42 @@ class ChatRouter:
         mode: str,
         limit: int,
     ) -> str:
-        memory_dir, _db_path, error = self._resolve_vault(vault_name)
-        if error:
-            return error
-        try:
-            from recall_service import SearchMode, recall as recall_memory
+        if vault_name == "all":
+            # #466 fan-out — no single memory_dir; keyword pass per vault with
+            # per-vault attribution. Persona processes are fenced inside
+            # recall_all (they get their own vault only).
+            try:
+                from recall_service import recall_all
 
-            mode_map = {
-                "auto": SearchMode.AUTO,
-                "hybrid": SearchMode.HYBRID,
-                "keyword": SearchMode.KEYWORD,
-            }
-            response = await recall_memory(
-                query=query,
-                memory_dir=memory_dir,
-                search_mode=mode_map[mode],
-                caller=f"vault-command:{subcommand}",
-                max_results=limit,
-                is_slash_command=False,
-            )
-        except Exception as e:
-            return f"Vault recall failed for `{vault_name}`: {type(e).__name__}: {e}"
+                response = await recall_all(
+                    query=query,
+                    caller=f"vault-command:{subcommand}",
+                    max_results=limit,
+                )
+            except Exception as e:
+                return f"Vault recall failed for `all`: {type(e).__name__}: {e}"
+        else:
+            memory_dir, _db_path, error = self._resolve_vault(vault_name)
+            if error:
+                return error
+            try:
+                from recall_service import SearchMode, recall as recall_memory
+
+                mode_map = {
+                    "auto": SearchMode.AUTO,
+                    "hybrid": SearchMode.HYBRID,
+                    "keyword": SearchMode.KEYWORD,
+                }
+                response = await recall_memory(
+                    query=query,
+                    memory_dir=memory_dir,
+                    search_mode=mode_map[mode],
+                    caller=f"vault-command:{subcommand}",
+                    max_results=limit,
+                    is_slash_command=False,
+                )
+            except Exception as e:
+                return f"Vault recall failed for `{vault_name}`: {type(e).__name__}: {e}"
 
         results = list(getattr(response, "results", []) or [])
         title = {
@@ -2345,7 +2389,10 @@ class ChatRouter:
             f"  Query: `{query}`",
             "",
         ]
-        for result in results[:limit]:
+        # "all" keeps every vault's per-vault cap — a global [:limit] slice
+        # would let one loud vault crowd the rest out of the reply.
+        display = results if vault_name == "all" else results[:limit]
+        for result in display:
             path = getattr(result, "path", "")
             start = getattr(result, "start_line", 0)
             end = getattr(result, "end_line", 0)
@@ -2354,6 +2401,9 @@ class ChatRouter:
             if len(text) > 260:
                 text = text[:257].rstrip() + "..."
             loc = f"{path}:{start}-{end}" if start and end else path
+            vault_tag = getattr(result, "vault", "")
+            if vault_tag:
+                loc = f"{vault_tag}:{loc}"
             lines.append(f"- `{loc}` — {section}\n  {text}")
         return "\n".join(lines)
 
@@ -2384,7 +2434,8 @@ class ChatRouter:
             "`/vault contacts [query] [--vault name]`\n"
             "`/vault ingest <url> [--vault name]`\n"
             "`/vault ops <routine> [args] [--vault name]`\n\n"
-            "Vaults: `thehomie`, `coding-vault`."
+            "Vaults: `thehomie`, `coding-vault`, any live persona id "
+            "(read-only), or `all`/`apartments` to sweep every vault."
         )
 
     async def _handle_file_subcommand(self, sub: str, auto_id: str) -> str:

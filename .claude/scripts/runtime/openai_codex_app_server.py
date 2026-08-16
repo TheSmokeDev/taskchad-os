@@ -240,6 +240,17 @@ def resolve_codex_executable(command: str = "codex") -> str:
     raise RuntimeConfigError(f"Codex CLI not found: {command}")
 
 
+def _subprocess_creation_flags() -> int:
+    """Keep the native app-server outside the scheduled worker's console."""
+
+    if sys.platform != "win32":
+        return 0
+    # A shared Windows console broadcasts Ctrl+C to every attached process.
+    # The app-server is a stdio protocol and needs no console of its own, so a
+    # windowless child prevents child teardown from terminating the batch host.
+    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+
+
 def _auth_path() -> Path:
     configured = os.environ.get("CODEX_HOME", "").strip()
     root = Path(configured) if configured else Path.home() / ".codex"
@@ -400,6 +411,7 @@ class CodexAppServerClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_child_env(self._codex_home_path, root),
+                creationflags=_subprocess_creation_flags(),
             )
         except FileNotFoundError as exc:
             raise RuntimeConfigError(f"Codex CLI not found: {self.executable}") from exc

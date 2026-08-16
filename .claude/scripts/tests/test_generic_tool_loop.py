@@ -446,3 +446,32 @@ async def test_result_carries_the_normalized_tool_telemetry(monkeypatch):
     assert result.tool_names_used == ["get_weather"], "names must be deduped and sorted"
     assert [c.id for c in result.tool_calls] == ["c1", "c2"]
     assert result.provider == "kimi"
+
+
+@pytest.mark.asyncio
+async def test_sync_dispatch_runs_off_the_event_loop_thread():
+    """Codex R1: a sync dispatcher does blocking I/O (the persona action
+    gate's SQLite writes). It must hop a worker thread — running it inline
+    stalls every other coroutine on this runtime's loop."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+
+    def dispatch(name, args):
+        threads.append(threading.get_ident())
+        return "2C"
+
+    client = _FakeClient([
+        _completion(tool_calls=[_tool_call("c1", "get_weather", '{"city":"Oslo"}')]),
+        _completion(content="done"),
+    ])
+    runtime = OpenAICompatibleRuntime(_profile())
+    _text, calls, _usage, _messages = await _run(
+        runtime,
+        _request(tool_defs=[GET_WEATHER], capability=TOOL_REASONING, tool_dispatch=dispatch),
+        client,
+    )
+
+    assert calls[0].status == "completed"
+    assert threads and all(t != loop_thread for t in threads)

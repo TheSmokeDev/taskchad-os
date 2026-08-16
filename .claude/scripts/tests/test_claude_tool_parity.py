@@ -284,3 +284,27 @@ async def test_ordinary_turns_are_untouched(monkeypatch):
 
     assert capture.kwargs.get("tools") == [], "default-deny behavior regressed"
     assert capture.kwargs["allowed_tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_sync_dispatch_runs_off_the_event_loop_thread():
+    """Codex R1: same event-loop protection as the generic lane — the SDK
+    handler must not run blocking sync dispatch inline."""
+    import threading
+
+    from claude_agent_sdk import tool
+
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+
+    def dispatch(name, args):
+        threads.append(threading.get_ident())
+        return "2C"
+
+    sdk_tool = claude_tool_bridge._make_sdk_tool(
+        tool, "get_weather", "d", GET_WEATHER["function"]["parameters"], dispatch
+    )
+    result = await _invoke(sdk_tool, {"city": "Oslo"})
+
+    assert _text_of(result) == "2C"
+    assert threads and all(t != loop_thread for t in threads)

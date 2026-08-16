@@ -340,13 +340,26 @@ def main() -> None:
 
     ensure_directories()
 
-    from config import resolve_vault
+    from config import is_readonly_vault, resolve_vault
 
     memory_dir, db_path = resolve_vault(args.vault)
     if memory_dir is None:
         print(
             f"Vault '{args.vault}' is not configured — set its HOMIE_CODING_VAULT_DIR "
             "env var (thehomie is always available)."
+        )
+        raise SystemExit(1)
+
+    # #466 made persona vaults RESOLVABLE by name so the main homie can READ
+    # them. Indexing is a write, and it reaches this path for free: before
+    # #466 a persona name resolved to None and died on the guard above. The
+    # apartments contract is one-way, so refuse rather than inherit a write
+    # the widened resolver never meant to grant. A persona indexes its own
+    # vault as itself (``-p <id>``), which re-roots every path.
+    if is_readonly_vault(args.vault):
+        print(
+            f"Vault '{args.vault}' is a persona vault — read-only from here (#466). "
+            f"Index it as that persona: memory_index.py -p {args.vault}"
         )
         raise SystemExit(1)
 

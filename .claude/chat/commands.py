@@ -123,6 +123,11 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     # so this row is defense in depth, not the authority. Decides PROPOSALS —
     # direct grants live on /persona grant above.
     ("grant", "Persona toolset counter-offers — list, approve <persona> <code>, deny", "router", "admin"),
+    # Persona action proposals (epic #465): the dedicated operator gate for
+    # persona WRITE tools. Admin-only — approving one EXECUTES the stored
+    # payload through the tool's registered executor. The handler re-gates
+    # role and interactive source server-side; this row is defense in depth.
+    ("act", "Persona action approvals — approve|deny <persona> <code> (dedicated-gate writes)", "router", "admin"),
     ("crypto", "Crypto Homie tape - tape debauchery|x today, with attributed cited takes", "engine", "admin"),
     # -- Content Creation --
     ("blog", "Generate a research-backed blog article via the blog-pipeline skill", "engine", "admin"),
@@ -205,7 +210,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
         ],
     ),
     # Personas — the operator's persona-capability surface (issue #427).
-    ("Personas", ["persona"]),
+    ("Personas", ["persona", "act"]),
     (
         "Content Creation",
         ["blog", "image", "generate-image", "owner-image", "quote", "linkedin", "primo", "tweet", "instagram", "yt_script", "shorts", "video"],
@@ -275,6 +280,7 @@ TELEGRAM_NATIVE_COMMANDS: tuple[str, ...] = (
     "curriculum",
     "persona",
     "grant",
+    "act",
     "blog",
     "image",
     "tweet",

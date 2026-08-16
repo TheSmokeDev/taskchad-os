@@ -8762,6 +8762,136 @@ async def handle_grant(
     return _grant_usage_text()
 
 
+# ── /act — decide a persona's pending WRITE action (epic #465 1a) ─────────
+#
+# This command decides ACTION proposals; it cannot create one. The only
+# producers are dedicated-gate tool handlers (x_follow_accounts & co.), which
+# file a pending row and show the operator a card — the browser is never
+# touched until an authenticated admin approves here, and what executes is the
+# STORED payload through the tool's registered executor.
+
+
+def _act_usage_text() -> str:
+    return (
+        "**Persona action approvals**\n"
+        "`/act list [<persona>]` — pending write-action proposals\n"
+        "`/act approve <persona> <code>` — execute the stored action (admin only)\n"
+        "`/act deny <persona> <code>` — decline it\n"
+        "A persona proposes; only you can approve. Approving EXECUTES the "
+        "exact stored payload once — grant expands reach, this gate authorizes action."
+    )
+
+
+async def handle_act(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
+    """`/act list|approve|deny` — the typed half of the action-gate flow.
+
+    Mirrors the `/grant` seam exactly: the role comes off the stamped
+    ``incoming.user_role`` ingress field (models.resolve_ingress_role,
+    #424/#449) and is re-checked inside ``decide_action``; the source comes
+    off ``incoming.source`` and must be ``interactive`` — a tool/cron/hook
+    turn is automation reaching for the approval surface. The decision does
+    synchronous sqlite plus the executor's browser work, so it rides
+    ``asyncio.to_thread`` with every argument resolved on the loop first.
+
+    ``collect_only`` is the natural-language auto-dispatch guard: a keyword
+    in ordinary conversation must never execute a persona write.
+    """
+    if collect_only:
+        return _act_usage_text()
+
+    from personas import action_proposals
+
+    try:
+        parts = shlex.split(args or "")
+    except ValueError as exc:
+        return f"Act argument error: {exc}"
+    action = parts.pop(0).casefold() if parts else "list"
+
+    if action == "list":
+        persona_id = parts[0] if parts else ""
+        if not persona_id:
+            persona_id = await asyncio.to_thread(_resolve_active_persona_id)
+        if not persona_id:
+            return "Usage: `/act list <persona>` — no persona is active here."
+        pending = await asyncio.to_thread(action_proposals.list_pending, persona_id)
+        if not pending:
+            return f"No pending action proposals for `{persona_id}`."
+        lines = [f"**Pending action proposals — `{persona_id}`**"]
+        # Full summary, never truncated: the operator approves exactly what is
+        # shown, so every stored target must be visible before the decision
+        # (#465 1a codex R3 BLOCKER). Summaries are bounded by the tools' own
+        # handle caps, so this cannot flood the surface.
+        lines.extend(f"`{p.short_code}` · `{p.tool_name}` · {p.summary}" for p in pending)
+        lines.append(f"Approve with `/act approve {persona_id} <code>`.")
+        return "\n".join(lines)
+
+    if action in {"approve", "deny"}:
+        if len(parts) < 2:
+            return f"Usage: `/act {action} <persona> <code>`"
+        persona_id, code = parts[0], parts[1]
+        role = str(getattr(incoming, "user_role", "viewer") or "viewer").strip().lower()
+        actor = str(getattr(getattr(incoming, "user", None), "platform_id", "") or "")
+        source = str(getattr(incoming, "source", "interactive") or "interactive")
+        platform_value = getattr(
+            getattr(incoming, "platform", None), "value", None
+        ) or str(getattr(incoming, "platform", ""))
+        channel_id = str(
+            getattr(getattr(incoming, "channel", None), "platform_id", "") or ""
+        )
+
+        def _decide() -> Any:
+            # Registration hangs off ASSEMBLY in this codebase — a fresh chat
+            # process may never have built a persona tool payload, and without
+            # the executors registered an honest approval would refuse as
+            # "no executor". Converge the registry for the proposal's OWN tool
+            # before deciding — naming a fixed tool set here silently fails
+            # every future action tool (#465 1a codex R3: the X-only list left
+            # GA4 approvals unexecutable from chat). Idempotent by contract.
+            from runtime import persona_tools
+
+            pending = action_proposals.get_action(persona_id, code)
+            required = {pending.tool_name} if pending is not None else set()
+            persona_tools.ensure_tools_registered(required or None)
+            return action_proposals.decide_action(
+                persona_id,
+                code,
+                action == "approve",
+                user_role=role,
+                source=source,
+                actor=actor,
+                surface=str(platform_value),
+                channel_id=channel_id,
+            )
+
+        try:
+            decision = await asyncio.to_thread(_decide)
+        except Exception as exc:
+            # KillSwitchDisabled PROPAGATES out of decide_action by design —
+            # answer "disabled", never "failed". The import is lazy because
+            # the security slice is not a chat-slice dependency at module load.
+            try:
+                from security import kill_switches
+            except Exception:  # noqa: BLE001
+                kill_switches = None  # type: ignore[assignment]
+            if kill_switches is not None and isinstance(exc, kill_switches.KillSwitchDisabled):
+                return (
+                    "Persona action approvals are disabled by the operator kill "
+                    "switch (HOMIE_KILLSWITCH_PERSONA_ACTION_PROPOSALS). "
+                    "Nothing executed."
+                )
+            return f"Action decision failed: {type(exc).__name__}: {exc}"
+        return decision.message
+
+    return _act_usage_text()
+
+
+
 def _resolve_active_persona_id() -> str:
     """Best-effort active persona for a bare ``/grant list``. Never raises.
 
@@ -8884,6 +9014,10 @@ CORE_HANDLERS: dict[str, Any] = {
     # Persona toolset counter-offers (#428) — decide, never conjure. Distinct
     # surface from /persona grant: this decides PROPOSALS, never creates one.
     "grant": handle_grant,
+    # Persona action gate (epic #465 1a) — approve/deny a dedicated-gate
+    # persona WRITE. Approving executes the stored payload via the registered
+    # executor; the only road to a persona X write.
+    "act": handle_act,
     "extensions": handle_extensions,
     # Native design — Open Design power, no daemon (brief -> artifact -> critique).
     "design": handle_design,

@@ -124,6 +124,7 @@ class _FallbackResult:
     section_title: str = ""
     graph_hops: int = 0
     source_query: str = ""
+    vault: str = ""
 
 
 @dataclass
@@ -274,6 +275,103 @@ async def recall(
         _persist_log(result.log)
         _update_span(result.log, result.results)
         return result
+
+
+FANOUT_VAULT_ALIASES = frozenset({"all", "apartments"})
+
+
+async def recall_all(
+    query: str,
+    caller: str = "chat",
+    max_results: int = 5,
+) -> RecallResponse:
+    """Fan-out recall (#466): main + every registered vault, one KEYWORD pass
+    per vault, merged with per-vault attribution.
+
+    Merge policy is a PER-VAULT cap — each vault contributes up to its own
+    top-k and results are concatenated in vault order, never globally
+    score-sorted into one pool: attribution is the point of the feature, and a
+    single loud vault must not crowd out the rest. Graph traversal is SKIPPED
+    (a cold graph miss rglobs whole vault trees); keyword over each vault's
+    persona-maintained FTS5 index is the bounded read.
+    """
+    import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
+    from personas import activity  # late-bind so monkeypatch propagates (Rule 3)
+
+    # One-way fence: only the default (main) profile may sweep the estate.
+    # A persona-bot process asking for "all" gets its own vault, full stop.
+    try:
+        fenced = activity.get_active_profile_name() != "default"
+    except Exception:
+        fenced = True
+    if fenced:
+        return await recall(
+            query,
+            memory_dir=Path(_cfg.MEMORY_DIR),
+            search_mode=SearchMode.KEYWORD,
+            caller=caller,
+            max_results=max_results,
+        )
+
+    start = time.monotonic()
+
+    from security import kill_switches  # late-bind, Rule 3
+    try:
+        kill_switches.requireEnabled("recall", caller="recall_service")
+    except kill_switches.KillSwitchDisabled:
+        log = _make_log(tier="killswitch_disabled", caller=caller, search_mode="keyword")
+        _persist_log(log)
+        return RecallResponse(results=[], formatted_text="", log=log)
+
+    if not _cfg.RECALL_ENABLED:
+        log = _make_log(tier="disabled", caller=caller, search_mode="keyword")
+        _persist_log(log)
+        return RecallResponse(results=[], formatted_text="", log=log)
+
+    if not query or not query.strip():
+        log = _make_log(tier="empty_query", caller=caller, search_mode="keyword")
+        _persist_log(log)
+        return RecallResponse(results=[], formatted_text="", log=log)
+
+    vaults: list[tuple[str, Path]] = []
+    try:
+        for name in _cfg.list_vault_names():
+            vault_memory_dir, _db_path = _cfg.resolve_vault(name)
+            if vault_memory_dir is None:
+                continue
+            vaults.append((name, Path(vault_memory_dir)))
+    except Exception:
+        vaults = [("thehomie", Path(_cfg.MEMORY_DIR))]
+
+    log = _make_log(tier="fanout", caller=caller, search_mode="keyword")
+    merged_results: list = []
+    fallback_blocks: list[str] = []
+    for name, vault_memory_dir in vaults:
+        try:
+            resp = await asyncio.to_thread(
+                _keyword_only_recall, query, caller, max_results,
+                memory_dir=vault_memory_dir,
+            )
+        except Exception:
+            continue  # one bad vault never sinks the sweep
+        if not resp.results:
+            continue
+        for r in resp.results:
+            r.vault = name
+        merged_results.extend(resp.results)
+        if resp.formatted_text:
+            fallback_blocks.append(f"[vault:{name}]\n{resp.formatted_text}")
+
+    if _COGNITION_AVAILABLE:
+        formatted = format_recall_results(merged_results) if merged_results else ""
+    else:
+        formatted = "\n\n".join(fallback_blocks)
+
+    log.results_returned = len(merged_results)
+    log.top_scores = [r.score for r in merged_results[:3]]
+    log.latency_ms = (time.monotonic() - start) * 1000
+    _persist_log(log)
+    return RecallResponse(results=merged_results, formatted_text=formatted, log=log)
 
 
 def _keyword_only_recall(

@@ -120,13 +120,88 @@ _VAULT_DB_PATHS: dict[str, Path] = {
 VAULT_NAMES = tuple(_VAULT_MEMORY_DIRS.keys())
 
 
+def iter_persona_vaults() -> dict[str, tuple[Path, Path]]:
+    """Live persona vaults as ``{id: (memory_dir, db_path)}`` — the read-only
+    shelf entries behind ``resolve_vault`` / ``list_vault_names`` (issue #466).
+
+    Physical enumeration per call (Rule 2, no module-scope cache): a persona
+    created moments ago is addressable on the next call; a deleted one drops
+    out immediately. A profile missing ``memory/`` or ``data/`` drops out (the
+    deleted/half-provisioned case). Empty outside the default profile — the
+    apartments read path is ONE-WAY (main→persona), so a persona process never
+    resolves the estate, by name or by fan-out.
+    """
+    from personas import activity  # late-bind so monkeypatch propagates (Rule 3)
+    from personas.core import list_persona_profile_ids
+
+    try:
+        if activity.get_active_profile_name() != "default":
+            return {}
+    except Exception:
+        return {}
+    vaults: dict[str, tuple[Path, Path]] = {}
+    for pid in list_persona_profile_ids():
+        try:
+            paths = personas.get_persona_paths(pid)
+            memory_dir = paths["memory"]
+            data_dir = paths["data"]
+            if not memory_dir.is_dir() or not data_dir.is_dir():
+                continue
+        except OSError:
+            continue
+        vaults[pid] = (memory_dir, data_dir / "memory.db")
+    return vaults
+
+
+def list_vault_names() -> tuple[str, ...]:
+    """Static pair + live persona vault ids, resolved per call (Rule 1)."""
+    return tuple(_VAULT_MEMORY_DIRS) + tuple(
+        pid for pid in iter_persona_vaults() if pid not in _VAULT_MEMORY_DIRS
+    )
+
+
 def resolve_vault(name: str) -> "tuple[Path | None, Path]":
     """Vault name -> (memory_dir, db_path).
 
-    ``memory_dir`` is None when the vault's env path is unset (vault not
-    configured on this machine). ``db_path`` is always defined.
+    The static registry wins FIRST — a persona whose id collides with
+    ``thehomie``/``coding-vault`` is SHADOWED, not merged. ``memory_dir``
+    is None when the vault's env path is unset (vault not configured on this
+    machine) or the name is unknown. ``db_path`` is always defined.
     """
-    return _VAULT_MEMORY_DIRS.get(name), _VAULT_DB_PATHS.get(name, DATABASE_PATH)
+    if name in _VAULT_MEMORY_DIRS:
+        return _VAULT_MEMORY_DIRS[name], _VAULT_DB_PATHS.get(name, DATABASE_PATH)
+    persona = iter_persona_vaults().get(name)
+    if persona is not None:
+        return persona
+    return None, DATABASE_PATH
+
+
+def is_readonly_vault(name_or_dir: str | Path | None) -> bool:
+    """True iff the argument addresses a persona vault (by plain id or by
+    memory dir). Static vaults win first — in a persona process ``MEMORY_DIR``
+    IS that persona's own memory dir, and the static match keeps that
+    process's own recall byte-identical (never read-only against itself).
+    """
+    if name_or_dir is None:
+        return False
+    if str(name_or_dir) in _VAULT_MEMORY_DIRS:
+        return False
+    # Every static answer is settled BEFORE iter_persona_vaults(), which stats
+    # the whole roster. This is the recall hot path: the default turn asks
+    # about MEMORY_DIR (a Path, not a name), and enumerating N profiles to
+    # answer a question the static registry already answers costs an iterdir
+    # plus two stats per persona on every search.
+    target = Path(name_or_dir).resolve()
+    for vdir in _VAULT_MEMORY_DIRS.values():
+        if vdir and Path(vdir).resolve() == target:
+            return False
+    persona_vaults = iter_persona_vaults()
+    if str(name_or_dir) in persona_vaults:
+        return True
+    return any(
+        Path(memory_dir).resolve() == target
+        for memory_dir, _db in persona_vaults.values()
+    )
 
 
 def resolve_db_path(memory_dir: "Path | str | None" = None) -> Path:

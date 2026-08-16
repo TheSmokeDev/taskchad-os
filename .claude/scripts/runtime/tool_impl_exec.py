@@ -52,6 +52,12 @@ nothing):
 * Windows process containment is best-effort. `taskkill /T` handles the common
   tree; a deliberately detached descendant can outlive the timeout. Real
   containment needs a Job Object.
+* A shell is a superset of every TOOL-layer gate (epic #465, Codex R1): a
+  persona with `terminal` can edit the gate's own files or drive a browser
+  directly. The persona action gate's execution token defends in-process and
+  tool-path misuse; it does not contain a granted shell. That residual is a
+  follow-up issue, not something the `_GATE_INTERNAL_PATTERNS` tripwire
+  above claims to close.
 
 Every one of these is a consequence of "grant a shell", not an oversight in it.
 They are written down so the next reader does not mistake the confinement that
@@ -83,6 +89,21 @@ _MAX_TIMEOUT_S = 600
 # Never readable OR writable by a tool. Writing is the worse direction: a
 # poisoned `.env` outlives the turn and silently re-auths every later process.
 _CREDENTIAL_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx"})
+
+# Persona-terminal-only denylist for the persona action gate's internals
+# (epic #465, Codex R1). Substring-matched in `_terminal` AFTER the shared
+# destructive list. Deliberately NOT added to shared.DANGEROUS_BASH_PATTERNS:
+# that list is enforced on the OPERATOR's own PreToolUse hook, where blocking
+# `decide_action(` would break the operator's own gate development. A shell
+# is a superset of every tool-layer gate, so this is a tripwire for the
+# obvious bypass strings, not a boundary — the boundary is the gate-minted
+# execution token, which a hand-typed call cannot produce.
+_GATE_INTERNAL_PATTERNS: tuple[str, ...] = (
+    "decide_action(",
+    "x_action_driver",
+    "propose_action(",
+    "persona_action_proposals",
+)
 
 
 def _truncate(text: str, limit: int = _MAX_RESULT_CHARS) -> str:
@@ -287,6 +308,27 @@ def _terminal(command: str = "", cwd: str = "", timeout: int = 0, **_: Any) -> s
             f"error: refused — matches a blocked destructive pattern ({hit}). "
             "This denylist is shared with the operator's own PreToolUse hook. "
             "If this is genuinely needed, it requires operator approval."
+        )
+
+    # Gate-internals denylist (epic #465, Codex R1 BLOCKER). This module is
+    # persona-facing only — the operator's own hook enforces the SHARED list
+    # above, which is deliberately untouched. A persona with a shell and a
+    # six-character approval code can read the code it was shown; these
+    # patterns keep the obvious bypass strings (deciding its own action,
+    # driving the X writer directly) out of reach. This is a tripwire, not a
+    # boundary — a shell can route around substring matching, and the module
+    # docstring says so. The real boundary is the execution token: without a
+    # gate-minted token these calls fail closed even if typed by hand.
+    gate_hit = next(
+        (pattern for pattern in _GATE_INTERNAL_PATTERNS if pattern in command),
+        None,
+    )
+    if gate_hit is not None:
+        _logger.warning("persona terminal refused on gate-internal pattern %r", gate_hit)
+        return (
+            f"error: refused — the command reaches for persona action-gate "
+            f"internals ({gate_hit}). Persona writes execute only through an "
+            "operator-approved /act decision."
         )
 
     if cwd.strip():

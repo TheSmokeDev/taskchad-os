@@ -113,6 +113,17 @@ _MARKER_RE = re.compile(r"<<\s*GRANT_REQUEST\s*:\s*([^>\n]{0,80}?)\s*>>", re.IGN
 _TOOLSET_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _CODE_RE = re.compile(r"^[A-Z0-9]{6}$")
 
+# Single-capability counter-offers (epic #465 1c): the marker payload
+# ``tool:<name>`` proposes a grant over ONE registered tool instead of a
+# whole bundle. Tool names are identifiers with underscores
+# (``memory_search``) — a different shape from toolset keys, so a separate
+# pattern rather than a widened one.
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+_TOOL_KIND_PREFIX = "tool:"
+
+KIND_TOOLSET = _grants.KIND_TOOLSET
+KIND_TOOL = _grants.KIND_TOOL
+
 # Long enough for an operator to come back to a card after a meeting, short
 # enough that a stale counter-offer cannot be approved days later against a
 # request nobody remembers. Un-actioned proposals expire quietly and audited.
@@ -145,6 +156,9 @@ class GrantProposal:
     requested_by: str
     trigger_text: str
     rationale: str
+    # The grant's grain (#465 1c): ``toolset`` for a bundle, ``tool`` for one
+    # capability. Rows written before 1c read as ``toolset`` — what they were.
+    kind: str = KIND_TOOLSET
     decided_by: str = ""
     decided_at: float | None = None
     status_detail: str = ""
@@ -248,10 +262,23 @@ def _connect(persona_id: str, db_path: Path | str | None) -> sqlite3.Connection:
             rationale TEXT NOT NULL,
             decided_by TEXT NOT NULL DEFAULT '',
             decided_at REAL,
-            status_detail TEXT NOT NULL DEFAULT ''
+            status_detail TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'toolset'
         )
         """
     )
+    # In-place migration for stores created before the kind column existed
+    # (#465 1c): CREATE TABLE IF NOT EXISTS cannot retrofit an existing DB,
+    # so the column arrives by guarded ALTER — a duplicate-column error just
+    # means it is already there. Same precedent as the action-proposals
+    # execution-token columns.
+    try:
+        conn.execute(
+            "ALTER TABLE persona_grant_proposals ADD COLUMN kind "
+            "TEXT NOT NULL DEFAULT 'toolset'"
+        )
+    except sqlite3.OperationalError:
+        pass
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_grant_proposals_status "
         "ON persona_grant_proposals(persona_id, status, expires_at)"
@@ -277,6 +304,7 @@ def _row_to_proposal(row: sqlite3.Row | None) -> GrantProposal | None:
         requested_by=str(row["requested_by"]),
         trigger_text=str(row["trigger_text"]),
         rationale=str(row["rationale"]),
+        kind=str(row["kind"] or KIND_TOOLSET),
         decided_by=str(row["decided_by"] or ""),
         decided_at=(float(row["decided_at"]) if row["decided_at"] is not None else None),
         status_detail=str(row["status_detail"] or ""),
@@ -288,6 +316,7 @@ def _audit(
     *,
     persona_id: str,
     toolset: str,
+    kind: str = KIND_TOOLSET,
     reason: str = "",
     actor: str = "",
     actor_role: str = "",
@@ -311,6 +340,7 @@ def _audit(
         operation=_grants.OPERATION_PROPOSE,
         persona_id=persona_id,
         toolset=toolset,
+        kind=kind,
         outcome=outcome,
         reason=reason,
         actor=actor,
@@ -330,6 +360,7 @@ def _audit_strict(
     *,
     persona_id: str,
     toolset: str,
+    kind: str = KIND_TOOLSET,
     reason: str = "",
     actor: str = "",
     actor_role: str = "",
@@ -356,6 +387,7 @@ def _audit_strict(
         operation=_grants.OPERATION_PROPOSE,
         persona_id=persona_id,
         toolset=toolset,
+        kind=kind,
         outcome=outcome,
         reason=reason,
         actor=actor,
@@ -454,6 +486,45 @@ def normalize_toolset_name(name: Any) -> str:
     return ""
 
 
+def split_marker_kind(payload: Any) -> tuple[str, str]:
+    """Split a marker payload into ``(kind, name)`` (#465 1c).
+
+    ``tool:memory_search`` proposes one capability; a bare name proposes a
+    toolset bundle. The prefix match is case-insensitive on the PREFIX only —
+    the name keeps its case for the registry lookup. Anything else,
+    including an empty name after the prefix, is a toolset payload and will
+    miss the registry honestly.
+    """
+    text = str(payload or "").strip()
+    if text.casefold().startswith(_TOOL_KIND_PREFIX):
+        name = text[len(_TOOL_KIND_PREFIX):].strip()
+        if name:
+            return KIND_TOOL, name
+    return KIND_TOOLSET, text
+
+
+def normalize_tool_name(name: Any) -> str:
+    """Canonicalize a model-named TOOL against the LIVE tool registry.
+
+    Mirrors :func:`normalize_toolset_name` against ``runtime.tool_registry``
+    (substance, not structure): charset-checked first, case-insensitive
+    match, ``""`` on a miss. A ``dedicated_gate`` tool DOES resolve here on
+    purpose — the grant is reach-only; its action gate still authorizes every
+    execution downstream (the 1a doctrine).
+    """
+    wanted = str(name or "").strip()
+    if not wanted or not _TOOL_NAME_RE.match(wanted):
+        return ""
+    known = _grants.known_tool_names()
+    if wanted in known:
+        return wanted
+    folded = wanted.casefold()
+    for candidate in known:
+        if candidate.casefold() == folded:
+            return candidate
+    return ""
+
+
 # ── Custom ids ───────────────────────────────────────────────────────────
 
 
@@ -525,12 +596,15 @@ def counter_offer_briefing() -> str:
         "In either case end the reply with exactly one line:\n"
         "`<<GRANT_REQUEST: toolset_name>>`\n"
         f"Registered toolsets: {catalog}.\n"
-        "Name one of those exactly. That line is stripped before the operator sees "
+        "Name one of those exactly. For ONE capability instead of a bundle, name "
+        "`tool:<tool_name>` (e.g. `<<GRANT_REQUEST: tool:memory_search>>`). "
+        "That line is stripped before the operator sees "
         "it and only tees up a proposal they approve with one tap — you can never "
         "grant yourself anything, proposing is not permission to act, and every "
         "per-tool gate (sends, spends, browser and social writes) still applies "
-        "afterwards. If a single tool call is what you need instead, use "
-        "`request_tool`."
+        "afterwards. If a single tool CALL is what you need — one exact-args "
+        "invocation, once — use `request_tool`; a `tool:` grant is the "
+        "persistent single-capability form, not a one-shot."
     )
 
 
@@ -550,12 +624,22 @@ def card_text(proposal: GrantProposal) -> str:
     server-owned surface literal. The stored ``rationale`` (the tail of the
     model's own reply) is never rendered.
     """
-    description = _grants.describe_toolset(proposal.toolset)
+    description = (
+        _grants.describe_tool(proposal.toolset)
+        if proposal.kind == KIND_TOOL
+        else _grants.describe_toolset(proposal.toolset)
+    )
     minutes = max(1, int(round((proposal.expires_at - proposal.created_at) / 60)))
-    lines = [
-        f"**Counter-offer `{proposal.short_code}`** — `{proposal.persona_id}` is "
-        f"missing the `{proposal.toolset}` toolset.",
-    ]
+    if proposal.kind == KIND_TOOL:
+        lines = [
+            f"**Counter-offer `{proposal.short_code}`** — `{proposal.persona_id}` is "
+            f"missing the `{proposal.toolset}` capability.",
+        ]
+    else:
+        lines = [
+            f"**Counter-offer `{proposal.short_code}`** — `{proposal.persona_id}` is "
+            f"missing the `{proposal.toolset}` toolset.",
+        ]
     if description:
         lines.append(f"What it adds: {description}")
     lines.append(
@@ -575,17 +659,23 @@ def card_text(proposal: GrantProposal) -> str:
     return "\n".join(lines)
 
 
-def unknown_toolset_card(persona_id: str, wanted: str) -> str:
+def unknown_toolset_card(persona_id: str, wanted: str, *, kind: str = KIND_TOOLSET) -> str:
     """An honest registry miss — the persona asked for something unregistered."""
-    suggestions = _grants.nearest_names(wanted)
+    names = (
+        _grants.known_tool_names() if kind == KIND_TOOL else _grants.known_toolset_names()
+    )
+    suggestions = _grants.nearest_names(wanted, names=names)
     hint = f" Nearest: {', '.join(suggestions)}." if suggestions else ""
+    noun = "capability" if kind == KIND_TOOL else "toolset"
     return (
-        f"`{persona_id}` asked for a `{str(wanted)[:64]}` toolset, which is not in "
+        f"`{persona_id}` asked for a `{str(wanted)[:64]}` {noun}, which is not in "
         f"the live registry, so there is nothing to approve.{hint}"
     )
 
 
-def proposal_unavailable_card(persona_id: str, toolset: str) -> str:
+def proposal_unavailable_card(
+    persona_id: str, toolset: str, *, kind: str = KIND_TOOLSET
+) -> str:
     """An honest miss when the name IS registered but no proposal was made.
 
     Distinct from :func:`unknown_toolset_card` on purpose: the toolset name
@@ -594,8 +684,9 @@ def proposal_unavailable_card(persona_id: str, toolset: str) -> str:
     profile, a missing operator turn) is already audited by
     :func:`propose_grant` — this card just avoids repeating the wrong one.
     """
+    noun = "capability" if kind == KIND_TOOL else "toolset"
     return (
-        f"`{persona_id}` asked for the `{toolset}` toolset, but no counter-offer "
+        f"`{persona_id}` asked for the `{toolset}` {noun}, but no counter-offer "
         "could be created right now. Nothing changed; check the grant ledger "
         "for the reason."
     )
@@ -650,6 +741,7 @@ def expire_pending(
                 _grants.OUTCOME_EXPIRED,
                 persona_id=proposal.persona_id,
                 toolset=proposal.toolset,
+                kind=proposal.kind,
                 reason=REASON_PROPOSAL_EXPIRED,
                 actor=proposal.requested_by,
                 surface=proposal.surface,
@@ -847,6 +939,7 @@ def propose_grant(
     channel_id: str,
     thread_id: str = "",
     rationale: str = "",
+    kind: str = KIND_TOOLSET,
     now: float | None = None,
     db_path: Path | str | None = None,
     audit_path: Path | str | None = None,
@@ -857,6 +950,11 @@ def propose_grant(
     sqlite store and nothing else. Every refusal branch is audited and returns
     ``None`` rather than raising: a counter-offer that cannot be made is a
     normal reply without a card, never a broken turn.
+
+    ``kind`` is the grant's grain (#465 1c): ``toolset`` (default) validates
+    the name against the toolset registry, ``tool`` against the live tool
+    registry. Both are reach-only asks — a ``dedicated_gate`` tool may be
+    proposed, because its execution gate still applies after the grant.
 
     Refusals, in order: the operator's kill switch, a blank persona, an
     invalid persona name, the default profile (the executor cannot serve it —
@@ -869,6 +967,9 @@ def propose_grant(
     """
     persona = str(persona_id or "").strip()
     wanted_raw = str(toolset or "").strip()
+    kind = str(kind or "").strip() or KIND_TOOLSET
+    if kind not in {KIND_TOOLSET, KIND_TOOL}:
+        kind = KIND_TOOLSET
     who = str(requested_by or "").strip()
     trigger = _grants.normalize_trigger_text(trigger_text)
     surface = str(surface or "").strip()
@@ -886,6 +987,7 @@ def propose_grant(
             _grants.OUTCOME_REFUSED,
             persona_id=persona,
             toolset=toolset_label or wanted_raw[:64],
+            kind=kind,
             reason=reason,
             actor=who,
             surface=surface,
@@ -937,12 +1039,27 @@ def propose_grant(
         _refuse(_grants.REASON_INVALID_PERSONA, str(exc))
         return None
 
-    name = normalize_toolset_name(wanted_raw)
+    name = (
+        normalize_tool_name(wanted_raw)
+        if kind == KIND_TOOL
+        else normalize_toolset_name(wanted_raw)
+    )
     if not name:
         _refuse(
-            _grants.REASON_UNKNOWN_TOOLSET,
-            "not in the live toolset registry",
-            suggestions=_grants.nearest_names(wanted_raw),
+            _grants.REASON_UNKNOWN_TOOL
+            if kind == KIND_TOOL
+            else _grants.REASON_UNKNOWN_TOOLSET,
+            "not in the live tool registry"
+            if kind == KIND_TOOL
+            else "not in the live toolset registry",
+            suggestions=_grants.nearest_names(
+                wanted_raw,
+                names=(
+                    _grants.known_tool_names()
+                    if kind == KIND_TOOL
+                    else _grants.known_toolset_names()
+                ),
+            ),
         )
         return None
 
@@ -972,8 +1089,8 @@ def propose_grant(
                     "INSERT INTO persona_grant_proposals ("
                     "proposal_id, short_code, persona_id, toolset, status, "
                     "created_at, expires_at, surface, channel_id, thread_id, "
-                    "requested_by, trigger_text, rationale) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "requested_by, trigger_text, rationale, kind) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         proposal_id,
                         short_code,
@@ -988,6 +1105,7 @@ def propose_grant(
                         who,
                         trigger,
                         rationale_text,
+                        kind,
                     ),
                 )
                 conn.commit()
@@ -1014,6 +1132,7 @@ def propose_grant(
         _grants.OUTCOME_PROPOSED,
         persona_id=created.persona_id,
         toolset=created.toolset,
+        kind=created.kind,
         actor=created.requested_by,
         surface=created.surface,
         channel_id=created.channel_id,
@@ -1100,6 +1219,7 @@ def decide_proposal(
                 _grants.OUTCOME_REFUSED,
                 persona_id=proposal.persona_id,
                 toolset=proposal.toolset,
+                kind=proposal.kind,
                 reason=reason,
                 actor=who,
                 actor_role=role,
@@ -1204,6 +1324,7 @@ def decide_proposal(
             _grants.OUTCOME_DENIED,
             persona_id=proposal.persona_id,
             toolset=proposal.toolset,
+            kind=proposal.kind,
             actor=who,
             actor_role=role,
             surface=surface,
@@ -1222,6 +1343,7 @@ def decide_proposal(
         _grants.OUTCOME_APPROVED,
         persona_id=proposal.persona_id,
         toolset=proposal.toolset,
+        kind=proposal.kind,
         actor=who,
         actor_role=role,
         surface=surface,
@@ -1240,10 +1362,17 @@ def decide_proposal(
     )
     try:
         # Lazy + module-attribute: ``services`` is heavy, and a test patching
-        # ``personas.services.add_persona_toolset`` must propagate here.
+        # ``personas.services.add_persona_toolset`` must propagate here. The
+        # branch on kind (#465 1c) picks the single-capability executor; both
+        # are the same mutation path with the same gates.
         from personas import services as _services  # noqa: PLC0415 — cycle-safe
 
-        result = _services.add_persona_toolset(
+        executor = (
+            _services.add_persona_tool
+            if proposal.kind == KIND_TOOL
+            else _services.add_persona_toolset
+        )
+        result = executor(
             proposal.persona_id,
             proposal.toolset,
             actor=who,
@@ -1271,11 +1400,12 @@ def decide_proposal(
         db_path=db_path,
     )
     live = ", ".join(result.toolsets) or "(none)"
+    noun = "capability" if proposal.kind == KIND_TOOL else "toolset"
     return ProposalDecision(
         DECISION_GRANTED,
         proposal,
-        f"Granted `{proposal.toolset}` to `{proposal.persona_id}` — live on its "
-        f"next turn. Toolsets now: {live}.",
+        f"Granted {noun} `{proposal.toolset}` to `{proposal.persona_id}` — live on its "
+        f"next turn. Now holds: {live}.",
         result=result,
     )
 
@@ -1366,6 +1496,7 @@ def decision_receipt(
     assistant_row = (
         f"[grant receipt] decision={action} outcome={_receipt_field(decision.outcome)} "
         f"persona={persona} toolset={toolset} code={short_code} "
+        f"kind={_receipt_field(getattr(proposal, 'kind', '') or 'toolset', limit=16)} "
         f"by={_receipt_field(actor, limit=80)} role={_receipt_field(actor_role, limit=32)}"
     )
     return user_row, assistant_row
@@ -1412,16 +1543,24 @@ def tee_up_from_reply(
         # refusal branch (kill switch, invalid persona, default profile,
         # unregistered toolset, missing operator turn), and reporting all of
         # them as "not in the live registry" is a lie when the name is real.
-        known_name = normalize_toolset_name(wanted)
+        # The kind split (#465 1c) happens HERE, once: `tool:<name>` asks for
+        # one capability, a bare name asks for a bundle.
+        kind, bare_name = split_marker_kind(wanted)
+        known_name = (
+            normalize_tool_name(bare_name)
+            if kind == KIND_TOOL
+            else normalize_toolset_name(bare_name)
+        )
         proposal = propose_grant(
             persona_id,
-            wanted,
+            bare_name,
             requested_by=requested_by,
             trigger_text=trigger_text,
             surface=surface,
             channel_id=channel_id,
             thread_id=thread_id,
             rationale=cleaned[-_MAX_RATIONALE_CHARS:],
+            kind=kind,
             now=now,
             db_path=db_path,
             audit_path=audit_path,
@@ -1430,11 +1569,11 @@ def tee_up_from_reply(
             if not known_name:
                 return CounterOffer(
                     reply_text=cleaned,
-                    card_text=unknown_toolset_card(persona_id, wanted),
+                    card_text=unknown_toolset_card(persona_id, bare_name, kind=kind),
                 )
             return CounterOffer(
                 reply_text=cleaned,
-                card_text=proposal_unavailable_card(persona_id, known_name),
+                card_text=proposal_unavailable_card(persona_id, known_name, kind=kind),
             )
         return CounterOffer(
             reply_text=cleaned,
@@ -1456,8 +1595,7 @@ def tee_up_from_reply(
 __all__ = [
     "ACTION_APPROVE",
     "ACTION_DENY",
-    "CUSTOM_ID_PREFIX",
-    "DECISION_ALREADY_DECIDED",
+    "CUSTOM_ID_PREFIX",    "DECISION_ALREADY_DECIDED",
     "DECISION_AUDIT_FAILED",
     "DECISION_DENIED",
     "DECISION_ERROR",
@@ -1467,6 +1605,8 @@ __all__ = [
     "DECISION_REFUSED",
     "DECISION_UNKNOWN",
     "KILL_SWITCH_NAME",
+    "KIND_TOOL",
+    "KIND_TOOLSET",
     "REASON_ALREADY_DECIDED",
     "REASON_GRANT_FAILED",
     "REASON_INVALID_MARKER",
@@ -1491,6 +1631,7 @@ __all__ = [
     "get_proposal",
     "list_pending",
     "normalize_toolset_name",
+    "normalize_tool_name",
     "parse_custom_id",
     "parse_grant_marker",
     "propose_grant",
@@ -1498,6 +1639,7 @@ __all__ = [
     "proposal_unavailable_card",
     "resolve_store_path",
     "sweep_expired",
+    "split_marker_kind",
     "tee_up_from_reply",
     "unknown_toolset_card",
 ]
