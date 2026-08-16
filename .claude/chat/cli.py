@@ -374,7 +374,7 @@ def _console_hard_exit() -> None:
 @main.command()
 @click.option("-q", "--query", default=None, help="Single query (non-interactive)")
 @click.option("-Q", "--quiet", is_flag=True, help="Quiet/JSON output (for Paperclip)")
-@click.option("-m", "--model", default=None, help="Select runtime lane/provider/model (claude/codex/gemini/openrouter/openai/auto, sol/terra/luna, provider:model, or gpt5.5)")
+@click.option("-m", "--model", default=None, help="Select runtime lane/provider/model (claude/codex/gemini/openrouter/openai/kimi/nvidia/auto, sol/terra/luna, provider:model, or gpt5.5)")
 @click.option("-t", "--toolsets", default=None, help="Filter tool access (reserved for future)")
 @click.option("--resume", "-r", "resume_id", default=None, help="Resume session by ID")
 @click.option(
@@ -3385,6 +3385,7 @@ def _detect_providers(env_values: dict[str, str]) -> dict[str, bool]:
         "openrouter": bool(env_values.get("OPENROUTER_API_KEY", "")),
         "openai": bool(env_values.get("OPENAI_API_KEY", "")),
         "kimi": bool(env_values.get("KIMI_API_KEY", "")),
+        "nvidia": bool(env_values.get("NVIDIA_API_KEY", "")),
     }
 
 

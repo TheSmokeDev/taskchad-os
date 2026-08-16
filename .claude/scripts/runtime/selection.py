@@ -123,6 +123,8 @@ def runtime_selection_choice(selection: RuntimeSelection) -> str:
         return "openai"
     if selection.generic_provider == "kimi":
         return "kimi"
+    if selection.generic_provider == "nvidia-kimi":
+        return "nvidia"
     return "auto"
 
 

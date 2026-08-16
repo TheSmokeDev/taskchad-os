@@ -32,6 +32,7 @@ DEFAULT_PROVIDER_CHAIN = (
     "openrouter",
     "openai",
     "kimi",
+    "nvidia",
 )
 
 DEFAULT_TEXT_ROUTE = (
@@ -40,6 +41,7 @@ DEFAULT_TEXT_ROUTE = (
     "openrouter",
     "openai",
     "claude",
+    "nvidia",
 )
 
 DEFAULT_TOOL_ROUTE = DEFAULT_PROVIDER_CHAIN

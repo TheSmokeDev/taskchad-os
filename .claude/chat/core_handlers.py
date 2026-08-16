@@ -4928,6 +4928,11 @@ def _get_provider_status() -> str:
                 "API key",
                 bool(os.getenv("KIMI_API_KEY", "").strip()),
             ),
+            "nvidia": lambda: (
+                "NVIDIA Kimi API",
+                "API key",
+                bool(os.getenv("NVIDIA_API_KEY", "").strip()),
+            ),
         }
 
         for provider in DEFAULT_PROVIDER_CHAIN:
@@ -5006,6 +5011,8 @@ def _switch_provider(choice: str) -> str:
             "  /model openai - generic runtime lane via OpenAI-compatible\n"
             "  /model kimi - generic runtime lane via Kimi\n"
             "  /model kimi:k3 - Kimi pinned model (default k3)\n"
+            "  /model nvidia - NVIDIA-hosted Kimi K2.6 lane\n"
+            "  /model nvidia:<model> - pin an NVIDIA NIM model\n"
             "  /model auto - automatic lane/provider routing"
         )
 
@@ -5049,7 +5056,7 @@ def _switch_provider(choice: str) -> str:
         return (
             "Unknown runtime selection: "
             f"{choice}. Use: claude, sonnet, opus, fable, codex, codex:default, "
-            "sol, terra, luna, codex:<model>, gpt5.5, gemini, openrouter, openai, kimi, or auto"
+            "sol, terra, luna, codex:<model>, gpt5.5, gemini, openrouter, openai, kimi, nvidia, or auto"
         )
     except Exception as e:
         return f"Failed to switch provider: {e}"

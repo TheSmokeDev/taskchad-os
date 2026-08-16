@@ -515,7 +515,15 @@ class CodexAppServerClient:
         # or user home. Dynamic tool handlers still execute in the Homie parent.
         assert self._empty_cwd is not None
         empty_cwd = str(self._empty_cwd.resolve())
-        persona_instructions = (self.request.system_prompt or "").strip()
+        # ``system_prompt`` is ``dict | str | None`` (base.py). The dict shape is
+        # the Claude preset+append form; carry only its ``append`` text, matching
+        # openai_compatible.py:180-183 and prompt_builder.py:175-178. Without
+        # this, every persona turn on this lane raised
+        # "'dict' object has no attribute 'strip'".
+        raw_system_prompt: Any = self.request.system_prompt
+        if isinstance(raw_system_prompt, dict):
+            raw_system_prompt = raw_system_prompt.get("append", "")
+        persona_instructions = str(raw_system_prompt or "").strip()
         safety_instructions = (
             "Use only the caller-supplied dynamic tools. Native shell, file, "
             "web, MCP, app, skill, browser, computer, image, and collaboration "

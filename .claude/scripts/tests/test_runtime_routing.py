@@ -41,6 +41,7 @@ def test_default_text_route_prefers_gemini_then_codex_then_openrouter(
         "openrouter",
         "openai-compatible",
         "claude",
+        "nvidia-kimi",
     ]
 
 
@@ -89,6 +90,7 @@ def test_chat_turn_text_only_prefers_text_route(monkeypatch: pytest.MonkeyPatch)
         "openrouter",
         "openai-compatible",
         "claude",
+        "nvidia-kimi",
     ]
 
 
@@ -121,6 +123,7 @@ def test_chat_turn_tool_mode_uses_full_chain(monkeypatch: pytest.MonkeyPatch) ->
         "openrouter",
         "openai-compatible",
         "kimi",
+        "nvidia-kimi",
     ]
 
 
@@ -147,6 +150,7 @@ def test_generic_text_route_prefers_api_profiles_before_cli(
         "openai-codex",
         "gemini-cli",
         "kimi",
+        "nvidia-kimi",
     ]
 
 
@@ -264,6 +268,7 @@ def test_generic_route_ignores_legacy_claude_pin(
         "openai-codex",
         "gemini-cli",
         "kimi",
+        "nvidia-kimi",
     ]
 
 

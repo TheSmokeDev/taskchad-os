@@ -2,7 +2,7 @@
 
 Status: active baseline
 Owner: lane-first runtime selection
-Last updated: 2026-07-17
+Last updated: 2026-08-16
 
 ## What It Does
 
@@ -100,10 +100,21 @@ unobserved.
 `KIMI_API_KEY` (Kimi Code Console; usage counts against the membership quota,
 not separate pay-as-you-go billing). Default model is `k3`; pin with
 `/model kimi:k3` or `SECOND_BRAIN_KIMI_MODEL`. The lane is text-route only
-(last in `GENERIC_TEXT_ROUTE`, excluded from the tool route). The shared
+(excluded from the provider-owned tool route). The shared
 OpenAI-compatible adapter uses the chat-completions call shape for this lane
 because the coding endpoint does not serve the OpenAI Responses API
 (`/responses` returns 404; probed 2026-07-17).
+
+## NVIDIA Kimi Lane
+
+`/model nvidia` selects NVIDIA's hosted Kimi lane through the NIM API at
+`https://integrate.api.nvidia.com/v1`. It reads `NVIDIA_API_KEY` and defaults
+to the NVIDIA catalog model `moonshotai/kimi-k2.6`; pin another NVIDIA model
+with `/model nvidia:<model>` or `SECOND_BRAIN_NVIDIA_KIMI_MODEL`. NVIDIA does
+not currently list a Kimi K3 endpoint, so this route is intentionally separate
+from the native `/model kimi:k3` coding lane. The NVIDIA route uses the shared
+OpenAI-compatible chat-completions adapter and is last in the generic text
+fallback route.
 
 ## Per-Adapter Runtime Deadlines (#133)
 

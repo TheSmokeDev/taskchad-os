@@ -835,3 +835,17 @@ def test_check_environment_still_errors_with_no_runtime(
 
     messages = [message for _level, message, _hint in check_environment()]
     assert "No runtime provider available" in messages
+
+
+def test_check_environment_accepts_nvidia_only_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import diagnostics as diagnostics_module
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("NVIDIA_API_KEY=nvapi-test\n", encoding="utf-8")
+    monkeypatch.setattr(diagnostics_module, "ENV_FILE", env_path)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    messages = [message for _level, message, _hint in check_environment()]
+    assert "No runtime provider available" not in messages

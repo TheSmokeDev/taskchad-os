@@ -2,7 +2,7 @@
 
 The registry in `runtime.profiles.GENERIC_PROVIDER_REGISTRY` is the single
 source of truth for transport, auth, aliases, routing priorities, and display
-names for the five generic-lane providers. These tests verify that every
+names for the generic-lane providers. These tests verify that every
 derived surface (routes, aliases, legacy writes, display names, adapter
 dispatch) stays in sync with the registry.
 """
@@ -32,11 +32,18 @@ from runtime.selection import (
     _PROVIDER_DISPLAY_NAMES,
 )
 
-CANONICAL_KEYS = ("openai-compatible", "openrouter", "openai-codex", "gemini-cli", "kimi")
+CANONICAL_KEYS = (
+    "openai-compatible",
+    "openrouter",
+    "openai-codex",
+    "gemini-cli",
+    "kimi",
+    "nvidia-kimi",
+)
 
 
 def test_registry_completeness() -> None:
-    """All 5 canonical keys are present and every overlay field is populated."""
+    """All canonical keys are present and every overlay field is populated."""
 
     assert set(GENERIC_PROVIDER_REGISTRY.keys()) == set(CANONICAL_KEYS)
 
@@ -94,6 +101,7 @@ def test_text_route_derivation() -> None:
         "openai-codex",
         "gemini-cli",
         "kimi",
+        "nvidia-kimi",
     )
 
     text_priorities = [
@@ -136,6 +144,7 @@ def test_legacy_write_values_derivation() -> None:
         "openrouter": "openrouter",
         "openai-compatible": "openai",
         "kimi": "kimi",
+        "nvidia-kimi": "nvidia",
     }
 
     for canonical, overlay in GENERIC_PROVIDER_REGISTRY.items():
@@ -156,6 +165,7 @@ def test_legacy_write_values_derivation() -> None:
         ("openai-compatible", OpenAICompatibleRuntime),
         ("openrouter", OpenAICompatibleRuntime),
         ("kimi", OpenAICompatibleRuntime),
+        ("nvidia-kimi", OpenAICompatibleRuntime),
     ],
 )
 def test_adapter_for_dispatch(provider: str, adapter_cls: type) -> None:
@@ -173,6 +183,7 @@ def test_build_profile_returns_none_when_unavailable(monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
 
     # CLI providers: mock auth as unavailable. profiles.py imports these names
     # at module load, so monkeypatching the source module is a no-op here.
@@ -263,6 +274,38 @@ def test_kimi_selection_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert runtime_selection_choice(
         RuntimeSelection(lane=RUNTIME_LANE_GENERIC, generic_provider="kimi")
     ) == "kimi"
+
+
+def test_nvidia_kimi_profile_and_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NVIDIA Kimi resolves through NIM and round-trips through /model nvidia."""
+
+    from runtime.base import RUNTIME_LANE_GENERIC
+    from runtime.selection import (
+        GENERIC_PROVIDER_ENV_KEY,
+        LEGACY_RUNTIME_PROVIDER_KEY,
+        RUNTIME_LANE_ENV_KEY,
+        apply_runtime_selection_choice,
+        runtime_selection_choice,
+    )
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
+    monkeypatch.delenv("SECOND_BRAIN_NVIDIA_KIMI_MODEL", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_NVIDIA_BASE_URL", raising=False)
+
+    profile = build_profile_for_provider("nvidia", key_prefix="primary")
+    assert profile is not None
+    assert profile.provider == "nvidia-kimi"
+    assert profile.model == "moonshotai/kimi-k2.6"
+    assert profile.base_url == "https://integrate.api.nvidia.com/v1"
+    assert profile.api_key == "nvapi-test"
+
+    env: dict[str, str] = {}
+    selection = apply_runtime_selection_choice("nvidia", environ=env)
+    assert selection.generic_provider == "nvidia-kimi"
+    assert env[GENERIC_PROVIDER_ENV_KEY] == "nvidia-kimi"
+    assert env[LEGACY_RUNTIME_PROVIDER_KEY] == "nvidia"
+    assert env[RUNTIME_LANE_ENV_KEY] == RUNTIME_LANE_GENERIC
+    assert runtime_selection_choice(selection) == "nvidia"
 
 
 def test_kimi_model_pin_uses_kimi_env_key(monkeypatch: pytest.MonkeyPatch) -> None:

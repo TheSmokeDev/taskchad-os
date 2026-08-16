@@ -122,6 +122,21 @@ GENERIC_PROVIDER_REGISTRY: dict[str, GenericProviderOverlay] = {
         base_url_env_var="SECOND_BRAIN_KIMI_BASE_URL",
         wire_api="chat_completions",
     ),
+    "nvidia-kimi": GenericProviderOverlay(
+        transport="openai_responses",
+        auth_type="api_key",
+        display_name="NVIDIA Kimi",
+        model_env_var="SECOND_BRAIN_NVIDIA_KIMI_MODEL",
+        default_model="moonshotai/kimi-k2.6",
+        text_route_priority=5,
+        tool_route_priority=-1,
+        aliases=("nvidia", "nvidia-kimi", "kimi-nvidia", "nim"),
+        legacy_write_key="nvidia",
+        api_key_env_vars=("NVIDIA_API_KEY",),
+        base_url="https://integrate.api.nvidia.com/v1",
+        base_url_env_var="SECOND_BRAIN_NVIDIA_BASE_URL",
+        wire_api="chat_completions",
+    ),
 }
 
 
@@ -384,6 +399,12 @@ def build_profile_for_provider(
         return _openrouter_profile(key_prefix=key_prefix)
     if provider == "kimi":
         return _kimi_profile(key_prefix=key_prefix)
+    if overlay.transport == "openai_responses":
+        return _http_profile(
+            key_prefix=key_prefix,
+            provider=provider,
+            overlay=overlay,
+        )
     return None
 
 

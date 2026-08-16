@@ -1189,3 +1189,9 @@ def test_detect_providers_includes_kimi() -> None:
     providers = cli_module._detect_providers({"KIMI_API_KEY": "sk-test"})
     assert providers["kimi"] is True
     assert cli_module._detect_providers({})["kimi"] is False
+
+
+def test_detect_providers_includes_nvidia() -> None:
+    providers = cli_module._detect_providers({"NVIDIA_API_KEY": "nvapi-test"})
+    assert providers["nvidia"] is True
+    assert cli_module._detect_providers({})["nvidia"] is False

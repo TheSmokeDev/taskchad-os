@@ -165,7 +165,7 @@ class OpenAICompatibleRuntime:
             )
         if not self.profile.api_key:
             raise RuntimeConfigError(
-                "OPENAI_API_KEY is not configured for OpenAI-compatible fallback"
+                f"API key is not configured for {self.profile.provider}"
             )
 
         try:

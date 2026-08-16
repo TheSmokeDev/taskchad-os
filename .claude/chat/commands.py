@@ -51,7 +51,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("voice", "Voice replies across Telegram and Discord - always | auto | off", "router", "admin"),
     ("talk", "Live voice in your Discord voice channel - join | leave | status", "router", "admin"),
     ("provider", "Show runtime lane status - selection, routes, provider health", "router", "admin"),
-    ("model", "Select lane/model: claude, sonnet, opus, codex, gemini, openrouter, openai, kimi(:k3), auto", "router", "admin"),
+    ("model", "Select lane/model: claude, sonnet, opus, codex, gemini, openrouter, openai, kimi(:k3), nvidia, auto", "router", "admin"),
     ("reload", "Reload bot config without restarting", "router", "admin"),
     ("restart", "Restart myself — kill this process and start fresh", "router", "admin"),
     ("autostart", "Bot autostart at logon — status | on | off", "router", "admin"),
