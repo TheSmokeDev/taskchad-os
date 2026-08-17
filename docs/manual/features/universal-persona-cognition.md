@@ -176,6 +176,9 @@ router picks a carrier lane or the turn refuses loudly.
 | `thehomie persona ingest <name> <file\|text>` | drop an article/text into the persona's experience notes (reindexed; distilled that night) |
 | `uv run python persona_learning_tick.py --test` / `--once` | dry-run / single-persona tick |
 | `uv run python persona_dream_tick.py --test` | side-effect-free dream fan-out check (writes `last_test_*` only, no LLM calls, no vault writes) |
+| `thehomie recall "<q>" --vault <persona-id>` · `/vault search <q> --vault <persona-id>` | read ONE apartment by its plain profile id, read-only (#466) |
+| `thehomie recall "<q>" --vault all` (alias `apartments`) | sweep main + every persona vault, keyword pass per vault, `[vault:<id>]` attribution on each hit (#466) |
+| `uv run python memory_index.py --vault <persona-id>` | **refused** — indexing is persona-owned; run it as that persona (`memory_index.py -p <id>`) |
 
 ## Kill switches and knobs (the fire extinguishers)
 
