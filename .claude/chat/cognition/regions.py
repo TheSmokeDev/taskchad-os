@@ -98,6 +98,14 @@ def truncate_region(region: PromptRegion) -> str:
     return truncated
 
 
+# Hard-constraint regions are EXEMPT from process weighting (#484 r2): a spend
+# ceiling does not matter less because the mind is planning, so no
+# PROCESS_WEIGHTS entry — present or future — may down-weight `safety`.
+# Up-weighting is equally excluded: the region holds a fixed-size rules file,
+# and inflating its budget only bloats the pre-clamp append for zero content.
+PROCESS_WEIGHT_EXEMPT_REGIONS = frozenset({"safety"})
+
+
 def apply_process_weights(
     base_budgets: dict[str, int],
     weights: dict[str, float],
@@ -107,10 +115,15 @@ def apply_process_weights(
     """Apply mental process weight multipliers to region budgets.
 
     CRITICAL: Clamp weights to [min_weight, max_weight] to prevent starvation.
-    Returns adjusted budgets as a new dict.
+    Regions in ``PROCESS_WEIGHT_EXEMPT_REGIONS`` keep their base budget
+    verbatim regardless of the weights dict. Returns adjusted budgets as a
+    new dict.
     """
     adjusted = {}
     for region, budget in base_budgets.items():
+        if region in PROCESS_WEIGHT_EXEMPT_REGIONS:
+            adjusted[region] = budget
+            continue
         w = weights.get(region, 1.0)
         w = max(min_weight, min(max_weight, w))
         adjusted[region] = max(0, int(budget * w))

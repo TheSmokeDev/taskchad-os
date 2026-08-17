@@ -54,31 +54,63 @@ DEFAULT_INCLUDE: tuple[str, ...] = (
     "SAFETY",
 )
 
-# --- Authored-vs-stub predicate (#484) ------------------------------------
-# A seeded identity file is pure scaffold: YAML frontmatter, one H1 title,
-# and an HTML seed comment. The predicate is SEMANTIC — it strips those
-# three scaffold shapes and asks whether anything remains — rather than
-# string-matching the seed comment text, which would break on any template
-# reword. It generalizes to the other seeded identity files if they are
-# ever wired.
-_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n.*?\n---[ \t]*\n?", re.DOTALL)
+# --- Authored-vs-stub predicate (#484, tightened in r2) --------------------
+# A seeded identity file is a KNOWN scaffold: a frontmatter block carrying
+# exactly the seeder's two keys (``profile`` / ``identity_file``), one H1
+# whose text is the file's own title, and an HTML seed comment. The
+# predicate recognizes ONLY that scaffold and treats everything else as
+# authored — it never strips general shapes, because an operator may
+# legitimately write policy AS frontmatter keys or AS multiple H1 headings,
+# and a shape-stripping predicate would silently discard those rules (the
+# exact recall-dependent disappearance #484 exists to prevent). It is not a
+# string match on the seed comment text either, so a template reword cannot
+# break it. Every malformed input errs toward SHOWING safety content:
+# unclosed comments, unclosed frontmatter, and unrecognized lines all
+# classify as authored.
+_FRONTMATTER_BLOCK_RE = re.compile(r"\A---[ \t]*\n(?P<body>.*?)\n---[ \t]*\n?", re.DOTALL)
+_FRONTMATTER_SCAFFOLD_KEY_RE = re.compile(r"^(?:profile|identity_file)[ \t]*:")
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-_H1_HEADING_RE = re.compile(r"^#(?!#)[ \t].*$", re.MULTILINE)
+_H1_HEADING_RE = re.compile(r"^#(?!#)[ \t]+(?P<title>.*?)[ \t]*$", re.MULTILINE)
 
 
-def has_authored_content(text: str) -> bool:
-    """True when *text* carries content beyond seeded scaffold.
+def has_authored_content(text: str, *, scaffold_title: str) -> bool:
+    """True when *text* carries content beyond the seeder's known scaffold.
 
-    Strips (in order): the leading YAML frontmatter block, every HTML
-    comment, and H1 heading lines. Whatever survives — even a single line —
-    counts as authored. An unclosed HTML comment is left in place and thus
-    counts as authored: malformed input errs toward SHOWING safety content,
-    never toward hiding it.
+    Scaffold recognition (anything outside it counts as authored):
+
+    - Frontmatter: only the seeder's own keys (``profile``,
+      ``identity_file``) are scaffold. ANY other frontmatter line — an extra
+      key, a list item, a comment — is authored content (policy may live in
+      frontmatter). An unclosed frontmatter block is left in place and thus
+      counts as authored.
+    - Headings: only ONE H1, and only when its text equals
+      ``scaffold_title`` (the seeded ``# <FILE-STEM>`` line), is scaffold.
+      A second H1, or a first H1 with any other text, is authored content —
+      constraints written as H1 headings must never be discarded.
+    - HTML comments: closed comments are scaffold. An unclosed comment is
+      left in place and counts as authored.
+
+    Malformed input always errs toward SHOWING safety content, never toward
+    hiding it.
     """
-    stripped = _FRONTMATTER_RE.sub("", text, count=1)
-    stripped = _HTML_COMMENT_RE.sub("", stripped)
-    stripped = _H1_HEADING_RE.sub("", stripped)
-    return bool(stripped.strip())
+    remainder = text
+    frontmatter = _FRONTMATTER_BLOCK_RE.match(text)
+    if frontmatter:
+        for line in frontmatter.group("body").splitlines():
+            stripped_line = line.strip()
+            if not stripped_line:
+                continue
+            if not _FRONTMATTER_SCAFFOLD_KEY_RE.match(stripped_line):
+                return True
+        remainder = text[frontmatter.end():]
+
+    remainder = _HTML_COMMENT_RE.sub("", remainder)
+
+    first_h1 = _H1_HEADING_RE.search(remainder)
+    if first_h1 is not None and first_h1.group("title") == scaffold_title:
+        remainder = remainder[: first_h1.start()] + remainder[first_h1.end():]
+
+    return bool(remainder.strip())
 
 
 def build_identity_payload(
@@ -131,8 +163,9 @@ def build_identity_payload(
         # #484: an unedited SAFETY.md seed stub yields NO key (not an empty
         # string) so downstream prompts stay byte-identical for unconfigured
         # personas. Scoped to SAFETY only — other identity files keep their
-        # existing include-if-non-empty behavior verbatim.
-        if name == "SAFETY" and not has_authored_content(content):
+        # existing include-if-non-empty behavior verbatim. The scaffold H1
+        # title is the file's own stem (the seeder writes ``# SAFETY``).
+        if name == "SAFETY" and not has_authored_content(content, scaffold_title=name):
             continue
         payload[name] = content
     return payload

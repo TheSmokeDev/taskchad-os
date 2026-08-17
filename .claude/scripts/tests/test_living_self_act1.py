@@ -713,27 +713,18 @@ def test_save_is_atomic_no_tmp_sibling(tmp_path, monkeypatch):
 
 
 def test_region_budget_base_sum_unchanged():
-    """Net-zero BASE delta: SELF + INFERENCES + PREFETCHED + SAFETY == 3700.
+    """Net-zero BASE delta: SELF_MODEL + USER_INFERENCES + PREFETCHED == 3700.
 
-    Act 1 (M4): 400 + 300 + 3000 == 3700 became 700 + 500 + 2500 == 3700.
-    Issue #484 extended the same net-zero mechanism: PREFETCHED 2500 -> 1800
-    funds the new SAFETY region (700 tokens), keeping the reallocation
-    envelope at 3700. With the unchanged final 27K clamp this guarantees NO
-    new overflow. Deliberately NOT a byte-identity assertion
-    (apply_process_weights multiplies by clamped weights -> a weighted
-    assembly is not char-identical).
+    Pre-change was 400 + 300 + 3000 == 3700; post-change is 700 + 500 + 2500 ==
+    3700. With the unchanged final 27K clamp this guarantees NO new overflow.
+    Deliberately NOT a byte-identity assertion (apply_process_weights multiplies
+    by clamped weights -> a weighted assembly is not char-identical).
     """
     b = config.REGION_BUDGETS
     assert b["self_model"] == 700
     assert b["user_inferences"] == 500
-    assert b["prefetched_context"] == 1800
-    assert b["safety"] == 700
-    assert (
-        b["self_model"]
-        + b["user_inferences"]
-        + b["prefetched_context"]
-        + b["safety"]
-    ) == 3700
+    assert b["prefetched_context"] == 2500
+    assert b["self_model"] + b["user_inferences"] + b["prefetched_context"] == 3700
 
 
 def test_region_budget_common_path_under_cap():

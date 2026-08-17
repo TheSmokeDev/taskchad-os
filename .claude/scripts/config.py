@@ -470,24 +470,41 @@ REGION_BUDGETS = {
     "identity": int(os.getenv("REGION_BUDGET_IDENTITY", "1500")),
     # Issue #484: SAFETY.md hard boundaries (spend ceilings, default-deny
     # surfaces). 700 tokens (2800 chars) fits the largest existing authored
-    # SAFETY.md (the main vault's, 2473 bytes) without truncation. Net-zero
-    # BASE reallocation per the Act 1 precedent below: taken entirely from
-    # PREFETCHED (2500 -> 1800), so the total budget envelope under the 27K
-    # win32 clamp is unchanged. DEFAULTS only; env override path unchanged.
+    # SAFETY.md (the main vault's, 2473 bytes) without truncation. BASE
+    # reallocation taken ENTIRELY from DURABLE_MEMORY (2000 -> 1300) —
+    # like-for-like durable identity content, and (unlike prefetched, empty
+    # on light turns) a region whose real content is budget-binding on the
+    # main vault, so the freed chars are physical: the real light-turn
+    # append was ~1000 chars under the 27K win32 clamp, and the 2473-char
+    # SAFETY.md must displace real content, not paper budget.
+    #
+    # The safety+durable pair sums to the pre-#484 durable 2000 ONLY at
+    # DEFAULT (unweighted) budgets. Under mental-process weights the pair
+    # diverges (durable scales, e.g. PLANNING x1.5, while `safety` is
+    # weight-EXEMPT — pinned at base by
+    # cognition.regions.PROCESS_WEIGHT_EXEMPT_REGIONS, because a hard
+    # constraint must never be down-weighted by mood). The enforced
+    # invariant is therefore NOT net-zero-across-modes; it is: the safety
+    # region renders whole, un-truncated, at position 2 (inside the win32
+    # head-keep window) in EVERY process mode — proven by physical render
+    # tests in tests/test_persona_safety_wiring.py. DEFAULTS only; env
+    # override path unchanged.
     "safety": int(os.getenv("REGION_BUDGET_SAFETY", "700")),
     # Living Self Act 1 (M4): SELF_MODEL 400->700, USER_INFERENCES 300->500,
     # PREFETCHED 3000->2500 — net-zero BASE-budget reallocation (-500 +300 +200
     # == 0) so the now-clean SELF.md + operator-belief regions get room while the
     # final 27K win32 clamp guarantees no new overflow. DEFAULTS only; the env
-    # override path is unchanged. (#484 later took PREFETCHED 2500 -> 1800 to
-    # fund the `safety` region above — same net-zero mechanism.)
+    # override path is unchanged.
     "self_model": int(os.getenv("REGION_BUDGET_SELF_MODEL", "700")),
     "user_model": int(os.getenv("REGION_BUDGET_USER_MODEL", "1000")),
-    "durable_memory": int(os.getenv("REGION_BUDGET_MEMORY", "2000")),
+    # #484: 2000 -> 1300 funds the `safety` region above (base-budget pair:
+    # safety 700 + durable 1300 == the pre-#484 durable 2000 at DEFAULT;
+    # weighted modes diverge — see the safety comment above).
+    "durable_memory": int(os.getenv("REGION_BUDGET_MEMORY", "1300")),
     "continuity": int(os.getenv("REGION_BUDGET_CONTINUITY", "500")),
     "recalled_memory": int(os.getenv("REGION_BUDGET_RECALLED", "750")),
     "procedural_memory": int(os.getenv("REGION_BUDGET_PROCEDURAL", "500")),
-    "prefetched_context": int(os.getenv("REGION_BUDGET_PREFETCHED", "1800")),
+    "prefetched_context": int(os.getenv("REGION_BUDGET_PREFETCHED", "2500")),
     "user_inferences": int(os.getenv("REGION_BUDGET_USER_INFERENCES", "500")),
     "working_memory": int(os.getenv("REGION_BUDGET_WORKING_MEMORY", "600")),
     # Cofounder v2 Part C — the lean agenda-status region for the default
