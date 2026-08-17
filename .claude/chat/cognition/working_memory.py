@@ -64,6 +64,14 @@ class WorkingMemory:
     memories: tuple[Memory, ...] = ()
     region_order: tuple[str, ...] = (
         "identity",
+        # Issue #484: SAFETY.md hard boundaries sit immediately after identity
+        # — NOT appended at the tail. order_regions() sorts unknown regions to
+        # the END, which is the win32 head-keep truncation zone (same hazard
+        # the `portfolio` entry below documents): a tail-dumped safety region
+        # would be the FIRST thing silently sheared on heavy-context turns.
+        # Position 2 also means under budget pressure safety is dropped LAST,
+        # after recalled_memory / continuity / procedural_memory.
+        "safety",
         "current_speaker",
         "self_model",
         "user_model",

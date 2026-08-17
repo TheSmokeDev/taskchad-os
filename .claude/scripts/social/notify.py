@@ -3,7 +3,7 @@ approve / edit / reject buttons.
 
 Cross-process safe: the cadence cron runs in a SEPARATE process from the
 chat bot, so this posts directly to the Telegram Bot API (same pattern as
-``example_scout._send_telegram``). The button tap then routes back into the
+``upstream_watch._send_telegram``). The button tap then routes back into the
 running bot's existing callback pipeline as ``__button:social:<action>:<id>``.
 
 Fail-open contract: a delivery failure NEVER breaks draft generation. Every

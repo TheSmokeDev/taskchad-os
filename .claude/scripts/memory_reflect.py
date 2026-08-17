@@ -1542,9 +1542,9 @@ If nothing is worth updating in any file, respond with exactly: REFLECTION_OK
     # --- Hermes Scout post-step (daily upstream intelligence) ---
     if not test_mode:
         try:
-            from example_scout import run_example_scout
+            from upstream_watch import run_upstream_watch
 
-            scout_result = await run_example_scout(test_mode=False, days=1)
+            scout_result = await run_upstream_watch(test_mode=False, days=1)
             if scout_result and scout_result != "HERMES_SILENT":
                 print(f"[{now_local()}] Hermes Scout completed post-reflection")
                 append_to_daily_log("Hermes Scout ran as daily post-step", "Reflection")

@@ -777,7 +777,7 @@ def _drive_persona_reflection(
 
     real_import = __import__
     blocked = {
-        "memory_dream", "example_scout", "business_signal.signal_engine",
+        "memory_dream", "upstream_watch", "business_signal.signal_engine",
         "called_shots_sweep", "crypto_plays_sweep", "state_sync",
         "entity_extractor", "vault_lint", "recall_service",
     } - set(unblock_imports)

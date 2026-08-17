@@ -2,8 +2,8 @@
 
 This module is the canonical entry point used by the chat engine and the cron
 memory pipelines (reflect / weekly / dream) for assembling the identity-file
-payload (SOUL, SELF, USER, MEMORY, GOALS, WORKING). Each consumer keeps its own
-prompt assembly + ordering + headers; the shim only hands back raw file
+payload (SOUL, SELF, USER, MEMORY, GOALS, WORKING, SAFETY). Each consumer keeps
+its own prompt assembly + ordering + headers; the shim only hands back raw file
 content keyed by uppercase name.
 
 Design rules enforced here:
@@ -27,6 +27,7 @@ Fail-open contract (matches ``runtime.bootstrap.read_file_safe``):
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -46,7 +47,38 @@ DEFAULT_INCLUDE: tuple[str, ...] = (
     "MEMORY",
     "GOALS",
     "WORKING",
+    # Issue #484: SAFETY.md carries a persona's hard boundaries (spend
+    # ceilings, default-deny surfaces). Wired here so it reaches the prompt
+    # deterministically instead of depending on a recall match. Stub-gated in
+    # build_identity_payload — an unedited lifecycle seed yields NO key.
+    "SAFETY",
 )
+
+# --- Authored-vs-stub predicate (#484) ------------------------------------
+# A seeded identity file is pure scaffold: YAML frontmatter, one H1 title,
+# and an HTML seed comment. The predicate is SEMANTIC — it strips those
+# three scaffold shapes and asks whether anything remains — rather than
+# string-matching the seed comment text, which would break on any template
+# reword. It generalizes to the other seeded identity files if they are
+# ever wired.
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n.*?\n---[ \t]*\n?", re.DOTALL)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_H1_HEADING_RE = re.compile(r"^#(?!#)[ \t].*$", re.MULTILINE)
+
+
+def has_authored_content(text: str) -> bool:
+    """True when *text* carries content beyond seeded scaffold.
+
+    Strips (in order): the leading YAML frontmatter block, every HTML
+    comment, and H1 heading lines. Whatever survives — even a single line —
+    counts as authored. An unclosed HTML comment is left in place and thus
+    counts as authored: malformed input errs toward SHOWING safety content,
+    never toward hiding it.
+    """
+    stripped = _FRONTMATTER_RE.sub("", text, count=1)
+    stripped = _HTML_COMMENT_RE.sub("", stripped)
+    stripped = _H1_HEADING_RE.sub("", stripped)
+    return bool(stripped.strip())
 
 
 def build_identity_payload(
@@ -64,7 +96,9 @@ def build_identity_payload(
     include:
         Optional tuple of uppercase identity names to read. Defaults to
         ``DEFAULT_INCLUDE`` (``SOUL``/``SELF``/``USER``/``MEMORY``/``GOALS``/
-        ``WORKING``). Pass an explicit tuple to scope the read to a subset.
+        ``WORKING``/``SAFETY``). Pass an explicit tuple to scope the read to
+        a subset. ``SAFETY`` is additionally stub-gated: an unedited seeded
+        stub (frontmatter + H1 + seed comment only) yields no key.
 
     Returns
     -------
@@ -92,8 +126,15 @@ def build_identity_payload(
     payload: dict[str, str] = {}
     for name in names:
         content = read_file_safe(memory_dir / f"{name}.md")
-        if content:
-            payload[name] = content
+        if not content:
+            continue
+        # #484: an unedited SAFETY.md seed stub yields NO key (not an empty
+        # string) so downstream prompts stay byte-identical for unconfigured
+        # personas. Scoped to SAFETY only — other identity files keep their
+        # existing include-if-non-empty behavior verbatim.
+        if name == "SAFETY" and not has_authored_content(content):
+            continue
+        payload[name] = content
     return payload
 
 

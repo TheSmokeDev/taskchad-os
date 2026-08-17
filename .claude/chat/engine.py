@@ -51,7 +51,12 @@ try:
         log_recall_event,
         prompt_regions_from_working_memory,
     )
-    from cognition.regions import DEFAULT_REGION_BUDGETS, PromptRegion, truncate_region
+    from cognition.regions import (
+        CHARS_PER_TOKEN,
+        DEFAULT_REGION_BUDGETS,
+        PromptRegion,
+        truncate_region,
+    )
     from cognition.staging import StagingStore
     from cognition.working_memory import Memory, WorkingMemory
 
@@ -94,7 +99,14 @@ except ImportError:
 # Protected prefix of system_prompt["append"] at BOTH assembly sites (initial
 # build + cognition region overwrite). It must stay a PREFIX: the win32 cap
 # (_truncate_win32_append) keeps the FIRST 27,000 chars, so anything appended
-# late (e.g. chat_rules) can be silently tail-truncated — a prefix cannot.
+# late can be silently tail-truncated — a prefix cannot.
+#
+# `chat_rules` now rides directly behind this for the same reason. It used to
+# sit at the TAIL of both sites, which put the "# Email Prompt Injection
+# Defense" block first in line to be sheared: real logs show appends of
+# 30,807 / 30,872 / 31,307 chars cut to 27,000 — every cut wider than the
+# 1,956-char rules block, so the whole thing vanished with no error (a
+# truncated prompt is still a valid prompt). Keep BOTH in the head.
 GROUNDING_RULES = (
     "# Grounding\n"
     "Only claim actions that actually happened in this conversation. If a prior "
@@ -434,6 +446,43 @@ class ConversationEngine:
         except Exception:
             return ""
 
+    def _warn_safety_overflow(self, safety_content: str) -> None:
+        """Overflow is LOUD, never silent (#484).
+
+        A SAFETY.md over its region budget still gets trimmed by
+        ``truncate_region`` (which marks the cut in-prompt), but that alone is
+        invisible to the operator — and half a spend cap reads as governed
+        output that is not governed. Log a warning naming the persona, byte
+        size, and cap so the overflow is a receipt, not a surprise. Fail-open:
+        a broken warning never breaks a turn.
+        """
+        if not safety_content:
+            return
+        try:
+            from config import REGION_BUDGETS  # Rule 1 — call-time resolve
+
+            cap_chars = REGION_BUDGETS.get("safety", 0) * CHARS_PER_TOKEN
+            if cap_chars <= 0 or len(safety_content) <= cap_chars:
+                return
+            persona = "default"
+            try:
+                import personas
+
+                persona = personas.get_active_profile_name()
+            except Exception:
+                pass
+            print(
+                f"[{datetime.now()}] [Safety] SAFETY.md for persona "
+                f"'{persona}' exceeds its region budget: "
+                f"{len(safety_content.encode('utf-8'))} bytes > "
+                f"{cap_chars}-char cap — the tail will be marked "
+                "[TRUNCATED] in the prompt. Raise REGION_BUDGET_SAFETY or "
+                "trim the file.",
+                flush=True,
+            )
+        except Exception:
+            pass
+
     def _build_base_working_memory(
         self,
         *,
@@ -450,11 +499,16 @@ class ConversationEngine:
         payload = build_identity_payload(MEMORY_DIR)
         vault_files = {
             "SOUL.md": payload.get("SOUL", ""),
+            # #484: absent for personas whose SAFETY.md is missing or an
+            # unedited seed stub (the shim's stub gate yields no key), so
+            # their prompt stays byte-identical.
+            "SAFETY.md": payload.get("SAFETY", ""),
             "SELF.md": payload.get("SELF", ""),
             "USER.md": payload.get("USER", ""),
             "MEMORY.md": payload.get("MEMORY", ""),
             "WORKING.md": payload.get("WORKING", ""),
         }
+        self._warn_safety_overflow(vault_files["SAFETY.md"])
 
         skill_text = ""
         if _PROCESSES_AVAILABLE:
@@ -1630,10 +1684,10 @@ class ConversationEngine:
             "preset": "claude_code",
             "append": (
                 GROUNDING_RULES
+                + chat_rules
                 + identity_context
                 + "\n\n# Current Speaker\n"
                 + current_speaker_block
-                + chat_rules
             ),
         }
         if _trace_decisions is not None:
@@ -2031,10 +2085,22 @@ class ConversationEngine:
                         f"failed (non-blocking): {e}",
                         flush=True,
                     )
-            regions = prompt_regions_from_working_memory(turn_wm, budgets)
+            # The transcript is delivered on RuntimeRequest.prompt (stdin — no
+            # argv cap); see the "# Recent Conversation Context" splice further
+            # down. Rendering it HERE too sent the SAME bytes twice, and at
+            # RECENT_CONVERSATION_COUNT=80 x MESSAGE_MAX_CHARS=2000 it is by far
+            # the largest region — the reason this append routinely cleared the
+            # win32 27,000-char cap and sheared its own tail. Stripped only at
+            # the render, AFTER the cognitive pass above, so the monologue still
+            # thinks WITH the transcript; identical idiom to the "internal" and
+            # "challenge" regions extracted a few lines up. `recent_region_meta`
+            # still reports the real size to trace_decisions.
+            regions = prompt_regions_from_working_memory(
+                turn_wm.without_regions("recent_conversation"), budgets,
+            )
             if regions:
                 system_prompt["append"] = (
-                    GROUNDING_RULES + assemble_regions(regions) + chat_rules
+                    GROUNDING_RULES + chat_rules + assemble_regions(regions)
                 )
         elif recall_response and recall_response.formatted_text:
             # Cognition unavailable but got keyword results — append plainly.

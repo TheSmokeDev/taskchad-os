@@ -14,7 +14,7 @@ import config as _main_config
 SIGNAL_DIR = _main_config.MEMORY_DIR / "signal"
 SIGNAL_STATE_FILE = _main_config.STATE_DIR / "signal-state.json"
 
-# Toggle — default ON (same as example_scout_ENABLED pattern)
+# Toggle — default ON (same as upstream_watch_ENABLED pattern)
 SIGNAL_ENABLED = os.getenv("SIGNAL_ENABLED", "true").lower() == "true"
 
 

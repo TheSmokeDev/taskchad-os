@@ -919,7 +919,15 @@ async def test_resumed_session_injects_recent_conversation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The last-N prior messages must be injected as a recent_conversation region."""
+    """The last-N prior messages must reach the model — on RuntimeRequest.prompt.
+
+    The transcript used to be rendered into system_prompt["append"] AS WELL,
+    which sent the same bytes twice and made this (largest) region the reason
+    the append cleared the win32 27,000-char argv cap and sheared its own tail.
+    The prompt rides stdin and has no such cap, so it is the only carrier now —
+    this test asserts delivery on that channel AND that the append no longer
+    duplicates it.
+    """
     store = SQLiteSessionStore(tmp_path / "chat.db")
     project_root = _make_project_root(tmp_path)
     convo = ConversationEngine(store, project_root)
@@ -946,12 +954,19 @@ async def test_resumed_session_injects_recent_conversation(
     outputs = [out async for out in convo.handle_message(_make_message("yee"))]
 
     assert outputs[-1].text == "resumed response"
+    prompt_text = str(captured["prompt"])
+    assert "Recent Conversation" in prompt_text, "Header for recent_conversation must be present"
+    assert "do u dream" in prompt_text
+    assert "Sometimes I dream about vector spaces" in prompt_text
+    assert "what about AI consciousness?" in prompt_text
+    assert "Consciousness in AI is an unresolved philosophical question" in prompt_text
+
+    # The append must NOT carry a second copy — that duplication is the defect
+    # this test now locks out. Fails if the region is ever re-added upstream.
     append_text = captured["system_prompt"]["append"]
-    assert "Recent Conversation" in append_text, "Header for recent_conversation must be present"
-    assert "do u dream" in append_text
-    assert "Sometimes I dream about vector spaces" in append_text
-    assert "what about AI consciousness?" in append_text
-    assert "Consciousness in AI is an unresolved philosophical question" in append_text
+    assert "do u dream" not in append_text, (
+        "transcript must not be duplicated into the win32-capped system append"
+    )
 
 
 @pytest.mark.asyncio
@@ -1432,6 +1447,58 @@ async def test_grounding_rule_reaches_runtime_system_prompt(
     append_text = str(captured["system_prompt"])
     assert append_text.startswith("# Grounding")
     assert append_text.startswith(engine_module.GROUNDING_RULES)
+
+
+@pytest.mark.asyncio
+async def test_chat_rules_sit_in_protected_head_not_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`chat_rules` must sit DIRECTLY behind GROUNDING_RULES in the append.
+
+    It carries the Email Prompt Injection Defense and the browser-automation
+    contract. Parked at the TAIL (where it used to live) it was the first thing
+    the win32 head-keeping cap sheared, and silently: real logs show 30,807 /
+    30,872 / 31,307-char appends cut to 27,000, every cut wider than the whole
+    1,956-char block. Position is asserted structurally rather than by length,
+    so the guarantee does not depend on how big the regions happen to be — the
+    regions grow with conversation length and can never be allowed to push the
+    safety block over the cliff.
+    """
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        captured["system_prompt"] = request.system_prompt["append"]
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [out async for out in convo.handle_message(_make_message())]
+
+    assert outputs[-1].text == "ok"
+    append_text = str(captured["system_prompt"])
+    assert append_text.startswith(engine_module.GROUNDING_RULES)
+    after_grounding = append_text[len(engine_module.GROUNDING_RULES):]
+    assert after_grounding.startswith("\n\n# Chat Interface Rules"), (
+        "chat_rules must follow GROUNDING_RULES immediately — anything that "
+        "pushes it behind the regions puts the injection defense back in the "
+        "win32 truncation drop zone"
+    )
+    assert "# Email Prompt Injection Defense" in append_text
+    assert "# Browser Automation (agent-browser)" in append_text
 
 
 def test_grounding_survives_win32_truncation() -> None:

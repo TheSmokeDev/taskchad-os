@@ -1,0 +1,55 @@
+# never-ship.txt — INDEPENDENT oracle for the public export gate.
+#
+# TEMPLATE. Copy to scripts/never-ship.txt and fill in with your own values.
+# The real never-ship.txt is denied from the public export by design.
+#
+# Rules:
+#   - one literal token per line, matched case-insensitively as a SUBSTRING
+#   - no regex: no \b, no character classes, nothing that can silently fail to
+#     match a spelling nobody anticipated (that is the whole point of this file)
+#   - a line starting with '!' is an ALLOW: if it appears anywhere on a matching
+#     line, that line is not a hit (use for canonical public URLs)
+#   - blunt beats clever. A false positive costs one allow line; a false
+#     negative costs a public leak.
+#
+# The example file ships publicly as a TEMPLATE. Replace every placeholder with
+# your own identifiers before relying on the gate — an unfilled list fails closed
+# on purpose, because "no tokens" and "no leaks" must never look the same.
+
+# --- allow: canonical public URLs that legitimately contain a handle ---------
+!your-org/your-public-repo
+
+# --- business entity / legal names ------------------------------------------
+your-company-llc
+your-parent-company
+
+# --- physical address --------------------------------------------------------
+your-street-name
+your-city, st
+00000
+
+# --- people ------------------------------------------------------------------
+your-surname
+your-partner-surname
+
+# --- operator handles / accounts ---------------------------------------------
+your-github-handle
+your-x-handle
+you@example.com
+
+# --- local machine paths ------------------------------------------------------
+users\your-username
+users/your-username
+
+# --- clients / engagements ----------------------------------------------------
+your-client-name
+
+# --- private infrastructure ---------------------------------------------------
+your.internal.host
+203.0.113.10
+
+# --- real platform ids --------------------------------------------------------
+000000000000000000
+
+# --- private surfaces whose NAMES leak the mechanism -------------------------
+your_private_module

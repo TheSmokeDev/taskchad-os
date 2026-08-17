@@ -573,9 +573,9 @@ If there is no real cross-domain signal this week, write: `No cross-domain signa
     # --- Hermes Scout post-step ---
     if not test_mode:
         try:
-            from example_scout import run_example_scout
+            from upstream_watch import run_upstream_watch
 
-            scout_result = await run_example_scout(test_mode=False, days=days)
+            scout_result = await run_upstream_watch(test_mode=False, days=days)
             if scout_result and scout_result != "HERMES_SILENT":
                 print(f"[{now_local()}] Hermes Scout completed post-weekly")
                 append_to_daily_log("Hermes Scout ran as weekly post-step", "Weekly Synthesis")

@@ -263,9 +263,9 @@ DREAM_MIN_INTERVAL_HOURS = int(os.getenv("DREAM_MIN_INTERVAL_HOURS", "12"))
 DREAM_SIGNAL_THRESHOLD = int(os.getenv("DREAM_SIGNAL_THRESHOLD", "4"))
 
 # === Hermes Scout Configuration ===
-example_scout_ENABLED = os.getenv("example_scout_ENABLED", "true").lower() == "true"
-example_scout_REPO = os.getenv("example_scout_REPO", "NousResearch/hermes-agent")
-example_scout_STATE_FILE = STATE_DIR / "example_scout-state.json"
+upstream_watch_ENABLED = os.getenv("upstream_watch_ENABLED", "true").lower() == "true"
+upstream_watch_REPO = os.getenv("upstream_watch_REPO", "NousResearch/hermes-agent")
+upstream_watch_STATE_FILE = STATE_DIR / "upstream_watch-state.json"
 
 # === CLI Update-Check Configuration ===
 UPDATE_CHECK_STATE_FILE = STATE_DIR / "update-check-state.json"
@@ -468,18 +468,26 @@ TIER1_GRAPH_MAX_NEIGHBORS = int(os.getenv("TIER1_GRAPH_MAX_NEIGHBORS", "5"))
 # ~6500 tokens * 4 = ~26K chars + ~3K overhead = fits under limit.
 REGION_BUDGETS = {
     "identity": int(os.getenv("REGION_BUDGET_IDENTITY", "1500")),
+    # Issue #484: SAFETY.md hard boundaries (spend ceilings, default-deny
+    # surfaces). 700 tokens (2800 chars) fits the largest existing authored
+    # SAFETY.md (the main vault's, 2473 bytes) without truncation. Net-zero
+    # BASE reallocation per the Act 1 precedent below: taken entirely from
+    # PREFETCHED (2500 -> 1800), so the total budget envelope under the 27K
+    # win32 clamp is unchanged. DEFAULTS only; env override path unchanged.
+    "safety": int(os.getenv("REGION_BUDGET_SAFETY", "700")),
     # Living Self Act 1 (M4): SELF_MODEL 400->700, USER_INFERENCES 300->500,
     # PREFETCHED 3000->2500 — net-zero BASE-budget reallocation (-500 +300 +200
     # == 0) so the now-clean SELF.md + operator-belief regions get room while the
     # final 27K win32 clamp guarantees no new overflow. DEFAULTS only; the env
-    # override path is unchanged.
+    # override path is unchanged. (#484 later took PREFETCHED 2500 -> 1800 to
+    # fund the `safety` region above — same net-zero mechanism.)
     "self_model": int(os.getenv("REGION_BUDGET_SELF_MODEL", "700")),
     "user_model": int(os.getenv("REGION_BUDGET_USER_MODEL", "1000")),
     "durable_memory": int(os.getenv("REGION_BUDGET_MEMORY", "2000")),
     "continuity": int(os.getenv("REGION_BUDGET_CONTINUITY", "500")),
     "recalled_memory": int(os.getenv("REGION_BUDGET_RECALLED", "750")),
     "procedural_memory": int(os.getenv("REGION_BUDGET_PROCEDURAL", "500")),
-    "prefetched_context": int(os.getenv("REGION_BUDGET_PREFETCHED", "2500")),
+    "prefetched_context": int(os.getenv("REGION_BUDGET_PREFETCHED", "1800")),
     "user_inferences": int(os.getenv("REGION_BUDGET_USER_INFERENCES", "500")),
     "working_memory": int(os.getenv("REGION_BUDGET_WORKING_MEMORY", "600")),
     # Cofounder v2 Part C — the lean agenda-status region for the default

@@ -41,6 +41,7 @@ def truncate_for_win32_argv(
 # Default budgets in characters (~4 chars/token)
 DEFAULT_REGION_BUDGETS: dict[str, int] = {
     "identity": 16000,          # ~4K tokens — SOUL.md
+    "safety": 2800,             # ~700 tokens — SAFETY.md hard boundaries (#484)
     "current_speaker": 1200,    # bounded per-turn active speaker metadata
     "self_model": 8000,         # ~2K tokens — SELF.md
     "user_model": 12000,        # ~3K tokens — USER.md
@@ -136,6 +137,9 @@ def build_initial_working_memory(
 
     region_file_map = {
         "identity": "SOUL.md",
+        # #484: hard boundaries ride their own region, ordered right after
+        # identity by WorkingMemory.region_order (the ordering authority).
+        "safety": "SAFETY.md",
         "self_model": "SELF.md",
         "user_model": "USER.md",
         "durable_memory": "MEMORY.md",

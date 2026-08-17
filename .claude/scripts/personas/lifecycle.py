@@ -123,6 +123,13 @@ class LifecycleError(RuntimeError):
 # Identity markdown files seeded under ``<profile>/memory/`` (PRD §3.1).
 # Each file gets a sensible empty body + frontmatter so providers loading
 # them via ``bootstrap.py`` see a coherent (if empty) identity substrate.
+#
+# SAFETY.md is deliberately NOT seeded (#484): a file the runtime never reads
+# is the trap that produced the safety-wiring incident, and now that the
+# loader DOES read it, an operator authors one on purpose rather than
+# inheriting a stub. The 29 pre-#484 profiles that already carry a seeded
+# stub are handled by the authored-vs-stub gate in
+# ``cognition.identity_payload`` (an unedited stub yields no prompt region).
 _REQUIRED_IDENTITY_FILES: tuple[str, ...] = (
     "SOUL.md",
     "USER.md",
@@ -135,7 +142,6 @@ _REQUIRED_IDENTITY_FILES: tuple[str, ...] = (
     "INDEX.md",
     "LOG.md",
     "BACKLOG.md",
-    "SAFETY.md",
     "SCHEMA.md",
     "MOC-Concepts.md",
     "MOC-Connections.md",
@@ -310,6 +316,29 @@ def _seed_identity_body(filename: str, profile_name: str) -> str:
     the operator's job.
     """
     title = filename[: -len(".md")] if filename.endswith(".md") else filename
+    if filename == "SAFETY.md":
+        # #484: SAFETY.md is no longer part of the seeded inventory, but any
+        # creator that still scaffolds one (sibling persona factories, manual
+        # provisioning) must get a template that states its own scope — an
+        # operator writing a spend cap here must not assume the scheduled
+        # pipelines honor it until #485 closes. The scope note lives inside
+        # the HTML comment so an unedited scaffold still classifies as a stub
+        # under ``cognition.identity_payload.has_authored_content``.
+        return (
+            f"---\n"
+            f"profile: {profile_name}\n"
+            f"identity_file: {filename}\n"
+            f"---\n"
+            f"\n"
+            f"# {title}\n"
+            f"\n"
+            f"<!-- Author hard boundaries here (spend ceilings, default-deny\n"
+            f"surfaces, secret handling). SCOPE: this file governs INTERACTIVE\n"
+            f"turns only — it is NOT yet read by scheduled cognition\n"
+            f"(reflection / weekly / dream); see issue #485. Remove this\n"
+            f"caveat when #485 closes. An unedited seed adds nothing to the\n"
+            f"prompt. -->\n"
+        )
     return (
         f"---\n"
         f"profile: {profile_name}\n"

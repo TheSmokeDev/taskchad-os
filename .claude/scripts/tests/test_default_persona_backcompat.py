@@ -342,7 +342,7 @@ def test_cell_d_windows_path_resolve_is_idempotent(
         ("config.REFLECTION_STATE_FILE", "reflection-state.json"),
         ("config.WEEKLY_STATE_FILE", "weekly-state.json"),
         ("config.DREAM_STATE_FILE", "dream-state.json"),
-        ("config.example_scout_STATE_FILE", "example_scout-state.json"),
+        ("config.upstream_watch_STATE_FILE", "upstream_watch-state.json"),
     ],
 )
 def test_state_files_are_under_state_dir(
