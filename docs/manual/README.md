@@ -67,6 +67,8 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 | Homie Dashboard Framework | Canonical operator shell | [homie-dashboard-framework](features/homie-dashboard-framework.md) | `dashboard/`, `/mission`, `/teams`, `/browser`, `/mobile` |
 | Operating Room | Product slice implemented | [operating-room](features/operating-room.md) | `/teams`, `/api/team/operating-room/run` |
 | Capability Gateway | Read-only v1 implemented | [capability-gateway](features/capability-gateway.md) | `/capabilities`, `/api/capabilities/status` |
+| Capability Plugin Kernel | Runtime foundation implemented; v1.7.0 release target, disabled fixture only, no production wiring | [capability-plugin-kernel](features/capability-plugin-kernel.md) | Python runtime boundary API; operator surfaces are later slices |
+| Hermes Talk Capability-Kernel Port | Cross-runtime port contract documented; no Hermes hot lifecycle claimed | [hermes-talk-capability-port](features/hermes-talk-capability-port.md) | `hermes-talk` `plugin.yaml`, `PluginContext`, `talk_capabilities`, doctor/status |
 | Desktop v0 | Dashboard-first Electron app + unpacked and portable artifacts | [desktop-v0](features/desktop-v0.md) | `thehomie desktop --shell`, `dashboard/desktop` |
 | Desktop Dev Launcher | Windows-first dev launcher | [desktop-dev-launcher](features/desktop-dev-launcher.md) | `thehomie desktop` |
 | Runtime Status And Model Control | Active baseline | [runtime-status-model-control](features/runtime-status-model-control.md) | `/provider`, `/model`, status/doctor |

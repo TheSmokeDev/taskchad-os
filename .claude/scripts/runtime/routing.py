@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 
 from . import base as _base
 from .base import RuntimeRequest
@@ -138,6 +139,21 @@ def resolve_runtime_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
 def resolve_generic_runtime_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
     """Resolve profiles for the generic runtime lane only."""
 
+    return list(iter_generic_runtime_profiles(request))
+
+
+def iter_generic_runtime_profiles(request: RuntimeRequest) -> Iterator[RuntimeProfile]:
+    """Yield generic-lane profiles lazily in effective route order.
+
+    Building a subprocess-backed profile can perform a synchronous auth probe
+    (for example, ``codex login status``).  The execution lane must therefore
+    stop profile discovery as soon as a carrying preferred provider succeeds;
+    eagerly constructing every unused fallback would block the async hot path
+    before the first adapter was contacted.  The list-returning public resolver
+    above remains a compatibility wrapper for diagnostics and callers that
+    explicitly need the complete configured inventory.
+    """
+
     provider_order = _generic_provider_order_for_request(request)
     if request.model_only:
         # Health selection happens before the lane router can ask adapters for
@@ -148,16 +164,35 @@ def resolve_generic_runtime_profiles(request: RuntimeRequest) -> list[RuntimePro
         # already bounded, so return the complete configured route here; the
         # lane router still skips every adapter without a literal guarantee and
         # records fresh health from the actual attempt.
-        return _build_profiles(
+        yield from _iter_profiles(
             provider_order,
             request,
             respect_health=False,
             ignore_primary_health=False,
         )
-    return _resolve_profiles(
+        return
+
+    yielded_healthy = False
+    for profile in _iter_profiles(
         provider_order,
         request,
+        respect_health=True,
         ignore_primary_health=bool(_preferred_generic_provider(request)),
+    ):
+        yielded_healthy = True
+        yield profile
+
+    if yielded_healthy:
+        return
+
+    # Preserve the existing physical-health retry contract: only when the
+    # healthy pass produced no configured profile at all do we expose the same
+    # route again without the cooldown filter.
+    yield from _iter_profiles(
+        provider_order,
+        request,
+        respect_health=False,
+        ignore_primary_health=False,
     )
 
 
@@ -202,11 +237,34 @@ def _provider_order_for_request(request: RuntimeRequest) -> tuple[str, ...]:
 
 
 def _generic_provider_order_for_request(request: RuntimeRequest) -> tuple[str, ...]:
+    carries_caller_tools = _base.request_carries_tools(request)
     preferred_provider = _preferred_generic_provider(request)
     if preferred_provider:
+        # An operator provider choice is route ORDER, not exclusive
+        # eligibility, for a turn that carries caller-supplied schemas.
+        #
+        # Collapsing the route to the single preferred provider here happens
+        # UPSTREAM of `lane_router._adapter_carries_tool_defs`, so a preferred
+        # provider that cannot carry schemas left the request with nowhere to
+        # go: the capability gate correctly skipped the only candidate and the
+        # turn died as a transport failure even though a carrying fallback was
+        # configured and permitted. The operator asked for a provider, not for
+        # their equipped tools to be dropped.
+        #
+        # The preferred provider stays FIRST, so a carrying preference still
+        # wins immediately and never reaches the appended candidates. Nothing
+        # is widened for anyone else: the expansion applies only when the
+        # request carries caller definitions AND its own contract already
+        # permits fallback. `allow_fallback=False` and resume both keep the
+        # exact single-provider route they have today.
+        #
+        # `GENERIC_CALLER_TOOLS_ROUTE` is the FULL generic pool, so this is the
+        # same candidate set the unpinned branch below resolves to — the pin
+        # only moves one provider to the front of it.
+        if carries_caller_tools and _can_fallback(request):
+            return _dedupe_order([preferred_provider, *GENERIC_CALLER_TOOLS_ROUTE])
         return (preferred_provider,)
 
-    carries_caller_tools = _base.request_carries_tools(request)
     override = _generic_route_override_for_task(
         request.task_name,
         capability=request.capability,
@@ -236,7 +294,24 @@ def _build_profiles(
     respect_health: bool,
     ignore_primary_health: bool,
 ) -> list[RuntimeProfile]:
-    resolved: list[RuntimeProfile] = []
+    return list(
+        _iter_profiles(
+            provider_order,
+            request,
+            respect_health=respect_health,
+            ignore_primary_health=ignore_primary_health,
+        )
+    )
+
+
+def _iter_profiles(
+    provider_order: tuple[str, ...],
+    request: RuntimeRequest,
+    *,
+    respect_health: bool,
+    ignore_primary_health: bool,
+) -> Iterator[RuntimeProfile]:
+    """Build profiles one at a time so unused fallbacks stay undiscovered."""
 
     for index, provider in enumerate(provider_order):
         prefix = "primary" if index == 0 else f"fallback{index}"
@@ -246,9 +321,7 @@ def _build_profiles(
         if respect_health and not (ignore_primary_health and index == 0):
             if not is_profile_available(profile):
                 continue
-        resolved.append(profile)
-
-    return resolved
+        yield profile
 
 
 def _route_override_for_task(task_name: str) -> tuple[str, ...]:
@@ -305,7 +378,17 @@ def _preferred_generic_provider(request: RuntimeRequest) -> str | None:
     provider = selection.generic_provider
     if provider is None:
         return None
-    if provider in _allowed_generic_providers_for_capability(request.capability):
+    # Same allowlist the route overrides use, asked with the same question.
+    # Omitting `carries_caller_tools` here dropped an operator pin on exactly
+    # the providers that CAN carry schemas: kimi sits outside
+    # _GENERIC_TOOL_PROVIDER_SET, so a pinned kimi on a caller-tools
+    # TOOL_REASONING turn resolved to None and fell back to the unpinned route
+    # — where kimi is fifth. The pin was not refused, it was silently demoted.
+    allowed = _allowed_generic_providers_for_capability(
+        request.capability,
+        carries_caller_tools=_base.request_carries_tools(request),
+    )
+    if provider in allowed:
         return provider
     return None
 

@@ -39,6 +39,7 @@ is always authoritative and may include more than this table.
 | "fix vault health", "vault A-grade" | `archon-vault-a-grade` | Fixes the tracked Obsidian vaults to a health target in parallel, then runs a verification pass. |
 | "run the clutch gates on this PRD" | `archon-clutch` | The multi-gate review→implement pipeline: adversarial review → fix → parallel judges → synthesize → reality-check gate → execute → validate. See `intent-prd-and-clutch.md` for the full gate model. |
 | "implement this one bounded PRP" | `implement-prp` | Linked-worktree-only, test-first PRP delivery with preflight/reconnaissance gates, focused and regression tests, four reviews, exact-diff packaging, and separate plan/publish approvals. It opens a PR only after final approval and never auto-merges. |
+| "run one PIV ticket with Codex only" after explicit Claude/Kimi quota confirmation | `epic-piv-ticket-codex-adversarial` | Codex implements, deterministic tests rerun, and a separate Codex xhigh read-only session adversarially gates the diff. Same-vendor independent-session review only; draft PR, never merge. |
 
 Rule of thumb: reach for `archon-ralph-dag` when you trust the spec and want it
 built end-to-end; reach for `archon-piv-loop` when you want to approve the plan

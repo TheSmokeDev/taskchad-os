@@ -498,6 +498,18 @@ def _tool_capabilities(
 
 
 def _transport_axis() -> tuple[AxisReadiness, str, tuple[str, ...]]:
+    """Caller-tool transport truth for the currently selected lane.
+
+    Returns ``(axis, selected_lane, selected_providers)``.
+
+    ``selected_providers`` is the CONFIGURED candidate order, unchanged — it
+    answers "what route did this box resolve", which is what an operator
+    debugging a pin needs to see. The executable subset is deliberately NOT
+    folded into it (that would silently change the field's meaning for every
+    existing consumer); it is published beside the candidates as the
+    ``carrying_providers`` / ``skipped_noncarrying`` evidence pair.
+    """
+
     from runtime import lane_router, tool_registry
 
     schema = tool_registry.build_tool_schema(
@@ -526,7 +538,9 @@ def _transport_axis() -> tuple[AxisReadiness, str, tuple[str, ...]]:
         )
 
     candidates: list[dict[str, Any]] = []
-    carrying = 0
+    carrying_providers: list[str] = []
+    skipped_noncarrying: list[str] = []
+    probe_errors: list[dict[str, str]] = []
     reasons: list[str] = []
     providers: list[str] = []
     for candidate in probe.candidates:
@@ -534,43 +548,70 @@ def _transport_axis() -> tuple[AxisReadiness, str, tuple[str, ...]]:
         providers.append(provider)
         carries = candidate.carries_caller_tools
         if candidate.error:
+            # A probe that FAILED is an anomaly, not a routine exclusion: the
+            # adapter could not even be constructed. It stays in `reasons` at
+            # every status so the compact `doctor` render (which shows only the
+            # first reason per axis) cannot hide a broken adapter behind a
+            # healthy fallback.
             reasons.append(
                 _safe_reason(
                     f"provider {provider} caller-tool probe failed: "
                     f"{candidate.error}"
                 )
             )
-        if carries:
-            carrying += 1
-        else:
-            reasons.append(
-                f"provider {provider} cannot execute caller-supplied tool definitions"
+            probe_errors.append(
+                {"provider": provider, "error": _safe_reason(str(candidate.error))}
             )
+        if carries:
+            carrying_providers.append(provider)
+        else:
+            skipped_noncarrying.append(provider)
         candidates.append(
             {
                 "provider": provider,
                 "carries_caller_tools": carries,
             }
         )
-    if not probe.candidates:
-        reasons.append(
-            f"selected lane {probe.lane} has no configured runtime profile"
-        )
-    if probe.candidates and carrying == len(probe.candidates):
+
+    carrying = len(carrying_providers)
+    # Readiness describes the EXECUTABLE route, not the configured one.
+    #
+    # `lane_router` excludes every noncarrying adapter BEFORE provider contact,
+    # so a configured text-only fallback sitting behind a carrier costs the
+    # equipped turn nothing — it is never offered the request. Grading that
+    # route PARTIAL reported a degradation the runtime does not have, and every
+    # equipped persona with a legitimate text fallback configured looked
+    # damaged. One executable carrier is a working route; zero is a blocked
+    # one. There is no partial state between them.
+    if carrying:
         status = "READY"
-    elif carrying:
-        status = "PARTIAL"
     else:
         status = "BLOCKED"
+        if not probe.candidates:
+            reasons.append(
+                f"selected lane {probe.lane} has no configured runtime profile"
+            )
+        # Only when nothing carries are the noncarriers the BLOCKING reason.
+        reasons.extend(
+            f"provider {provider} cannot execute caller-supplied tool definitions"
+            for provider in skipped_noncarrying
+        )
     return (
         AxisReadiness(
             status=status,
             reasons=tuple(dict.fromkeys(reasons)),
             evidence={
                 "selected_lane": probe.lane,
+                # `candidates` keeps every CONFIGURED candidate in route order;
+                # the two lists below split it into the executable carriers and
+                # the candidates execution will skip, so an operator can read
+                # the effective route without re-deriving it.
                 "candidate_count": len(candidates),
                 "carrying_count": carrying,
                 "candidates": candidates,
+                "carrying_providers": carrying_providers,
+                "skipped_noncarrying": skipped_noncarrying,
+                "probe_errors": probe_errors,
             },
         ),
         probe.lane,

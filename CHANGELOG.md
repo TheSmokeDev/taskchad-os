@@ -13,6 +13,48 @@ context. They are not public release tags unless a matching public tag exists.
 
 ---
 
+## The Homie v1.7.0
+
+**Release Date:** August 22, 2026
+
+> The capability-kernel release: equipped tool turns now follow one truthful
+> lane-first transport contract, with a secure plugin lifecycle foundation for
+> the capability adapters that follow.
+
+### Highlights
+
+- **Universal Caller-Tool Transport** — equipped turns exclude adapters that
+  cannot carry the registered schema, preserve no-fallback policy, and report
+  readiness from the route that can actually execute the request.
+- **Strict Capability Manifests** — versioned, closed manifests and import-free
+  discovery validate plugin identity, compatibility, contributions, sources,
+  and replacement conflicts before code is loaded.
+- **Transactional Plugin Lifecycle** — enable/load and disable/unload apply at
+  turn boundaries with immutable snapshots, reverse dependency disposal,
+  atomic publication, crash-safe receipts, deterministic recovery, and honest
+  `restart_required` state when cleanup cannot be proven.
+- **Frozen Executable Authority** — accepted plugin code and relative imports
+  are bound to captured, bounded artifact bytes so validation and execution
+  cannot silently diverge.
+- **Operator Documentation** — the manual now maps the kernel, the existing
+  persona grant/tool-dispatch boundary, rollback, verification, and future
+  adapter/operator slices.
+- **Hermes Port Contract** — a sibling guide maps the kernel's learned
+  invariants onto the `hermes-talk` plugin:
+  strict discovery, frozen artifacts, authority separation, atomic
+  publication, reverse disposal, journaled recovery, and lane-honest proof,
+  without claiming shared internals or a completed Hermes hot lifecycle.
+
+### Safety Contract
+
+- The bundled fixture is disabled and inert by default. This release adds no
+  production boot wiring and activates no plugin.
+- Plugin reach never replaces persona grants, tool scope, dispatcher
+  authorization, carrier eligibility, one-time elevation, or write-action
+  approval gates.
+- Configured lifecycle state that cannot be proven clean fails closed or moves
+  to `restart_required`; receipts are bounded and redacted.
+
 ## The Homie v1.1.2
 
 **Release Date:** July 15, 2026

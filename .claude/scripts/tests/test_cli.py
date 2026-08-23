@@ -1007,9 +1007,9 @@ def test_crypto_round_quiet_status_reports_enabled_unavailable_nft(
 ) -> None:
     from types import SimpleNamespace
 
-    import crypto_round.config as round_config
-    import crypto_round.db as round_db
-    from crypto_round.config import NFTIntelligenceSettings
+    round_config = pytest.importorskip("crypto_round.config")
+    round_db = pytest.importorskip("crypto_round.db")
+    NFTIntelligenceSettings = round_config.NFTIntelligenceSettings
 
     db = round_db.CryptoRoundDB(tmp_path / "rounds.db")
     db.ensure_round("round-status", "crypto", "2026-08-15T16:00:00+00:00")

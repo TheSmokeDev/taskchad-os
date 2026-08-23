@@ -116,6 +116,62 @@ from the fixed runtime package root, through the lane router's public read-only
 probe. Integration capability rows discover caller-tool wrappers from live
 registry metadata and separately verify handler presence plus persona scope.
 
+### Transportable means one executable carrier, not a uniform route
+
+The `transportable` axis describes the **executable** route, not the configured
+one. It is `READY` when at least one candidate in the selected lane literally
+carries caller schemas, and `BLOCKED` when none does. There is no partial state
+between them, because execution has none: the lane router excludes every
+noncarrying adapter before provider contact, so a text-only fallback sitting
+behind a carrier costs an equipped turn nothing.
+
+Grading a mixed route `PARTIAL` reported a degradation the runtime does not
+have, and made every persona with a legitimate text fallback configured look
+damaged. The skipped candidates did not disappear — they moved from readiness
+reasons to evidence:
+
+| Evidence key | Meaning |
+|---|---|
+| `candidates` | Every configured candidate, in route order, with its carriage verdict |
+| `carrying_providers` | The executable subset — what an equipped turn can actually reach |
+| `skipped_noncarrying` | Configured candidates execution will skip without contact |
+| `probe_errors` | Candidates whose adapter could not be constructed at all |
+
+`selected_providers` keeps its original meaning: the configured candidate order.
+It is deliberately not narrowed to the carriers, so an operator debugging a
+provider pin still sees the route the box resolved.
+
+Two things this axis does **not** do. It does not mask any other axis — a
+declared tool with no registered handler keeps `callable` red and the persona
+out of `READY` regardless of transport. And a probe that *failed* stays in
+`reasons` at every status, because a broken adapter is an anomaly rather than a
+routine exclusion and the compact `doctor` render shows only the first reason
+per axis.
+
+A carrying adapter can still fail at run time for auth or quota. That is
+runtime health, reported through provider status and runtime auth attention —
+not transport incapability, and it does not belong on this axis.
+
+### Caller-schema budget baseline for disclosure decisions
+
+Issue #529 recorded the durable input for the progressive-disclosure decision
+in #533. The measurement uses the real `build_persona_tool_payload` assembly,
+compact key-sorted JSON, and `ceil(serialized characters / 4)` as the documented
+dependency-free token approximation. These values are asserted in
+`tests/test_tool_transport.py`; an intentional equipment or schema change must
+update the snapshot and review the context-cost delta.
+
+| Equipment | Tools | Serialized characters | Approx. tokens |
+|---|---:|---:|---:|
+| `safe_core` | 5 | 1,895 | 474 |
+| `ai_engineering` | 9 | 3,042 | 761 |
+| `founder_operations` | 6 | 2,413 | 604 |
+| `seo_geo_read` | 21 | 6,424 | 1,606 |
+
+This is a baseline, not an automatic activation threshold. Ticket #533 owns
+the ten-percent decision and must compare deferrable schema cost against the
+smallest supported context window before enabling progressive disclosure.
+
 `thehomie status --json`, human status, and `thehomie doctor` retain the full
 axis and surface vector. Doctor treats `PARTIAL`, `BLOCKED`, and `ERROR`
 compiled profiles as attention; it does not turn a single passing axis into a

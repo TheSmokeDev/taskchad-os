@@ -1,0 +1,30 @@
+{
+  "manifestVersion": 2,
+  "id": "homie.capability-fixture",
+  "name": "Capability Lifecycle Fixture",
+  "version": "1.0.0",
+  "description": "Public-safe in-memory fixture for transactional capability lifecycle proof.",
+  "source": "bundled",
+  "entrypoint": "plugin:register",
+  "requirements": {
+    "coreVersion": ">=1.6,<2",
+    "env": [],
+    "plugins": []
+  },
+  "contributions": [
+    {
+      "id": "homie.fixture.base",
+      "type": "generic",
+      "dependsOn": []
+    },
+    {
+      "id": "homie.fixture.dependent",
+      "type": "generic",
+      "dependsOn": ["homie.fixture.base"]
+    }
+  ],
+  "enabledByDefault": false,
+  "replaces": null,
+  "contractVersion": 1,
+  "export": "public"
+}

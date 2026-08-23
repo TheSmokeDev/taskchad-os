@@ -329,31 +329,211 @@ def _no_operator_pin(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def test_a_pinned_provider_still_wins_over_the_caller_tools_route(monkeypatch):
-    """An explicit operator pin is honored even for caller-tools requests.
+def _pin_generic_provider(monkeypatch, provider: str) -> None:
+    """Pin the canonical selection resolver, not whichever env var leaked in.
 
-    Codex now carries caller definitions through app-server, but routing still
-    must not silently override an explicit operator pin. Mock the canonical
-    selection resolver rather than whichever environment variable happened to
-    be active before this test process started.
+    `_generic_provider_order_for_request` reads `resolve_runtime_selection`
+    through the `routing` module namespace, so patching the module attribute is
+    what actually reaches the code under test.
     """
     from runtime import routing
-    from runtime.routing import _generic_provider_order_for_request
 
     monkeypatch.setattr(
         routing,
         "resolve_runtime_selection",
-        lambda: SimpleNamespace(
-            lane="generic_runtime",
-            generic_provider="openai-codex",
-        ),
+        lambda: SimpleNamespace(lane="generic_runtime", generic_provider=provider),
     )
+
+
+def test_a_pinned_provider_still_leads_the_caller_tools_route(monkeypatch):
+    """An explicit operator pin is ORDER, and it still wins when it carries.
+
+    Codex carries caller definitions through app-server, so a pinned Codex is
+    offered the turn first and the appended candidates are never reached. What
+    changed in #529 is only what happens when the pin CANNOT carry — see the
+    fall-through test below. The guarantee asserted here is the one the
+    rollback criteria name: a carrying preferred provider is still selected
+    first.
+    """
+    from runtime.routing import _generic_provider_order_for_request
+
+    _pin_generic_provider(monkeypatch, "openai-codex")
     order = _generic_provider_order_for_request(
         _request(tool_defs=[GET_WEATHER], capability=TOOL_REASONING, task_name="persona_turn")
     )
-    assert order == ("openai-codex",), (
-        "an explicit pin must not be silently overridden by the caller-tools route"
+    assert order[0] == "openai-codex", (
+        "an explicit pin must remain the first candidate offered the turn"
     )
+
+
+def test_a_noncarrying_pin_falls_through_to_a_carrying_candidate(monkeypatch):
+    """The #529 starvation: a pin must not delete the operator's own tools.
+
+    Gemini CLI has no caller-schema surface at all. Collapsing the route to it
+    happened UPSTREAM of `lane_router._adapter_carries_tool_defs`, so the gate
+    correctly skipped the only candidate and the equipped turn died as a
+    transport failure — with a perfectly good carrying fallback configured and
+    permitted. The pin stays first (it is still the operator's preference, and
+    the gate will skip it without contact); a carrying candidate must exist
+    behind it.
+    """
+    from runtime.routing import _generic_provider_order_for_request
+
+    _pin_generic_provider(monkeypatch, "gemini-cli")
+    order = _generic_provider_order_for_request(
+        _request(tool_defs=[GET_WEATHER], capability=TOOL_REASONING, task_name="persona_turn")
+    )
+
+    assert order[0] == "gemini-cli", "the operator's preference must stay first"
+    assert "kimi" in order, (
+        f"a noncarrying pin resolved to {order} — the equipped turn has no "
+        "carrying candidate to fall through to"
+    )
+    assert len(order) == len(set(order)), f"route contains duplicates: {order}"
+
+
+def test_a_pinned_carrying_provider_outside_the_tool_set_is_not_demoted(monkeypatch):
+    """A pin the capability allowlist used to discard on the wrong question.
+
+    kimi carries caller schemas but sits outside `_GENERIC_TOOL_PROVIDER_SET`
+    (it runs no agentic tools of its own). `_preferred_generic_provider` asked
+    the allowlist WITHOUT `carries_caller_tools`, so a pinned kimi on a
+    caller-tools TOOL_REASONING turn resolved to None and fell back to the
+    unpinned route — where kimi is fifth. The pin was not refused, it was
+    silently demoted behind four providers that cannot serve the request.
+    """
+    from runtime.routing import _generic_provider_order_for_request
+
+    _pin_generic_provider(monkeypatch, "kimi")
+    order = _generic_provider_order_for_request(
+        _request(tool_defs=[GET_WEATHER], capability=TOOL_REASONING, task_name="persona_turn")
+    )
+    assert order[0] == "kimi", f"a pinned carrying provider was demoted: {order}"
+
+
+@pytest.mark.parametrize(
+    "kw,label",
+    [
+        ({"allow_fallback": False}, "allow_fallback=False"),
+        ({"resume": "session-abc"}, "resume contract"),
+    ],
+)
+def test_a_pin_stays_the_only_candidate_when_fallback_is_forbidden(
+    monkeypatch, kw, label
+):
+    """Route expansion is bounded by the request's OWN fallback contract.
+
+    A caller who said "this provider or nothing" gets exactly that, and fails
+    honestly through the typed transport error rather than being silently
+    widened onto a provider they did not authorize.
+    """
+    from runtime.routing import _generic_provider_order_for_request
+
+    _pin_generic_provider(monkeypatch, "gemini-cli")
+    order = _generic_provider_order_for_request(
+        _request(
+            tool_defs=[GET_WEATHER],
+            capability=TOOL_REASONING,
+            task_name="persona_turn",
+            **kw,
+        )
+    )
+    assert order == ("gemini-cli",), f"{label} was widened to {order}"
+
+
+@pytest.mark.asyncio
+async def test_run_with_runtime_lanes_keeps_resume_pinned_through_real_routing(
+    monkeypatch, _registered_get_weather
+):
+    """#529 gate finding: `run_with_runtime_lanes` widened a resume-bound turn.
+
+    `test_a_pin_stays_the_only_candidate_when_fallback_is_forbidden` above
+    calls `_generic_provider_order_for_request()` directly on a request that
+    still carries `resume` — it never exercises the strip
+    `run_with_runtime_lanes` performs before calling `_resolve_lane_profiles`.
+    That strip clears `resume` to satisfy generic adapters (every adapter's
+    own `supports()` refuses a non-None resume), but `_can_fallback` reads
+    that SAME field, so clearing it alone silently re-permitted the full
+    caller-tool fallback route for a request whose resume contract says it
+    must stay pinned.
+
+    Here the resolver runs UNMOCKED end to end: a resume-bound equipped turn
+    pinned to a noncarrying provider (`gemini-cli`) must fail through the
+    documented typed transport error, never reach a carrying candidate behind
+    it.
+    """
+    from runtime import routing
+    from runtime.base import RUNTIME_LANE_GENERIC, RuntimeResult
+
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+    _pin_generic_provider(monkeypatch, "gemini-cli")
+
+    contacted: list[str] = []
+
+    class _AnyProviderAdapter:
+        def __init__(self, provider: str) -> None:
+            self._provider = provider
+
+        def supports_caller_tool_defs(self) -> bool:
+            # Every candidate the (buggy) widened route would append behind
+            # gemini-cli carries — so a regression here reaches and succeeds
+            # on one of them instead of exhausting to the typed error.
+            return self._provider != "gemini-cli"
+
+        def supports(self, request) -> bool:
+            return True
+
+        async def run(self, request) -> RuntimeResult:
+            contacted.append(self._provider)
+            return RuntimeResult(
+                text="ok",
+                runtime_lane=RUNTIME_LANE_GENERIC,
+                provider=self._provider,
+                model="fake-1",
+            )
+
+    monkeypatch.setattr(
+        lane_router, "_adapter_for", lambda profile: _AnyProviderAdapter(profile.provider)
+    )
+
+    request = _request(
+        tool_defs=[GET_WEATHER],
+        capability=TOOL_REASONING,
+        task_name="persona_turn",
+        runtime_lane=RUNTIME_LANE_GENERIC,
+        resume="session-abc",
+        tool_dispatch=lambda name, args: "18C",
+    )
+
+    with pytest.raises(RuntimeCallerToolTransportError):
+        await lane_router.run_with_runtime_lanes(request)
+
+    assert contacted == [], (
+        f"resume-bound pin was widened onto {contacted} instead of failing "
+        "through the single-provider contract the resume value must enforce"
+    )
+
+
+def test_a_pin_is_not_widened_for_turns_that_carry_no_caller_tools(monkeypatch):
+    """The expansion is surgical — no caller definitions, no behavior change.
+
+    Text turns and provider-native tool turns keep the single-provider pin
+    they have today. Widening those would push every ordinary turn at
+    providers the operator deliberately routed away from.
+    """
+    from runtime.routing import _generic_provider_order_for_request
+
+    _pin_generic_provider(monkeypatch, "gemini-cli")
+
+    for request in (
+        _request(capability=TEXT_REASONING, task_name="persona_turn"),
+        _request(capability=TOOL_REASONING, task_name="persona_turn"),
+        _request(
+            capability=TOOL_REASONING, task_name="persona_turn", allowed_tools=["Bash"]
+        ),
+        _request(tool_defs=[], capability=TOOL_REASONING, task_name="persona_turn"),
+    ):
+        assert _generic_provider_order_for_request(request) == ("gemini-cli",)
 
 
 def test_caller_tools_request_is_offered_a_carrying_provider(_no_operator_pin):
@@ -696,3 +876,106 @@ async def test_tool_turn_with_no_carrying_lane_fails_loudly(monkeypatch, _regist
     assert "caller-supplied tool definitions" in message, (
         "the error must name the real reason, not blame the capability tier"
     )
+
+
+# ---------------------------------------------------------------------------
+# Caller-schema token baseline (#529 task 7 -> input to #533)
+# ---------------------------------------------------------------------------
+#
+# #533 decides whether progressive disclosure (`tool_search`/`tool_describe`/
+# `tool_call`) is worth building, and its decision rule is a MEASUREMENT: build
+# it only when deferrable schemas consume at least ten percent of the smallest
+# supported context window. That measurement has to come from the real
+# assembly path, not an estimate, so it is recorded here while #529 already has
+# the equipment sets in hand.
+#
+# Method, deliberately dependency-free and deterministic:
+#   * assemble through the REAL `build_persona_tool_payload` (the same call the
+#     cabinet turn makes), so the numbers describe shipped equipment;
+#   * serialize compact + key-sorted, so byte counts are stable across runs and
+#     Python versions;
+#   * approximate tokens as ceil(chars / 4) -- the standard rough ratio for
+#     JSON/English. Adding a real tokenizer would put a production dependency in
+#     the tree to answer a question that only needs an order of magnitude.
+#
+# This test RECORDS and guards determinism. It does not activate disclosure and
+# does not assert a threshold: the threshold is #533's call, and hardcoding one
+# here would silently pre-commit that ticket's decision.
+
+BASELINE_EQUIPMENT: tuple[tuple[str, dict], ...] = (
+    ("safe_core", {"toolsets": ["safe_core"]}),
+    ("ai_engineering", {"toolsets": ["ai_engineering"]}),
+    ("founder_operations", {"toolsets": ["founder_operations"]}),
+    ("seo_geo_read", {"toolsets": ["seo_geo_read"]}),
+)
+
+# Durable #529 snapshot consumed by #533.  Update these values only alongside
+# an intentional equipment/schema change and review the resulting context-cost
+# delta.  Shape: (tool_count, compact_sorted_json_chars, ceil(chars / 4)).
+EXPECTED_CALLER_SCHEMA_BASELINE: dict[str, tuple[int, int, int]] = {
+    "safe_core": (5, 1895, 474),
+    "ai_engineering": (9, 3042, 761),
+    "founder_operations": (6, 2413, 604),
+    "seo_geo_read": (21, 6424, 1606),
+}
+
+
+def _measure_caller_schema_bytes(config: dict) -> tuple[int, int, int]:
+    """Return ``(tool_count, chars, approx_tokens)`` for one equipment set."""
+    import json
+    import math
+
+    from runtime.persona_tools import build_persona_tool_payload
+
+    payload = build_persona_tool_payload("schema-baseline-probe", config)
+    if payload is None:
+        return 0, 0, 0
+    definitions, _dispatch = payload
+    serialized = json.dumps(definitions, separators=(",", ":"), sort_keys=True)
+    return len(definitions), len(serialized), math.ceil(len(serialized) / 4)
+
+
+def test_caller_schema_token_baseline_is_measurable_and_deterministic(capsys):
+    """Record the real per-equipment schema cost; prove the measure is stable.
+
+    Non-vacuous on two axes: every listed equipment set must actually assemble
+    definitions through the real registry (a broken toolset closure returns
+    None and fails here), and the same set measured twice must produce the
+    identical byte count (an unstable measure is not a baseline).
+    """
+    rows = []
+    observed: dict[str, tuple[int, int, int]] = {}
+    for label, config in BASELINE_EQUIPMENT:
+        count, chars, approx_tokens = _measure_caller_schema_bytes(config)
+        assert count > 0, (
+            f"equipment {label!r} assembled no caller definitions - the "
+            "baseline cannot be recorded from an empty scope"
+        )
+        assert chars > 0
+        again = _measure_caller_schema_bytes(config)
+        assert again == (count, chars, approx_tokens), (
+            f"equipment {label!r} measured differently on a second pass "
+            f"({again} vs {(count, chars, approx_tokens)}) - a nondeterministic "
+            "serialization cannot serve as a budget baseline"
+        )
+        rows.append((label, count, chars, approx_tokens))
+        observed[label] = (count, chars, approx_tokens)
+
+    assert observed == EXPECTED_CALLER_SCHEMA_BASELINE, (
+        "caller-schema budget drifted; update the checked-in #529 snapshot "
+        "and document the intentional equipment/schema change for #533: "
+        f"observed={observed!r}"
+    )
+
+    # A strictly larger toolset closure cannot cost less than the safe floor.
+    floor = next(row for row in rows if row[0] == "safe_core")
+    for label, _count, chars, _tokens in rows:
+        assert chars >= floor[2], (
+            f"{label!r} serialized smaller than the safe_core floor - the "
+            "toolset closure is not resolving its includes"
+        )
+
+    with capsys.disabled():
+        print("\n#529 caller-schema baseline (compact JSON, approx tokens = chars/4):")
+        for label, count, chars, approx_tokens in rows:
+            print(f"  {label:<20} tools={count:<4} chars={chars:<7} approx_tokens={approx_tokens}")

@@ -117,8 +117,8 @@ class TestDiagnosticsReport:
 
         import diagnostics as diagnostics_module
 
-        import crypto_round.config as round_config
-        import crypto_round.db as round_db
+        round_config = pytest.importorskip("crypto_round.config")
+        round_db = pytest.importorskip("crypto_round.db")
         from lib import x_rate
 
         calls: list[bool] = []

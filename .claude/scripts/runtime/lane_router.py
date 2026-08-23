@@ -19,6 +19,7 @@ import asyncio
 import logging
 import math
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 from security import kill_switches
@@ -48,7 +49,7 @@ from .profiles import (
     RuntimeProfile,
     build_profile_for_provider,
 )
-from .routing import resolve_generic_runtime_profiles
+from .routing import iter_generic_runtime_profiles, resolve_generic_runtime_profiles
 from .selection import resolve_runtime_selection
 
 _logger = logging.getLogger(__name__)
@@ -232,11 +233,27 @@ def _lane_profiles(lane: str, request: RuntimeRequest) -> list[RuntimeProfile]:
     return list(resolve_generic_runtime_profiles(request))
 
 
-def _resolve_lane_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
+def _iter_lane_profiles(lane: str, request: RuntimeRequest):
+    """Yield execution candidates without constructing unused fallbacks."""
+    if lane == RUNTIME_LANE_CLAUDE_NATIVE:
+        profile = build_profile_for_provider("claude", key_prefix="primary", request=request)
+        if profile:
+            yield profile
+        return
+
+    yield from iter_generic_runtime_profiles(request)
+
+
+def _resolve_lane_profiles(request: RuntimeRequest) -> Iterable[RuntimeProfile]:
     lane = resolve_runtime_lane(request)
-    profiles = _lane_profiles(lane, request)
     if not request.model_only:
-        return profiles
+        # Preserve this long-standing execution/test seam while returning the
+        # generic route lazily.  Diagnostics can still consume the iterable to
+        # completion; the runtime loop stops after the first success and never
+        # constructs unused subprocess-backed fallbacks.
+        return _iter_lane_profiles(lane, request)
+
+    profiles = _lane_profiles(lane, request)
 
     # Capability-constrained widening for the model_only contract.
     #
@@ -327,9 +344,24 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
     if lane != RUNTIME_LANE_CLAUDE_NATIVE and request.resume is not None:
         # Runtime resume IDs are Claude-specific. A user-selected generic lane
         # must not be forced back to Claude by a stale Telegram/CLI session.
-        effective_request = replace(request, resume=None)
+        #
+        # Clearing `resume` alone is not enough: `routing._can_fallback` reads
+        # the SAME field to decide whether a resume-bound turn may hop across
+        # providers, so stripping it here silently reopened the full
+        # caller-tool fallback route for a request the resume contract says
+        # must stay pinned (#529 gate finding — reproduced via a noncarrying
+        # pin + `resume` + `allow_fallback=True` resolving to the entire
+        # generic pool instead of a single typed failure). Forcing
+        # `allow_fallback=False` on the effective request preserves the
+        # no-fallback fact the original resume value carried, independent of
+        # the ID itself.
+        effective_request = replace(request, resume=None, allow_fallback=False)
     errors: list[str] = []
 
+    # `_resolve_lane_profiles` is lazy for ordinary generic execution and eager
+    # only for the model-only cross-lane contract.  A carrying preferred
+    # provider can therefore win before an unused subprocess fallback performs
+    # blocking auth discovery (#529).
     for profile in _resolve_lane_profiles(effective_request):
         adapter = _adapter_for(profile)
         if effective_request.model_only and not _adapter_supports_model_only(adapter):

@@ -411,10 +411,19 @@ def test_selected_noncarrying_lane_blocks_transport_without_provider_call(
     assert snapshot.surfaces["discord"].status == "BLOCKED"
 
 
-def test_mixed_fallback_transport_is_partial_not_false_green(
+def test_mixed_fallback_transport_is_ready_because_noncarriers_are_excluded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """#529 — readiness describes the EXECUTABLE route, not the configured one.
+
+    `lane_router` skips every noncarrying adapter BEFORE provider contact, so a
+    text-only fallback sitting behind a carrier costs the equipped turn
+    nothing. Grading that PARTIAL reported a degradation the runtime does not
+    have and made every equipped persona with a legitimate text fallback look
+    damaged. The skipped candidate stays fully visible as evidence — it is just
+    no longer a readiness reason.
+    """
     paths = _write_compiled_profile(tmp_path)
     monkeypatch.setattr(
         lane_router,
@@ -438,12 +447,200 @@ def test_mixed_fallback_transport_is_partial_not_false_green(
 
     snapshot = build_persona_readiness_snapshot(PERSONA_ID, paths=paths)
 
+    transport = snapshot.axes["transportable"]
+    # `selected_providers` keeps its documented meaning: the CONFIGURED route
+    # in order. The executable split lives beside it as evidence.
     assert snapshot.selected_providers == ("claude", "gemini")
-    assert snapshot.axes["transportable"].status == "PARTIAL"
-    assert snapshot.axes["transportable"].evidence["carrying_count"] == 1
+    assert transport.status == "READY"
+    assert transport.evidence["carrying_count"] == 1
+    assert transport.evidence["carrying_providers"] == ["claude"]
+    assert transport.evidence["skipped_noncarrying"] == ["gemini"]
+    assert transport.evidence["candidates"] == [
+        {"provider": "claude", "carries_caller_tools": True},
+        {"provider": "gemini", "carries_caller_tools": False},
+    ]
+    assert transport.reasons == (), (
+        "a skipped noncarrier is evidence, not a readiness reason — leaving it "
+        "in `reasons` leaks it into every interactive surface's reason list"
+    )
+
+
+def test_ready_transport_does_not_mask_a_blocked_callable_axis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#529 — the transport fix must not turn any OTHER axis green.
+
+    A persona whose declared tool has no registered handler is still broken;
+    only the transport axis changed meaning. Without this, "mixed route is
+    READY" could be delivered by accidentally relaxing aggregation.
+    """
+    paths = _write_compiled_profile(tmp_path)
+    monkeypatch.setattr(
+        lane_router,
+        "probe_caller_tool_transport",
+        lambda _request: lane_router.CallerToolTransportProbe(
+            lane="generic_runtime",
+            candidates=(
+                lane_router.CallerToolTransportCandidate(
+                    provider="claude",
+                    carries_caller_tools=True,
+                ),
+                lane_router.CallerToolTransportCandidate(
+                    provider="gemini",
+                    carries_caller_tools=False,
+                ),
+            ),
+        ),
+    )
+    _enable_sheets(monkeypatch)
+    _activate_persona(monkeypatch)
+
+    snapshot = build_persona_readiness_snapshot(PERSONA_ID, paths=paths)
+
+    assert snapshot.axes["transportable"].status == "READY"
+    assert snapshot.axes["callable"].status != "READY", (
+        "this fixture is only meaningful while its declared tool is uncallable "
+        "(#534 owns the handler gap); update the fixture, not the assertion"
+    )
+    assert snapshot.status != "READY"
+
+
+def test_probe_error_stays_visible_even_when_another_candidate_carries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FAILED probe is an anomaly, not a routine exclusion.
+
+    `doctor` renders only the first reason per axis, so an adapter that could
+    not even be constructed must not be demoted to evidence-only just because a
+    healthy fallback exists behind it.
+    """
+    paths = _write_compiled_profile(tmp_path)
+    monkeypatch.setattr(
+        lane_router,
+        "probe_caller_tool_transport",
+        lambda _request: lane_router.CallerToolTransportProbe(
+            lane="generic_runtime",
+            candidates=(
+                lane_router.CallerToolTransportCandidate(
+                    provider="gemini",
+                    carries_caller_tools=False,
+                    error="Unsupported runtime provider: gemini",
+                ),
+                lane_router.CallerToolTransportCandidate(
+                    provider="claude",
+                    carries_caller_tools=True,
+                ),
+            ),
+        ),
+    )
+    _enable_sheets(monkeypatch)
+    _activate_persona(monkeypatch)
+
+    snapshot = build_persona_readiness_snapshot(PERSONA_ID, paths=paths)
+
+    transport = snapshot.axes["transportable"]
+    assert transport.status == "READY"
+    assert any("caller-tool probe failed" in reason for reason in transport.reasons)
+    assert transport.evidence["probe_errors"] == [
+        {"provider": "gemini", "error": "Unsupported runtime provider: gemini"}
+    ]
+
+
+def test_probe_error_secret_is_redacted_in_reasons_and_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Evidence is serialized into `status --json`; it must be scrubbed too."""
+    paths = _write_compiled_profile(tmp_path)
+    secret = "must-not-leak-529"
+    monkeypatch.setattr(
+        lane_router,
+        "probe_caller_tool_transport",
+        lambda _request: lane_router.CallerToolTransportProbe(
+            lane="generic_runtime",
+            candidates=(
+                lane_router.CallerToolTransportCandidate(
+                    provider="kimi",
+                    carries_caller_tools=True,
+                    error=f"bad config KIMI_API_KEY={secret}",
+                ),
+            ),
+        ),
+    )
+    _enable_sheets(monkeypatch)
+    _activate_persona(monkeypatch)
+
+    snapshot = build_persona_readiness_snapshot(PERSONA_ID, paths=paths)
+
+    serialized = json.dumps(snapshot.as_dict())
+    assert secret not in serialized
+    assert "KIMI_API_KEY=<redacted>" in serialized
+
+
+def test_zero_carrying_candidates_block_even_with_many_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#529 — READY needs a CARRIER, never merely a populated route."""
+    paths = _write_compiled_profile(tmp_path)
+    monkeypatch.setattr(
+        lane_router,
+        "probe_caller_tool_transport",
+        lambda _request: lane_router.CallerToolTransportProbe(
+            lane="generic_runtime",
+            candidates=(
+                lane_router.CallerToolTransportCandidate(
+                    provider="gemini",
+                    carries_caller_tools=False,
+                ),
+                lane_router.CallerToolTransportCandidate(
+                    provider="openai-codex-exec",
+                    carries_caller_tools=False,
+                ),
+            ),
+        ),
+    )
+    _enable_sheets(monkeypatch)
+    _activate_persona(monkeypatch)
+
+    snapshot = build_persona_readiness_snapshot(PERSONA_ID, paths=paths)
+
+    transport = snapshot.axes["transportable"]
+    assert transport.status == "BLOCKED"
+    assert transport.evidence["carrying_providers"] == []
+    assert transport.evidence["skipped_noncarrying"] == ["gemini", "openai-codex-exec"]
+    assert len(transport.reasons) == 2, (
+        "with zero carriers every noncarrier IS a blocking reason"
+    )
+    assert snapshot.surfaces["discord"].status == "BLOCKED"
+
+
+def test_empty_route_blocks_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No configured profile at all is a blocked route, not a ready one."""
+    paths = _write_compiled_profile(tmp_path)
+    monkeypatch.setattr(
+        lane_router,
+        "probe_caller_tool_transport",
+        lambda _request: lane_router.CallerToolTransportProbe(
+            lane="generic_runtime",
+            candidates=(),
+        ),
+    )
+    _enable_sheets(monkeypatch)
+    _activate_persona(monkeypatch)
+
+    snapshot = build_persona_readiness_snapshot(PERSONA_ID, paths=paths)
+
+    transport = snapshot.axes["transportable"]
+    assert transport.status == "BLOCKED"
+    assert transport.evidence["carrying_count"] == 0
     assert any(
-        "gemini cannot execute caller-supplied tool definitions" in reason
-        for reason in snapshot.axes["transportable"].reasons
+        "has no configured runtime profile" in reason for reason in transport.reasons
     )
 
 
