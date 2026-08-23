@@ -134,7 +134,7 @@ def _activate_persona(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_snapshot_keeps_six_axes_and_exact_declared_handler_gaps(
+def test_snapshot_keeps_six_axes_and_all_declared_tools_are_callable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -148,7 +148,7 @@ def test_snapshot_keeps_six_axes_and_exact_declared_handler_gaps(
     assert tuple(snapshot.axes) == AXIS_NAMES
     assert snapshot.axes["declared"].status == "READY"
     assert snapshot.axes["transportable"].status == "READY"
-    assert snapshot.axes["callable"].status == "PARTIAL"
+    assert snapshot.axes["callable"].status == "READY"
     assert snapshot.axes["configured"].status == "READY"
     assert snapshot.axes["channel-bound"].status == "READY"
     assert snapshot.axes["scheduler-safe"].status == "READY"
@@ -165,21 +165,18 @@ def test_snapshot_keeps_six_axes_and_exact_declared_handler_gaps(
     capabilities = {row.id: row for row in snapshot.capabilities}
     tool_name = "gh_issue_view"
     row = capabilities[tool_name]
-    assert row.status == "PARTIAL"
+    assert row.status == "READY"
     assert row.axes["declared"] == "READY"
-    assert row.axes["callable"] == "BLOCKED"
+    assert row.axes["callable"] == "READY"
     assert row.axes["scheduler-safe"] == "NOT_APPLICABLE"
     assert row.surfaces["web"] == "NOT_APPLICABLE"
     assert row.surfaces["scheduled"] == "NOT_APPLICABLE"
-    assert any(
-        f"declared tool {tool_name!r} has no registered handler" in reason
-        for reason in row.reasons
-    )
+    assert row.reasons == ()
     sheets = capabilities["sheets.read"]
     assert sheets.kind == "integration"
     assert sheets.axes["configured"] == "READY"
-    assert sheets.axes["callable"] == "PARTIAL"
-    assert any("no persona caller-tool handler" in reason for reason in sheets.reasons)
+    assert sheets.axes["callable"] == "READY"
+    assert sheets.reasons == ()
 
     serialized = json.dumps(snapshot.as_dict(), sort_keys=True)
     assert SECRET_VALUE not in serialized
@@ -476,6 +473,14 @@ def test_ready_transport_does_not_mask_a_blocked_callable_axis(
     READY" could be delivered by accidentally relaxing aggregation.
     """
     paths = _write_compiled_profile(tmp_path)
+    from runtime import tool_registry
+
+    original_get_entry = tool_registry.get_entry
+    monkeypatch.setattr(
+        tool_registry,
+        "get_entry",
+        lambda name: None if name == "gh_issue_view" else original_get_entry(name),
+    )
     monkeypatch.setattr(
         lane_router,
         "probe_caller_tool_transport",
@@ -500,8 +505,7 @@ def test_ready_transport_does_not_mask_a_blocked_callable_axis(
 
     assert snapshot.axes["transportable"].status == "READY"
     assert snapshot.axes["callable"].status != "READY", (
-        "this fixture is only meaningful while its declared tool is uncallable "
-        "(#534 owns the handler gap); update the fixture, not the assertion"
+        "an injected missing handler must remain visible even when transport is ready"
     )
     assert snapshot.status != "READY"
 

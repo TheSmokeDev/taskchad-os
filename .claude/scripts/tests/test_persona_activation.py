@@ -411,7 +411,7 @@ def test_reconcile_refuses_to_restore_missing_identity_from_template(
     assert config_path.read_bytes() == before
 
 
-def test_declared_unavailable_repo_tool_reports_exact_readiness_failure(
+def test_declared_repo_tool_is_callable_after_handler_wiring(
     activation_paths: ProvisionPaths,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,10 +441,8 @@ def test_declared_unavailable_repo_tool_reports_exact_readiness_failure(
 
     assert snapshot.axes["channel-bound"].status == "READY"
     assert github_tool.axes["declared"] == "READY"
-    assert github_tool.axes["callable"] == "BLOCKED"
-    assert github_tool.reasons == (
-        "declared tool 'gh_issue_view' has no registered handler",
-    )
+    assert github_tool.axes["callable"] == "READY"
+    assert github_tool.reasons == ()
     assert "test-only-secret" not in json.dumps(snapshot.as_dict())
 
 

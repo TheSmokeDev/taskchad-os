@@ -415,6 +415,15 @@ def register_tools() -> int:
         _logger.warning("ga4-write-tool registration failed", exc_info=True)
 
     try:
+        # Generic read surfaces for research, repositories, GitHub, and the
+        # visible browser. They reuse existing clients and add no shell escape.
+        from runtime import tool_impl_research_repo
+
+        registered += tool_impl_research_repo.register_tools()
+    except Exception:  # noqa: BLE001
+        _logger.warning("research/repo tool registration failed", exc_info=True)
+
+    try:
         # SEO/GEO owns its direct, read-only GSC/GA4/Firecrawl/OpenSEO wrappers.
         # Keeping them out of the generic read set avoids granting research
         # credentials to unrelated personas.

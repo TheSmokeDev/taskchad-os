@@ -13,6 +13,38 @@ context. They are not public release tags unless a matching public tag exists.
 
 ---
 
+## The Homie v1.7.1
+
+**Release Date:** August 22, 2026
+
+> The equipped-agents follow-up: declared research, repository, browser, and
+> business-read capabilities now execute through real bounded handlers.
+
+### Highlights
+
+- **AI Engineer And Founder Readiness** — `ai-engineer` and
+  `founder-operator` now resolve every assigned tool to a callable handler and
+  report `READY` against the operator's real configuration and channel
+  bindings.
+- **Real Read Surfaces** — public Exa/Firecrawl research, GitHub issue/PR/run
+  reads, tracked-repository search, visible-browser navigation/console reads,
+  and bounded Google Sheets reads reuse the existing framework integrations.
+- **Authority Preserved** — handlers remain owned by explicit toolsets;
+  `business_read` is not inherited by generic research, equipped turns still
+  require a carrying runtime, and dispatch still rechecks persona grants.
+- **Output Hardening** — public URLs reject local/private targets, repository
+  searches exclude credential paths, GitHub runs without a shell, and all
+  external/tool output crosses the shared secret redactor.
+
+### Safety Contract
+
+- No browser typing, clicking, submission, authentication, or hidden-profile
+  launch is exposed.
+- No GitHub write command, arbitrary filesystem root, shell escape, or
+  unbounded spreadsheet read is exposed.
+- Web persona runtime stays explicitly text-only; scheduled authorities retain
+  their existing model-only or not-applicable posture.
+
 ## The Homie v1.7.0
 
 **Release Date:** August 22, 2026

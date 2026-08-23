@@ -110,6 +110,31 @@ disclosure, migrations, and operator controls are later slices. Until those
 slices land, enabling a v2 capability plugin cannot add a tool to any persona,
 Talk, Cabinet, Discord, or chat turn.
 
+## Read-capability packs
+
+The built-in `ai_engineering` and `founder_operations` packs now resolve to
+real handlers rather than catalog-only names. Their common read surfaces are:
+
+- public web research through the existing Exa and Firecrawl clients;
+- bounded GitHub issue, pull-request, and Actions reads through argument-array
+  `gh` commands;
+- local code search through repository slugs in the tracked repository index;
+- visible-browser status, tabs, snapshot, navigation, and console reads with
+  no typing, clicking, submission, or hidden browser fallback;
+- a separately owned `business_read` pack for bounded Google Sheets reads.
+
+Registry ownership remains the authorization boundary. `seo_geo_read`
+composes `research_read` so the shared Firecrawl tool has one owner; Sheets is
+not part of generic research and reaches only packs that explicitly include
+`business_read`.
+
+This intentionally increases the checked-in caller-schema baseline. Compact
+schema costs are currently approximately 1,678 tokens for `ai_engineering`,
+1,404 for `founder_operations`, and 1,985 for `seo_geo_read` (the deterministic
+measurement is guarded in `test_tool_transport.py`). The later disclosure
+slice owns the threshold decision; this change records the cost without
+silently enabling or rejecting progressive disclosure.
+
 ## Verification
 
 ```powershell

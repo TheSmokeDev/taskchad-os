@@ -914,9 +914,9 @@ BASELINE_EQUIPMENT: tuple[tuple[str, dict], ...] = (
 # delta.  Shape: (tool_count, compact_sorted_json_chars, ceil(chars / 4)).
 EXPECTED_CALLER_SCHEMA_BASELINE: dict[str, tuple[int, int, int]] = {
     "safe_core": (5, 1895, 474),
-    "ai_engineering": (9, 3042, 761),
-    "founder_operations": (6, 2413, 604),
-    "seo_geo_read": (21, 6424, 1606),
+    "ai_engineering": (23, 6710, 1678),
+    "founder_operations": (18, 5613, 1404),
+    "seo_geo_read": (26, 7940, 1985),
 }
 
 

@@ -24,10 +24,10 @@ def _clean_registry():
 
 
 def test_registers_all_seo_geo_tools_as_read_only():
-    assert tool_impl_seo_geo.register_tools() == 16
+    assert tool_impl_seo_geo.register_tools() == 15
     for name in (
         "gsc_overview", "gsc_top_queries", "gsc_top_pages", "gsc_query_page_slice", "ga4_overview",
-        "ga4_top_pages", "ga4_traffic_sources", "firecrawl_scrape", "firecrawl_map",
+        "ga4_top_pages", "ga4_traffic_sources", "firecrawl_map",
         "seo_exa_search", "seo_exa_fetch", "openseo_read", "fleet_pulse_latest",
         "fleet_measurement_registry_latest",
         "fleet_control_review_latest",

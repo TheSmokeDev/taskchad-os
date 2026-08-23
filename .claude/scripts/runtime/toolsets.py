@@ -118,6 +118,10 @@ _REPO_READ_TOOLS: list[str] = [
     "repo_search",
 ]
 
+_BUSINESS_READ_TOOLS: list[str] = [
+    "sheets_read",
+]
+
 _BROWSER_READ_TOOLS: list[str] = [
     "browser_status",
     "browser_tabs",
@@ -154,11 +158,16 @@ TOOLSETS: dict[str, Toolset] = {
     "seo_geo_read": {
         "description": "Read-only SEO/GEO intelligence: GSC, GA4, Firecrawl, local OpenSEO, and fleet receipts",
         "tools": _SEO_GEO_READ_TOOLS,
-        "includes": ["safe_core"],
+        "includes": ["research_read"],
     },
     "repo_read": {
         "description": "Read-only repository and GitHub inspection",
         "tools": _REPO_READ_TOOLS,
+        "includes": ["safe_core"],
+    },
+    "business_read": {
+        "description": "Bounded read-only access to configured business data integrations",
+        "tools": _BUSINESS_READ_TOOLS,
         "includes": ["safe_core"],
     },
     "browser_read": {
@@ -169,12 +178,12 @@ TOOLSETS: dict[str, Toolset] = {
     "ai_engineering": {
         "description": "AI engineering domain pack: web/browser research plus repository reads",
         "tools": [],
-        "includes": ["browser_read", "repo_read"],
+        "includes": ["browser_read", "repo_read", "business_read"],
     },
     "founder_operations": {
         "description": "Founder/operator domain pack: market research plus repository reads",
         "tools": [],
-        "includes": ["research_read", "repo_read"],
+        "includes": ["research_read", "repo_read", "business_read"],
     },
     # -----------------------------------------------------------------------
     # Legacy compatibility toolsets.
