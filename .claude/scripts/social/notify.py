@@ -17,12 +17,9 @@ import json
 import os
 import urllib.parse
 import urllib.request
-from typing import TYPE_CHECKING
 
 from social.channels import get_channel
-
-if TYPE_CHECKING:
-    from social.models import SocialPost
+from social.models import SocialPost, approval_binding_digest
 
 # Telegram hard limits.
 _TG_TEXT_LIMIT = 4096
@@ -63,7 +60,7 @@ def _telegram_credentials() -> tuple[str, str] | None:
     return token, chat_id
 
 
-def _build_card_text(post: "SocialPost", limit: int = _TG_TEXT_LIMIT) -> str:
+def _build_card_text(post: SocialPost, limit: int = _TG_TEXT_LIMIT) -> str:
     """Compose the paste-ready draft card. Plain text (no parse_mode) so
     arbitrary generated content can never break Telegram entity parsing.
 
@@ -79,7 +76,10 @@ def _build_card_text(post: "SocialPost", limit: int = _TG_TEXT_LIMIT) -> str:
     source = post.topic_source or "manual"
     header = f"📝 New {channel} draft  ·  #{post.id}  ·  {source}"
     body = post.body or "(empty draft)"
-    footer = "Tap Approve & Post to publish, Edit to tweak, or Reject."
+    footer = (
+        "Tap Approve & Post to publish, Revise Copy or Redo Image to tweak, "
+        "or Reject."
+    )
 
     # Reserve room for header/footer/separators inside the limit.
     overhead = len(header) + len(footer) + 8
@@ -115,7 +115,7 @@ def _utf16_truncate(text: str, max_units: int) -> str:
     return "".join(out)
 
 
-def _build_photo_caption(post: "SocialPost") -> str:
+def _build_photo_caption(post: SocialPost) -> str:
     """The draft card sized for a photo caption. Telegram caps captions at 1024
     UTF-16 code units (not code points), so a code-point cap alone can still
     overflow on emoji-heavy text — apply a UTF-16-aware final trim."""
@@ -123,16 +123,108 @@ def _build_photo_caption(post: "SocialPost") -> str:
     return _utf16_truncate(caption, _TG_CAPTION_LIMIT)
 
 
-def _build_reply_markup(post_id: int) -> dict:
+def _build_reply_markup(post: SocialPost | int) -> dict:
+    if isinstance(post, int):
+        # Test/compatibility callers should pass the row.  Keep a bounded
+        # fail-closed placeholder for integer-only construction; live delivery
+        # always supplies the full SocialPost below.
+        post_id = post
+        revision = 1
+        digest = "0" * 12
+    else:
+        post_id = post.id
+        revision = post.revision
+        digest = approval_binding_digest(post)
+
+    def callback(action: str) -> str:
+        return f"social:{action}:{post_id}:{revision}:{digest}"
+
     return {
         "inline_keyboard": [
-            [{"text": "✅ Approve & Post", "callback_data": f"social:approve:{post_id}"}],
+            [{"text": "✅ Approve & Post", "callback_data": callback("approve")}],
             [
-                {"text": "✏️ Edit", "callback_data": f"social:edit:{post_id}"},
-                {"text": "❌ Reject", "callback_data": f"social:reject:{post_id}"},
+                {"text": "✏️ Revise Copy", "callback_data": callback("edit")},
+                {"text": "🖼️ Redo Image", "callback_data": callback("image")},
+            ],
+            [
+                {"text": "❌ Reject", "callback_data": callback("reject")},
             ],
         ]
     }
+
+
+def _full_copy_messages(post: SocialPost) -> list[str]:
+    """Return complete, UTF-16-safe review messages without truncating copy."""
+
+    header = f"📝 FULL COPY · #{post.id} · revision {post.revision}"
+    text = f"{header}\n\n{post.body or '(empty draft)'}"
+    messages: list[str] = []
+    remaining = text
+    while remaining:
+        chunk = _utf16_truncate(remaining, _TG_TEXT_LIMIT)
+        if not chunk:
+            break
+        messages.append(chunk)
+        remaining = remaining[len(chunk) :]
+    return messages or [header]
+
+
+def _review_control_text(post: SocialPost) -> str:
+    return (
+        f"Review controls for draft #{post.id} · revision {post.revision} · "
+        f"{approval_binding_digest(post)}"
+    )
+
+
+def _send_media_review_blocked(
+    token: str,
+    chat_id: str,
+    post: SocialPost,
+    *,
+    full_copy_sent: bool,
+) -> bool:
+    """Show the copy but never attach approval controls to unseen media."""
+
+    if not full_copy_sent:
+        for message in _full_copy_messages(post):
+            if not _send_message(token, chat_id, message):
+                return False
+    return _send_message(
+        token,
+        chat_id,
+        (
+            f"Media for draft #{post.id} revision {post.revision} could not be "
+            "delivered. No approval control was issued. Redo the image or reopen "
+            "the current revision after the media is visible."
+        ),
+        reply_markup=None,
+    )
+
+
+def _send_message(
+    token: str,
+    chat_id: str,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+) -> bool:
+    fields: dict[str, str] = {
+        "chat_id": chat_id,
+        "text": _utf16_truncate(text, _TG_TEXT_LIMIT),
+        "disable_web_page_preview": "true",
+    }
+    if reply_markup is not None:
+        fields["reply_markup"] = json.dumps(reply_markup)
+    try:
+        data = urllib.parse.urlencode(fields).encode()
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except Exception as exc:
+        safe = _redact(f"{type(exc).__name__}: {exc}", token)
+        print(f"[social.notify] Telegram delivery failed: {safe}")
+        return False
 
 
 def send_text_to_telegram(text: str) -> bool:
@@ -196,7 +288,7 @@ def _send_photo(
     chat_id: str,
     image_path: str,
     caption: str,
-    reply_markup: dict,
+    reply_markup: dict | None,
 ) -> bool:
     """Upload a local image as a Telegram photo with a caption + inline buttons.
 
@@ -218,11 +310,10 @@ def _send_photo(
 
     boundary = "----HomieSocialNotify7f3a2b"
     parts: list[bytes] = []
-    for name, value in (
-        ("chat_id", chat_id),
-        ("caption", caption),
-        ("reply_markup", json.dumps(reply_markup)),
-    ):
+    fields = [("chat_id", chat_id), ("caption", caption)]
+    if reply_markup is not None:
+        fields.append(("reply_markup", json.dumps(reply_markup)))
+    for name, value in fields:
         parts.append(f"--{boundary}\r\n".encode())
         parts.append(
             f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
@@ -252,7 +343,7 @@ def _send_photo(
         return False
 
 
-def deliver_draft_to_telegram(post: "SocialPost") -> bool:
+def deliver_draft_to_telegram(post: SocialPost) -> bool:
     """Send the draft card with inline buttons to the operator's Telegram.
 
     When the draft carries a readable local image (``media_type == "image"``),
@@ -275,29 +366,57 @@ def deliver_draft_to_telegram(post: "SocialPost") -> bool:
     # Photo card first when a rendered image is attached; fail-open to text.
     media_path = getattr(post, "media_path", None)
     media_type = getattr(post, "media_type", None)
-    if media_type == "image" and media_path and os.path.isfile(str(media_path)):
-        if _send_photo(
+    if media_type == "image" and media_path:
+        if not os.path.isfile(str(media_path)):
+            return _send_media_review_blocked(
+                token, chat_id, post, full_copy_sent=False
+            )
+        caption = _build_photo_caption(post)
+        complete_card = _build_card_text(post, limit=10_000_000)
+        caption_truncates = _utf16_len(complete_card) > _TG_CAPTION_LIMIT
+        if caption_truncates:
+            # Exact review order: complete copy, then the image, then the
+            # revision/hash-bound controls.  The approval button is never
+            # attached to a truncated caption.
+            for message in _full_copy_messages(post):
+                if not _send_message(token, chat_id, message):
+                    return False
+            media_caption = f"🖼️ Media for draft #{post.id} · revision {post.revision}"
+            if _send_photo(
+                token,
+                chat_id,
+                str(media_path),
+                media_caption,
+                None,
+            ):
+                return _send_message(
+                    token,
+                    chat_id,
+                    _review_control_text(post),
+                    reply_markup=_build_reply_markup(post),
+                )
+            return _send_media_review_blocked(
+                token, chat_id, post, full_copy_sent=True
+            )
+        elif _send_photo(
             token,
             chat_id,
             str(media_path),
-            _build_photo_caption(post),
-            _build_reply_markup(post_id),
+            caption,
+            _build_reply_markup(post),
         ):
             return True
+        return _send_media_review_blocked(
+            token, chat_id, post, full_copy_sent=False
+        )
 
     try:
-        data = urllib.parse.urlencode(
-            {
-                "chat_id": chat_id,
-                "text": _build_card_text(post),
-                "reply_markup": json.dumps(_build_reply_markup(post.id)),
-                "disable_web_page_preview": "true",
-            }
-        ).encode()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        req = urllib.request.Request(url, data=data)
-        urllib.request.urlopen(req, timeout=10)
-        return True
+        return _send_message(
+            token,
+            chat_id,
+            _build_card_text(post),
+            reply_markup=_build_reply_markup(post),
+        )
     except Exception as exc:
         # urllib exceptions can embed the request URL (which carries the token).
         safe = _redact(f"{type(exc).__name__}: {exc}", token)

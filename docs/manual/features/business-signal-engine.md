@@ -1,8 +1,8 @@
 # Business Signal Engine
 
-Status: Shipped (#79), merged to master
+Status: Shipped legacy lane (#79); GEO Authority mode implemented behind a disabled flag
 Owner: `.claude/scripts/business_signal/` (pipeline) + `.claude/chat/` (the `/signal` command)
-Last updated: 2026-06-19
+Last updated: 2026-09-03
 
 ## What It Does
 
@@ -18,11 +18,21 @@ daily artifact. It is **write-only by design**: it drafts and files, it never
 posts. Acting on a draft is a separate, operator-gated step (see
 [Social Post Pipeline](social-post-pipeline.md)).
 
+The additive **GEO Authority mode** is the source-backed research contract for
+public editorial work. It does not replace the legacy digest. It runs three
+bounded Exa discovery lanes, reads current public metadata for an explicit
+repository allowlist, enriches at most two shortlisted pages through
+Firecrawl, and emits versioned `AuthoritySignalPacket` JSON only after strict
+relevance, freshness, deduplication, provenance, privacy, and schema gates.
+This mode defaults disabled until the operator completes containment and live
+credential/session readiness.
+
 ## Operator Entry Points
 
 - Chat/Telegram: `/signal` (status of the last run) and `/signal refresh` (run
   now). The command is admin-only.
 - CLI: `uv run python .claude/scripts/business_signal/signal_engine.py [--test] [--days N]`
+- Authority CLI: `uv run python -m business_signal.authority status|queue|refresh [--dry-run]`
 - Cadence: runs automatically as a non-blocking post-step of daily reflection
   (fast tier) and weekly synthesis (quality tier).
 - Dashboard/API: none — this is a vault-and-chat surface.
@@ -48,6 +58,104 @@ The fetch and focus layers are deliberately generic: the shipped default targets
 the operator's own verticals, but the feed list and the keyword tiers are fully
 configurable (see Config Knobs). Fetcher failures are isolated per-source — one
 dead feed or an unconfigured email account never crashes a run.
+
+## GEO Authority Mode
+
+Authority mode extends the Business Signal Engine rather than creating another
+crawler. Its order is:
+
+```text
+three Exa discovery lanes + configured GitHub repositories
+  -> freshness/dedup/public-safety gates
+  -> authority relevance scoring
+  -> at most two Firecrawl enrichments
+  -> model-only editorial proposal
+  -> strict AuthoritySignalPacket
+  -> authority-signal vault digest and packet queue
+```
+
+The three discovery lanes are fixed and bounded:
+
+1. AI-search platform changes.
+2. Practical GEO evidence.
+3. Open-source and repository distribution.
+
+Each `AuthoritySignalPacket` uses schema `authority-signal/v1` and carries a
+stable signal ID and SHA-256 dedup key, observed and expiry timestamps,
+audience, supported series, exact source-bound claims, source class and
+confidence, prohibited claims, privacy notes, article/social/CTA/repository and
+visual briefs, destination, evidence class, and the first-person-language gate.
+Unknown fields fail validation. A packet cannot enable first person unless its
+evidence class is `verified_operator_receipt`; ordinary public research and
+repository metadata never qualify.
+
+Supported series are:
+
+- GEO Signal
+- GEO Tip
+- Myth vs Receipt
+- Citation Anatomy
+- AI Search Teardown
+- Stack Drop
+- Repo Field Note
+- Factory Floor / Dark Factory
+
+### Authority relevance gate
+
+Authority scoring is deterministic and separate from the legacy business
+focus. Skip terms reject immediately. Canonical phrases are matched
+longest-first with consumed spans, so `ai agents` and its contained singular do
+not score twice. Each unique HIGH concept is `0.45`, each unique MEDIUM concept
+is `0.15`, and the result caps at `1.0`. Normal web evidence requires at least
+one HIGH concept. A verified event from the configured repository allowlist may
+bypass only that HIGH-match requirement; it receives no invented score boost.
+Triage begins at `0.45`; packet candidacy begins at `0.75`.
+
+### Source and model safety
+
+- Source text is labeled untrusted and markup-escaped before a model sees it.
+- Authority and legacy signal model calls use `model_only=True`, an empty
+  allowlist, `disallowed_tools=["*"]`, no MCP servers, and no setting sources.
+- A failed or invalid model response creates no packet or draft. There is no
+  fallback that turns a title, topic, or fetched snippet into publishable copy.
+- Claim URLs must exactly match the candidate source URL. Public URLs reject
+  local/private targets, embedded credentials, nonstandard ports, and
+  credential-like query parameters.
+- Packet text rejects obvious credentials, private filesystem paths, and
+  private project/client identifiers before persistence.
+- Source classes remain explicit: official documentation, primary source,
+  repository, vendor research, or practitioner self-report. Vendor and
+  practitioner material cannot mark itself primary.
+
+### Firecrawl budget
+
+The authority lane owns a transactional UTC-month ledger. It reserves a credit
+immediately before a provider call and never rolls the reservation back because
+a failed provider attempt may still consume a credit. The hard limits are:
+
+- at most 2 reads in one authority run;
+- at most 60 reads in one UTC calendar month.
+
+The third per-run read request and sixty-first monthly read request fail before
+network use.
+The caps are not environment-overridable.
+
+### Authority outputs
+
+- Packet JSON: `MEMORY_DIR/authority-signal/as_YYYYMMDD_<digest>.json`
+- Daily readable receipt: `MEMORY_DIR/authority-signal/YYYY-MM-DD.md`
+- Latest readable receipt: `MEMORY_DIR/authority-signal/latest.md`
+- Run/dedup state: `STATE_DIR/authority-signal-state.json`
+- Firecrawl ledger: `STATE_DIR/authority-firecrawl-usage.json`
+
+Weak, stale, duplicate, unsupported, model-failed, or schema-invalid sources
+produce `AUTHORITY_SILENT`; they do not generate filler. The digest records
+bounded counts and skip classes without persisting raw scraped source bodies.
+The packet queue is read-only at this layer. Social, article, Telegram, and
+publication code must consume validated packet paths through a separately owned
+approval pipeline. Integration callers should use `list_authority_queue()` to
+select an active signal ID and `load_authority_packet(signal_id)` to revalidate
+the exact file; the loader accepts IDs, not arbitrary paths.
 
 ## Cadence
 
@@ -93,6 +201,18 @@ in a default arg). Env-var names only; set values in `.claude/scripts/.env`.
 | `SIGNAL_RSS_FEEDS` | (shipped defaults) | Comma-separated feed URLs; overrides the default feed list. |
 | `SIGNAL_MODEL_TIER` | `fast` | `fast` (daily) or `quality` (weekly) — selects the background-model tier. |
 
+Authority-specific settings:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `AUTHORITY_ENGINE_ENABLED` | `false` | Containment gate. Live refresh returns `disabled` until explicitly enabled. |
+| `AUTHORITY_TRIAGE_THRESHOLD` | `0.45` | May be raised, never lowered below `0.45`. |
+| `AUTHORITY_CANDIDATE_THRESHOLD` | `0.75` | May be raised, never lowered below `0.75`. |
+| `AUTHORITY_EXA_RESULTS_PER_LANE` | `5` | Results per each of exactly three lanes; clamped to 1-10. |
+| `AUTHORITY_MAX_PACKETS_PER_RUN` | `3` | Validated packet cap; clamped to 1-3. |
+| `AUTHORITY_FRESHNESS_DAYS` | `30` | Dated-source freshness window; clamped to 1-90 days. |
+| `AUTHORITY_REPOSITORIES` | three public flagships | Comma-separated `owner/name` allowlist for verified repository reads. |
+
 ## Safety Boundaries
 
 - **Write-only.** The engine drafts and files into the vault. It never posts,
@@ -122,23 +242,40 @@ uv run python business_signal/signal_engine.py
 
 # Wider dedup window
 uv run python business_signal/signal_engine.py --days 14
+
+# Authority status and validated packet queue (no provider calls)
+uv run python -m business_signal.authority status
+uv run python -m business_signal.authority queue
+
+# Exact no-call/no-write preflight
+uv run python -m business_signal.authority refresh --dry-run
+
+# Live source/model run; still only writes local vault/state artifacts
+uv run python -m business_signal.authority refresh
 ```
 
 ## How To Test It
 
 ```powershell
 cd .claude/scripts
-uv run pytest tests/test_signal_engine.py tests/test_signal_fetchers.py tests/test_signal_focus.py tests/test_signal_models.py tests/test_signal_output.py tests/test_signal_research.py tests/test_signal_triage.py -q
+uv run pytest tests/test_signal_engine.py tests/test_signal_fetchers.py tests/test_signal_focus.py tests/test_signal_models.py tests/test_signal_output.py tests/test_signal_research.py tests/test_signal_triage.py tests/test_signal_authority.py -q
 ```
 
-61 tests across 7 files: dataclass shape, focus scoring (HIGH/MED/SKIP), triage
-threshold/sort, fetcher mocking + per-source isolation + dedup TTL, output
-(digest frontmatter/body, draft creation, `SIGNAL_SILENT` no-output), research
-enrichment, and an end-to-end integration (mock fetchers → real triage → mock LLM
-→ verified digest/drafts/state).
+The current focused suite contains 80 tests across nine signal files: legacy
+dataclass shape, focus scoring, triage, fetcher isolation, dedup TTL, digest and
+draft output, URL enrichment, plus authority packet/schema safety, longest-first
+scoring, three-lane discovery, source normalization, Firecrawl caps, corrupt
+ledger/state refusal, zero-tool model requests, no-fallback behavior, daily
+digest persistence, and active packet loading.
 
 ## Latest Live Proof
 
+- GEO Authority mode has local fake-source proof only. It remains disabled and
+  has not made a live Exa, Firecrawl, GitHub, publication, or social call.
+- Focused local proof on 2026-09-03: 80 tests passed; `ruff check
+  business_signal integrations/research_sources.py` passed; dry-run/status/queue
+  performed no external writes.
+- The receipt below is the earlier legacy Business Signal production proof.
 - Date: 2026-06-19
 - Surface: merged PR #79 (squash commit `3fc795f7`); re-reviewed and merged.
 - Result: 61/61 signal tests green on the merged tree; `/signal` registered and
@@ -160,6 +297,8 @@ enrichment, and an end-to-end integration (mock fetchers → real triage → moc
 | `business_signal/synthesize.py` | Background-model digest builder (kill-switch guarded). |
 | `business_signal/draft_generator.py` | Background-model draft copy (kill-switch guarded, graceful fallback). |
 | `business_signal/output.py` | Stage 6: digest write, draft files, daily-log append. |
+| `business_signal/authority.py` | Three-lane authority orchestrator, Firecrawl ledger, model-only packet builder, packet/digest persistence, status/queue/refresh CLI. |
+| `integrations/research_sources.py` | Shared read-only Exa, Firecrawl, and public GitHub transport with normalized source documents. |
 | `business_signal/fetchers/__init__.py` | Fetcher protocol + registry (per-fetcher error isolation). |
 | `business_signal/fetchers/rss_fetcher.py` | RSS/Atom parsing + URL dedup (TTL). |
 | `business_signal/fetchers/haro_fetcher.py` | HARO email scan + keyword match. |

@@ -142,7 +142,7 @@ reasoning + per-persona recall only), so:
 | `GITHUB_SIGNAL_RESURFACE_COOLDOWN_WEEKS` | `8` | Weeks before a surfaced-but-unactioned pick can return |
 | `GITHUB_SIGNAL_SNOOZE_WEEKS` | `4` | Default `/stars snooze` duration |
 | `GITHUB_SIGNAL_TRENDING_KEYWORDS` | generic AI terms | Comma list filtering trending hits |
-| `GITHUB_SIGNAL_MAX_BUDGET_USD` | `0.25` | Per-run LLM budget cap |
+| `GITHUB_SIGNAL_MAX_BUDGET_USD` | unset (no cap) | Optional per-run LLM cost ceiling for API-key deployments; subscription lanes leave it unset |
 | `GITHUB_SIGNAL_DISCORD_CHANNEL_ID` | `""` (off) | Discord channel for digest + eval cards |
 | `GITHUB_SIGNAL_SCOUT_PROFILE` | `repo-scout` | Persona profile receiving memory sync ("" = off) |
 | `GITHUB_SIGNAL_EVAL_MAX_REPO_MB` | `200` | Skip clone above this size (API-only evidence) |

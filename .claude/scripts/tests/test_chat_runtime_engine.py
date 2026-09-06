@@ -18,6 +18,14 @@ from runtime.base import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_legacy_engine_prompt_contract(monkeypatch):
+    """These tests assert the pre-learning prompt contract; enabled learning is
+    covered by test_persona_learning_surface_integration with real tmp storage.
+    """
+    monkeypatch.setenv("PERSONA_LEARNING_ENABLED", "false")
+
+
 def _make_message(text: str = "Need a summary") -> IncomingMessage:
     return IncomingMessage(
         text=text,
@@ -552,15 +560,15 @@ async def test_unknown_discord_speaker_context_warns_without_owner_default(
     assert "status: unknown_unverified" in append_text
     assert "warning: Active speaker identity is incomplete" in append_text
     assert "Do not use owner/default identity" in append_text
-    assert captured["metadata"] == {
-        "speaker_context": {
-            "status": "unknown_unverified",
-            "platform": "discord",
-            "channel_scope": "shared_channel",
-            "has_display_name": False,
-            "has_platform_user_id": False,
-        }
+    assert captured["metadata"]["speaker_context"] == {
+        "status": "unknown_unverified",
+        "platform": "discord",
+        "channel_scope": "shared_channel",
+        "has_display_name": False,
+        "has_platform_user_id": False,
     }
+    # Persona learning attribution is independent of the unknown human speaker.
+    assert captured["metadata"]["learning"]["coverage"] == "disabled"
 
 
 @pytest.mark.asyncio
@@ -2647,6 +2655,10 @@ async def test_internal_monologue_survives_win32_truncation_with_receipt(
             ("durable_memory", 10000),
             ("user_model", 5000),
             ("prefetched_context", 12000),
+            # Current per-region budgets shrink the four original fixtures
+            # below 27K. Fill two more regions to exercise the OUTER clamp.
+            ("safety", 6000),
+            ("self_model", 6000),
         ):
             enriched = enriched.with_memory(Memory(
                 role="system",
@@ -2785,3 +2797,159 @@ async def test_session_brief_coexists_with_internal_monologue_brief_last(
     monologue_idx = prompt.index("# Internal Monologue")
     brief_idx = prompt.index("# Session Opening Brief")
     assert monologue_idx < brief_idx
+
+
+def test_today_block_reports_the_current_local_date():
+    """The prompt must state today, or a date-keyed menu cannot resolve."""
+    from config import now_local
+
+    block = engine_module.build_today_block()
+    assert block.startswith("# Today")
+    assert now_local().strftime("%Y-%m-%d") in block
+
+
+def test_today_block_is_resolved_per_call_not_frozen_at_import(monkeypatch):
+    """Rule 1: the bot runs for days; a cached date would go stale overnight."""
+    import config
+
+    real = config.now_local
+    seen = []
+
+    def fake_now_local():
+        stamp = real()
+        seen.append(stamp)
+        return stamp
+
+    monkeypatch.setattr(config, "now_local", fake_now_local)
+    engine_module.build_today_block()
+    engine_module.build_today_block()
+    assert len(seen) == 2, "clock must be read on every call"
+
+
+def test_today_block_fails_open_when_the_clock_raises(monkeypatch):
+    """A timezone/clock fault must never take down a turn."""
+    import config
+
+    def boom():
+        raise RuntimeError("tz database missing")
+
+    monkeypatch.setattr(config, "now_local", boom)
+    assert engine_module.build_today_block() == ""
+
+
+@pytest.mark.asyncio
+async def test_today_block_rides_the_assembled_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Wiring proof: the date reaches the real system prompt, not just the helper.
+
+    Without this the persona has the menu but not the day, so a date-keyed
+    schedule cannot resolve to today's row.
+    """
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def fake_recall(**kwargs):
+        return _FakeRecallResponse(tier="tier_1", formatted_text="")
+
+    async def fake_run(request):
+        captured["system_prompt"] = request.system_prompt["append"]
+        return RuntimeResult(
+            text="ok",
+            runtime_lane=RUNTIME_LANE_GENERIC,
+            provider="openai-codex",
+            model="gpt-5.5",
+            profile_key="primary-openai-codex",
+            session_id=None,
+        )
+
+    monkeypatch.setattr(
+        engine_module, "build_today_block", lambda: "# Today\nSENTINEL-DATE\n\n"
+    )
+    monkeypatch.setattr(engine_module, "recall_memory_service", fake_recall)
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", fake_run)
+
+    outputs = [out async for out in convo.handle_message(_make_message())]
+
+    assert outputs[-1].text == "ok"
+    append_text = str(captured["system_prompt"])
+    assert "SENTINEL-DATE" in append_text
+    assert append_text.startswith(engine_module.GROUNDING_RULES), (
+        "the date block must not displace the protected head"
+    )
+
+
+# ── Budget passthrough (Codex review of #684) ───────────────────────────────
+# Two request-level overrides used to replace the configured cap: PIV turns
+# got 5.0 and prefetched non-Telegram turns got 0.5, so a subscription lane
+# with no cap could still die on "Reached maximum budget".
+
+
+def _budget_probe(captured: dict[str, object]):
+    async def fake_run(request):
+        captured["max_budget_usd"] = request.max_budget_usd
+        captured["max_turns"] = request.max_turns
+        return RuntimeResult(
+            text="ok",
+            runtime_lane="generic_runtime",
+            provider="gemini-cli",
+            model="gemini-3-flash-preview",
+            profile_key="primary-gemini-cli",
+        )
+
+    return fake_run
+
+
+@pytest.mark.asyncio
+async def test_piv_turn_keeps_the_configured_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    assert convo.max_budget_usd is None
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", _budget_probe(captured))
+
+    message = _make_message("run the workflow")
+    message.is_piv = True
+    outputs = [out async for out in convo.handle_message(message)]
+
+    assert outputs[-1].text == "ok"
+    assert captured["max_budget_usd"] is None
+    assert captured["max_turns"] == 50
+
+
+@pytest.mark.asyncio
+async def test_piv_turn_keeps_an_explicit_budget_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path), 25, 1.25)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", _budget_probe(captured))
+
+    message = _make_message("run the workflow")
+    message.is_piv = True
+    [out async for out in convo.handle_message(message)]
+
+    assert captured["max_budget_usd"] == 1.25
+
+
+@pytest.mark.asyncio
+async def test_prefetched_non_telegram_turn_keeps_the_configured_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    convo = ConversationEngine(store, _make_project_root(tmp_path))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(engine_module, "run_with_runtime_lanes", _budget_probe(captured))
+
+    message = _make_discord_message("how are we looking?")
+    message.prefetched_context = "## /budget\nBalance: fine"
+    outputs = [out async for out in convo.handle_message(message)]
+
+    assert outputs[-1].text == "ok"
+    assert captured["max_budget_usd"] is None
+    assert captured["max_turns"] == 1

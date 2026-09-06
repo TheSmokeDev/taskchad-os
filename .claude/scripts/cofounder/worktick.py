@@ -348,10 +348,12 @@ def _execute_assignment(
             worktick_settings,
             dispatch_code,
             now,
+            learning_origin=f"cofounder:assignment:{message.id}",
         )
     else:
         status, summary, deliverable_path, output_text = _execute_draft(
-            persona, task, payload, agenda_ref, run_draft, now
+            persona, task, payload, agenda_ref, run_draft, now,
+            learning_origin=f"cofounder:assignment:{message.id}",
         )
 
     record["status"] = status
@@ -473,6 +475,7 @@ def _execute_draft(
     agenda_ref: str,
     run_draft,
     now: datetime,
+    *, learning_origin: str | None = None,
 ) -> tuple[str, str, str | None, str]:
     """One no-tools background-quality run as the persona -> vault file.
 
@@ -480,17 +483,33 @@ def _execute_draft(
     output text rides out so #420's experience note can quote the persona's
     OWN words without re-reading (and re-parsing) the deliverable file.
     """
+    turn = None
     try:
         prompt = build_draft_prompt(persona, task, payload, now)
+        from personas.learning.hooks import prepare_turn
+        turn = prepare_turn(_draft_request(prompt), persona_id=persona, surface="worktick_draft",
+                            origin_id=learning_origin or f"cofounder:draft:{agenda_ref}", task=task)
+        prompt = turn.request.prompt
         if run_draft is None:
-            run_draft = _llm_draft
-        text = (run_draft(prompt) or "").strip()
+            text = _llm_draft(prompt, turn=turn).strip()
+        else:
+            text = turn.complete(SimpleNamespace(text=run_draft(prompt) or ""))
         if not text:
             return EXEC_FAILED, "draft run returned no text", None, ""
         path = _write_deliverable(persona, agenda_ref, task, text, now)
+        if turn.service is not None and turn.experience is not None:
+            try:
+                turn.service.record_execution(turn.experience["id"], {
+                    "stage": "artifact_written", "deliverable_path": str(path),
+                    "customer_message_sent": False,
+                }, attempt_key=f"{turn.attempt_id}:written")
+            except Exception as exc:
+                turn.failure("deliverable_receipt", exc)
         first_line = text.splitlines()[0] if text.splitlines() else ""
         return EXEC_DONE, f"deliverable written: {first_line}", str(path), text
     except Exception as exc:
+        if turn is not None:
+            turn.failed(exc)
         logger.exception("cofounder.worktick: draft execution failed")
         from shared import safe_exc_text
 
@@ -508,8 +527,10 @@ def _execute_code(
     worktick_settings,
     dispatch_code,
     now: datetime,
+    *, learning_origin: str | None = None,
 ) -> tuple[str, str, str | None, str | None]:
     """One detached Archon dispatch (v1's receipt-or-failed contract)."""
+    turn = None
     try:
         from cofounder import repos as repos_mod
         from cofounder.run_pass import MERGE_POLICY_INSTRUCTION
@@ -524,6 +545,22 @@ def _execute_code(
             f"Assignment from the co-founder (persona: {persona}, "
             f"{agenda_ref}):\n\n{task}\n\n{MERGE_POLICY_INSTRUCTION}"
         )
+        from personas.learning.hooks import prepare_turn
+        from runtime.base import RuntimeRequest
+        turn = prepare_turn(RuntimeRequest(prompt=message, cwd=resolution.local_path,
+                            task_name="cofounder_code_dispatch"),
+                            persona_id=persona, surface="worktick_code",
+                            origin_id=learning_origin or f"cofounder:code:{agenda_ref}", task=task)
+        message = turn.request.prompt
+        if turn.service is not None and turn.experience is not None:
+            try:
+                turn.service.record_execution(turn.experience["id"], {
+                    "stage": "dispatch_started", "repo": str(resolution.local_path),
+                    "branch": branch,
+                    "domain_expectation": "not_supplied", "native_internal_steps": "uncaptured",
+                }, attempt_key=f"{turn.attempt_id}:started")
+            except Exception as exc:
+                turn.failure("dispatch_started", exc)
         if dispatch_code is None:
             dispatch_code = _archon_dispatch
         run_id = dispatch_code(
@@ -533,6 +570,15 @@ def _execute_code(
             resolution.local_path,
             ref_slug,
         )
+        if turn.service is not None and turn.experience is not None:
+            try:
+                turn.service.record_execution(turn.experience["id"], {
+                    "stage": "dispatched" if run_id is not None else "dispatch_failed",
+                    "run_id": str(run_id) if run_id is not None else None,
+                    "branch": branch, "work_completed": False,
+                }, attempt_key=f"{turn.attempt_id}:dispatched")
+            except Exception as exc:
+                turn.failure("dispatch_receipt", exc)
         if run_id is None:
             return (
                 EXEC_FAILED,
@@ -548,6 +594,8 @@ def _execute_code(
             branch,
         )
     except Exception as exc:
+        if turn is not None:
+            turn.failed(exc)
         logger.exception("cofounder.worktick: code dispatch failed")
         from shared import safe_exc_text
 
@@ -1093,16 +1141,11 @@ def _repo_notes(repo: Any) -> str:
         return ""
 
 
-def _llm_draft(prompt: str) -> str:
-    """One background-QUALITY runtime call (the orchestrate/agenda shape)."""
-    import asyncio
-
+def _draft_request(prompt: str):
     import config
-    from runtime import registry  # module-attribute call site (patchable)
     from runtime.base import RuntimeRequest
     from runtime.capabilities import TEXT_REASONING
-
-    request = RuntimeRequest(
+    return RuntimeRequest(
         prompt=prompt,
         cwd=config.PROJECT_ROOT,
         task_name=TASK_NAME,
@@ -1112,7 +1155,17 @@ def _llm_draft(prompt: str) -> str:
         allowed_tools=[],  # personas execute with NO tools here — the draft
         # is text; every external mutation keeps its own default-deny gate.
     )
+
+
+def _llm_draft(prompt: str, *, turn=None) -> str:
+    """One background-quality call, retaining real runtime metadata for learning."""
+    import asyncio
+
+    from runtime import registry
+    request = turn.request if turn is not None else _draft_request(prompt)
     result = asyncio.run(registry.run_with_fallback(request))
+    if turn is not None:
+        return turn.complete(result)
     return getattr(result, "text", "") or ""
 
 

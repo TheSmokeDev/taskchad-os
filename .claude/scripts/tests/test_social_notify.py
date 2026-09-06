@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import urllib.parse
 
-import pytest
-
 from social import notify
-from social.models import SocialPost
+from social.models import SocialPost, approval_binding_digest
 
 
 def _post(**kw) -> SocialPost:
@@ -42,7 +40,10 @@ class TestCardText:
     def test_truncates_long_body_under_limit(self):
         card = notify._build_card_text(_post(body="x" * 9000))
         assert len(card) <= notify._TG_TEXT_LIMIT
-        assert card.endswith("Tap Approve & Post to publish, Edit to tweak, or Reject.")
+        assert card.endswith(
+            "Tap Approve & Post to publish, Revise Copy or Redo Image to tweak, "
+            "or Reject."
+        )
 
     def test_hard_caps_even_with_huge_header_fields(self):
         # An unbounded topic_source must never push the card past the limit.
@@ -52,14 +53,17 @@ class TestCardText:
 
 class TestReplyMarkup:
     def test_callback_data_contract(self):
-        mk = notify._build_reply_markup(42)
+        post = _post(id=42)
+        digest = approval_binding_digest(post)
+        mk = notify._build_reply_markup(post)
         rows = mk["inline_keyboard"]
-        assert rows[0][0]["callback_data"] == "social:approve:42"
-        assert rows[1][0]["callback_data"] == "social:edit:42"
-        assert rows[1][1]["callback_data"] == "social:reject:42"
+        assert rows[0][0]["callback_data"] == f"social:approve:42:1:{digest}"
+        assert rows[1][0]["callback_data"] == f"social:edit:42:1:{digest}"
+        assert rows[1][1]["callback_data"] == f"social:image:42:1:{digest}"
+        assert rows[2][0]["callback_data"] == f"social:reject:42:1:{digest}"
 
     def test_callback_data_within_64_bytes(self):
-        mk = notify._build_reply_markup(9999999999)
+        mk = notify._build_reply_markup(_post(id=9999999999))
         for row in mk["inline_keyboard"]:
             for btn in row:
                 assert len(btn["callback_data"].encode("utf-8")) <= 64
@@ -105,7 +109,7 @@ class TestDelivery:
         params = dict(urllib.parse.parse_qsl(captured["data"].decode()))
         assert params["chat_id"] == "55555"  # first allowed id
         assert "Body." in params["text"]
-        assert "social:approve:7" in params["reply_markup"]
+        assert "social:approve:7:1:" in params["reply_markup"]
 
     def test_never_raises_and_redacts_token_on_network_error(self, monkeypatch, capsys):
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "SUPERSECRET")
@@ -164,7 +168,33 @@ class TestPhotoDelivery:
         assert "bottok123/sendPhoto" in captured["url"]
         assert "multipart/form-data" in (captured["ctype"] or "")
         # the approve/edit/reject buttons still ride with the photo
-        assert b"social:approve:9" in captured["data"]
+        assert b"social:approve:9:1:" in captured["data"]
+
+    def test_long_copy_is_sent_before_image_then_bound_controls(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok123")
+        monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "55555")
+        calls: list[tuple[str, bytes]] = []
+
+        def fake_urlopen(req, timeout=30):
+            calls.append((req.full_url, req.data or b""))
+            return None
+
+        monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
+        post = _post(
+            id=11,
+            body="Complete body. " * 180,
+            media_path=self._img(tmp_path),
+            media_type="image",
+        )
+
+        assert notify.deliver_draft_to_telegram(post) is True
+        assert "sendMessage" in calls[0][0]
+        assert b"Complete+body" in calls[0][1]
+        assert "sendPhoto" in calls[-2][0]
+        assert "sendMessage" in calls[-1][0]
+        assert b"social%3Aapprove%3A11%3A1%3A" in calls[-1][1]
 
     def test_text_card_when_no_media(self, monkeypatch):
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok123")
@@ -181,23 +211,25 @@ class TestPhotoDelivery:
     def test_missing_file_falls_back_to_text(self, monkeypatch):
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok123")
         monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "55555")
-        captured: dict = {}
+        captured: list[bytes] = []
         monkeypatch.setattr(
             notify.urllib.request, "urlopen",
-            lambda req, timeout=10: captured.update(url=req.full_url),
+            lambda req, timeout=10: captured.append(req.data),
         )
         post = _post(id=6, media_path="/no/such/file.png", media_type="image")
         ok = notify.deliver_draft_to_telegram(post)
         assert ok is True
-        assert "sendMessage" in captured["url"]
+        assert captured
+        assert all(b"social%3Aapprove" not in body for body in captured)
+        assert b"No+approval+control+was+issued" in captured[-1]
 
-    def test_photo_send_failure_falls_back_to_text(self, tmp_path, monkeypatch):
+    def test_photo_send_failure_sends_no_approval_controls(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok123")
         monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "55555")
-        calls: list = []
+        calls: list[tuple[str, bytes]] = []
 
         def fake_urlopen(req, timeout=10):
-            calls.append(req.full_url)
+            calls.append((req.full_url, req.data))
             if "sendPhoto" in req.full_url:
                 raise RuntimeError("boom")
             return None
@@ -205,9 +237,11 @@ class TestPhotoDelivery:
         monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
         post = _post(id=4, media_path=self._img(tmp_path), media_type="image")
         ok = notify.deliver_draft_to_telegram(post)
-        assert ok is True  # text card still delivered
-        assert any("sendPhoto" in u for u in calls)
-        assert any("sendMessage" in u for u in calls)
+        assert ok is True  # copy + an informational block still arrive
+        assert any("sendPhoto" in url for url, _body in calls)
+        assert any("sendMessage" in url for url, _body in calls)
+        assert all(b"social%3Aapprove" not in body for _url, body in calls)
+        assert b"No+approval+control+was+issued" in calls[-1][1]
 
 
 class TestDiscordSend:

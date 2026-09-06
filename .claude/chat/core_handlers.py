@@ -3003,6 +3003,44 @@ async def handle_signal(adapter: Any, incoming: Any, args: str, *, collect_only:
     """Business signal digest — status or refresh."""
     subcmd = args.strip().lower() if args.strip() else ""
 
+    if subcmd == "authority" or subcmd.startswith("authority "):
+        authority_action = subcmd.removeprefix("authority").strip() or "status"
+        try:
+            import json
+            import sys
+            from pathlib import Path
+
+            _scripts = Path(__file__).resolve().parent.parent / "scripts"
+            if str(_scripts) not in sys.path:
+                sys.path.insert(0, str(_scripts))
+
+            from business_signal.authority import (
+                get_authority_status,
+                list_authority_queue,
+                run_authority_refresh,
+            )
+
+            if authority_action == "status":
+                return get_authority_status()
+            if authority_action == "refresh":
+                receipt = await run_authority_refresh()
+                return json.dumps(receipt.as_dict(), indent=2)
+            if authority_action == "queue":
+                rows = list_authority_queue()
+                if not rows:
+                    return "Authority Signal queue is empty."
+                lines = ["*GEO Authority Signal Queue*"]
+                for row in rows:
+                    lines.append(
+                        f"  {row['signal_id']} · {row['series']} · "
+                        f"{row['score_class']} · expires {row['expires_at']}"
+                    )
+                    lines.append(f"    {row['source_url']}")
+                return "\n".join(lines)
+            return "Usage: `/signal authority status|refresh|queue`"
+        except Exception as e:
+            return f"Authority Signal error: {type(e).__name__}: {e}"
+
     if subcmd == "refresh":
         try:
             import sys
@@ -4998,7 +5036,7 @@ def _switch_provider(choice: str) -> str:
             "Usage: /model <lane|provider|provider:model|model>\n"
             "  /model claude - Claude native lane\n"
             "  /model sonnet - Claude Sonnet 5\n"
-            "  /model opus - Claude Opus 4.8\n"
+            "  /model opus - Claude Opus 5\n"
             "  /model fable - Claude Fable 5 (flagship)\n"
             "  /model codex - generic runtime lane via Codex\n"
             "  /model codex:default - Codex plan default (no --model passed)\n"
@@ -5245,7 +5283,6 @@ async def handle_design(adapter: Any, incoming: Any, args: str, *, collect_only:
             allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
             permission_mode="acceptEdits",
             max_turns=20,
-            max_budget_usd=1.0,
             # Brief lives in `prompt` (lane-agnostic). system_prompt left None so
             # the generic CLI lanes (codex/gemini) receive identical instructions
             # — prompt_builder only forwards string system_prompts.
@@ -6642,6 +6679,24 @@ async def _send_linkedin_topic_prompt(adapter: Any, incoming: Any) -> None:
     )
 
 
+def _bound_social_callback(action: str, post: Any) -> str:
+    from social.models import approval_binding_digest
+
+    return (
+        f"social:{action}:{post.id}:{post.revision}:"
+        f"{approval_binding_digest(post)}"
+    )
+
+
+def _bound_linkedin_callback(action: str, post: Any) -> str:
+    from social.models import approval_binding_digest
+
+    return (
+        f"linkedin_flow:{action}:{post.id}:{post.revision}:"
+        f"{approval_binding_digest(post)}"
+    )
+
+
 async def _send_linkedin_preview(adapter: Any, incoming: Any, post: Any) -> None:
     from models import Attachment, MessageComponent
 
@@ -6675,22 +6730,22 @@ async def _send_linkedin_preview(adapter: Any, incoming: Any, post: Any) -> None
         components=[
             MessageComponent(
                 label="Approve & Post",
-                custom_id=f"social:approve:{post.id}",
+                custom_id=_bound_social_callback("approve", post),
                 style="success",
             ),
             MessageComponent(
                 label="Cook the Copy",
-                custom_id=f"linkedin_flow:revise:{post.id}",
+                custom_id=_bound_linkedin_callback("revise", post),
                 style="primary",
             ),
             MessageComponent(
                 label="Redo Image",
-                custom_id=f"linkedin_flow:image:{post.id}",
+                custom_id=_bound_linkedin_callback("image", post),
                 style="secondary",
             ),
             MessageComponent(
                 label="Reject",
-                custom_id=f"social:reject:{post.id}",
+                custom_id=_bound_social_callback("reject", post),
                 style="danger",
             ),
             MessageComponent(
@@ -6883,7 +6938,12 @@ async def handle_linkedin_button(
         return
 
     parts = custom_id.split(":")
-    if len(parts) != 3 or not parts[2].isdigit():
+    if (
+        len(parts) != 5
+        or not parts[2].isdigit()
+        or not parts[3].isdigit()
+        or len(parts[4]) != 12
+    ):
         await _linkedin_send(
             adapter,
             incoming,
@@ -6892,12 +6952,42 @@ async def handle_linkedin_button(
         )
         return
     action, post_id = parts[1], int(parts[2])
+    from social.service import SocialPostService
+
+    try:
+        matches, current = SocialPostService().validate_binding(
+            post_id,
+            revision=int(parts[3]),
+            digest=parts[4],
+        )
+    except ValueError as exc:
+        await _linkedin_send(adapter, incoming, f"LinkedIn draft unavailable: {exc}", is_error=True)
+        return
+    if not matches:
+        await _linkedin_send(
+            adapter,
+            incoming,
+            "That button is stale. Here is the current revision; review it before acting.",
+            is_error=True,
+        )
+        if current.status == "draft":
+            await _send_linkedin_preview(adapter, incoming, current)
+        else:
+            await _linkedin_send(
+                adapter,
+                incoming,
+                f"Current draft #{post_id} ({current.status}):\n\n{current.body}",
+            )
+        return
     if action == "revise":
         _linkedin_workshop_set(key, stage="await_revision", post_id=post_id)
         await _linkedin_send(
             adapter,
             incoming,
-            "What should I change in the copy? Send it naturally, like: make the hook more direct and cut the last paragraph.",
+            (
+                "What should I change in the copy? Send it naturally, like: "
+                "make the hook more direct and cut the last paragraph."
+            ),
         )
         return
     if action == "image":
@@ -7185,7 +7275,7 @@ async def _send_primo_preview(adapter: Any, incoming: Any, post: Any) -> None:
     components = [
         MessageComponent(
             label="Approve & Post",
-            custom_id=f"social:approve:{post.id}",
+            custom_id=_bound_social_callback("approve", post),
             style="success",
         ),
         MessageComponent(
@@ -7211,7 +7301,7 @@ async def _send_primo_preview(adapter: Any, incoming: Any, post: Any) -> None:
         [
             MessageComponent(
                 label="Reject",
-                custom_id=f"social:reject:{post.id}",
+                custom_id=_bound_social_callback("reject", post),
                 style="danger",
             ),
             MessageComponent(
@@ -7239,12 +7329,25 @@ async def _send_primo_image_failure(
 ) -> None:
     from models import MessageComponent
 
+    from social.service import SocialPostService
+
+    post = SocialPostService().get_post(post_id)
+    if post is None:
+        await _primo_send(
+            adapter,
+            incoming,
+            f"Primo draft #{post_id} no longer exists.",
+            is_error=True,
+        )
+        return
+
     await _primo_send(
         adapter,
         incoming,
         (
-            f"The copy for Primo draft #{post_id} is ready, but the required image did not render. "
-            "Nothing can be approved from this message. Retry the image or explicitly switch to text only."
+            f"The copy for Primo draft #{post_id} is ready, but the required "
+            "image did not render. Nothing can be approved from this message. "
+            "Retry the image or explicitly switch to text only."
         ),
         components=[
             MessageComponent(
@@ -7259,7 +7362,7 @@ async def _send_primo_image_failure(
             ),
             MessageComponent(
                 label="Reject",
-                custom_id=f"social:reject:{post_id}",
+                custom_id=_bound_social_callback("reject", post),
                 style="danger",
             ),
         ],
@@ -7676,7 +7779,13 @@ def _spawn_social_post_runner(post_id: int) -> str:
     )
 
 
-async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
+async def handle_social(
+    adapter: Any,
+    incoming: Any,
+    args: str,
+    *,
+    collect_only: bool = False,
+) -> str:
     """Social post queue — status, queue, draft, approve, reject, post, cadence."""
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -7687,8 +7796,8 @@ async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only:
 
     if subcmd == "status":
         try:
-            from social.service import SocialPostService
             from social.channels import list_channels
+            from social.service import SocialPostService
 
             svc = SocialPostService()
             counts = svc.count_by_status()
@@ -7697,7 +7806,15 @@ async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only:
             lines = ["*Social Post Queue*\n"]
             total = sum(counts.values())
             lines.append(f"Total posts: {total}")
-            for status in ("draft", "approved", "posted", "failed", "rejected"):
+            for status in (
+                "draft",
+                "approved",
+                "verification_required",
+                "posted",
+                "failed",
+                "rejected",
+                "superseded",
+            ):
                 c = counts.get(status, 0)
                 if c:
                     lines.append(f"  {status}: {c}")
@@ -7708,6 +7825,60 @@ async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only:
             return "\n".join(lines)
         except Exception as e:
             return f"Error: {e}"
+
+    elif subcmd == "outcome":
+        try:
+            from social.outcomes import (
+                list_outcomes,
+                parse_outcome_arguments,
+                record_outcome,
+            )
+
+            if rest.strip().lower() == "list" or rest.strip().lower().startswith(
+                "list "
+            ):
+                query = rest.strip()[4:].strip() or None
+                rows = list_outcomes(subject_id=query, limit=20)
+                if not rows:
+                    return "No Socials outcomes recorded for that scope."
+                lines = ["*Socials Outcome Evidence*"]
+                for row in rows:
+                    metrics = ", ".join(
+                        f"{name}={value}"
+                        for name, value in (row.get("metrics") or {}).items()
+                    )
+                    lines.append(
+                        f"  {row['outcome_id']} · {row['subject_id']} · {metrics}"
+                    )
+                    if row.get("github_attribution"):
+                        lines.append("    correlated movement, not a conversion")
+                return "\n".join(lines)
+
+            subject_id, metrics, note = parse_outcome_arguments(rest)
+            receipt = await asyncio.to_thread(
+                record_outcome,
+                subject_id,
+                metrics,
+                note=note,
+            )
+            outcome = receipt["outcome"]
+            lines = [
+                f"Socials outcome {receipt['status']}: {outcome['outcome_id']}",
+                f"Subject: {outcome['subject_id']}",
+                "Metrics: "
+                + ", ".join(
+                    f"{name}={value}"
+                    for name, value in outcome["metrics"].items()
+                ),
+                "Causal attribution: none",
+            ]
+            if outcome.get("github_attribution"):
+                lines.append("GitHub deltas: correlated movement, not conversions")
+            return "\n".join(lines)
+        except ValueError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            return f"Error recording outcome: {type(e).__name__}: {e}"
 
     elif subcmd == "queue":
         try:
@@ -7729,7 +7900,11 @@ async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only:
     elif subcmd == "draft":
         draft_parts = rest.strip().split(None, 1)
         if len(draft_parts) < 2:
-            return "Usage: `/social draft <channel> <idea>`\nExample: `/social draft linkedin Our new AI receptionist handles 100 calls a day`"
+            return (
+                "Usage: `/social draft <channel> <idea>`\n"
+                "Example: `/social draft linkedin Our new AI receptionist "
+                "handles 100 calls a day`"
+            )
         channel_id, topic = draft_parts[0].lower(), draft_parts[1]
         try:
             from social.draft_generator import generate_draft
@@ -7739,26 +7914,48 @@ async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only:
                 svc = SocialPostService()
                 post = svc.get_post(pid)
                 preview = post.body[:200] if post else ""
-                return f"Draft created: #{pid} ({channel_id})\n\n{preview}{'...' if post and len(post.body) > 200 else ''}\n\nApprove: `/social approve {pid}`"
+                suffix = "..." if post and len(post.body) > 200 else ""
+                return (
+                    f"Draft created: #{pid} ({channel_id})\n\n{preview}{suffix}\n\n"
+                    f"Approve: `/social approve {pid}`"
+                )
             return "Draft generation failed. Check logs."
         except Exception as e:
             return f"Error creating draft: {e}"
 
     elif subcmd == "approve":
+        approval_parts = rest.strip().split()
         try:
-            post_id = int(rest.strip())
-        except (ValueError, TypeError):
+            post_id = int(approval_parts[0])
+        except (IndexError, ValueError, TypeError):
             return "Usage: `/social approve <id>`"
+        expected_revision = None
+        expected_digest = None
+        if len(approval_parts) == 3:
+            try:
+                expected_revision = int(approval_parts[1])
+            except ValueError:
+                return "Error: invalid approval revision"
+            expected_digest = approval_parts[2]
+        elif len(approval_parts) != 1:
+            return "Usage: `/social approve <id> [revision digest]`"
         try:
-            from social.service import SocialPostService
             from social.audit import append_social_audit_record
+            from social.service import SocialPostService
             svc = SocialPostService()
-            post = svc.approve_post(post_id)
+            post = svc.approve_post(
+                post_id,
+                expected_revision=expected_revision,
+                expected_digest=expected_digest,
+            )
             append_social_audit_record(
                 channel=post.channel, action="approve", post_id=post_id,
                 outcome="approved", operator="operator",
             )
-            return f"Post #{post_id} approved ({post.channel}). Dispatch: `/social post {post_id}`"
+            return (
+                f"Post #{post_id} approved ({post.channel}). "
+                f"Dispatch: `/social post {post_id}`"
+            )
         except ValueError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -7771,11 +7968,25 @@ async def handle_social(adapter: Any, incoming: Any, args: str, *, collect_only:
         except (ValueError, TypeError):
             return "Usage: `/social reject <id> [reason]`"
         reason = reject_parts[1] if len(reject_parts) > 1 else ""
+        expected_revision = None
+        expected_digest = None
+        # Authenticated button callbacks pass: reject <id> <revision> <digest>.
+        # A typed/manual reason retains the legacy two-part command.
+        bound_parts = rest.strip().split()
+        if len(bound_parts) == 3 and bound_parts[1].isdigit():
+            expected_revision = int(bound_parts[1])
+            expected_digest = bound_parts[2]
+            reason = ""
         try:
-            from social.service import SocialPostService
             from social.audit import append_social_audit_record
+            from social.service import SocialPostService
             svc = SocialPostService()
-            post = svc.reject_post(post_id, reason=reason)
+            post = svc.reject_post(
+                post_id,
+                reason=reason,
+                expected_revision=expected_revision,
+                expected_digest=expected_digest,
+            )
             append_social_audit_record(
                 channel=post.channel, action="reject", post_id=post_id,
                 outcome="rejected", operator="operator",

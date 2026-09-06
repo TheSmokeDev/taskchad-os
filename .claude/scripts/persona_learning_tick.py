@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -39,7 +40,7 @@ from personas import get_default_paths  # noqa: E402
 from personas.capabilities import build_capability_scoped_env  # noqa: E402
 from personas.lifecycle import list_profiles  # noqa: E402
 from personas.services import is_active_default_profile, load_persona_config  # noqa: E402
-from shared import load_state, safe_exc_text, save_state  # noqa: E402
+from shared import file_lock, load_state, safe_exc_text, save_state  # noqa: E402
 
 # Inject .claude/chat for session store access
 _CHAT_DIR = Path(__file__).resolve().parent.parent / "chat"
@@ -183,14 +184,78 @@ def _count_attributed_rows_since(
         return 0
 
 
+_FAILURE_TAIL_LINES = 6
+_FAILURE_TAIL_MAX_CHARS = 900
+
+# A scheduled slot that lands within this many hours of the interval counts as
+# due. The throttle stamp is taken during the tick, seconds to minutes after
+# the scheduler fired it, so a 12h guard on a 12h cadence compared 11.9x h
+# against 12.0 h and skipped — every slot. Observed 2026-09-02: crypto failed
+# at 09:31, the 21:30 slot logged "recency guard (11.97h < 12.0h), skipping",
+# and the retry landed at 09:30 the next day. A failed persona was degraded to
+# one retry per day.
+RECENCY_GUARD_JITTER_HOURS = 0.25
+
+# How long a second tick waits for the process-wide lock before giving up.
+# A child runs for minutes, so waiting longer never helps; the loser exits
+# without spawning and the next scheduled slot retries.
+TICK_LOCK_TIMEOUT_SECONDS = 2.0
+
+
+def _attempt_sort_key(persona_name: str) -> str:
+    """Oldest attempt first; never-attempted and unreadable stamps first of all."""
+    try:
+        state = load_state(_persona_state_file(persona_name))
+        return str(state.get("last_attempt") or state.get("last_run") or "")
+    except Exception:
+        return ""
+
+
+def _as_text(value: object) -> str:
+    """``TimeoutExpired`` carries whatever was captured: str, bytes, or None."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
+
+
+def _child_failure_tail(stdout: str | None, stderr: str | None) -> str:
+    """The child's own explanation of a non-zero exit, for the receipt.
+
+    ``memory_reflect.py`` prints every reason it exits 1 on STDOUT — the
+    fail-honest notes leg ("Work-note distillation did not complete"), the
+    distillation call's own error line, the kill-switch refusal — and its
+    stderr is empty on all of them. Keeping only a stderr tail produced the
+    receipt ``exit 1: `` for every failed persona: the cause was captured and
+    thrown away, and the operator had to re-run the child by hand to read it.
+    The last few non-empty stdout lines carry the cause; a stderr tail is
+    appended when one exists (a traceback still lands there).
+    """
+    parts: list[str] = []
+    out_lines = [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
+    if out_lines:
+        parts.append("stdout: " + " | ".join(out_lines[-_FAILURE_TAIL_LINES:]))
+    err = (stderr or "").strip()
+    if err:
+        parts.append("stderr: " + err[-500:])
+    if not parts:
+        return "(child produced no output)"
+    return " ; ".join(parts)[-_FAILURE_TAIL_MAX_CHARS:]
+
+
 def _spawn_persona_pipeline(
     persona_name: str,
     profile_root: Path,
     *,
     test_mode: bool = False,
     notes_since: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> tuple[bool, str]:
     """Spawn memory_reflect.py -p <persona> as a subprocess.
+
+    ``timeout_seconds`` is ``PERSONA_LEARNING_TIMEOUT`` (Rule 1: resolved at
+    call time when not passed). It used to be a hard-coded 300 — which killed
+    crypto's first-ever successful distillation on 2026-09-02 while the
+    contradiction judge was still running, and threw away the child's output.
 
     ``notes_since`` is the effective gate boundary, passed EXPLICITLY because
     parent and child do not share a ``STATE_DIR``: the child re-roots under
@@ -217,35 +282,86 @@ def _spawn_persona_pipeline(
     if test_mode:
         cmd.append("--test")
 
+    if timeout_seconds is None:
+        timeout_seconds = get_persona_learning_settings().timeout_seconds
+
     try:
         result = subprocess.run(
             cmd,
             env=env,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=timeout_seconds,
             cwd=str(_SCRIPTS_DIR),
         )
         if result.returncode == 0:
             return True, "success"
-        stderr_tail = (result.stderr or "")[-500:]
-        return False, f"exit {result.returncode}: {stderr_tail}"
-    except subprocess.TimeoutExpired:
-        return False, "timeout (300s)"
+        return False, (
+            f"exit {result.returncode}: "
+            f"{_child_failure_tail(result.stdout, result.stderr)}"
+        )
+    except subprocess.TimeoutExpired as exc:
+        # The partial output is the only evidence of how far the child got.
+        return False, (
+            f"timeout ({timeout_seconds:.0f}s): "
+            f"{_child_failure_tail(_as_text(exc.stdout), _as_text(exc.stderr))}"
+        )
     except Exception as exc:
         return False, f"spawn error: {exc}"
 
 
-def run_tick(*, test_mode: bool = False, once: bool = False) -> None:
-    """Main tick: enumerate learning-enabled personas, spawn pipelines."""
+@dataclass(frozen=True)
+class TickOutcome:
+    """What one tick did, so the entrypoint can exit honestly.
+
+    ``failed`` names every persona whose spawned child did not succeed this
+    tick. The parent used to swallow these: it printed ``FAILED`` into its own
+    log, stamped the receipt, and exited 0 — so Task Scheduler showed a green
+    ``Last Result: 0`` for a night on which a persona learned nothing.
+    """
+
+    spawned: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
+
+
+def run_tick(*, test_mode: bool = False, once: bool = False) -> TickOutcome:
+    """Main tick: enumerate learning-enabled personas, spawn pipelines.
+
+    One tick at a time. The scheduled task is IgnoreNew, but a manual run
+    beside it used to pass the same recency guard and spawn the same persona
+    twice — two model calls, two reflections mutating one profile, one receipt
+    overwriting the other. The lock is the process-wide lease; the pre-spawn
+    claim inside ``_run_tick_locked`` is the per-persona one.
+    """
+    try:
+        with file_lock(
+            STATE_DIR / "persona-learning-tick.json", timeout=TICK_LOCK_TIMEOUT_SECONDS
+        ):
+            outcome = _run_tick_locked(test_mode=test_mode, once=once)
+        try:
+            from personas.learning import worker as learning_worker
+            learning_worker.run_pending_profiles(test_mode=test_mode, once=once)
+        except Exception as exc:
+            print(f"[{_now_iso()}] Learning queue wake failed (non-blocking): {safe_exc_text(exc)}")
+        return outcome
+    except TimeoutError:
+        print(
+            f"[{_now_iso()}] PERSONA_LEARNING_TICK: another tick holds the lock; "
+            "exiting without spawning (nothing consumed, retried next slot)"
+        )
+        return TickOutcome()
+
+
+def _run_tick_locked(*, test_mode: bool, once: bool) -> TickOutcome:
     settings = get_persona_learning_settings()
+    tick_started = datetime.now(timezone.utc).isoformat()
     if not settings.enabled:
         print(f"[{_now_iso()}] [persona-learning] disabled via PERSONA_LEARNING_ENABLED")
-        return
+        return TickOutcome()
 
     if not is_active_default_profile():
         print(f"[{_now_iso()}] PERSONA_LEARNING_TICK: must run under default profile, skipping")
-        return
+        return TickOutcome()
 
     install_db = get_default_paths()["data"] / "chat.db"
 
@@ -254,7 +370,7 @@ def run_tick(*, test_mode: bool = False, once: bool = False) -> None:
 
     if not named_profiles:
         print(f"[{_now_iso()}] PERSONA_LEARNING_TICK: no named profiles found, exiting")
-        return
+        return TickOutcome()
 
     bg_models = get_background_models()
     os.environ["SECOND_BRAIN_BACKGROUND_QUALITY_MODEL"] = bg_models["quality"]
@@ -274,10 +390,20 @@ def run_tick(*, test_mode: bool = False, once: bool = False) -> None:
 
     if not eligible:
         print(f"[{_now_iso()}] PERSONA_LEARNING_TICK: no learning-enabled personas, exiting")
-        return
+        return TickOutcome()
 
     print(f"[{_now_iso()}] PERSONA_LEARNING_TICK: {len(eligible)} learning-enabled persona(s)")
 
+    # Overdue-first. Every attempted persona is stamped with the same tick
+    # start, so a roster whose head keeps timing out inside the task's
+    # one-hour execution limit would re-run that same head every slot and
+    # never reach the tail. Sorting by the oldest attempt rotates the tail
+    # forward; a never-attempted persona (or one whose stamp cannot be read)
+    # sorts first, so it is retried rather than skipped.
+    eligible.sort(key=lambda item: _attempt_sort_key(item[0]))
+
+    spawned: list[str] = []
+    failed: list[str] = []
     for persona_name, profile_root in eligible:
         state_file = _persona_state_file(persona_name)
         state = load_state(state_file)
@@ -305,7 +431,7 @@ def run_tick(*, test_mode: bool = False, once: bool = False) -> None:
                 hours_since = (
                     datetime.now(timezone.utc) - last_dt
                 ).total_seconds() / 3600.0
-                if hours_since < settings.tick_interval_hours:
+                if hours_since < settings.tick_interval_hours - RECENCY_GUARD_JITTER_HOURS:
                     print(
                         f"[{_now_iso()}] PERSONA_LEARNING_TICK [{persona_name}]: "
                         f"recency guard ({hours_since:.1f}h < "
@@ -410,11 +536,21 @@ def run_tick(*, test_mode: bool = False, once: bool = False) -> None:
         # lost note is not.
         scan_upper_bound = datetime.now(timezone.utc).isoformat()
 
+        # Claim the attempt BEFORE the child starts. A second tick that reads
+        # this receipt while the child is running sees the attempt and skips,
+        # instead of spawning the same persona twice. Stamped with the TICK's
+        # start, not this persona's spawn instant: the throttle measures slot
+        # to slot, and a stamp taken minutes into the roster made the next
+        # 12h slot read 11.9x h and skip (see RECENCY_GUARD_JITTER_HOURS).
+        state["last_attempt"] = tick_started
+        save_state(state, state_file)
+
         success, message = _spawn_persona_pipeline(
             persona_name,
             profile_root,
             test_mode=test_mode,
             notes_since=notes_since,
+            timeout_seconds=settings.timeout_seconds,
         )
 
         # `last_attempt` always advances (it throttles the retry); `last_run`
@@ -429,7 +565,6 @@ def run_tick(*, test_mode: bool = False, once: bool = False) -> None:
         # than the watermark, so they were never fresh again and the lessons in
         # them were lost permanently. Leaving the boundary put means the next
         # tick after recovery counts exactly the same notes and retries them.
-        state["last_attempt"] = datetime.now(timezone.utc).isoformat()
         if success:
             state["last_run"] = scan_upper_bound
         state["result"] = "success" if success else "failed"
@@ -437,6 +572,9 @@ def run_tick(*, test_mode: bool = False, once: bool = False) -> None:
         state["notes_found"] = note_count
         state["message"] = message
         save_state(state, state_file)
+        spawned.append(persona_name)
+        if not success:
+            failed.append(persona_name)
 
         if success:
             print(f"[{_now_iso()}] PERSONA_LEARNING_TICK [{persona_name}]: SUCCESS")
@@ -446,10 +584,28 @@ def run_tick(*, test_mode: bool = False, once: bool = False) -> None:
         if once:
             break
 
+    if failed:
+        print(
+            f"[{_now_iso()}] PERSONA_LEARNING_TICK: {len(failed)} persona(s) FAILED "
+            f"this tick: {', '.join(failed)}"
+        )
+    return TickOutcome(spawned=tuple(spawned), failed=tuple(failed))
 
-if __name__ == "__main__":
+
+def main(argv: list[str] | None = None) -> int:
+    """Entrypoint. Non-zero when any persona's child failed this tick.
+
+    The wrappers (``run_persona_learning.bat`` / ``.sh``) forward this code to
+    Task Scheduler, so a failed persona is a red ``Last Result`` instead of a
+    line buried in the tick's own log.
+    """
     parser = argparse.ArgumentParser(description="Persona Learning Tick")
     parser.add_argument("--test", action="store_true", help="Dry run")
     parser.add_argument("--once", action="store_true", help="Process first eligible persona only")
-    args = parser.parse_args()
-    run_tick(test_mode=args.test, once=args.once)
+    args = parser.parse_args(argv)
+    outcome = run_tick(test_mode=args.test, once=args.once)
+    return 1 if outcome.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

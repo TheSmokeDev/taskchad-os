@@ -6,8 +6,10 @@ Requires: GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET, GRAPH_TENANT_ID, GRAPH_USER_EMAI
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +37,7 @@ GRAPH_TENANT_ID = os.getenv("GRAPH_TENANT_ID", "")
 GRAPH_USER_EMAIL = os.getenv("GRAPH_USER_EMAIL", "")
 
 _token_cache: dict[str, Any] = {}
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -178,6 +181,65 @@ def list_emails(
     return [_parse_message(m) for m in messages]
 
 
+def observe_inbound_response(
+    *, thread_id: str, outbound_id: str, recipient_email: str, mailbox_id: str,
+    collected_at: str, deadline: str | None = None, session: Any = None,
+    mailbox_email: str | None = None, max_pages: int = 100,
+) -> dict[str, Any]:
+    """Read a conversation with stable Graph IDs across moves and all pages.
+
+    An interrupted or bounded page scan can establish a reply but cannot prove
+    its absence. Every request carries the immutable ID preference.
+    """
+    from urllib.parse import quote, urlparse
+
+    from personas.learning.observers import (
+        observe_mail_response,
+        outlook_messages,
+        unavailable_observation,
+    )
+
+    require_integration_action("outlook", "read")
+    try:
+        address = mailbox_email or GRAPH_USER_EMAIL
+        if not address:
+            return unavailable_observation("outlook", "mailbox_not_configured")
+        if address.casefold() != mailbox_id.casefold():
+            return unavailable_observation("outlook", "mailbox_identity_mismatch")
+        headers = {"Prefer": 'IdType="ImmutableId"'}
+        if session is None:
+            headers["Authorization"] = f"Bearer {_get_access_token()}"
+        client = session if session is not None else requests
+        url = f"https://graph.microsoft.com/v1.0/users/{quote(address, safe='')}/messages"
+        params = {"$filter": "conversationId eq '" + thread_id.replace("'", "''") + "'",
+                  "$select": ("id,conversationId,internetMessageId,from,toRecipients,ccRecipients,"
+                              "receivedDateTime,sentDateTime,isDraft,bodyPreview"),
+                  "$top": "100"}
+        messages: list[dict[str, Any]] = []
+        complete = False
+        for _ in range(max(1, max_pages)):
+            response = client.get(url, params=params, headers=headers, timeout=15)
+            response.raise_for_status()
+            page = response.json()
+            messages.extend(page.get("value", []))
+            next_url = page.get("@odata.nextLink")
+            if not next_url:
+                complete = True
+                break
+            # Never forward Graph credentials to a URL supplied by a foreign host.
+            parsed = urlparse(str(next_url))
+            if parsed.scheme != "https" or parsed.netloc != "graph.microsoft.com":
+                raise ValueError("invalid Graph pagination URL")
+            url, params = str(next_url), None
+        return observe_mail_response(
+            provider="outlook", mailbox_id=mailbox_id, outbound_id=outbound_id,
+            recipient_email=recipient_email, messages=outlook_messages(messages, address),
+            collected_at=collected_at, deadline=deadline, complete=complete,
+        )
+    except Exception as exc:
+        return unavailable_observation("outlook", type(exc).__name__)
+
+
 def get_unread_count() -> int:
     """Get count of unread emails."""
     result = _graph_get("/mailFolders/inbox")
@@ -263,6 +325,8 @@ def send_email(
     body: str,
     content_type: str = "Text",
     append_signature: bool = False,
+    *,
+    learning_context: dict[str, str] | None = None,
 ) -> bool:
     """Send an email via Microsoft Graph API.
 
@@ -303,9 +367,124 @@ def send_email(
         },
         "saveToSentItems": "true"
     }
+    learning = None
+    if learning_context is not None:
+        from personas.learning import observers
+
+        send_id = uuid.uuid4().hex
+        try:
+            learning = observers.begin_mail_send(
+                learning_context, mailbox_id=GRAPH_USER_EMAIL, to_email=to_email,
+                subject=subject, body=body, content_type=content_type, send_id=send_id,
+            )
+        except Exception as exc:
+            _logger.warning("mail learning capture unavailable: %s", type(exc).__name__)
+        # Opaque host correlation only: never put persona IDs or credentials in
+        # outbound headers. Graph supports custom x- headers on sendMail.
+        if learning is not None:
+            payload["message"]["internetMessageHeaders"] = [
+                {"name": "x-homie-send-id", "value": send_id}
+            ]
     try:
         _graph_post("/sendMail", payload)
-        return True
-    except Exception as e:
-        # Re-raise to let caller handle error reporting
-        raise e
+    except Exception:
+        # The POST may have reached Graph. Never repeat it to obtain IDs. The
+        # durable intent remains unknown and the scheduled collector reads it.
+        raise
+    if learning is not None:
+        try:
+            observers.resolve_mail_outbound(*learning)
+        except Exception as exc:
+            # Preserve sender compatibility: provider acceptance cannot become
+            # an apparent send failure that tempts a caller to send again.
+            _logger.warning("mail learning readback unavailable: %s", type(exc).__name__)
+    return True
+
+
+def find_sent_learning_message(intent: dict[str, Any], *, session: Any = None,
+                               max_pages: int = 10) -> dict[str, Any]:
+    """Verify Sent Items evidence for one prior host send, without any POST.
+
+    Microsoft documents sendMail's 202 as acceptance, not completion:
+    https://learn.microsoft.com/en-us/graph/api/user-sendmail
+    ID linkage requires the opaque send header plus exact account, recipient,
+    content and bounded server timestamp. Ambiguity is unknown, never guessed.
+    """
+    from urllib.parse import quote, urlparse
+
+    from personas.learning.observers import (
+        _time,
+        mail_content_hash,
+        outlook_messages,
+        unavailable_observation,
+    )
+
+    require_integration_action("outlook", "read")
+    try:
+        address = GRAPH_USER_EMAIL
+        if not address or address.casefold() != str(intent.get("mailbox_id", "")).casefold():
+            return unavailable_observation("outlook", "mailbox_identity_mismatch")
+        started, latest = _time(intent["started_at"]), _time(intent["send_not_after"])
+        # Graph timestamps may carry seconds only. The unique host header and
+        # exact content still bind the send; record the server precision below.
+        earliest = started.replace(microsecond=0)
+        headers = {
+            "Prefer": 'IdType="ImmutableId", outlook.body-content-type="'
+                      + str(intent["content_type"]) + '"',
+        }
+        client = session if session is not None else requests
+        if session is None:
+            headers["Authorization"] = f"Bearer {_get_access_token()}"
+        root = f"https://graph.microsoft.com/v1.0/users/{quote(address, safe='')}"
+        url = root + "/mailFolders/sentitems/messages"
+        params = {
+            "$filter": "sentDateTime ge " + earliest.isoformat().replace("+00:00", "Z")
+                       + " and sentDateTime le " + latest.isoformat().replace("+00:00", "Z"),
+            "$select": "id,conversationId,internetMessageId,internetMessageHeaders,from,"
+                       "toRecipients,ccRecipients,bccRecipients,sentDateTime,receivedDateTime,"
+                       "isDraft,subject,body,bodyPreview", "$top": "100",
+        }
+        matches = {}
+        complete = False
+        for _ in range(max(1, max_pages)):
+            response = client.get(url, params=params, headers=headers, timeout=15)
+            response.raise_for_status()
+            page = response.json()
+            for item in page.get("value", []):
+                marker = [h.get("value") for h in item.get("internetMessageHeaders", [])
+                          if str(h.get("name", "")).casefold() == "x-homie-send-id"]
+                if marker != [intent["send_id"]]:
+                    continue
+                message = outlook_messages([item], address)[0]
+                stamp = _time(message["occurred_at"])
+                recipients = [str(r.get("emailAddress", {}).get("address", "")).casefold()
+                              for r in item.get("toRecipients", [])]
+                if (not message["sent"] or message["draft"] or not earliest <= stamp <= latest
+                    or recipients != [intent["recipient_email"]]
+                    or item.get("ccRecipients") or item.get("bccRecipients")
+                    or mail_content_hash(recipients[0], item.get("subject", ""),
+                        item.get("body", {}).get("content", ""),
+                        item.get("body", {}).get("contentType", "")) != intent["content_hash"]):
+                    continue
+                message["host_send_started_at"] = intent["started_at"]
+                message["send_id"] = intent["send_id"]
+                matches[message["id"]] = message
+            next_url = page.get("@odata.nextLink")
+            if not next_url:
+                complete = True
+                break
+            parsed = urlparse(str(next_url))
+            if parsed.scheme != "https" or parsed.netloc != "graph.microsoft.com":
+                raise ValueError("invalid Graph pagination URL")
+            if not str(next_url).startswith(root + "/"):
+                raise ValueError("Graph pagination account mismatch")
+            url, params = str(next_url), None
+        if not complete:
+            return unavailable_observation("outlook", "sent_scan_incomplete")
+        if len(matches) != 1:
+            return unavailable_observation(
+                "outlook", "sent_match_ambiguous" if matches else "sent_not_observed"
+            )
+        return {"status": "sent_observed", "outbound": next(iter(matches.values()))}
+    except Exception as exc:
+        return unavailable_observation("outlook", type(exc).__name__)

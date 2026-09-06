@@ -9,8 +9,10 @@ All external posts are gated via require_integration_action() with pre-send audi
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from integrations.capabilities import IntegrationPolicyError, require_integration_action
 from social.audit import append_social_audit_record
@@ -20,10 +22,40 @@ from social.service import SocialPostService
 logger = logging.getLogger(__name__)
 
 
+def _is_linkedin_permalink(value: str) -> bool:
+    parsed = urlsplit(value or "")
+    return (
+        parsed.scheme == "https"
+        and (parsed.hostname or "").lower() in {"linkedin.com", "www.linkedin.com"}
+        and parsed.path.startswith("/feed/update/urn:li:")
+    )
+
+
+def _receipt_json(receipt: object, metadata: dict) -> str:
+    """Persist only the explicit proof envelope, never page text or bytes."""
+
+    allowed = {
+        "screenshot_path",
+        "workflow_id",
+        "subtask_id",
+        "verification_state",
+        "post_url",
+        "submitted_at",
+        "confirmation_result",
+    }
+    payload = {key: metadata.get(key) for key in allowed if key in metadata}
+    payload["executor_status"] = str(getattr(receipt, "status", ""))
+    error = getattr(receipt, "error", None)
+    if error:
+        payload["error"] = str(error)[:500]
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def dispatch_post(
     post_id: int,
     *,
     db_path: str | Path | None = None,
+    claim_owned: bool = False,
 ) -> bool:
     """Dispatch an approved post to its channel executor.
 
@@ -39,6 +71,38 @@ def dispatch_post(
         raise ValueError(
             f"Post {post_id} has status '{post.status}', expected 'approved'"
         )
+
+    # Every ingress must own the same durable CAS claim before it can reach an
+    # external transport.  Cron/runner callers claim first and prove that fact;
+    # dashboard/factory/direct callers acquire here.  A losing race is a quiet
+    # no-op, never a second send.
+    if claim_owned:
+        if not post.claimed_at:
+            raise ValueError(f"Post {post_id} has no dispatch claim")
+    else:
+        if not svc.claim_post(post_id):
+            return False
+        claimed = svc.get_post(post_id)
+        if claimed is None or not claimed.claimed_at:
+            raise ValueError(f"Post {post_id} dispatch claim could not be verified")
+        post = claimed
+
+    try:
+        post = svc.assert_integrity(post_id)
+    except ValueError as exc:
+        svc.mark_failed(
+            post_id,
+            error=str(exc),
+            verification_state="integrity_failed",
+        )
+        append_social_audit_record(
+            channel=post.channel,
+            action="post",
+            post_id=post_id,
+            outcome="failed",
+            error=str(exc),
+        )
+        return False
 
     channel = get_channel(post.channel)
     if channel is None:
@@ -98,7 +162,7 @@ def dispatch_due_posts(
         if not svc.claim_post(post.id):
             continue
         try:
-            ok = dispatch_post(post.id, db_path=db_path)
+            ok = dispatch_post(post.id, db_path=db_path, claim_owned=True)
             if ok:
                 summary["dispatched"] += 1
             else:
@@ -120,12 +184,13 @@ def sweep_stale_claims(
     db_path: str | Path | None = None,
     ttl_minutes: int | None = None,
 ) -> dict:
-    """Fail posts whose dispatch claim went stale (runner died mid-flight).
+    """Quarantine posts whose dispatch claim went stale (runner died mid-flight).
 
     A claimed row still 'approved' after SOCIAL_RUNNER_CLAIM_TTL_MIN (default
-    15) means the claiming process never finished — mark it failed and tell
-    the operator to verify on the site before re-drafting (the drive may have
-    landed before the crash). Fail-open: a notify miss never blocks the sweep.
+    15) means the claiming process never finished. LinkedIn rows become
+    verification_required because the drive may have landed before the crash;
+    other channels keep the legacy failed behavior. Fail-open: a notify miss
+    never blocks the sweep.
     Returns {"swept": int, "errors": [...]}.
     """
     import os
@@ -142,7 +207,25 @@ def sweep_stale_claims(
     for post in svc.list_stale_claims(ttl_minutes):
         label = f"#{post.id} ({post.channel})"
         try:
-            svc.mark_failed(post.id, error="runner died mid-flight (stale claim swept)")
+            if post.channel.lower() in {"linkedin", "li"}:
+                receipt = json.dumps(
+                    {
+                        "verification_state": "verification_required",
+                        "confirmation_result": "runner_died_mid_flight",
+                        "submitted_at": post.claimed_at,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                svc.mark_verification_required(
+                    post.id,
+                    receipt_json=receipt,
+                    error="runner died mid-flight; verify LinkedIn before any new draft",
+                )
+            else:
+                svc.mark_failed(
+                    post.id, error="runner died mid-flight (stale claim swept)"
+                )
             summary["swept"] += 1
         except Exception as exc:
             summary["errors"].append(f"Post {post.id}: {exc}")
@@ -152,7 +235,8 @@ def sweep_stale_claims(
 
             send_text_to_telegram(
                 f"⚠️ Post {label} was claimed {ttl_minutes}+ min ago but never "
-                f"finished — marked failed. Verify on the site before re-drafting."
+                "finished — manual verification is required. Do not retry it; "
+                "verify on the site before re-drafting."
             )
         except Exception as exc:
             logger.warning("Stale-claim notify for %s failed: %s", label, exc)
@@ -162,8 +246,8 @@ def sweep_stale_claims(
 
 def _dispatch_api(
     svc: SocialPostService,
-    post: "SocialPost",  # noqa: F821
-    channel: "SocialChannel",  # noqa: F821
+    post: SocialPost,  # noqa: F821
+    channel: SocialChannel,  # noqa: F821
 ) -> bool:
     # Map channel to integration action
     action_map = {
@@ -181,7 +265,12 @@ def _dispatch_api(
 
     try:
         # Gate check: require integration action before external post
-        require_integration_action("social", action_name, surface="operator_confirmed", caller="dispatch_api")
+        require_integration_action(
+            "social",
+            action_name,
+            surface="operator_confirmed",
+            caller="dispatch_api",
+        )
 
         # Write pre-send gate record (audit trail of send attempt)
         append_social_audit_record(
@@ -290,8 +379,8 @@ def _dispatch_api(
 
 def _dispatch_postiz(
     svc: SocialPostService,
-    post: "SocialPost",  # noqa: F821
-    channel: "SocialChannel",  # noqa: F821
+    post: SocialPost,  # noqa: F821
+    channel: SocialChannel,  # noqa: F821
 ) -> bool:
     """Publish through the Postiz lane (optimistic accept + reconcile).
 
@@ -315,7 +404,12 @@ def _dispatch_postiz(
 
     try:
         # Gate check: require integration action before external post
-        require_integration_action("social", action_name, surface="operator_confirmed", caller="dispatch_postiz")
+        require_integration_action(
+            "social",
+            action_name,
+            surface="operator_confirmed",
+            caller="dispatch_postiz",
+        )
 
         # Write pre-send gate record (audit trail of send attempt)
         append_social_audit_record(
@@ -450,8 +544,8 @@ def _dispatch_postiz(
 
 def _dispatch_browser(
     svc: SocialPostService,
-    post: "SocialPost",  # noqa: F821
-    channel: "SocialChannel",  # noqa: F821
+    post: SocialPost,  # noqa: F821
+    channel: SocialChannel,  # noqa: F821
 ) -> bool:
     # Map channel to integration action
     action_map = {
@@ -463,7 +557,12 @@ def _dispatch_browser(
 
     try:
         # Gate check: require integration action before external post
-        require_integration_action("social", action_name, surface="operator_confirmed", caller="dispatch_browser")
+        require_integration_action(
+            "social",
+            action_name,
+            surface="operator_confirmed",
+            caller="dispatch_browser",
+        )
 
         # Write pre-send gate record (audit trail of send attempt)
         append_social_audit_record(
@@ -503,7 +602,9 @@ def _dispatch_browser(
         # .claude/ is on sys.path; otherwise fall back to the flat-slice
         # convention (chat/ on sys.path) used everywhere else (#53).
         try:
-            from chat.social_write_driver import make_social_write_driver  # type: ignore[import-not-found]
+            from chat.social_write_driver import (
+                make_social_write_driver,  # type: ignore[import-not-found]
+            )
         except ModuleNotFoundError as exc:
             # Only fall back for the EXPECTED package-resolution miss (the chat
             # slice not importable as `chat.*`). A real broken dependency inside
@@ -528,11 +629,39 @@ def _dispatch_browser(
         with browser_write_lock():
             receipt = executor.dispatch(subtask)
 
+        metadata = receipt.metadata if isinstance(receipt.metadata, dict) else {}
+        receipt_json = _receipt_json(receipt, metadata)
         if receipt.status == "completed":
-            post_url = ""
-            if receipt.metadata:
-                post_url = receipt.metadata.get("post_url", "")
-            svc.mark_posted(post.id, post_url=post_url)
+            post_url = str(metadata.get("post_url") or "")
+            verification_state = str(metadata.get("verification_state") or "")
+            linkedin_write = post.channel.lower() in {"linkedin", "li"}
+            if linkedin_write and (
+                verification_state != "verified"
+                or not _is_linkedin_permalink(post_url)
+            ):
+                svc.mark_verification_required(
+                    post.id,
+                    receipt_json=receipt_json,
+                    error=(
+                        "LinkedIn submit was clicked but no verifiable View post "
+                        "permalink was captured; do not retry"
+                    ),
+                )
+                append_social_audit_record(
+                    channel=post.channel,
+                    action="post",
+                    post_id=post.id,
+                    outcome="verification_required",
+                    body_preview=post.body,
+                    error="missing or invalid LinkedIn permalink",
+                )
+                return False
+            svc.mark_posted(
+                post.id,
+                post_url=post_url,
+                verification_state=verification_state or "not_required",
+                receipt_json=receipt_json,
+            )
             append_social_audit_record(
                 channel=post.channel,
                 action="post",
@@ -543,7 +672,12 @@ def _dispatch_browser(
             )
             return True
         else:
-            svc.mark_failed(post.id, error=receipt.error or "Browser executor failed")
+            svc.mark_failed(
+                post.id,
+                error=receipt.error or "Browser executor failed",
+                verification_state="failed_before_confirmation",
+                receipt_json=receipt_json,
+            )
             append_social_audit_record(
                 channel=post.channel,
                 action="post",

@@ -10,12 +10,15 @@ from pathlib import Path
 
 from social.models import SocialPost
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS social_post_queue (
+_TABLE_SQL = """
+CREATE TABLE social_post_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'draft'
-        CHECK (status IN ('draft', 'approved', 'posted', 'failed', 'rejected')),
+        CHECK (status IN (
+            'draft', 'approved', 'posted', 'failed', 'rejected',
+            'superseded', 'verification_required'
+        )),
     title TEXT NOT NULL,
     body TEXT NOT NULL,
     voice_profile TEXT NOT NULL DEFAULT '',
@@ -31,13 +34,46 @@ CREATE TABLE IF NOT EXISTS social_post_queue (
     external_ref TEXT,
     media_path TEXT,
     media_type TEXT,
-    claimed_at TEXT
+    claimed_at TEXT,
+    source_packet_id TEXT,
+    revision INTEGER NOT NULL DEFAULT 1,
+    content_digest TEXT NOT NULL DEFAULT '',
+    media_digest TEXT NOT NULL DEFAULT '',
+    verification_state TEXT NOT NULL DEFAULT 'pending',
+    receipt_json TEXT,
+    supersede_reason TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_social_post_status ON social_post_queue(status);
-CREATE INDEX IF NOT EXISTS idx_social_post_channel ON social_post_queue(channel);
-CREATE INDEX IF NOT EXISTS idx_social_post_scheduled ON social_post_queue(scheduled_for)
-    WHERE scheduled_for IS NOT NULL;
 """
+
+_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_social_post_status ON social_post_queue(status)",
+    "CREATE INDEX IF NOT EXISTS idx_social_post_channel ON social_post_queue(channel)",
+    """CREATE INDEX IF NOT EXISTS idx_social_post_scheduled
+       ON social_post_queue(scheduled_for) WHERE scheduled_for IS NOT NULL""",
+)
+
+_REQUIRED_INDEXES = {
+    "idx_social_post_status",
+    "idx_social_post_channel",
+    "idx_social_post_scheduled",
+}
+
+_NEW_COLUMNS: dict[str, str] = {
+    "external_ref": "TEXT",
+    "media_path": "TEXT",
+    "media_type": "TEXT",
+    "claimed_at": "TEXT",
+    "source_packet_id": "TEXT",
+    "revision": "INTEGER NOT NULL DEFAULT 1",
+    "content_digest": "TEXT NOT NULL DEFAULT ''",
+    "media_digest": "TEXT NOT NULL DEFAULT ''",
+    "verification_state": "TEXT NOT NULL DEFAULT 'pending'",
+    "receipt_json": "TEXT",
+    "supersede_reason": "TEXT",
+}
+
+_ALL_COLUMNS = tuple(SocialPost.__dataclass_fields__.keys())
+_MIGRATION_TABLE = "social_post_queue__authority_migration"
 
 
 def _row_to_post(row: sqlite3.Row) -> SocialPost:
@@ -59,25 +95,97 @@ class SocialPostDB:
     def _ensure_tables(self) -> None:
         conn = self._connect()
         try:
-            conn.executescript(_SCHEMA_SQL)
-            # Idempotent migration for pre-external_ref databases (the CREATE
-            # above is IF NOT EXISTS, so existing tables keep their old shape).
-            try:
-                conn.execute(
-                    "ALTER TABLE social_post_queue ADD COLUMN external_ref TEXT"
-                )
-            except sqlite3.OperationalError:
-                pass  # column already exists
-            for _col in ("media_path", "media_type", "claimed_at"):
-                try:
-                    conn.execute(
-                        f"ALTER TABLE social_post_queue ADD COLUMN {_col} TEXT"
-                    )
-                except sqlite3.OperationalError:
-                    pass  # column already exists
+            # CHECK constraints cannot be extended with ALTER TABLE.  Keep the
+            # entire status/column migration in one transaction, validate the
+            # copied row count and indexes, then commit.  A failed verification
+            # rolls back to the untouched legacy table.
+            conn.execute("BEGIN IMMEDIATE")
+            table_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='social_post_queue'"
+            ).fetchone()
+            if table_row is None:
+                conn.execute(_TABLE_SQL)
+            else:
+                table_sql = str(table_row["sql"] or "")
+                if (
+                    "'superseded'" not in table_sql
+                    or "'verification_required'" not in table_sql
+                ):
+                    self._rebuild_for_authority_statuses(conn)
+                else:
+                    existing = {
+                        row["name"]
+                        for row in conn.execute("PRAGMA table_info(social_post_queue)")
+                    }
+                    for column, definition in _NEW_COLUMNS.items():
+                        if column not in existing:
+                            conn.execute(
+                                f"ALTER TABLE social_post_queue ADD COLUMN {column} {definition}"
+                            )
+            for statement in _INDEX_SQL:
+                conn.execute(statement)
+            self._verify_schema(conn)
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
+
+    @staticmethod
+    def _rebuild_for_authority_statuses(conn: sqlite3.Connection) -> None:
+        before = int(
+            conn.execute("SELECT COUNT(*) FROM social_post_queue").fetchone()[0]
+        )
+        conn.execute(f"DROP TABLE IF EXISTS {_MIGRATION_TABLE}")
+        conn.execute(_TABLE_SQL.replace("social_post_queue", _MIGRATION_TABLE, 1))
+        old_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(social_post_queue)")
+        }
+        common = [column for column in _ALL_COLUMNS if column in old_columns]
+        quoted = ", ".join(f'"{column}"' for column in common)
+        conn.execute(
+            f"INSERT INTO {_MIGRATION_TABLE} ({quoted}) "
+            f"SELECT {quoted} FROM social_post_queue"
+        )
+        copied = int(
+            conn.execute(f"SELECT COUNT(*) FROM {_MIGRATION_TABLE}").fetchone()[0]
+        )
+        if copied != before:
+            raise RuntimeError(
+                f"social queue migration row-count mismatch: before={before}, copied={copied}"
+            )
+        conn.execute("DROP TABLE social_post_queue")
+        conn.execute(
+            f"ALTER TABLE {_MIGRATION_TABLE} RENAME TO social_post_queue"
+        )
+
+    @staticmethod
+    def _verify_schema(conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(social_post_queue)")
+        }
+        missing_columns = set(_ALL_COLUMNS) - columns
+        if missing_columns:
+            raise RuntimeError(
+                "social queue migration missing columns: "
+                + ", ".join(sorted(missing_columns))
+            )
+        table_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='social_post_queue'"
+        ).fetchone()
+        table_sql = str(table_row["sql"] or "") if table_row else ""
+        if "'superseded'" not in table_sql or "'verification_required'" not in table_sql:
+            raise RuntimeError("social queue migration did not install authority statuses")
+        indexes = {
+            row["name"] for row in conn.execute("PRAGMA index_list(social_post_queue)")
+        }
+        missing_indexes = _REQUIRED_INDEXES - indexes
+        if missing_indexes:
+            raise RuntimeError(
+                "social queue migration missing indexes: "
+                + ", ".join(sorted(missing_indexes))
+            )
 
     def insert(self, post: SocialPost) -> int:
         conn = self._connect()
@@ -85,8 +193,10 @@ class SocialPostDB:
             cur = conn.execute(
                 """INSERT INTO social_post_queue
                    (channel, status, title, body, voice_profile, topic_source,
-                    created_at, scheduled_for, audit_id, media_path, media_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    created_at, scheduled_for, audit_id, media_path, media_type,
+                    source_packet_id, revision, content_digest, media_digest,
+                    verification_state, receipt_json, supersede_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     post.channel,
                     post.status,
@@ -99,6 +209,13 @@ class SocialPostDB:
                     post.audit_id,
                     post.media_path,
                     post.media_type,
+                    post.source_packet_id,
+                    post.revision,
+                    post.content_digest,
+                    post.media_digest,
+                    post.verification_state,
+                    post.receipt_json,
+                    post.supersede_reason,
                 ),
             )
             conn.commit()
@@ -224,18 +341,36 @@ class SocialPostDB:
             conn.close()
 
     def update_status(
-        self, post_id: int, new_status: str, **fields: str | None
+        self,
+        post_id: int,
+        new_status: str,
+        *,
+        expected_status: str | None = None,
+        expected_revision: int | None = None,
+        expected_content_digest: str | None = None,
+        expected_media_digest: str | None = None,
+        **fields: str | int | None,
     ) -> bool:
         sets = ["status = ?"]
         params: list[str | int | None] = [new_status]
         for col, val in fields.items():
             sets.append(f"{col} = ?")
             params.append(val)
+        where = ["id = ?"]
         params.append(post_id)
+        for column, value in (
+            ("status", expected_status),
+            ("revision", expected_revision),
+            ("content_digest", expected_content_digest),
+            ("media_digest", expected_media_digest),
+        ):
+            if value is not None:
+                where.append(f"{column} = ?")
+                params.append(value)
         conn = self._connect()
         try:
             cur = conn.execute(
-                f"UPDATE social_post_queue SET {', '.join(sets)} WHERE id = ?",
+                f"UPDATE social_post_queue SET {', '.join(sets)} WHERE {' AND '.join(where)}",
                 params,
             )
             conn.commit()
@@ -243,7 +378,7 @@ class SocialPostDB:
         finally:
             conn.close()
 
-    def update_fields(self, post_id: int, **fields: str | None) -> bool:
+    def update_fields(self, post_id: int, **fields: str | int | None) -> bool:
         """Update non-status columns (reconcile fills post_url etc.).
 
         Status changes MUST go through the service transition table — this
@@ -270,12 +405,81 @@ class SocialPostDB:
         finally:
             conn.close()
 
+    def update_draft_revision(
+        self,
+        post_id: int,
+        *,
+        expected_revision: int,
+        fields: dict[str, str | int | None],
+    ) -> bool:
+        """Atomically mutate one draft and advance its exact-review revision."""
+
+        if not fields:
+            return False
+        sets = ["revision = revision + 1"]
+        params: list[str | int | None] = []
+        for column, value in fields.items():
+            if column in {"id", "status", "revision"}:
+                raise ValueError(f"draft revision cannot directly update {column}")
+            sets.append(f"{column} = ?")
+            params.append(value)
+        params.extend([post_id, expected_revision])
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                f"""UPDATE social_post_queue SET {', '.join(sets)}
+                    WHERE id = ? AND status = 'draft' AND revision = ?""",
+                params,
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        finally:
+            conn.close()
+
+    def supersede_legacy_linkedin_drafts(self, reason: str) -> int:
+        """One-shot, history-preserving cutover helper (never run implicitly)."""
+
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            before = int(
+                conn.execute(
+                    """SELECT COUNT(*) FROM social_post_queue
+                       WHERE status = 'draft' AND lower(channel) IN ('linkedin', 'li')"""
+                ).fetchone()[0]
+            )
+            cur = conn.execute(
+                """UPDATE social_post_queue
+                   SET status = 'superseded', supersede_reason = ?, claimed_at = NULL
+                   WHERE status = 'draft' AND lower(channel) IN ('linkedin', 'li')""",
+                (reason,),
+            )
+            remaining = int(
+                conn.execute(
+                    """SELECT COUNT(*) FROM social_post_queue
+                       WHERE status = 'draft' AND lower(channel) IN ('linkedin', 'li')"""
+                ).fetchone()[0]
+            )
+            if cur.rowcount != before or remaining != 0:
+                raise RuntimeError(
+                    "legacy LinkedIn supersede verification failed: "
+                    f"before={before}, updated={cur.rowcount}, remaining={remaining}"
+                )
+            conn.commit()
+            return cur.rowcount
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def count_by_status(self, channel: str | None = None) -> dict[str, int]:
         conn = self._connect()
         try:
             if channel:
                 rows = conn.execute(
-                    "SELECT status, COUNT(*) as cnt FROM social_post_queue WHERE channel = ? GROUP BY status",
+                    """SELECT status, COUNT(*) as cnt FROM social_post_queue
+                       WHERE channel = ? GROUP BY status""",
                     (channel,),
                 ).fetchall()
             else:

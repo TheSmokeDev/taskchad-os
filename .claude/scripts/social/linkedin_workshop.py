@@ -100,7 +100,7 @@ def revise_linkedin_copy(
         raise RuntimeError("The revision runtime returned an empty draft")
     revised = revised[: constraints["max_chars"]]
     title = revised[:60].replace("\n", " ")
-    updated = svc.set_post_fields(post_id, body=revised, title=title)
+    updated = svc.update_draft_copy(post_id, body=revised, title=title)
     append_social_audit_record(
         channel="linkedin",
         action="revise",
@@ -141,7 +141,7 @@ def regenerate_linkedin_image(
     )
     if not media_path:
         raise RuntimeError("LinkedIn image generation returned no image")
-    updated = svc.set_post_fields(
+    updated = svc.update_draft_media(
         post_id,
         media_path=media_path,
         media_type="image",

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from social import content_factory, draft_generator, linkedin_workshop
@@ -63,6 +61,8 @@ def test_revise_updates_same_draft_without_inventing_prompt(monkeypatch, tmp_pat
 
     assert updated.id == pid
     assert updated.body == "Revised true detail"
+    assert updated.revision == 2
+    assert updated.content_digest != ""
     assert "Do not invent metrics" in prompts[0]
 
 
@@ -109,5 +109,7 @@ def test_regenerate_image_updates_same_row(monkeypatch, tmp_path) -> None:
     assert updated.id == pid
     assert updated.media_path == str(image)
     assert updated.media_type == "image"
+    assert updated.revision == 2
+    assert updated.media_digest != ""
     assert seen["design_file"] == "brand.json"
     assert seen["persona_pack"] == "person"

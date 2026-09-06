@@ -21,6 +21,33 @@ collect_ignore_glob = ["_holders/*"]
 
 
 @pytest.fixture(autouse=True)
+def _isolate_persona_harness_learning(monkeypatch, tmp_path):
+    """New automatic hooks may run in old adapter tests; never touch live profiles.
+
+    Patch only the learning facade's lookup, leaving persona resolver tests real.
+    Explicit LearningTarget fixtures and per-test monkeypatches still work.
+    Learning-specific model calls require explicit fakes in unit tests.
+    """
+    from personas.learning import service as learning_service
+    from personas.learning.models import LearningTarget
+
+    def target_for(persona_id):
+        base = tmp_path / "harness-profiles" / persona_id
+        return LearningTarget(persona_id, base / "memory", base / "data",
+                              base / "state", base / "skills")
+
+    monkeypatch.setattr(learning_service, "resolve_learning_target", target_for)
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_ACTIVITY_DB", str(tmp_path / "runtime-activity.db"))
+
+    async def no_learning_provider(*args, **kwargs):
+        raise RuntimeError("unit tests must explicitly fake learning model calls")
+
+    from personas.learning import evaluation, worker
+    monkeypatch.setattr(evaluation, "runtime_reasoning", no_learning_provider)
+    monkeypatch.setattr(worker, "_runtime_role", no_learning_provider)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_runtime_health_file(monkeypatch, tmp_path):
     """Keep runtime health bookkeeping off the OPERATIONAL state file.
 

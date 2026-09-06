@@ -888,7 +888,7 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
             )
 
             scoped_tools = build_persona_tool_payload(
-                args.persona_id, profile_context.config or {}
+                args.persona_id, profile_context.config or {}, learning_capture=True
             )
             if scoped_tools is not None:
                 persona_scope_version = persona_tool_scope_version(
@@ -1042,10 +1042,19 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
         system_prompt=persona_system_prompt,
     )
 
+    from personas.learning import hooks as learning_hooks
+    learning_turn = await learning_hooks.prepare_turn_async(
+        request, persona_id=_canonical_agent_id(args.persona_id),
+        surface="cabinet_voice" if args.is_voice else "cabinet_text",
+        origin_id=f"cabinet:{args.meeting_id}:{args.turn_id}:{args.persona_id}",
+        task=args.user_text,
+    )
+    request = learning_turn.request
+
     text = ""
     try:
         result = await lane_router.run_with_runtime_lanes(request)
-        text = (result.text or "").strip()
+        text = await learning_turn.acomplete(result)
         # Surface tool-call audit rows.
         for tc in result.tool_calls or []:
             _audit_cabinet(
@@ -1063,7 +1072,11 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
                 "tool": tc.name,
                 "argsPreview": _preview_args(tc.arguments),
             })
+    except asyncio.CancelledError as exc:
+        await learning_turn.afailed(exc)
+        raise
     except kill_switches.KillSwitchDisabled as exc:
+        await learning_turn.afailed(exc)
         logger.info("cabinet persona turn refused: %s", _redact(str(exc)))
         args.turn_state["anyIncomplete"] = True
         channel.emit({
@@ -1074,6 +1087,7 @@ async def _run_agent_turn(args: _RunAgentArgs) -> str:
         })
         return ""
     except Exception as exc:  # noqa: BLE001
+        await learning_turn.afailed(exc)
         logger.warning(
             "cabinet persona turn failed (%s): %s",
             args.persona_id,

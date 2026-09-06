@@ -93,7 +93,6 @@ def render_runtime_request(
         capability=TEXT_REASONING,
         model=model_hint,
         max_turns=1,
-        max_budget_usd=0.10,
         allowed_tools=[],
         system_prompt=system_prompt,
     )

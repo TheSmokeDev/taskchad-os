@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/preact';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Talk } from '@/pages/Talk';
+import { Talk, TalkRealtimeTransport } from '@/pages/Talk';
 
 const WEB_SRC = join(__dirname, '..');
 
@@ -213,5 +213,30 @@ describe('Talk page', () => {
       String(call[0]).startsWith('/api/talk/flush'),
     );
     expect(flushCalls).toEqual([]);
+  });
+});
+
+
+describe('Talk function-call correlation', () => {
+  it('sends the same namespaced Realtime call ID on repeated transport attempts', async () => {
+    const fetchMock = stubStatusFetch(statusPayload());
+    const transport = new TalkRealtimeTransport({} as never, {
+      onStatus: vi.fn(), onTranscript: vi.fn(), onError: vi.fn(),
+    });
+    // Invoke the real relay without starting WebRTC or requesting a microphone.
+    const relay = transport as unknown as {
+      handleFunctionCall: (event: { call_id: string; name: string; arguments: string }) => Promise<void>;
+    };
+    const event = { call_id: 'call-123', name: 'memory_search', arguments: '{"query":"test"}' };
+    await relay.handleFunctionCall(event);
+    await relay.handleFunctionCall(event);
+    const requests = fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/talk/tool'));
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      const init = (request as unknown as [RequestInfo, RequestInit])[1];
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        name: 'memory_search', originKey: 'realtime:call-123', arguments: { query: 'test' },
+      });
+    }
   });
 });

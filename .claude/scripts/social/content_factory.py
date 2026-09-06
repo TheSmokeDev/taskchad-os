@@ -20,14 +20,19 @@ degrades that slot to caption-only, never crashes the run.
 
 from __future__ import annotations
 
-import glob
 import json
 import logging
-import os
 import random
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from social.brand_packs import (
+    SUPPORTED_IMAGE_ASPECTS,
+    SUPPORTED_VIDEO_ASPECTS,
+    BrandPack,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,79 @@ _ASPECT_SIZES = {
     "4:5": (1080, 1350),
     "9:16": (1080, 1920),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _EffectiveBrandSettings:
+    """Resolved pack intent over legacy channel brand/media defaults."""
+
+    voice_profile: str
+    design_file: str
+    persona_pack: str
+    image_aspect: str
+    video_aspect: str
+
+
+def _validated_aspect(
+    aspect: str,
+    *,
+    supported: frozenset[str],
+    default: str,
+) -> str:
+    candidate = (aspect or default).strip()
+    if candidate not in supported:
+        raise ValueError("unsupported media aspect")
+    return candidate
+
+
+def _parse_video_result(stdout: str) -> dict | None:
+    """Parse the final complete JSON object emitted by ``video_pipeline.py``."""
+
+    for index in range(len(stdout) - 1, -1, -1):
+        if stdout[index] != "{":
+            continue
+        try:
+            value = json.loads(stdout[index:].strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _effective_brand_settings(
+    channel: object,
+    brand_pack: BrandPack | None,
+) -> _EffectiveBrandSettings:
+    """Compute immutable render/copy inputs without mutating ``SocialChannel``."""
+
+    if brand_pack is None:
+        return _EffectiveBrandSettings(
+            voice_profile=str(getattr(channel, "voice_profile", "") or ""),
+            design_file=str(getattr(channel, "design_file", "") or ""),
+            persona_pack=str(getattr(channel, "persona_pack", "") or ""),
+            image_aspect=str(getattr(channel, "image_aspect", "1:1") or "1:1"),
+            video_aspect="9:16",
+        )
+    return _EffectiveBrandSettings(
+        voice_profile=(
+            str(brand_pack.voice_profile)
+            if brand_pack.voice_profile is not None
+            else str(getattr(channel, "voice_profile", "") or "")
+        ),
+        design_file=(
+            str(brand_pack.design_file)
+            if brand_pack.design_file is not None
+            else str(getattr(channel, "design_file", "") or "")
+        ),
+        persona_pack=(
+            str(brand_pack.persona_pack)
+            if brand_pack.persona_pack is not None
+            else str(getattr(channel, "persona_pack", "") or "")
+        ),
+        image_aspect=brand_pack.image_aspect,
+        video_aspect=brand_pack.video_aspect,
+    )
 
 
 def _normalize_image_aspect(image_path: str | Path, aspect: str) -> str | None:
@@ -120,17 +198,21 @@ def _render_video(
     duration_s: int = 18,
     design_file: str | None = None,
     persona_pack: str = "",
+    aspect: str = "9:16",
 ) -> str | None:
-    """Render a 9:16 vertical MP4 via the HyperFrames pipeline. A design_file
+    """Render an aspect-controlled MP4 via the HyperFrames pipeline. A design_file
     (brand palette/fonts) makes the clip on-brand instead of the dark neutral
     default. A persona_pack locks a face onto the hero + payoff beats. Returns
     the absolute mp4 path or None on any failure (never raises)."""
     try:
-        import config
-
+        resolved_aspect = _validated_aspect(
+            aspect,
+            supported=SUPPORTED_VIDEO_ASPECTS,
+            default="9:16",
+        )
         cmd = [
             "uv", "run", "python", "video_pipeline.py", topic,
-            "--aspect", "9:16", "--duration-target", str(duration_s),
+            "--aspect", resolved_aspect, "--duration-target", str(duration_s),
             "--captions", "on",
         ]
         resolved = _resolve_design_file(design_file or "")
@@ -145,24 +227,26 @@ def _render_video(
             text=True,
             timeout=900,
         )
-        # The pipeline emits a JSON result line with mp4_path.
-        for line in reversed(proc.stdout.splitlines()):
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    data = json.loads(line)
-                    mp4 = data.get("mp4_path")
-                    if mp4 and os.path.isfile(mp4):
-                        return mp4
-                except json.JSONDecodeError:
-                    continue
-        # Fallback: newest render on disk (path may be nested in log noise).
-        candidates = glob.glob(
-            os.path.join(str(config.DATA_DIR), "video-renders", "*", "*.mp4")
-        )
-        if candidates:
-            return max(candidates, key=os.path.getmtime)
-        logger.warning("video render produced no mp4 (rc=%s)", proc.returncode)
+        data = _parse_video_result(proc.stdout)
+        if proc.returncode != 0 or data is None or data.get("ok") is not True:
+            logger.warning("video render failed or returned no verified receipt")
+            return None
+        raw_mp4 = data.get("mp4_path")
+        if not isinstance(raw_mp4, str) or not raw_mp4.strip():
+            logger.warning("video render receipt omitted mp4_path")
+            return None
+        candidate = Path(raw_mp4)
+        if not candidate.is_absolute():
+            candidate = _SCRIPTS_DIR / candidate
+        try:
+            mp4 = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            logger.warning("video render receipt points to a missing artifact")
+            return None
+        if not mp4.is_file() or mp4.suffix.lower() != ".mp4":
+            logger.warning("video render receipt does not identify an mp4 file")
+            return None
+        return str(mp4)
     except Exception as exc:  # subprocess/timeout/etc — fail open
         logger.warning("video render failed: %s", exc)
     return None
@@ -185,6 +269,11 @@ def _render_image(
         import config
         import video_imagegen
 
+        resolved_aspect = _validated_aspect(
+            aspect,
+            supported=SUPPORTED_IMAGE_ASPECTS,
+            default="1:1",
+        )
         images_dir = config.DATA_DIR / "social_images"
         images_dir.mkdir(parents=True, exist_ok=True)
         # Microseconds guarantee that regeneration creates a new asset instead
@@ -206,31 +295,85 @@ def _render_image(
                 design = {}
         refs = _resolve_persona_refs(persona_pack) or None
         rel = video_imagegen.generate_image(
-            prompt=prompt, design=design, aspect=aspect or "1:1",
+            prompt=prompt, design=design, aspect=resolved_aspect,
             assets_dir=str(images_dir), name=name, refs=refs,
         )
         if not rel:
             return None
         raw_path = images_dir / Path(rel).name
-        return _normalize_image_aspect(raw_path, aspect or "1:1")
+        return _normalize_image_aspect(raw_path, resolved_aspect)
     except Exception as exc:
         logger.warning("image gen failed: %s", exc)
     return None
 
 
-def _generate_caption(channel_id: str, topic: str, voice_profile: str) -> str:
+def _generate_caption(
+    channel_id: str,
+    topic: str,
+    voice_profile: str,
+    *,
+    persona_id: str | None = None,
+) -> str:
     """Copy via the shared draft_generator runtime path (fast background tier)."""
     from social import draft_generator as dg
+
+    try:
+        persona_context = dg._load_persona_identity_context(persona_id)
+    except dg.PersonaContextUnavailableError as exc:
+        from social.audit import append_social_audit_record
+
+        append_social_audit_record(
+            channel=channel_id,
+            action="draft",
+            outcome="skipped",
+            error=str(exc),
+        )
+        raise
 
     constraints = dg.CHANNEL_CONSTRAINTS.get(
         channel_id, dg.CHANNEL_CONSTRAINTS["facebook"]
     )
-    voice_ctx = dg._read_voice_context(voice_profile)
+    voice_ctx = ""
+    voice_path = Path(voice_profile) if voice_profile else None
+    if voice_path is not None and voice_path.is_absolute() and voice_path.is_file():
+        try:
+            voice_ctx = voice_path.read_text(encoding="utf-8")[:1500]
+        except (OSError, UnicodeError):
+            voice_ctx = ""
+    if not voice_ctx:
+        voice_ctx = dg._read_voice_context(
+            voice_profile,
+            allow_global_fallback=persona_id is None,
+        )
     prompt = dg._build_draft_prompt(channel_id, topic, voice_ctx, constraints)
     try:
-        body = dg._invoke_runtime(prompt) or topic
+        body = dg._invoke_runtime(prompt, system_prompt=persona_context)
     except Exception as exc:
+        if persona_id is not None:
+            from social.audit import append_social_audit_record
+
+            error = f"configured persona draft runtime failed ({type(exc).__name__})"
+            append_social_audit_record(
+                channel=channel_id,
+                action="draft",
+                outcome="skipped",
+                error=error,
+            )
+            raise
         logger.warning("caption gen failed, using topic: %s", exc)
+        body = topic
+    if not body:
+        if persona_id is not None:
+            from social.audit import append_social_audit_record
+
+            error = "configured persona draft runtime returned no content"
+            append_social_audit_record(
+                channel=channel_id,
+                action="draft",
+                outcome="skipped",
+                error=error,
+            )
+            raise RuntimeError(error)
         body = topic
     return body[: constraints["max_chars"]]
 
@@ -254,6 +397,8 @@ def produce(
     topic_source: str = "factory",
     autopilot: bool | None = None,
     db_path: str | None = None,
+    brand_pack: BrandPack | None = None,
+    source_packet_id: str | None = None,
 ) -> dict:
     """Generate ``count`` drafts for ``channel_id`` and queue them.
 
@@ -272,11 +417,21 @@ def produce(
     from social.channels import get_channel
     from social.service import SocialPostService
 
+    if brand_pack is not None:
+        brand_pack.validate()
+        if "social" not in brand_pack.allowed_consumers:
+            return {"error": "brand pack is not authorized for the social consumer"}
+
     settings = config.get_content_factory_settings()
-    do_autopilot = settings.unattended if autopilot is None else bool(autopilot)
+    do_autopilot = (
+        False
+        if brand_pack is not None
+        else settings.unattended if autopilot is None else bool(autopilot)
+    )
     channel = get_channel(channel_id)
     if channel is None:
         return {"error": f"unknown channel: {channel_id}"}
+    effective = _effective_brand_settings(channel, brand_pack)
 
     svc = SocialPostService(db_path=db_path)
     summary: dict = {
@@ -286,6 +441,13 @@ def produce(
         "posted": [],
         "failed": [],
     }
+    if brand_pack is not None:
+        summary["brand_pack"] = {
+            "pack_id": brand_pack.pack_id,
+            "version": brand_pack.version,
+            "source_hash": brand_pack.source_hash,
+        }
+        summary["media_outcomes"] = []
 
     for i in range(max(1, count)):
         slot_topic = topic or (
@@ -293,37 +455,73 @@ def produce(
         )
         kind = _resolve_media_kind(channel_id, media, i)
 
+        # Copy/identity validation comes before any provider-backed media work.
+        # A missing configured persona therefore skips without creating an
+        # orphaned render or spending a media-provider call.
+        caption = _generate_caption(
+            channel_id,
+            slot_topic,
+            effective.voice_profile,
+            persona_id=getattr(channel, "persona_id", None),
+        )
+        title = caption[:60].replace("\n", " ")
+
         media_path: str | None = None
         media_type: str | None = None
-        if kind == "video":
-            media_path = _render_video(
-                slot_topic,
-                duration_s=settings.video_duration_s,
-                design_file=channel.design_file,
-                persona_pack=channel.persona_pack,
-                aspect=channel.image_aspect,
-            )
-            media_type = "video" if media_path else None
-        elif kind == "image":
-            media_path = _render_image(
-                channel_id,
-                slot_topic,
-                design_file=channel.design_file,
-                persona_pack=channel.persona_pack,
-            )
-            media_type = "image" if media_path else None
+        try:
+            if kind == "video":
+                media_path = _render_video(
+                    slot_topic,
+                    duration_s=settings.video_duration_s,
+                    design_file=effective.design_file,
+                    persona_pack=effective.persona_pack,
+                    aspect=effective.video_aspect,
+                )
+                media_type = "video" if media_path else None
+            elif kind == "image":
+                media_path = _render_image(
+                    channel_id,
+                    slot_topic,
+                    design_file=effective.design_file,
+                    persona_pack=effective.persona_pack,
+                    aspect=effective.image_aspect,
+                )
+                media_type = "image" if media_path else None
+        except Exception as exc:
+            # Keep the factory's documented fail-open boundary even when a
+            # renderer adapter violates its own never-raise contract.
+            logger.warning("%s render failed: %s", kind, exc)
+            media_path = None
+            media_type = None
 
-        caption = _generate_caption(channel_id, slot_topic, channel.voice_profile)
-        title = caption[:60].replace("\n", " ")
+        if brand_pack is not None:
+            if kind == "none":
+                media_status = "not_requested"
+                media_reason = None
+            elif media_path:
+                media_status = "generated"
+                media_reason = None
+            else:
+                media_status = "degraded"
+                media_reason = "media_generation_failed"
+            summary["media_outcomes"].append(
+                {
+                    "slot": i,
+                    "requested": kind,
+                    "status": media_status,
+                    "reason": media_reason,
+                }
+            )
 
         pid = svc.create_draft(
             channel=channel_id,
             title=title,
             body=caption,
-            voice_profile=channel.voice_profile,
+            voice_profile=effective.voice_profile,
             topic_source=topic_source,
             media_path=media_path,
             media_type=media_type,
+            source_packet_id=source_packet_id,
         )
         append_social_audit_record(
             channel=channel_id, action="draft", post_id=pid,
@@ -345,6 +543,37 @@ def produce(
                 logger.warning("autopilot post of %s failed: %s", pid, exc)
 
     return summary
+
+
+def produce_brand_content(
+    channel_id: str,
+    *,
+    brand_pack: BrandPack,
+    count: int = 1,
+    media: str | None = None,
+    topic: str | None = None,
+    topic_source: str = "brand_content_factory",
+    db_path: str | None = None,
+    source_packet_id: str | None = None,
+) -> dict:
+    """Adapt one resolved BrandPack into the existing draft queue owner.
+
+    This boundary is permanently queue-only. It does not accept an autopilot
+    argument, and ``produce`` independently forces queue mode whenever a pack
+    is present, so the global unattended flag cannot widen its authority.
+    """
+
+    return produce(
+        channel_id,
+        count=count,
+        media=media or brand_pack.default_media_policy,
+        topic=topic,
+        topic_source=topic_source,
+        autopilot=False,
+        db_path=db_path,
+        brand_pack=brand_pack,
+        source_packet_id=source_packet_id,
+    )
 
 
 if __name__ == "__main__":

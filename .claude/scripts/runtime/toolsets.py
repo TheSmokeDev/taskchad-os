@@ -20,6 +20,8 @@ remains a leaf module.
 
 from __future__ import annotations
 
+import re
+import threading
 from typing import NotRequired, TypedDict
 
 
@@ -137,6 +139,11 @@ _BROWSER_READ_TOOLS: list[str] = [
 # ``resolve_toolset()`` call. There is no cache layer between the registry
 # and the live aggregator — staleness window is zero.
 TOOLSETS: dict[str, Toolset] = {
+    "cognitive_learning": {
+        "description": "Persona-private expectations and learning records.",
+        "tools": ["record_expectation"],
+        "includes": [],
+    },
     # -----------------------------------------------------------------------
     # Blueprint-safe classes and domain packs.
     # -----------------------------------------------------------------------
@@ -285,6 +292,11 @@ TOOLSETS: dict[str, Toolset] = {
         "tools": [],
         "includes": ["browser"],
     },
+    "mail_write": {
+        "description": "Outlook send proposals; operator approval executes the exact stored email once.",
+        "tools": ["outlook_send_email"],
+        "includes": [],
+    },
     "x_social_write": {
         "description": (
             "X write verbs (follow accounts, enable notifications). Membership "
@@ -341,3 +353,188 @@ TOOLSETS: dict[str, Toolset] = {
         "live_filter": "integration.",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Capability-plugin toolset overlay (issue #531)
+# ---------------------------------------------------------------------------
+#
+# A plugin contributes a toolset by INSERTING a row into ``TOOLSETS`` itself,
+# not by wrapping the resolver. That is deliberate: ``resolve_toolset`` and
+# ``resolve_toolset_closure`` both read this dict directly, and a parallel
+# overlay dict would mean two structures that must be kept in agreement — the
+# exact drift class the module docstring already refuses for the tool catalog.
+#
+# The static literal above stays the baseline: registration REFUSES any name
+# that already exists (static or another plugin's), so a plugin can add a
+# toolset but can never shadow one. Removal is compare-and-remove against both
+# the ownership record and the physically installed row (Rule 2), so a disposer
+# can only delete what its own load installed.
+
+
+class ToolsetRegistryError(ValueError):
+    """Raised on a plugin toolset registration that would shadow or corrupt."""
+
+
+_PLUGIN_TOOLSET_LOCK = threading.RLock()
+# name -> (plugin_id, plugin_version, id(installed row))
+_PLUGIN_TOOLSET_OWNERS: dict[str, tuple[str, str, int]] = {}
+_TOOLSET_GENERATION: int = 0
+_PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _validated_plugin_toolset(name: str, toolset: Toolset) -> Toolset:
+    if type(name) is not str or not _PLUGIN_NAME_RE.fullmatch(name):
+        raise ToolsetRegistryError("plugin toolset name has an invalid shape")
+    if type(toolset) is not dict or set(toolset) != {
+        "description",
+        "tools",
+        "includes",
+    }:
+        raise ToolsetRegistryError(
+            "plugin toolset must use the closed description/tools/includes shape"
+        )
+    description = toolset["description"]
+    if type(description) is not str or not description.strip() or len(description) > 400:
+        raise ToolsetRegistryError("plugin toolset description is invalid")
+
+    normalized: dict[str, list[str]] = {}
+    for field_name in ("tools", "includes"):
+        values = toolset[field_name]
+        if type(values) is not list or len(values) > 128:
+            raise ToolsetRegistryError(f"plugin toolset {field_name} must be a bounded list")
+        if any(type(item) is not str or not _PLUGIN_NAME_RE.fullmatch(item) for item in values):
+            raise ToolsetRegistryError(f"plugin toolset {field_name} has an invalid name")
+        if len(values) != len(set(values)):
+            raise ToolsetRegistryError(f"plugin toolset {field_name} contains duplicates")
+        normalized[field_name] = list(values)
+    if name in normalized["includes"]:
+        raise ToolsetRegistryError("plugin toolset may not include itself")
+    missing = sorted(item for item in normalized["includes"] if item not in TOOLSETS)
+    if missing:
+        raise ToolsetRegistryError(
+            f"plugin toolset includes unknown toolset {missing[0]!r}"
+        )
+    return {
+        "description": description.strip(),
+        "tools": normalized["tools"],
+        "includes": normalized["includes"],
+    }
+
+
+def get_toolset_generation() -> int:
+    """Current toolset-structure generation. Bumps on every overlay mutation.
+
+    Consumers derive tool catalogs from this registry; the counter exists so a
+    test can PROVE an unload is observable on the next assembly rather than
+    assert it in a comment (same contract as ``tool_registry.get_generation``).
+    """
+    return _TOOLSET_GENERATION
+
+
+def register_plugin_toolset(
+    name: str,
+    toolset: Toolset,
+    *,
+    plugin_id: str,
+    plugin_version: str,
+) -> None:
+    """Install one plugin-owned toolset row.
+
+    Raises:
+        ToolsetRegistryError: on a blank owner, a blank name, or a name that is
+            already present in ``TOOLSETS`` — including the static baseline and
+            any other plugin's row.
+    """
+    global _TOOLSET_GENERATION
+
+    if type(plugin_id) is not str or not plugin_id.strip():
+        raise ToolsetRegistryError("plugin toolset registration requires a plugin id")
+    if type(plugin_version) is not str or not plugin_version.strip():
+        raise ToolsetRegistryError("plugin toolset registration requires a plugin version")
+    row = _validated_plugin_toolset(name, toolset)
+
+    with _PLUGIN_TOOLSET_LOCK:
+        # Physical check, not a bookkeeping check: the static literal and every
+        # other owner's row both live in TOOLSETS, and that dict is the only
+        # thing the resolver reads.
+        if name in TOOLSETS:
+            owner = _PLUGIN_TOOLSET_OWNERS.get(name)
+            owner_label = f"{owner[0]}@{owner[1]}" if owner else "<baseline>"
+            raise ToolsetRegistryError(
+                f"toolset {name!r} is already registered by {owner_label}; "
+                f"refusing to shadow it for {plugin_id!r}"
+            )
+        TOOLSETS[name] = row
+        _PLUGIN_TOOLSET_OWNERS[name] = (
+            plugin_id.strip(),
+            plugin_version.strip(),
+            id(row),
+        )
+        _TOOLSET_GENERATION += 1
+
+
+def unregister_plugin_toolset(
+    name: str,
+    *,
+    plugin_id: str,
+    plugin_version: str,
+) -> bool:
+    """Compare-and-remove one plugin-owned toolset. True if it was removed.
+
+    Returns False when the row is already gone (disposal is idempotent). Raises
+    when the installed row belongs to a different owner, or when the ownership
+    record and the physically installed row have diverged — a stale record must
+    never authorize deleting somebody else's structure.
+    """
+    global _TOOLSET_GENERATION
+
+    with _PLUGIN_TOOLSET_LOCK:
+        owner = _PLUGIN_TOOLSET_OWNERS.get(name)
+        installed = TOOLSETS.get(name)
+        if owner is None:
+            if installed is None:
+                return False
+            raise ToolsetRegistryError(
+                f"toolset {name!r} is not plugin-owned; refusing to unregister it"
+            )
+        owner_id, owner_version, row_identity = owner
+        if owner_id != plugin_id or owner_version != plugin_version:
+            raise ToolsetRegistryError(
+                f"toolset {name!r} is owned by {owner_id}@{owner_version}; "
+                f"refusing to unregister it for {plugin_id}@{plugin_version}"
+            )
+        if installed is None:
+            _PLUGIN_TOOLSET_OWNERS.pop(name, None)
+            _TOOLSET_GENERATION += 1
+            return False
+        if id(installed) != row_identity:
+            raise ToolsetRegistryError(
+                f"toolset {name!r} was replaced after registration; refusing "
+                "to unregister a row this owner did not install"
+            )
+        del TOOLSETS[name]
+        _PLUGIN_TOOLSET_OWNERS.pop(name, None)
+        _TOOLSET_GENERATION += 1
+        return True
+
+
+def plugin_toolset_owner(name: str) -> tuple[str, str] | None:
+    """Return ``(plugin_id, plugin_version)`` for a plugin-owned toolset."""
+    owner = _PLUGIN_TOOLSET_OWNERS.get(name)
+    installed = TOOLSETS.get(name)
+    if owner is None or installed is None or id(installed) != owner[2]:
+        return None
+    return owner[0], owner[1]
+
+
+def list_plugin_toolsets() -> tuple[tuple[str, str, str], ...]:
+    """Every plugin-owned toolset as ``(name, plugin_id, plugin_version)``.
+
+    Diagnostics only. Structure lives in ``TOOLSETS``; this answers ownership.
+    """
+    return tuple(
+        (name, owner[0], owner[1])
+        for name, owner in sorted(_PLUGIN_TOOLSET_OWNERS.items())
+        if name in TOOLSETS and id(TOOLSETS[name]) == owner[2]
+    )

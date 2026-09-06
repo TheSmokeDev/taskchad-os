@@ -90,7 +90,11 @@ def test_spawn_detached_platform_kwargs(monkeypatch, tmp_path):
     assert captured["kwargs"]["stderr"] is shared.subprocess.STDOUT  # merged into log
     assert log.parent.exists()  # mkdir -p happened
     if sys.platform == "win32":
-        assert captured["kwargs"].get("creationflags", 0) != 0
+        expected_flags = (
+            shared.subprocess.CREATE_NEW_PROCESS_GROUP
+            | shared.subprocess.CREATE_NO_WINDOW
+        )
+        assert captured["kwargs"]["creationflags"] == expected_flags
         assert "start_new_session" not in captured["kwargs"]
     else:
         assert captured["kwargs"].get("start_new_session") is True

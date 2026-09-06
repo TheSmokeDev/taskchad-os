@@ -1,0 +1,17 @@
+{
+  "name": "thehomie-root-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Root command surface for The Homie (PRPs/active/PRP-framework-harness-hardening-phase-1.md). Thin delegation ONLY — nested projects own their real config. Deliberately NOT an npm workspace: a `workspaces` key would claim ownership of the dashboard packages and change their install resolution. `lint` is scoped to the hard-gated core slices and is honestly RED until the Phase 2 clear-out (168 errors as of 2026-08-17); `security` verb ships in Phase 3 when a real scanner exists behind it.",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "setup": "uv --directory .claude/scripts sync && npm --prefix dashboard/web install && npm --prefix dashboard/server install && npm --prefix dashboard/desktop install",
+    "lint": "uv --directory .claude/scripts run ruff check runtime orchestration personas security",
+    "typecheck": "npm --prefix dashboard/web run typecheck && npm --prefix dashboard/server run typecheck",
+    "test": "uv --directory .claude/scripts run pytest -q",
+    "build": "npm --prefix dashboard/web run build && npm --prefix dashboard/server run build",
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build"
+  }
+}

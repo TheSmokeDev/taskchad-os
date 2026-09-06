@@ -311,6 +311,34 @@ def check_sent_reply(thread_id: str, after_timestamp: str) -> str | None:
     return None
 
 
+def observe_inbound_response(
+    *, thread_id: str, outbound_id: str, recipient_email: str, mailbox_id: str,
+    collected_at: str, deadline: str | None = None, service: Any = None,
+) -> dict[str, Any]:
+    """Read a prospect response to a verified SENT message; never send or mark read."""
+    from personas.learning.observers import (
+        gmail_messages,
+        observe_mail_response,
+        unavailable_observation,
+    )
+
+    require_integration_action("gmail", "read")
+    try:
+        client = service if service is not None else get_gmail_service()
+        profile = with_retry(lambda: client.users().getProfile(userId="me").execute())
+        if str(profile.get("emailAddress") or "").casefold() != mailbox_id.casefold():
+            return unavailable_observation("gmail", "mailbox_identity_mismatch")
+        data = with_retry(lambda: client.users().threads().get(
+            userId="me", id=thread_id, format="full").execute())
+        return observe_mail_response(
+            provider="gmail", mailbox_id=mailbox_id, outbound_id=outbound_id,
+            recipient_email=recipient_email, messages=gmail_messages(data),
+            collected_at=collected_at, deadline=deadline,
+        )
+    except Exception as exc:
+        return unavailable_observation("gmail", type(exc).__name__)
+
+
 def get_important_unreplied_emails(
     hours_ago: int = 4,
     max_results: int = 10,

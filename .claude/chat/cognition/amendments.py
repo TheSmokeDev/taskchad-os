@@ -99,6 +99,8 @@ class AmendmentProposal:
     rollback_after_hash: str = ""
     rollback_rescue_snapshot_path: str = ""
     rollback_error: str | None = None
+    rollback_mode: str = "snapshot"
+    rollback_restore_snapshot_path: str = ""
     apply_prepare_error: str | None = None
 
     def __post_init__(self) -> None:

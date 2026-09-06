@@ -3,6 +3,11 @@
 Status: Shipped (epic #418, 2026-08-13 — six tickets, PRs #430/#437/#442/#441/#449/#444)
 Owner: Framework (personas + memory pipelines + cofounder + curriculum)
 
+For the experience-to-evaluation-to-adoption cycle and its operator controls, see
+[Autonomous Persona Harness Learning](persona-harness-learning.md). That extension
+reuses this cognitive foundation and records whether changed methods were tested,
+delivered in future context, and supported by subsequent observations.
+
 This is the operator's chapter for the whole cognitive machine. Each subsystem
 has its own detailed page (linked below); this page is the map: what runs,
 when, how to drive it, and how to verify it is actually learning.

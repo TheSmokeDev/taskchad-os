@@ -48,14 +48,15 @@ KILL_SWITCH_NAME = "persona_tools"
 # but an audit FAILURE must be visible, never swallowed into nothing.
 _AUDIT_ACTION = "persona_tool_call"
 
-# Every named persona gets this read/request-only bootstrap on authenticated
+# Every named persona gets this read/request/private-memory bootstrap on authenticated
 # chat turns, regardless of which domain toolsets an older profile declared.
-# These tools discover instructions and ask for authority; none performs the
+# These tools discover instructions, record expectations, and ask for authority; none performs the
 # requested domain action itself.
 PERSONA_CHAT_BASE_TOOLS: tuple[str, ...] = (
     "skills_list",
     "skill_view",
     "request_tool",
+    "record_expectation",
 )
 
 
@@ -118,6 +119,7 @@ def build_persona_tool_payload(
     request_context: dict[str, Any] | None = None,
     elevation_grant: Any | None = None,
     allowed_tool_names: Collection[str] | None = None,
+    learning_capture: bool = False,
 ) -> tuple[list[dict[str, Any]], Callable[..., Any]] | None:
     """Build ``(tool_defs, tool_dispatch)`` for one persona, or None.
 
@@ -279,6 +281,20 @@ def build_persona_tool_payload(
 
     if not tool_defs:
         return None
+
+    # Learning is a framework-private capability on an already tool-capable
+    # turn. Never turn an empty/no-tools payload into a saving-tool request.
+    try:
+        from runtime import tool_impl_learning
+        if learning_capture:
+            tool_impl_learning.register_tools()
+        learning_entry = tool_registry.get_entry("record_expectation")
+        if (learning_capture and learning_entry is not None and "record_expectation" not in granted_names
+                and (allowed_tool_names is None or "record_expectation" in allowed)):
+            tool_defs.append(copy.deepcopy(learning_entry.schema))
+            granted_names.add("record_expectation")
+    except Exception:
+        _logger.warning("learning tool unavailable", exc_info=True)
 
     bounded_context = dict(request_context or {})
     bounded_context["persona_id"] = persona_id

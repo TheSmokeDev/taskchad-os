@@ -1,0 +1,44 @@
+{
+  "upstream": "https://github.com/CopilotKit/openbot",
+  "commit": "f8885b6d635c585d8daf47876e8af500de261f0e",
+  "license": "MIT",
+  "reviewed_at": "2026-08-20",
+  "imports": [
+    {
+      "source": "app/src/styles.css",
+      "destination": "src/styles.css",
+      "disposition": "adapted",
+      "notes": "OpenBot color tokens, typography, compact channel density, and scroll treatment. Tailwind-specific declarations removed."
+    },
+    {
+      "source": "app/src/components/agents/abstract-avatar.tsx",
+      "destination": "src/components/AbstractAvatar.tsx",
+      "disposition": "adapted",
+      "notes": "Accessibility and deterministic avatar behavior retained."
+    },
+    {
+      "source": "app/src/components/app-sidebar/channel.tsx",
+      "destination": "src/components/CoworkerSidebar.tsx",
+      "disposition": "adapted",
+      "notes": "Channel row semantics retained; Homie persona projections replace OpenBot channel storage."
+    },
+    {
+      "source": "app/src/components/channels/conversation-view.tsx",
+      "destination": "src/components/ConversationPane.tsx",
+      "disposition": "adapted",
+      "notes": "OpenBot transcript/composer ownership retained; Homie history/send/SSE contracts replace CopilotKit threads."
+    },
+    {
+      "source": "app/src/components/computer/computer-view.tsx",
+      "destination": "src/components/ComputerPanel.tsx",
+      "disposition": "adapted",
+      "notes": "Fixed-ratio live computer panel retained as a read-only boundary over Homie Browser Viewer."
+    },
+    {
+      "source": "app/src/components/layout/detail-panel.tsx",
+      "destination": "src/App.tsx",
+      "disposition": "adapted",
+      "notes": "Three-pane responsive shell and detail-panel behavior retained without frontend business authority."
+    }
+  ]
+}

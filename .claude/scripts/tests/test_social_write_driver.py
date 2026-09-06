@@ -82,6 +82,7 @@ def test_linkedin_post_accepts_link_trigger_and_attaches_reviewed_media(
             'button "Upload from computer" [ref=e13]',
             'button "Next" [ref=e14]',
             'button "Edit media preview" [ref=e15]\nbutton "Post" [ref=e16]',
+            'status "Post successful"\nlink "View post" [ref=e17]',
         ]
     )
 
@@ -89,6 +90,11 @@ def test_linkedin_post_accepts_link_trigger_and_attaches_reviewed_media(
         calls.append(args)
         if args[0] == "snapshot":
             return _result(ok=True, output=next(snapshots))
+        if args[:2] == ["get", "attr"]:
+            return _result(
+                ok=True,
+                output="https://www.linkedin.com/feed/update/urn:li:share:123456/",
+            )
         if args[0] == "get":
             return _result(ok=True, output="A real post")
         if args[0] == "eval":
@@ -112,9 +118,8 @@ def test_linkedin_post_accepts_link_trigger_and_attaches_reviewed_media(
         media_path=str(media),
     )
 
-    ok, detail = social_write_driver.AgentBrowserSocialWriteDriver()._drive_post(
-        task, port=18222
-    )
+    driver = social_write_driver.AgentBrowserSocialWriteDriver()
+    ok, detail = driver._drive_post(task, port=18222)
 
     assert ok is True
     assert detail == "post submitted and confirmed"
@@ -123,6 +128,82 @@ def test_linkedin_post_accepts_link_trigger_and_attaches_reviewed_media(
     assert ["upload", "e13", str(media.resolve())] in calls
     assert ["click", "e14"] in calls
     assert dialog_cleanup_calls == [True]
+    assert driver.verification_receipt()["verification_state"] == "verified"
+    assert driver.verification_receipt()["post_url"].endswith(
+        "/feed/update/urn:li:share:123456/"
+    )
+
+
+def test_linkedin_submit_without_permalink_requires_verification(monkeypatch):
+    snapshots = iter(
+        [
+            'button "Start a post" [ref=e10]',
+            'textbox "Text editor for creating content" [ref=e11]',
+            'status "Post successful"',
+            'status "Post successful"',
+            'status "Post successful"',
+        ]
+    )
+
+    def fake_run(args: list[str], *, port: int, timeout: int):
+        if args[0] == "snapshot":
+            return _result(ok=True, output=next(snapshots))
+        if args[:2] == ["get", "text"]:
+            return _result(ok=True, output="A real post")
+        if args[0] == "eval":
+            if "ED_OK" in args[1]:
+                return _result(ok=True, output="ED_OK")
+            return _result(ok=True, output="CLICKED")
+        return _result(ok=True, output="Done")
+
+    monkeypatch.setattr(social_write_driver, "run_agent_browser", fake_run)
+    driver = social_write_driver.AgentBrowserSocialWriteDriver()
+    ok, detail = driver._drive_post(
+        SimpleNamespace(payload_text="A real post", target_url="", media_path=""),
+        port=18222,
+    )
+
+    assert ok is True
+    assert "verification required" in detail
+    receipt = driver.verification_receipt()
+    assert receipt["verification_state"] == "verification_required"
+    assert receipt["confirmation_result"] == "confirmation_seen_without_permalink"
+
+
+def test_linkedin_post_click_timeout_stays_verification_required(monkeypatch):
+    snapshot_count = 0
+
+    def fake_run(args: list[str], *, port: int, timeout: int):
+        nonlocal snapshot_count
+        if args[0] == "snapshot":
+            snapshot_count += 1
+            if snapshot_count == 1:
+                return _result(ok=True, output='button "Start a post" [ref=e10]')
+            if snapshot_count == 2:
+                return _result(
+                    ok=True,
+                    output='textbox "Text editor for creating content" [ref=e11]',
+                )
+            raise subprocess.TimeoutExpired(args, timeout)
+        if args[:2] == ["get", "text"]:
+            return _result(ok=True, output="A real post")
+        if args[0] == "eval":
+            if "ED_OK" in args[1]:
+                return _result(ok=True, output="ED_OK")
+            return _result(ok=True, output="CLICKED")
+        return _result(ok=True, output="Done")
+
+    monkeypatch.setattr(social_write_driver, "run_agent_browser", fake_run)
+    driver = social_write_driver.AgentBrowserSocialWriteDriver()
+    ok, detail = driver._drive_post(
+        SimpleNamespace(payload_text="A real post", target_url="", media_path=""),
+        port=18222,
+    )
+    assert ok is True
+    assert "verification required" in detail
+    receipt = driver.verification_receipt()
+    assert receipt["verification_state"] == "verification_required"
+    assert receipt["submitted_at"]
 
 
 def test_drive_routes_x_workflow_to_x_driver(monkeypatch):

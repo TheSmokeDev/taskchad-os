@@ -78,7 +78,8 @@ def test_run_post_claimed_dispatches_and_sends_receipt(
 
     dispatched: list[int] = []
 
-    def fake_dispatch(post_id: int, *, db_path=None) -> bool:
+    def fake_dispatch(post_id: int, *, db_path=None, claim_owned=False) -> bool:
+        assert claim_owned is True
         dispatched.append(post_id)
         SocialPostService(db_path=db_path).mark_posted(post_id, post_url="https://x/1")
         return True
@@ -116,7 +117,8 @@ def test_run_post_failure_sends_failure_receipt(
     pid = _approved_post(svc)
     assert svc.claim_post(pid)
 
-    def fake_dispatch(post_id: int, *, db_path=None) -> bool:
+    def fake_dispatch(post_id: int, *, db_path=None, claim_owned=False) -> bool:
+        assert claim_owned is True
         SocialPostService(db_path=db_path).mark_failed(post_id, error="composer never hydrated")
         return False
 
@@ -132,6 +134,56 @@ def test_run_post_failure_sends_failure_receipt(
     assert len(receipts) == 1 and "composer never hydrated" in receipts[0]
 
 
+def test_run_post_ambiguous_submission_is_locked_without_retry(
+    monkeypatch: pytest.MonkeyPatch, svc: SocialPostService, db_path: Path
+) -> None:
+    pid = _approved_post(svc)
+    assert svc.claim_post(pid)
+
+    def fake_dispatch(post_id: int, *, db_path=None, claim_owned=False) -> bool:
+        assert claim_owned is True
+        SocialPostService(db_path=db_path).mark_verification_required(
+            post_id,
+            receipt_json='{"screenshot_path":"C:/proof/ambiguous.png"}',
+        )
+        return False
+
+    receipts: list[str] = []
+    monkeypatch.setattr(post_executor, "dispatch_post", fake_dispatch)
+    import social.notify as notify
+
+    monkeypatch.setattr(
+        notify, "send_text_to_telegram", lambda text: receipts.append(text) or True
+    )
+
+    assert run_post(pid, claimed=True, db_path=str(db_path)) == 0
+    assert svc.get_post(pid).status == "verification_required"
+    assert "will not retry" in receipts[0]
+    assert "C:/proof/ambiguous.png" in receipts[0]
+
+
+def test_run_post_crash_quarantines_linkedin_claim(
+    monkeypatch: pytest.MonkeyPatch, svc: SocialPostService, db_path: Path
+) -> None:
+    pid = _approved_post(svc)
+    assert svc.claim_post(pid)
+    monkeypatch.setattr(
+        post_executor,
+        "dispatch_post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("lost receipt")),
+    )
+    receipts: list[str] = []
+    import social.notify as notify
+
+    monkeypatch.setattr(
+        notify, "send_text_to_telegram", lambda text: receipts.append(text) or True
+    )
+
+    assert run_post(pid, claimed=True, db_path=str(db_path)) == 0
+    assert svc.get_post(pid).status == "verification_required"
+    assert "do not retry" in receipts[0]
+
+
 # ---------------------------------------------------------------- sweep
 
 
@@ -142,7 +194,7 @@ def _stale_claim(svc: SocialPostService, pid: int, minutes_ago: int) -> None:
     svc.set_post_fields(pid, claimed_at=stamp)
 
 
-def test_sweep_fails_stale_claim_and_notifies(
+def test_sweep_locks_stale_linkedin_claim_for_verification_and_notifies(
     monkeypatch: pytest.MonkeyPatch, svc: SocialPostService, db_path: Path
 ) -> None:
     pid = _approved_post(svc)
@@ -158,9 +210,9 @@ def test_sweep_fails_stale_claim_and_notifies(
 
     assert summary["swept"] == 1
     post = svc.get_post(pid)
-    assert post is not None and post.status == "failed"
+    assert post is not None and post.status == "verification_required"
     assert "runner died mid-flight" in (post.error or "")
-    assert len(receipts) == 1 and "never finished" in receipts[0]
+    assert len(receipts) == 1 and "manual verification" in receipts[0]
 
 
 def test_sweep_ignores_fresh_claims(svc: SocialPostService, db_path: Path) -> None:

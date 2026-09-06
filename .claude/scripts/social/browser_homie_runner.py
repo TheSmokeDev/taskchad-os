@@ -25,6 +25,7 @@ _dispatch_browser. This script must never contain bot lifecycle commands
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -77,23 +78,61 @@ def run_post(post_id: int, *, claimed: bool, db_path: str | None = None) -> int:
         # browser_write_lock lives inside post_executor._dispatch_browser,
         # the chokepoint every ingress shares.
         _log(f"dispatching {label}")
-        ok = dispatch_post(post_id, db_path=db_path)
+        ok = dispatch_post(post_id, db_path=db_path, claim_owned=True)
     except IntegrationPolicyError as exc:
         _log(f"{label}: blocked by default-deny gate: {exc}")
         _send_receipt(f"⛔ Post {label} blocked by policy: {exc}")
         return 1
     except Exception as exc:  # noqa: BLE001
         _log(f"{label}: dispatch crashed: {type(exc).__name__}: {exc}")
+        quarantined = False
         try:
             refreshed = svc.get_post(post_id)
             if refreshed is not None and refreshed.status == "approved":
-                svc.mark_failed(post_id, error=f"runner crash: {exc}")
+                if refreshed.channel.lower() in {"linkedin", "li"}:
+                    svc.mark_verification_required(
+                        post_id,
+                        receipt_json=json.dumps(
+                            {
+                                "verification_state": "verification_required",
+                                "confirmation_result": "runner_crashed_mid_dispatch",
+                                "submitted_at": refreshed.claimed_at,
+                                "error": f"{type(exc).__name__}: {exc}"[:500],
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        error="runner crashed mid-dispatch; verify LinkedIn before retry",
+                    )
+                    quarantined = True
+                else:
+                    svc.mark_failed(post_id, error=f"runner crash: {exc}")
         except Exception:  # noqa: BLE001
             pass
+        if quarantined:
+            _send_receipt(
+                f"⚠️ Post {label} hit a runner error after dispatch began. It is "
+                "locked in verification_required; verify LinkedIn and do not retry."
+            )
+            return 0
         _send_receipt(f"❌ Post {label} failed: {type(exc).__name__}: {exc}")
         return 1
 
     refreshed = svc.get_post(post_id)
+    if refreshed is not None and refreshed.status == "verification_required":
+        screenshot = "n/a"
+        try:
+            receipt = json.loads(refreshed.receipt_json or "{}")
+            screenshot = str(receipt.get("screenshot_path") or "n/a")
+        except (TypeError, ValueError):
+            pass
+        _log(f"{label}: verification required — do not retry")
+        _send_receipt(
+            f"⚠️ Post {label} may have submitted, but LinkedIn did not return a "
+            "verifiable View post permalink. It is locked in verification_required "
+            f"and will not retry. Screenshot: {screenshot}"
+        )
+        return 0
     if ok:
         url = (refreshed.post_url if refreshed else "") or "n/a"
         _log(f"{label}: posted — {url}")

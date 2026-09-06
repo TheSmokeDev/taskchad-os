@@ -15,6 +15,17 @@ from business_signal.models import SignalItem
 logger = logging.getLogger(__name__)
 
 
+def fence_untrusted_text(value: str) -> str:
+    """Quote fetched material so it cannot escape into the instruction layer."""
+
+    escaped = str(value or "").replace("<", "\\u003c").replace(">", "\\u003e")
+    return (
+        "<UNTRUSTED_PUBLIC_SOURCE>"
+        + escaped
+        + "</UNTRUSTED_PUBLIC_SOURCE>"
+    )
+
+
 async def research_items(items: list[SignalItem]) -> list[SignalItem]:
     """Enrich triaged items with full-text content from source URLs.
 

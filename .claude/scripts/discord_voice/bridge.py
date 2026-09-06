@@ -115,6 +115,7 @@ def _api_tool_executor(
     arguments: dict,
     speaker_id: object = None,
     binding: object = None,
+    origin_key: str | None = None,
 ) -> str:
     """Execute a talk tool via the main process's /api/talk/tool route.
 
@@ -151,6 +152,8 @@ def _api_tool_executor(
         "transport": "discord_voice",
         "speakerId": str(speaker_id) if speaker_id is not None else None,
     }
+    if origin_key:
+        payload["originKey"] = origin_key
     if binding is not None:
         payload["speakerBinding"] = {
             "token": getattr(binding, "token", None),
@@ -782,7 +785,8 @@ class VoiceBridge:
         """
         verdict = self._speaker_ledger.resolve_for_wire(bound or {})
         return _api_tool_executor(
-            name, arguments, speaker_id=verdict.user_id, binding=verdict
+            name, arguments, speaker_id=verdict.user_id, binding=verdict,
+            origin_key=f"realtime:{bound['call_id']}" if bound.get("call_id") else None,
         )
 
     async def _pump_mic(self) -> None:

@@ -8,13 +8,12 @@ from pathlib import Path
 import pytest
 import yaml
 
+from social.audit import append_social_audit_record
 from social.channels import (
-    SocialChannel,
     get_channel,
     list_active_channels,
     list_channels,
 )
-from social.audit import append_social_audit_record
 
 
 @pytest.fixture()
@@ -27,6 +26,7 @@ def yaml_path(tmp_path: Path) -> Path:
                 "cadence_enabled": True,
                 "cadence_interval_hours": 24,
 
+                "persona_id": "socials",
                 "voice_profile": "",
                 "topic_pool": ["insights", "updates"],
                 "browser_workflow_id": "linkedin.post.create",
@@ -74,6 +74,7 @@ class TestChannelRegistry:
         assert ch.execution_method == "browser"
         assert ch.cadence_enabled is True
         assert ch.browser_workflow_id == "linkedin.post.create"
+        assert ch.persona_id == "socials"
 
     def test_get_channel_missing(self, yaml_path: Path):
         assert get_channel("tiktok", yaml_path=yaml_path) is None
@@ -126,6 +127,16 @@ class TestChannelRegistry:
         assert reddit is not None
         assert reddit.persona_pack == ""
         assert reddit.image_aspect == "1:1"
+        assert reddit.persona_id is None
+
+    def test_blank_persona_id_normalizes_to_none(self, tmp_path: Path):
+        p = tmp_path / "channels.yaml"
+        p.write_text("channels:\n  reddit:\n    persona_id: '  '\n", encoding="utf-8")
+
+        reddit = get_channel("reddit", yaml_path=p)
+
+        assert reddit is not None
+        assert reddit.persona_id is None
 
     def test_missing_yaml_returns_empty(self, tmp_path: Path):
         missing = tmp_path / "nonexistent.yaml"

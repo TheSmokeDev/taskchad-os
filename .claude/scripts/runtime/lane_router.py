@@ -16,6 +16,8 @@ monkeypatch propagation in tests.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import uuid
 import logging
 import math
 import os
@@ -254,6 +256,12 @@ def _resolve_lane_profiles(request: RuntimeRequest) -> Iterable[RuntimeProfile]:
         return _iter_lane_profiles(lane, request)
 
     profiles = _lane_profiles(lane, request)
+    if request.preferred_provider and not request.allow_fallback:
+        # Frozen paired trials must fail visibly when their selected runtime is
+        # unavailable, instead of comparing a replacement model accidentally.
+        from .profiles import normalize_provider
+        selected = normalize_provider(request.preferred_provider)
+        return [profile for profile in profiles if profile.provider == selected]
 
     # Capability-constrained widening for the model_only contract.
     #
@@ -322,8 +330,49 @@ def probe_caller_tool_transport(request: RuntimeRequest) -> CallerToolTransportP
     return CallerToolTransportProbe(lane=lane, candidates=tuple(candidates))
 
 
+async def _observe_attempt(request, event):
+    callback = request.attempt_observer
+    if callback is None:
+        return
+    # The host owns whether recording is required; it may refuse a learning
+    # experiment before invocation. Keep callables out of tracing metadata.
+    if inspect.iscoroutinefunction(callback):
+        await callback(dict(event))
+    else:
+        outcome = await asyncio.to_thread(callback, dict(event))
+        if inspect.isawaitable(outcome):
+            await outcome
+
+
+async def _run_observed_attempt(adapter, request, timeout_s, attempt):
+    token = _base._ATTEMPT_CONTEXT.set(attempt)
+    try:
+        await _observe_attempt(request, {**attempt, "phase": "started"})
+        try:
+            result = await asyncio.wait_for(adapter.run(request), timeout=timeout_s)
+        except BaseException as exc:
+            await _observe_attempt(request, {**attempt, "phase": "failed", "error_type": type(exc).__name__})
+            raise
+        await _observe_attempt(request, {
+            **attempt, "phase": "succeeded", "model": result.model or attempt["model"],
+            "provider": result.provider or attempt["provider"],
+        })
+        return result
+    finally:
+        _base._ATTEMPT_CONTEXT.reset(token)
+
+
 async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
     """Run a request through the lane-first runtime facade."""
+
+    from . import activity
+
+    async with activity.foreground_request(request):
+        return await _run_with_runtime_lanes(request)
+
+
+async def _run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
+    """Existing execution policy, wrapped only by foreground activity tracking."""
 
     # PRD-8 Phase 7a WS4 — operator kill-switch. Raises KillSwitchDisabled
     # when HOMIE_KILLSWITCH_LLM=disabled. Callers (engine.py, memory_reflect,
@@ -392,8 +441,13 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
         # bookkeeping below. On timeout the adapter is cancelled; the CLI
         # adapters reap their child on the way out.
         timeout_s = _adapter_timeout_seconds(effective_request)
+        attempt = {
+            "attempt_id": uuid.uuid4().hex, "provider": profile.provider,
+            "profile": profile.key, "model": profile.model,
+            "lane": RUNTIME_LANE_CLAUDE_NATIVE if profile.provider == "claude" else RUNTIME_LANE_GENERIC,
+        }
         try:
-            result = await asyncio.wait_for(adapter.run(effective_request), timeout=timeout_s)
+            result = await _run_observed_attempt(adapter, effective_request, timeout_s, attempt)
         except RuntimeUnsupportedCapabilityError as exc:
             errors.append(f"{profile.key}: {exc}")
             continue
@@ -430,7 +484,12 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
                 profile.key,
                 exc_info=True,
             )
-        result.runtime_lane = lane
+        # Strict model-only routing can widen across lanes. Report the executed
+        # lane, so a later frozen qualification can select that same runtime.
+        result.runtime_lane = (
+            RUNTIME_LANE_CLAUDE_NATIVE if profile.provider == "claude"
+            else RUNTIME_LANE_GENERIC
+        ) if effective_request.model_only else lane
         return result
 
     joined = "; ".join(errors) if errors else "no runtime profiles resolved"

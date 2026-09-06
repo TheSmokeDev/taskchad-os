@@ -1,11 +1,11 @@
 [project]
 name = "thehomie"
-version = "1.7.1"
+version = "1.8.0"
 description = "The Homie — personal AI agent framework"
 requires-python = ">=3.12"
 dependencies = [
-    "claude-agent-sdk>=0.1.48,<0.2",
-    # claude-agent-sdk 0.1.x calls the MCP 1.x Server.list_tools API. MCP 2.0
+    "claude-agent-sdk>=0.2.139,<0.3",
+    # claude-agent-sdk 0.2.x still requires MCP 1.x (mcp<2.0.0,>=1.23.0). MCP 2.0
     # removed that surface, so a clean worktree otherwise fails tool parity
     # while an older environment on MCP 1.26 still passes.
     "mcp>=1.26,<2",
@@ -190,3 +190,10 @@ markers = [
     "live_chat_acceptance: cross-repo live-chat lock fix acceptance gate",
     "integration: opt-in test against a real installed external runtime",
 ]
+# Harness hardening Phase 1 (PRPs/active/PRP-framework-harness-hardening-phase-1.md)
+# — a bare `pytest` used to abort collection with 6 errors: discord_voice/tests
+# imports `discord.sinks` (py-cord), which ships only with the optional voice
+# extras. Setting norecursedirs REPLACES pytest's defaults, so they are
+# re-stated here. An explicitly named path (e.g. `pytest discord_voice/tests`)
+# still collects — this only removes it from the default recursive walk.
+norecursedirs = ["*.egg", ".*", "build", "dist", "node_modules", "venv", "discord_voice"]

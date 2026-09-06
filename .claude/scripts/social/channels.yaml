@@ -6,6 +6,7 @@ channels:
     # Slightly under 48h so a few seconds of Task Scheduler jitter do not
     # skip the intended every-other-day draft window.
     cadence_interval_hours: 47
+    persona_id: null
     voice_profile: "owner-linkedin"
     design_file: brand_designs/owner-linkedin.json
     persona_pack: owner-YourBusiness-rep

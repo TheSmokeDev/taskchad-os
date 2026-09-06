@@ -115,6 +115,31 @@ GROUNDING_RULES = (
     "conversation shows it succeeded. If you cannot verify, say you cannot verify.\n\n"
 )
 
+
+def build_today_block() -> str:
+    """Return the current local date as a prompt block.
+
+    Resolved per call, never cached: the bot process runs for days, so a
+    module-level constant would freeze at import and report a stale date on
+    every later turn (Rule 1). Fails open to an empty string so a clock or
+    timezone problem can never take down a turn.
+    """
+    try:
+        from config import now_local
+
+        stamp = now_local()
+        return (
+            "# Today\n"
+            + stamp.strftime("%A, %B ")
+            + str(stamp.day)
+            + stamp.strftime(", %Y (%Y-%m-%d), local time %H:%M")
+            + ".\n"
+            "Any date-keyed schedule, menu, or plan you hold resolves against "
+            "this date. Do not ask the operator what day it is.\n\n"
+        )
+    except Exception:
+        return ""
+
 # Hard cap on an inlined SKILL.md prompt block. The win32 argv cap
 # (_truncate_win32_append) is a head-keep over the WHOLE append — an unbounded
 # skill body spliced in early could push the assembled regions past the cap
@@ -277,7 +302,7 @@ class ConversationEngine:
         session_store: SQLiteSessionStore | PostgresSessionStore,
         project_root: Path,
         max_turns: int = 25,
-        max_budget_usd: float = 2.0,
+        max_budget_usd: float | None = None,
     ) -> None:
         self.session_store = session_store
         self.project_root = project_root
@@ -1635,11 +1660,11 @@ class ConversationEngine:
         if tiny_fast_text_path:
             allowed_tools = []
 
-        # PIV commands need more turns and budget for multi-step workflows
+        # PIV commands need more turns for multi-step workflows. No budget
+        # override: the configured cap (None on subscription lanes) applies.
         if message.is_piv:
             piv_max_turns = 50
-            piv_max_budget = 5.0
-            requested_model = "claude-opus-4-8"
+            requested_model = "claude-opus-5"
             # CLUTCH needs team orchestration tools
             if message.piv_command == "clutch":
                 allowed_tools += [
@@ -1685,6 +1710,7 @@ class ConversationEngine:
             "append": (
                 GROUNDING_RULES
                 + chat_rules
+                + build_today_block()
                 + identity_context
                 + "\n\n# Current Speaker\n"
                 + current_speaker_block
@@ -2100,7 +2126,10 @@ class ConversationEngine:
             )
             if regions:
                 system_prompt["append"] = (
-                    GROUNDING_RULES + chat_rules + assemble_regions(regions)
+                    GROUNDING_RULES
+                    + chat_rules
+                    + build_today_block()
+                    + assemble_regions(regions)
                 )
         elif recall_response and recall_response.formatted_text:
             # Cognition unavailable but got keyword results — append plainly.
@@ -2151,7 +2180,6 @@ class ConversationEngine:
         if message.prefetched_context and message.platform != Platform.TELEGRAM:
             allowed_tools = []  # Force no tools — data is pre-loaded
             piv_max_turns = 1   # Single response, no back-and-forth
-            piv_max_budget = 0.5  # Cheap ceiling
 
         # Windows CreateProcess has a 32767 char command line limit.
         # The SDK passes --append-system-prompt on the command line, so
@@ -2356,16 +2384,31 @@ class ConversationEngine:
             },
         )
 
+        from personas.learning import hooks as learning_hooks
+        import personas as learning_personas
+        learning_turn = await learning_hooks.prepare_turn_async(
+            runtime_request,
+            persona_id=learning_personas.get_active_profile_name() or "default",
+            surface="chat_engine",
+            origin_id=learning_hooks.incoming_origin(message, session_key),
+            task=message.text,
+        )
+        runtime_request = learning_turn.request
+        if _trace_decisions is not None:
+            _trace_decisions["learning"] = runtime_request.metadata.get("learning")
+
         # Run through runtime (propagate_attributes is at the outer scope)
         try:
             result = await run_with_runtime_lanes(runtime_request)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            await learning_turn.afailed(exc)
             # /stop or task cancel mid-runtime: CancelledError is a
             # BaseException — it bypasses both handlers below. The brief was
             # not delivered; re-arm it, then let the cancel propagate. (#138)
             self._rollback_session_brief(brief_token)
             raise
         except RuntimeExecutionError as e:
+            await learning_turn.afailed(e)
             self._rollback_session_brief(brief_token)  # #138 — brief never delivered
             print(f"[{datetime.now()}] Runtime execution error: {e}")
             capability_hint = ""
@@ -2382,6 +2425,7 @@ class ConversationEngine:
             )
             return
         except Exception as e:
+            await learning_turn.afailed(e)
             self._rollback_session_brief(brief_token)  # #138 — covers kill-switch branch too
             # PRD-8 Phase 7a WS4 R2 NM2 — explicit KillSwitchDisabled handling.
             # Late-bind import so engine.py doesn't hard-depend on the security/
@@ -2415,7 +2459,7 @@ class ConversationEngine:
             )
             return
 
-        response_text = result.text.strip() or "No response returned."
+        response_text = await learning_turn.acomplete(result) or "No response returned."
         if _COGNITION_AVAILABLE and current_wm is not None:
             turn_wm_after = self._append_turn_to_working_memory(
                 current_wm,

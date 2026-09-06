@@ -372,6 +372,14 @@ def _pinned_primary_provider() -> str | None:
 
 
 def _preferred_generic_provider(request: RuntimeRequest) -> str | None:
+    if request.preferred_provider:
+        provider = normalize_provider(request.preferred_provider)
+        allowed = _allowed_generic_providers_for_capability(
+            request.capability, carries_caller_tools=_base.request_carries_tools(request),
+        )
+        if provider not in allowed:
+            raise ValueError("requested provider is not eligible for this generic runtime capability")
+        return provider
     selection = resolve_runtime_selection()
     if selection.lane == "claude_native":
         return None

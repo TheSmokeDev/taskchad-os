@@ -30,7 +30,7 @@ apply_persona_override()
 
 import asyncio  # noqa: E402
 import json as json_mod  # noqa: E402
-from datetime import datetime  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
 
 import click  # noqa: E402
 from engine import ConversationEngine  # noqa: E402
@@ -95,6 +95,10 @@ main.add_command(session_group)
 main.add_command(backup_cmd)
 main.add_command(restore_cmd)
 main.add_command(snapshot_group)
+
+
+
+
 
 
 def _resolve_vault_memory_dir(vault: str) -> Path:
@@ -5107,8 +5111,13 @@ def profile_repair(name, all_profiles, check, json_mode):
 
 @profile.group("learning")
 def profile_learning():
-    """Toggle persona learning (reflection pipeline opt-in)."""
+    """Inspect, pause, resume, and manage persona learning."""
     pass
+
+
+from cli_learning import register_learning_commands  # noqa: E402
+
+register_learning_commands(profile_learning)
 
 
 @profile_learning.command("enable")

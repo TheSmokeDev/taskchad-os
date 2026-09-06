@@ -2819,6 +2819,15 @@ def main() -> None:
     except Exception:
         _log_cofounder_seam_error()
 
+    # The same durable learning queue used by reflection/dream, including named
+    # profiles with due outcomes but no fresh chat rows. Children bootstrap their
+    # own profile before config imports; no runtime/profile state is swapped here.
+    try:
+        from personas.learning import worker as learning_worker
+        learning_worker.run_pending_profiles(test_mode=args.test)
+    except Exception:
+        _log_cofounder_seam_error()
+
 
 if __name__ == "__main__":
     try:

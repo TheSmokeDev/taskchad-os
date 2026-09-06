@@ -550,7 +550,6 @@ def build_persona_notes_request(memory_dir: Path, instruction: str) -> RuntimeRe
             # operator's interactive flagship model.
             model=get_background_models()["quality"],
             max_turns=1,
-            max_budget_usd=0.10,
         )
     )
 
@@ -1040,7 +1039,13 @@ async def run_reflection(
     """
     try:
         with file_lock(REFLECTION_STATE_FILE, timeout=5.0):
-            return await _run_reflection_inner(test_mode, days, notes_since)
+            result = await _run_reflection_inner(test_mode, days, notes_since)
+        try:
+            from personas.learning import worker as learning_worker
+            await learning_worker.wake_learning(test_mode=test_mode, max_stages=1)
+        except Exception as exc:
+            print(f"[{now_local()}] Learning queue wake failed (non-blocking): {type(exc).__name__}")
+        return result
     except TimeoutError:
         print(f"[{now_local()}] Another reflection is already running, skipping")
         return None

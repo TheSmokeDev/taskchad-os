@@ -381,7 +381,21 @@ DASHBOARD_DB_PATH = Path(
 # and resolves to this constant inside the body, never at def time).
 DASHBOARD_BOT_GRACE_SECONDS = int(os.getenv("DASHBOARD_BOT_GRACE_SECONDS", "5"))
 CHAT_MAX_TURNS = int(os.getenv("CHAT_MAX_TURNS", "25"))
-CHAT_MAX_BUDGET_USD = float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0"))
+
+
+def _optional_float_env(name: str) -> float | None:
+    """A float knob with NO default: unset, blank, or none/off means "no limit"."""
+    raw = os.getenv(name, "").strip()
+    if not raw or raw.lower() in {"none", "null", "off", "unlimited"}:
+        return None
+    return float(raw)
+
+
+# No default cost cap. The Homie runs on subscription lanes (Claude Max, Codex,
+# Kimi) where ``cost_usd`` is subscription-backed accounting, not money — a
+# dollar ceiling there only ever killed real work ("Reached maximum budget").
+# Set CHAT_MAX_BUDGET_USD explicitly to cap an API-key deployment.
+CHAT_MAX_BUDGET_USD: float | None = _optional_float_env("CHAT_MAX_BUDGET_USD")
 CHAT_ENGINE_TIMEOUT_SECONDS = float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "900"))
 # doc-upload-truthful-reads Phase 2 — attachment full-read caps + attachment-turn
 # timeout. Consumers resolve these at CALL TIME via None-sentinel params
@@ -3843,12 +3857,14 @@ class PersonaLearningSettings(NamedTuple):
     enabled: bool
     tick_interval_hours: float
     silent_skip_window_hours: float
+    timeout_seconds: float = 900.0
 
 
 def get_persona_learning_settings(
     enabled: bool | None = None,
     tick_interval_hours: float | None = None,
     silent_skip_window_hours: float | None = None,
+    timeout_seconds: float | None = None,
 ) -> PersonaLearningSettings:
     """Resolve persona-learning-tick knobs at CALL TIME (Rule 1).
 
@@ -3864,6 +3880,11 @@ def get_persona_learning_settings(
         PERSONA_LEARNING_SILENT_SKIP_WINDOW ("24") — hours: if a persona
             has zero attributed rows newer than this window, skip it with no
             model call (``PERSONA_REFLECT_SILENT``).
+        PERSONA_LEARNING_TIMEOUT ("900") — seconds one persona's reflection
+            child may run before the tick kills it and records a timeout
+            receipt (boundary held, notes retained, retried next slot). A
+            working child — distillation, belief extraction, the contradiction
+            judge — needs more than the 300 s that used to be hard-coded.
 
     None-sentinel pattern: explicit values pass through; ``None`` resolves
     the matching env var inside the body so ``monkeypatch.setenv`` takes
@@ -3885,10 +3906,15 @@ def get_persona_learning_settings(
         silent_skip_window_hours = _finite_or_default(
             _safe_float_env("PERSONA_LEARNING_SILENT_SKIP_WINDOW", 24.0), 24.0
         )
+    if timeout_seconds is None:
+        timeout_seconds = _finite_or_default(
+            _safe_float_env("PERSONA_LEARNING_TIMEOUT", 900.0), 900.0
+        )
     return PersonaLearningSettings(
         enabled=enabled,
         tick_interval_hours=tick_interval_hours,
         silent_skip_window_hours=silent_skip_window_hours,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -5100,7 +5126,7 @@ def reload_config() -> dict[str, tuple[str, str]]:
         "VOICE_TTS_VOICE_EDGE": os.getenv("VOICE_TTS_VOICE_EDGE", "en-US-AndrewMultilingualNeural|+14%"),
         "VOICE_TTS_VOICE_OPENAI": os.getenv("VOICE_TTS_VOICE_OPENAI", "alloy"),
         "CHAT_MAX_TURNS": int(os.getenv("CHAT_MAX_TURNS", "25")),
-        "CHAT_MAX_BUDGET_USD": float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0")),
+        "CHAT_MAX_BUDGET_USD": _optional_float_env("CHAT_MAX_BUDGET_USD"),
         "CHAT_ENGINE_TIMEOUT_SECONDS": float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "900")),
         "SESSION_TURN_THRESHOLD": int(os.getenv("SESSION_TURN_THRESHOLD", "0")),
         "RECENT_CONVERSATION_COUNT": int(os.getenv("RECENT_CONVERSATION_COUNT", "80")),

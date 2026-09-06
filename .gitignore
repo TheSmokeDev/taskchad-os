@@ -29,6 +29,12 @@ __pycache__/
 **/.env.*
 !**/.env.example
 !**/.env.test
+# Bare `.env` had NO generic rule until 2026-08-17 — `**/.env.*` requires a
+# dot after "env", so a plain `.env` anywhere except .claude/scripts/ (repo
+# root, dashboard/server/, dashboard/web/, any new slice) was trackable, with
+# only the sanitizer regex (scripts/sanitize.py:1029) standing between it and
+# the public mirror. A bare-name pattern matches at every depth.
+.env
 # Backup-suffixed files are the same class (google_token.json.bak-2026-07-10
 # reached public staging the same day) — backups never belong in git.
 *.bak
@@ -209,3 +215,9 @@ mobile/.vscode/
 # the former can send email; the latter embeds a personal account lookup.
 /.claude/scripts/send_dispute_email_once.py
 /.claude/scripts/tmp_poly.sh
+
+# Isolated harness verification artifacts; never persona memory or source inputs.
+/.test-data/
+/.test-runs/
+/.test-tmp*/
+**/.test-cache/

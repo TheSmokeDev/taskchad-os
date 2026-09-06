@@ -415,7 +415,6 @@ async def _run_rerank_request(prompt: str) -> str:
             capability=TEXT_REASONING,
             model="haiku",
             max_turns=1,
-            max_budget_usd=0.10,
             allowed_tools=[],
             system_prompt="You are a search result ranker. Output only comma-separated numbers.",
         )

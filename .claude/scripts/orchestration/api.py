@@ -14,7 +14,7 @@ import logging
 import os
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -359,6 +359,15 @@ class TeamExecutorStepBody(BaseModel):
 # ── FastAPI app ───────────────────────────────────────────────────────────
 
 app = FastAPI(title="Orchestration Control API", version="0.1.0")
+
+
+@app.on_event("startup")
+async def _bootstrap_runtime_tool_registry() -> None:
+    """Populate physical caller tools before the API serves read models."""
+    from runtime import tool_impl
+
+    registered = tool_impl.register_tools()
+    logger.info("orchestration API boot registered %d framework tools", registered)
 
 
 @app.middleware("http")
@@ -1050,7 +1059,15 @@ def run_operating_room(request: Request, body: OperatingRoomRunBody):
 
 
 @app.get("/api/capabilities/status")
-def get_capability_gateway_status(request: Request):
+def get_capability_gateway_status(
+    request: Request,
+    search: str = "",
+    kinds: list[str] = Query(default=[]),
+    sources: list[str] = Query(default=[]),
+    limit: int = 50,
+    cursor: str | None = None,
+    persona_id: str | None = None,
+):
     surface = _operator_surface(request)
     with orchestration_span(
         "orchestration.api.capabilities_status",
@@ -1058,7 +1075,17 @@ def get_capability_gateway_status(request: Request):
         trace_metadata={"surface": surface, "feature_phase": 13},
         expected_exceptions=(HTTPException,),
     ):
-        payload = collect_capability_gateway_status()
+        try:
+            payload = collect_capability_gateway_status(
+                search=search,
+                kinds=tuple(kinds),
+                sources=tuple(sources),
+                limit=limit,
+                cursor=cursor,
+                persona_id=persona_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid capability catalog query") from exc
         update_observation(
             metadata={
                 "enabled_capabilities": payload["capabilities"]["enabled_count"],

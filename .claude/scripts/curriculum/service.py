@@ -513,6 +513,15 @@ class CurriculumService:
             )
             doctrine = await self._recall_doctrine(video)
             persona_context = await asyncio.to_thread(self._persona_context)
+            from . import learning as learning_adapter
+            transcript_digest = hashlib.sha256(
+                extraction.transcript.strip().encode("utf-8")
+            ).hexdigest()
+            prepared_learning = await asyncio.to_thread(
+                learning_adapter.prepare_study, self.persona_id, video, transcript_digest,
+                transcript=extraction.transcript, transcript_source=extraction.transcript_source,
+                source_timestamp=extraction.metadata.upload_date,
+            )
             study = await study_extraction(
                 extraction,
                 persona_id=self.persona_id,
@@ -559,6 +568,16 @@ class CurriculumService:
             await asyncio.to_thread(
                 ledger.record_runtime_receipt, "study", runtime, video_id=video_id
             )
+            learning_receipt = await asyncio.to_thread(
+                learning_adapter.complete_study, prepared_learning,
+                video=video, transcript_digest=transcript_digest,
+                dossier_path=str(dossier), study=study,
+                dossier_text=await asyncio.to_thread(dossier.read_text, encoding="utf-8"),
+                proposals=[
+                    {"title": title, "body": body} for title, body in
+                    _split_proposals(_section(study.markdown, "Application candidates"))[:5]
+                ],
+            )
             return {
                 "success": True,
                 "persona_id": self.persona_id,
@@ -567,6 +586,7 @@ class CurriculumService:
                 "raw_path": str(raw_path),
                 "dossier_path": str(dossier),
                 "proposal_ids": proposal_ids,
+                "learning": learning_receipt,
                 "runtime": runtime,
             }
         except kill_switches.KillSwitchDisabled:

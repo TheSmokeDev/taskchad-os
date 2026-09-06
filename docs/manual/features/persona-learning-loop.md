@@ -4,6 +4,11 @@ Status: Shipped — born learning per profile (#422, 2026-08-13)
 Owner: Framework (memory pipelines + personas)
 Last updated: 2026-08-13
 
+The [Autonomous Persona Harness Learning](persona-harness-learning.md) extension
+adds expectations, observable outcomes, held-out evaluation, automatic method
+adoption, versioned future use, and reassessment. Its Learning tab and CLI expose
+that evidence separately from this existing reflection and belief pipeline.
+
 ## What It Does
 
 Points the Living Self machinery at every named persona profile so that
@@ -121,7 +126,7 @@ So the tick keeps two stamps:
 | Stamp | Advances | Read by |
 |---|---|---|
 | `last_run` | only when the child exits 0 | `_resolve_since_boundary` — the freshness boundary for both counters and the child's `--notes-since` |
-| `last_attempt` | on every spawn | the `PERSONA_LEARNING_TICK_INTERVAL` recency guard |
+| `last_attempt` | on every spawn, stamped with the tick's START instant | the `PERSONA_LEARNING_TICK_INTERVAL` recency guard, which treats a slot landing within 15 minutes of the interval as due (a 12h guard used to skip every 12h slot, because the stamp was taken minutes into the roster) |
 
 They were one field until the child was made fail-honest. Splitting them is
 what lets a failed night retry: the boundary stays put so the same notes are
@@ -129,6 +134,25 @@ counted fresh on the next tick, while the guard still throttles the retry to
 the configured interval instead of re-spawning a failing child every tick. A
 legacy state file with no `last_attempt` falls back to `last_run` for one tick,
 then self-heals.
+
+**Failure visibility (2026-09-02).** A failed child's receipt `message` carries
+the last few non-empty lines of the child's STDOUT plus any stderr tail —
+`memory_reflect.py` prints every reason it exits 1 on stdout (the fail-honest
+notes leg, the distillation call's own error, a kill-switch refusal), so a
+stderr-only tail produced the receipt `exit 1: ` while the cause was thrown
+away. `run_tick()` now returns a `TickOutcome` (`spawned`, `failed`) and
+`main()` exits 1 when any persona's child failed; both wrappers forward that
+code, so Task Scheduler's `Last Result` goes non-zero instead of staying green
+over a night nobody learned from. Read the per-persona receipt for the cause.
+
+**Order, claim, lock (Codex review of #684).** The roster runs overdue-first
+(oldest `last_attempt` first; never-attempted or unreadable stamps first of
+all), so a head that keeps timing out inside the task's one-hour execution
+limit cannot starve the tail forever. Each persona's `last_attempt` is written
+BEFORE its child is spawned (the per-persona claim), and the whole tick holds
+a process-wide lock (`STATE_DIR/persona-learning-tick.json.lock`); a manual
+run beside the scheduled one exits without spawning and says so. The scheduled
+task itself is `IgnoreNew`, so the lock only ever matters for hand runs.
 
 **Why `--notes-since` is threaded explicitly:** the parent tick runs as the
 DEFAULT profile and the child re-roots under the persona, so their `STATE_DIR`s
@@ -335,8 +359,9 @@ All knobs are resolved at call time via `get_persona_learning_settings()` in
 | Env var | Default | Meaning |
 |---|---|---|
 | `PERSONA_LEARNING_ENABLED` | `true` | Global kill switch for the tick. When false, the tick exits immediately with no persona enumeration. |
-| `PERSONA_LEARNING_TICK_INTERVAL` | `12` | Minimum hours between full tick runs (recency guard, same pattern as dream-state). |
+| `PERSONA_LEARNING_TICK_INTERVAL` | `12` | Minimum hours between full tick runs (recency guard, same pattern as dream-state). A slot landing within 15 minutes of the interval counts as due, so the guard fires on a cadence equal to it. |
 | `PERSONA_LEARNING_SILENT_SKIP_WINDOW` | `24` | Hours: if a persona has zero attributed rows **and zero fresh notes** newer than this window, skip it with no model call (`PERSONA_REFLECT_SILENT`). Also the cold-start boundary handed to the child as `--notes-since`. |
+| `PERSONA_LEARNING_TIMEOUT` | `900` | Seconds one persona's reflection child may run before the tick kills it and records `timeout (Ns): <child's last output>` (boundary held, notes retained, retried next slot). A working child — distillation, belief extraction, the contradiction judge — needs more than the 300 s that used to be hard-coded; on 2026-09-02 that limit killed crypto's first-ever successful distillation mid-judge. |
 
 ### Work-note corpus knobs
 

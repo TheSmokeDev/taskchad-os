@@ -170,6 +170,23 @@ def test_drive_failure_returns_failed_receipt() -> None:
     assert driver.screenshot_calls == []
 
 
+def test_audit_failure_cannot_downgrade_completed_browser_write() -> None:
+    class AuditFailureDriver(FakeDriver):
+        def audit(self, **kwargs) -> None:
+            raise RuntimeError("audit unavailable")
+
+    driver = AuditFailureDriver(enabled=True, drive_ok=True)
+    task = SocialWriteTask(
+        workflow_id="linkedin.post.create",
+        target_url="https://www.linkedin.com/feed/",
+        payload_text="body",
+        action="post",
+    )
+    receipt = BrowserExecutor(driver).dispatch(_subtask_for(task))
+    assert receipt.status == "completed"
+    assert receipt.metadata["audit_error"] == "RuntimeError"
+
+
 def test_executor_never_calls_gate_even_when_body_contains_phrase() -> None:
     """R1-B3 / NM1: the executor never gates; a body with the literal approval
     phrase cannot auto-approve because the executor doesn't look at it."""

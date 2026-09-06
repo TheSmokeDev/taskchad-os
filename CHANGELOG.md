@@ -13,6 +13,44 @@ context. They are not public release tags unless a matching public tag exists.
 
 ---
 
+## TaskChad OS v1.8.0 — Persona Harness Learning
+
+**Release Date:** September 6, 2026
+
+Personas can develop and revise their working methods through a persistent,
+model-independent learning cycle owned by the framework.
+
+### Highlights
+
+- **Complete learning cycle:** capture expectations before meaningful actions,
+  reconcile observed outcomes, propose conditional improvements, and evaluate
+  them on separate cases before autonomous provisional adoption.
+- **Framework lifecycle hooks:** chat, host tools, curriculum, background work,
+  Cabinet, and Talk delegation share persona-owned learning records and context.
+- **Versioned methods:** existing skill and amendment lifecycles supply actual
+  content, tested-content binding, correction-aware reassessment, and selective
+  rollback. Learning persists across model changes with per-model qualification.
+- **Idle learning:** a resumable queue uses existing heartbeat, reflection, and
+  dream entry points. Foreground work takes priority; quota, auth, and observation
+  failures retain visible retry states.
+- **Learning controls:** named and default personas have a Learning tab, shared
+  Python API, and CLI for history, linked evidence, pause/resume, and rollback.
+- **Outcome evidence:** read-only email observers distinguish actual replies from
+  drafts or sent messages. An optional Outlook write tool preserves the existing
+  exact-action approval gate and verifies sent-message receipts without resending.
+
+### Validation and limits
+
+The implementation passed 680 Python/CLI checks, 55 dashboard/proxy tests,
+TypeScript checks, the production web build, and canonical export validation.
+Live synthetic method-use checks passed on Sonnet and Haiku; a live second-vendor
+check remains pending because the tested Gemini account lacked a valid license.
+Qualification and synthetic results do not establish long-term professional
+improvement. Existing external-action authority remains separate from learning.
+
+See [Persona Harness Learning](docs/manual/features/persona-harness-learning.md)
+for lifecycle, configuration, evidence coverage, and recovery behavior.
+
 ## The Homie v1.7.1
 
 **Release Date:** August 22, 2026

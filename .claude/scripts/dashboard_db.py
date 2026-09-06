@@ -48,7 +48,9 @@ WS1 → WS2 contract (locked at PRP §1565-1580):
 
 from __future__ import annotations
 
+import re
 import sqlite3
+import time
 from pathlib import Path
 
 __all__ = ["DashboardDB", "get_connection"]
@@ -190,7 +192,17 @@ CREATE INDEX IF NOT EXISTS idx_audit_persona
     ON audit_log(persona_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_action
     ON audit_log(action, created_at DESC);
+
+
 """
+
+
+_SCHEMA_BUSY_TIMEOUT_MS = 5000
+_SCHEMA_INIT_ATTEMPTS = 5
+_SCHEMA_RETRY_DELAY_S = 0.01
+
+_EXPECTED_CABINET_MEETING_COLUMNS = frozenset({"title", "chat_id", "broadcast_order"})
+
 
 
 def _resolve_db_path(db_path: Path | None) -> Path:
@@ -208,6 +220,7 @@ def _resolve_db_path(db_path: Path | None) -> Path:
     # module scope; resolve on every call so HOMIE_HOME / DASHBOARD_DB_PATH
     # env-overrides applied mid-process take effect immediately.
     import config as _config  # noqa: PLC0415 — late-bind by design (Rule 1/2)
+
     return Path(_config.DASHBOARD_DB_PATH)
 
 
@@ -218,6 +231,157 @@ def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
     except sqlite3.Error:
         return set()
     return {row[1] for row in rows}
+
+
+
+
+def _schema_statements() -> tuple[str, ...]:
+    """Split the static schema script into single executable statements.
+
+    ``Connection.executescript`` commits an active transaction before running
+    its script. Schema initialization needs the opposite guarantee: every
+    CREATE, physical-column inspection, ALTER, and dependent index must stay
+    inside the same ``BEGIN IMMEDIATE`` transaction. ``complete_statement``
+    lets us execute the existing schema text statement-by-statement without
+    changing its public shape or relying on a fragile semicolon split.
+    """
+    statements: list[str] = []
+    pending: list[str] = []
+    for line in _SCHEMA_SQL.splitlines():
+        pending.append(line)
+        candidate = "\n".join(pending).strip()
+        if candidate and sqlite3.complete_statement(candidate):
+            statements.append(candidate)
+            pending.clear()
+
+    trailing = "\n".join(pending).strip()
+    if trailing and any(line.strip() and not line.lstrip().startswith("--") for line in pending):
+        raise RuntimeError("dashboard schema contains an incomplete SQL statement")
+    return tuple(statements)
+
+
+def _execute_schema(conn: sqlite3.Connection) -> None:
+    """Execute all static DDL without escaping the caller's transaction."""
+    for statement in _schema_statements():
+        conn.execute(statement)
+
+
+def _expected_schema_objects() -> tuple[set[str], set[str]]:
+    """Derive required object names from the active private/public schema text."""
+    tables: set[str] = set()
+    indexes = {"idx_cabinet_meetings_chat_open"}
+    pattern = re.compile(
+        r"\bCREATE\s+(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+([A-Za-z0-9_]+)",
+        re.IGNORECASE,
+    )
+    for statement in _schema_statements():
+        match = pattern.search(statement)
+        if match is None:
+            continue
+        target = tables if match.group(1).casefold() == "table" else indexes
+        target.add(match.group(2))
+    return tables, indexes
+
+
+
+
+def _verify_physical_schema(conn: sqlite3.Connection) -> None:
+    """Fail unless the required physical tables, indexes, and columns exist."""
+    rows = conn.execute(
+        "SELECT type, name FROM sqlite_master "
+        "WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    tables = {row[1] for row in rows if row[0] == "table"}
+    indexes = {row[1] for row in rows if row[0] == "index"}
+    columns = _column_names(conn, "cabinet_meetings")
+    expected_tables, expected_indexes = _expected_schema_objects()
+
+    missing_tables = sorted(expected_tables - tables)
+    missing_indexes = sorted(expected_indexes - indexes)
+    missing_columns = sorted(_EXPECTED_CABINET_MEETING_COLUMNS - columns)
+    if missing_tables or missing_indexes or missing_columns:
+        raise sqlite3.DatabaseError(
+            "dashboard schema physical verification failed: "
+            f"tables={missing_tables!r}, indexes={missing_indexes!r}, "
+            f"cabinet_meetings_columns={missing_columns!r}"
+        )
+
+
+
+def _physical_schema_is_current(conn: sqlite3.Connection) -> bool:
+    try:
+        _verify_physical_schema(conn)
+    except sqlite3.Error:
+        return False
+    return True
+
+
+
+
+def _is_schema_contention(exc: sqlite3.OperationalError) -> bool:
+    """Return whether *exc* is a retryable schema-initialization race."""
+    message = str(exc).casefold()
+    return "locked" in message or "busy" in message or "duplicate column name" in message
+
+
+def _rollback_schema_attempt(
+    conn: sqlite3.Connection,
+    exc: sqlite3.Error,
+) -> None:
+    """Rollback a failed attempt without hiding rollback failures."""
+    try:
+        conn.rollback()
+    except sqlite3.Error as rollback_exc:
+        raise rollback_exc from exc
+
+
+def _initialize_schema(conn: sqlite3.Connection) -> None:
+    """Atomically initialize/migrate schema with bounded contention retry.
+
+    ``BEGIN IMMEDIATE`` serializes all first-use writers before any physical
+    schema inspection occurs. A waiter therefore starts only after the first
+    initializer commits, then re-reads ``PRAGMA table_info`` in its own write
+    transaction instead of acting on a stale missing-column decision.
+
+    Lock or duplicate-column contention is never accepted on exception text
+    alone. A retry reruns the physical inspection and the successful path
+    always verifies the schema shape before returning. At the retry boundary,
+    an already-complete physical schema is the only condition that can classify
+    the contended initialization as successful.
+    """
+    # Preserve the prior ``executescript`` behavior for callers that pass a
+    # connection with an active transaction: schema initialization begins only
+    # after their pending transaction has been committed.
+    conn.commit()
+
+    last_contention: sqlite3.OperationalError | None = None
+    for attempt in range(_SCHEMA_INIT_ATTEMPTS):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _execute_schema(conn)
+            _apply_phase_5a_columns(conn)
+            _apply_phase_6_columns(conn)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cabinet_meetings_chat_open "
+                "ON cabinet_meetings(chat_id, started_at DESC) "
+                "WHERE ended_at IS NULL"
+            )
+            _verify_physical_schema(conn)
+            conn.commit()
+            return
+        except sqlite3.DatabaseError as exc:
+            _rollback_schema_attempt(conn, exc)
+            if not isinstance(exc, sqlite3.OperationalError) or not _is_schema_contention(exc):
+                raise
+            last_contention = exc
+            if attempt + 1 < _SCHEMA_INIT_ATTEMPTS:
+                time.sleep(_SCHEMA_RETRY_DELAY_S * (attempt + 1))
+
+    assert last_contention is not None
+    try:
+        _verify_physical_schema(conn)
+    except sqlite3.Error:
+        raise last_contention
 
 
 def _apply_phase_5a_columns(conn: sqlite3.Connection) -> None:
@@ -235,9 +399,7 @@ def _apply_phase_5a_columns(conn: sqlite3.Connection) -> None:
     if "title" not in cols:
         conn.execute("ALTER TABLE cabinet_meetings ADD COLUMN title TEXT")
     if "chat_id" not in cols:
-        conn.execute(
-            "ALTER TABLE cabinet_meetings ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''"
-        )
+        conn.execute("ALTER TABLE cabinet_meetings ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''")
 
 
 def _apply_phase_6_columns(conn: sqlite3.Connection) -> None:
@@ -257,26 +419,65 @@ def _apply_phase_6_columns(conn: sqlite3.Connection) -> None:
     """
     cols = _column_names(conn, "cabinet_meetings")
     if "broadcast_order" not in cols:
-        conn.execute(
-            "ALTER TABLE cabinet_meetings ADD COLUMN broadcast_order TEXT"
-        )
+        conn.execute("ALTER TABLE cabinet_meetings ADD COLUMN broadcast_order TEXT")
 
 
-def _apply_pragmas(conn: sqlite3.Connection) -> None:
-    """Set the canonical pragmas on a fresh connection.
+def _apply_connection_pragmas(conn: sqlite3.Connection) -> None:
+    """Set connection-local pragmas without acquiring a write reservation."""
+    conn.execute(f"PRAGMA busy_timeout={_SCHEMA_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _ensure_wal_mode(conn: sqlite3.Connection) -> None:
+    """Transition a new/stale database to WAL with bounded contention retry.
 
     Mirrors ``OrchestrationDB`` (``orchestration/db.py:210-211``):
-        - WAL journal mode (concurrent readers + single writer)
-        - busy_timeout=5000ms (matches the criterion locked in the JSON contract)
-        - foreign_keys=ON (cabinet_transcripts FK to cabinet_meetings)
+        - WAL journal mode (concurrent readers + single writer).
 
-    journal_mode persists in the DB header once set — re-asserting it on
-    every connection is safe (the SQLite docs explicitly call this out).
-    busy_timeout is per-connection and MUST be set on every connect.
+    ``PRAGMA journal_mode=WAL`` may need a write lock. Callers first prove the
+    physical schema and persisted journal mode so an already-current WAL file
+    never executes this transition on a read connection.
     """
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
+    last_contention: sqlite3.OperationalError | None = None
+    for attempt in range(_SCHEMA_INIT_ATTEMPTS):
+        try:
+            mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            if not _is_schema_contention(exc):
+                raise
+            last_contention = exc
+            if attempt + 1 < _SCHEMA_INIT_ATTEMPTS:
+                time.sleep(_SCHEMA_RETRY_DELAY_S * (attempt + 1))
+                continue
+            break
+        if str(mode).casefold() != "wal":
+            raise sqlite3.DatabaseError(f"dashboard database failed to enter WAL mode: {mode!r}")
+        break
+    else:  # pragma: no cover - loop exits by success or the final break
+        raise AssertionError("unreachable WAL retry state")
+
+    if last_contention is not None and attempt + 1 == _SCHEMA_INIT_ATTEMPTS:
+        # A contended WAL transition is successful only when a physical re-read
+        # proves another initializer completed the transition.
+        try:
+            current_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        except sqlite3.Error:
+            raise last_contention
+        if str(current_mode).casefold() != "wal":
+            raise last_contention
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Use a read-only fast path; reserve writes only for absent/stale schema."""
+    _apply_connection_pragmas(conn)
+    schema_is_current = _physical_schema_is_current(conn)
+    journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
+    if schema_is_current and journal_mode == "wal":
+        return
+    if journal_mode != "wal":
+        _ensure_wal_mode(conn)
+    if not schema_is_current:
+        _initialize_schema(conn)
 
 
 class DashboardDB:
@@ -324,19 +525,24 @@ class DashboardDB:
         conn = sqlite3.connect(
             str(self.db_path),
             check_same_thread=self._check_same_thread,
+            timeout=_SCHEMA_BUSY_TIMEOUT_MS / 1000,
         )
         conn.row_factory = sqlite3.Row
-        _apply_pragmas(conn)
-        self.init_schema(conn)
+        try:
+            _ensure_schema(conn)
+        except BaseException:
+            conn.close()
+            raise
         self._conn = conn
         return conn
 
     def init_schema(self, conn: sqlite3.Connection | None = None) -> None:
         """Create all tables idempotently.
 
-        Uses ``executescript`` so the entire DDL runs in a single transaction
-        — no partial-init half-state is possible. CREATE IF NOT EXISTS makes
-        re-invocation a no-op. Rule 2: the DDL inspects the actual SQLite
+        Uses an explicit ``BEGIN IMMEDIATE`` write transaction so the entire
+        DDL and additive migration run atomically — no partial-init half-state
+        or stale missing-column decision is possible. CREATE IF NOT EXISTS
+        makes re-invocation a no-op. Rule 2: the DDL inspects the actual SQLite
         backend (via CREATE IF NOT EXISTS), not a sidecar 'schema_version'
         flag, so meta lies cannot make us skip a table that physically went
         missing.
@@ -349,20 +555,7 @@ class DashboardDB:
         if conn is None:
             conn = self.connect()
             return  # connect() already calls init_schema(conn) on the fresh conn
-        conn.executescript(_SCHEMA_SQL)
-        _apply_phase_5a_columns(conn)
-        # PRD-8 Phase 6 — additive `broadcast_order` column on cabinet_meetings.
-        _apply_phase_6_columns(conn)
-        # Indexes that depend on backwards-compat-added columns must run
-        # AFTER the column-ensure step (older DBs would crash with
-        # "no such column" otherwise — same class as orchestration/db.py
-        # msg_type ordering fix).
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_cabinet_meetings_chat_open "
-            "ON cabinet_meetings(chat_id, started_at DESC) "
-            "WHERE ended_at IS NULL"
-        )
-        conn.commit()
+        _ensure_schema(conn)
 
     def close(self) -> None:
         """Close the most-recently-opened connection if one is held."""

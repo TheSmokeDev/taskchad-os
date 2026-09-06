@@ -1031,7 +1031,13 @@ async def run_dream(
         return await _run_dream_inner(test_mode, force, days, post_weekly, no_llm)
     try:
         with file_lock(DREAM_STATE_FILE, timeout=5.0):
-            return await _run_dream_inner(test_mode, force, days, post_weekly, no_llm)
+            result = await _run_dream_inner(test_mode, force, days, post_weekly, no_llm)
+        try:
+            from personas.learning import worker as learning_worker
+            await learning_worker.wake_learning(test_mode=test_mode, max_stages=1)
+        except Exception as exc:
+            print(f"[{now_local()}] Learning queue wake failed (non-blocking): {type(exc).__name__}")
+        return result
     except TimeoutError:
         print(f"[{now_local()}] Another dream cycle is already running, skipping")
         return None

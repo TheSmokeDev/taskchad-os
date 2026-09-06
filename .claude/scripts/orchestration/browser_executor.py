@@ -49,6 +49,7 @@ class SocialWriteDriver(Protocol):
       readiness    -> browser_control.browser_readiness(port=...) -> {enabled: bool, ...}
       drive        -> sequential run_agent_browser(--cdp) steps -> (ok, detail)
       screenshot   -> persists capture_browser_screenshot_png BYTES -> file, returns PATH
+      verification_receipt -> optional public-safe permalink/confirmation proof
       audit        -> browser_audit.append_browser_audit_record (redacts internally)
     """
 
@@ -62,6 +63,9 @@ class SocialWriteDriver(Protocol):
         ...
 
     def screenshot(self, *, port: int, workflow_id: str) -> str | None:
+        ...
+
+    def verification_receipt(self) -> dict[str, str]:
         ...
 
     def audit(self, **kwargs: Any) -> None:
@@ -177,24 +181,45 @@ class BrowserExecutor(ExecutorAdapter):
                 )
 
             shot: str | None = None
+            verification: dict[str, str] = {}
+            if ok:
+                verifier = getattr(self._driver, "verification_receipt", None)
+                if callable(verifier):
+                    try:
+                        raw_verification = verifier()
+                        if isinstance(raw_verification, dict):
+                            verification = {
+                                str(key): str(value)
+                                for key, value in raw_verification.items()
+                                if value is not None
+                            }
+                    except Exception:  # noqa: BLE001 - absent proof is handled upstream
+                        verification = {}
             if ok and task.post_action_snapshot:
                 try:
                     shot = self._driver.screenshot(port=port, workflow_id=task.workflow_id)
                 except Exception:  # noqa: BLE001 - a screenshot failure must not fail a landed write
                     shot = None
 
-            self._driver.audit(
-                command=f"executor:{task.workflow_id}",
-                workflow_id=task.workflow_id,
-                outcome="succeeded" if ok else "failed",
-                reason=detail,
-                cdp_port=readiness.get("cdp_port"),
-                cdp_reachable=readiness.get("cdp_reachable"),
-                target_url=task.target_url,
-                action=task.action,
-                subtask_id=subtask.id,
-                executor_name=self.name,
-            )
+            audit_outcome = "succeeded" if ok else "failed"
+            if verification.get("verification_state") == "verification_required":
+                audit_outcome = "verification_required"
+            audit_error: str | None = None
+            try:
+                self._driver.audit(
+                    command=f"executor:{task.workflow_id}",
+                    workflow_id=task.workflow_id,
+                    outcome=audit_outcome,
+                    reason=detail,
+                    cdp_port=readiness.get("cdp_port"),
+                    cdp_reachable=readiness.get("cdp_reachable"),
+                    target_url=task.target_url,
+                    action=task.action,
+                    subtask_id=subtask.id,
+                    executor_name=self.name,
+                )
+            except Exception as exc:  # noqa: BLE001 - audit cannot erase a landed write
+                audit_error = type(exc).__name__
 
             return ExecutorReceipt(
                 status="completed" if ok else "failed",
@@ -204,6 +229,8 @@ class BrowserExecutor(ExecutorAdapter):
                     "screenshot_path": shot,  # path only — never bytes/URL/page text
                     "workflow_id": task.workflow_id,
                     "subtask_id": subtask.id,
+                    "audit_error": audit_error,
+                    **verification,
                 },
                 timestamp=int(time.time()),
             )

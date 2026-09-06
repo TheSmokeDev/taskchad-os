@@ -366,11 +366,12 @@ def persona_skill_dir(persona_id: str) -> Path:
 
 
 def installed_skill_names(persona_id: str) -> tuple[str, ...]:
-    """Skill directory names physically installed for *persona_id*, sorted.
+    """Runtime-index skill names physically installed for *persona_id*, sorted.
 
     Rule 2: read the directory, never a sidecar or a config claim. The
-    persona's index is built by walking this tree, so the tree is the only
-    thing that can be right about what the persona can reach.
+    persona's index is built by walking this tree and identifies each skill by
+    its ``name`` frontmatter (falling back to the directory slug), so this read
+    model must use that same identity rather than infer from the path.
 
     Fail-open: an unreadable or absent dir is an empty install set, so a
     caller reporting reach cannot be turned into a crash by a permissions
@@ -380,13 +381,9 @@ def installed_skill_names(persona_id: str) -> tuple[str, ...]:
         root = persona_skill_dir(persona_id)
         if not root.is_dir():
             return ()
-        return tuple(
-            sorted(
-                skill_md.parent.name
-                for skill_md in root.rglob("SKILL.md")
-                if skill_md.is_file()
-            )
-        )
+        from cognition import skills as skill_index
+
+        return tuple(sorted(set(skill_index._iter_existing_skills(root))))
     except OSError as exc:
         _logger.warning(
             "personas.skill_assignment: could not list installed skills for %s: %s",

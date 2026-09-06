@@ -18,9 +18,15 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
+import multiprocessing
 import sqlite3
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -40,6 +46,180 @@ _EXPECTED_TABLES: tuple[str, ...] = (
     "audit_log",
 )
 
+_EXPECTED_SCHEMA_TABLES = {
+    "scheduled_tasks",
+    "agent_file_history",
+    "dashboard_settings",
+    "cabinet_meetings",
+    "cabinet_transcripts",
+    "cabinet_text_meetings",
+    "cabinet_client_msg_seen",
+    "pair_requests",
+    "audit_log",
+    "operator_evidence_import_receipts",
+    "operator_evidence_observations",
+    "operator_evidence_projections",
+    "operator_evidence_dimensions",
+    "operator_evidence_source_cursors",
+    "operator_evidence_cursor_fingerprints",
+    "operator_evidence_answers",
+    "operator_evidence_answer_claims",
+    "operator_evidence_answer_citations",
+    "operator_evidence_answer_refusals",
+    "operator_work_occurrence_versions",
+    "operator_work_receipt_versions",
+    "operator_work_receipt_citations",
+    "operator_work_receipt_supersessions",
+}
+
+_EXPECTED_SCHEMA_INDEXES = {
+    "idx_scheduled_persona",
+    "idx_scheduled_next_run",
+    "idx_agent_file_history_persona_filename",
+    "idx_cabinet_meetings_started",
+    "idx_cabinet_meetings_chat_open",
+    "idx_cabinet_transcripts_meeting",
+    "idx_cabinet_transcripts_meeting_id_desc",
+    "idx_cabinet_text_meetings_meeting",
+    "idx_cabinet_client_msg_seen_age",
+    "idx_pair_status",
+    "idx_audit_time",
+    "idx_audit_persona",
+    "idx_audit_action",
+    "idx_operator_evidence_receipts_digest",
+    "idx_operator_evidence_observation_query",
+    "idx_operator_evidence_projection_query",
+    "idx_operator_evidence_answer_lookup",
+    "idx_operator_work_occurrence_task",
+    "idx_operator_work_receipt_task",
+}
+
+
+def _create_legacy_answer_schema(db_path: Path) -> None:
+    claim = {
+        "claim_id": "claim-legacy000000000000000000",
+        "state": "confirmed",
+        "observation_ids": ["observation-legacy000000000000000"],
+        "evidence_references": ["fixture:legacy-evidence"],
+    }
+    payload = {
+        "client_key": "glow-peptides",
+        "answer_id": "answer-legacy000000000000000000",
+        "question": "what-changed-today",
+        "requested_as_of": "2026-08-27T12:00:00Z",
+        "answer_as_of": "2026-08-27T12:00:00Z",
+        "validation_as_of": "2026-08-27T12:00:00Z",
+        "producer_content_digest": "sha256:" + "1" * 64,
+        "producer_poll_receipt_digest": "sha256:" + "2" * 64,
+        "fixture_manifest_digest": "sha256:" + "3" * 64,
+        "producer_rule_version": "operator-evidence-rules/v1",
+        "answer_rule_version": "operator-evidence-answer-rules/v1",
+        "claims": [claim],
+    }
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    payload_digest = "sha256:" + hashlib.sha256(payload_json.encode()).hexdigest()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(
+            """
+            CREATE TABLE operator_evidence_answers (
+                client_key TEXT NOT NULL, answer_id TEXT NOT NULL,
+                question TEXT NOT NULL, requested_as_of TEXT NOT NULL,
+                answer_as_of TEXT NOT NULL, producer_content_digest TEXT NOT NULL,
+                payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL,
+                PRIMARY KEY (client_key, answer_id)
+            );
+            CREATE INDEX idx_operator_evidence_answer_lookup
+                ON operator_evidence_answers(
+                    client_key, question, producer_content_digest,
+                    answer_as_of DESC, answer_id
+                );
+            CREATE TABLE operator_evidence_answer_claims (
+                client_key TEXT NOT NULL, answer_id TEXT NOT NULL,
+                claim_id TEXT NOT NULL, state TEXT NOT NULL,
+                PRIMARY KEY (client_key, answer_id, claim_id)
+            );
+            CREATE TABLE operator_evidence_answer_citations (
+                client_key TEXT NOT NULL, answer_id TEXT NOT NULL,
+                claim_id TEXT NOT NULL, citation_order INTEGER NOT NULL,
+                observation_id TEXT NOT NULL, evidence_reference TEXT NOT NULL,
+                PRIMARY KEY (client_key, answer_id, claim_id, citation_order)
+            );
+            CREATE TABLE operator_evidence_answer_refusals (
+                client_key TEXT NOT NULL, receipt_id TEXT NOT NULL,
+                receipt_class TEXT NOT NULL, question TEXT NOT NULL,
+                requested_as_of TEXT NOT NULL, answer_as_of TEXT NOT NULL,
+                error_code TEXT NOT NULL, PRIMARY KEY (client_key, receipt_id)
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO operator_evidence_answers VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                payload["client_key"],
+                payload["answer_id"],
+                payload["question"],
+                payload["requested_as_of"],
+                payload["answer_as_of"],
+                payload["producer_content_digest"],
+                payload_json,
+                payload_digest,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO operator_evidence_answer_claims VALUES (?, ?, ?, ?)",
+            (
+                payload["client_key"],
+                payload["answer_id"],
+                claim["claim_id"],
+                claim["state"],
+            ),
+        )
+        conn.execute(
+            "INSERT INTO operator_evidence_answer_citations VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                payload["client_key"],
+                payload["answer_id"],
+                claim["claim_id"],
+                0,
+                claim["observation_ids"][0],
+                claim["evidence_references"][0],
+            ),
+        )
+        conn.commit()
+
+
+def _process_initialize_blank_dashboard_db(
+    db_path: str,
+    start_event,
+    result_queue,
+) -> None:
+    """Spawn-safe worker used to exercise independent SQLite connections."""
+    try:
+        if not start_event.wait(timeout=15):
+            raise TimeoutError("process start event timed out")
+        import dashboard_db
+
+        conn = dashboard_db.get_connection(Path(db_path))
+        try:
+            conn.execute("SELECT COUNT(*) FROM operator_evidence_answers").fetchone()
+        finally:
+            conn.close()
+    except BaseException as exc:  # noqa: BLE001 - report child failure to parent
+        result_queue.put(("error", type(exc).__name__, str(exc)))
+    else:
+        result_queue.put(("ok", "", ""))
+
+
+def _physical_schema(conn: sqlite3.Connection) -> tuple[set[str], set[str]]:
+    rows = conn.execute(
+        "SELECT type, name FROM sqlite_master "
+        "WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    tables = {row[1] for row in rows if row[0] == "table"}
+    indexes = {row[1] for row in rows if row[0] == "index"}
+    return tables, indexes
+
 
 # ---------------------------------------------------------------------------
 # Module-level / import-shape tests
@@ -47,11 +227,31 @@ _EXPECTED_TABLES: tuple[str, ...] = (
 
 
 def test_module_importable() -> None:
-    """The dashboard_db module is importable and exports the public surface."""
+    """The private module imports with its public API and private runtime intact."""
     import dashboard_db
 
     assert hasattr(dashboard_db, "__all__")
     assert set(dashboard_db.__all__) == {"DashboardDB", "get_connection"}
+    expected_constants = {
+        "_PRIVATE_EVIDENCE_PREFIX",
+        "_PRIVATE_ANSWER_TABLE",
+        "_PRIVATE_CLAIM_TABLE",
+        "_PRIVATE_CITATION_TABLE",
+        "_PRIVATE_REFUSAL_TABLE",
+        "_PRIVATE_LOOKUP_INDEX",
+        "_ANSWER_TABLE_SPECS",
+        "_LEGACY_ANSWER_TABLE_SPECS",
+        "_ANSWER_LOOKUP_INDEX",
+    }
+    expected_callables = {
+        "_answer_schema_state",
+        "_decode_legacy_answers",
+        "_verify_answer_lookup_index",
+        "_migrate_legacy_answer_tables",
+    }
+    assert expected_constants <= vars(dashboard_db).keys()
+    assert all(callable(getattr(dashboard_db, name)) for name in expected_callables)
+    assert dashboard_db._PRIVATE_ANSWER_TABLE in dashboard_db._expected_schema_objects()[0]
     assert hasattr(dashboard_db, "DashboardDB")
     assert hasattr(dashboard_db, "get_connection")
     assert callable(dashboard_db.get_connection)
@@ -72,9 +272,9 @@ def test_init_schema_idempotent(tmp_path: Path) -> None:
     db1 = dashboard_db.DashboardDB(db_file)
     conn1 = db1.connect()
     tables_first = sorted(
-        r[0] for r in conn1.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        r[0]
+        for r in conn1.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     )
     db1.close()
@@ -83,9 +283,9 @@ def test_init_schema_idempotent(tmp_path: Path) -> None:
     db2 = dashboard_db.DashboardDB(db_file)
     conn2 = db2.connect()
     tables_second = sorted(
-        r[0] for r in conn2.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        r[0]
+        for r in conn2.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     )
     db2.close()
@@ -96,6 +296,156 @@ def test_init_schema_idempotent(tmp_path: Path) -> None:
         assert tbl in tables_first, f"missing table after init: {tbl}"
 
 
+def test_100_synchronized_blank_database_initializers_are_atomic(
+    tmp_path: Path,
+) -> None:
+    """100 first-use threads produce one exact physical schema without errors."""
+    import dashboard_db
+
+    db_file = tmp_path / "concurrent-thread-first-use.db"
+    initializer_count = 100
+    barrier = threading.Barrier(initializer_count)
+
+    def initialize() -> None:
+        barrier.wait(timeout=30)
+        conn = dashboard_db.get_connection(db_file)
+        try:
+            conn.execute("SELECT COUNT(*) FROM operator_evidence_answers").fetchone()
+        finally:
+            conn.close()
+
+    assert not db_file.exists()
+    with ThreadPoolExecutor(max_workers=initializer_count) as pool:
+        futures = [pool.submit(initialize) for _ in range(initializer_count)]
+        for future in futures:
+            future.result(timeout=60)
+
+    with sqlite3.connect(db_file) as conn:
+        tables, indexes = _physical_schema(conn)
+        cabinet_columns = {row[1] for row in conn.execute("PRAGMA table_info(cabinet_meetings)")}
+    assert tables == _EXPECTED_SCHEMA_TABLES
+    assert indexes == _EXPECTED_SCHEMA_INDEXES
+    assert {"title", "chat_id", "broadcast_order"} <= cabinet_columns
+
+
+def test_synchronized_processes_initialize_one_blank_database(
+    tmp_path: Path,
+) -> None:
+    """Independent processes also serialize blank first-use initialization."""
+    db_file = tmp_path / "concurrent-process-first-use.db"
+    process_count = 12
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_process_initialize_blank_dashboard_db,
+            args=(str(db_file), start_event, result_queue),
+        )
+        for _ in range(process_count)
+    ]
+
+    assert not db_file.exists()
+    try:
+        for process in processes:
+            process.start()
+        start_event.set()
+        for process in processes:
+            process.join(timeout=45)
+        assert all(not process.is_alive() for process in processes)
+        assert all(process.exitcode == 0 for process in processes)
+        outcomes = [result_queue.get(timeout=5) for _ in processes]
+        assert outcomes == [("ok", "", "")] * process_count
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        result_queue.close()
+        result_queue.join_thread()
+
+    with sqlite3.connect(db_file) as conn:
+        tables, indexes = _physical_schema(conn)
+    assert tables == _EXPECTED_SCHEMA_TABLES
+    assert indexes == _EXPECTED_SCHEMA_INDEXES
+
+
+def test_100_synchronized_legacy_migrations_are_atomic_and_preserve_rows(
+    tmp_path: Path,
+) -> None:
+    import dashboard_db
+
+    db_file = tmp_path / "concurrent-thread-legacy.db"
+    _create_legacy_answer_schema(db_file)
+    initializer_count = 100
+    barrier = threading.Barrier(initializer_count)
+
+    def initialize() -> int:
+        barrier.wait(timeout=30)
+        conn = dashboard_db.get_connection(db_file)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM operator_evidence_answers").fetchone()[0]
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=initializer_count) as pool:
+        futures = [pool.submit(initialize) for _ in range(initializer_count)]
+        assert [future.result(timeout=60) for future in futures] == [1] * initializer_count
+
+    with sqlite3.connect(db_file) as conn:
+        assert len(conn.execute("PRAGMA table_info(operator_evidence_answers)").fetchall()) == 13
+        assert (
+            len(conn.execute("PRAGMA table_info(operator_evidence_answer_claims)").fetchall()) == 6
+        )
+        assert conn.execute("SELECT COUNT(*) FROM operator_evidence_answers").fetchone()[0] == 1
+        assert (
+            conn.execute("SELECT COUNT(*) FROM operator_evidence_answer_claims").fetchone()[0] == 1
+        )
+
+
+def test_12_synchronized_processes_migrate_one_legacy_database(
+    tmp_path: Path,
+) -> None:
+    db_file = tmp_path / "concurrent-process-legacy.db"
+    _create_legacy_answer_schema(db_file)
+    process_count = 12
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_process_initialize_blank_dashboard_db,
+            args=(str(db_file), start_event, result_queue),
+        )
+        for _ in range(process_count)
+    ]
+
+    try:
+        for process in processes:
+            process.start()
+        start_event.set()
+        for process in processes:
+            process.join(timeout=45)
+        assert all(not process.is_alive() for process in processes)
+        assert all(process.exitcode == 0 for process in processes)
+        outcomes = [result_queue.get(timeout=5) for _ in processes]
+        assert outcomes == [("ok", "", "")] * process_count
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        result_queue.close()
+        result_queue.join_thread()
+
+    with sqlite3.connect(db_file) as conn:
+        assert len(conn.execute("PRAGMA table_info(operator_evidence_answers)").fetchall()) == 13
+        assert (
+            len(conn.execute("PRAGMA table_info(operator_evidence_answer_claims)").fetchall()) == 6
+        )
+        assert conn.execute("SELECT COUNT(*) FROM operator_evidence_answers").fetchone()[0] == 1
+
+
 def test_all_six_tables_present(tmp_path: Path) -> None:
     """Every Phase 3 + Phase 5/7-future table is in the schema."""
     import dashboard_db
@@ -103,8 +453,7 @@ def test_all_six_tables_present(tmp_path: Path) -> None:
     conn = dashboard_db.get_connection(tmp_path / "dashboard.db")
     try:
         rows = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
         names = {r[0] for r in rows}
         for tbl in _EXPECTED_TABLES:
@@ -161,9 +510,7 @@ def test_default_path_resolves_at_call_time(
     )
 
 
-def test_env_override_honored(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_override_honored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``DASHBOARD_DB_PATH`` env var is honored when config is reloaded."""
     custom_path = tmp_path / "custom-dashboard.db"
     monkeypatch.setenv("DASHBOARD_DB_PATH", str(custom_path))
@@ -231,6 +578,44 @@ def test_wal_mode_set(tmp_path: Path) -> None:
         assert str(mode).lower() == "wal", f"expected WAL, got {mode!r}"
     finally:
         conn.close()
+
+
+def test_current_schema_read_connection_does_not_wait_for_unrelated_wal_writer(
+    tmp_path: Path,
+) -> None:
+    import dashboard_db
+
+    db_file = tmp_path / "current-read-fast-path.db"
+    initialized = dashboard_db.get_connection(db_file)
+    initialized.close()
+    writer_started = threading.Event()
+
+    def hold_writer() -> None:
+        with sqlite3.connect(db_file, timeout=5) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute(
+                "INSERT INTO dashboard_settings(key, value) VALUES (?, ?)",
+                ("unrelated-writer", "held"),
+            )
+            writer_started.set()
+            time.sleep(1.2)
+            writer.rollback()
+
+    thread = threading.Thread(target=hold_writer)
+    thread.start()
+    assert writer_started.wait(timeout=5)
+    started_at = time.monotonic()
+    conn = dashboard_db.get_connection(db_file)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM operator_evidence_answers").fetchone()[0] == 0
+    finally:
+        conn.close()
+    elapsed = time.monotonic() - started_at
+    writer_was_still_held = thread.is_alive()
+    thread.join(timeout=5)
+
+    assert writer_was_still_held
+    assert elapsed < 0.4
 
 
 def test_busy_timeout_set(tmp_path: Path) -> None:
@@ -305,9 +690,7 @@ def test_audit_log_has_target_persona_id_column(tmp_path: Path) -> None:
     conn = dashboard_db.get_connection(tmp_path / "audit_target.db")
     try:
         cols = _audit_log_columns(conn)
-        assert "target_persona_id" in cols, (
-            f"target_persona_id missing; have {list(cols)}"
-        )
+        assert "target_persona_id" in cols, f"target_persona_id missing; have {list(cols)}"
         assert cols["target_persona_id"][2].upper() == "TEXT"
         assert cols["target_persona_id"][3] == 1  # NOT NULL
     finally:
@@ -335,15 +718,12 @@ def test_audit_log_idx_action_exists(tmp_path: Path) -> None:
     conn = dashboard_db.get_connection(tmp_path / "audit_idx.db")
     try:
         rows = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='index' AND tbl_name='audit_log'"
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='audit_log'"
         ).fetchall()
         idx_names = {r[0] for r in rows}
         # Both Phase 3 indexes must exist.
         for expected in ("idx_audit_action", "idx_audit_time", "idx_audit_persona"):
-            assert expected in idx_names, (
-                f"missing index {expected}; have {idx_names}"
-            )
+            assert expected in idx_names, f"missing index {expected}; have {idx_names}"
     finally:
         conn.close()
 
@@ -387,8 +767,7 @@ def test_audit_log_accepts_hard_delete_row_shape(tmp_path: Path) -> None:
             "(persona_id, action, detail, blocked, "
             "operator_id, target_persona_id, outcome) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("default", "delete_full", "intent=initiated", 0,
-             "dashboard", "sales", "initiated"),
+            ("default", "delete_full", "intent=initiated", 0, "dashboard", "sales", "initiated"),
         )
         conn.commit()
         rows = conn.execute(

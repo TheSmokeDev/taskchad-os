@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from runtime import framework_registry
 from runtime.base import RuntimeRequest
 from runtime.capabilities import TEXT_REASONING, TOOL_REASONING
 from runtime.framework_registry import (
@@ -78,6 +79,8 @@ def test_discovers_mcp_servers_and_redacts_secret_values(tmp_path: Path) -> None
 
     assert [server.name for server in servers] == ["brave-search"]
     assert servers[0].transport == "stdio"
+    assert servers[0].configured is True
+    assert servers[0].callable is True
     assert servers[0].config["env"] == {"BRAVE_API_KEY": "<env:BRAVE_API_KEY>"}
     assert "actual-secret-value" not in json.dumps(servers[0].config)
     assert "api_key=<redacted>" in servers[0].config["url"]
@@ -225,3 +228,50 @@ def test_discover_skills_fences_persona_scoped_promoted_skills(
     assert "global-skill" in names
     assert "sales-research" not in names
     assert "orphan-skill" not in names  # fail closed: no row, no reach
+
+
+def test_plugin_mcp_overlay_preserves_physical_truth_and_transport_spelling(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    plugin_id = "piv-mcp-plugin-571"
+    version = "1.0.0"
+    server_name = "piv-mcp-server-571"
+    missing_env = "PIV_MCP_MISSING_571"
+    monkeypatch.delenv(missing_env, raising=False)
+    entry = framework_registry.McpServerEntry(
+        name=server_name,
+        transport="stdio",
+        config={"command": "python", "env": {"TOKEN": f"${{{missing_env}}}"}},
+        source="fixture",
+    )
+
+    framework_registry.register_plugin_mcp_server(
+        entry,
+        plugin_id=plugin_id,
+        plugin_version=version,
+        project_root=tmp_path,
+    )
+    try:
+        stored = next(
+            row
+            for row, owner in framework_registry._plugin_mcp_rows()
+            if owner == (plugin_id, version) and row.name == server_name
+        )
+    finally:
+        framework_registry.unregister_plugin_mcp_server(
+            server_name,
+            plugin_id=plugin_id,
+            plugin_version=version,
+        )
+
+    assert stored.configured is False
+    assert stored.callable is False
+    assert framework_registry._mcp_physical_state(
+        {"url": "https://example.invalid/mcp"},
+        "streamable-http",
+    ) == (True, True)
+    assert framework_registry._mcp_physical_state(
+        {"url": "http://?"},
+        "http",
+    ) == (False, False)

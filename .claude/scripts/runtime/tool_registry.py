@@ -49,8 +49,10 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -118,6 +120,12 @@ class ToolEntry:
         dedicated_gate: True when the tool owns a stronger authorization gate
             (money, external posts, profile mutation, browser writes, etc.). A
             dedicated-gate tool can never be one-time elevated.
+        plugin_id: Capability-plugin owner id, or ``""`` for a baseline
+            registration. Set by :func:`plugin_owner_scope`, never by the
+            caller — a plugin cannot claim provenance it was not granted.
+        plugin_version: Owner version stamped alongside ``plugin_id``. Removal
+            is compare-and-remove on the PAIR, so a plugin can only unregister
+            the exact rows its own load produced.
     """
 
     name: str
@@ -131,6 +139,8 @@ class ToolEntry:
     dispatch_context_scoped: bool = False
     elevatable: bool = False
     dedicated_gate: bool = False
+    plugin_id: str = ""
+    plugin_version: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +170,102 @@ RESERVED_TOOL_NAMES: frozenset[str] = frozenset(
 # (`external_post`, `archive`, `send`) and tests mutation as `effect != "read"`,
 # so consumers written that idiomatic way treat `execute` as mutating for free.
 VALID_EFFECTS: frozenset[str] = frozenset({"read", "write", "execute"})
+
+
+# ---------------------------------------------------------------------------
+# Capability-plugin ownership (issue #531)
+# ---------------------------------------------------------------------------
+#
+# Existing `tool_impl` modules keep their business logic exactly where it is.
+# A bundled compatibility contribution calls their unchanged
+# ``register_tools()`` INSIDE an owner scope, and every row that registration
+# produces inherits plugin provenance plus an exact disposer set. Nothing about
+# an ordinary (unscoped) registration changes: `plugin_id` stays `""`.
+
+
+@dataclass
+class _OwnerScope:
+    """One active owner-scoped registration window."""
+
+    plugin_id: str
+    plugin_version: str
+    registered: list[str] = field(default_factory=list)
+
+
+# Owner scope is thread-local: a compatibility module registers synchronously
+# on the lifecycle thread, while unrelated runtime threads must remain baseline
+# registrations rather than inheriting another thread's plugin authority.
+_OWNER_LOCK = threading.RLock()
+_OWNER_LOCAL = threading.local()
+
+
+@contextmanager
+def plugin_owner_scope(plugin_id: str, plugin_version: str) -> Iterator[list[str]]:
+    """Stamp plugin provenance on every tool registered inside the block.
+
+    Yields the live list of names registered so far, which the caller keeps as
+    its exact disposer set. Raises :class:`ToolRegistryError` on a blank owner
+    or on nesting — a nested scope would silently attribute one plugin's rows
+    to another.
+    """
+    if not plugin_id or not plugin_id.strip():
+        raise ToolRegistryError("plugin owner scope requires a non-empty plugin id")
+    if not plugin_version or not plugin_version.strip():
+        raise ToolRegistryError("plugin owner scope requires a non-empty plugin version")
+
+    with _OWNER_LOCK:
+        if getattr(_OWNER_LOCAL, "scope", None) is not None:
+            raise ToolRegistryError(
+                "a plugin owner scope is already active; nested scopes would "
+                "misattribute registered tools"
+            )
+        scope = _OwnerScope(plugin_id.strip(), plugin_version.strip())
+        _OWNER_LOCAL.scope = scope
+        try:
+            yield scope.registered
+        finally:
+            _OWNER_LOCAL.scope = None
+
+
+def unregister_tool_for_owner(
+    name: str,
+    *,
+    plugin_id: str,
+    plugin_version: str,
+) -> bool:
+    """Compare-and-remove one plugin-owned tool. Returns True if it was removed.
+
+    Refuses to remove a baseline row or another plugin's row, so a disposer can
+    never delete a capability it does not own. Returns False (not an error) when
+    the row is already gone — disposal must be idempotent.
+    """
+    global _GENERATION
+
+    entry = _REGISTRY.get(name)
+    if entry is None:
+        return False
+    if entry.plugin_id != plugin_id or entry.plugin_version != plugin_version:
+        raise ToolRegistryError(
+            f"tool {name!r} is owned by "
+            f"{entry.plugin_id or '<baseline>'!r}; refusing to unregister it "
+            f"for {plugin_id!r}"
+        )
+    del _REGISTRY[name]
+    _GENERATION += 1
+    return True
+
+
+def list_registered_for_owner(plugin_id: str, plugin_version: str) -> list[ToolEntry]:
+    """Every tool physically registered under one plugin owner, name-sorted.
+
+    Reads the registry itself rather than any bookkeeping list, so a residue
+    check answers what is actually installed (Rule 2).
+    """
+    return [
+        entry
+        for entry in list_registered()
+        if entry.plugin_id == plugin_id and entry.plugin_version == plugin_version
+    ]
 
 
 def build_tool_schema(
@@ -332,6 +438,23 @@ def register_tool(
             f"{existing.toolset!r}; refusing to move it to {toolset!r}"
         )
 
+    scope = getattr(_OWNER_LOCAL, "scope", None)
+    plugin_id = scope.plugin_id if scope is not None else ""
+    plugin_version = scope.plugin_version if scope is not None else ""
+    if existing is not None and (
+        existing.plugin_id != plugin_id or existing.plugin_version != plugin_version
+    ):
+        # Re-registration is a legal RELOAD only within one owner. Across
+        # owners it is a shadow: whoever registers second silently owns the
+        # name, and the first owner's disposer then refuses to remove a row it
+        # believes it installed. Refuse before the write, so the load fails
+        # atomically and leaves zero shadow registration.
+        raise ToolRegistryError(
+            f"tool {name!r} is already registered by owner "
+            f"{existing.plugin_id or '<baseline>'!r}; refusing to shadow it "
+            f"for {plugin_id or '<baseline>'!r}"
+        )
+
     entry = ToolEntry(
         name=name,
         description=description,
@@ -344,9 +467,13 @@ def register_tool(
         dispatch_context_scoped=dispatch_context_scoped,
         elevatable=elevatable,
         dedicated_gate=dedicated_gate,
+        plugin_id=plugin_id,
+        plugin_version=plugin_version,
     )
     _REGISTRY[name] = entry
     _GENERATION += 1
+    if scope is not None and name not in scope.registered:
+        scope.registered.append(name)
     return entry
 
 
@@ -599,8 +726,11 @@ __all__ = [
     "get_tool_definitions",
     "list_registered",
     "list_registered_for_integration_action",
+    "list_registered_for_owner",
+    "plugin_owner_scope",
     "register_tool",
     "resolve_tool_names",
     "resolve_toolset_closure",
     "unregister_tool",
+    "unregister_tool_for_owner",
 ]

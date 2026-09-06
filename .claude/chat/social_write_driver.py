@@ -27,6 +27,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from browser_audit import append_browser_audit_record
 from browser_control import (
@@ -50,6 +51,11 @@ _SOCIAL_CDP_ENV_NAMES = (
     "AGENT_BROWSER_CDP_PORT",
 )
 _X_BROWSER_SESSION = "primo-x"
+_LINKEDIN_PERMALINK_RE = re.compile(
+    r"(?:https://(?:www\.)?linkedin\.com)?"
+    r"(/feed/update/urn:li:(?:share|activity):\d+/?)",
+    re.IGNORECASE,
+)
 
 
 def _data_dir() -> Path:
@@ -83,6 +89,27 @@ def _step_fail(label: str, result: Any) -> tuple[bool, str]:
 
     detail = redact_text_urls(result.output[:600]) or "(no output)"
     return False, f"{label}: {detail}"
+
+
+def _validated_linkedin_permalink(raw: str) -> str | None:
+    """Extract one public LinkedIn post permalink from agent-browser output."""
+
+    normalized = (raw or "").replace("\\/", "/")
+    match = _LINKEDIN_PERMALINK_RE.search(normalized)
+    if not match:
+        return None
+    candidate = match.group(0)
+    if candidate.startswith("/"):
+        candidate = urljoin("https://www.linkedin.com", candidate)
+    parsed = urlsplit(candidate)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in {
+        "linkedin.com",
+        "www.linkedin.com",
+    }:
+        return None
+    if not _LINKEDIN_PERMALINK_RE.fullmatch(parsed.path):
+        return None
+    return urlunsplit(("https", "www.linkedin.com", parsed.path, "", ""))
 
 
 def _dismiss_windows_chrome_file_dialog() -> None:
@@ -147,6 +174,7 @@ class AgentBrowserSocialWriteDriver:
     def __init__(self, *, screenshot_dir: Path | None = None) -> None:
         # Rule 1: resolve the screenshot dir at call time, not in a default arg.
         self._screenshot_dir = screenshot_dir
+        self._last_verification: dict[str, str] = {}
 
     # ── Approval gate (HANDLER's use only — executor never calls this) ──────
     def gate(
@@ -182,6 +210,7 @@ class AgentBrowserSocialWriteDriver:
         For connect, the flow is Connect -> Add a note -> note textbox -> Send.
         """
 
+        self._last_verification = {}
         action = getattr(task, "action", "post")
         workflow_id = getattr(task, "workflow_id", "") or ""
         if action == "post":
@@ -383,7 +412,8 @@ class AgentBrowserSocialWriteDriver:
         # trust the click result (a "Done" click can still leave it closed).
         editor_probe = (
             "(()=>{function deep(r){let a=[...r.querySelectorAll('*')];"
-            "r.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)a=a.concat(deep(e.shadowRoot));});return a;}"
+            "r.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)"
+            "a=a.concat(deep(e.shadowRoot));});return a;}"
             "return deep(document).find(e=>e.classList&&e.classList.contains('ql-editor')"
             "&&e.getAttribute('role')==='textbox')?'ED_OK':'NO_EDITOR';})()"
         )
@@ -520,7 +550,8 @@ class AgentBrowserSocialWriteDriver:
         # BUTTON whose text is exactly "Post" and fire its real onClick.
         click_js = (
             "(()=>{function deep(r){let a=[...r.querySelectorAll('*')];"
-            "r.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)a=a.concat(deep(e.shadowRoot));});return a;}"
+            "r.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)"
+            "a=a.concat(deep(e.shadowRoot));});return a;}"
             "const b=deep(document).find(e=>e.tagName==='BUTTON'&&!e.disabled"
             "&&(e.innerText||'').trim()==='Post');"
             "if(!b)return 'NO_POST_BTN';b.click();return 'CLICKED';})()"
@@ -531,16 +562,81 @@ class AgentBrowserSocialWriteDriver:
         if "CLICKED" not in (submit.output or ""):
             return False, f"post button not found: {redact_text_urls((submit.output or '')[:200])}"
 
-        # Confirm via the "Post successful / View post" toast (Rule 7).
-        run_agent_browser(["wait", "3000"], port=port, timeout=10)
-        verify = run_agent_browser(
-            ["eval", "(()=>/Post successful|View post/i.test(document.body.innerText||'')?'POSTED':'UNCONFIRMED')()"],
-            port=port,
-            timeout=15,
-        )
-        if verify.ok and "POSTED" in (verify.output or ""):
+        # A successful click is not proof of publication.  Read the visible
+        # "View post" link by accessibility REF, fetch its href, and validate
+        # it as a LinkedIn feed-update permalink.  No permalink means an
+        # intentionally non-retryable verification_required queue state.
+        submitted_at = datetime.now(UTC).isoformat(timespec="seconds")
+        # The external boundary has already been crossed.  Stamp quarantine
+        # proof immediately so any later browser timeout/error can never make
+        # this look retryable or "failed before confirmation".
+        self._last_verification = {
+            "verification_state": "verification_required",
+            "post_url": "",
+            "submitted_at": submitted_at,
+            "confirmation_result": "submit_clicked_proof_pending",
+        }
+        confirmation_seen = False
+        permalink: str | None = None
+        for attempt in range(3):
+            try:
+                run_agent_browser(
+                    ["wait", "3000" if attempt == 0 else "1500"],
+                    port=port,
+                    timeout=10,
+                )
+                snap = run_agent_browser(
+                    ["snapshot", "-i"], port=port, timeout=30
+                )
+                if not snap.ok:
+                    continue
+                snapshot_text = snap.stdout or ""
+                confirmation_seen = confirmation_seen or bool(
+                    re.search(
+                        r"Post successful|View post",
+                        snapshot_text,
+                        re.IGNORECASE,
+                    )
+                )
+                view_match = re.search(
+                    r'(?:link|button) "View post" \[ref=(e\d+)\]',
+                    snapshot_text,
+                    re.IGNORECASE,
+                )
+                if not view_match:
+                    continue
+                href = run_agent_browser(
+                    ["get", "attr", view_match.group(1), "href"],
+                    port=port,
+                    timeout=20,
+                )
+                if href.ok:
+                    permalink = _validated_linkedin_permalink(href.output)
+                if permalink:
+                    break
+            except Exception:  # noqa: BLE001 - click already crossed write boundary
+                continue
+
+        if permalink:
+            self._last_verification = {
+                "verification_state": "verified",
+                "post_url": permalink,
+                "submitted_at": submitted_at,
+                "confirmation_result": "view_post_permalink_verified",
+            }
             return True, "post submitted and confirmed"
-        return True, "post submitted (confirmation toast not detected — verify manually)"
+
+        self._last_verification = {
+            "verification_state": "verification_required",
+            "post_url": "",
+            "submitted_at": submitted_at,
+            "confirmation_result": (
+                "confirmation_seen_without_permalink"
+                if confirmation_seen
+                else "submit_clicked_without_confirmation"
+            ),
+        }
+        return True, "post submitted; permalink verification required"
 
     def _drive_connect(self, task: Any, *, port: int) -> tuple[bool, str]:
         note = getattr(task, "payload_text", "") or ""
@@ -585,6 +681,11 @@ class AgentBrowserSocialWriteDriver:
         out_path = out_dir / f"{ts}-{_safe_workflow_slug(workflow_id)}.png"
         out_path.write_bytes(data)
         return str(out_path)
+
+    def verification_receipt(self) -> dict[str, str]:
+        """Return public-safe proof metadata for the most recent drive."""
+
+        return dict(self._last_verification)
 
     def audit(self, **kwargs: Any) -> None:
         append_browser_audit_record(**kwargs)

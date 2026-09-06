@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date
 from pathlib import Path
 
-from config import DRAFTS_ACTIVE_DIR, MEMORY_DIR
-
-from business_signal.config import SIGNAL_DIR, get_signal_settings
+from business_signal.config import get_signal_settings
 from business_signal.draft_generator import generate_draft_copy
-from business_signal.models import SignalDigest, SignalItem
+from business_signal.models import SignalDigest
+from config import DRAFTS_ACTIVE_DIR, MEMORY_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +111,9 @@ async def _create_drafts(digest: SignalDigest) -> list[str]:
 
         # Generate AI-drafted social post copy
         draft_post = await generate_draft_copy(item)
+        if not draft_post.strip():
+            logger.warning("Draft skipped: grounded model copy was unavailable for %s", item.url)
+            continue
 
         content = (
             f"---\n"

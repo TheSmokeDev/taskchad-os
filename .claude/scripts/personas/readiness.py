@@ -117,6 +117,43 @@ class PersonaReadinessSnapshot:
         return asdict(self)
 
 
+def capability_readiness_from_projection(
+    projection: Any,
+) -> tuple[CapabilityReadiness, ...]:
+    """Adapt the normalized six-kind read model to the legacy readiness row.
+
+    This is an adoption seam, not a second collector: callers build one
+    physical catalog projection and retain the existing six-axis and surface
+    detail while older readiness renderers continue consuming
+    :class:`CapabilityReadiness`.
+    """
+    from personas import capability_catalog
+
+    if not isinstance(projection, capability_catalog.PersonaCapabilityProjection):
+        raise PersonaReadinessError(
+            "capability readiness requires a PersonaCapabilityProjection"
+        )
+    rows: list[CapabilityReadiness] = []
+    for state in projection.states:
+        axes = dict(state.readiness_axes)
+        surfaces = dict(state.surface_states)
+        rows.append(
+            CapabilityReadiness(
+                id=state.descriptor.id,
+                kind=state.descriptor.kind.value,
+                status=(
+                    _aggregate_status([*axes.values(), *surfaces.values()])
+                    if state.enabled
+                    else "BLOCKED"
+                ),
+                axes=axes,
+                surfaces=surfaces,
+                reasons=tuple(reason.detail for reason in state.blocked_reasons),
+            )
+        )
+    return tuple(rows)
+
+
 def build_persona_readiness_snapshot(
     persona_id: str,
     *,

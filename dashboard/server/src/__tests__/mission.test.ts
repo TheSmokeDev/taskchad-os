@@ -6,6 +6,10 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROUTE_MANIFEST } from '../routes.js';
+import {
+  translateCapabilityQuery,
+  translateCapabilityResponse,
+} from '../routes/mission.js';
 
 const MISSION_ROUTE = join(__dirname, '..', 'routes', 'mission.ts');
 
@@ -38,5 +42,18 @@ describe('mission orchestration route', () => {
     expect(src).toContain('authedFetch(upstreamPath');
     expect(src).not.toMatch(/better-sqlite3|\bnew\s+Database\(|sqlite3/);
     expect(src).not.toMatch(/readFileSync|config\.yaml|TheHomie\/Memory/);
+  });
+
+  it('translates the default persona at the capability Hono boundary', () => {
+    const upstream = translateCapabilityQuery(
+      new URL('http://dashboard.test/api/capabilities/status?persona_id=main&limit=1'),
+    );
+    expect(upstream.searchParams.get('persona_id')).toBe('default');
+
+    const body = translateCapabilityResponse(
+      '/api/capabilities/status',
+      JSON.stringify({ capabilities: { catalog: { persona_id: 'default', items: [] } } }),
+    );
+    expect(JSON.parse(body).capabilities.catalog.persona_id).toBe('main');
   });
 });

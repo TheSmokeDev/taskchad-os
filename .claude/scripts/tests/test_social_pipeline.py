@@ -370,6 +370,41 @@ class TestDispatchNonApproved:
         with pytest.raises(ValueError, match="not found"):
             dispatch_post(9999, db_path=svc._db._db_path)
 
+    def test_direct_dispatch_losing_cron_claim_is_noop(
+        self, svc: SocialPostService, monkeypatch
+    ):
+        from social import post_executor
+
+        pid = svc.create_draft(channel="facebook", title="T", body="B")
+        svc.approve_post(pid)
+        assert svc.claim_post(pid) is True
+        calls = []
+        monkeypatch.setattr(
+            post_executor,
+            "get_channel",
+            lambda _channel: SocialChannel(
+                channel_id="facebook",
+                display_name="Facebook",
+                execution_method="api",
+            ),
+        )
+        monkeypatch.setattr(
+            post_executor,
+            "_dispatch_api",
+            lambda *args, **kwargs: calls.append("sent") or True,
+        )
+
+        assert post_executor.dispatch_post(
+            pid, db_path=svc._db._db_path
+        ) is False
+        assert calls == []
+        assert post_executor.dispatch_post(
+            pid,
+            db_path=svc._db._db_path,
+            claim_owned=True,
+        ) is True
+        assert calls == ["sent"]
+
 
 class TestVideoDispatch:
     """A media_type=video draft routes to the reel/video lane on every transport."""
@@ -934,6 +969,81 @@ class TestPreSendAuditRecord:
         dispatch_idx = call_order.index("browser_dispatch")
         assert dispatch_idx > 0
         assert dispatched_metadata["media_path"] == "C:/approved/linkedin.png"
+
+    @pytest.mark.parametrize(
+        ("metadata", "expected_status", "expected_ok"),
+        [
+            (
+                {
+                    "verification_state": "verified",
+                    "post_url": (
+                        "https://www.linkedin.com/feed/update/"
+                        "urn:li:share:123456/"
+                    ),
+                    "screenshot_path": "C:/proof/posted.png",
+                    "submitted_at": "2026-09-03T12:00:00+00:00",
+                    "confirmation_result": "view_post_permalink_verified",
+                },
+                "posted",
+                True,
+            ),
+            (
+                {
+                    "verification_state": "verification_required",
+                    "post_url": "",
+                    "screenshot_path": "C:/proof/ambiguous.png",
+                    "submitted_at": "2026-09-03T12:00:00+00:00",
+                    "confirmation_result": "confirmation_seen_without_permalink",
+                },
+                "verification_required",
+                False,
+            ),
+        ],
+    )
+    def test_linkedin_receipt_requires_valid_permalink(
+        self,
+        svc: SocialPostService,
+        metadata: dict,
+        expected_status: str,
+        expected_ok: bool,
+    ):
+        pid = svc.create_draft(channel="linkedin", title="T", body="B")
+        svc.approve_post(pid)
+        receipt = MagicMock(status="completed", metadata=metadata, error=None)
+        driver_module = MagicMock()
+        executor = MagicMock()
+        executor.dispatch.return_value = receipt
+
+        import sys
+
+        with patch("social.post_executor.get_channel") as mock_channel, patch(
+            "social.post_executor.require_integration_action"
+        ), patch("social.post_executor.append_social_audit_record"), patch.dict(
+            sys.modules,
+            {"chat": MagicMock(), "chat.social_write_driver": driver_module},
+        ), patch(
+            "orchestration.browser_executor.BrowserExecutor",
+            return_value=executor,
+        ):
+            mock_channel.return_value = SocialChannel(
+                channel_id="linkedin",
+                display_name="LinkedIn",
+                execution_method="browser",
+                browser_workflow_id="linkedin.post.create",
+            )
+            from social.post_executor import dispatch_post
+
+            ok = dispatch_post(pid, db_path=svc._db._db_path)
+
+        post = svc.get_post(pid)
+        assert ok is expected_ok
+        assert post.status == expected_status
+        assert post.receipt_json is not None
+        assert metadata["screenshot_path"] in post.receipt_json
+        if expected_ok:
+            assert post.post_url == metadata["post_url"]
+        else:
+            assert svc.claim_post(pid) is False
 
 
 class TestDispatchDueBlockedCount:

@@ -815,7 +815,9 @@ class ChatRouter:
             "__button:social:"
         ) or text.startswith("__button:linkedin_flow:") or text.startswith(
             "__button:primo_flow:"
-        ) or text.startswith("__button:capability:") or text.startswith(
+        ) or text.startswith("__button:insights:") or text.startswith(
+            "__button:capability:"
+        ) or text.startswith(
             # #428 counter-offer decisions are deterministic Python and must
             # not queue behind an engine turn — the operator taps approve and
             # expects the grant, or the refusal, right there.
@@ -3052,6 +3054,8 @@ class ChatRouter:
             await _primo_handlers.handle_primo_button(adapter, incoming, custom_id)
         elif custom_id.startswith("social:"):
             await self._handle_social_button(adapter, incoming, custom_id)
+        elif custom_id.startswith("insights:"):
+            await self._handle_insights_button(adapter, incoming, custom_id)
         elif custom_id.startswith("cofounder:"):
             await self._handle_cofounder_button(adapter, incoming, custom_id)
         elif custom_id.startswith(f"{_grant_proposals.CUSTOM_ID_PREFIX}:"):
@@ -3327,12 +3331,12 @@ class ChatRouter:
     async def _handle_social_button(
         self, adapter: Any, incoming: Any, custom_id: str
     ) -> None:
-        """Route a social-draft button tap (``social:<action>:<id>``) to the
-        existing ``/social`` handler.
+        """Route a revision-bound social-draft button to ``/social``.
 
         Approve runs approve+dispatch in one go (the auth-gated button tap IS
         the operator approval under the default-deny write doctrine). Reject
-        kills the draft. Edit returns the full body for manual copy/tweak.
+        kills the exact revision. LinkedIn copy/media edits enter the existing
+        workshop instead of returning manual instructions.
         """
         # Default-deny: an external write (LinkedIn/Reddit post) may fire ONLY
         # from a genuine, auth-checked button tap. The Telegram adapter verifies
@@ -3341,10 +3345,20 @@ class ChatRouter:
         # ingress (CLI / web relay) lacks that marker and is refused — typed text
         # can never synthesize an approval.
         raw_event = getattr(incoming, "raw_event", None) or {}
-        if raw_event.get("interaction_type") != "button":
+        source_platform = getattr(incoming, "platform", None) or getattr(
+            getattr(incoming, "channel", None), "platform", None
+        )
+        if (
+            raw_event.get("interaction_type") != "button"
+            or raw_event.get("source_message_is_own") is not True
+            or source_platform is not Platform.TELEGRAM
+        ):
             await adapter.send(
                 OutgoingMessage(
-                    text="Social actions only run from the draft buttons. Use `/social` to manage the queue.",
+                    text=(
+                        "Social actions only run from the draft buttons. "
+                        "Use `/social` to manage the queue."
+                    ),
                     channel=incoming.channel,
                     thread=incoming.thread,
                     is_error=True,
@@ -3353,7 +3367,12 @@ class ChatRouter:
             return
 
         parts = custom_id.split(":")
-        if len(parts) != 3 or not parts[2].isdigit():
+        if (
+            len(parts) != 5
+            or not parts[2].isdigit()
+            or not parts[3].isdigit()
+            or re.fullmatch(r"[0-9a-f]{12}", parts[4]) is None
+        ):
             await adapter.send(
                 OutgoingMessage(
                     text=f"Malformed social action: {custom_id}",
@@ -3364,13 +3383,69 @@ class ChatRouter:
             )
             return
 
-        _, action, pid = parts
+        _, action, pid, revision, digest = parts
         import core_handlers
+
+        if action not in {"approve", "reject", "edit", "image"}:
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Unknown social action: {action}",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        try:
+            matches, current = self._social_button_binding(
+                pid, revision, digest
+            )
+        except Exception as exc:  # noqa: BLE001 - button handling fails closed
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Social action failed closed: {type(exc).__name__}: {exc}",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+        if not matches:
+            await adapter.send(
+                OutgoingMessage(
+                    text=(
+                        f"That button is stale. Draft #{pid} is now revision "
+                        f"{current.revision} with status '{current.status}'. "
+                        "No action was taken."
+                    ),
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            if (
+                current.status == "draft"
+                and current.channel.lower() in {"linkedin", "li"}
+                and hasattr(core_handlers, "_send_linkedin_preview")
+            ):
+                await core_handlers._send_linkedin_preview(
+                    adapter, incoming, current
+                )
+            else:
+                await adapter.send(
+                    OutgoingMessage(
+                        text=f"Current draft #{pid}:\n\n{current.body}",
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                    )
+                )
+            return
 
         try:
             if action == "approve":
                 approved = await core_handlers.handle_social(
-                    adapter, incoming, f"approve {pid}"
+                    adapter, incoming, f"approve {pid} {revision} {digest}"
                 )
                 # Dispatch only if the post actually reached 'approved' state —
                 # verified against the DB, not by sniffing the reply string.
@@ -3382,12 +3457,23 @@ class ChatRouter:
                     reply = approved
             elif action == "reject":
                 reply = await core_handlers.handle_social(
-                    adapter, incoming, f"reject {pid}"
+                    adapter, incoming, f"reject {pid} {revision} {digest}"
                 )
+            elif action in {"edit", "image"} and current.channel.lower() in {
+                "linkedin",
+                "li",
+            }:
+                workshop_action = "revise" if action == "edit" else "image"
+                await core_handlers.handle_linkedin_button(
+                    adapter,
+                    incoming,
+                    f"linkedin_flow:{workshop_action}:{pid}:{revision}:{digest}",
+                )
+                return
             elif action == "edit":
                 reply = await self._social_edit_reply(pid)
             else:
-                reply = f"Unknown social action: {action}"
+                reply = "Image revision is only available for LinkedIn drafts."
         except Exception as e:  # noqa: BLE001 — never leave the tap on read
             reply = f"Social action failed: {type(e).__name__}: {e}"
 
@@ -3397,6 +3483,135 @@ class ChatRouter:
                 channel=incoming.channel,
                 thread=incoming.thread,
             )
+        )
+
+    async def _handle_insights_button(
+        self, adapter: Any, incoming: Any, custom_id: str
+    ) -> None:
+        """Apply one authenticated, revision-bound YourProduct article approval."""
+
+        raw_event = getattr(incoming, "raw_event", None) or {}
+        source_platform = getattr(incoming, "platform", None) or getattr(
+            getattr(incoming, "channel", None), "platform", None
+        )
+        if (
+            raw_event.get("interaction_type") != "button"
+            or raw_event.get("source_message_is_own") is not True
+            or source_platform is not Platform.TELEGRAM
+        ):
+            await adapter.send(
+                OutgoingMessage(
+                    text="Tenant Insights approvals only run from Telegram buttons.",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+        parts = custom_id.split(":")
+        if (
+            len(parts) != 5
+            or parts[1] not in {"preview", "publish"}
+            or re.fullmatch(r"insights_\d{8}_[0-9a-f]{12}", parts[2]) is None
+            or not parts[3].isdigit()
+            or re.fullmatch(r"[0-9a-f]{12}", parts[4]) is None
+        ):
+            await adapter.send(
+                OutgoingMessage(
+                    text="Malformed Tenant Insights approval.",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        _, action, package_id, revision_text, digest = parts
+        revision = int(revision_text)
+        try:
+            import asyncio
+            import sys
+
+            scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+            from social.tenant_insights import (
+                approve_for_preview,
+                deliver_insights_preview,
+                load_package,
+                publish_approved_preview,
+            )
+
+            if action == "preview":
+                result = await asyncio.to_thread(
+                    approve_for_preview,
+                    package_id,
+                    revision=revision,
+                    digest=digest,
+                )
+                if result.status == "awaiting_publish_approval":
+                    delivered = await asyncio.to_thread(
+                        deliver_insights_preview, package_id
+                    )
+                    reply = (
+                        f"Local preview validated for {package_id}. "
+                        + (
+                            "The exact publish approval is in Telegram."
+                            if delivered
+                            else "Preview proof was saved, but Telegram delivery failed."
+                        )
+                    )
+                else:
+                    reply = (
+                        f"Insights preview {result.status}: "
+                        f"{', '.join(result.reasons) or 'no change'}"
+                    )
+            else:
+                result = await asyncio.to_thread(
+                    publish_approved_preview,
+                    package_id,
+                    revision=revision,
+                    digest=digest,
+                )
+                if result.status == "published":
+                    state, _ = load_package(package_id)
+                    receipt = state.get("publish_receipt") or {}
+                    reply = (
+                        f"Tenant Insights published: {receipt.get('liveUrl')}\n"
+                        f"Commit: {receipt.get('commit')}"
+                    )
+                else:
+                    reply = (
+                        f"Insights publication {result.status}: "
+                        f"{', '.join(result.reasons) or 'no change'}"
+                    )
+        except Exception as exc:  # noqa: BLE001 - approvals fail closed
+            reply = (
+                "Tenant Insights approval failed closed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        await adapter.send(
+            OutgoingMessage(
+                text=reply,
+                channel=incoming.channel,
+                thread=incoming.thread,
+                is_error="failed closed" in reply,
+            )
+        )
+
+    def _social_button_binding(
+        self, pid: str, revision: str, digest: str
+    ) -> tuple[bool, Any]:
+        """Load and validate the exact row version represented by a button."""
+
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from social.service import SocialPostService
+
+        return SocialPostService().validate_binding(
+            int(pid), revision=int(revision), digest=digest
         )
 
     async def _handle_cofounder_button(

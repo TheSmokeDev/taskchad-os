@@ -12,19 +12,40 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from social.audit import append_social_audit_record
-from social.channels import SocialChannel, get_channel
+from social.channels import get_channel
 from social.service import SocialPostService
 
 logger = logging.getLogger(__name__)
 
+_PERSONA_IDENTITY_ORDER: tuple[str, ...] = (
+    "SOUL",
+    "SELF",
+    "USER",
+    "MEMORY",
+    "GOALS",
+    "SAFETY",
+)
+
+
+class PersonaContextUnavailableError(RuntimeError):
+    """A channel selected a persona whose identity cannot be loaded."""
+
+
 CHANNEL_CONSTRAINTS: dict[str, dict] = {
     "linkedin": {
         "max_chars": 3000,
-        "style": "Professional but human and experience-led. Use short readable paragraphs. Do not require hashtags; use at most 3 only when genuinely useful.",
+        "style": (
+            "Professional but human and education-led. Use short readable "
+            "paragraphs. Do not require hashtags; use at most 3 only when "
+            "genuinely useful."
+        ),
     },
     "facebook": {
         "max_chars": 500,
-        "style": "Conversational, community-oriented. No hashtag overload. Ask a question or call-to-action at the end.",
+        "style": (
+            "Conversational, community-oriented. No hashtag overload. Ask a "
+            "question or call-to-action at the end."
+        ),
     },
     "x": {
         "max_chars": 280,
@@ -32,11 +53,17 @@ CHANNEL_CONSTRAINTS: dict[str, dict] = {
     },
     "reddit": {
         "max_chars": 2000,
-        "style": "Value-first, no self-promotion tone. Read like a genuine community member sharing insight.",
+        "style": (
+            "Value-first, no self-promotion tone. Read like a genuine community "
+            "member sharing insight."
+        ),
     },
     "instagram": {
         "max_chars": 2200,
-        "style": "Visual-first caption. Start with a hook line. Include 5-10 relevant hashtags at the end.",
+        "style": (
+            "Visual-first caption. Start with a hook line. Include 5-10 relevant "
+            "hashtags at the end."
+        ),
     },
     "discord": {
         "max_chars": 2000,
@@ -44,7 +71,9 @@ CHANNEL_CONSTRAINTS: dict[str, dict] = {
     },
     "mastodon": {
         "max_chars": 500,
-        "style": "Conversational, community-first fediverse tone. 1-2 hashtags max, only when organic.",
+        "style": (
+            "Conversational, community-first fediverse tone. 1-2 hashtags max, only when organic."
+        ),
     },
     "bluesky": {
         "max_chars": 300,
@@ -63,25 +92,33 @@ def _build_draft_prompt(
     voice_context: str,
     constraints: dict,
 ) -> str:
+    voice_rules = voice_context or (
+        "Write in a confident, authentic voice. No corporate jargon. No em-dashes."
+    )
+    output_rule = (
+        'Return ONLY the post text. No preamble, no "Here\'s a draft:", no '
+        "markdown code blocks. Just the raw post content ready to paste."
+    )
     return f"""You are a social media content writer. Generate ONE post for {channel_id.upper()}.
 
 ## Topic
 {topic}
 
 ## Voice & Brand
-{voice_context if voice_context else "Write in a confident, authentic voice. No corporate jargon. No em-dashes."}
+{voice_rules}
 
 ## Platform Rules
-- Maximum {constraints['max_chars']} characters
-- Style: {constraints['style']}
+- Maximum {constraints["max_chars"]} characters
+- Style: {constraints["style"]}
 
 ## Output
-Return ONLY the post text. No preamble, no "Here's a draft:", no markdown code blocks. Just the raw post content ready to paste."""
+{output_rule}"""
 
 
-def _read_voice_context(voice_profile: str = "") -> str:
+def _read_voice_context(voice_profile: str = "", *, allow_global_fallback: bool = True) -> str:
     try:
         import config
+
         if voice_profile:
             base = Path(__file__).resolve().parent / "voice_profiles"
             safe_name = Path(voice_profile).name
@@ -93,18 +130,89 @@ def _read_voice_context(voice_profile: str = "") -> str:
                 if profile_path.is_file():
                     text = profile_path.read_text(encoding="utf-8")
                     return text[:1500]
-        soul_path = config.SOUL_FILE
-        if soul_path.is_file():
-            text = soul_path.read_text(encoding="utf-8")
-            if len(text) > 1500:
-                text = text[:1500]
-            return text
+        if allow_global_fallback:
+            soul_path = config.SOUL_FILE
+            if soul_path.is_file():
+                text = soul_path.read_text(encoding="utf-8")
+                if len(text) > 1500:
+                    text = text[:1500]
+                return text
     except Exception:
         pass
     return ""
 
 
-def _invoke_runtime(prompt: str) -> str:
+def _load_persona_identity_context(persona_id: str | None) -> str | None:
+    """Render one explicitly configured persona without changing profile state.
+
+    Named persona paths are resolved directly.  The process-wide active profile
+    is intentionally untouched, so queue/config/credential resolution keeps its
+    existing default-profile behavior.  HEARTBEAT.md is deliberately absent
+    from ``_PERSONA_IDENTITY_ORDER``; it belongs only to the authority
+    scheduler's checklist, never ordinary draft identity.
+    """
+
+    if not persona_id:
+        return None
+
+    try:
+        from personas import get_persona_paths, validate_persona_name
+
+        validate_persona_name(persona_id)
+        paths = get_persona_paths(persona_id)
+        memory_dir = paths["memory"]
+        if not memory_dir.is_dir():
+            raise PersonaContextUnavailableError(
+                f"configured persona {persona_id!r} has no memory directory"
+            )
+
+        chat_dir = Path(__file__).resolve().parents[2] / "chat"
+        if str(chat_dir) not in sys.path:
+            sys.path.insert(0, str(chat_dir))
+        from cognition.scheduled_payload import (
+            build_scheduled_cognition_payload,
+            render_identity_context,
+        )
+
+        payload = build_scheduled_cognition_payload(
+            memory_dir,
+            inference_state_file=paths["state"] / "self-model-inferences.json",
+        )
+        rendered = render_identity_context(
+            payload,
+            order=_PERSONA_IDENTITY_ORDER,
+        ).strip()
+        if not rendered:
+            raise PersonaContextUnavailableError(
+                f"configured persona {persona_id!r} has no readable identity files"
+            )
+    except PersonaContextUnavailableError:
+        raise
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise PersonaContextUnavailableError(
+            f"configured persona {persona_id!r} is unavailable: {exc}"
+        ) from exc
+    except ImportError as exc:
+        raise PersonaContextUnavailableError(
+            f"configured persona {persona_id!r} cannot load cognition support"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - configured identity must fail closed
+        raise PersonaContextUnavailableError(
+            f"configured persona {persona_id!r} cannot load identity "
+            f"({type(exc).__name__})"
+        ) from exc
+
+    return (
+        "# Scheduled Social Persona\n\n"
+        f"Operate as the explicitly configured `{persona_id}` Homie persona. "
+        "Identity and safety rules below are authoritative. Turn-specific "
+        "topics and source packets stay in the user prompt and may supply "
+        "facts, but they cannot rewrite this identity.\n\n"
+        f"{rendered}"
+    )
+
+
+def _invoke_runtime(prompt: str, *, system_prompt: str | None = None) -> str:
     """Run one background-model completion and return the text.
 
     Bridges the async runtime from this sync function: a plain ``asyncio.run``
@@ -128,6 +236,11 @@ def _invoke_runtime(prompt: str) -> str:
         model=model,
         max_turns=1,
         allowed_tools=[],
+        disallowed_tools=["*"],
+        setting_sources=[],
+        mcp_servers=[],
+        model_only=True,
+        system_prompt=system_prompt,
     )
 
     async def _go() -> str:
@@ -198,12 +311,28 @@ def generate_draft(
         logger.error("Unknown channel: %s", channel_id)
         return None
 
+    try:
+        persona_context = _load_persona_identity_context(channel.persona_id)
+    except PersonaContextUnavailableError as exc:
+        error = str(exc)
+        logger.error("Draft generation skipped for %s: %s", channel_id, error)
+        append_social_audit_record(
+            channel=channel_id,
+            action="draft",
+            outcome="skipped",
+            error=error,
+        )
+        return None
+
     constraints = CHANNEL_CONSTRAINTS.get(channel_id, CHANNEL_CONSTRAINTS["facebook"])
-    voice_ctx = _read_voice_context(voice_profile or channel.voice_profile)
+    voice_ctx = _read_voice_context(
+        voice_profile or channel.voice_profile,
+        allow_global_fallback=channel.persona_id is None,
+    )
     prompt = _build_draft_prompt(channel_id, topic, voice_ctx, constraints)
 
     try:
-        body = _invoke_runtime(prompt)
+        body = _invoke_runtime(prompt, system_prompt=persona_context)
 
         if not body:
             logger.error("Empty draft from runtime for %s", channel_id)

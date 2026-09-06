@@ -541,7 +541,12 @@ def main() -> None:
     print(f"  Project root:  {PROJECT_ROOT}")
     print(f"  Database:      {CHAT_DB_PATH}")
     print(f"  Max turns:     {CHAT_MAX_TURNS}")
-    print(f"  Max budget:    ${CHAT_MAX_BUDGET_USD:.2f}")
+    budget_label = (
+        "none (subscription lane)"
+        if CHAT_MAX_BUDGET_USD is None
+        else f"${CHAT_MAX_BUDGET_USD:.2f}"
+    )
+    print(f"  Max budget:    {budget_label}")
 
     if has_slack:
         print(f"  Slack:         {SLACK_BOT_TOKEN[:12]}...")

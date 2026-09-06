@@ -121,6 +121,12 @@ _redact = _redact_mod.redact
 
 router = APIRouter()
 
+# Learning remains Python-owned; the subrouter reuses this module's request
+# scope checks and is mounted into the same orchestration authentication path.
+from dashboard_learning_api import router as learning_router  # noqa: E402
+
+router.include_router(learning_router)
+
 
 _DASHBOARD_CHAT_DEFAULT_CONVERSATION_ID = "dashboard-main"
 _DASHBOARD_CHAT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")

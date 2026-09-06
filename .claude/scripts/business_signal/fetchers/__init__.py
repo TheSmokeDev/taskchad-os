@@ -7,7 +7,6 @@ per-fetcher error isolation (one failing does not block others).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Protocol, runtime_checkable
 

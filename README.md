@@ -1,10 +1,9 @@
 # TaskChad OS
 
-**Realtime voice for your second brain. Talk to it like it's on a call. Open source, rides your subscription.**
+**A self-hosted cognitive agent OS and personal AI assistant with persistent memory, realtime voice, multi-agent orchestration, browser control, Telegram/Discord, and operator-controlled factories.**
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)
-![Release: v1.3.0](https://img.shields.io/badge/release-v1.3.0-blue?style=flat-square)
-![Tests: 10406](https://img.shields.io/badge/tests-10%2C406%20across%20480%20files-brightgreen?style=flat-square)
+[![Latest release](https://img.shields.io/github/v/release/TheSmokeDev/taskchad-os?sort=semver&style=flat-square)](https://github.com/TheSmokeDev/taskchad-os/releases/latest)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Channels: 6](https://img.shields.io/badge/Channels-Telegram%20%C2%B7%20Slack%20%C2%B7%20Discord%20%C2%B7%20WhatsApp%20%C2%B7%20Web%20%C2%B7%20CLI-4A154B?style=flat-square)
 
@@ -12,7 +11,29 @@ It hears you live, not voice notes. Talk your agents through real work out loud,
 
 It can even install its own voice. Your second brain runs the `talk-mode-setup` skill, checks your keys, wires the sidecar, and defaults to your Codex subscription so there is no per-minute meter.
 
-Under the voice is a real cognitive OS, not a chat wrapper: a 9-layer cognition stack (62 modules), multi-agent orchestration over a dependency-tracked convoy graph, and a memory that forms beliefs and flags your contradictions instead of agreeing by default. It is built to push back, not just please. Runs the same on Claude, Codex, Gemini, or any OpenAI-compatible backend, and reaches you on Telegram, Slack, WhatsApp, the web, and the CLI too. 10,406 tests across 480 files, each claim mapped to its file and count in the [Cognition Stack](#the-9-layer-cognitive-stack) section below.
+Under the voice is a real cognitive OS, not a chat wrapper: a 9-layer cognition stack, multi-agent orchestration over a dependency-tracked convoy graph, and a memory that forms beliefs and flags contradictions instead of agreeing by default. It is built to push back, not just please. It runs on Claude, Codex, Gemini, or an OpenAI-compatible backend and reaches you through Telegram, Slack, WhatsApp, the web, and the CLI. The regression suite is concentrated on the stateful boundaries where agent systems usually fail; see [Proof: Tests + Operator Loops](#proof-tests--operator-loops).
+
+## The Dark Factory
+
+TaskChad OS can assemble specialized personas with isolated memory, scoped tools,
+scheduled work, team rooms, approval queues, and durable receipts. That makes it
+a **dark-factory toolkit for agent work**: the repetitive machinery can keep
+moving while the operator retains the switches, approvals, and evidence.
+
+"Dark factory" does **not** mean unbounded autonomy. External writes stay
+default-denied, coding dispatch stays operator-controlled, and a generated
+artifact is never treated as pushed, deployed, published, or proven without its
+corresponding receipt.
+
+### Factory map
+
+| Factory surface | What it assembles | Start here |
+|---|---|---|
+| Persona factory | Identity, memory, tools, readiness, and learning | [Persona Blueprints](docs/manual/features/persona-blueprints-capability-provisioning.md) |
+| Repository factory | Bounded issue-to-worktree coding dispatch | [Archon Repo Dispatch](docs/manual/features/archon-repo-dispatch.md) |
+| Visual factory | Grounded image concepts and validated prompt packs | [Image Node Factory](docs/manual/features/image-node-factory.md) |
+| Authority factory | Evidence-gated SEO/GEO pages and release waves | [TokenMax Authority Stack](docs/manual/features/tokenmax-seo-authority-stack.md) |
+| Client-site factory | Branded, testable service-business websites | [Client Site Factory](docs/manual/features/client-site-factory.md) |
 
 ## Lineage + Provenance
 
@@ -29,15 +50,16 @@ sponsored by, or endorsed by those projects. See [NOTICE.md](NOTICE.md) and
 
 ---
 
-## Watch The Demo
+## Archived Preview
 
 ![The Homie v0.1.0-alpha.1 dashboard product tour](https://github.com/TheSmokeDev/taskchad-os/releases/download/v0.1.0-alpha.1/the-homie-v0.1.0-alpha.1-demo-preview.gif)
 
-45-second product tour: dashboard, Desktop Stack controls, Mobile Access,
+This 45-second alpha-era product tour shows dashboard, Desktop Stack controls, Mobile Access,
 Browser Viewer, Work Queue, Convoy, Operating Room, and clean shutdown proof.
-(Recorded on the initial preview; the real-time voice, quick-agent steering,
-and Runs surfaces described below shipped in later releases — see the
-[v1.2.0 release](https://github.com/TheSmokeDev/taskchad-os/releases/tag/v1.2.0).)
+It is preserved as historical evidence, not a current full-product walkthrough.
+Realtime voice, quick-agent steering, Runs, and the later factory surfaces are
+documented in the [latest release](https://github.com/TheSmokeDev/taskchad-os/releases/latest)
+and the [operator manual](docs/manual/README.md).
 
 Full-quality MP4 is attached on the
 [v0.1.0-alpha.1 release](https://github.com/TheSmokeDev/taskchad-os/releases/tag/v0.1.0-alpha.1).
@@ -46,19 +68,18 @@ Full-quality MP4 is attached on the
 
 ## Proof: Tests + Operator Loops
 
-The suite is **10,406 test functions across 480 files** in `.claude/scripts/tests/`
-(count it yourself: `git ls-files '.claude/scripts/tests/test_*.py' | wc -l` for
-files, and a `def test_` grep for functions). Coverage is concentrated where the
-moat is, not spread thin across getters:
+The suite lives in `.claude/scripts/tests/`. Instead of publishing a count that
+drifts whenever a generated export changes, TaskChad OS points to the actual
+coverage surfaces and the commands that reproduce them:
 
-| Subsystem | Tests | Where |
-|-----------|-------|-------|
-| Orchestration (convoy / mailbox / team / executor) | 331 across 13 files | `test_orchestration_api.py`, `test_executor_boundary.py`, the team suite |
-| Cognition + memory (recall, beliefs, episodes, briefs) | 479 across 13 files | living-self acts, `test_living_memory.py`, `test_episodes.py`, `test_session_brief.py`, `test_recall_*.py`, `test_belief_*.py` |
-| Talk Mode voice (session, runs, steering, Discord debrief) | 350 across 12 files | `test_talk_tools.py`, `test_talk_runs.py`, `test_talk_steering.py`, `test_talk_flush.py`, `test_discord_voice_*.py` |
-| Runtime + lane routing | 70+ across 6 files | `test_selection_*.py`, `test_lane_*.py`, `test_runtime_*.py` |
-| Memory pipelines | 54+ across 4 files | `test_memory_*.py` |
-| Observability (Langfuse) | 27 | `test_langfuse.py` |
+| Subsystem | Representative coverage |
+|-----------|-------------------------|
+| Orchestration | `test_orchestration_api.py`, `test_executor_boundary.py`, team and mailbox suites |
+| Cognition + memory | living-self acts, `test_living_memory.py`, `test_episodes.py`, `test_session_brief.py`, recall and belief suites |
+| Talk Mode voice | session, runs, steering, flush, Discord receive, and debrief suites |
+| Runtime + lane routing | selection, lane, provider adapter, diagnostics, and quiet-JSON suites |
+| Memory pipelines | reflection, weekly synthesis, dream, indexing, and recall suites |
+| Observability | Langfuse trace-shape and failure-visibility suites |
 
 On top of unit coverage, the framework is exercised through operator-loop and
 smoke testing, not just happy-path assertions:
@@ -76,9 +97,9 @@ smoke testing, not just happy-path assertions:
 - Sanitizer/export leak checks before public release so private vault data,
   local tokens, and machine-specific proof artifacts stay out of the framework.
 
-Numbers above are from the current export; rerun the grep after pulling to
-confirm. Proof boundaries (what is *not* yet claimed) are listed under
-[Current Proof Boundaries](#current-proof-boundaries).
+Run the targeted suite for the surface you changed and use `uv run pytest
+tests/ -q` for the broad local regression. Proof boundaries (what is *not* yet
+claimed) are listed under [Current Proof Boundaries](#current-proof-boundaries).
 
 ---
 

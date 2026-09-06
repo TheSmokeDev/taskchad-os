@@ -274,7 +274,14 @@ class _ModelOnlyLaunchEnv:
         # charge the wrong project. Keep model-only fallback on the consumer
         # OAuth surface it was authenticated for.
         launch_env.pop("GOOGLE_CLOUD_PROJECT", None)
+        launch_env.pop("GOOGLE_CLOUD_PROJECT_ID", None)
         launch_env.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+        # Workspace Code Assist OAuth can require a project. Honor an explicit
+        # host request, while continuing to discard unrelated inherited routing.
+        explicit = self.request.env or {}
+        project = explicit.get("GOOGLE_CLOUD_PROJECT") or explicit.get("GOOGLE_CLOUD_PROJECT_ID")
+        if project and project.strip():
+            launch_env["GOOGLE_CLOUD_PROJECT"] = project.strip()
         return launch_env
 
     def __exit__(self, *_exc: object) -> None:

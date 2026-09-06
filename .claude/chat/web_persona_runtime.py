@@ -325,44 +325,57 @@ async def run_web_persona_turn(
             "conversation_id": channel_id,
         },
     )
-    tools_degraded = False
+    from personas.learning import hooks as learning_hooks
+    learning_turn = await learning_hooks.prepare_turn_async(
+        request, persona_id=persona_id, surface="web_persona_chat",
+        origin_id=learning_hooks.incoming_origin(incoming, session_key), task=incoming.text,
+    )
+    request = learning_turn.request
     try:
-        result = await run_with_runtime_lanes(request)
-    except RuntimeCallerToolTransportError as exc:
-        # Persona chats are conversation surfaces first. If every selected
-        # runtime refuses or loses the caller-tool transport, retry exactly once
-        # as a declared text-only turn. This never supplies the dispatcher and
-        # never claims an action happened; other runtime/config/security errors
-        # still propagate normally.
-        tools_degraded = True
-        print(
-            f"[web_persona_runtime] scoped tools unavailable for {persona_id}; "
-            f"retrying text-only: {exc}",
-            flush=True,
-        )
-        degraded_prompt = (
-            "# Tool Availability\n"
-            "Your scoped tools are unavailable for this turn. Respond "
-            "conversationally from the context you already have. Do not claim "
-            "you checked, changed, sent, searched, or executed anything. If the "
-            "request requires a tool, say what could not be verified.\n\n"
-            + prompt
-        )
-        degraded_metadata = dict(request.metadata or {})
-        degraded_metadata.pop("tool_scope_version", None)
-        degraded_metadata["caller_tools_degraded"] = True
-        result = await run_with_runtime_lanes(
-            replace(
-                request,
-                prompt=degraded_prompt,
-                max_turns=1,
-                tool_defs=None,
-                tool_dispatch=None,
-                tool_scope_version=None,
-                metadata=degraded_metadata,
+        tools_degraded = False
+        try:
+            result = await run_with_runtime_lanes(request)
+        except RuntimeCallerToolTransportError as exc:
+            await learning_turn.afailed(exc)
+            # Persona chats are conversation surfaces first. If every selected
+            # runtime refuses or loses the caller-tool transport, retry exactly once
+            # as a declared text-only turn. This never supplies the dispatcher and
+            # never claims an action happened; other runtime/config/security errors
+            # still propagate normally.
+            tools_degraded = True
+            print(
+                f"[web_persona_runtime] scoped tools unavailable for {persona_id}; "
+                f"retrying text-only: {exc}",
+                flush=True,
             )
-        )
-    response_text = (result.text or "").strip() or "No response returned."
+            degraded_prompt = (
+                "# Tool Availability\n"
+                "Your scoped tools are unavailable for this turn. Respond "
+                "conversationally from the context you already have. Do not claim "
+                "you checked, changed, sent, searched, or executed anything. If the "
+                "request requires a tool, say what could not be verified.\n\n"
+                + request.prompt
+            )
+            degraded_metadata = dict(request.metadata or {})
+            degraded_metadata.pop("tool_scope_version", None)
+            degraded_metadata["caller_tools_degraded"] = True
+            degraded_metadata["learning"] = dict(degraded_metadata.get("learning") or {})
+            degraded_metadata["learning"]["transport_retry"] = "text_only"
+            result = await run_with_runtime_lanes(
+                await learning_turn.aretry_request(replace(
+                    request,
+                    prompt=degraded_prompt,
+                    max_turns=1,
+                    tool_defs=None,
+                    tool_dispatch=None,
+                    tool_scope_version=None,
+                    metadata=degraded_metadata,
+                ), reason="caller_tool_transport_unavailable")
+            )
+    except BaseException as exc:
+        await learning_turn.afailed(exc)
+        raise
+    response_text = await learning_turn.acomplete(result) or "No response returned."
     if tools_degraded:
         response_text += "\n\n_(Scoped tools were unavailable; no tool action was performed.)_"
 

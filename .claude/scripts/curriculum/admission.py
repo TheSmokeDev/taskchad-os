@@ -232,7 +232,6 @@ Allowed topics: {", ".join(TOPIC_KEYWORDS)} or other.
                 capability=TEXT_REASONING,
                 model=models.get(model_tier, models.get("fast")),
                 max_turns=1,
-                max_budget_usd=0.15,
                 allowed_tools=[],
                 disallowed_tools=["*"],
                 metadata={"persona_id": persona_id, "curriculum": True},

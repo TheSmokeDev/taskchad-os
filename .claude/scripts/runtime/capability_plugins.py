@@ -10,6 +10,7 @@ import asyncio
 import builtins as python_builtins
 import importlib
 import inspect
+import logging
 import os
 import re
 import sys
@@ -29,6 +30,7 @@ from types import MappingProxyType, ModuleType
 from typing import Any
 
 import config
+from runtime import capability_contributions
 from runtime.capability_plugin_journal import (
     CommandIdentityConflictError,
     JournalCommitAmbiguousError,
@@ -63,6 +65,7 @@ _PLUGIN_VERSION_RE = re.compile(
 _MODULE_PART_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DETAIL_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _PROVENANCE_ID_RE = re.compile(r"^[a-z_]+:[a-f0-9]{20}$")
+_logger = logging.getLogger(__name__)
 
 
 class CapabilityPluginError(RuntimeError):
@@ -1030,6 +1033,7 @@ class PluginInstanceView:
     effective_state: PluginEffectiveState
     lifecycle_state: PluginLifecycleState
     contribution_ids: tuple[str, ...]
+    contribution_inventory: tuple[Mapping[str, object], ...]
     residual_contribution_ids: tuple[str, ...]
     error_code: str
     detail: str
@@ -1216,6 +1220,68 @@ class _RegisteredContribution:
     disposer: Callable[[], object]
 
 
+def _compose_contribution_disposer(
+    application: capability_contributions.AppliedContribution,
+    plugin_disposer: Callable[[], object],
+) -> Callable[[], object]:
+    """Dispose the owner row before the plugin's generic staged effect.
+
+    Both cleanup layers are attempted for ordinary failures.  The returned
+    exact boolean remains subject to the kernel's existing disposer validator,
+    so a false/deferred plugin result or an unproven owner removal still drives
+    the established ``restart_required`` path.
+    """
+
+    def dispose() -> object:
+        owner_proven = False
+        try:
+            owner_proven = application.dispose() is True
+        except KeyboardInterrupt:
+            raise
+        except BaseException:
+            _logger.warning(
+                "capability contribution %s owner disposer raised",
+                application.contribution_id,
+            )
+        plugin_result = plugin_disposer()
+        if (
+            inspect.isawaitable(plugin_result)
+            or inspect.isgenerator(plugin_result)
+            or inspect.isasyncgen(plugin_result)
+        ):
+            return plugin_result
+        return owner_proven and plugin_result is True
+
+    return dispose
+
+
+def _typed_contribution_requests(
+    manifest: CapabilityPluginManifest,
+    registrations: Mapping[str, _RegisteredContribution],
+) -> tuple[capability_contributions.ContributionRequest, ...]:
+    """Bind staged payloads to manifest-owned identities in dependency order."""
+
+    declarations = {item.id: item for item in manifest.contributions}
+    requests: list[capability_contributions.ContributionRequest] = []
+    for contribution_id in contribution_topological_order(manifest):
+        declaration = declarations[contribution_id]
+        if declaration.type is ContributionType.GENERIC:
+            continue
+        requests.append(
+            capability_contributions.ContributionRequest(
+                owner=capability_contributions.ContributionOwner(
+                    plugin_id=manifest.id,
+                    plugin_version=manifest.version,
+                    contribution_id=contribution_id,
+                    type=declaration.type,
+                    depends_on=declaration.depends_on,
+                ),
+                payload=registrations[contribution_id].value,
+            )
+        )
+    return tuple(requests)
+
+
 @dataclass(slots=True)
 class _PluginInstance:
     candidate: CapabilityPluginCandidate
@@ -1223,6 +1289,7 @@ class _PluginInstance:
     effective_state: PluginEffectiveState
     lifecycle_state: PluginLifecycleState
     registrations: dict[str, _RegisteredContribution] = field(default_factory=dict)
+    contribution_inventory: tuple[Mapping[str, object], ...] = ()
     ownership: _LoaderOwnership | None = None
     lease_count: int = 0
     deferred_unload: _DeferredUnload | None = None
@@ -1390,6 +1457,10 @@ class CapabilityPluginKernel:
         command_id_factory: Callable[[], str] | None = None,
         environ: Mapping[str, str] | None = None,
         core_version: str | None = None,
+        contribution_adapters: (
+            capability_contributions.ContributionAdapterRegistry | None
+        ) = None,
+        contribution_services: capability_contributions.ContributionServices | None = None,
     ) -> None:
         ordered = _validate_and_order_candidates(tuple(candidates))
         self._lock = threading.RLock()
@@ -1407,6 +1478,8 @@ class CapabilityPluginKernel:
         self._command_id_factory = command_id_factory
         self._environ = environ
         self._core_version = core_version
+        self._contribution_adapters = contribution_adapters
+        self._contribution_services = contribution_services
         self._recovered_journal_path: Path | None = None
         self._journal: LockedLifecycleJournal | None = None
         self._writer_records: dict[str, PluginLifecycleReceipt] = {}
@@ -1489,10 +1562,48 @@ class CapabilityPluginKernel:
                 effective_state=instance.effective_state,
                 lifecycle_state=instance.lifecycle_state,
                 contribution_ids=tuple(instance.registrations),
+                contribution_inventory=self._inventory_for_instance(instance),
                 residual_contribution_ids=instance.residual_contribution_ids,
                 error_code=instance.error_code,
                 detail=instance.detail,
             )
+
+    def contribution_inventory(
+        self, plugin_id: str | None = None
+    ) -> tuple[Mapping[str, object], ...]:
+        """Return redacted typed owner rows for one plugin or the whole kernel."""
+
+        with self._lock:
+            instances = (
+                (self._get_instance(plugin_id),)
+                if plugin_id is not None
+                else tuple(self._instances[item] for item in sorted(self._instances))
+            )
+            return tuple(
+                record
+                for instance in instances
+                for record in self._inventory_for_instance(instance)
+            )
+
+    @staticmethod
+    def _inventory_for_instance(
+        instance: _PluginInstance,
+    ) -> tuple[Mapping[str, object], ...]:
+        residual = set(instance.residual_contribution_ids)
+        return tuple(
+            MappingProxyType(
+                {
+                    **dict(record),
+                    "owner_state": (
+                        "residual"
+                        if record.get("contribution_id") in residual
+                        else "registered"
+                    ),
+                    "disposer_registered": True,
+                }
+            )
+            for record in instance.contribution_inventory
+        )
 
     def outstanding_leases(self) -> tuple[PluginLeaseView, ...]:
         """Return bounded diagnostics for snapshots the kernel still owns."""
@@ -2183,6 +2294,7 @@ class CapabilityPluginKernel:
         registrar = StagedRegistrar(manifest)
         loaded: _LoadedEntrypoint | None = None
         registrations: dict[str, _RegisteredContribution] = {}
+        contribution_inventory: tuple[Mapping[str, object], ...] = ()
         load_failure_receipt: PluginLifecycleReceipt | None = None
         propagate_clean_interrupt = False
         try:
@@ -2212,8 +2324,44 @@ class CapabilityPluginKernel:
                         "runtime_contribution_conflict",
                         "Contribution conflict reached load stage",
                     )
+            typed_requests = _typed_contribution_requests(manifest, registrations)
+            if typed_requests:
+                try:
+                    applied = capability_contributions.apply_contributions(
+                        typed_requests,
+                        adapters=self._contribution_adapters,
+                        services=self._contribution_services,
+                    )
+                except capability_contributions.ContributionApplyError as exc:
+                    for application in exc.residual:
+                        registered = registrations[application.contribution_id]
+                        registrations[application.contribution_id] = replace(
+                            registered,
+                            disposer=_compose_contribution_disposer(
+                                application, registered.disposer
+                            ),
+                        )
+                    contribution_inventory = (
+                        capability_contributions.contribution_catalog(exc.residual)
+                    )
+                    if exc.code == "operator_interrupted":
+                        raise KeyboardInterrupt() from None
+                    raise CapabilityPluginError(exc.code, exc.detail) from None
+                except capability_contributions.ContributionError as exc:
+                    raise CapabilityPluginError(exc.code, exc.detail) from None
+                for application in applied:
+                    registered = registrations[application.contribution_id]
+                    registrations[application.contribution_id] = replace(
+                        registered,
+                        disposer=_compose_contribution_disposer(
+                            application, registered.disposer
+                        ),
+                    )
+                contribution_inventory = (
+                    capability_contributions.contribution_catalog(applied)
+                )
         except BaseException as exc:  # plugin-controlled process-exit types are isolated
-            staged = dict(registrar._staged)
+            staged = dict(registrations or registrar._staged)
             disposal_batch = self._dispose_registrations(manifest, staged)
             disposals = disposal_batch.receipts
             failed_ids = disposal_batch.failed_ids
@@ -2243,6 +2391,11 @@ class CapabilityPluginKernel:
                 instance.registrations = {
                     item: staged[item] for item in failed_ids if item in staged
                 }
+                instance.contribution_inventory = tuple(
+                    record
+                    for record in contribution_inventory
+                    if record.get("contribution_id") in set(failed_ids)
+                )
                 instance.ownership = (
                     loaded.ownership if loaded is not None and restart_required else None
                 )
@@ -2304,6 +2457,7 @@ class CapabilityPluginKernel:
             self._assert_transaction(transaction)
             self._bindings.update(registrations)
             instance.registrations = registrations
+            instance.contribution_inventory = contribution_inventory
             instance.ownership = loaded.ownership
             instance.residual_contribution_ids = ()
             instance.error_code = ""
@@ -2353,6 +2507,11 @@ class CapabilityPluginKernel:
             instance.registrations = {
                 item: registrations[item] for item in failed_ids if item in registrations
             }
+            instance.contribution_inventory = tuple(
+                record
+                for record in contribution_inventory
+                if record.get("contribution_id") in set(failed_ids)
+            )
             instance.ownership = loaded.ownership if not cleanup_proven else None
             instance.residual_contribution_ids = failed_ids
             instance.effective_state = PluginEffectiveState.RESTART_REQUIRED
@@ -2468,6 +2627,11 @@ class CapabilityPluginKernel:
                 instance.registrations = {
                     item: registrations[item] for item in failed_ids if item in registrations
                 }
+                instance.contribution_inventory = tuple(
+                    record
+                    for record in instance.contribution_inventory
+                    if record.get("contribution_id") in set(failed_ids)
+                )
                 instance.residual_contribution_ids = failed_ids
                 instance.effective_state = PluginEffectiveState.RESTART_REQUIRED
                 instance.lifecycle_state = PluginLifecycleState.RESTART_REQUIRED
@@ -2500,6 +2664,7 @@ class CapabilityPluginKernel:
             with self._lock:
                 self._assert_transaction(transaction)
                 instance.registrations = {}
+                instance.contribution_inventory = ()
                 instance.residual_contribution_ids = ()
                 instance.effective_state = PluginEffectiveState.RESTART_REQUIRED
                 instance.lifecycle_state = PluginLifecycleState.RESTART_REQUIRED
@@ -2529,6 +2694,7 @@ class CapabilityPluginKernel:
         with self._lock:
             self._assert_transaction(transaction)
             instance.registrations = {}
+            instance.contribution_inventory = ()
             instance.residual_contribution_ids = ()
             instance.ownership = None
             instance.effective_state = PluginEffectiveState.UNLOADED

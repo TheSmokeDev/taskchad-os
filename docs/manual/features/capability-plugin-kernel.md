@@ -8,13 +8,14 @@ Last updated: 2026-08-22
 
 The capability plugin kernel discovers trusted local v2 plugin manifests without importing
 their code, rejects conflicts before effects can run, and applies enable or disable requests
-as transactions at an explicit turn boundary. Each new turn receives an immutable generic
-contribution snapshot. A snapshot already held by an in-flight turn remains intact after a
-later boundary changes the live registry.
+as transactions at an explicit turn boundary. Generic contributions remain lease-bound
+snapshot values. Typed contributions now install reversible rows in their existing domain
+registries. A snapshot already held by an in-flight turn keeps those physical rows alive until
+its lease releases, while the next turn sees the binding-free generation.
 
-Issue #530 proves only the lifecycle and generic binding contract. It does not connect real
-tools, toolsets, skills, MCP servers, commands, chat boot, profiles, Talk, Cabinet, or the
-Dashboard to the kernel.
+Issue #531 adds lifecycle plumbing for tools, toolsets, skills, MCP servers, commands, intents,
+prompt/context hooks, health probes, and configuration requirements. It does not equip a
+profile, activate plugins at boot, migrate every capability family, or add Dashboard controls.
 
 ## Operator Entry Points
 
@@ -110,6 +111,32 @@ append succeeds does desired state change or a boundary operation enter the queu
 
 Repeated equivalent requests append typed `no_op` receipts. They do not advance the
 generation, republish bindings, or call a disposer twice.
+
+## Typed Owner Adapters
+
+Typed payloads are immutable domain records. Plugin ID, version, contribution ID, type, and
+dependency edges come only from the validated manifest binding; plugin code cannot self-assign
+an owner. Before the first owner mutation, the kernel resolves every adapter, validates every
+payload, and proves every required owner service is available.
+
+| Contribution | Owning validation/execution seam |
+|---|---|
+| Tool | `runtime.tool_registry` |
+| Toolset | `runtime.toolsets` |
+| Skill, MCP/MCP server | `runtime.framework_registry` |
+| Command, intent | `chat.extension_manager` |
+| Prompt/context hook, health probe, config requirement | `runtime.capability_contributions` |
+
+Owner rows apply in manifest dependency order. A later refusal rolls earlier rows back in
+reverse order before the kernel publishes a generation. Normal unload runs each owner disposer
+before the plugin's generic disposer. Removal is compare-and-remove by plugin ID and version;
+wrong-owner attempts leave the physical row unchanged. If physical absence cannot be proven,
+the contribution remains in redacted inventory as `owner_state: residual` and the plugin becomes
+`restart_required`.
+
+`CapabilityPluginKernel.contribution_inventory()` returns metadata only: owner/version, type,
+dependency IDs, owner seam/key, disposer presence, and safe domain labels. It never serializes a
+callable, environment value, MCP config value, prompt content, or absolute executable path.
 
 ## Transaction And Snapshot Guarantees
 
@@ -317,9 +344,11 @@ or intents, so existing v1 packages retain their current behavior.
 |---|---|
 | Manifest/discovery | `.claude/scripts/runtime/capability_plugin_manifest.py` |
 | Lifecycle/snapshots | `.claude/scripts/runtime/capability_plugins.py` |
+| Typed contributions/adapters | `.claude/scripts/runtime/capability_contributions.py` |
+| Typed owner overlays | `.claude/scripts/runtime/tool_registry.py`, `toolsets.py`, `framework_registry.py`, `.claude/chat/extension_manager.py` |
 | Locked receipt journal | `.claude/scripts/runtime/capability_plugin_journal.py` |
 | Bundled proof | `.claude/extensions/_capability_fixture/extension.json`, `plugin.py` |
-| Tests | `.claude/scripts/tests/test_capability_plugin_manifest.py`, `test_capability_plugins.py` |
+| Tests | `.claude/scripts/tests/test_capability_plugin_manifest.py`, `test_capability_plugins.py`, `test_capability_contributions.py` |
 | Subprocess lock proof | `.claude/scripts/tests/_holders/hold_capability_journal_owner.py` |
 | Legacy compatibility | `.claude/chat/extension_manager.py`, `.claude/scripts/local_extension_loader.py` |
 
@@ -329,8 +358,8 @@ or intents, so existing v1 packages retain their current behavior.
   signed-package policy, and remote code execution are excluded.
 - Manifest and error data are hostile, bounded, and redacted. Secret values must never appear
   in manifests, catalogs, receipts, logs, commits, or public exports.
-- Registration is generic in this slice. Real contribution adapters and domain registry
-  mutation belong to issue #531.
+- Typed registration mutates process-local owner registries only through injected adapters.
+  No typed plugin is activated by merely shipping this code.
 - Profile equipment/epochs, progressive disclosure, migrations, CLI/API/Dashboard controls,
   production activation, and sanitizer export are later slices.
 - Plugin reach never replaces execution authorization or any existing gate.
@@ -342,8 +371,10 @@ From `.claude/scripts`:
 ```powershell
 python -m pytest tests/test_capability_plugin_manifest.py -q
 python -m pytest tests/test_capability_plugins.py -q
+python -m pytest tests/test_capability_contributions.py -q
 python -m pytest tests/test_capability_plugin_manifest.py `
-  tests/test_capability_plugins.py tests/test_extension_manager.py `
+  tests/test_capability_plugins.py tests/test_capability_contributions.py `
+  tests/test_extension_manager.py tests/test_framework_registry.py `
   tests/test_local_extension_loader.py tests/test_tool_registry.py -q
 ```
 
@@ -352,21 +383,22 @@ available. Tests inject temporary receipt paths and do not write operator lifecy
 
 ## Rollback
 
-Revert the issue #530 implementation commits. There is no data migration, database schema,
+Revert the issue #531 implementation commit, then #530 only if the generic kernel must also be
+removed. There is no data migration, database schema,
 profile mutation, or production activation to undo. Existing legacy extensions remain on the
 chat manager throughout. Historical JSONL receipts are audit records and should not be
 silently deleted as part of code rollback.
 
 ## Latest Proof
 
-- Date: 2026-08-22
-- Surface: isolated worktree unit and fixture integration suites
-- Result: 177 focused tests and 272 complete #530/legacy tests passed after the branch was
-  refreshed onto current `master`. The direct #529 transport/readiness files passed 88 tests
-  with one intentional skip, and the mandated PR2 runtime suite passed all 232 tests. The
-  earlier persona activation/diagnostics/CLI gate also passed all 97 tests. Ruff, Python 3.12
-  compilation, and diff checks passed. This is code proof only; no bot restart, provider call,
-  deploy, or production/operator mutation is implied.
+- Date: 2026-08-23
+- Surface: issue #531 isolated-worktree typed contribution and owner-registry suites
+- Result: 295 focused contribution/manifest/kernel/owner/legacy tests passed in three
+  fail-fast pytest processes, plus all 203 sanitizer tests. Targeted Ruff and Python compilation
+  also passed. This is code proof only; no plugin activation, bot restart, provider call,
+  deploy, public export, or production/operator mutation is implied.
+- Prior #530 proof remains 177 focused manifest/kernel tests and 272 complete lifecycle/legacy
+  tests after that branch was refreshed onto `master`.
 
 ## Public Export Status
 
@@ -378,6 +410,5 @@ or add production boot wiring.
 
 ## Next Slices
 
-- Issue #531: typed adapters for real tool, toolset, skill, MCP, and command contributions.
 - Later epic slices: profile equipment/epochs, disclosure, representative migrations,
   operator controls, production activation, and additional release hardening.

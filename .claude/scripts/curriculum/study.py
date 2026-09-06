@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +23,6 @@ CHUNK_CHARS = 18_000
 MAX_STUDY_CHUNKS = 12
 MAX_TRANSCRIPT_CHARS = CHUNK_CHARS * MAX_STUDY_CHUNKS
 MAX_FINDING_CHARS = 6_000
-CHUNK_BUDGET_USD = 0.10
-SYNTHESIS_BUDGET_USD = 0.30
-MAX_STUDY_BUDGET_USD = MAX_STUDY_CHUNKS * CHUNK_BUDGET_USD + SYNTHESIS_BUDGET_USD
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +37,7 @@ class CurriculumStudyResult:
     tool_call_count: int = 0
     execution_time_ms: int = 0
     calls: tuple[dict[str, Any], ...] = ()
+    learning_receipt: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +108,6 @@ async def study_extraction(
                 capability=TEXT_REASONING,
                 model=fast_model,
                 max_turns=1,
-                max_budget_usd=CHUNK_BUDGET_USD,
                 allowed_tools=[],
                 disallowed_tools=["*"],
                 metadata={
@@ -129,26 +127,30 @@ async def study_extraction(
         findings.append(result.text.strip()[:MAX_FINDING_CHARS])
         if result.cost_usd is not None:
             costs.append(float(result.cost_usd))
-            if sum(costs) > MAX_STUDY_BUDGET_USD:
-                raise RuntimeError("Curriculum deep study exceeded its cost ceiling.")
         final_runtime = result
 
     call_started = time.monotonic()
+    from .learning import record_study_context, render_study_context
+
+    synthesis_prompt = _synthesis_prompt(
+        extraction,
+        persona_id=persona_id,
+        persona_context=persona_context,
+        recalled_doctrine=recalled_doctrine,
+        findings=findings,
+    )
+    synthesis_prompt = await asyncio.to_thread(
+        render_study_context, persona_id, synthesis_prompt, model=study_model
+    )
+    await asyncio.to_thread(record_study_context, synthesis_prompt)
     synthesis = await run_curriculum_model(
         RuntimeRequest(
-            prompt=_synthesis_prompt(
-                extraction,
-                persona_id=persona_id,
-                persona_context=persona_context,
-                recalled_doctrine=recalled_doctrine,
-                findings=findings,
-            ),
+            prompt=synthesis_prompt,
             cwd=workspace,
             task_name="curriculum_deep_study",
             capability=TEXT_REASONING,
             model=study_model,
             max_turns=1,
-            max_budget_usd=SYNTHESIS_BUDGET_USD,
             allowed_tools=[],
             disallowed_tools=["*"],
             metadata={
@@ -158,6 +160,9 @@ async def study_extraction(
             },
         )
     )
+    learning_receipt = await asyncio.to_thread(
+        record_study_context, synthesis_prompt, result=synthesis
+    )
     calls.append(
         _call_receipt(
             synthesis,
@@ -166,8 +171,6 @@ async def study_extraction(
     )
     if synthesis.cost_usd is not None:
         costs.append(float(synthesis.cost_usd))
-        if sum(costs) > MAX_STUDY_BUDGET_USD:
-            raise RuntimeError("Curriculum deep study exceeded its cost ceiling.")
     final_runtime = synthesis
     return CurriculumStudyResult(
         markdown=synthesis.text.strip(),
@@ -180,6 +183,7 @@ async def study_extraction(
         tool_call_count=sum(int(call["tool_calls"]) for call in calls),
         execution_time_ms=sum(int(call["execution_time_ms"]) for call in calls),
         calls=tuple(calls),
+        learning_receipt=learning_receipt,
     )
 
 
@@ -222,7 +226,6 @@ Return JSON only with: decision ("deep" or "reject"), score (0-100), reason.
             capability=TEXT_REASONING,
             model=models.get(model_tier, models.get("fast")),
             max_turns=1,
-            max_budget_usd=0.20,
             allowed_tools=[],
             disallowed_tools=["*"],
             metadata={"persona_id": persona_id, "curriculum": True, "skim": True},

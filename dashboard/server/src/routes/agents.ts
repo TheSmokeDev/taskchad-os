@@ -24,6 +24,65 @@ import {
 
 export const agentsRoute = new Hono();
 
+// Learning payloads contain nested ledger records. Translate persona fields
+// through the same canonical mapper, leaving record ids and content untouched.
+function translateLearning(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(translateLearning);
+  if (!value || typeof value !== 'object') return value;
+  const row = value as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(row).map(([key, child]) => [
+    key,
+    key === 'persona_id' && typeof child === 'string'
+      ? outboundPersonaId(child)
+      : translateLearning(child),
+  ]));
+}
+
+// Python owns validation, storage, evaluation, and rollback. Do not interpret
+// records or resolve evidence paths in this proxy.
+agentsRoute.get('/api/agents/:id/learning', async (c) => {
+  const id = inboundPersonaId(c.req.param('id'))!;
+  const result = await authedFetchJson(`/api/agents/${encodeURIComponent(id)}/learning`);
+  return c.json(translateLearning(result.json) as Record<string, unknown>, result.status as 200);
+});
+
+agentsRoute.get('/api/agents/:id/learning/records', async (c) => {
+  const id = inboundPersonaId(c.req.param('id'))!;
+  const query = new URLSearchParams();
+  for (const key of ['kind', 'limit', 'cursor', 'status']) {
+    const value = c.req.query(key);
+    if (value !== undefined) query.set(key, value);
+  }
+  const result = await authedFetchJson(`/api/agents/${encodeURIComponent(id)}/learning/records?${query}`);
+  return c.json(translateLearning(result.json) as Record<string, unknown>, result.status as 200);
+});
+
+agentsRoute.get('/api/agents/:id/learning/records/:recordId', async (c) => {
+  const id = inboundPersonaId(c.req.param('id'))!;
+  const recordId = encodeURIComponent(c.req.param('recordId'));
+  const result = await authedFetchJson(`/api/agents/${encodeURIComponent(id)}/learning/records/${recordId}`);
+  return c.json(translateLearning(result.json) as Record<string, unknown>, result.status as 200);
+});
+
+agentsRoute.post('/api/agents/:id/learning/pause', async (c) => {
+  const id = inboundPersonaId(c.req.param('id'))!;
+  const result = await authedFetchJson(`/api/agents/${encodeURIComponent(id)}/learning/pause`, { method: 'POST' });
+  return c.json(translateLearning(result.json) as Record<string, unknown>, result.status as 200);
+});
+
+agentsRoute.post('/api/agents/:id/learning/resume', async (c) => {
+  const id = inboundPersonaId(c.req.param('id'))!;
+  const result = await authedFetchJson(`/api/agents/${encodeURIComponent(id)}/learning/resume`, { method: 'POST' });
+  return c.json(translateLearning(result.json) as Record<string, unknown>, result.status as 200);
+});
+
+agentsRoute.post('/api/agents/:id/learning/activations/:activationId/rollback', async (c) => {
+  const id = inboundPersonaId(c.req.param('id'))!;
+  const activationId = encodeURIComponent(c.req.param('activationId'));
+  const result = await authedFetchJson(`/api/agents/${encodeURIComponent(id)}/learning/activations/${activationId}/rollback`, { method: 'POST' });
+  return c.json(translateLearning(result.json) as Record<string, unknown>, result.status as 200);
+});
+
 // ── List + create ──────────────────────────────────────────────────────
 
 agentsRoute.get('/api/agents', async (c) => {

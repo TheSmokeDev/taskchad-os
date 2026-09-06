@@ -53,7 +53,7 @@ MODEL_CONFIGS: dict[str, RuntimeModelConfig] = {
         default_model=CLAUDE_DEFAULT_MODEL,
         aliases={
             "sonnet": "claude-sonnet-5",
-            "opus": "claude-opus-4-8",
+            "opus": "claude-opus-5",
             "fable": "claude-fable-5",
         },
     ),

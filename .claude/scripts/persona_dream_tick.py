@@ -756,6 +756,11 @@ def run_tick(
             summary += f", {len(truncated)} never attempted (operator wall-clock cap)"
         _log(None, summary)
 
+    try:
+        from personas.learning import worker as learning_worker
+        learning_worker.run_pending_profiles(test_mode=test_mode or child_test, once=once)
+    except Exception as exc:
+        _log(None, f"Learning queue wake failed (non-blocking): {exc}")
     return TickOutcome(tuple(attempted), tuple(failed), tuple(truncated))
 
 

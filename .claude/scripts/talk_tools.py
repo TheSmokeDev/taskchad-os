@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import talk_runs
@@ -285,7 +286,7 @@ _TOOL_DELEGATE_TASK: dict = {
         "when it lands. Quick agents are STEERABLE while running: manage_run "
         "'say' with the receipt number queues a course-correction for the "
         "agent's next turn boundary, and 'cancel' stops it. Say what you're "
-        "delegating before you fire it."
+        "delegating before you fire it. Use target_persona when the task belongs to a named Homie."
     ),
     "parameters": {
         "type": "object",
@@ -307,6 +308,20 @@ _TOOL_DELEGATE_TASK: dict = {
                 "type": "string",
                 "enum": ["codex", "claude", "gemini", "kimi"],
                 "description": "Optional engine lane override (default codex, quick scope only).",
+            },
+            "expectation": {
+                "type": "object",
+                "description": "Optional testable expectation for the task outcome, captured before delegation.",
+                "properties": {
+                    "claim": {"type": "string"}, "check_by": {"type": "string"},
+                    "resolution_rule": {"type": "string"}, "situation": {"type": "object"},
+                },
+                "required": ["claim", "check_by", "resolution_rule", "situation"],
+                "additionalProperties": False,
+            },
+            "target_persona": {
+                "type": "string",
+                "description": "Optional exact profile id for the Homie doing the work; default preserves the active profile.",
             },
             "scope": {
                 "type": "string",
@@ -730,6 +745,7 @@ def execute_talk_tool(
     transport: str | None = TRANSPORT_BROWSER,
     speaker_id: str | None = None,
     binding: object = None,
+    origin_key: str | None = None,
 ) -> str:
     """Dispatch one tool call and return plain text for the model to speak.
 
@@ -760,7 +776,11 @@ def execute_talk_tool(
         return denial
     role_token = _REQUEST_ROLE.set(resolved_role)
     try:
-        output = handler(arguments or {})
+        call_arguments = dict(arguments or {})
+        call_arguments.pop("_learning_origin_key", None)
+        if name == "delegate_task" and origin_key:
+            call_arguments["_learning_origin_key"] = f"talk:{transport}:{origin_key}"
+        output = handler(call_arguments)
     except kill_switches.KillSwitchDisabled:
         # A kill switch is an operator DECISION, not a tool failure. It keeps
         # its own shape all the way out of the gate (house contract), so map
@@ -1159,7 +1179,8 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
 
 
 def _run_agent_turn(
-    prompt: str, lane: str, timeout_s: int, run_id: int, *, resume_sid: str = ""
+    prompt: str, lane: str, timeout_s: int, run_id: int, *, resume_sid: str = "",
+    target_persona: str | None = None, origin_key: str | None = None
 ) -> dict:
     """One agent conversation turn. Returns the parsed envelope as a dict.
 
@@ -1172,6 +1193,11 @@ def _run_agent_turn(
     """
 
     argv = ["uv", "run", "thehomie", "chat", "-m", lane]
+    if target_persona is not None:
+        argv += ["--profile", target_persona]
+    learning_env = {}
+    if origin_key:
+        learning_env = {"env": {**os.environ, "HOMIE_LEARNING_ORIGIN_KEY": origin_key}}
     if resume_sid:
         # Strict: a missed resume ABORTS before the engine — a context-less
         # steer turn must never execute (it could act on real targets with
@@ -1186,6 +1212,7 @@ def _run_agent_turn(
         encoding="utf-8",
         errors="replace",
         cwd=Path(__file__).resolve().parent,
+        **learning_env,
     )
     if not talk_runs.attach_pid(run_id, proc.pid):
         # Cancel won the race between the worker's status check and this
@@ -1271,7 +1298,8 @@ def _reassemble_prompt(task: str, last_output: str, steer_text: str) -> str:
     )
 
 
-def start_agent_run(task: str, title: str, lane: str) -> tuple[int, int | str]:
+def start_agent_run(task: str, title: str, lane: str, *,
+                    target_persona: str | None = None, origin_key: str | None = None) -> tuple[int, int | str]:
     """Create the ledger row and spawn the STEERABLE agent worker.
 
     Returns ``(run_id, subtask_id)``. The worker is a bounded turn loop:
@@ -1349,8 +1377,14 @@ def start_agent_run(task: str, title: str, lane: str) -> tuple[int, int | str]:
                 sid, turn_prompt = resume_sid, steer_text
 
             try:
+                attribution = {}
+                if target_persona is not None:
+                    attribution["target_persona"] = target_persona
+                if origin_key:
+                    attribution["origin_key"] = f"{origin_key}:turn:{turns_done}"
                 envelope = _run_agent_turn(
-                    turn_prompt, lane, int(remaining), run_id, resume_sid=sid
+                    turn_prompt, lane, int(remaining), run_id, resume_sid=sid,
+                    **attribution,
                 )
             except subprocess.TimeoutExpired:
                 if turns_done == 0:
@@ -1454,7 +1488,8 @@ def start_agent_run(task: str, title: str, lane: str) -> tuple[int, int | str]:
         "agent",
         title[:60],
         worker,
-        meta={"subtask_id": subtask_id, "convoy_id": convoy_id, "lane": lane},
+        meta={"subtask_id": subtask_id, "convoy_id": convoy_id, "lane": lane,
+              "target_persona": target_persona, "origin_key": origin_key},
     )
     return run_id, subtask_id
 
@@ -1475,17 +1510,75 @@ def _handle_delegate_task(arguments: dict) -> str:
         return "delegate_task needs the task itself."
     title = str(arguments.get("title") or "").strip() or " ".join(task.split())[:80]
     scope = str(arguments.get("scope") or "").strip().lower()
+    target_persona = str(arguments.get("target_persona") or "").strip() or None
+    if target_persona == "main":
+        target_persona = "default"
+    if target_persona is not None:
+        from personas.lifecycle import show_profile
+        show_profile(target_persona)  # Validate before work can be attributed or spawned.
+    origin_key = str(arguments.get("_learning_origin_key") or "").strip() or None
+    attribution = {}
+    if target_persona is not None:
+        attribution["target_persona"] = target_persona
+    if origin_key:
+        attribution["origin_key"] = origin_key
+    from personas.learning import hooks as learning_hooks
+    from runtime.base import RuntimeRequest
+    import personas
+    # The Realtime caller made the delegation judgment. The target has not
+    # executed yet and must never inherit that claim as its own prediction.
+    learning_persona = personas.get_active_profile_name() or "default"
+    delegation = learning_hooks.prepare_turn(
+        RuntimeRequest(prompt=task, cwd=_repo_root(), task_name="talk_delegation"),
+        persona_id=learning_persona, surface="talk_delegation",
+        origin_id=origin_key or f"talk_delegation:{uuid.uuid4().hex}", task=task,
+        capture_only=True,
+        capture_metadata={"initiating_persona": learning_persona, "target_persona": target_persona},
+    )
+    if delegation.service is not None and delegation.experience is not None:
+        expected = arguments.get("expectation")
+        if isinstance(expected, dict):
+            try:
+                delegation.service.commit_expectation(delegation.experience["id"],
+                    dict(expected, phase="pre_action", author="persona", author_persona_id=learning_persona), action_key="delegation")
+            except Exception as capture_exc:
+                delegation.failure("delegation_expectation", capture_exc)
+        else:
+            delegation.failure("pre_dispatch", "missing_actor_expectation")
     if scope == "substantial":
-        return _delegate_through_archon(task, title)
+        try:
+            receipt = _delegate_through_archon(task, title, **attribution)
+        except Exception as dispatch_exc:
+            delegation.failed(dispatch_exc)
+            raise
+        _record_delegation_receipt(delegation, receipt)
+        return receipt
     lane = _agent_lane(arguments.get("lane"))
-    run_id, subtask_id = start_agent_run(task, title, lane)
+    try:
+        run_id, subtask_id = start_agent_run(task, title, lane, **attribution)
+    except Exception as dispatch_exc:
+        delegation.failed(dispatch_exc)
+        raise
+    _record_delegation_receipt(delegation, {"run_id": run_id, "subtask_id": subtask_id})
     return (
         f"{talk_runs.started_sentinel(run_id, 'agent', title[:60])} "
         f"Task #{subtask_id} is on the work queue and running now."
     )
 
 
-def _delegate_through_archon(task: str, title: str) -> str:
+def _record_delegation_receipt(turn, receipt) -> None:
+    if turn.service is not None and turn.experience is not None:
+        try:
+            turn.service.record_execution(turn.experience["id"], {
+                "stage": "dispatch_returned", "action_key": "delegation", "receipt": receipt,
+                "completion_observed": False,
+            }, attempt_key=f"{turn.attempt_id}:delegated")
+        except Exception as capture_exc:
+            turn.failure("delegation_receipt", capture_exc)
+
+
+def _delegate_through_archon(task: str, title: str, *,
+                             target_persona: str | None = None, origin_key: str | None = None) -> str:
     """The substantial branch: route a delegated task onto the Archon spine."""
 
     import talk_archon  # noqa: PLC0415 — lazy: keeps session-mint import light
@@ -1496,6 +1589,8 @@ def _delegate_through_archon(task: str, title: str) -> str:
             task,
             title=title,
             caller="talk.delegate_task",
+            **({"target_persona": target_persona} if target_persona is not None else {}),
+            **({"origin_key": origin_key} if origin_key else {}),
         )
     except (TalkToolError, talk_archon.ArchonDispatchError) as exc:
         return str(exc)
@@ -1751,6 +1846,7 @@ def start_archon_run(
     *,
     title: str | None = None,
     caller: str = "talk.run_archon",
+    target_persona: str | None = None, origin_key: str | None = None,
 ) -> tuple[int, str, int | str]:
     """Deploy a workflow through Archon. ``(run_id, workflow, subtask_id)``.
 
@@ -1787,6 +1883,29 @@ def start_archon_run(
             error=str(exc),
         )
         raise
+
+    learning_turn = None
+    if target_persona is not None:
+        from personas.learning import hooks as learning_hooks
+        from personas import get_persona_paths
+        from runtime.base import RuntimeRequest
+        from runtime.bootstrap import build_session_start_context
+        target_paths = get_persona_paths(target_persona)
+        # Identity is independent of the learning toggle. A disabled learner
+        # must still execute as the selected persona.
+        identity = build_session_start_context(
+            "talk_archon_delegation", memory_dir=target_paths["memory"],
+            daily_dir=target_paths["memory"] / "daily",
+        ).strip()
+        targeted_brief = f"# Target Persona: {target_persona}\n{identity}\n\n{brief}"
+        learning_turn = learning_hooks.prepare_turn(
+            RuntimeRequest(prompt=targeted_brief, cwd=_repo_root(), task_name="talk_archon_delegation"),
+            persona_id=target_persona, surface="talk_archon_delegation",
+            origin_id=origin_key or f"talk_archon:{uuid.uuid4().hex}", task=brief,
+        )
+        # Archon consumes this exact brief; remote provider-internal steps
+        # remain explicitly outside detailed capture.
+        brief = learning_turn.request.prompt
 
     grant = talk_archon.require_dispatch_allowed(
         resolved, brief, caller=caller, repo_root=_repo_root()
@@ -1831,7 +1950,24 @@ def start_archon_run(
 
         try:
             dispatch = talk_archon.dispatch_now(grant, run_id=run_id)
+            if learning_turn is not None and learning_turn.experience is not None:
+                try:
+                    learning_turn.service.record_context_receipt(
+                        learning_turn.experience["id"], learning_turn.context, brief,
+                        attempt_key=f"{learning_turn.attempt_id}:submitted", phase="submitted",
+                    )
+                    learning_turn.service.record_execution(learning_turn.experience["id"], {
+                        "stage": "dispatched", "run_id": run_id,
+                        "conversation_id": dispatch.conversation_id,
+                        "conversation_db_id": dispatch.conversation_db_id,
+                        "target_persona": target_persona,
+                        "coverage": "brief_context_and_dispatch; remote_internal_steps_uncaptured",
+                    }, attempt_key=f"{learning_turn.attempt_id}:dispatch")
+                except Exception as capture_exc:
+                    learning_turn.failure("archon_dispatch", capture_exc)
         except talk_archon.ArchonDispatchError as exc:
+            if learning_turn is not None:
+                learning_turn.failed(exc)
             message = f"I could not deploy {resolved} through Archon: {exc}"
             ledger(
                 "failure",
@@ -1947,6 +2083,15 @@ def start_archon_run(
             status = str(row.get("status") or "").lower()
             talk_runs.annotate_run(run_id, archon_status=status)
             if status in _ARCHON_TERMINAL:
+                if learning_turn is not None and learning_turn.experience is not None:
+                    try:
+                        learning_turn.service.record_observation(learning_turn.experience["id"], {
+                            "quality": "direct", "status": "partial",
+                            "evidence": {"kind": "archon_terminal", "run_id": archon_run_id, "status": status},
+                            "domain_outcome_observed": False,
+                        }, source_key=f"{learning_turn.attempt_id}:terminal:{archon_run_id}")
+                    except Exception as capture_exc:
+                        learning_turn.failure("archon_terminal", capture_exc)
                 minutes = int((time.time() - started) / 60)
                 where = row.get("working_path") or "no worktree recorded"
                 if status in _ARCHON_OK_TERMINAL:
@@ -1978,6 +2123,8 @@ def start_archon_run(
             "subtask_id": subtask_id,
             "convoy_id": convoy_id,
             "codebase_id": grant.codebase_id,
+            "target_persona": target_persona,
+            "origin_key": origin_key,
         },
     )
     return run_id, resolved, subtask_id

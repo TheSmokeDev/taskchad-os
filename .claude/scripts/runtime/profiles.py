@@ -357,7 +357,7 @@ def normalize_provider(provider: str) -> str:
     return PROVIDER_ALIASES.get(normalized, normalized)
 
 
-def build_profile_for_provider(
+def _build_profile_for_provider(
     provider: str,
     *,
     key_prefix: str,
@@ -406,6 +406,26 @@ def build_profile_for_provider(
             overlay=overlay,
         )
     return None
+
+
+def build_profile_for_provider(
+    provider: str, *, key_prefix: str, request: RuntimeRequest | None = None,
+    model: str | None = None,
+) -> RuntimeProfile | None:
+    """Canonical profile builder with an explicit provider-bound model override.
+
+    Generic models historically ignore RuntimeRequest.model because a Claude
+    model name cannot be sent to arbitrary fallbacks. An explicit matching
+    provider removes that ambiguity; no global environment mutation is needed.
+    """
+    profile = _build_profile_for_provider(provider, key_prefix=key_prefix,
+                                          request=request, model=model)
+    if (profile is not None and request is not None and request.preferred_provider
+            and normalize_provider(request.preferred_provider) == profile.provider
+            and request.model):
+        from dataclasses import replace
+        profile = replace(profile, model=request.model, candidate_models=(request.model,))
+    return profile
 
 
 def resolve_runtime_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
