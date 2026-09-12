@@ -464,6 +464,12 @@ def _check_runtime(report: DiagnosticsReport) -> None:
             if normalized not in providers_to_check:
                 providers_to_check.append(normalized)
 
+        if selection.generic_provider == "opencode-free":
+            report.runtime_providers["opencode-free"] = "CONFIGURED"
+            report.runtime_provider_details["opencode-free"] = (
+                "Anonymous Free selected; paid fallback disabled. "
+                "Live availability is not checked by diagnostics."
+            )
         for provider in providers_to_check:
             try:
                 if provider == "openai-codex":
@@ -744,8 +750,23 @@ def check_environment() -> list[tuple[str, str, str]]:
                 issues.append(("warn", "Buzz CLI compatibility check failed", "Pilot contract is Buzz 0.5.x"))
 
     # Runtime provider available
+    from runtime.profiles import GENERIC_PROVIDER_REGISTRY
+
+    from runtime.selection import resolve_runtime_selection
+    selected_overlay = GENERIC_PROVIDER_REGISTRY.get(resolve_runtime_selection().generic_provider)
+    keyless_runtime_available = bool(
+        selected_overlay and selected_overlay.auth_type == "keyless"
+    )
+    runtime_api_keys = [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "KIMI_API_KEY",
+        "NVIDIA_API_KEY",
+    ]
     has_runtime = (
-        any(env.get(k) for k in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "KIMI_API_KEY", "NVIDIA_API_KEY"])
+        keyless_runtime_available
+        or any(env.get(key) for key in runtime_api_keys)
         or shutil.which("claude")
         or shutil.which("codex")
     )

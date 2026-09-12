@@ -695,7 +695,13 @@ async def handle_provider(adapter: Any, incoming: Any, args: str, *, collect_onl
 
 async def handle_model(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
     """Switch runtime provider."""
-    return _switch_provider(args.strip() if args else "")
+    choice = args.strip() if args else ""
+    if not choice:
+        return _switch_provider("")
+    from config import ENV_FILE
+    from runtime.model_switch import switch_runtime_model
+
+    return await switch_runtime_model(choice, env_path=ENV_FILE)
 
 
 async def handle_restart(adapter: Any, incoming: Any, args: str, *, collect_only: bool = False) -> str:
@@ -4977,13 +4983,23 @@ def _get_provider_status() -> str:
                 "API key",
                 bool(os.getenv("NVIDIA_API_KEY", "").strip()),
             ),
+            "opencode-free": lambda: ("OpenCode Free", "keyless", True),
         }
 
-        for provider in DEFAULT_PROVIDER_CHAIN:
+        providers_to_check = list(DEFAULT_PROVIDER_CHAIN)
+        if selection.generic_provider == "opencode-free":
+            providers_to_check.append("opencode-free")
+        for provider in providers_to_check:
             try:
                 name, auth_type, available = provider_checks.get(provider, lambda: (provider, "unknown", False))()
                 profile = build_profile_for_provider(provider, key_prefix="status-check")
                 healthy = is_profile_available(profile) if profile else False
+                if provider == "opencode-free":
+                    lines.append(
+                        "  CONFIGURED *OpenCode Free* (anonymous; paid fallback disabled; "
+                        "live availability not checked by /provider)"
+                    )
+                    continue
                 status_icon = "ON" if (available and healthy) else ("AUTH" if available else "OFF")
                 lines.append(f"  {status_icon} *{name}* ({auth_type})")
             except Exception as e:
@@ -5057,9 +5073,14 @@ def _switch_provider(choice: str) -> str:
             "  /model kimi:k3 - Kimi pinned model (default k3)\n"
             "  /model nvidia - NVIDIA-hosted Kimi K2.6 lane\n"
             "  /model nvidia:<model> - pin an NVIDIA NIM model\n"
+            "  /model free - keyless OpenCode Free lane (no account or API key)\n"
+            "  /model free:<model> - pin a current OpenCode Free model\n"
             "  /model auto - automatic lane/provider routing"
         )
 
+    from runtime.profiles import normalize_provider
+    if normalize_provider(choice.split(":", 1)[0]) == "opencode-free":
+        raise ValueError("Free requires verified async switching through /model")
     if resolve_runtime_model_choice(choice):
         try:
             from config import ENV_FILE as env_path
@@ -5100,7 +5121,8 @@ def _switch_provider(choice: str) -> str:
         return (
             "Unknown runtime selection: "
             f"{choice}. Use: claude, sonnet, opus, fable, codex, codex:default, "
-            "sol, terra, luna, codex:<model>, gpt5.5, gemini, openrouter, openai, kimi, nvidia, or auto"
+            "sol, terra, luna, codex:<model>, gpt5.5, gemini, openrouter, openai, "
+            "kimi, nvidia, free, or auto"
         )
     except Exception as e:
         return f"Failed to switch provider: {e}"

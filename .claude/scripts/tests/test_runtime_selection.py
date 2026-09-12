@@ -291,6 +291,26 @@ def test_switch_provider_writes_lane_aware_env(monkeypatch: pytest.MonkeyPatch) 
     assert removals == []
 
 
+def test_sync_free_switch_cannot_bypass_verification() -> None:
+    import core_handlers
+
+    with pytest.raises(ValueError, match="verified async switching"):
+        core_handlers._switch_provider("free")
+
+
+def test_model_help_lists_keyless_free_selector(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core_handlers
+
+    monkeypatch.setattr(core_handlers, "resolve_runtime_selection", lambda _env=None: RuntimeSelection())
+    monkeypatch.setattr(core_handlers, "selected_runtime_model", lambda _selection: None)
+    monkeypatch.setattr(core_handlers, "runtime_model_warnings", lambda _selection: [])
+
+    message = core_handlers._switch_provider("")
+
+    assert "/model free - keyless OpenCode Free lane" in message
+    assert "/model free:<model> - pin a current OpenCode Free model" in message
+
+
 def test_switch_provider_codex_default_warns_and_clears_model_pin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -414,6 +434,38 @@ def test_provider_status_omits_legacy_chain(monkeypatch: pytest.MonkeyPatch) -> 
     assert "Generic tool route: Codex -> Gemini" in message
     assert "generic preferred provider: Codex" in message
     assert "Chain:" not in message
+
+
+def test_provider_status_lists_selected_keyless_free_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import core_handlers
+    import runtime.health as runtime_health
+    import runtime.profiles as profiles
+    import runtime.routing as routing
+    import runtime.selection as selection
+
+    monkeypatch.setattr(
+        core_handlers,
+        "resolve_runtime_selection",
+        lambda _env=None: selection.RuntimeSelection(
+            lane=RUNTIME_LANE_GENERIC,
+            generic_provider="opencode-free",
+        ),
+    )
+    monkeypatch.setattr(routing, "DEFAULT_PROVIDER_CHAIN", ())
+    monkeypatch.setattr(
+        profiles,
+        "build_profile_for_provider",
+        lambda provider, **_kwargs: object() if provider == "opencode-free" else None,
+    )
+    monkeypatch.setattr(runtime_health, "is_profile_available", lambda _profile: True)
+
+    message = core_handlers._get_provider_status()
+
+    assert "configured model: deepseek-v4-flash-free" in message
+    assert "CONFIGURED *OpenCode Free*" in message
+    assert "live availability not checked" in message
 
 
 @pytest.mark.asyncio

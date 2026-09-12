@@ -25,7 +25,7 @@ from runtime.profiles import (
     RuntimeProfile,
     build_profile_for_provider,
 )
-from runtime.routing import GENERIC_TEXT_ROUTE, GENERIC_TOOL_ROUTE
+from runtime.routing import GENERIC_CALLER_TOOLS_ROUTE, GENERIC_TEXT_ROUTE, GENERIC_TOOL_ROUTE
 from runtime.selection import (
     _GENERIC_PROVIDER_ALIASES,
     _LEGACY_PROVIDER_WRITE_VALUES,
@@ -39,6 +39,7 @@ CANONICAL_KEYS = (
     "gemini-cli",
     "kimi",
     "nvidia-kimi",
+    "opencode-free",
 )
 
 
@@ -50,7 +51,7 @@ def test_registry_completeness() -> None:
     for key, overlay in GENERIC_PROVIDER_REGISTRY.items():
         assert isinstance(overlay, GenericProviderOverlay)
         assert overlay.transport in {"subprocess_cli", "openai_responses"}
-        assert overlay.auth_type in {"codex", "gemini", "api_key"}
+        assert overlay.auth_type in {"codex", "gemini", "api_key", "keyless"}
         assert overlay.display_name, f"{key}: display_name empty"
         assert overlay.model_env_var, f"{key}: model_env_var empty"
         assert overlay.default_model, f"{key}: default_model empty"
@@ -58,7 +59,15 @@ def test_registry_completeness() -> None:
         assert overlay.legacy_write_key, f"{key}: legacy_write_key empty"
         # transport-specific invariants
         if overlay.transport == "openai_responses":
-            assert overlay.api_key_env_vars, f"{key}: HTTP transport needs api_key_env_vars"
+            if overlay.auth_type == "keyless":
+                assert not overlay.api_key_env_vars, (
+                    f"{key}: keyless HTTP transport must not require credentials"
+                )
+                assert overlay.default_headers.get("Authorization") == "", (
+                    f"{key}: keyless HTTP transport must clear Authorization"
+                )
+            else:
+                assert overlay.api_key_env_vars, f"{key}: HTTP transport needs api_key_env_vars"
         if overlay.transport == "subprocess_cli":
             assert not overlay.api_key_env_vars, (
                 f"{key}: CLI transport should not set api_key_env_vars"
@@ -93,7 +102,7 @@ def test_tool_route_derivation() -> None:
 
 
 def test_text_route_derivation() -> None:
-    """GENERIC_TEXT_ROUTE includes every registry entry in text_route_priority order."""
+    """GENERIC_TEXT_ROUTE includes auto-routable entries in priority order."""
 
     assert GENERIC_TEXT_ROUTE == (
         "openai-compatible",
@@ -103,9 +112,13 @@ def test_text_route_derivation() -> None:
         "kimi",
         "nvidia-kimi",
     )
+    assert "opencode-free" not in GENERIC_TEXT_ROUTE
+    assert "opencode-free" not in GENERIC_CALLER_TOOLS_ROUTE
 
     text_priorities = [
-        overlay.text_route_priority for overlay in GENERIC_PROVIDER_REGISTRY.values()
+        overlay.text_route_priority
+        for overlay in GENERIC_PROVIDER_REGISTRY.values()
+        if overlay.auto_route
     ]
     assert len(set(text_priorities)) == len(text_priorities), (
         "Duplicate text_route_priority produces arbitrary tie-break ordering"
@@ -145,6 +158,7 @@ def test_legacy_write_values_derivation() -> None:
         "openai-compatible": "openai",
         "kimi": "kimi",
         "nvidia-kimi": "nvidia",
+        "opencode-free": "opencode_free",
     }
 
     for canonical, overlay in GENERIC_PROVIDER_REGISTRY.items():
@@ -166,6 +180,7 @@ def test_legacy_write_values_derivation() -> None:
         ("openrouter", OpenAICompatibleRuntime),
         ("kimi", OpenAICompatibleRuntime),
         ("nvidia-kimi", OpenAICompatibleRuntime),
+        ("opencode-free", OpenAICompatibleRuntime),
     ],
 )
 def test_adapter_for_dispatch(provider: str, adapter_cls: type) -> None:
@@ -191,7 +206,7 @@ def test_build_profile_returns_none_when_unavailable(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(profiles, "gemini_auth_available", lambda _auth: False)
 
     request = RuntimeRequest(prompt="hi", cwd=".", task_name="memory_flush")
-    for canonical in CANONICAL_KEYS:
+    for canonical in (key for key in CANONICAL_KEYS if key != "opencode-free"):
         profile = build_profile_for_provider(canonical, key_prefix="primary", request=request)
         assert profile is None, f"{canonical}: expected None when unavailable, got {profile!r}"
 
@@ -204,11 +219,11 @@ def test_unknown_provider_returns_none() -> None:
 
 
 def test_tool_route_priority_matches_membership() -> None:
-    """An overlay's tool_route_priority >= 0 iff its canonical name is in GENERIC_TOOL_ROUTE."""
+    """Only auto-routable overlays with a tool priority join GENERIC_TOOL_ROUTE."""
 
     for canonical, overlay in GENERIC_PROVIDER_REGISTRY.items():
         in_tool_route = canonical in GENERIC_TOOL_ROUTE
-        priority_allows_tool = overlay.tool_route_priority >= 0
+        priority_allows_tool = overlay.auto_route and overlay.tool_route_priority >= 0
         assert in_tool_route == priority_allows_tool, (
             f"{canonical}: tool_route_priority={overlay.tool_route_priority}, "
             f"in_tool_route={in_tool_route}"
@@ -323,6 +338,94 @@ def test_kimi_model_pin_uses_kimi_env_key(monkeypatch: pytest.MonkeyPatch) -> No
     assert default is not None
     assert default.model == "k3"
     assert default.persist_model is None
+
+
+def test_opencode_free_profile_selection_and_model_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenCode Free is keyless, slash-selectable, and accepts a provider model pin."""
+
+    from runtime.base import RUNTIME_LANE_GENERIC
+    from runtime.model_control import resolve_runtime_model_choice
+    from runtime.selection import (
+        GENERIC_PROVIDER_ENV_KEY,
+        LEGACY_RUNTIME_PROVIDER_KEY,
+        RUNTIME_LANE_ENV_KEY,
+        apply_runtime_selection_choice,
+        runtime_selection_choice,
+    )
+
+    monkeypatch.delenv("SECOND_BRAIN_OPENCODE_FREE_MODEL", raising=False)
+    profile = build_profile_for_provider("free", key_prefix="primary")
+
+    assert profile is not None
+    assert profile.provider == "opencode-free"
+    assert profile.model == "deepseek-v4-flash-free"
+    assert profile.base_url == "https://opencode.ai/zen/v1"
+    assert profile.api_key == "opencode-free-keyless"
+    assert profile.default_headers["Authorization"] == ""
+    assert GENERIC_PROVIDER_REGISTRY["opencode-free"].wire_api == "chat_completions"
+    assert OpenAICompatibleRuntime(profile).supports_caller_tool_defs() is True
+
+    env: dict[str, str] = {}
+    selection = apply_runtime_selection_choice("free", environ=env)
+    assert selection.generic_provider == "opencode-free"
+    assert env[GENERIC_PROVIDER_ENV_KEY] == "opencode-free"
+    assert env[LEGACY_RUNTIME_PROVIDER_KEY] == "opencode_free"
+    assert env[RUNTIME_LANE_ENV_KEY] == RUNTIME_LANE_GENERIC
+    assert runtime_selection_choice(selection) == "free"
+
+    pin = resolve_runtime_model_choice("free:mimo-v2.5-free")
+    assert pin is not None
+    assert pin.provider == "opencode-free"
+    assert pin.model_env_key == "SECOND_BRAIN_OPENCODE_FREE_MODEL"
+    assert pin.model == "mimo-v2.5-free"
+
+
+def test_opencode_free_runtime_clears_sdk_bearer_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The OpenAI SDK receives the blank Authorization override required by OpenCode Free."""
+
+    import asyncio
+    import sys
+    import types
+
+    captured: dict = {}
+
+    class _FakeMessage:
+        content = "OPENCODE_FREE_OK"
+
+    class _FakeChoice:
+        message = _FakeMessage()
+        finish_reason = "stop"
+
+    class _FakeCompletion:
+        choices = [_FakeChoice()]
+
+    class _FakeChatCompletions:
+        async def create(self, **_kwargs):
+            return _FakeCompletion()
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.chat = types.SimpleNamespace(completions=_FakeChatCompletions())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(AsyncOpenAI=_FakeClient))
+    profile = build_profile_for_provider("opencode-free", key_prefix="primary")
+    assert profile is not None
+
+    result = asyncio.run(
+        OpenAICompatibleRuntime(profile).run(
+            RuntimeRequest(
+                prompt="Reply with exactly OPENCODE_FREE_OK",
+                cwd=".",
+                task_name="chat_turn",
+            )
+        )
+    )
+
+    assert captured["api_key"] == "opencode-free-keyless"
+    assert captured["base_url"] == "https://opencode.ai/zen/v1"
+    assert captured["default_headers"]["Authorization"] == ""
+    assert result.text == "OPENCODE_FREE_OK"
 
 
 def test_kimi_adapter_ignores_claude_lane_request_model(

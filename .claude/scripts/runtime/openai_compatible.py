@@ -66,17 +66,29 @@ def _model_only_output_limit(request: RuntimeRequest) -> int:
     return requested if requested is not None else 4096
 
 
-def _require_model_only_request(request: RuntimeRequest) -> None:
+def _require_model_only_request(request: RuntimeRequest, profile=None) -> None:
     if not request.model_only:
         return
     _base.assert_model_only_contract(request)
-    if request.max_budget_usd is not None:
+    if request.max_budget_usd is not None and not (
+        profile is not None and profile.provider == "opencode-free"
+    ):
         # Tokens are measurable; an arbitrary provider's billing/pricing is not.
         # Do not pretend a token limit enforces an operator's USD ceiling.
         raise RuntimeUnsupportedCapabilityError(
             "OpenAI-compatible model-only runtime cannot enforce a non-null USD budget; "
             "configure a supported budget-aware runtime or an explicit token-only policy"
         )
+    if profile is not None and profile.provider == "opencode-free":
+        import math
+
+        from .opencode_free import FreeRuntimeError, validate_free_profile
+        validate_free_profile(profile)
+        budget = request.max_budget_usd
+        if budget is not None and (
+            type(budget) not in (int, float) or not math.isfinite(budget) or budget < 0
+        ):
+            raise FreeRuntimeError("INVALID_BUDGET")
     _model_only_output_limit(request)
 
 
@@ -226,7 +238,14 @@ class OpenAICompatibleRuntime:
         )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
-        _require_model_only_request(request)
+        if self.profile.provider == "opencode-free":
+            from dataclasses import replace
+
+            from .opencode_free import bind_free_request
+            request = bind_free_request(replace(
+                request, metadata={**(request.metadata or {}), "free_only": True},
+            ))
+        _require_model_only_request(request, self.profile)
         if not self.supports(request):
             raise RuntimeUnsupportedCapabilityError(
                 f"OpenAI-compatible runtime does not support capability {request.capability}"
@@ -239,7 +258,13 @@ class OpenAICompatibleRuntime:
         except ImportError as exc:
             raise RuntimeConfigError("openai package is not installed") from exc
 
-        client = AsyncOpenAI(api_key=self.profile.api_key, base_url=self.profile.base_url)
+        from .opencode_free import FREE_PROVIDER, free_client_kwargs
+        free = self.profile.provider == FREE_PROVIDER
+        client_kwargs = free_client_kwargs(self.profile) if free else {
+            "api_key": self.profile.api_key, "base_url": self.profile.base_url,
+            "default_headers": dict(self.profile.default_headers),
+        }
+        client = AsyncOpenAI(**client_kwargs)
         # The resolved profile already applies explicit matching provider pins.
         # Request hints may belong to Claude and never override another provider.
         model = self.profile.model
@@ -264,7 +289,8 @@ class OpenAICompatibleRuntime:
                 "tools": "none",
                 "wire_api": wire_api,
                 "max_output_tokens": _model_only_output_limit(request),
-                "usd_budget": None,
+                "usd_budget": request.max_budget_usd,
+                **({"cost_policy": "anonymous_free_only"} if free else {}),
             }
 
         try:
@@ -330,6 +356,9 @@ class OpenAICompatibleRuntime:
                 if not text:
                     text = _extract_response_text(response)
         except Exception as exc:
+            if free:
+                from .opencode_free import FreeRuntimeError, error_code
+                raise FreeRuntimeError(error_code(exc)) from exc
             error_text = str(exc).lower()
             if any(
                 token in error_text
@@ -339,8 +368,12 @@ class OpenAICompatibleRuntime:
             if "auth" in error_text or "api key" in error_text or "401" in error_text:
                 raise RuntimeConfigError(str(exc)) from exc
             raise
+        finally:
+            close = getattr(client, "close", None)
+            if close is not None:
+                await close()
 
-        if request.model_only and not text.strip():
+        if (request.model_only or free) and not text.strip():
             raise RuntimeExecutionError("model-only runtime returned no completed text")
         metadata["image_inputs"] = [{**r, "delivered": True} for r in image_receipts]
         return RuntimeResult(
@@ -351,6 +384,7 @@ class OpenAICompatibleRuntime:
             profile_key=self.profile.key,
             metadata=metadata,
             usage=usage or None,
+            cost_usd=0.0 if free else None,
             tool_call_count=len(tool_calls),
             tool_names_used=sorted({c.name for c in tool_calls if c.name}),
             tool_calls=tool_calls,
@@ -396,7 +430,7 @@ class OpenAICompatibleRuntime:
             if carries_tools:
                 kwargs["tools"] = tool_defs
             if request.model_only:
-                _require_model_only_request(request)
+                _require_model_only_request(request, self.profile)
                 kwargs.update(
                     tools=[],
                     tool_choice="none",
@@ -427,6 +461,12 @@ class OpenAICompatibleRuntime:
                     )
 
             if not carries_tools or not raw_calls:
+                if self.profile.provider == "opencode-free" and (
+                    raw_calls or getattr(message, "function_call", None)
+                    or getattr(choice, "finish_reason", None) != "stop" or not text
+                ):
+                    from .opencode_free import FreeRuntimeError
+                    raise FreeRuntimeError("INCOMPLETE_RESPONSE")
                 return text, collected
 
             if request.tool_dispatch is None:

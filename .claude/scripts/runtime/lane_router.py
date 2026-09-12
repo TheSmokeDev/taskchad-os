@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import uuid
 import logging
 import math
 import os
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
@@ -46,6 +46,13 @@ from .gemini_cli import GeminiCliRuntime
 from .health import mark_profile_retryable_failure, mark_profile_success, mark_profile_unavailable
 from .openai_codex_app_server import OpenAICodexAppServerRuntime
 from .openai_compatible import OpenAICompatibleRuntime
+from .opencode_free import (
+    FREE_PROVIDER,
+    FreeRuntimeError,
+    bind_free_request,
+    error_code,
+    requires_free,
+)
 from .profiles import (
     GENERIC_PROVIDER_REGISTRY,
     RuntimeProfile,
@@ -106,6 +113,9 @@ def _adapter_timeout_seconds(request: RuntimeRequest) -> float | None:
 def resolve_runtime_lane(request: RuntimeRequest) -> str:
     """Choose the top-level runtime lane for a request."""
 
+    if requires_free(request):
+        bind_free_request(request)
+        return RUNTIME_LANE_GENERIC
     if request.runtime_lane:
         return request.runtime_lane
     selection = resolve_runtime_selection()
@@ -247,6 +257,10 @@ def _iter_lane_profiles(lane: str, request: RuntimeRequest):
 
 
 def _resolve_lane_profiles(request: RuntimeRequest) -> Iterable[RuntimeProfile]:
+    if requires_free(request):
+        pinned = bind_free_request(request)
+        profile = build_profile_for_provider(FREE_PROVIDER, key_prefix="free-only", request=pinned)
+        return [profile] if profile is not None else []
     lane = resolve_runtime_lane(request)
     if not request.model_only:
         # Preserve this long-standing execution/test seam while returning the
@@ -351,7 +365,9 @@ async def _run_observed_attempt(adapter, request, timeout_s, attempt):
         try:
             result = await asyncio.wait_for(adapter.run(request), timeout=timeout_s)
         except BaseException as exc:
-            await _observe_attempt(request, {**attempt, "phase": "failed", "error_type": type(exc).__name__})
+            await _observe_attempt(request, {
+                **attempt, "phase": "failed", "error_type": type(exc).__name__,
+            })
             raise
         await _observe_attempt(request, {
             **attempt, "phase": "succeeded", "model": result.model or attempt["model"],
@@ -367,6 +383,7 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
 
     from . import activity
 
+    request = bind_free_request(request)
     async with activity.foreground_request(request):
         return await _run_with_runtime_lanes(request)
 
@@ -378,6 +395,8 @@ async def _run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
     # when HOMIE_KILLSWITCH_LLM=disabled. Callers (engine.py, memory_reflect,
     # memory_weekly, memory_dream) catch this explicitly and degrade cleanly.
     kill_switches.requireEnabled("llm", caller="lane_router")
+    request = bind_free_request(request)
+    free_only = requires_free(request)
 
     # Epic #236 — registry provenance. Every lane crosses this boundary, so it
     # is the one place a hand-assembled `tool_defs` array can be caught before
@@ -444,22 +463,32 @@ async def _run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
         attempt = {
             "attempt_id": uuid.uuid4().hex, "provider": profile.provider,
             "profile": profile.key, "model": profile.model,
-            "lane": RUNTIME_LANE_CLAUDE_NATIVE if profile.provider == "claude" else RUNTIME_LANE_GENERIC,
+            "lane": (
+                RUNTIME_LANE_CLAUDE_NATIVE if profile.provider == "claude" else RUNTIME_LANE_GENERIC
+            ),
         }
         try:
             result = await _run_observed_attempt(adapter, effective_request, timeout_s, attempt)
         except RuntimeUnsupportedCapabilityError as exc:
+            if free_only:
+                raise FreeRuntimeError(error_code(exc)) from exc
             errors.append(f"{profile.key}: {exc}")
             continue
         except RuntimeRetryableError as exc:
+            if free_only:
+                raise FreeRuntimeError(error_code(exc)) from exc
             mark_profile_retryable_failure(profile, str(exc))
             errors.append(f"{profile.key}: retryable error {exc}")
             continue
         except RuntimeConfigError as exc:
+            if free_only:
+                raise FreeRuntimeError(error_code(exc)) from exc
             mark_profile_unavailable(profile, str(exc))
             errors.append(f"{profile.key}: unavailable {exc}")
             continue
         except TimeoutError:
+            if free_only:
+                raise FreeRuntimeError("TIMEOUT") from None
             # asyncio.TimeoutError IS builtins.TimeoutError on 3.11+. Must
             # precede `except Exception` (TimeoutError ⊂ OSError ⊂ Exception),
             # else the generic arm mislabels the message. `asyncio.CancelledError`
@@ -469,9 +498,14 @@ async def _run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
             errors.append(f"{profile.key}: timed out after {timeout_s}s")
             continue
         except Exception as exc:
+            if free_only:
+                raise FreeRuntimeError(error_code(exc)) from exc
             mark_profile_retryable_failure(profile, str(exc))
             errors.append(f"{profile.key}: {exc}")
             continue
+
+        if free_only and result.provider != FREE_PROVIDER:
+            raise FreeRuntimeError("PROVIDER_MISMATCH")
 
         # Success bookkeeping stays OUTSIDE the provider try/except: an
         # exception here must never convert a successful run into a provider
@@ -492,6 +526,8 @@ async def _run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
         ) if effective_request.model_only else lane
         return result
 
+    if free_only:
+        raise FreeRuntimeError("UNSUPPORTED_CAPABILITY" if errors else "NO_FREE_PROFILE")
     joined = "; ".join(errors) if errors else "no runtime profiles resolved"
     message = (
         f"No runtime could satisfy task '{request.task_name}' "

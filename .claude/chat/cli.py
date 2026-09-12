@@ -378,7 +378,7 @@ def _console_hard_exit() -> None:
 @main.command()
 @click.option("-q", "--query", default=None, help="Single query (non-interactive)")
 @click.option("-Q", "--quiet", is_flag=True, help="Quiet/JSON output (for Paperclip)")
-@click.option("-m", "--model", default=None, help="Select runtime lane/provider/model (claude/codex/gemini/openrouter/openai/kimi/nvidia/auto, sol/terra/luna, provider:model, or gpt5.5)")
+@click.option("-m", "--model", default=None, help="Select runtime lane/provider/model (claude/codex/gemini/openrouter/openai/kimi/nvidia/free/auto, sol/terra/luna, provider:model, or gpt5.5)")
 @click.option("-t", "--toolsets", default=None, help="Filter tool access (reserved for future)")
 @click.option("--resume", "-r", "resume_id", default=None, help="Resume session by ID")
 @click.option(
@@ -439,7 +439,19 @@ def chat(query, quiet, model, toolsets, resume_id, resume_strict, continue_last,
     # -m: Apply an in-process runtime selection override for this CLI session.
     if model:
         model_arg = model.strip()
-        if resolve_runtime_model_choice(model_arg):
+        from runtime.profiles import normalize_provider
+        model_choice = resolve_runtime_model_choice(model_arg)
+        provider = model_choice.provider if model_choice else normalize_provider(model_arg)
+        if provider == "opencode-free":
+            from runtime.model_switch import switch_runtime_model
+            reply = asyncio.run(switch_runtime_model(model_arg, environ=os.environ))
+            if reply.is_error:
+                if quiet:
+                    from adapters.cli_adapter import build_quiet_error_envelope
+                    click.echo(build_quiet_error_envelope(RuntimeError(str(reply)), source=source))
+                    raise SystemExit(1)
+                raise click.ClickException(str(reply))
+        elif model_choice:
             apply_runtime_model_choice(model_arg, environ=os.environ)
         else:
             apply_runtime_selection_choice(model_arg.lower(), environ=os.environ)
@@ -989,6 +1001,11 @@ def doctor():
         f"\nRuntime providers: "
         f"{len([v for v in report.runtime_providers.values() if v == 'ON'])} active"
     )
+    if report.runtime_selected_generic_provider == "opencode-free":
+        click.echo(
+            "Selected runtime: OpenCode Free (configured; live availability unverified; "
+            "paid fallback disabled)."
+        )
     if report.runtime_auth_issues:
         click.echo("Runtime auth attention:")
         for provider, issue in report.runtime_auth_issues.items():
@@ -1024,7 +1041,10 @@ def doctor():
             + (1 if has_diagnostics_failure else 0)
         )
         if has_diagnostics_failure and not errors:
-            click.echo("\nNo runtime providers available — check API keys or CLI installs.")
+            if report.runtime_selected_generic_provider == "opencode-free":
+                click.echo("\nFree availability is unverified. Use /model free for a bounded probe.")
+            else:
+                click.echo("\nNo runtime providers available — check API keys or CLI installs.")
         click.echo(f"\n{problems} issue(s) found. Fix them and re-run `thehomie doctor`.")
         sys.exit(1)
     else:
@@ -3169,6 +3189,7 @@ def _run_setup_wizard(advanced: bool, headless_google: bool):
 
     # Step 1: Runtime Selection
     click.echo("Step 1/4: Runtime Selection\n")
+    click.echo("  Optional Free relay: use /model free to verify and opt in explicitly.\n")
     providers_found = _detect_providers(env_values)
     current_selection = resolve_runtime_selection(env_values)
 
@@ -3390,6 +3411,9 @@ def _detect_providers(env_values: dict[str, str]) -> dict[str, bool]:
         "openai": bool(env_values.get("OPENAI_API_KEY", "")),
         "kimi": bool(env_values.get("KIMI_API_KEY", "")),
         "nvidia": bool(env_values.get("NVIDIA_API_KEY", "")),
+        # Installed is not selected: otherwise setup's first-available branch
+        # silently opted a credential-free installation into this external relay.
+        "free": resolve_runtime_selection(env_values).generic_provider == "opencode-free",
     }
 
 

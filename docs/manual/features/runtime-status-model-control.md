@@ -2,7 +2,7 @@
 
 Status: active baseline
 Owner: lane-first runtime selection
-Last updated: 2026-09-10
+Last updated: 2026-09-12
 
 ## What It Does
 
@@ -24,7 +24,7 @@ completed. See [Persona Harness Learning](persona-harness-learning.md).
 
 ## Operator Entry Points
 
-- Chat/Telegram: `/provider`, `/model`, `/diagnostics`
+- Chat/Telegram/Discord: `/provider`, `/model`, `/diagnostics`
 - CLI: `thehomie status --json`, `thehomie doctor`,
   `thehomie chat -m <lane-or-provider>`
 - Dashboard: `/agents`, `/usage`
@@ -69,7 +69,7 @@ uv run pytest tests/test_runtime_selection.py tests/test_diagnostics.py tests/te
 ## Model Pinning And Codex Aliases
 
 Runtime selection is lane-first: `/model claude`, `/model codex`, `/model
-gemini`, `/model openrouter`, `/model openai`, `/model kimi`, and `/model auto`
+gemini`, `/model openrouter`, `/model openai`, `/model kimi`, `/model free`, and `/model auto`
 choose where the next request runs. Provider-specific model pins use
 `provider:model`, but Codex also accepts short GPT-style aliases:
 
@@ -159,6 +159,76 @@ from the native `/model kimi:k3` coding lane. The NVIDIA route uses the shared
 OpenAI-compatible chat-completions adapter and is last in the generic text
 fallback route.
 
+## OpenCode Free Lane
+
+Select `/model free` or `/model free:<model>` in Telegram or Discord. In
+Discord's native `/model` command, put `free` in the **args** option; typed
+commands work too. CLI equivalents are `thehomie chat -q "/model free" -Q`
+(persistent profile selection) and `thehomie chat -m free -q "hi" -Q`
+(process-local selection). Existing role gates and profile scope are unchanged.
+
+The keyless relay is `https://opencode.ai/zen/v1`. No account, API key, OAuth,
+or subscription is needed. The bundled default is `deepseek-v4-flash-free`;
+`/model free:mimo-v2.5-free` illustrates a model pin. Free promotions rotate:
+there is no automatic catalog discovery in this release. An unsupported or
+retired model is an error, not permission to use another provider.
+
+### Verify before changing selection
+
+`/model free` and Free CLI overrides first make a maximum-30-second anonymous
+inference probe containing only `Reply exactly OK.` No system prompt, vault,
+history, images, or tool schemas are included. Only a completed response allows
+the canonical selection/model keys to be committed. Persistence uses a file
+lock and atomic replacement; a superseded probe cannot overwrite a newer choice.
+
+On failure, the previous selection stays active, with an explicit error such as:
+
+> Free switch failed — HTTP 429. Selection unchanged by this request: generic
+> runtime via Codex [model: chatgpt-plan-default]. Try again later.
+
+After switching successfully, **Free stays Free**. Rate limits, timeouts,
+unsupported tools, and provider errors terminate that request. There is no
+retry through paid APIs, Claude, Codex, Gemini, or subscription quota. Other
+providers' normal fallback behavior is unchanged. Free is never inserted into
+an automatic route or selected for unrelated profiles.
+
+### Harness and capabilities
+
+Free reuses the existing model-neutral memory/learning lifecycle and scoped
+caller-tool dispatcher. It does not implement provider-native shell tools,
+CLI session resume, or provider hooks. Requests requiring those features fail
+visibly; the runtime never silently drops required tools. This means a legacy
+chat profile still using only native CLI tools may need an existing scoped
+caller-tool configuration for tool-enabled Free turns. No grants are added by
+selecting a model.
+
+Model-only learning continues to send `tools=[]`, `tool_choice=none` and an
+output-token limit. A non-null USD budget is accepted only for the fixed,
+anonymous Free endpoint; its runtime inference cost is reported as zero under
+that contract. Other HTTP adapters still reject budgets they cannot enforce.
+Free does not make external tool services free, and a model switch is not
+permission for external actions.
+
+The SDK placeholder key never goes on the wire: Authorization is empty, SDK
+account/project headers cannot inherit credentials, environment proxies are
+not inherited, and redirects and SDK retries are disabled. Ordinary Free turns
+send their normal assembled context to an external provider; **keyless is not
+local or a data-retention guarantee**. Avoid sensitive inputs unless you accept
+the provider's current data policy. The probe verifies availability, not privacy.
+
+`/provider`, diagnostics and status distinguish **configured** Free from a
+completed execution. Quiet JSON failures retain `success=false` and the error;
+execution receipts retain the actual provider/model. No automatic bot restart
+or change to installation defaults accompanies this source release. Native
+menus refresh through the existing adapter startup/sync path when deployed.
+
+### Regression tests
+
+Run `tests/test_opencode_free.py`, the runtime selection/routing/CLI suites,
+and the channel and persona-learning suites. Tests use synthetic messages,
+mock HTTP transports and temporary state, never the operator's live profile.
+The wire tests inspect SDK-built headers, not only constructor arguments.
+
 ## Per-Adapter Runtime Deadlines (#133)
 
 Every `adapter.run()` at the lane chokepoint is bounded by `asyncio.wait_for`,
@@ -176,7 +246,7 @@ Semantics to know:
   providers can legitimately take up to N x timeout before the request fails.
 - `<= 0` disables the deadline entirely (escape hatch — nothing bounds the call).
 - On timeout the profile is marked retryable-failed and the chain **continues**
-  to the next provider; an operator cancel (`CancelledError`) propagates
+  to the next provider **except under the strict Free-only policy**; an operator cancel (`CancelledError`) propagates
   untouched instead of being mislabeled a timeout.
 - On Windows the cancelled CLI child is **tree-killed** (`taskkill /T`) — the
   npm `.CMD` wrapper trap left the real Node process alive under a plain kill.

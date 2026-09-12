@@ -146,7 +146,7 @@ Deep dive: [Telegram Command Menu](telegram-command-menu.md) · [Runtime Status 
 | `/mode` | Show the current mode | |
 | `/voice` | Persist voice reply behavior across Telegram and Discord | `always` = voice + text, `auto` = reply in voice to voice messages, `off` = text only; `/voice on` aliases `always` |
 | `/provider` | Runtime lane status — selection, routes, health | admin |
-| `/model` | Select lane/provider/model (claude, sonnet, opus, fable, codex, sol, terra, luna, gemini, openrouter, openai, kimi, auto) | admin; Discord-native slash command; `sol` pins Codex GPT-5.6 Sol with xhigh reasoning; `kimi:k3` pins the Kimi lane model |
+| `/model` | Select lane/provider/model (claude, sonnet, opus, fable, codex, sol, terra, luna, gemini, openrouter, openai, kimi, free, auto) | admin; Discord-native slash command; `sol` pins Codex GPT-5.6 Sol with xhigh reasoning; `kimi:k3` pins the Kimi lane model; `free` is keyless OpenCode Free and accepts `free:<model>` |
 | `/reload` | Reload bot config without restarting | admin |
 | `/restart` | Restart the bot — kill this process and start fresh | admin |
 | `/update` | Safe framework + toolchain update — `status`, `now`, `auto on|off|status`, `history` | admin |
@@ -391,3 +391,12 @@ thehomie team close <id>         # Force-close team session
 
 Public-framework safe. Public export still goes through `scripts/sanitize.py`;
 never copy manually.
+
+### Free model selection (Telegram, Discord and CLI)
+
+Use `/model free` or `/model free:<model>`. Discord's native command takes the
+selector in `args`. A synthetic anonymous probe must succeed before switching;
+failure preserves and names the previous selection. Once Free is selected,
+failure stops the request without paid/subscription fallback. See
+[Runtime Status And Model Control](runtime-status-model-control.md#opencode-free-lane)
+for capability limits, privacy, error codes and deployment requirements.

@@ -1232,6 +1232,7 @@ class ChatRouter:
                             cmd, adapter, incoming, cmd_args, collect_only=True,
                         )
                         if r:
+                            had_error = had_error or bool(getattr(r, "is_error", False))
                             replies.append(f"*/{cmd}*\n{r}")
                     except Exception as e:
                         had_error = True
@@ -1303,6 +1304,7 @@ class ChatRouter:
                     await adapter.send(
                         OutgoingMessage(
                             text=reply,
+                            is_error=bool(getattr(reply, "is_error", False)),
                             channel=incoming.channel,
                             thread=incoming.thread,
                         )

@@ -8,8 +8,17 @@ from pathlib import Path
 
 import pytest
 
-# Ensure scripts dir is on path for imports
+# Use this checkout, not an editable installation of a different private tree.
+# Otherwise an intentionally denied public module can resolve privately and
+# prepend its old chat handlers, invalidating sanitized-tree safety tests.
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+sys.path[:] = [
+    entry for entry in sys.path
+    if not (
+        Path(entry).name.lower() in {"scripts", "chat"}
+        and Path(entry).parent.name.lower() == ".claude"
+    )
+]
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR.parent / "chat"))
 
