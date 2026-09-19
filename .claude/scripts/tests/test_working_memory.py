@@ -373,9 +373,16 @@ class TestRuntimeBridge:
         assert request.task_name == "wm_transform"
         assert "I am helpful" in request.system_prompt["append"]
 
-    def test_render_runtime_request_model_hint(self):
+    def test_render_runtime_request_model_hint(self, monkeypatch):
         """Processor arg maps to model hint on RuntimeRequest."""
+        from types import SimpleNamespace
+
         from cognition.runtime_bridge import render_runtime_request
+        from runtime import selection
+
+        monkeypatch.setattr(
+            selection, "resolve_runtime_selection", lambda: SimpleNamespace(lane="claude_native")
+        )
 
         wm = WorkingMemory(soul_name="test")
 
@@ -385,7 +392,7 @@ class TestRuntimeBridge:
 
         # "quality" processor should map to sonnet model
         request = render_runtime_request(wm, "Hi", "quality", cwd="/tmp")
-        assert request.model == "claude-sonnet-4-6"
+        assert request.model == "claude-sonnet-5"
 
         # "claude" processor should map to None (default)
         request = render_runtime_request(wm, "Hi", "claude", cwd="/tmp")

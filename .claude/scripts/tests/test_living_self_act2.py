@@ -554,6 +554,8 @@ def test_decide_explicit_vs_explicit_opted_in_falls_through():
     """B1 opt-in: allow_explicit_vs_explicit=True -> held=False, evidence decides."""
     a = _rec("a", "alpha", source="explicit", evidence_count=3)
     b = _rec("b", "beta", source="explicit", evidence_count=1)
+    a.source_evidence = [{"ref": f"message-{i}", "revision": "v1"} for i in range(3)]
+    b.source_evidence = [{"ref": "message-4", "revision": "v1"}]
     loser, winner, reason, held = bc._decide_loser(
         a, b, _settings(allow_explicit_vs_explicit=True)
     )
@@ -577,6 +579,8 @@ def test_decide_explicit_beats_reflection_regardless_of_evidence():
 def test_decide_reflection_evidence_wins():
     a = _rec("a", "alpha", source="reflection", evidence_count=3)
     b = _rec("b", "beta", source="reflection", evidence_count=1)
+    a.source_evidence = [{"ref": f"message-{i}", "revision": "v1"} for i in range(3)]
+    b.source_evidence = [{"ref": "message-4", "revision": "v1"}]
     loser, winner, reason, held = bc._decide_loser(a, b, _settings())
     assert held is False
     assert loser.id == "b"
@@ -1214,6 +1218,7 @@ def test_write_time_off_is_state_parity(tmp_path, monkeypatch):
             observation=c["claim"],
             confidence=0.5,  # apply_operator_beliefs' default when "confidence" absent
             source="reflection",
+            source_evidence=[],
         )
 
     def _normalized(records):
@@ -1472,11 +1477,11 @@ def test_write_time_dedup_hit_skips_judge(tmp_path, monkeypatch):
     # The helper was NEVER invoked — proven by the call counter, not by a swallowed
     # judge raise (which would pass even if the helper ran and the judge was hit).
     assert helper_calls.count == 0
-    # The original record was strengthened in place (still ONE record).
+    # The original identity remains; uncited extraction adds no support.
     recs = InferenceTracker(path).load()
     assert len(recs) == 1
     assert recs[0].id == "orig"
-    assert recs[0].evidence_count == 2
+    assert recs[0].evidence_count == 1
 
 
 def test_write_time_legacy_zero_evidence_hit_skips_judge(tmp_path, monkeypatch):

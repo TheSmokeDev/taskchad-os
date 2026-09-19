@@ -136,6 +136,9 @@ def apply_persona_override() -> None:
     so the user sees the error; sticky-meta corruption (stale or hand-edited
     ``~/.homie/active_profile``) NEVER bricks startup. PRD §14.13.
     """
+    from .deployment import bootstrap_deployment_pins
+
+    bootstrap_deployment_pins(Path(__file__).resolve().parent.parent, include_orchestration=False)
     argv = sys.argv[1:]
 
     # Rank 1: CLI flag pre-parse.

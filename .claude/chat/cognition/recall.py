@@ -25,6 +25,8 @@ from cognition.graph import (
 from cognition.injection import sanitize_recalled_content, wrap_recalled_memory
 from cognition.observability import RecallLog
 
+from evolve import policy as recall_policy
+
 
 def _get_observe():
     """Return a decorator factory that defers Langfuse binding to call time.
@@ -42,7 +44,7 @@ def _get_observe():
             async def _async_wrapper(*args, **kwargs):
                 try:
                     from runtime.langfuse_setup import is_langfuse_enabled
-                    if is_langfuse_enabled():
+                    if not recall_policy.is_replaying() and is_langfuse_enabled():
                         from langfuse import observe
                         decorated = observe(**decorator_kwargs)(fn)
                         return await decorated(*args, **kwargs)
@@ -54,7 +56,7 @@ def _get_observe():
             def _sync_wrapper(*args, **kwargs):
                 try:
                     from runtime.langfuse_setup import is_langfuse_enabled
-                    if is_langfuse_enabled():
+                    if not recall_policy.is_replaying() and is_langfuse_enabled():
                         from langfuse import observe
                         decorated = observe(**decorator_kwargs)(fn)
                         return decorated(*args, **kwargs)
@@ -231,7 +233,7 @@ async def expand_queries(
 def _search_with_fallback(
     query: str,
     limit: int = 5,
-    memory_dir: "Path | None" = None,
+    memory_dir: Path | None = None,
 ) -> list[RecallResult]:
     """Run keyword + hybrid search with graceful fallback.
 
@@ -243,17 +245,17 @@ def _search_with_fallback(
     weighted merge floored by ``RECALL_MIN_SCORE`` (the documented merged-score
     knob). Wiring both floors here is what makes those two knobs real (#136).
     """
-    import config as _cfg  # noqa: PLC0415 — Rule 2 module-attr so evolve/monkeypatch overrides propagate.
-
     results: list[RecallResult] = []
 
     try:
         from memory_search import search_hybrid, search_keyword
 
+        values = recall_policy.resolve_values(memory_dir)
+
         # Keyword search (fast, no embeddings). Floor on the FTS5 scale.
         keyword_results = search_keyword(query, limit=limit, memory_dir=memory_dir)
         for r in keyword_results:
-            if r.score < _cfg.RECALL_KEYWORD_MIN_SCORE:
+            if r.score < values["RECALL_KEYWORD_MIN_SCORE"]:
                 continue
             results.append(
                 RecallResult(
@@ -273,7 +275,7 @@ def _search_with_fallback(
         # instead of letting search_hybrid fall back to its own SEARCH_MIN_SCORE.
         try:
             hybrid_results = search_hybrid(
-                query, limit=limit, min_score=_cfg.RECALL_MIN_SCORE, memory_dir=memory_dir
+                query, limit=limit, min_score=values["RECALL_MIN_SCORE"], memory_dir=memory_dir
             )
             for r in hybrid_results:
                 results.append(
@@ -288,10 +290,12 @@ def _search_with_fallback(
                         source_query=query,
                     )
                 )
-        except Exception:
+        except Exception as exc:
+            recall_policy.record_failure(exc)
             pass  # Hybrid search optional — keyword is sufficient
 
     except Exception as e:
+        recall_policy.record_failure(e)
         print(f"[Recall] _search_with_fallback failed (non-blocking): {e}")
 
     return results
@@ -394,7 +398,8 @@ async def _llm_rerank(
         if len(indices) >= 2:
             return _rerank_blend(candidates, indices)[:return_n]
 
-    except (asyncio.TimeoutError, Exception):
+    except (TimeoutError, Exception) as exc:
+        recall_policy.record_failure(exc)
         pass  # Timeout or any error — return original ranking
 
     return results[:return_n]
@@ -415,11 +420,11 @@ async def _run_rerank_request(prompt: str) -> str:
             capability=TEXT_REASONING,
             model="haiku",
             max_turns=1,
-            max_budget_usd=0.10,
             allowed_tools=[],
             system_prompt="You are a search result ranker. Output only comma-separated numbers.",
         )
     )
+    recall_policy.record_runtime(result)
     return result.text
 
 
@@ -544,7 +549,7 @@ async def run_recall_pipeline(
 
     loop = asyncio.get_event_loop()
     search_tasks = [
-        loop.run_in_executor(None, _search_with_fallback, q, 5, memory_dir)
+        asyncio.to_thread(_search_with_fallback, q, 5, memory_dir)
         for q in queries
     ]
     # The graph lookup depends only on memory_dir, not on the searches above,
@@ -558,11 +563,15 @@ async def run_recall_pipeline(
     for result in search_results:
         if isinstance(result, list):
             all_results.extend(result)
+        elif isinstance(result, Exception):
+            recall_policy.record_failure(result)
 
     # Step 3: Graph neighbors (1-hop from matched notes)
     if isinstance(graph_result, MemoryGraph):
         graph = graph_result
     else:
+        if isinstance(graph_result, Exception):
+            recall_policy.record_failure(graph_result)
         print(f"[cognition.recall] graph build failed (non-fatal): {graph_result!r}", flush=True)
         graph = MemoryGraph()
     matched_stems = list(
@@ -595,9 +604,12 @@ async def run_recall_pipeline(
 
     if RECALL_RERANK_ENABLED and tier == RecallTier.TIER_1 and len(merged) > 3:
         try:
-            merged = await _llm_rerank(merged, message_text, top_n=RECALL_RERANK_TOP_N, return_n=max_results)
+            merged = await _llm_rerank(
+                merged, message_text, top_n=RECALL_RERANK_TOP_N, return_n=max_results
+            )
             log.reranked = True
-        except Exception:
+        except Exception as exc:
+            recall_policy.record_failure(exc)
             log.reranked = False
 
     # Step 5: Cap at configured limit

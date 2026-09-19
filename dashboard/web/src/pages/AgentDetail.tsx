@@ -5,6 +5,7 @@ import { Tabs } from '@/components/Tabs';
 import { Empty } from '@/components/Empty';
 import { Spinner } from '@/components/Spinner';
 import { AgentActions } from '@/components/AgentActions';
+import { AgentLearning } from '@/components/AgentLearning';
 import { AvatarUploader } from '@/components/AvatarUploader';
 import { LaneStatusPill } from '@/components/LaneStatusPill';
 import { useFetch } from '@/lib/useFetch';
@@ -39,7 +40,7 @@ interface TasksResponse { tasks: TaskRow[]; }
 export function AgentDetail() {
   const [, params] = useRoute('/agents/:id');
   const agentId = params?.id ?? '';
-  const [tab, setTab] = useState<'overview' | 'tokens' | 'tasks'>('overview');
+  const [tab, setTab] = useState<'overview' | 'tokens' | 'tasks' | 'learning'>('overview');
 
   const agentFetch = useFetch<Agent>(agentId ? `/api/agents/${agentId}` : null);
   const tokensFetch = useFetch<TokensResponse>(
@@ -50,29 +51,30 @@ export function AgentDetail() {
   );
 
   if (!agentId) return <Empty title="No agent specified" />;
-  if (agentFetch.loading) return <div class="flex items-center justify-center h-full"><Spinner /></div>;
-  if (agentFetch.error || !agentFetch.data) return <Empty title="Agent not found" description={agentFetch.error ?? undefined} />;
-
   const agent = agentFetch.data;
+  const detailReady = !!agent && !agentFetch.error && agent.id === agentId;
 
   return (
     <div class="flex flex-col h-full">
       <TopBar
-        title={agent.name || agent.id}
-        subtitle={agent.description}
-        actions={<AgentActions agentId={agent.id} running={agent.running} onChange={agentFetch.refresh} />}
+        title={detailReady ? agent.name || agentId : agentId}
+        subtitle={detailReady ? agent.description : undefined}
+        actions={detailReady ? <AgentActions agentId={agentId} running={agent.running} onChange={agentFetch.refresh} /> : undefined}
       />
       <Tabs
         tabs={[
           { id: 'overview', label: 'Overview' },
           { id: 'tokens', label: 'Tokens' },
           { id: 'tasks', label: 'Tasks' },
+          { id: 'learning', label: 'Learning' },
         ]}
         active={tab}
         onChange={(t) => setTab(t as any)}
       >
         <div class="h-full overflow-y-auto p-6">
-          {tab === 'overview' && (
+          {tab === 'overview' && agentFetch.loading && <Spinner />}
+          {tab === 'overview' && !agentFetch.loading && !detailReady && <Empty title="Agent details unavailable" description={agentFetch.error ?? undefined} />}
+          {tab === 'overview' && detailReady && (
             <div class="space-y-6 max-w-2xl">
               <section>
                 <h3 class="text-[10px] uppercase tracking-wider text-[var(--color-text-faint)] mb-2">Avatar</h3>
@@ -90,6 +92,7 @@ export function AgentDetail() {
           )}
           {tab === 'tokens' && <TokensTab fetchState={tokensFetch} />}
           {tab === 'tasks' && <TasksTab fetchState={tasksFetch} />}
+          {tab === 'learning' && <AgentLearning key={agentId} agentId={agentId} />}
         </div>
       </Tabs>
     </div>

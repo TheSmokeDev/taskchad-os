@@ -1,37 +1,12 @@
-"""Living Self Act 4 — the evolve-loop orchestrator + the missing propose() seam.
+"""Evolve compatibility entrypoints and retained decision-artifact readers.
 
-``evolve/regression.py:16`` and ``veto.py:20`` reference a ``propose()`` that was
-NEVER built (grep ``def propose`` evolve/ -> zero non-comment hits). This module
-BUILDS it (the recall ``propose`` subcommand) and ADDS the new ``propose-belief``
-identity rail — the fitness oracle Archon calls.
+Belief proposals enter the shared persona learning journal and queue. Source
+support, behavioral qualification, provider retries and publication have one
+owner there. The historical artifact helpers remain readable for prior runs;
+new automatic belief admission never grants direct amendment authority.
 
-TWO subcommands, both gated by ``EVOLVE_ENABLED`` at their entrypoint (m6):
-  - ``propose`` (recall safe-first, the no-op-safe wake-the-loop proof): run
-    ``run_replay`` over the baseline + a candidate override-set, ``compare_reports``,
-    the EXISTING recall ``evaluate_regression_corpus``, ``evaluate_veto(delta,
-    ruleset, regression_summary=...)``, ``write_decision_artifact``. NO identity
-    mutation — recall params only. M3: replay over the EXACT ``regression_queries
-    .json`` ``query`` list (via ``goldens.load_regression_queries``) so the
-    per-query results are index-aligned with the regression entries
-    (``evaluate_regression_corpus`` raises ``ValueError`` on length mismatch).
-  - ``propose-belief`` (the identity rail): construct the ``AmendmentProposal``
-    ONCE via ``_proposal_from`` (B1 — reuse the SAME instance for ``led.append`` +
-    ``apply`` so the ledger row flips to ``applied``), run ``verify_evidence_support``
-    (the confined evidence-READ + deterministic floor, incl. the candidate's own
-    N1 ``prediction``), then ``judge_belief_candidate`` (the scheduled LLM judge),
-    then ``_write_belief_decision`` (M1 — the SIBLING artifact, NOT
-    ``write_decision_artifact`` which needs a recall ReportDelta that does not
-    exist for a belief). On ADOPT AND not ``--dry-run``, route the WINNER through
-    the UNCHANGED ledger with the SAME deterministic gate bound (defense-in-depth).
-
-Boundary (vertical-slice): the candidate-SEARCH loop is Archon; the FITNESS ORACLE
-(``evolve/``) + the STORE (the ledger + memory.db) are The Homie. This module is
-the contract surface Archon calls (writes a candidate JSON, reads a decision
-artifact). The bare cron runs the SAFE recall ``propose``; the belief rail is
-Archon-driven (provider-quota discipline).
-
-Rule 1 (call-time settings), Rule 2 (physical reads + atomic artifact), Rule 3
-(the judge rides reasoning_step -> run_with_runtime_lanes), fail-open VISIBLE.
+Recall commands retain their compatibility surface and delegate to their
+existing evaluator/tuning owners.
 """
 
 from __future__ import annotations
@@ -90,9 +65,7 @@ def _proposal_from(candidate: dict) -> Any:
     # but that compatibility behavior must not silently turn malformed live
     # candidates into evidence-free proposals.
     if "evidence_paths" not in candidate:
-        raise ValueError(
-            f"candidate is missing required evidence_paths: keys={sorted(candidate)}"
-        )
+        raise ValueError(f"candidate is missing required evidence_paths: keys={sorted(candidate)}")
 
     prop = _coerce_dataclass(AmendmentProposal, candidate)
     if prop is None:
@@ -228,7 +201,8 @@ def _malformed_candidate_decision(candidate: dict, reason: str) -> dict:
 
     A candidate that cannot coerce into an ``AmendmentProposal`` (a missing
     required field — e.g. no ``evidence_paths``, which ``_proposal_from`` now
-    rejects explicitly with ``ValueError``) is a REJECT, not a crash. The fail-open contract: a bad-shape
+    rejects explicitly with ``ValueError``) is a REJECT, not a crash.
+    The fail-open contract: a bad-shape
     candidate writes a reject decision artifact + a visible distinct print +
     returns the conservative reject dict, so the Archon bash node sees exit 0 and a
     reject artifact instead of a raw traceback. The artifact is keyed by a stable
@@ -238,9 +212,12 @@ def _malformed_candidate_decision(candidate: dict, reason: str) -> dict:
 
     from config import BELIEF_EVOLVE_DECISION_DIR
 
-    synthetic_id = "malformed-" + hashlib.sha1(
-        json.dumps(candidate, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()[:12]
+    synthetic_id = (
+        "malformed-"
+        + hashlib.sha1(
+            json.dumps(candidate, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:12]
+    )
     out = Path(BELIEF_EVOLVE_DECISION_DIR)
     try:
         out.mkdir(parents=True, exist_ok=True)
@@ -302,215 +279,109 @@ async def propose_belief(
     memory_dir: Path | str | None = None,
     reasoning: Any | None = None,
     attempts: int = 0,
+    service: Any | None = None,
 ) -> dict:
-    """The identity rail — evidence-READ -> floor -> judge -> decision artifact.
+    """Compatibility admission adapter to the shared learning journal/queue.
 
-    On ADOPT (``supported and correctness >= min and evidence_fidelity >= min``)
-    AND not ``dry_run``, route the WINNER through the UNCHANGED ledger
-    (``led.append`` + ``apply_amendment_if_allowed`` with the SAME deterministic
-    gate bound — defense-in-depth; the gate is the source of truth, not the loop's
-    earlier pass). ``--dry-run`` writes the artifact + prints the verdict but does
-    NOT mutate SELF.md. m6: ``EVOLVE_ENABLED`` is enforced at the entrypoint.
-
-    ``attempts`` (#170) is the count of PRIOR judge attempts for this candidate id
-    (0 for a fresh candidate). When the outcome is ``retryable=True`` and this run
-    would push the running total (``attempts + 1``) to ``max_attempts`` or beyond,
-    the candidate is downgraded to TERMINAL (``retryable=False``,
-    ``outcome_reason="retry_budget_exhausted"``) so a permanently-broken judge call
-    cannot be re-picked forever. Every existing caller passes no ``attempts`` (so
-    ``next_attempts=1 < 3`` default) — byte-identical to pre-#170 behavior.
+    The old support-only judge cannot publish standing behavior. No provider
+    runs here; shared evaluation owns retries and typed infrastructure deferral.
+    Dry runs preserve the old call shape but spend no inference or retry budget.
     """
-    from cognition.evidence_gate import read_evidence_texts, verify_evidence_support
+    from config import get_belief_evolve_settings
+    from personas.learning.authority import submit_proposal
+    from personas.learning.errors import LearningDeferredError, LearningUnavailableError
+    from personas.learning.models import LearningError, content_hash
 
-    from config import MEMORY_DIR, PROJECT_ROOT, get_belief_evolve_settings
-    from evolve.judge import judge_belief_candidate
-
-    s = get_belief_evolve_settings()
-    if not s.enabled:  # m6 — EVOLVE_ENABLED enforcement point
-        print(
-            "[evolve.loop] EVOLVE_ENABLED=false — propose-belief disabled; "
-            "no artifact, no mutation.",
-            flush=True,
-        )
+    settings = get_belief_evolve_settings()
+    base = {
+        "adopt": False,
+        "supported": False,
+        "correctness": 0.0,
+        "evidence_fidelity": 0.0,
+        "attempts": attempts,
+        "max_attempts": settings.max_attempts,
+    }
+    if not settings.enabled:
         return {
-            "adopt": False,
+            **base,
+            "outcome": "disabled",
+            "reason": "evolve_disabled",
             "evidence_ok": False,
             "evidence_reason": "evolve_disabled",
-            "supported": False,
-            "correctness": 0.0,
-            "evidence_fidelity": 0.0,
-            "reason": "evolve_disabled",
         }
-
-    mem = Path(memory_dir) if memory_dir is not None else MEMORY_DIR
-
-    # F1 — a malformed candidate (missing required field, e.g. no evidence_paths)
-    # is a REJECT, not a crash. _proposal_from raises ValueError when
-    # _coerce_dataclass returns None; catch it, write a reject artifact, return the
-    # conservative dict (the Archon bash node sees exit 0 + a reject artifact, not a
-    # raw traceback — the fail-open contract).
     try:
-        proposal = _proposal_from(candidate)  # B1 — construct ONCE, reuse instance
+        proposal = _proposal_from(candidate)
+        if not isinstance(proposal.summary, str) or not proposal.summary.strip():
+            raise ValueError("belief summary is required")
+        if not isinstance(proposal.proposed_content, str) or not proposal.proposed_content.strip():
+            raise ValueError("belief content is required")
     except (ValueError, TypeError):
-        return _malformed_candidate_decision(candidate, "malformed_candidate")
+        return {
+            **base,
+            "outcome": "reject",
+            "reason": "malformed_candidate",
+            "evidence_ok": False,
+            "evidence_reason": "malformed_candidate",
+        }
+    if dry_run:
+        return {
+            **base,
+            "outcome": "pending",
+            "reason": "shared_evaluation_required",
+            "retryable": True,
+            "evidence_ok": False,
+            "evidence_reason": "not_evaluated",
+            "dry_run": True,
+        }
+    if service is None:
+        from personas import get_active_profile_name
+        from personas.learning.service import get_learning_service
 
-    # N1 — the floor sees the candidate's OWN prediction (extra entry) + the seed.
-    corpus = _belief_corpus_with_prediction(candidate, s)
-
-    # The confined evidence-READ + deterministic floor (incl. the prediction).
-    ev_ok, ev_reason = verify_evidence_support(proposal, mem, settings=s, corpus=corpus)
-    # The SAME confined+bounded resolver the gate uses — the judge never sees a
-    # path the gate rejected (M4).
-    evidence_texts = read_evidence_texts(proposal, mem, settings=s)
-
-    verdict = await judge_belief_candidate(
-        candidate, evidence_texts, cwd=PROJECT_ROOT, settings=s, reasoning=reasoning
-    )
-    # The pre-gate PREDICTION (floor + judge ONLY) — NOT the final outcome. The
-    # UNCHANGED apply-time policy gate (confidence >= 0.75, content <= 1200 chars,
-    # secret/destructive regex) is checked SEPARATELY below; the artifact's
-    # `outcome` is reconciled to what ACTUALLY happened to SELF.md/the ledger (F2),
-    # never to this prediction.
-    predicted_adopt = (
-        ev_ok
-        and verdict["supported"]
-        and verdict["correctness"] >= s.min_correctness
-        and verdict["evidence_fidelity"] >= s.min_fidelity
-    )
-
-    # F2 (issue #169) — a judge INFRA failure (rate limit / network / provider
-    # outage) is NOT a semantic reject: verdict["supported"] is False either way,
-    # but "the judge said no" and "the judge never ran" must not collapse into the
-    # same terminal "reject". A retryable "error" lets the Archon rail re-pick this
-    # candidate instead of permanently vetoing a belief that was never actually
-    # judged. Gated strictly on the exact "judge_failed" reason string, which
-    # judge_belief_candidate returns ONLY from its except-Exception branch
-    # (evolve/judge.py:176) — judge.py is out of scope for this PR, so there is no
-    # shared constant; if that literal string ever changes there, update here too.
-    judge_infra_failed = verdict.get("reason") == "judge_failed"
-    # Separate from `judge_infra_failed` (judge never ran) — this also flips True
-    # when the live apply lands bytes but the ledger flip doesn't confirm (see the
-    # `apply_pending` branch below). Both are "retryable", for different reasons.
-    retryable = judge_infra_failed
-
-    # The REAL outcome + reason, reconciled from the apply result (F2). Defaults to
-    # the prediction for the floor/judge-reject and dry-run paths (where no apply
-    # runs); overwritten by the live apply's actual AmendmentApplyResult below.
-    if judge_infra_failed:
-        outcome, outcome_reason, applied = "error", "judge_failed", False
-    else:
-        outcome = "adopt" if predicted_adopt else "reject"
-        outcome_reason = "" if predicted_adopt else (ev_reason or verdict.get("reason", ""))
-        applied = predicted_adopt  # what we REPORT as `adopt` — corrected on the live path
-
-    if predicted_adopt and not dry_run:
-        from cognition.amendments import (
-            AmendmentPolicy,
-            ProposalLedger,
-            apply_amendment_if_allowed,
-            ledger_file_lock,
+        service = get_learning_service(get_active_profile_name())
+    if memory_dir is not None and Path(memory_dir).resolve() != service.target.memory_dir.resolve():
+        raise LearningError("belief_target_does_not_match_persona")
+    # A stable payload fingerprint coalesces repeated nightly output even when
+    # the old producer supplied a new UUID. Paths remain provenance, never fake
+    # real-world observations. Missing root IDs leave an inspectable pending row.
+    payload = {
+        "candidate_type": "self_model",
+        "title": proposal.summary,
+        "content": proposal.proposed_content,
+        "applicability": candidate.get("applicability") or proposal.summary,
+        "evidence_ids": candidate.get("evidence_ids", []),
+        "counterevidence_ids": candidate.get("counterevidence_ids", []),
+        "changes_behavior": candidate.get("changes_behavior", False),
+        "target_file": proposal.target_file,
+        "producer": "evolve_belief",
+        "source_manifest": candidate.get(
+            "source_manifest",
+            [
+                {"ref": str(path), "kind": "legacy_citation", "unverified": True}
+                for path in proposal.evidence_paths
+            ],
+        ),
+        "derived_input_ids": candidate.get("derived_input_ids", []),
+        "producer_runtime": candidate.get("producer_runtime", {}),
+        **({"cycle_id": candidate["cycle_id"]} if candidate.get("cycle_id") else {}),
+    }
+    try:
+        change = submit_proposal(
+            service, payload, source_key="evolve-belief:" + content_hash(payload)
         )
-
-        from config import AMENDMENT_LEDGER_FILE
-
-        # Defense-in-depth: the SAME deterministic gate (with the SAME N1-augmented
-        # corpus) runs again at apply time — the gate is the source of truth.
-        policy = AmendmentPolicy(
-            evidence_check=lambda p, m: verify_evidence_support(
-                p, m, settings=s, corpus=corpus
-            )
-        )
-        # F2 — CAPTURE the AmendmentApplyResult and WRAP the apply. The apply re-runs
-        # the UNCHANGED policy gate (which the loop's prediction does NOT mirror), so
-        # a confidence=0.5 / >1200-char belief the loop "predicted adopt" can be
-        # REJECTED here — the artifact must record that REALITY, not the prediction.
-        # An apply exception (SELF.md unwritable / locked on win32) must NOT crash
-        # the loop and must NOT leave a lying "adopt" artifact.
-        try:
-            with ledger_file_lock(AMENDMENT_LEDGER_FILE):  # reentrant, like producers
-                led = ProposalLedger(AMENDMENT_LEDGER_FILE)
-                led.append(proposal)  # B1 — append the SAME instance...
-                result = apply_amendment_if_allowed(
-                    proposal, led, mem, policy=policy
-                )  # ...and apply the SAME id -> the ledger row flips to applied
-            # Reconcile the artifact to the REAL apply result.
-            if result.status == "applied":
-                outcome, outcome_reason, applied = "adopt", result.policy_reason, True
-            elif result.status == "apply_pending":
-                # F4a (#169) follow-through: the target bytes ARE on disk (the
-                # atomic write succeeded), but the ledger flip to "applied" did
-                # not confirm. This is neither an adopt (not ledger-settled) nor
-                # a policy "reject" (the belief was NOT declined — it physically
-                # landed); calling it "reject" would lie about SELF.md/MEMORY.md
-                # having changed. Report it as a retryable "error" instead — the
-                # next apply_amendment_if_allowed pass self-heals the ledger row
-                # (amendments.py's apply_pending reconciliation block).
-                outcome = "error"
-                outcome_reason = result.policy_reason or result.status
-                applied = False
-                retryable = True
-            else:
-                # policy_rejected (or any other non-applied terminal) — the belief
-                # did NOT land. Record the REAL policy_reason (low_confidence /
-                # content_too_large / etc.) so the artifact does not lie.
-                outcome = "reject"
-                outcome_reason = result.policy_reason or result.status
-                applied = False
-        except Exception as exc:  # F2 — uncontained apply crash -> contained "error"
-            outcome, outcome_reason, applied = "error", repr(exc), False
-            print(
-                f"[evolve.loop] propose-belief: apply RAISED (non-fatal): {exc!r} — "
-                "outcome=error, SELF.md untouched, no lying adopt artifact.",
-                flush=True,
-            )
-
-    # #170 — retry-budget cap. This is the LAST mutation before the write, so it
-    # overrides whatever judge_infra_failed / apply_pending set `retryable` to
-    # (never the other way around): a candidate that would otherwise be re-picked
-    # forever goes TERMINAL once its running attempt count reaches the budget.
-    # Kimi gate MAJOR on PR #181: a dry-run (memory_dream.py --test) must NOT
-    # burn retry budget — incrementing `attempts` / downgrading to
-    # retry_budget_exhausted here would let the documented "safe probe" push a
-    # queued candidate TERMINAL without it ever being permitted to write. Under
-    # dry-run the artifact is still written (preview), but with the attempt count
-    # UNCHANGED and no budget downgrade.
-    recorded_attempts = attempts
-    if not dry_run:
-        next_attempts = attempts + 1
-        recorded_attempts = next_attempts
-        if retryable and next_attempts >= s.max_attempts:
-            retryable = False
-            outcome_reason = "retry_budget_exhausted"
-
-    # F2 — write the artifact AFTER the apply, from the REAL outcome (never the
-    # pre-gate prediction). On dry-run / floor-reject, `outcome` is the prediction
-    # (no apply ran); on the live path it is the actual applied/rejected/error truth.
-    _write_belief_decision(
-        proposal, candidate, ev_ok, ev_reason, verdict, outcome,
-        outcome_reason=outcome_reason,
-        retryable=retryable,
-        attempts=recorded_attempts,
-        max_attempts=s.max_attempts,
-    )
-
-    print(
-        f"[evolve.loop] propose-belief: outcome={outcome}"
-        + (f" ({outcome_reason})" if outcome_reason else "")
-        + f" evidence_ok={ev_ok} ({ev_reason}) "
-        f"supported={verdict['supported']} correctness={verdict['correctness']:.2f} "
-        f"fidelity={verdict['evidence_fidelity']:.2f} dry_run={dry_run}",
-        flush=True,
-    )
+    except LearningDeferredError:
+        raise
+    except (TimeoutError, ConnectionError, OSError) as exc:
+        raise LearningUnavailableError("belief_admission_unavailable") from exc
     return {
-        "adopt": applied,  # F2 — the REAL outcome (apply-reconciled), not the prediction
-        "outcome": outcome,
-        "outcome_reason": outcome_reason,
-        "retryable": retryable,  # F2 (#169) — judge outage / apply_pending != real reject
-        "attempts": recorded_attempts,  # #170 — running count (unchanged on dry-run)
-        "max_attempts": s.max_attempts,  # #170 — the budget this run enforced
-        "evidence_ok": ev_ok,
-        "evidence_reason": ev_reason,
-        **verdict,
+        **base,
+        "outcome": "pending",
+        "reason": change.get("reason", "queued_for_evaluation"),
+        "retryable": True,
+        "evidence_ok": False,
+        "evidence_reason": "not_evaluated",
+        "change_proposal_id": change["id"],
+        "candidate_id": change.get("candidate_id"),
+        "shared_queue": True,
     }
 
 
@@ -521,25 +392,35 @@ async def propose(
     candidate_overrides: dict | None = None,
     run_replay_fn: Any | None = None,
 ) -> int:
-    """The recall safe-first proof (the no-op-safe wake-the-loop). Returns an
-    ``ExitCode`` int. NO identity mutation — recall params only.
+    """Legacy scheduled recall wake now admits the shared tuning queue.
 
-    M3: ``run_replay`` over the EXACT ``regression_queries.json`` ``query`` list
-    (via ``goldens.load_regression_queries``) so the per-query results are
-    index-aligned with the regression entries (``evaluate_regression_corpus``
-    raises ``ValueError`` on length mismatch). Keeps ``write_decision_artifact``
-    (recall has a real ReportDelta). m6: ``EVOLVE_ENABLED`` enforced at entry.
-
-    ``run_replay_fn`` is injectable for tests where the embedding model is offline
-    (a fake replay proves the orchestration wiring without the ~130MB model).
+    Explicit overrides or an injected replay retain the old offline diagnostic
+    comparison. Diagnostic acceptance never installs a recall policy.
     """
     from config import get_belief_evolve_settings
 
     s = get_belief_evolve_settings()
     if not s.enabled:  # m6 — EVOLVE_ENABLED enforcement point (BOTH subcommands)
         print(
-            "[evolve.loop] EVOLVE_ENABLED=false — propose disabled; "
-            "no artifact, no mutation.",
+            "[evolve.loop] EVOLVE_ENABLED=false — propose disabled; no artifact, no mutation.",
+            flush=True,
+        )
+        return 0
+
+    if candidate_overrides is None and run_replay_fn is None:
+        from evolve import tuning
+        from personas import get_active_profile_name
+        from personas.learning.service import LearningService
+
+        service = LearningService.for_persona(get_active_profile_name())
+        if (
+            memory_dir is not None
+            and Path(memory_dir).resolve() != service.target.memory_dir.resolve()
+        ):
+            raise ValueError("scheduled tuning vault must match the active persona")
+        receipt = tuning.tuning_status(service) if dry_run else await tuning.tune(service)
+        print(
+            json.dumps({"operation": "recall_tuning_admission", "dry_run": dry_run, **receipt}),
             flush=True,
         )
         return 0
@@ -578,12 +459,8 @@ async def propose(
     )
 
     delta = compare_reports(baseline, candidate_report)
-    regression_summary = evaluate_regression_corpus(
-        candidate_report.per_query, regression_entries
-    )
-    verdict = evaluate_veto(
-        delta, DEFAULT_VETO_RULESET, regression_summary=regression_summary
-    )
+    regression_summary = evaluate_regression_corpus(candidate_report.per_query, regression_entries)
+    verdict = evaluate_veto(delta, DEFAULT_VETO_RULESET, regression_summary=regression_summary)
     exit_code = compute_exit_code(verdict, force=False)
 
     from config import DATA_DIR
@@ -602,7 +479,7 @@ async def propose(
     )
     print(
         f"[evolve.loop] propose (recall): accepted={verdict.accepted} "
-        f"exit_code={int(exit_code)} dry_run={dry_run} (no identity mutation)",
+        f"exit_code={int(exit_code)} dry_run={dry_run} (offline diagnostic; no policy adoption)",
         flush=True,
     )
     return int(exit_code)
@@ -616,9 +493,7 @@ def _load_candidate(value: str) -> dict:
     else:
         raw = json.loads(value)
     if not isinstance(raw, dict):
-        raise ValueError(
-            f"--candidate must be a JSON object, got {type(raw).__name__}"
-        )
+        raise ValueError(f"--candidate must be a JSON object, got {type(raw).__name__}")
     return raw
 
 
@@ -672,11 +547,7 @@ def load_retryable_belief_candidates(
     """
     from config import BELIEF_EVOLVE_DECISION_DIR
 
-    base = (
-        Path(decision_dir)
-        if decision_dir is not None
-        else Path(BELIEF_EVOLVE_DECISION_DIR)
-    )
+    base = Path(decision_dir) if decision_dir is not None else Path(BELIEF_EVOLVE_DECISION_DIR)
     out: list[dict[str, Any]] = []
     if not base.exists():
         return out, 0
@@ -712,8 +583,10 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_propose = sub.add_parser("propose", help="Recall safe-first (no identity mutation)")
-    p_propose.add_argument("--dry-run", action="store_true", help="Write artifact only")
+    p_propose = sub.add_parser("propose", help="Admit recall tuning to the shared learning queue")
+    p_propose.add_argument(
+        "--dry-run", action="store_true", help="Inspect readiness without enqueueing"
+    )
 
     p_belief = sub.add_parser(
         "propose-belief", help="The identity rail (evidence-read -> floor -> judge)"

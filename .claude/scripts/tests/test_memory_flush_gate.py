@@ -1,3 +1,5 @@
+# Explicit legacy flush helper compatibility; automatic queue admission and
+# completed-debrief projections are covered by test_unified_nightly_bridge.py.
 from __future__ import annotations
 
 import importlib.util
@@ -125,7 +127,7 @@ async def test_low_signal_session_can_still_drop_after_semantic_review(
         lambda text, section: daily_entries.append((text, section)),
     )
 
-    result = await memory_flush.run_flush(context_file)
+    result = await memory_flush._run_flush_legacy_inner(context_file)
 
     assert result is None
     assert not context_file.exists()
@@ -196,7 +198,7 @@ async def test_flush_ok_produces_no_episode(tmp_path: Path, monkeypatch) -> None
     context_file = tmp_path / "session-flush-telegram-1111111111-2222222222-20260612-100000.md"
     context_file.write_text("**User:** hi\n", encoding="utf-8")
 
-    result = await memory_flush.run_flush(context_file)
+    result = await memory_flush._run_flush_legacy_inner(context_file)
 
     assert result is None
     episodes_dir = harness["vault"] / "episodes"
@@ -222,7 +224,7 @@ async def test_flushed_session_writes_episode_after_daily_log(
     context_file = tmp_path / "session-flush-telegram-1111111111-2222222222-20260612-100000.md"
     context_file.write_text("**User:** decision turn\n", encoding="utf-8")
 
-    result = await memory_flush.run_flush(context_file)
+    result = await memory_flush._run_flush_legacy_inner(context_file)
 
     assert result is not None
     assert harness["daily"], "daily-log consumer must run"
@@ -240,7 +242,7 @@ async def test_test_mode_writes_no_episode(tmp_path: Path, monkeypatch) -> None:
     context_file = tmp_path / "session-flush-telegram-1111111111-2222222222-20260612-100000.md"
     context_file.write_text("**User:** decision turn\n", encoding="utf-8")
 
-    result = await memory_flush.run_flush(context_file, test_mode=True)
+    result = await memory_flush._run_flush_legacy_inner(context_file, test_mode=True)
 
     assert result is not None
     episodes_dir = harness["vault"] / "episodes"
@@ -265,7 +267,7 @@ async def test_episode_writer_failure_is_fail_open(
     context_file = tmp_path / "session-flush-telegram-1111111111-2222222222-20260612-100000.md"
     context_file.write_text("**User:** decision turn\n", encoding="utf-8")
 
-    result = await memory_flush.run_flush(context_file)
+    result = await memory_flush._run_flush_legacy_inner(context_file)
 
     assert result is not None  # flush returned normally
     assert harness["daily"], "daily-log entry must still be written"
@@ -284,7 +286,7 @@ async def test_reindex_failure_is_fail_open(tmp_path: Path, monkeypatch) -> None
     context_file = tmp_path / "session-flush-telegram-1111111111-2222222222-20260612-100000.md"
     context_file.write_text("**User:** decision turn\n", encoding="utf-8")
 
-    result = await memory_flush.run_flush(context_file)
+    result = await memory_flush._run_flush_legacy_inner(context_file)
 
     assert result is not None
     # Episode itself still landed; only the reindex step failed.
@@ -300,7 +302,7 @@ async def test_flush_state_schema_unchanged_no_episode_keys(
     context_file = tmp_path / "session-flush-telegram-1111111111-2222222222-20260612-100000.md"
     context_file.write_text("**User:** decision turn\n", encoding="utf-8")
 
-    await memory_flush.run_flush(context_file)
+    await memory_flush._run_flush_legacy_inner(context_file)
 
     state = json.loads(harness["state_file"].read_text(encoding="utf-8"))
     assert set(state.keys()) == {

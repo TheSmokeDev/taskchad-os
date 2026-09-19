@@ -53,3 +53,16 @@ settingsRoute.post('/api/autostart', async (c) => {
     'Content-Type': result.headers.get('content-type') ?? 'application/json',
   });
 });
+
+// Python owns the admin gate: /api/audit-log is exempt from the
+// orchestration-token middleware and DASHBOARD_ADMIN_TOKEN bearer is the
+// SOLE auth path (fail-closed 503 when unset). Forward the incoming
+// operator bearer verbatim — Hono never substitutes its own framework
+// token on this path.
+settingsRoute.get('/api/audit-log', async (c) => {
+  const auth = c.req.header('Authorization') ?? '';
+  const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : undefined;
+  const query = new URL(c.req.url).search;
+  const result = await authedFetchJson(`/api/audit-log${query}`, { token });
+  return c.json(result.json as Record<string, unknown>, result.status as 200);
+});

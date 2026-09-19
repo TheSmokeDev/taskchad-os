@@ -105,13 +105,14 @@ def test_parsed_output_double_run_zero_growth(tmp_path: Path) -> None:
 
     assert len(after_run_2) == len(after_run_1)
     assert after_run_2 == after_run_1
-    assert ledger.count_pending() == 0
+    assert ledger.count_pending() == 1  # confidence alone does not authorize publication
+    assert _AMENDMENT_MARKER not in after_run_2.decode("utf-8")
 
 
 def test_direct_written_idless_record_double_run_zero_growth(
     tmp_path: Path,
 ) -> None:
-    """Replicate the live #58 failure: a raw id-less JSONL row applies once.
+    """A raw id-less legacy row remains stable and awaits shared evaluation.
 
     The flood bug: rows written directly into the ledger (no ``id`` /
     ``created_at`` / ``dedupe_key`` keys) got a FRESH uuid on every read, so
@@ -145,7 +146,8 @@ def test_direct_written_idless_record_double_run_zero_growth(
         section_cap=20,
     )
     after_run_1 = memory_file.read_bytes()
-    assert after_run_1.decode("utf-8").count(_AMENDMENT_MARKER) == 1
+    assert after_run_1.decode("utf-8").count(_AMENDMENT_MARKER) == 0
+    first_id = ledger.read_all()[0].id
 
     process_amendment_output(
         "",
@@ -159,8 +161,8 @@ def test_direct_written_idless_record_double_run_zero_growth(
 
     assert after_run_2 == after_run_1
     statuses = [proposal.status for proposal in ledger.read_all()]
-    assert "pending" not in statuses
-    assert "applied" in statuses
+    assert statuses == ["pending"]
+    assert ledger.read_all()[0].id == first_id
 
 
 # =============================================================================

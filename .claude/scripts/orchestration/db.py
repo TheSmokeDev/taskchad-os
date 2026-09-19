@@ -1,7 +1,7 @@
 """SQLite persistence for orchestration — schema, CRUD, row mapping.
 
 Uses stdlib sqlite3 only. No external dependencies.
-DB path default: .claude/data/orchestration.db (from config.ORCHESTRATION_DB_PATH).
+DB path default: .claude/data/orchestration.db (from config.get_orchestration_db_path()).
 """
 
 from __future__ import annotations

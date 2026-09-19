@@ -5,7 +5,10 @@ Proves all endpoints delegate to ConvoyService/MailboxService with zero
 business logic in the handler layer.
 """
 
+import ast
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
@@ -39,6 +42,143 @@ def client(tmp_path, monkeypatch):
         api_mod._team_svc = ts
         yield TestClient(api_mod.app)
         db.close()
+
+
+def test_capability_status_exposes_bounded_search_query_contract(client):
+    response = client.get(
+        "/api/capabilities/status",
+        params={"search": "capability fixture", "kinds": "plugin", "limit": 1},
+    )
+
+    assert response.status_code == 200
+    catalog = response.json()["capabilities"]["catalog"]
+    assert catalog["matched_count"] == 1
+    assert len(catalog["items"]) == 1
+    assert catalog["items"][0]["id"] == "plugin.homie.capability-fixture"
+
+    invalid = client.get("/api/capabilities/status", params={"limit": 101})
+    assert invalid.status_code == 400
+
+
+def test_capability_status_first_request_bootstraps_all_six_kinds_in_fresh_process(
+    tmp_path,
+):
+    script = textwrap.dedent(
+        f"""
+        from pathlib import Path
+        from fastapi.testclient import TestClient
+        import config
+
+        config.ORCHESTRATION_DB_PATH = Path({str(tmp_path / 'fresh-orchestration.db')!r})
+        from runtime import tool_registry
+        import orchestration.api as api
+
+        assert tool_registry.list_registered() == []
+        with TestClient(api.app) as client:
+            expected = ('tool', 'toolset', 'skill', 'mcp', 'integration', 'plugin')
+            observed = set()
+            for kind in expected:
+                response = client.get(
+                    '/api/capabilities/status',
+                    params={{'kinds': kind, 'limit': 1}},
+                )
+                assert response.status_code == 200, response.text
+                payload = response.json()['capabilities']
+                assert payload['status'] == 'ok', payload
+                observed.update(item['kind'] for item in payload['catalog']['items'])
+            assert observed == set(expected), observed
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_SCRIPTS_DIR,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_capability_status_projects_real_missing_handler_as_blocked(
+    client,
+    monkeypatch,
+):
+    from personas import capability_catalog, readiness, services, skill_assignment
+    from runtime import tool_registry
+
+    tool_name = "piv_http_missing_handler_571"
+    entry = tool_registry.ToolEntry(
+        name=tool_name,
+        description="HTTP projection missing-handler fixture",
+        schema=tool_registry.build_tool_schema(tool_name, "Missing handler"),
+        handler=None,
+        toolset="safe_core",
+        effect="read",
+    )
+    catalog_snapshot = capability_catalog.CapabilityCatalogSnapshot(
+        status="ok",
+        items=capability_catalog.collect_tool_descriptors((entry,)),
+    )
+    axes = {name: readiness.AxisReadiness("READY") for name in readiness.AXIS_NAMES}
+    surfaces = {
+        name: readiness.SurfaceReadiness("READY", (), True)
+        for name in readiness.SURFACE_NAMES
+    }
+    readiness_snapshot = readiness.PersonaReadinessSnapshot(
+        schema_version=1,
+        persona_id="persona-a",
+        status="READY",
+        selected_lane="generic",
+        selected_providers=("test",),
+        axes=axes,
+        surfaces=surfaces,
+        capabilities=(),
+    )
+    monkeypatch.setattr(
+        capability_catalog,
+        "build_capability_catalog",
+        lambda **_kwargs: catalog_snapshot,
+    )
+    monkeypatch.setattr(tool_registry, "list_registered", lambda: (entry,))
+    monkeypatch.setattr(
+        services,
+        "load_persona_config",
+        lambda _persona: {"tools": [tool_name], "toolsets": []},
+    )
+    monkeypatch.setattr(
+        readiness,
+        "build_persona_readiness_snapshot",
+        lambda _persona: readiness_snapshot,
+    )
+    monkeypatch.setattr(skill_assignment, "installed_skill_names", lambda _persona: ())
+
+    response = client.get(
+        "/api/capabilities/status",
+        params={
+            "kinds": "tool",
+            "limit": 1,
+            "persona_id": "persona-a",
+        },
+    )
+
+    assert response.status_code == 200
+    item = response.json()["capabilities"]["catalog"]["items"][0]
+    assert item["id"] == f"tool.{tool_name}"
+    assert item["assigned"] is True
+    assert item["callable"] is False
+    assert item["enabled"] is False
+    assert "missing_handler" in [
+        reason["code"] for reason in item["blocked_reasons"]
+    ]
+
+    hostile = client.get(
+        "/api/capabilities/status",
+        params={"persona_id": "../../Authorization: Bearer synthetic-secret"},
+    )
+    assert hostile.status_code == 400
+    assert "synthetic-secret" not in hostile.text
 
 
 # ── Convoy endpoint tests ────────────────────────────────────────────────
@@ -528,44 +668,41 @@ def test_api_thin_no_business_logic():
     assert "conn.execute" not in source, "api.py must not execute SQL directly"
     assert "sqlite3" not in source, "api.py must not import sqlite3"
 
-    # Only imports from orchestration.* + stdlib + fastapi/pydantic
-    import_lines = [
-        l.strip() for l in source.splitlines() if l.strip().startswith(("import ", "from "))
-    ]
-    allowed_prefixes = (
-        "from __future__",
-        "import dataclasses",
-        "import logging",
-        "import os",
-        "import time",
-        "from typing",
-        "from fastapi",
-        "from pydantic",
-        "from orchestration.",
-        "import config",
-        "import importlib",
-        # PRP-7c Phase 3 (WS2 lifecycle-surfaces): API_PORT delegates through
-        # personas.services for profile-aware port resolution. This is a
-        # path-resolution helper, not business logic — same category as
-        # ``import config``.
-        "from personas.services",
-        # PRD-8 Phase 3 / WS2 — dashboard router mount. The dashboard slice
-        # owns its own router in dashboard_api.py; orchestration/api.py
-        # only includes it via app.include_router. Slice ownership preserved.
-        "from dashboard_api import router",
-        # Same router-mount-only pattern for the persona pairing API —
-        # api.py includes the router, owns none of its logic.
-        "from pairing_api import router",
-        # Same again for the Talk mode + Discord voice routers (shipped
-        # 2026-07-24 in f39ab80c / ace75b35 without allowlist entries, which
-        # left this test red on master until 2026-07-27).
-        "from talk_api import router",
-        "from discord_voice_api import router",
-    )
-    for line in import_lines:
-        assert any(line.startswith(p) for p in allowed_prefixes), (
-            f"api.py has disallowed import: {line}"
-        )
+    # Parse imports structurally so an allowed prefix cannot admit a write/provider
+    # sibling such as ``from runtime import tool_impl_x_write``.
+    allowed_imports = {
+        "dataclasses",
+        "logging",
+        "os",
+        "time",
+        "config",
+        "importlib",
+        "discord_voice_lifecycle",
+    }
+    allowed_from = {
+        "__future__": {"annotations"},
+        "personas.services": {"get_orchestration_api_port"},
+        "dashboard_api": {"router"},
+        "pairing_api": {"router"},
+        "talk_api": {"router"},
+        "discord_voice_api": {"router"},
+        "runtime": {"tool_impl"},
+    }
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name in allowed_imports, (
+                    f"api.py has disallowed import: import {alias.name}"
+                )
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            imported_names = {alias.name for alias in node.names}
+            if module == "typing" or module.startswith(("fastapi", "pydantic", "orchestration.")):
+                continue
+            assert module in allowed_from and imported_names <= allowed_from[module], (
+                f"api.py has disallowed import: from {module} import "
+                f"{', '.join(sorted(imported_names))}"
+            )
 
 
 def test_non_loopback_requires_explicit_opt_in(monkeypatch, tmp_path):

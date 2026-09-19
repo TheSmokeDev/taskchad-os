@@ -19,6 +19,8 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from evolve import policy as recall_policy  # noqa: E402 - scripts path bridge
+
 # Cognition imports — graceful degradation if unavailable
 try:
     from cognition.observability import RecallLog, log_recall_event
@@ -59,7 +61,7 @@ def _get_observe():
             async def _async_wrapper(*args, **kwargs):
                 try:
                     from runtime.langfuse_setup import is_langfuse_enabled
-                    if is_langfuse_enabled():
+                    if not recall_policy.is_replaying() and is_langfuse_enabled():
                         from langfuse import observe
                         decorated = observe(**decorator_kwargs)(fn)
                         return await decorated(*args, **kwargs)
@@ -71,7 +73,7 @@ def _get_observe():
             def _sync_wrapper(*args, **kwargs):
                 try:
                     from runtime.langfuse_setup import is_langfuse_enabled
-                    if is_langfuse_enabled():
+                    if not recall_policy.is_replaying() and is_langfuse_enabled():
                         from langfuse import observe
                         decorated = observe(**decorator_kwargs)(fn)
                         return decorated(*args, **kwargs)
@@ -138,6 +140,8 @@ class RecallResponse:
 
 def _persist_log(log: object) -> None:
     """Best-effort persist to ring buffer. Called ONLY at recall() boundary."""
+    if recall_policy.is_replaying():
+        return
     try:
         from cognition.observability import RecallLogStore
         RecallLogStore().append(log)
@@ -153,6 +157,7 @@ def _make_log(tier: str = "", caller: str = "", search_mode: str = "") -> object
     return _FallbackLog(tier=tier, caller=caller, search_mode=search_mode)
 
 
+@recall_policy.with_recall_policy
 @_get_observe()(name="recall", as_type="span")
 async def recall(
     query: str,
@@ -396,11 +401,11 @@ def _keyword_only_recall(
         # RECALL_KEYWORD_MIN_SCORE, not RECALL_MIN_SCORE: raw FTS5 scores are
         # 1/(1+|bm25|) (~0.05-0.17 for real hits) — the hybrid merged-score
         # floor (0.3) on this scale returned zero results on real queries.
-        from config import RECALL_KEYWORD_MIN_SCORE
         from memory_search import search_keyword
 
         raw_results = search_keyword(query, limit=max_results, memory_dir=memory_dir)
-        raw_results = [r for r in raw_results if r.score >= RECALL_KEYWORD_MIN_SCORE]
+        floor = recall_policy.resolve_values(memory_dir)["RECALL_KEYWORD_MIN_SCORE"]
+        raw_results = [r for r in raw_results if r.score >= floor]
 
         # Convert SearchResult → uniform result type
         if _COGNITION_AVAILABLE:
@@ -462,7 +467,8 @@ def _keyword_only_recall(
         log.latency_ms = (time.monotonic() - start) * 1000
         return RecallResponse(results=results, formatted_text=formatted, log=log)
 
-    except Exception:
+    except Exception as exc:
+        recall_policy.record_failure(exc)
         log.latency_ms = (time.monotonic() - start) * 1000
         return RecallResponse(results=[], formatted_text="", log=log)
 

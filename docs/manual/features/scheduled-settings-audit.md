@@ -42,10 +42,10 @@ success separately, and skips disabled profiles without a provider call. See
 ## How To Run It
 
 ```text
-http://127.0.0.1:5173/scheduled
-http://127.0.0.1:5173/settings
-http://127.0.0.1:5173/audit
-http://127.0.0.1:5173/mobile
+http://127.0.0.1:5473/scheduled
+http://127.0.0.1:5473/settings
+http://127.0.0.1:5473/audit
+http://127.0.0.1:5473/mobile
 ```
 
 ## How To Test It

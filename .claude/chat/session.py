@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
@@ -269,6 +270,20 @@ class ChatMessage:
     content: str
     created_at: datetime
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    source_origin_ref: str | None = None
+
+    @property
+    def source_ref(self) -> str | None:
+        """Original message identity shared by all derived transcript envelopes."""
+        if self.source_origin_ref:
+            return self.source_origin_ref
+        return f"chat-message:{self.session_id}:{self.id}" if self.id is not None else None
+
+    @property
+    def source_revision(self) -> str:
+        """Content revision, independent of collection windows and read time."""
+        payload = json.dumps([self.role, self.content], ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _serialize_tool_calls(tool_calls: Any) -> str:
@@ -280,6 +295,15 @@ def _serialize_tool_calls(tool_calls: Any) -> str:
         return json.dumps(tool_calls)
     except TypeError:
         return "[]"
+
+
+def _message_origin_ref(value: str | None) -> str | None:
+    """Validate host-supplied identity without deriving it from message content."""
+    if value is not None and (
+        not isinstance(value, str) or not value.strip() or len(value) > 2048
+    ):
+        raise ValueError("message source_ref must be a nonempty string of at most 2048 characters")
+    return value
 
 
 def _parse_tool_calls(raw: Any) -> list[dict[str, Any]]:
@@ -429,7 +453,8 @@ class SQLiteSessionStore:
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    tool_calls_json TEXT DEFAULT '[]'
+                    tool_calls_json TEXT DEFAULT '[]',
+                    source_origin_ref TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
                     ON chat_messages(session_id, created_at);
@@ -477,6 +502,22 @@ class SQLiteSessionStore:
                     conn.execute(statement)
                 except sqlite3.OperationalError:
                     pass
+            message_columns = {
+                row[1]: row for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()
+            }
+            if "source_origin_ref" not in message_columns:
+                try:
+                    conn.execute("ALTER TABLE chat_messages ADD COLUMN source_origin_ref TEXT")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name: source_origin_ref" not in str(exc).lower():
+                        raise
+                message_columns = {
+                    row[1]: row
+                    for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()
+                }
+            origin_column = message_columns["source_origin_ref"]
+            if origin_column[2].upper() != "TEXT" or origin_column[3] != 0:
+                raise RuntimeError("chat_messages.source_origin_ref must be nullable TEXT")
             conn.execute(
                 """
                 UPDATE chat_sessions
@@ -594,6 +635,9 @@ class SQLiteSessionStore:
                 _parse_tool_calls(row["tool_calls_json"])
                 if "tool_calls_json" in row.keys()
                 else []
+            ),
+            source_origin_ref=(
+                row["source_origin_ref"] if "source_origin_ref" in row.keys() else None
             ),
         )
 
@@ -844,15 +888,19 @@ class SQLiteSessionStore:
         content: str,
         created_at: datetime | None = None,
         tool_calls: Any = None,
+        *,
+        source_ref: str | None = None,
     ) -> None:
         """Persist one chat message for transcript replay/search."""
 
         timestamp = (created_at or datetime.now()).isoformat()
         with self._connect() as conn:
             conn.execute(
-                """INSERT INTO chat_messages (session_id, role, content, created_at, tool_calls_json)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (session_id, role, content, timestamp, _serialize_tool_calls(tool_calls)),
+                """INSERT INTO chat_messages
+                   (session_id, role, content, created_at, tool_calls_json, source_origin_ref)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (session_id, role, content, timestamp, _serialize_tool_calls(tool_calls),
+                 _message_origin_ref(source_ref)),
             )
 
     def list_messages(self, session_id: str, limit: int = 200) -> list[ChatMessage]:
@@ -861,7 +909,8 @@ class SQLiteSessionStore:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """SELECT id, session_id, role, content, created_at, tool_calls_json
+                """SELECT id, session_id, role, content, created_at,
+                          tool_calls_json, source_origin_ref
                    FROM chat_messages
                    WHERE session_id = ?
                    ORDER BY created_at ASC, id ASC
@@ -876,7 +925,8 @@ class SQLiteSessionStore:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """SELECT id, session_id, role, content, created_at, tool_calls_json
+                """SELECT id, session_id, role, content, created_at,
+                          tool_calls_json, source_origin_ref
                    FROM chat_messages
                    WHERE session_id = ?
                    ORDER BY created_at DESC, id DESC
@@ -904,7 +954,8 @@ class SQLiteSessionStore:
             if session_id:
                 rows = conn.execute(
                     """
-                    SELECT m.id, m.session_id, m.role, m.content, m.created_at, m.tool_calls_json
+                    SELECT m.id, m.session_id, m.role, m.content, m.created_at,
+                           m.tool_calls_json, m.source_origin_ref
                     FROM chat_messages_fts
                     JOIN chat_messages m ON m.id = chat_messages_fts.rowid
                     WHERE chat_messages_fts MATCH ? AND m.session_id = ?
@@ -916,7 +967,8 @@ class SQLiteSessionStore:
             else:
                 rows = conn.execute(
                     """
-                    SELECT m.id, m.session_id, m.role, m.content, m.created_at, m.tool_calls_json
+                    SELECT m.id, m.session_id, m.role, m.content, m.created_at,
+                           m.tool_calls_json, m.source_origin_ref
                     FROM chat_messages_fts
                     JOIN chat_messages m ON m.id = chat_messages_fts.rowid
                     WHERE chat_messages_fts MATCH ?
@@ -1125,9 +1177,19 @@ class PostgresSessionStore:
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL,
-                tool_calls_json TEXT DEFAULT '[]'
+                tool_calls_json TEXT DEFAULT '[]',
+                source_origin_ref TEXT
             )
         """)
+        cur.execute("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS source_origin_ref TEXT")
+        cur.execute(
+            "SELECT data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'chat_messages' AND column_name = 'source_origin_ref' "
+            "AND table_schema = current_schema()"
+        )
+        origin_column = cur.fetchone()
+        if not origin_column or origin_column[0] != "text" or origin_column[1] != "YES":
+            raise RuntimeError("chat_messages.source_origin_ref must be nullable TEXT")
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
                 ON chat_messages(session_id, created_at)
@@ -1426,14 +1488,18 @@ class PostgresSessionStore:
         content: str,
         created_at: datetime | None = None,
         tool_calls: Any = None,
+        *,
+        source_ref: str | None = None,
     ) -> None:
         """Persist one chat message for transcript replay/search."""
 
         cur = self._conn.cursor()
         cur.execute(
-            """INSERT INTO chat_messages (session_id, role, content, created_at, tool_calls_json)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (session_id, role, content, created_at or datetime.now(), _serialize_tool_calls(tool_calls)),
+            """INSERT INTO chat_messages
+               (session_id, role, content, created_at, tool_calls_json, source_origin_ref)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (session_id, role, content, created_at or datetime.now(),
+             _serialize_tool_calls(tool_calls), _message_origin_ref(source_ref)),
         )
 
     def list_messages(self, session_id: str, limit: int = 200) -> list[ChatMessage]:
@@ -1442,7 +1508,7 @@ class PostgresSessionStore:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT id, session_id, role, content, created_at, tool_calls_json
+            SELECT id, session_id, role, content, created_at, tool_calls_json, source_origin_ref
             FROM chat_messages
             WHERE session_id = %s
             ORDER BY created_at ASC, id ASC
@@ -1459,6 +1525,7 @@ class PostgresSessionStore:
                 content=row[3],
                 created_at=(row[4] if isinstance(row[4], datetime) else datetime.fromisoformat(str(row[4]))),
                 tool_calls=_parse_tool_calls(row[5] if len(row) > 5 else None),
+                source_origin_ref=row[6] if len(row) > 6 else None,
             )
             for row in rows
         ]
@@ -1469,7 +1536,7 @@ class PostgresSessionStore:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT id, session_id, role, content, created_at, tool_calls_json
+            SELECT id, session_id, role, content, created_at, tool_calls_json, source_origin_ref
             FROM chat_messages
             WHERE session_id = %s
             ORDER BY created_at DESC, id DESC
@@ -1486,6 +1553,7 @@ class PostgresSessionStore:
                 content=row[3],
                 created_at=(row[4] if isinstance(row[4], datetime) else datetime.fromisoformat(str(row[4]))),
                 tool_calls=_parse_tool_calls(row[5] if len(row) > 5 else None),
+                source_origin_ref=row[6] if len(row) > 6 else None,
             )
             for row in rows
         ]
@@ -1507,7 +1575,7 @@ class PostgresSessionStore:
         if session_id:
             cur.execute(
                 """
-                SELECT id, session_id, role, content, created_at, tool_calls_json
+                SELECT id, session_id, role, content, created_at, tool_calls_json, source_origin_ref
                 FROM chat_messages
                 WHERE session_id = %s
                   AND to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
@@ -1519,7 +1587,7 @@ class PostgresSessionStore:
         else:
             cur.execute(
                 """
-                SELECT id, session_id, role, content, created_at, tool_calls_json
+                SELECT id, session_id, role, content, created_at, tool_calls_json, source_origin_ref
                 FROM chat_messages
                 WHERE to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)
                 ORDER BY created_at DESC, id DESC
@@ -1536,6 +1604,7 @@ class PostgresSessionStore:
                 content=row[3],
                 created_at=(row[4] if isinstance(row[4], datetime) else datetime.fromisoformat(str(row[4]))),
                 tool_calls=_parse_tool_calls(row[5] if len(row) > 5 else None),
+                source_origin_ref=row[6] if len(row) > 6 else None,
             )
             for row in rows
         ]
@@ -1585,7 +1654,8 @@ def read_operator_user_turns(
     *,
     store: SQLiteSessionStore | PostgresSessionStore | None = None,
     persona_id: str | None | object = _UNSET,
-) -> list[str]:
+    include_provenance: bool = False,
+) -> list[str] | list[dict[str, Any]]:
     """Read the operator's VERBATIM ``role == "user"`` turns over a window (Living Self Act 1, B2).
 
     This is the ONLY place the operator's exact words live — the engine persists
@@ -1594,6 +1664,10 @@ def read_operator_user_turns(
     staging, which carries no role marker). Reads the SAME store recall uses; no
     schema change. Works for SQLite AND Postgres because ``list_active`` /
     ``list_messages`` are on both stores.
+
+    ``include_provenance=True`` retains physical message IDs, source refs, and
+    content revisions for extraction. The default string list remains a read
+    compatibility surface; strings alone cannot establish independent support.
 
     NB1 (tz no-op fix — the load-bearing correctness fix): ``window_start`` may
     be tz-aware (``now_local()``) while SQLite ``created_at`` is NAIVE and
@@ -1607,7 +1681,7 @@ def read_operator_user_turns(
     once a session is older than the window — instead of reading the full message
     history of every interactive session ever. KNOWN LIMITATION: ``list_messages``
     has a hard ``limit=200`` and returns oldest-first, so a single session with
-    >200 messages drops its oldest turns; the ``updated_at`` prefilter keeps the
+    >200 messages omits its newest turns; the ``updated_at`` prefilter keeps the
     read bounded and this is an accepted, documented bound for Act 1.
 
     NM2 (slash-command drop): rows whose stripped text starts with ``/`` are
@@ -1625,7 +1699,7 @@ def read_operator_user_turns(
             store = get_session_store()
 
         window_naive = normalize_physical_timestamp(window_start)
-        turns: list[str] = []
+        turns: list = []
         for sess in store.list_active(source="interactive", persona_id=persona_id):
             # NM1: list_active is updated_at DESC — once a session's last
             # activity predates the window, every later session is older too.
@@ -1652,7 +1726,31 @@ def read_operator_user_turns(
                 # NM2: drop slash commands — not stated beliefs.
                 if text.startswith("/"):
                     continue
-                turns.append(text)
+                if include_provenance:
+                    # IDs come from physical rows on BOTH backends. Never use
+                    # a window offset or text hash as an independent event ID.
+                    message_id = getattr(m, "id", None)
+                    session_id = getattr(m, "session_id", sess.session_id)
+                    backend = "postgres" if isinstance(store, PostgresSessionStore) else "sqlite"
+                    turns.append({
+                        "text": text,
+                        "role": m.role,
+                        "message_id": message_id,
+                        "session_id": session_id,
+                        "source_ref": (
+                            getattr(m, "source_ref", None) or (
+                                f"chat-message:{session_id}:{message_id}"
+                                if message_id is not None else None
+                            )
+                        ),
+                        "source_backend": backend,
+                        "source_revision": hashlib.sha256(
+                            json.dumps([m.role, m.content], ensure_ascii=False).encode("utf-8")
+                        ).hexdigest(),
+                        "source_time": m.created_at.isoformat(),
+                    })
+                else:
+                    turns.append(text)
         return turns
     except Exception as exc:
         # non-blocking — reflection survives an empty/locked store, but the

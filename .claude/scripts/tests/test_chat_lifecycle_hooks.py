@@ -12,6 +12,21 @@ from session import Session, SQLiteSessionStore
 from session_keys import build_session_key
 
 
+@pytest.fixture(autouse=True)
+def isolated_learning_lifecycle(tmp_path, monkeypatch):
+    from personas.learning import hooks
+    from personas.learning.models import LearningTarget
+    from personas.learning.service import LearningService
+
+    def local_service(persona_id):
+        root = tmp_path / "learning" / persona_id
+        return LearningService(LearningTarget(
+            persona_id, root / "memory", root / "data", root / "state", root / "skills"
+        ))
+
+    monkeypatch.setattr(hooks, "_service_for", local_service)
+
+
 def _seed_session(store: SQLiteSessionStore) -> Session:
     now = datetime.now()
     session_id = build_session_key("cli", "chan-1", "chan-1")

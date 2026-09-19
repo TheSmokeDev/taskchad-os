@@ -29,6 +29,7 @@ class DiagnosticsReport:
     cognition_available: bool = False
     cognition_moves: dict[str, bool] = field(default_factory=dict)
     cognitive_loop: dict[str, object] = field(default_factory=dict)
+    learning_dispatcher: dict[str, object] = field(default_factory=dict)
 
     # Called-shots ledger (epic #186 T1) — on/off must be PROVABLE, not guessed
     called_shots: dict[str, object] = field(default_factory=dict)
@@ -105,6 +106,7 @@ def collect_diagnostics() -> DiagnosticsReport:
 
     _check_cognition(report)
     _check_cognitive_loop(report)
+    _check_learning_dispatcher(report)
     _check_called_shots(report)
     _check_recall(report)
     _check_memory_db(report)
@@ -121,6 +123,14 @@ def collect_diagnostics() -> DiagnosticsReport:
     _check_capabilities(report)
 
     return report
+
+
+def _check_learning_dispatcher(report: DiagnosticsReport) -> None:
+    try:
+        from personas.learning.dispatcher import dispatcher_status
+        report.learning_dispatcher = dispatcher_status()
+    except Exception as exc:
+        report.learning_dispatcher = {"state": "unavailable", "error_type": type(exc).__name__}
 
 
 def _check_buzz(report: DiagnosticsReport) -> None:
@@ -734,8 +744,21 @@ def check_environment() -> list[tuple[str, str, str]]:
                 issues.append(("warn", "Buzz CLI compatibility check failed", "Pilot contract is Buzz 0.5.x"))
 
     # Runtime provider available
+    from runtime.profiles import GENERIC_PROVIDER_REGISTRY
+
+    keyless_runtime_available = any(
+        overlay.auth_type == "keyless" for overlay in GENERIC_PROVIDER_REGISTRY.values()
+    )
+    runtime_api_keys = [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "KIMI_API_KEY",
+        "NVIDIA_API_KEY",
+    ]
     has_runtime = (
-        any(env.get(k) for k in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "KIMI_API_KEY", "NVIDIA_API_KEY"])
+        keyless_runtime_available
+        or any(env.get(key) for key in runtime_api_keys)
         or shutil.which("claude")
         or shutil.which("codex")
     )

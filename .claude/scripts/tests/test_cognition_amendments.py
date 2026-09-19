@@ -36,6 +36,17 @@ from cognition.amendments import (  # noqa: E402
 )
 
 
+def _approve_for_physical_write(ledger):
+    """Physical-writer regressions use a real operator approval.
+
+    The automatic receipt contract is covered by test_unified_change_authority;
+    confidence alone no longer authorizes these byte/locking/rollback fixtures.
+    """
+    for row in ledger.read_all():
+        if row.status == "pending":
+            assert ledger.mark_reviewed(row.id, status="approved", reviewer="test-operator")
+
+
 def _raw_llm_record(
     content: str,
     *,
@@ -184,6 +195,7 @@ def test_policy_approved_amendment_applies_with_rollback(tmp_path: Path) -> None
     )
     assert ledger.append(proposal) is True
 
+    _approve_for_physical_write(ledger)
     results = apply_policy_approved_amendments(ledger, memory_dir)
 
     assert len(results) == 1
@@ -213,6 +225,7 @@ def test_policy_rejects_secret_like_content(tmp_path: Path) -> None:
     )
     ledger.append(proposal)
 
+    _approve_for_physical_write(ledger)
     results = apply_policy_approved_amendments(ledger, memory_dir)
 
     assert results[0].status == "policy_rejected"
@@ -245,6 +258,7 @@ def test_policy_rejects_real_vendor_key_shapes(tmp_path: Path, payload: str) -> 
     )
     ledger.append(proposal)
 
+    _approve_for_physical_write(ledger)
     results = apply_policy_approved_amendments(ledger, memory_dir)
 
     assert results[0].status == "policy_rejected"
@@ -273,6 +287,7 @@ def test_apply_result_status_reflects_ledger_update_failure(
     )
     assert ledger.append(proposal) is True
 
+    _approve_for_physical_write(ledger)
     monkeypatch.setattr(ProposalLedger, "_update_record", lambda self, pid, updates: False)
 
     result = apply_amendment_if_allowed(proposal, ledger, memory_dir)
@@ -332,8 +347,9 @@ def test_parse_and_process_amendment_output(tmp_path: Path) -> None:
     results = process_amendment_output(output, ledger, memory_dir, default_source="memory_reflect")
 
     assert parsed[0].source == "memory_reflect"
-    assert results[0].status == "applied"
-    assert "Prefers explicit model control" in (memory_dir / "USER.md").read_text(
+    assert results[0].status == "pending"
+    assert results[0].policy_reason == "automatic_evaluation_required"
+    assert "Prefers explicit model control" not in (memory_dir / "USER.md").read_text(
         encoding="utf-8"
     )
 
@@ -379,8 +395,8 @@ def test_exclude_kinds_drops_tagged_records_from_parse_and_process(
     )
 
 
-def test_exclude_kinds_default_preserves_prior_behavior(tmp_path: Path) -> None:
-    """Byte-identical behavior for every existing caller that omits `exclude_kinds`."""
+def test_exclude_kinds_default_captures_pending_proposals(tmp_path: Path) -> None:
+    """Omitting exclude_kinds captures proposals without bypassing evaluation."""
     memory_dir = tmp_path / "Memory"
     memory_dir.mkdir()
     (memory_dir / "USER.md").write_text("# USER\n", encoding="utf-8")
@@ -401,7 +417,8 @@ def test_exclude_kinds_default_preserves_prior_behavior(tmp_path: Path) -> None:
     results = process_amendment_output(output, ledger, memory_dir, default_source="memory_reflect")
 
     assert len(parsed) == 1
-    assert results[0].status == "applied"
+    assert results[0].status == "pending"
+    assert results[0].policy_reason == "automatic_evaluation_required"
 
 
 def test_model_supplied_source_is_overwritten_never_preserved(tmp_path: Path) -> None:
@@ -440,7 +457,8 @@ def test_model_supplied_source_is_overwritten_never_preserved(tmp_path: Path) ->
     results = process_amendment_output(
         output, ledger, memory_dir, default_source="memory_reflect_notes"
     )
-    assert results[0].status == "applied"
+    assert results[0].status == "pending"
+    assert results[0].policy_reason == "automatic_evaluation_required"
     stored = ledger.read_all()
     assert len(stored) == 1
     assert stored[0].source == "memory_reflect_notes"
@@ -474,6 +492,7 @@ def test_apply_persists_applied_status_for_idless_records(tmp_path: Path) -> Non
     )
     ledger = ProposalLedger(ledger_path)
 
+    _approve_for_physical_write(ledger)
     results = apply_policy_approved_amendments(ledger, memory_dir)
 
     assert len(results) == 1
@@ -510,6 +529,7 @@ def test_apply_skips_when_marker_already_present(tmp_path: Path) -> None:
     )
     target.write_text(seeded, encoding="utf-8")
 
+    _approve_for_physical_write(ledger)
     results = apply_policy_approved_amendments(ledger, memory_dir)
 
     assert results[0].status == "applied"
@@ -541,6 +561,7 @@ def test_apply_skips_when_content_already_present(tmp_path: Path) -> None:
     )
     assert ledger.append(proposal) is True
 
+    _approve_for_physical_write(ledger)
     results = apply_policy_approved_amendments(ledger, memory_dir)
 
     assert results[0].status == "applied"
@@ -584,9 +605,9 @@ def test_reconcile_with_missing_ledger_row_does_not_report_applied(
 
     result = apply_amendment_if_allowed(proposal, ledger, memory_dir)
 
-    assert result.status == "apply_pending"
-    assert result.policy_decision == "reconcile"
-    assert result.policy_reason == "already_present_but_ledger_update_failed"
+    assert result.status == "pending"
+    assert result.policy_decision == "defer"
+    assert result.policy_reason == "automatic_evaluation_required"
     assert target.read_text(encoding="utf-8") == seeded
     assert all(p.status != "applied" for p in ledger.read_all())
 
@@ -648,6 +669,7 @@ def test_apply_limit_counts_only_physical_writes(tmp_path: Path) -> None:
             )
         ) is True
 
+    _approve_for_physical_write(ledger)
     results = apply_policy_approved_amendments(ledger, memory_dir, limit=2)
 
     # The first candidate reconciles (free); two physical writes consume the limit.
@@ -660,7 +682,7 @@ def test_apply_limit_counts_only_physical_writes(tmp_path: Path) -> None:
     assert text.count("HOMIE_AUTO_AMENDMENT:") == 3  # pre-seeded + 2 physical writes
     statuses = [proposal.status for proposal in ledger.read_all()]
     assert statuses.count("applied") == 3
-    assert statuses.count("pending") == 2
+    assert statuses.count("approved") == 2  # authorized, still outside the physical-write limit
 
 
 def test_autonomous_section_capped_on_append(tmp_path: Path) -> None:
@@ -689,6 +711,7 @@ def test_autonomous_section_capped_on_append(tmp_path: Path) -> None:
         )
     ) is True
 
+    _approve_for_physical_write(ledger)
     results = apply_policy_approved_amendments(ledger, memory_dir, section_cap=20)
 
     assert results[0].status == "applied"
@@ -924,6 +947,7 @@ def test_prose_substring_does_not_reconcile(tmp_path: Path) -> None:
     )
     assert ledger.append(proposal) is True
 
+    _approve_for_physical_write(ledger)
     results = apply_policy_approved_amendments(ledger, memory_dir)
 
     assert results[0].policy_decision == "apply"  # NOT reconcile
@@ -1136,6 +1160,7 @@ def test_apply_lock_covers_reread_through_ledger_update(
 
     monkeypatch.setattr(ProposalLedger, "_update_record", spy_update_record)
 
+    _approve_for_physical_write(ledger)
     result = apply_amendment_if_allowed(proposal, ledger, memory_dir)
 
     assert observed["target_lock_held"] is True
@@ -1163,6 +1188,7 @@ def test_apply_nests_under_evolve_loop_style_ledger_lock_without_deadlock(
     )
     assert ledger.append(proposal) is True
 
+    _approve_for_physical_write(ledger)
     start = time.monotonic()
     with ledger_file_lock(ledger.path):  # same pattern as evolve_loop.py:363-368
         result = apply_amendment_if_allowed(proposal, ledger, memory_dir)
@@ -1195,6 +1221,7 @@ def test_apply_atomic_text_output_unchanged(tmp_path: Path) -> None:
         original, proposal, section_cap=20
     )
 
+    _approve_for_physical_write(ledger)
     apply_amendment_if_allowed(proposal, ledger, memory_dir)
 
     assert target.read_text(encoding="utf-8") == expected_after

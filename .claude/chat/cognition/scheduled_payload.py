@@ -20,8 +20,8 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from cognition.identity_payload import build_identity_payload
-from cognition.self_model import InferenceRecord, InferenceTracker
+from cognition.identity_payload import build_identity_payload  # noqa: E402
+from cognition.self_model import InferenceRecord, InferenceTracker  # noqa: E402
 
 DEFAULT_IDENTITY_ORDER: tuple[str, ...] = (
     "SOUL",
@@ -49,6 +49,7 @@ def build_scheduled_cognition_payload(
     inference_state_file: Path | None = None,
     min_confidence: float | None = None,
     cap: int | None = None,
+    learning_service=None,
 ) -> ScheduledCognitionPayload:
     """Build shared scheduled-loop context from caller-provided state.
 
@@ -62,7 +63,9 @@ def build_scheduled_cognition_payload(
         min_confidence=min_confidence,
         cap=cap,
     )
-    active = _load_active_inferences(state_file, resolved_min_confidence)
+    active = _load_active_inferences(
+        state_file, resolved_min_confidence, learning_service=learning_service
+    )
     active = _sort_active_inferences(active)[:resolved_cap]
     active_lines = tuple(_format_inference_line(record) for record in active)
     active_section = (
@@ -165,12 +168,15 @@ def _resolve_inference_config(
 def _load_active_inferences(
     state_file: Path | None,
     min_confidence: float,
+    *,
+    learning_service=None,
 ) -> list[InferenceRecord]:
     if state_file is None:
         return []
     try:
         return InferenceTracker(Path(state_file)).get_active(
             min_confidence=min_confidence,
+            **({"learning_service": learning_service} if learning_service is not None else {}),
         )
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return []

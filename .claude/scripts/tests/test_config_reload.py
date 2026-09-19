@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 
 class TestReloadMechanics:
     """Test Python import/reload behavior that the /reload feature depends on."""
@@ -166,8 +168,12 @@ class TestReloadConfigFunction:
             assert "CHAT_MAX_BUDGET_USD" in changes
             assert config.CHAT_MAX_BUDGET_USD == 99.0
         finally:
-            # Restore
-            os.environ["CHAT_MAX_BUDGET_USD"] = str(original)
+            # Restore — the knob has no default, so "unset" must round-trip
+            # as unset, never as the string "None".
+            if original is None:
+                os.environ.pop("CHAT_MAX_BUDGET_USD", None)
+            else:
+                os.environ["CHAT_MAX_BUDGET_USD"] = str(original)
             from config import reload_config as rc
 
             rc()
@@ -284,3 +290,26 @@ class TestReloadConfigFunction:
             from config import reload_config as rc
 
             rc()
+
+
+class TestOptionalFloatEnv:
+    """CHAT_MAX_BUDGET_USD has no default: unset, blank, or none mean no cap."""
+
+    @pytest.mark.parametrize("raw", ["", "   ", "none", "None", "off", "unlimited"])
+    def test_no_cap_spellings(self, monkeypatch, raw: str) -> None:
+        import config
+
+        monkeypatch.setenv("CHAT_MAX_BUDGET_USD", raw)
+        assert config._optional_float_env("CHAT_MAX_BUDGET_USD") is None
+
+    def test_explicit_value_is_a_float(self, monkeypatch) -> None:
+        import config
+
+        monkeypatch.setenv("CHAT_MAX_BUDGET_USD", "1.5")
+        assert config._optional_float_env("CHAT_MAX_BUDGET_USD") == 1.5
+
+    def test_unset_is_none(self, monkeypatch) -> None:
+        import config
+
+        monkeypatch.delenv("CHAT_MAX_BUDGET_USD", raising=False)
+        assert config._optional_float_env("CHAT_MAX_BUDGET_USD") is None

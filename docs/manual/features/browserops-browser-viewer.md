@@ -75,7 +75,7 @@ uv run thehomie chat -q "/browserops guide" -Q
 Dashboard:
 
 ```text
-http://127.0.0.1:5173/browser
+http://127.0.0.1:5473/browser
 ```
 
 Windows local notes:

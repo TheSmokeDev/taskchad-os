@@ -14,15 +14,31 @@ REM (the direct path is proven and needs no Archon runtime.)
 
 cd /d "%~dp0..\.."
 
+REM Worst-of exit code across every channel: one failed channel must not be
+REM reported to Task Scheduler as a clean 0x0 run. Each %ERRORLEVEL% below is
+REM expanded when cmd reads the line, i.e. after the preceding call returned.
+set EXITCODE=0
+
 echo [social-factory] YourBrand - Instagram
 call archon workflow run social-content-factory "channel=instagram count=1 media=auto"
+if not %ERRORLEVEL% EQU 0 set EXITCODE=%ERRORLEVEL%
 
 echo [social-factory] YourBrand - Facebook
 call archon workflow run social-content-factory "channel=facebook count=1 media=image"
+if not %ERRORLEVEL% EQU 0 set EXITCODE=%ERRORLEVEL%
 
 REM YouTube Shorts (vertical video render is minutes/clip) - arm once the
 REM render cadence is confirmed:
 REM echo [social-factory] YourBrand - YouTube
 REM call archon workflow run social-content-factory "channel=youtube count=1 media=video"
+REM if not %ERRORLEVEL% EQU 0 set EXITCODE=%ERRORLEVEL%
 
-echo [social-factory] done - drafts queued; approve in Telegram / dashboard.
+if %EXITCODE% EQU 0 (
+    echo [social-factory] done - drafts queued; approve in Telegram / dashboard.
+    echo %date% %time% - Social factory completed >> social_factory_runs.log
+) else (
+    echo [social-factory] FAILED exit=%EXITCODE% - check Archon run logs.
+    echo %date% %time% - Social factory FAILED exit=%EXITCODE% >> social_factory_runs.log
+)
+
+exit /b %EXITCODE%

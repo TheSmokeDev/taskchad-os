@@ -46,7 +46,7 @@ uv run thehomie chat -q "/standup What matters today?" -Q
 Dashboard:
 
 ```text
-http://127.0.0.1:5173/cabinet
+http://127.0.0.1:5473/cabinet
 ```
 
 ## How To Test It

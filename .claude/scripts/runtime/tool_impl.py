@@ -377,6 +377,13 @@ def register_tools() -> int:
 
     registered = 0
     try:
+        from runtime import tool_impl_learning
+
+        registered += tool_impl_learning.register_tools()
+    except Exception:
+        _logger.warning("learning-tool registration failed", exc_info=True)
+
+    try:
         # The authorization bridge is a safe-core meta-tool.  It can create a
         # pending request but cannot grant or execute anything itself.
         from runtime import persona_elevation
@@ -393,6 +400,13 @@ def register_tools() -> int:
         registered += tool_impl_eyes.register_tools()
     except Exception:  # noqa: BLE001 — one dead group must not deny the rest
         _logger.warning("eye-tool registration failed", exc_info=True)
+
+    try:
+        from runtime import tool_impl_mail_write
+
+        registered += tool_impl_mail_write.register_tools()
+    except Exception:
+        _logger.warning("mail-write-tool registration failed", exc_info=True)
 
     try:
         # The X hands (epic #465 1a): dedicated-gate WRITE tools whose handlers

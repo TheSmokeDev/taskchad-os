@@ -669,6 +669,12 @@ def render_profile_env(plan: EnvSyncPlan) -> str:
 
 
 _KILLSWITCH_ENV_PREFIX = "HOMIE_KILLSWITCH_"
+_DEPLOYMENT_PATH_KEYS = frozenset({
+    "HOMIE_DEFAULT_PROFILE_ROOT", "HOMIE_VAULT_DIR", "ORCHESTRATION_DB_PATH",
+    "SECOND_BRAIN_RUNTIME_ACTIVITY_DB",
+    "SECOND_BRAIN_GENERIC_MAX_OUTPUT_TOKENS",
+    "SECOND_BRAIN_CODEX_APP_SERVER_COMMAND",
+})
 
 
 def build_capability_scoped_env(
@@ -699,7 +705,7 @@ def build_capability_scoped_env(
     out = {
         key: value
         for key, value in scrubbed.items()
-        if key.upper() in _BASE_RUNTIME_ENV_KEYS
+        if key.upper() in _BASE_RUNTIME_ENV_KEYS | _DEPLOYMENT_PATH_KEYS
         or key.upper().startswith(_KILLSWITCH_ENV_PREFIX)
     }
     out.update(plan.values)
@@ -719,6 +725,18 @@ def build_capability_scoped_env(
             out[key] = value
 
     out["HOMIE_HOME"] = str(profile_root)
+    # These bind the installation, not capabilities. Retain the parent's exact
+    # pins after loading delegated values so child work cannot split the ledger.
+    for key in _DEPLOYMENT_PATH_KEYS:
+        if scrubbed.get(key, "").strip():
+            out[key] = scrubbed[key]
+    # A named profile may deliberately keep its domain ledger separate from the
+    # main bot. Its explicit physical pin wins over the inherited default ledger.
+    from .deployment import read_deployment_pins
+
+    child_pins = read_deployment_pins(Path(profile_root) / ".env")
+    if child_pins.get("ORCHESTRATION_DB_PATH", "").strip():
+        out["ORCHESTRATION_DB_PATH"] = child_pins["ORCHESTRATION_DB_PATH"]
     return out
 
 

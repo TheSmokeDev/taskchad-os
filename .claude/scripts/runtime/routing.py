@@ -55,26 +55,31 @@ TASK_ROUTE_DEFAULTS = {
     "memory_weekly": DEFAULT_PROVIDER_CHAIN,
 }
 
-# Derived from GENERIC_PROVIDER_REGISTRY: tool_route_priority >= 0 means the
-# provider participates in the tool route, and the int is its ordering key.
+# Derived from GENERIC_PROVIDER_REGISTRY: an auto-routable provider with
+# tool_route_priority >= 0 participates in the tool route, ordered by that key.
 GENERIC_TOOL_ROUTE: tuple[str, ...] = tuple(
     key
     for key, _overlay in sorted(
         (
             (k, v)
             for k, v in GENERIC_PROVIDER_REGISTRY.items()
-            if v.tool_route_priority >= 0
+            if v.auto_route and v.tool_route_priority >= 0
         ),
         key=lambda kv: kv[1].tool_route_priority,
     )
 )
 
-# Derived from GENERIC_PROVIDER_REGISTRY: every entry participates in the
-# text route, ordered by text_route_priority.
+# Derived from GENERIC_PROVIDER_REGISTRY: auto-routable entries participate in
+# the text route, ordered by text_route_priority. Selectable-only providers
+# such as OpenCode Free stay out of automatic fallback chains.
 GENERIC_TEXT_ROUTE: tuple[str, ...] = tuple(
     key
     for key, _overlay in sorted(
-        GENERIC_PROVIDER_REGISTRY.items(),
+        (
+            (k, v)
+            for k, v in GENERIC_PROVIDER_REGISTRY.items()
+            if v.auto_route
+        ),
         key=lambda kv: kv[1].text_route_priority,
     )
 )
@@ -109,9 +114,9 @@ GENERIC_TASK_ROUTE_DEFAULTS = {
 # generic pool and `lane_router._adapter_carries_tool_defs` does the filtering
 # — one source of truth, asked of the adapter itself.
 #
-# Same membership as GENERIC_TEXT_ROUTE by construction (every registry entry
-# participates in the text route); aliased rather than re-derived so the two
-# cannot diverge.
+# Same membership as GENERIC_TEXT_ROUTE by construction (every auto-routable
+# text provider participates); aliased rather than re-derived so the two cannot
+# diverge.
 GENERIC_CALLER_TOOLS_ROUTE: tuple[str, ...] = GENERIC_TEXT_ROUTE
 
 _GENERIC_TEXT_PROVIDER_SET = {
@@ -258,9 +263,9 @@ def _generic_provider_order_for_request(request: RuntimeRequest) -> tuple[str, .
         # permits fallback. `allow_fallback=False` and resume both keep the
         # exact single-provider route they have today.
         #
-        # `GENERIC_CALLER_TOOLS_ROUTE` is the FULL generic pool, so this is the
-        # same candidate set the unpinned branch below resolves to — the pin
-        # only moves one provider to the front of it.
+        # `GENERIC_CALLER_TOOLS_ROUTE` is the full automatic generic pool, so
+        # this is the same candidate set the unpinned branch below resolves to
+        # — the explicit pin only moves one provider to the front of it.
         if carries_caller_tools and _can_fallback(request):
             return _dedupe_order([preferred_provider, *GENERIC_CALLER_TOOLS_ROUTE])
         return (preferred_provider,)
@@ -372,13 +377,27 @@ def _pinned_primary_provider() -> str | None:
 
 
 def _preferred_generic_provider(request: RuntimeRequest) -> str | None:
+    if request.preferred_provider:
+        provider = normalize_provider(request.preferred_provider)
+        allowed = _allowed_generic_providers_for_capability(
+            request.capability, carries_caller_tools=_base.request_carries_tools(request),
+        )
+        if provider not in allowed and not _is_explicitly_selectable_generic_provider(
+            provider, request
+        ):
+            raise ValueError(
+                "requested provider is not eligible for this generic runtime capability"
+            )
+        return provider
     selection = resolve_runtime_selection()
     if selection.lane == "claude_native":
         return None
     provider = selection.generic_provider
     if provider is None:
         return None
-    # Same allowlist the route overrides use, asked with the same question.
+    # Same automatic-route allowlist the route overrides use, asked with the
+    # same question. A selectable-only provider is also valid when the
+    # operator explicitly chose it through /model or -m.
     # Omitting `carries_caller_tools` here dropped an operator pin on exactly
     # the providers that CAN carry schemas: kimi sits outside
     # _GENERIC_TOOL_PROVIDER_SET, so a pinned kimi on a caller-tools
@@ -388,9 +407,31 @@ def _preferred_generic_provider(request: RuntimeRequest) -> str | None:
         request.capability,
         carries_caller_tools=_base.request_carries_tools(request),
     )
-    if provider in allowed:
+    if provider in allowed or _is_explicitly_selectable_generic_provider(provider, request):
         return provider
     return None
+
+
+def _is_explicitly_selectable_generic_provider(provider: str, request: RuntimeRequest) -> bool:
+    """Whether an operator may select a non-automatic generic provider.
+
+    ``auto_route=False`` prevents an opt-in provider from silently becoming a
+    fallback. It must not make ``/model free`` or ``-m free`` a no-op. The
+    adapter remains the final capability gate; this narrow pre-check only
+    preserves the routes that its OpenAI chat-completions transport can carry.
+    """
+
+    overlay = GENERIC_PROVIDER_REGISTRY.get(provider)
+    if (
+        overlay is None
+        or overlay.auto_route
+        or request.resume is not None
+        or request.hooks is not None
+    ):
+        return False
+    if _base.request_carries_tools(request):
+        return overlay.wire_api == "chat_completions"
+    return request.capability == TEXT_REASONING and not request.allowed_tools
 
 
 def _default_route(request: RuntimeRequest) -> tuple[str, ...]:

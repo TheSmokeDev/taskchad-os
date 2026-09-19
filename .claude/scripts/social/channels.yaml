@@ -1,4 +1,23 @@
 channels:
+  linkedin_YourProduct_company:
+    display_name: YourProduct company · LinkedIn
+    execution_method: browser
+    platform: linkedin
+    publisher:
+      schema_version: 1
+      kind: organization
+      id: "131153956"
+      name: YourProduct
+      url: https://www.linkedin.com/company/YourProduct/
+    cadence_enabled: false
+    persona_id: null
+    voice_profile: YourProduct-company
+    browser_workflow_id: linkedin.post.create
+    design_file: brand_designs/YourProduct-company.json
+    topic_pool: []
+    persona_pack: ""
+    image_aspect: "4:5"
+
   linkedin:
     display_name: YourProduct · LinkedIn
     execution_method: browser
@@ -6,6 +25,7 @@ channels:
     # Slightly under 48h so a few seconds of Task Scheduler jitter do not
     # skip the intended every-other-day draft window.
     cadence_interval_hours: 47
+    persona_id: null
     voice_profile: "owner-linkedin"
     design_file: brand_designs/owner-linkedin.json
     persona_pack: owner-YourBusiness-rep

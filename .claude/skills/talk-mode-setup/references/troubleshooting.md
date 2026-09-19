@@ -46,8 +46,8 @@ falls back to 401. Reload with `?token=` again.
 Mic capture requires a secure context: `localhost` / `127.0.0.1` or HTTPS. A
 LAN IP silently denies it.
 
-**Vite is running but the page won't load on `127.0.0.1:5173`.**
-Vite may bind IPv6 only. Use `http://localhost:5173`.
+**Vite is running but the page won't load on `127.0.0.1:5473`.**
+Vite may bind IPv6 only. Use `http://localhost:5473`.
 
 **`EADDRINUSE` after restarting a service.**
 Task wrappers (`npm start`, `uv run`) die leaving the child holding the port.

@@ -38,7 +38,7 @@ identity files and bot lifecycle under Python-owned validation and redaction.
 Dashboard:
 
 ```text
-http://127.0.0.1:5173/agents
+http://127.0.0.1:5473/agents
 ```
 
 CLI:

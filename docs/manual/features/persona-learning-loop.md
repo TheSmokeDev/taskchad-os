@@ -2,7 +2,38 @@
 
 Status: Shipped — born learning per profile (#422, 2026-08-13)
 Owner: Framework (memory pipelines + personas)
-Last updated: 2026-08-13
+Last updated: 2026-09-10
+
+The scheduled commands now serve as compatibility entry points into the shared
+persona cognitive lifecycle: `memory_reflect.py`, `memory_dream.py`, and their
+persona ticks request synthesis or wake the existing queue. They do not provide
+an independent automatic amendment path. Shared pause, configuration disables,
+foreground priority, and provider deferral control the work.
+
+Use [Persona Harness Learning](persona-harness-learning.md) for current operator
+behavior and the [developer guide](persona-harness-learning-developer.md) for
+admission, exact source manifests, and authority contracts. The sections below
+preserve the earlier reflection implementation as historical context; its
+separate eligibility, direct write flow, and success-watermark descriptions must
+not be used to infer unified completion. Deployment and provider proof are
+installation-specific and are not established by this manual.
+
+## Current Compatibility Contract
+
+- A scheduled invocation can return queued, coalesced, no-signal, interval,
+  disabled, or deferred. Admission is not completed inference or applied memory.
+- Successful retention records the source revision and exact excerpt consumed.
+  Omitted or partial input remains eligible across retries and later runs.
+- Physical session message IDs and source-family provenance prevent repeated
+  rolling windows from increasing independent evidence counts.
+- Generated reflections remain derived context. Explicit operator instructions
+  keep their existing protected authority; persona/external text cannot mint it.
+- The shared change authority binds automatic proposals to their cycle, sources,
+  and appropriate evaluation before using existing amendment or skill owners.
+- Inspect `thehomie profile learning lifecycle <persona> --json`, synthesis
+  request history, and the Learning tab for the actual stage and provider receipt.
+
+## Historical Reflection Implementation
 
 ## What It Does
 
@@ -65,7 +96,7 @@ persona_learning_tick.py (DEFAULT profile, scheduled)
     │   │   ├── note files under PERSONA_NOTE_DIRS with mtime > boundary
     │   │   └── both zero? → PERSONA_REFLECT_SILENT (skip, no model call)
     │   └── subprocess: memory_reflect.py -p sales --notes-since <boundary>
-    │       ├── apply_persona_override() → HOMIE_HOME re-roots ALL paths
+    │       ├── apply_persona_override() → persona memory/data/state; preserve explicitly pinned shared ledgers
     │       ├── WORK-NOTE CORPUS (Spike-1 hybrid, NO-TOOLS):
     │       │   ├── fresh notes from memory/experience/ + memory/market/
     │       │   ├── injection gate per SECTION → reject before prompt
@@ -121,7 +152,7 @@ So the tick keeps two stamps:
 | Stamp | Advances | Read by |
 |---|---|---|
 | `last_run` | only when the child exits 0 | `_resolve_since_boundary` — the freshness boundary for both counters and the child's `--notes-since` |
-| `last_attempt` | on every spawn | the `PERSONA_LEARNING_TICK_INTERVAL` recency guard |
+| `last_attempt` | on every spawn, stamped with the tick's START instant | the `PERSONA_LEARNING_TICK_INTERVAL` recency guard, which treats a slot landing within 15 minutes of the interval as due (a 12h guard used to skip every 12h slot, because the stamp was taken minutes into the roster) |
 
 They were one field until the child was made fail-honest. Splitting them is
 what lets a failed night retry: the boundary stays put so the same notes are
@@ -129,6 +160,25 @@ counted fresh on the next tick, while the guard still throttles the retry to
 the configured interval instead of re-spawning a failing child every tick. A
 legacy state file with no `last_attempt` falls back to `last_run` for one tick,
 then self-heals.
+
+**Failure visibility (2026-09-02).** A failed child's receipt `message` carries
+the last few non-empty lines of the child's STDOUT plus any stderr tail —
+`memory_reflect.py` prints every reason it exits 1 on stdout (the fail-honest
+notes leg, the distillation call's own error, a kill-switch refusal), so a
+stderr-only tail produced the receipt `exit 1: ` while the cause was thrown
+away. `run_tick()` now returns a `TickOutcome` (`spawned`, `failed`) and
+`main()` exits 1 when any persona's child failed; both wrappers forward that
+code, so Task Scheduler's `Last Result` goes non-zero instead of staying green
+over a night nobody learned from. Read the per-persona receipt for the cause.
+
+**Order, claim, lock (Codex review of #684).** The roster runs overdue-first
+(oldest `last_attempt` first; never-attempted or unreadable stamps first of
+all), so a head that keeps timing out inside the task's one-hour execution
+limit cannot starve the tail forever. Each persona's `last_attempt` is written
+BEFORE its child is spawned (the per-persona claim), and the whole tick holds
+a process-wide lock (`STATE_DIR/persona-learning-tick.json.lock`); a manual
+run beside the scheduled one exits without spawning and says so. The scheduled
+task itself is `IgnoreNew`, so the lock only ever matters for hand runs.
 
 **Why `--notes-since` is threaded explicitly:** the parent tick runs as the
 DEFAULT profile and the child re-roots under the persona, so their `STATE_DIR`s
@@ -285,7 +335,9 @@ to misuse.
 | Command | What it does |
 |---|---|
 | `thehomie profile learning enable <name>` | Turn learning back on for a persona that was disabled (strict-read RMW of `config.yaml`). Creates a JSONL audit row. Also the migration verb for pre-#422 profiles. |
-| `thehomie profile learning disable <name>` | The per-persona off switch. Existing beliefs are preserved but no new extraction runs. |
+| `thehomie profile learning disable <name>` | Writes `learning.enabled: false`, making the persona ineligible for scheduled reflection and disabling its harness learning. Existing beliefs and applied methods remain. |
+| `thehomie profile learning pause <name>` / `resume <name>` | Pause/resume the harness only. Pause suppresses new harness capture, learned-context injection, and background work; it does not disable legacy reflection or remove applied skills/amendments. Resume preserves an explicit config disable. |
+| `thehomie profile learning rollback <name> <activation-id>` | Retire an adopted harness method through its recorded activation. Use this to undo a method; pause does not undo it. |
 
 ### A persona is born learning (#422)
 
@@ -306,13 +358,21 @@ Two switches still turn it off, and neither was weakened:
   switch. It survives `profile blueprint reconcile` (reconcile never touches
   the `learning` key), so a deliberate disable is not silently undone.
 
-**Pre-existing profiles are unchanged.** Absent-key semantics still mean OFF —
+**Legacy reflection still requires explicit eligibility.**
 `is_learning_eligible` reads a missing or malformed `learning` block as
-ineligible — and #422 shipped no migration that rewrites old configs. The 28
+ineligible, and #422 shipped no migration that rewrites old configs. The 28
 profiles that existed before it were switched on separately, through the
 audited `thehomie profile learning enable` CLI on 2026-08-12; each has its own
-audit row. A profile created before #422 and never touched is still OFF until
-an operator enables it.
+audit row. A profile created before #422 and never touched remains ineligible
+for this reflection tick until an operator enables it.
+
+**The v1.8.0 harness defaults on for valid default and named profiles.** An
+absent `learning` section or `enabled` key means enabled there; explicit
+`learning.enabled: false` is preserved, and malformed harness configuration
+reports an error. Harness availability therefore does not imply that the legacy
+reflection tick admitted that profile. Its separate pause state preserves all
+records and already applied content. See the
+[harness operator guide](persona-harness-learning.md) for current controls.
 
 One transient side effect on those old profiles: `memory/experience/` joined
 the required inventory in #422, so `profile list` / `/diagnostics` report
@@ -335,8 +395,9 @@ All knobs are resolved at call time via `get_persona_learning_settings()` in
 | Env var | Default | Meaning |
 |---|---|---|
 | `PERSONA_LEARNING_ENABLED` | `true` | Global kill switch for the tick. When false, the tick exits immediately with no persona enumeration. |
-| `PERSONA_LEARNING_TICK_INTERVAL` | `12` | Minimum hours between full tick runs (recency guard, same pattern as dream-state). |
+| `PERSONA_LEARNING_TICK_INTERVAL` | `12` | Minimum hours between full tick runs (recency guard, same pattern as dream-state). A slot landing within 15 minutes of the interval counts as due, so the guard fires on a cadence equal to it. |
 | `PERSONA_LEARNING_SILENT_SKIP_WINDOW` | `24` | Hours: if a persona has zero attributed rows **and zero fresh notes** newer than this window, skip it with no model call (`PERSONA_REFLECT_SILENT`). Also the cold-start boundary handed to the child as `--notes-since`. |
+| `PERSONA_LEARNING_TIMEOUT` | `900` | Seconds one persona's reflection child may run before the tick kills it and records `timeout (Ns): <child's last output>` (boundary held, notes retained, retried next slot). A working child — distillation, belief extraction, the contradiction judge — needs more than the 300 s that used to be hard-coded; on 2026-09-02 that limit killed crypto's first-ever successful distillation mid-judge. |
 
 ### Work-note corpus knobs
 
@@ -354,7 +415,7 @@ Resolved at call time via `get_persona_notes_settings()` in `config.py`
 
 | Config path | Value on a new profile | Value when the key is absent | Meaning |
 |---|---|---|---|
-| `<profile>/config.yaml → learning.enabled` | `true` (written at creation, #422) | ineligible (absent = OFF, unchanged) | Per-persona learning switch. Read at call time via `load_persona_config(name)`; admission decided by `persona_learning_tick.is_learning_eligible`. Written via `set_persona_learning()` (strict-read RMW) on the clone door and the operator toggle, or folded into the atomic transaction on the blueprint door. |
+| `<profile>/config.yaml → learning.enabled` | `true` (written at creation, #422) | legacy reflection: ineligible; harness: enabled | Shared config switch with separate admission defaults. Legacy reflection uses `persona_learning_tick.is_learning_eligible`; the harness uses `LearningService.enabled()`. Explicit `false` disables both. Written through the audited profile configuration helpers. |
 
 ### Inherited knobs
 
@@ -368,6 +429,18 @@ Persona reflection inherits the existing Living Self knobs:
   `INFERENCE_EXTRACTION_MIN_CHARS` (see the Living Self manual §8).
 - **Contradiction knobs** — the nightly contradiction pass runs unchanged
   against each persona's own belief set.
+
+## Continuous Cognition And Recovery Wakes
+
+The chat service supervises one installation-wide dispatcher that checks useful
+and due work every 60 seconds. Reflection, dream, persona-tick, and heartbeat
+entrypoints also wake the same queue as recovery paths; no separate reflection
+service or additional cron is required. Workers preserve checkpoints, yield to
+foreground work, and revisit persisted investigations after restart. See
+[Persona Harness Learning](persona-harness-learning.md) for dispatcher health,
+pause/resume, and investigation controls.
+Test mode skips harness queue work before discovery, writes, or model calls;
+this does not change the existing reflection test-mode contract above.
 
 ## Corpus Bounds
 
@@ -416,11 +489,13 @@ occasional dropped turn. The dropped turns still exist in the session store
 and are visible in the transcript — they are only excluded from the
 extractor prompt.
 
-## Provenance: Why Reflection-Only
+## Legacy Reflection Provenance
 
-All persona-sourced beliefs are forced to `source="reflection"` at the
-caller level, regardless of what the LLM labels them. This is a
-**construction-level guarantee**, not a policy:
+Beliefs extracted by this legacy persona-reflection pipeline are forced to
+`source="reflection"` at the caller level, regardless of the model's label.
+Continuous-cognition understanding, investigations, observations, and
+qualification receipts have their own typed provenance. For this extractor,
+the reflection label is a **construction-level guarantee**:
 
 - The LLM's `kind` label (which maps to `source` via the existing
   `apply_operator_beliefs` seam) is overridden to `"inferred"` for every

@@ -819,12 +819,10 @@ def test_check_environment_accepts_kimi_only_runtime(
     assert "No runtime provider available" not in messages
 
 
-def test_check_environment_still_errors_with_no_runtime(
+def test_check_environment_accepts_keyless_opencode_free_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Guard the guard: with NO provider keys and no CLI binaries, the
-    prerequisite check must still fire — the kimi entry widens detection,
-    it must not weaken it."""
+    """OpenCode Free makes a keyless runtime available without local binaries."""
 
     import diagnostics as diagnostics_module
 
@@ -834,7 +832,7 @@ def test_check_environment_still_errors_with_no_runtime(
     monkeypatch.setattr("shutil.which", lambda _name: None)
 
     messages = [message for _level, message, _hint in check_environment()]
-    assert "No runtime provider available" in messages
+    assert "No runtime provider available" not in messages
 
 
 def test_check_environment_accepts_nvidia_only_runtime(

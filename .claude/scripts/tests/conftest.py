@@ -21,6 +21,33 @@ collect_ignore_glob = ["_holders/*"]
 
 
 @pytest.fixture(autouse=True)
+def _isolate_persona_harness_learning(monkeypatch, tmp_path):
+    """New automatic hooks may run in old adapter tests; never touch live profiles.
+
+    Patch only the learning facade's lookup, leaving persona resolver tests real.
+    Explicit LearningTarget fixtures and per-test monkeypatches still work.
+    Learning-specific model calls require explicit fakes in unit tests.
+    """
+    from personas.learning import service as learning_service
+    from personas.learning.models import LearningTarget
+
+    def target_for(persona_id):
+        base = tmp_path / "harness-profiles" / persona_id
+        return LearningTarget(persona_id, base / "memory", base / "data",
+                              base / "state", base / "skills")
+
+    monkeypatch.setattr(learning_service, "resolve_learning_target", target_for)
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_ACTIVITY_DB", str(tmp_path / "runtime-activity.db"))
+
+    async def no_learning_provider(*args, **kwargs):
+        raise RuntimeError("unit tests must explicitly fake learning model calls")
+
+    from personas.learning import evaluation, worker
+    monkeypatch.setattr(evaluation, "runtime_reasoning", no_learning_provider)
+    monkeypatch.setattr(worker, "_runtime_role", no_learning_provider)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_runtime_health_file(monkeypatch, tmp_path):
     """Keep runtime health bookkeeping off the OPERATIONAL state file.
 
@@ -102,6 +129,27 @@ def _entity_guardrail_defaults(monkeypatch):
         "LINT_DELTA_ENABLED",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_orchestration_db_pin(monkeypatch):
+    """Keep the operator's ``ORCHESTRATION_DB_PATH`` deployment pin out of tests.
+
+    ``config.py`` loads the operator's personal ``.env`` via
+    ``load_dotenv(override=True)``, so a personal ``ORCHESTRATION_DB_PATH``
+    pin (the launcher's deployment identity, config.py
+    ``_deployment_path_overrides``) lands in ``os.environ``. Every caller that
+    resolves the ledger through ``config.get_orchestration_db_path()`` checks
+    the ENV VAR FIRST — ahead of the ``config.ORCHESTRATION_DB_PATH`` module
+    attribute the fixtures monkey-patch. Without this guard, fixtures that
+    patch the attribute still bind the LIVE pinned DB: tenant-token seeding
+    collides on the second fixture setup (UNIQUE token_sha256) and the
+    dashboard work-queue tests read/write real operator rows. Delenv the pin
+    so the resolver falls back to the patched attribute; tests that exercise
+    the env-override path (deployment-pin bootstrap, continuous-learning
+    identity, upwork worker env) set it with their own ``monkeypatch``.
+    """
+    monkeypatch.delenv("ORCHESTRATION_DB_PATH", raising=False)
 
 
 @pytest.fixture
@@ -601,3 +649,15 @@ def isolated_db_modules():
             )
 
         yield _factory
+
+
+@pytest.fixture(autouse=True)
+def _isolate_new_cognitive_chart_transport(monkeypatch):
+    """Ordinary unit tests never fetch live chart evidence implicitly."""
+    try:
+        from crypto_round import charting
+    except ImportError:
+        return
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("unit test requires fake market transport")
+    monkeypatch.setattr(charting, "_fetch_closed_candles", unavailable)

@@ -223,7 +223,7 @@ def test_a_late_operator_packet_cannot_sign_a_strangers_command() -> None:
         mp.setattr(
             bridge,
             "_api_tool_executor",
-            lambda name, arguments, speaker_id=None, binding=None: sent.append(
+            lambda name, arguments, speaker_id=None, binding=None, origin_key=None: sent.append(
                 {"speaker_id": speaker_id, "binding": binding}
             )
             or "ok",
@@ -272,7 +272,7 @@ def test_two_speakers_inside_one_turn_relay_no_speaker_at_all() -> None:
         mp.setattr(
             bridge,
             "_api_tool_executor",
-            lambda name, arguments, speaker_id=None, binding=None: sent.append(
+            lambda name, arguments, speaker_id=None, binding=None, origin_key=None: sent.append(
                 {"speaker_id": speaker_id, "binding": binding}
             )
             or "ok",
@@ -299,7 +299,7 @@ def test_the_operators_own_clean_turn_still_resolves_to_them() -> None:
         mp.setattr(
             bridge,
             "_api_tool_executor",
-            lambda name, arguments, speaker_id=None, binding=None: sent.append(
+            lambda name, arguments, speaker_id=None, binding=None, origin_key=None: sent.append(
                 {"speaker_id": speaker_id, "binding": binding}
             )
             or "ok",
@@ -327,7 +327,7 @@ def test_a_call_on_an_unminted_response_relays_no_speaker() -> None:
         mp.setattr(
             bridge,
             "_api_tool_executor",
-            lambda name, arguments, speaker_id=None, binding=None: sent.append(
+            lambda name, arguments, speaker_id=None, binding=None, origin_key=None: sent.append(
                 {"speaker_id": speaker_id, "binding": binding}
             )
             or "ok",
@@ -353,7 +353,7 @@ def test_the_tool_continuation_carries_the_binding_forward() -> None:
         mp.setattr(
             bridge,
             "_api_tool_executor",
-            lambda name, arguments, speaker_id=None, binding=None: "ok",
+            lambda name, arguments, speaker_id=None, binding=None, origin_key=None: "ok",
         )
         asyncio.run(drive())
 
@@ -410,3 +410,25 @@ def test_the_pump_labels_gated_frames_as_silence_not_as_the_speaker() -> None:
     assert {"user_id": OPERATOR} in speakers, "open-gate frames must name the speaker"
     assert None in speakers, "gated frames must be recorded as silence"
     assert all(s is None or s == {"user_id": OPERATOR} for s in speakers)
+
+
+def test_realtime_call_origin_survives_bound_executor_and_http_retries(monkeypatch):
+    import urllib.request
+    inst = _bridge_with_queue()
+    inst._speaker_ledger = SimpleNamespace(resolve_for_wire=lambda event: SimpleNamespace(
+        user_id=OPERATOR, token='synthetic', trusted=True, reason='test'))
+    seen = []
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return b'{"output":"captured"}'
+    def open_request(request, **kwargs):
+        seen.append(json.loads(request.data))
+        return Response()
+    monkeypatch.setattr(urllib.request, 'urlopen', open_request)
+    bound = {'call_id': 'call-real-transport'}
+    assert inst._bound_tool_executor('memory_search', {'query': 'test'}, bound) == 'captured'
+    assert inst._bound_tool_executor('memory_search', {'query': 'test'}, bound) == 'captured'
+    assert [payload['originKey'] for payload in seen] == ['realtime:call-real-transport'] * 2
+    assert all(payload['transport'] == 'discord_voice' for payload in seen)
+    assert all(payload['speakerId'] == str(OPERATOR) for payload in seen)

@@ -3,14 +3,14 @@
 The property under test is narrow and load-bearing: **a request carrying its own
 tool definitions must never reach a lane that would ignore them.**
 
-Codex ignores them politely — `tool_call_count=0` and a courteous "that tool is
+Codex ignores them politely â€” `tool_call_count=0` and a courteous "that tool is
 not actually available in this session" (measured 2026-07-27, codex-cli 0.145.0).
 From the framework's side that is indistinguishable from a persona refusing to
 act, which is the exact symptom the epic exists to kill. A loud "no lane
 available" is strictly better than a quiet wrong answer.
 
 The gate is driven by a declared adapter CAPABILITY, never a provider name.
-Several tests below use fake adapters specifically to prove that — if the
+Several tests below use fake adapters specifically to prove that â€” if the
 mechanism were hardcoded to `provider == "openai-codex"`, a fake adapter
 declaring False would still be routed to and those tests would fail.
 """
@@ -71,7 +71,7 @@ def test_request_carries_tools_keys_off_tool_defs_not_capability():
 
     This is the single most dangerous thing to get wrong in this ticket.
     `TOOL_REASONING` means "may use tools", which for the CLI lanes means THEIR
-    OWN shell and edit tools — Codex and Gemini serve those turns today and must
+    OWN shell and edit tools â€” Codex and Gemini serve those turns today and must
     keep doing so. Keying the exclusion off the capability tier would strip both
     CLI lanes from every existing tool turn in the framework and collapse the
     fallback chain to Claude alone: the epic's own failure, inverted.
@@ -79,7 +79,7 @@ def test_request_carries_tools_keys_off_tool_defs_not_capability():
     assert request_carries_tools(_request(tool_defs=[GET_WEATHER])) is True
 
     # A TOOL_REASONING turn with no caller definitions is NOT a tool turn for
-    # routing purposes — it uses the provider's own tools.
+    # routing purposes â€” it uses the provider's own tools.
     assert request_carries_tools(_request(capability=TOOL_REASONING)) is False
     native_tool_request = _request(
         capability=TOOL_REASONING,
@@ -103,7 +103,7 @@ def test_tool_dispatch_is_carried_as_a_single_callable():
 
     Modeled as ONE callable rather than a dict of handlers so there is nowhere
     else for a tool call to be executed. Two execution paths means two places to
-    forget a guardrail — the bridge tools in #245 must land here too.
+    forget a guardrail â€” the bridge tools in #245 must land here too.
     """
     calls = []
 
@@ -169,7 +169,7 @@ def test_codex_composite_keeps_exec_false_but_admits_app_server_tools():
     [OpenAICodexRuntime, GeminiCliRuntime, OpenAICompatibleRuntime, ClaudeSdkRuntime],
 )
 def test_adapters_refuse_tool_carrying_requests_directly(adapter_cls):
-    """Defense in depth — the guard holds even if the router is bypassed."""
+    """Defense in depth â€” the guard holds even if the router is bypassed."""
     adapter = adapter_cls(profile=None)
     if adapter.supports_caller_tool_defs():
         pytest.skip("adapter now executes caller tool defs; direct-refusal test retired")
@@ -191,7 +191,7 @@ def test_codex_still_serves_ordinary_turns():
 
 
 # ---------------------------------------------------------------------------
-# The router probe — capability-driven, fail-closed
+# The router probe â€” capability-driven, fail-closed
 # ---------------------------------------------------------------------------
 
 
@@ -218,7 +218,7 @@ def test_probe_is_capability_driven_not_provider_named():
     """A fake adapter with no provider identity at all still gates correctly.
 
     If the mechanism were hardcoded to a provider name, `_CarryingAdapter` and
-    `_NonCarryingAdapter` — which have no provider, profile, or module lineage —
+    `_NonCarryingAdapter` â€” which have no provider, profile, or module lineage â€”
     could not produce different answers.
     """
     assert lane_router._adapter_carries_tool_defs(_CarryingAdapter()) is True
@@ -244,13 +244,14 @@ class _FakeProfile:
     def __init__(self, key):
         self.key = key
         self.provider = "fake"
+        self.model = "fake-model"
 
 
 class _RecordingAdapter:
     """A carrying adapter must actually CONSUME what it was handed.
 
     The earlier version of this fake ignored both `tool_defs` and
-    `tool_dispatch` — so the "whole point" test passed for an adapter
+    `tool_dispatch` â€” so the "whole point" test passed for an adapter
     performing the exact polite drop it claims to prevent (adversarial review,
     Codex). A fake that models the bug cannot detect the bug.
 
@@ -276,7 +277,7 @@ class _RecordingAdapter:
         if self._carries and request_carries_tools(request):
             assert request.tool_defs, "carrying adapter received no tool_defs"
             assert request.tool_dispatch is not None, (
-                "carrying adapter received no dispatcher — it could not execute "
+                "carrying adapter received no dispatcher â€” it could not execute "
                 "a tool call even if the model emitted one"
             )
             name = request.tool_defs[0]["function"]["name"]
@@ -292,7 +293,7 @@ class _RecordingAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Upstream route resolution — the REAL resolver, deliberately unmocked
+# Upstream route resolution â€” the REAL resolver, deliberately unmocked
 # ---------------------------------------------------------------------------
 #
 # Found by adversarial review (Codex, 2026-07-27) and NOT caught by the
@@ -300,11 +301,11 @@ class _RecordingAdapter:
 # replace the very component that was broken.
 #
 # The starvation: `tool_route_priority` answers "can this provider run its OWN
-# agentic tools" — kimi/openrouter/openai-compatible are -1, so
+# agentic tools" â€” kimi/openrouter/openai-compatible are -1, so
 # GENERIC_TOOL_ROUTE is exactly ('openai-codex', 'gemini-cli'). Those are the
 # two lanes that CANNOT carry caller-supplied schemas. A TOOL_REASONING request
-# therefore resolved to precisely the lanes the gate excludes, while kimi — the
-# one provider measured to carry them (`finish_reason: tool_calls`) — was
+# therefore resolved to precisely the lanes the gate excludes, while kimi â€” the
+# one provider measured to carry them (`finish_reason: tool_calls`) â€” was
 # filtered out upstream, before the gate could even consider it.
 #
 # Lesson worth keeping: a mock AT the boundary of the thing under test is fine;
@@ -320,7 +321,7 @@ def _no_operator_pin(monkeypatch):
     `/model <provider>`) short-circuit `_generic_provider_order_for_request` to
     a single provider before any route logic runs. Without clearing them these
     tests assert on whatever the operator last pinned, so they'd pass or fail
-    for reasons unrelated to the code under test — and a green suite would mean
+    for reasons unrelated to the code under test â€” and a green suite would mean
     nothing on a machine with a pin set.
 
     The pin's own behavior is asserted separately below.
@@ -350,7 +351,7 @@ def test_a_pinned_provider_still_leads_the_caller_tools_route(monkeypatch):
 
     Codex carries caller definitions through app-server, so a pinned Codex is
     offered the turn first and the appended candidates are never reached. What
-    changed in #529 is only what happens when the pin CANNOT carry — see the
+    changed in #529 is only what happens when the pin CANNOT carry â€” see the
     fall-through test below. The guarantee asserted here is the one the
     rollback criteria name: a carrying preferred provider is still selected
     first.
@@ -372,7 +373,7 @@ def test_a_noncarrying_pin_falls_through_to_a_carrying_candidate(monkeypatch):
     Gemini CLI has no caller-schema surface at all. Collapsing the route to it
     happened UPSTREAM of `lane_router._adapter_carries_tool_defs`, so the gate
     correctly skipped the only candidate and the equipped turn died as a
-    transport failure — with a perfectly good carrying fallback configured and
+    transport failure â€” with a perfectly good carrying fallback configured and
     permitted. The pin stays first (it is still the operator's preference, and
     the gate will skip it without contact); a carrying candidate must exist
     behind it.
@@ -386,7 +387,7 @@ def test_a_noncarrying_pin_falls_through_to_a_carrying_candidate(monkeypatch):
 
     assert order[0] == "gemini-cli", "the operator's preference must stay first"
     assert "kimi" in order, (
-        f"a noncarrying pin resolved to {order} — the equipped turn has no "
+        f"a noncarrying pin resolved to {order} â€” the equipped turn has no "
         "carrying candidate to fall through to"
     )
     assert len(order) == len(set(order)), f"route contains duplicates: {order}"
@@ -399,7 +400,7 @@ def test_a_pinned_carrying_provider_outside_the_tool_set_is_not_demoted(monkeypa
     (it runs no agentic tools of its own). `_preferred_generic_provider` asked
     the allowlist WITHOUT `carries_caller_tools`, so a pinned kimi on a
     caller-tools TOOL_REASONING turn resolved to None and fell back to the
-    unpinned route — where kimi is fifth. The pin was not refused, it was
+    unpinned route â€” where kimi is fifth. The pin was not refused, it was
     silently demoted behind four providers that cannot serve the request.
     """
     from runtime.routing import _generic_provider_order_for_request
@@ -449,7 +450,7 @@ async def test_run_with_runtime_lanes_keeps_resume_pinned_through_real_routing(
 
     `test_a_pin_stays_the_only_candidate_when_fallback_is_forbidden` above
     calls `_generic_provider_order_for_request()` directly on a request that
-    still carries `resume` — it never exercises the strip
+    still carries `resume` â€” it never exercises the strip
     `run_with_runtime_lanes` performs before calling `_resolve_lane_profiles`.
     That strip clears `resume` to satisfy generic adapters (every adapter's
     own `supports()` refuses a non-None resume), but `_can_fallback` reads
@@ -476,7 +477,7 @@ async def test_run_with_runtime_lanes_keeps_resume_pinned_through_real_routing(
 
         def supports_caller_tool_defs(self) -> bool:
             # Every candidate the (buggy) widened route would append behind
-            # gemini-cli carries — so a regression here reaches and succeeds
+            # gemini-cli carries â€” so a regression here reaches and succeeds
             # on one of them instead of exhausting to the typed error.
             return self._provider != "gemini-cli"
 
@@ -515,7 +516,7 @@ async def test_run_with_runtime_lanes_keeps_resume_pinned_through_real_routing(
 
 
 def test_a_pin_is_not_widened_for_turns_that_carry_no_caller_tools(monkeypatch):
-    """The expansion is surgical — no caller definitions, no behavior change.
+    """The expansion is surgical â€” no caller definitions, no behavior change.
 
     Text turns and provider-native tool turns keep the single-provider pin
     they have today. Widening those would push every ordinary turn at
@@ -541,7 +542,7 @@ def test_caller_tools_request_is_offered_a_carrying_provider(_no_operator_pin):
 
     kimi carries caller tool defs natively; it must be a CANDIDATE for a
     caller-tools request. Whether it is ultimately selected is the capability
-    gate's business — but it cannot be selected if it was never on the list.
+    gate's business â€” but it cannot be selected if it was never on the list.
     """
     from runtime.routing import _generic_provider_order_for_request
 
@@ -550,7 +551,7 @@ def test_caller_tools_request_is_offered_a_carrying_provider(_no_operator_pin):
     )
 
     assert "kimi" in order, (
-        f"caller-tools request resolved to {order} — the one provider measured "
+        f"caller-tools request resolved to {order} â€” the one provider measured "
         "to carry caller tool defs is not even a candidate"
     )
     assert set(order) != {"openai-codex", "gemini-cli"}, (
@@ -576,7 +577,7 @@ def test_caller_tools_beats_task_route_economy(task_name, _no_operator_pin):
 
 
 def test_provider_tool_turns_keep_their_existing_route(_no_operator_pin):
-    """The fix must be surgical — no caller tool defs, no behavior change.
+    """The fix must be surgical â€” no caller tool defs, no behavior change.
 
     A TOOL_REASONING turn WITHOUT caller definitions still uses the provider's
     own agentic tools, and GENERIC_TOOL_ROUTE remains exactly right for it.
@@ -593,7 +594,7 @@ def test_operator_named_carrying_provider_is_not_silently_filtered(monkeypatch, 
     """An explicit routing instruction must survive the capability filter.
 
     `_allowed_generic_providers_for_capability` dropped any provider outside
-    _GENERIC_TOOL_PROVIDER_SET on a TOOL_REASONING turn — so an operator setting
+    _GENERIC_TOOL_PROVIDER_SET on a TOOL_REASONING turn â€” so an operator setting
     SECOND_BRAIN_ROUTE_TOOL=kimi had that choice discarded with no error.
     Silently discarding an operator's explicit routing instruction is the same
     class of failure as silently discarding a tool call.
@@ -614,7 +615,7 @@ def _registered_get_weather():
     """Register GET_WEATHER so it passes the provenance gate.
 
     The runtime now refuses tool_defs that did not come from the registry, so
-    routing tests must register their tool — which is the point: a
+    routing tests must register their tool â€” which is the point: a
     hand-assembled schema is exactly what must NOT reach a provider.
     """
     from runtime import tool_registry
@@ -636,7 +637,7 @@ async def test_tool_turn_skips_non_carrying_lane_and_lands_on_a_carrying_one(
     """The whole point: the tool turn falls THROUGH the dropper to a real lane.
 
     The carrying adapter now asserts it actually received the definitions and
-    invokes the dispatcher, so this proves the tools were REACHABLE — not just
+    invokes the dispatcher, so this proves the tools were REACHABLE â€” not just
     that some lane accepted the request.
     """
     ran_bad, ran_good, dispatched = [], [], []
@@ -663,13 +664,13 @@ async def test_tool_turn_skips_non_carrying_lane_and_lands_on_a_carrying_one(
     assert ran_bad == [], "a non-carrying lane was handed a tool-carrying request"
     assert ran_good == [True]
     assert dispatched == ["get_weather:18C"], (
-        "the carrying lane never actually executed a tool — routing succeeded "
+        "the carrying lane never actually executed a tool â€” routing succeeded "
         "while the capability it exists to deliver did not"
     )
 
 
 # ---------------------------------------------------------------------------
-# Registry provenance (adversarial review, Codex — BLOCKER)
+# Registry provenance (adversarial review, Codex â€” BLOCKER)
 # ---------------------------------------------------------------------------
 
 
@@ -679,7 +680,7 @@ async def test_hand_assembled_tool_defs_are_refused(monkeypatch):
 
     `tool_registry` enforces "all tools must be part of a toolset to be
     accessible" by only emitting names a toolset resolved to. But `tool_defs`
-    is a plain list[dict] — any caller could hand-assemble a schema for an
+    is a plain list[dict] â€” any caller could hand-assemble a schema for an
     unregistered or out-of-scope tool and hand it straight to a provider,
     making correct assembly a CONVENTION rather than default-deny by
     construction. Checked at the one boundary every lane crosses.
@@ -772,12 +773,12 @@ def test_non_tool_turns_skip_provenance_entirely():
 
 
 # ---------------------------------------------------------------------------
-# Fail-closed probe, strictly (adversarial review, Codex — HIGH)
+# Fail-closed probe, strictly (adversarial review, Codex â€” HIGH)
 # ---------------------------------------------------------------------------
 
 
 class _StringyAdapter:
-    """`bool("false")` is True — truthiness turned fail-closed into fail-OPEN."""
+    """`bool("false")` is True â€” truthiness turned fail-closed into fail-OPEN."""
 
     def supports_caller_tool_defs(self):
         return "false"
@@ -791,11 +792,11 @@ class _AsyncProbeAdapter:
 
 
 class _RaisingDescriptorAdapter:
-    """Attribute ACCESS itself raises — `getattr` must be inside the try.
+    """Attribute ACCESS itself raises â€” `getattr` must be inside the try.
 
     Scoped to the probe name only: a blanket `__getattr__` raise makes the
     object unintrospectable and blows up at pytest COLLECTION time, taking the
-    whole module with it — the same class of failure as #251.
+    whole module with it â€” the same class of failure as #251.
     """
 
     def __getattr__(self, name):
@@ -856,7 +857,7 @@ async def test_tool_turn_with_no_carrying_lane_fails_loudly(monkeypatch, _regist
     """"No lane" is a loud failure; "wrong lane" is a silent one.
 
     Until #239/#240 wire execution this is the live behavior, and it is the
-    correct one — nothing constructs `tool_defs` yet (#244 does), so this is
+    correct one â€” nothing constructs `tool_defs` yet (#244 does), so this is
     inert rather than a regression.
     """
     monkeypatch.setattr(

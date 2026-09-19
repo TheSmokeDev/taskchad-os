@@ -46,8 +46,8 @@ uv run thehomie mailbox --help
 Dashboard:
 
 ```text
-http://127.0.0.1:5173/convoy
-http://127.0.0.1:5173/work
+http://127.0.0.1:5473/convoy
+http://127.0.0.1:5473/work
 ```
 
 ## How To Test It

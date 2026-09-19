@@ -71,6 +71,7 @@ class TalkToolBody(BaseModel):
     transport: str = "browser"
     speakerId: str | None = None
     speakerBinding: TalkSpeakerBinding | None = None
+    originKey: str | None = None  # Stable client function-call id; correlation only.
 
 
 class TalkFlushItem(BaseModel):
@@ -156,6 +157,7 @@ def execute_tool(body: TalkToolBody) -> dict:
             transport=body.transport,
             speaker_id=body.speakerId,
             binding=body.speakerBinding,
+            **({"origin_key": body.originKey} if body.originKey else {}),
         )
     except kill_switches.KillSwitchDisabled as exc:
         # A PER-TOOL switch (e.g. archon_dispatch) fires inside the handler,

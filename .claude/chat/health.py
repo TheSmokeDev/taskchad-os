@@ -53,6 +53,7 @@ class HealthStatus:
     #   interval, never on this request path.
     adapter_liveness: dict[str, Any] = field(default_factory=dict)
     diagnostics_age_seconds: float | None = None
+    learning_dispatcher: dict[str, Any] = field(default_factory=dict)
 
 
 class HealthServer:

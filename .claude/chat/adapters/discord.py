@@ -389,6 +389,8 @@ class DiscordAdapter:
         """Expose the curated Homie command menu as Discord slash commands."""
 
         for command_name, description in get_discord_native_command_menu():
+            if command_name == "model":
+                continue  # registered below with clickable preset choices
 
             def make_callback(name: str) -> Any:
                 async def callback(interaction: Any, args: str = "") -> None:
@@ -406,7 +408,57 @@ class DiscordAdapter:
                     callback=make_callback(command_name),
                 )
             )
+        self._register_native_model_command(discord)
         self._register_native_vault_group(discord)
+
+    def _register_native_model_command(self, discord: Any) -> None:
+        """Expose /model with clickable preset choices plus free-text args.
+
+        The generic menu registration only offers a free-text ``args`` box, so
+        operators had to type provider names by hand. Presets cover the common
+        lane/model picks; ``args`` stays for advanced ``provider:model`` pins.
+        Both convert back into the shared router text path (``/model <x>``).
+        """
+
+        app_commands = discord.app_commands
+        preset_choices = [
+            app_commands.Choice(name=label, value=value)
+            for label, value in (
+                ("glm — OpenRouter GLM 5.3", "glm"),
+                ("deepseek — OpenRouter DeepSeek V4.1 Flash", "deepseek"),
+                ("claude — Claude native lane", "claude"),
+                ("sonnet — Claude Sonnet 5", "sonnet"),
+                ("opus — Claude Opus 5", "opus"),
+                ("fable — Claude Fable 5 (flagship)", "fable"),
+                ("codex — Codex lane", "codex"),
+                ("sol — Codex GPT-5.6 Sol (xhigh)", "sol"),
+                ("terra — Codex GPT-5.6 Terra", "terra"),
+                ("luna — Codex GPT-5.6 Luna", "luna"),
+                ("gemini — Gemini lane", "gemini"),
+                ("openrouter — OpenRouter lane (configured model)", "openrouter"),
+                ("openai — OpenAI-compatible lane", "openai"),
+                ("kimi — Kimi lane", "kimi"),
+                ("nvidia — NVIDIA Kimi K2.6 lane", "nvidia"),
+                ("free — OpenCode Free lane", "free"),
+                ("auto — automatic routing", "auto"),
+            )
+        ]
+
+        async def model(interaction: Any, preset: str = "", args: str = "") -> None:
+            selection = (preset or args or "").strip()
+            await self._queue_native_slash_command(interaction, "model", selection)
+
+        model.__name__ = "slash_model"
+        self._tree.add_command(
+            app_commands.Command(
+                name="model",
+                description="Show or change the model",
+                callback=app_commands.describe(
+                    preset="Pick a lane/model preset",
+                    args="Or type provider:model (e.g. openrouter:z-ai/glm-5.3)",
+                )(app_commands.choices(preset=preset_choices)(model)),
+            )
+        )
 
     def _register_native_vault_group(self, discord: Any) -> None:
         """Expose /vault as a typed Discord command group.

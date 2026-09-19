@@ -10,7 +10,7 @@ The dashboard slice has three components:
 |---|---|---|---|
 | `.claude/scripts/dashboard_api.py` | Python / FastAPI | 4322 (shared) | 30 framework HTTP endpoints, mounted onto the orchestration app. |
 | `dashboard/server/` | TypeScript / Hono | 3141 | Thin proxy. Translates `main↔default` (Q4 lock), forwards to port 4322. |
-| `dashboard/web/` | TypeScript / Vite + Preact | 5173 (dev) | Browser bundle. Hono serves the production build same-origin from port 3141. |
+| `dashboard/web/` | TypeScript / Vite + Preact | 5473 (dev) | Browser bundle. Hono serves the production build same-origin from port 3141. |
 
 The Python API is the single source of truth for all business logic.
 The Hono server is a translation/auth boundary; it never opens SQLite,
@@ -33,7 +33,7 @@ cd dashboard/server
 npm install
 npm run dev
 
-# Terminal 3 — Vite dev server (port 5173)
+# Terminal 3 — Vite dev server (port 5473)
 cd dashboard/web
 npm install
 npm run dev

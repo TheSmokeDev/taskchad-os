@@ -30,7 +30,7 @@ class GithubSignalSettings(NamedTuple):
     resurface_cooldown_weeks: int
     snooze_weeks: int
     trending_keywords: list[str]
-    max_budget_usd: float
+    max_budget_usd: float | None
     discord_channel_id: str
     scout_profile: str
     eval_max_repo_mb: int
@@ -83,8 +83,10 @@ def get_github_signal_settings(
         ).strip()
         trending_keywords = [k.strip().lower() for k in raw.split(",") if k.strip()]
     if max_budget_usd is None:
-        raw = os.getenv("GITHUB_SIGNAL_MAX_BUDGET_USD", "0.25").strip()
-        max_budget_usd = float(raw) if raw else 0.25
+        # No default cap: subscription lanes report cost_usd as accounting,
+        # not money, and a dollar ceiling there only ever killed real work.
+        raw = os.getenv("GITHUB_SIGNAL_MAX_BUDGET_USD", "").strip()
+        max_budget_usd = float(raw) if raw else None
     if discord_channel_id is None:
         discord_channel_id = os.getenv("GITHUB_SIGNAL_DISCORD_CHANNEL_ID", "").strip()
     if scout_profile is None:

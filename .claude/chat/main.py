@@ -541,7 +541,12 @@ def main() -> None:
     print(f"  Project root:  {PROJECT_ROOT}")
     print(f"  Database:      {CHAT_DB_PATH}")
     print(f"  Max turns:     {CHAT_MAX_TURNS}")
-    print(f"  Max budget:    ${CHAT_MAX_BUDGET_USD:.2f}")
+    budget_label = (
+        "none (subscription lane)"
+        if CHAT_MAX_BUDGET_USD is None
+        else f"${CHAT_MAX_BUDGET_USD:.2f}"
+    )
+    print(f"  Max budget:    {budget_label}")
 
     if has_slack:
         print(f"  Slack:         {SLACK_BOT_TOKEN[:12]}...")
@@ -916,6 +921,7 @@ def main() -> None:
                 memory_embedding_status=diag.get("memory_embedding_status", ""),
                 adapter_liveness=supervisor.snapshot(),
                 diagnostics_age_seconds=diag_cache.age_seconds(),
+                learning_dispatcher=diag.get("learning_dispatcher", {}),
             )
 
         health_srv = HealthServer(HEALTH_CHECK_PORT, _build_health_status)
@@ -940,7 +946,11 @@ def main() -> None:
         # Router.run() handles adapter connect + listen
         tasks["router"] = asyncio.create_task(router.run())
 
-        # Diagnostics refresher — keeps the expensive sweep OFF the /health path.
+        # Restart-safe elected wake source for the shared persona learning queue.
+        from personas.learning.dispatcher import run_dispatcher
+        tasks["cognitive_dispatcher"] = asyncio.create_task(run_dispatcher())
+
+        # Diagnostics refresh stays off the /health request path.
         tasks["diagnostics"] = asyncio.create_task(diag_cache.run())
 
         # Liveness supervisor — the watcher that did not exist during the wedge.

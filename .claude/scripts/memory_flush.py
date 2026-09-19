@@ -1,22 +1,18 @@
-"""
-Memory Flush — Background Agent SDK Script
+"""Durable session-debrief compatibility admission.
 
-Spawned by the PreCompact hook (pre-compact-flush.py). Reads conversation
-context from a temp file and uses Claude to intelligently decide what
-decisions, lessons, and facts to save to the daily log.
-
-Inspired by OpenClaw's approach: the LLM decides what matters, not keyword
-heuristics.
-
-Usage:
-    uv run python memory_flush.py --context-file <path>         # Run flush
-    uv run python memory_flush.py --context-file <path> --test  # Dry run
+Developer hooks and Talk may still spawn memory_flush.py --context-file PATH.
+The command submits that physical source to the canonical session debrief outbox;
+it never performs a second independent inference. The completed shared debrief
+projects its same result into daily logs and episodes. --test changes nothing.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -37,22 +33,19 @@ from config import (  # noqa: E402
 from runtime.base import RuntimeRequest  # noqa: E402
 from runtime.capabilities import TEXT_REASONING  # noqa: E402
 from runtime.lane_router import run_with_runtime_lanes  # noqa: E402
-from shared import append_to_daily_log, file_lock, load_state, save_state  # noqa: E402
+from shared import append_to_daily_log, load_state, save_state  # noqa: E402
+from shared import file_lock as file_lock  # noqa: E402 - diagnostic compatibility
 
 FLUSH_STATE_FILE = STATE_DIR / "flush-state.json"
 
 
 def _extract_session_id(context_file: Path) -> str:
     """Extract session_id from context filename like flush-context-{session_id}-{timestamp}.md."""
-    stem = context_file.stem  # e.g., "flush-context-abc123-20260206-153654"
-    parts = stem.split("-")
-    # Skip prefix words (flush, context or session, flush) and trailing timestamp parts
-    # Filename patterns: flush-context-{uuid}-{YYYYMMDD}-{HHMMSS}
-    #                     session-flush-{uuid}-{YYYYMMDD}-{HHMMSS}
-    # UUID has 5 groups separated by hyphens, timestamp has 2 groups
-    # Last 2 parts are YYYYMMDD and HHMMSS, first 2 are prefix
-    if len(parts) >= 5:
-        return "-".join(parts[2:-2])
+    match = re.fullmatch(
+        r"(?:flush-context|session-flush)-(.+)-\d{8}-\d{6}(?:-\d{6})?", context_file.stem
+    )
+    if match:
+        return match.group(1)
     return "unknown"
 
 
@@ -124,19 +117,43 @@ If nothing is worth saving, respond with exactly: FLUSH_OK
 
 
 async def run_flush(context_file: Path, test_mode: bool = False) -> str | None:
-    """Run the memory flush with concurrency guard.
-
-    Wraps the inner flush with a file lock to prevent simultaneous runs.
-    """
-    try:
-        with file_lock(FLUSH_STATE_FILE, timeout=5.0):
-            return await _run_flush_inner(context_file, test_mode)
-    except TimeoutError:
-        print(f"[{now_local()}] Another flush is already running, skipping")
-        return None
+    """Admit the canonical debrief; the shared worker projects its result."""
+    return await _run_flush_inner(context_file, test_mode)
 
 
 async def _run_flush_inner(context_file: Path, test_mode: bool = False) -> str | None:
+    if not context_file.exists():
+        return None
+    text = context_file.read_text(encoding="utf-8").strip()
+    if not text:
+        return None
+    if test_mode:
+        # Preview precedes service lookup, lock creation, providers and cleanup.
+        return json.dumps({"status": "dry_run", "source_chars": len(text)})
+    from episodes import derive_flush_meta
+    from personas import activity
+    from personas.learning import hooks
+
+    meta = derive_flush_meta(context_file.name)
+    header = re.search(r"^Session:\s*(.+)$", text, flags=re.MULTILINE)
+    session_id = (
+        os.environ.get("HOMIE_LEARNING_SESSION_ID", "").strip()
+        or (header.group(1).strip() if header else _extract_session_id(context_file))
+    )
+    receipt = hooks.enqueue_session_debrief(
+        persona_id=activity.get_active_profile_name(),
+        session_id=session_id,
+        surface=meta.surface,
+        transcript=text,
+        reason="pre_compact" if meta.surface == "compact" else "session_end",
+    )
+    # The immutable journal or replay outbox owns the source before cleanup.
+    if receipt.get("status") == "queued" or receipt.get("outbox_id"):
+        context_file.unlink(missing_ok=True)
+    return json.dumps(receipt, sort_keys=True)
+
+
+async def _run_flush_legacy_inner(context_file: Path, test_mode: bool = False) -> str | None:
     """Run the memory flush using Agent SDK.
 
     Args:
@@ -281,12 +298,13 @@ def _reindex_episode(path: Path) -> None:
 
 def main() -> None:
     """Main entry point."""
-    ensure_directories()
-
     parser = argparse.ArgumentParser(description="Memory flush background agent")
     parser.add_argument("--context-file", required=True, help="Path to context file")
     parser.add_argument("--test", action="store_true", help="Dry run mode")
     args = parser.parse_args()
+
+    if not args.test:
+        ensure_directories()
 
     context_file = Path(args.context_file)
 

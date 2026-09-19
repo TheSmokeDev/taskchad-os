@@ -18,6 +18,7 @@ import { AgentDetail } from '@/pages/AgentDetail';
 import { Scheduled } from '@/pages/Scheduled';
 import { Audit } from '@/pages/Audit';
 import { Usage } from '@/pages/Usage';
+import { Jarvis } from '@/pages/Jarvis';
 import { Settings } from '@/pages/Settings';
 import { Voices } from '@/pages/Voices';
 import { Talk } from '@/pages/Talk';
@@ -72,6 +73,7 @@ export function App() {
           <Route path="/memories"><Memories /></Route>
           <Route path="/hive"><HiveMind /></Route>
           <Route path="/usage"><Usage /></Route>
+          <Route path="/jarvis"><Jarvis /></Route>
           <Route path="/audit"><Audit /></Route>
           <Route path="/cabinet"><Cabinet /></Route>
           <Route path="/teams"><Teams /></Route>

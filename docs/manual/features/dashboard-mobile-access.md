@@ -58,7 +58,7 @@ npm run dev -- --host <tailscale-ip>
 Open:
 
 ```text
-http://<tailscale-ip>:5173/mobile
+http://<tailscale-ip>:5473/mobile
 ```
 
 ## How To Test It
@@ -84,7 +84,7 @@ npm run typecheck
 ## Latest Live Proof
 
 - Date: 2026-05-31
-- Surface: Tailscale raw-IP Vite URL, `http://<tailscale-ip>:5173/mobile`
+- Surface: Tailscale raw-IP Vite URL, `http://<tailscale-ip>:5473/mobile`
 - Result: page rendered, API returned sanitized status, Browser Viewer link
   pointed to the working raw-IP phone URL, Copy showed success, and console
   logs had no relevant warnings/errors.

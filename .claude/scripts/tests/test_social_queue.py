@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest
 
-from social.models import SOCIAL_POST_TRANSITIONS, SocialPost
-from social.service import SocialPostService
+from social.models import SOCIAL_POST_TRANSITIONS, approval_binding_digest
+from social.service import SocialPostService, StaleSocialApprovalError
 
 
 @pytest.fixture()
@@ -87,6 +86,21 @@ class TestCreateDraft:
         assert post is not None
         assert post.created_at != ""
 
+    def test_exact_review_provenance_is_stamped(self, svc: SocialPostService):
+        pid = svc.create_draft(
+            channel="linkedin",
+            title="T",
+            body="B",
+            source_packet_id="sig-123",
+        )
+        post = svc.get_post(pid)
+        assert post is not None
+        assert post.source_packet_id == "sig-123"
+        assert post.revision == 1
+        assert len(post.content_digest) == 64
+        assert len(post.media_digest) == 64
+        assert len(approval_binding_digest(post)) == 12
+
 
 class TestApprovePost:
     def test_transitions_to_approved(self, svc: SocialPostService):
@@ -104,6 +118,20 @@ class TestApprovePost:
         svc.reject_post(pid)
         with pytest.raises(ValueError, match="Cannot transition"):
             svc.approve_post(pid)
+
+    def test_bound_approval_refuses_stale_revision(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="linkedin", title="T", body="B")
+        original = svc.get_post(pid)
+        assert original is not None
+        stale_digest = approval_binding_digest(original)
+        svc.update_draft_copy(pid, title="T2", body="B2")
+        with pytest.raises(StaleSocialApprovalError, match="changed"):
+            svc.approve_post(
+                pid,
+                expected_revision=original.revision,
+                expected_digest=stale_digest,
+            )
+        assert svc.get_post(pid).status == "draft"
 
 
 class TestRejectPost:
@@ -145,6 +173,16 @@ class TestMarkFailed:
         post = svc.mark_failed(pid, error="CDP not ready")
         assert post.status == "failed"
         assert post.error == "CDP not ready"
+
+
+class TestVerificationRequired:
+    def test_ambiguous_submit_is_non_dispatchable(self, svc: SocialPostService):
+        pid = svc.create_draft(channel="linkedin", title="T", body="B")
+        svc.approve_post(pid)
+        post = svc.mark_verification_required(pid, receipt_json='{"proof":false}')
+        assert post.status == "verification_required"
+        assert svc.claim_post(pid) is False
+        assert post.receipt_json == '{"proof":false}'
 
 
 class TestListQueue:
@@ -312,6 +350,15 @@ class TestExternalRef:
         with pytest.raises(ValueError, match="cannot change status"):
             svc.set_post_fields(pid, status="posted")
 
+    def test_generic_draft_copy_update_advances_exact_review_revision(
+        self, svc: SocialPostService
+    ):
+        pid = svc.create_draft(channel="x", title="T", body="B")
+        before = svc.get_post(pid)
+        updated = svc.set_post_fields(pid, title="T2", body="B2")
+        assert updated.revision == before.revision + 1
+        assert updated.content_digest != before.content_digest
+
 
 class TestExternalRefMigration:
     """Old-schema databases (no external_ref column) migrate idempotently."""
@@ -379,6 +426,30 @@ class TestExternalRefMigration:
         assert post.media_path == "/tmp/reel.mp4"
         assert post.media_type == "video"
 
+    def test_migration_preserves_rows_and_installs_statuses_and_indexes(
+        self, tmp_path: Path
+    ):
+        import sqlite3
+
+        db_path = self._make_old_db(tmp_path)
+        SocialPostService(db_path=db_path)
+        conn = sqlite3.connect(db_path)
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='social_post_queue'"
+        ).fetchone()[0]
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(social_post_queue)")
+        }
+        count = conn.execute("SELECT COUNT(*) FROM social_post_queue").fetchone()[0]
+        conn.close()
+        assert count == 1
+        assert "verification_required" in sql and "superseded" in sql
+        assert {
+            "idx_social_post_status",
+            "idx_social_post_channel",
+            "idx_social_post_scheduled",
+        } <= indexes
+
 
 class TestMediaColumn:
     def test_create_draft_persists_media(self, svc: SocialPostService):
@@ -395,3 +466,22 @@ class TestMediaColumn:
         post = svc.get_post(pid)
         assert post.media_path is None
         assert post.media_type is None
+
+
+class TestLegacySupersede:
+    def test_one_shot_only_supersedes_linkedin_drafts(self, svc: SocialPostService):
+        old_a = svc.create_draft(channel="linkedin", title="A", body="1")
+        old_b = svc.create_draft(channel="li", title="B", body="2")
+        keep = svc.create_draft(channel="facebook", title="C", body="3")
+        posted = svc.create_draft(channel="linkedin", title="D", body="4")
+        svc.approve_post(posted)
+        svc.mark_posted(posted)
+
+        assert svc.supersede_legacy_linkedin_drafts() == 2
+        assert svc.get_post(old_a).status == "superseded"
+        assert svc.get_post(old_b).supersede_reason == (
+            "legacy-unverified-content-2026-09-03"
+        )
+        assert svc.get_post(keep).status == "draft"
+        assert svc.get_post(posted).status == "posted"
+        assert svc.supersede_legacy_linkedin_drafts() == 0

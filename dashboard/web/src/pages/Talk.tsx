@@ -144,7 +144,7 @@ function realtimeEventError(error: unknown): string {
  * `WebRtcSdpRealtimeTalkTransport` (setup :79-177, offer POST :256-295,
  * event handling :397-491). Audio-in/audio-out only.
  */
-class TalkRealtimeTransport {
+export class TalkRealtimeTransport {
   private peer: RTCPeerConnection | null = null;
   private channel: RTCDataChannel | null = null;
   private media: MediaStream | null = null;
@@ -319,7 +319,7 @@ class TalkRealtimeTransport {
     this.callbacks.onStatus(`Using ${name}…`);
     let output: string;
     try {
-      const res = await apiPost<TalkToolResponse>('/api/talk/tool', { name, arguments: args });
+      const res = await apiPost<TalkToolResponse>('/api/talk/tool', { name, arguments: args, originKey: `realtime:${callId}` });
       output = typeof res.output === 'string' && res.output.trim() ? res.output : '(no output)';
     } catch (err) {
       output = `Tool ${name} failed: ${describeApiError(err)}`;

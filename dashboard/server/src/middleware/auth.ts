@@ -7,8 +7,11 @@
  *     accept `?token=...` query param. Mounting a new SSE route WITHOUT
  *     adding it to `isQueryTokenPath` ships a 401 that only appears once a
  *     token is configured — see the /api/archon/stream note below.
- *   - Cabinet voice document/static GETs also accept `?token=...` because
- *     they are opened as browser documents/resources, not fetch() calls.
+ *   - Cabinet voice GETs also accept `?token=...`: document/static GETs are
+ *     opened as browser documents/resources, and the voice status + LiveKit
+ *     session GETs are called by that same Python-served document, which
+ *     only holds the token from its own URL (Python's voice prefix is
+ *     query-token-only).
  *   - Hono access logs scrub the token from the URL before write.
  *   - `Referrer-Policy: no-referrer` is set on stream/document responses.
  *   - framework-client.ts MUST never construct `?token=` itself.
@@ -34,7 +37,8 @@ const PUBLIC_PAIR_PATHS = new Set(['/api/pair/claim', '/api/pair/poll']);
  * Extract the bearer token from Authorization header OR an approved query token.
  *
  * Query tokens are permitted ONLY for stream endpoints and Cabinet voice
- * document/static GET endpoints. Other paths must use Authorization header.
+ * GET endpoints (document/static plus voice status + LiveKit session).
+ * Other paths must use Authorization header.
  */
 function extractToken(c: Context, urlPathname: string): string | null {
   const authHeader = c.req.header('authorization') || c.req.header('Authorization');
@@ -64,6 +68,11 @@ function isQueryTokenPath(pathname: string, method: string): boolean {
   // 401'd on every tokened deployment while passing in dev-mode-loopback.
   if (pathname === '/api/archon/stream') return true;
   if (method.toUpperCase() !== 'GET') return false;
+  // Voice status + LiveKit session mint are consumed by the Python-served
+  // voice document, which only holds the `?token=` from its own URL —
+  // Python's /api/cabinet/voice/ prefix accepts query tokens ONLY (P0-1).
+  if (pathname === '/api/cabinet/voice/status') return true;
+  if (pathname === '/api/cabinet/voice/livekit/session') return true;
   if (pathname === '/api/cabinet/voice/ui') return true;
   if (pathname === '/api/cabinet/voice/client.bundle.js') return true;
   if (pathname === '/api/cabinet/voice/client.js') return true;

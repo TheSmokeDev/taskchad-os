@@ -43,21 +43,23 @@ if str(_SCRIPTS_DIR) not in sys.path:
 # ``_SECRET_RE`` word heuristic misses are still rejected. Mirrors the existing
 # cross-slice import in ``runtime/subprocess_env.py`` (``security`` is on the
 # flat sys.path in this slice).
-from security.patterns import contains_leak_pattern
+from security.patterns import contains_leak_pattern  # noqa: E402 - cross-slice bootstrap
 
 AMENDMENT_TARGETS = frozenset({"SELF.md", "SOUL.md", "USER.md", "MEMORY.md"})
-PROPOSAL_STATUSES = frozenset({
-    "pending",
-    "approved",
-    "rejected",
-    "applied",
-    "policy_rejected",
-    "skipped",
-    "superseded",
-    "rollback_pending",
-    "apply_pending",
-    "rolled_back",
-})
+PROPOSAL_STATUSES = frozenset(
+    {
+        "pending",
+        "approved",
+        "rejected",
+        "applied",
+        "policy_rejected",
+        "skipped",
+        "superseded",
+        "rollback_pending",
+        "apply_pending",
+        "rolled_back",
+    }
+)
 _SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passwd|bearer\s+[a-z0-9._-]{12,}|"
     r"sk-[a-z0-9_-]{12,}|xox[baprs]-[a-z0-9-]{12,})"
@@ -99,6 +101,8 @@ class AmendmentProposal:
     rollback_after_hash: str = ""
     rollback_rescue_snapshot_path: str = ""
     rollback_error: str | None = None
+    rollback_mode: str = "snapshot"
+    rollback_restore_snapshot_path: str = ""
     apply_prepare_error: str | None = None
 
     def __post_init__(self) -> None:
@@ -335,9 +339,7 @@ class ProposalLedger:
             return False
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with _ledger_lock(self._path):
-            incoming_key = _dedupe_key(
-                proposal.target_file, proposal.proposed_content
-            )
+            incoming_key = _dedupe_key(proposal.target_file, proposal.proposed_content)
             if incoming_key in self._active_dedupe_keys():
                 return False
             with open(self._path, "a", encoding="utf-8") as handle:
@@ -365,7 +367,9 @@ class ProposalLedger:
     def read_pending(self) -> list[AmendmentProposal]:
         """Return proposals still waiting on policy/apply processing."""
 
-        return [proposal for proposal in self.read_all() if proposal.status == "pending"]
+        return [
+            proposal for proposal in self.read_all() if proposal.status == "pending"
+        ]
 
     def count_pending(self) -> int:
         """Return the pending proposal count."""
@@ -494,9 +498,7 @@ class ProposalLedger:
                 )
             return found
 
-    def _update_record_unique(
-        self, proposal_id: str, updates: dict[str, Any]
-    ) -> str:
+    def _update_record_unique(self, proposal_id: str, updates: dict[str, Any]) -> str:
         """Update the single record matching ``proposal_id``, or refuse.
 
         Unlike ``_update_record`` (which silently updates every duplicate-ID
@@ -523,8 +525,10 @@ class ProposalLedger:
                 record = _parse_record_line(line.decode("utf-8"))
                 if record is not None and record.get("id") == proposal_id:
                     record.update(updates)
-                    ending = bytes((13, 10)) if line.endswith(bytes((13, 10))) else (
-                        b"\n" if line.endswith(b"\n") else b""
+                    ending = (
+                        bytes((13, 10))
+                        if line.endswith(bytes((13, 10)))
+                        else (b"\n" if line.endswith(b"\n") else b"")
                     )
                     out_lines.append(
                         json.dumps(record, ensure_ascii=False).encode("utf-8") + ending
@@ -555,13 +559,8 @@ class AmendmentPolicy:
     min_evidence_paths: int = 1
     max_content_chars: int = 1200
     allow_destructive: bool = False
-    # Living Self Act 4 — additive evidence-READ precondition. Default None = the
-    # EXACT pre-Act-4 behavior (parity: the seam below is skipped entirely). The
-    # 44-amendment producers leave this None; only evolve_loop.py binds it to
-    # cognition.evidence_gate.verify_evidence_support so a candidate's cited
-    # evidence is OPENED + CONFINED + verified before the unchanged gate. The
-    # check is DETERMINISTIC (no provider call) — the LLM judge lives in
-    # evolve/judge.py, scheduled-only, never this seam.
+    # Additional deterministic checks remain usable; they do not replace a
+    # bound automatic authorization or an explicit operator ledger review.
     evidence_check: Callable[[AmendmentProposal, Path], tuple[bool, str]] | None = None
     # #425 design gate — per-SOURCE target confinement. Default None = the EXACT
     # pre-#425 behavior (every AMENDMENT_TARGETS name is admitted for every
@@ -578,6 +577,9 @@ class AmendmentPolicy:
     # ``source`` (``data["source"] = default_source``) — a model-supplied or
     # note-quoted source can never select a different allowlist entry.
     source_target_allowlist: Mapping[str, frozenset[str]] | None = None
+    # Only the shared learning authority constructs this capability. A legacy
+    # evidence predicate or confidence threshold cannot authorize publication.
+    automatic_authorization: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -627,8 +629,9 @@ machine policy gate. Do not directly edit `SELF.md`, `SOUL.md`, `USER.md`, or
 Do NOT create or edit the ledger file yourself. Output the JSON records in
 your final message only; the runtime appends them to the ledger.
 
-The policy engine may automatically apply records that have enough evidence,
-safe content, a valid target, rollback coverage, and no duplicate dedupe key.
+Proposals require source support through the shared learning evaluator before
+automatic application. Standing behavior also requires held-out qualification.
+Confidence and evidence paths alone cannot authorize publication.
 
 Required JSON keys:
 - `source`: `{source}`
@@ -646,7 +649,8 @@ tokens, or broad deletion instructions. Keep each amendment under 1200 chars."""
         return section
     try:
         recent = [
-            proposal for proposal in ledger.read_all()
+            proposal
+            for proposal in ledger.read_all()
             if proposal.status in {"pending", "applied"}
         ][-digest_limit:]
         if not recent:
@@ -699,7 +703,19 @@ def parse_amendment_records(
             continue
         data = dict(record)
         data["source"] = default_source
-        data.setdefault("status", "pending")
+        data["status"] = "pending"
+        for key in (
+            "reviewer",
+            "reviewed_at",
+            "review_note",
+            "policy_decision",
+            "policy_reason",
+            "before_hash",
+            "after_hash",
+            "rollback_snapshot_path",
+            "applied_at",
+        ):
+            data.pop(key, None)
         proposal = _coerce_dataclass(AmendmentProposal, data)
         if proposal is not None:
             proposals.append(proposal)
@@ -720,10 +736,12 @@ def process_amendment_output(
 ) -> list[AmendmentApplyResult]:
     """Capture structured amendments from output and optionally apply them."""
 
+    captured_ids = []
     for proposal in parse_amendment_records(
         text, default_source=default_source, exclude_kinds=exclude_kinds
     ):
-        ledger.append(proposal)
+        if ledger.append(proposal):
+            captured_ids.append(proposal.id)
     if not auto_apply:
         return []
     return apply_policy_approved_amendments(
@@ -732,6 +750,7 @@ def process_amendment_output(
         policy=policy,
         limit=apply_limit,
         section_cap=section_cap,
+        proposal_ids=frozenset(captured_ids),
     )
 
 
@@ -742,6 +761,7 @@ def apply_policy_approved_amendments(
     policy: AmendmentPolicy | None = None,
     limit: int | None = None,
     section_cap: int = 20,
+    proposal_ids: frozenset[str] | None = None,
 ) -> list[AmendmentApplyResult]:
     """Apply pending/approved amendments that pass policy evaluation.
 
@@ -752,8 +772,14 @@ def apply_policy_approved_amendments(
     active_policy = policy or AmendmentPolicy()
     results: list[AmendmentApplyResult] = []
     candidates = [
-        proposal for proposal in ledger.read_all()
+        proposal
+        for proposal in ledger.read_all()
         if proposal.status in {"pending", "approved", "apply_pending"}
+        and (proposal_ids is None or proposal.id in proposal_ids)
+        and (
+            active_policy.automatic_authorization is None
+            or proposal.id == active_policy.automatic_authorization.proposal_id
+        )
     ]
 
     physical_writes = 0
@@ -790,6 +816,37 @@ def apply_amendment_if_allowed(
         return AmendmentApplyResult(
             proposal.id, proposal.target_file, "policy_rejected", "reject", path_reason
         )
+
+    # Manual review remains an explicit operator capability, verified against
+    # the physical ledger rather than model-supplied proposal fields.
+    stored = next((row for row in ledger.read_all() if row.id == proposal.id), None)
+    manually_approved = bool(
+        stored
+        and stored.status in {"approved", "apply_pending"}
+        and stored.reviewer
+        and stored.reviewer != "machine_policy"
+        and stored.proposed_content == proposal.proposed_content
+        and stored.target_file == proposal.target_file
+    )
+    if not manually_approved:
+        from personas.learning.authority import AutomaticAuthorization
+
+        authorization = active_policy.automatic_authorization
+        if not isinstance(authorization, AutomaticAuthorization):
+            # Keep historical pending/apply_pending receipts intact for migration
+            # and operator review; lack of evaluation is not semantic rejection.
+            return AmendmentApplyResult(
+                proposal.id,
+                proposal.target_file,
+                "pending",
+                "defer",
+                "automatic_evaluation_required",
+            )
+        okay, why = authorization.verify(proposal, memory_root)
+        if not okay:
+            return AmendmentApplyResult(
+                proposal.id, proposal.target_file, "pending", "defer", why
+            )
 
     # Living Self Act 4 — additive evidence-READ seam (default None = parity, the
     # block is skipped). When bound (only by evolve_loop.py), a candidate whose
@@ -846,6 +903,15 @@ def apply_amendment_if_allowed(
     # already-held ledger_file_lock(AMENDMENT_LEDGER_FILE).
     with _ledger_lock(ledger.path):
         with _target_lock(target):
+            if not manually_approved:
+                # Recheck protected manual bytes inside the physical write lock.
+                okay, why = active_policy.automatic_authorization.verify(
+                    proposal, memory_root
+                )
+                if not okay:
+                    return AmendmentApplyResult(
+                        proposal.id, proposal.target_file, "pending", "defer", why
+                    )
             locked_target, path_reason = _confined_amendment_target(
                 memory_root, proposal.target_file
             )
@@ -876,25 +942,40 @@ def apply_amendment_if_allowed(
                     # Crash after replacement: exact prepared bytes are
                     # authoritative. Finalize without semantic marker parsing.
                     applied_at = datetime.now(UTC).isoformat()
-                    finalized = ledger._update_record_unique(proposal.id, {
-                        "status": "applied", "policy_decision": "apply",
-                        "policy_reason": "apply_reconciled_after_crash",
-                        "reviewer": "machine_policy", "reviewed_at": applied_at,
-                        "applied_at": applied_at,
-                    })
+                    finalized = ledger._update_record_unique(
+                        proposal.id,
+                        {
+                            "status": "applied",
+                            "policy_decision": "apply",
+                            "policy_reason": "apply_reconciled_after_crash",
+                            "reviewer": "machine_policy",
+                            "reviewed_at": applied_at,
+                            "applied_at": applied_at,
+                        },
+                    )
                     if finalized != "updated":
                         raise OSError("apply finalize ledger update failed")
                     return AmendmentApplyResult(
-                        proposal.id, proposal.target_file, "applied", "reconcile",
-                        "apply_reconciled_after_crash", proposal.before_hash,
-                        proposal.after_hash, proposal.rollback_snapshot_path,
+                        proposal.id,
+                        proposal.target_file,
+                        "applied",
+                        "reconcile",
+                        "apply_reconciled_after_crash",
+                        proposal.before_hash,
+                        proposal.after_hash,
+                        proposal.rollback_snapshot_path,
                     )
                 if current_hash != proposal.before_hash:
                     # Unknown third-state bytes are never overwritten.
                     return AmendmentApplyResult(
-                        proposal.id, proposal.target_file, "apply_pending",
-                        "conflict", "target_hash_conflict", proposal.before_hash,
-                        proposal.after_hash, proposal.rollback_snapshot_path,
+                        proposal.id,
+                        proposal.target_file,
+                        "apply_pending",
+                        "conflict",
+                        "target_hash_conflict",
+                        proposal.before_hash,
+                        proposal.after_hash,
+                        proposal.rollback_snapshot_path,
                     )
 
                 # Crash before replacement (or a retryable replacement failure):
@@ -906,9 +987,14 @@ def apply_amendment_if_allowed(
                 after_bytes = after.encode("utf-8")
                 if hashlib.sha256(after_bytes).hexdigest() != proposal.after_hash:
                     return AmendmentApplyResult(
-                        proposal.id, proposal.target_file, "apply_pending",
-                        "conflict", "target_hash_conflict", proposal.before_hash,
-                        proposal.after_hash, proposal.rollback_snapshot_path,
+                        proposal.id,
+                        proposal.target_file,
+                        "apply_pending",
+                        "conflict",
+                        "target_hash_conflict",
+                        proposal.before_hash,
+                        proposal.after_hash,
+                        proposal.rollback_snapshot_path,
                     )
                 replace_target, path_reason = _confined_amendment_target(
                     memory_root, proposal.target_file
@@ -925,18 +1011,28 @@ def apply_amendment_if_allowed(
                 if actual_after != after_bytes:
                     raise OSError("target verification failed")
                 applied_at = datetime.now(UTC).isoformat()
-                finalized = ledger._update_record_unique(proposal.id, {
-                    "status": "applied", "policy_decision": "apply",
-                    "policy_reason": "apply_retried_after_crash",
-                    "reviewer": "machine_policy", "reviewed_at": applied_at,
-                    "applied_at": applied_at,
-                })
+                finalized = ledger._update_record_unique(
+                    proposal.id,
+                    {
+                        "status": "applied",
+                        "policy_decision": "apply",
+                        "policy_reason": "apply_retried_after_crash",
+                        "reviewer": "machine_policy",
+                        "reviewed_at": applied_at,
+                        "applied_at": applied_at,
+                    },
+                )
                 if finalized != "updated":
                     raise OSError("apply finalize ledger update failed")
                 return AmendmentApplyResult(
-                    proposal.id, proposal.target_file, "applied", "apply",
-                    "apply_retried_after_crash", proposal.before_hash,
-                    proposal.after_hash, proposal.rollback_snapshot_path,
+                    proposal.id,
+                    proposal.target_file,
+                    "applied",
+                    "apply",
+                    "apply_retried_after_crash",
+                    proposal.before_hash,
+                    proposal.after_hash,
+                    proposal.rollback_snapshot_path,
                 )
             if _amendment_already_present(before, proposal):
                 now = datetime.now(UTC).isoformat()
@@ -945,20 +1041,28 @@ def apply_amendment_if_allowed(
                 # (e.g. a new-UUID proposal whose append was dedupe-blocked by
                 # a parked apply_pending twin) must not report "applied" while
                 # zero applied ledger rows exist.
-                reconciled = ledger._update_record(proposal.id, {
-                    "status": "applied", "policy_decision": "apply",
-                    "policy_reason": "already_present_reconciled",
-                    "reviewer": "machine_policy", "reviewed_at": now,
-                    "applied_at": now,
-                    "before_hash": proposal.before_hash,
-                    "after_hash": proposal.after_hash
-                    or hashlib.sha256(before_bytes).hexdigest(),
-                    "rollback_snapshot_path": proposal.rollback_snapshot_path,
-                })
+                reconciled = ledger._update_record(
+                    proposal.id,
+                    {
+                        "status": "applied",
+                        "policy_decision": "apply",
+                        "policy_reason": "already_present_reconciled",
+                        "reviewer": "machine_policy",
+                        "reviewed_at": now,
+                        "applied_at": now,
+                        "before_hash": proposal.before_hash,
+                        "after_hash": proposal.after_hash
+                        or hashlib.sha256(before_bytes).hexdigest(),
+                        "rollback_snapshot_path": proposal.rollback_snapshot_path,
+                    },
+                )
                 return AmendmentApplyResult(
-                    proposal.id, proposal.target_file,
-                    "applied" if reconciled else "apply_pending", "reconcile",
-                    "already_present_in_target" if reconciled
+                    proposal.id,
+                    proposal.target_file,
+                    "applied" if reconciled else "apply_pending",
+                    "reconcile",
+                    "already_present_in_target"
+                    if reconciled
                     else "already_present_but_ledger_update_failed",
                 )
             before_hash = hashlib.sha256(before_bytes).hexdigest()
@@ -970,13 +1074,16 @@ def apply_amendment_if_allowed(
             )
             after_bytes = after.encode("utf-8")
             after_hash = hashlib.sha256(after_bytes).hexdigest()
-            prepared = ledger._update_record_unique(proposal.id, {
-                "status": "apply_pending",
-                "before_hash": before_hash,
-                "after_hash": after_hash,
-                "rollback_snapshot_path": str(rollback),
-                "apply_prepare_error": None,
-            })
+            prepared = ledger._update_record_unique(
+                proposal.id,
+                {
+                    "status": "apply_pending",
+                    "before_hash": before_hash,
+                    "after_hash": after_hash,
+                    "rollback_snapshot_path": str(rollback),
+                    "apply_prepare_error": None,
+                },
+            )
             if prepared != "updated":
                 raise OSError("apply prepare ledger update failed")
             replace_target, path_reason = _confined_amendment_target(
@@ -1136,7 +1243,9 @@ def evaluate_amendment_policy(
     content = proposal.proposed_content.strip()
     if proposal.target_file not in AMENDMENT_TARGETS:
         return False, "target_not_allowed"
-    source_allowlist = (active_policy.source_target_allowlist or {}).get(proposal.source)
+    source_allowlist = (active_policy.source_target_allowlist or {}).get(
+        proposal.source
+    )
     if source_allowlist is not None and proposal.target_file not in source_allowlist:
         return False, "target_not_allowed_for_source"
     if not content:
@@ -1225,10 +1334,11 @@ def _iter_json_records(text: str) -> list[Any]:
     remaining = raw
     for match, parsed in reversed(fenced):
         if parsed:
-            remaining = remaining[: match.start()] + remaining[match.end():]
+            remaining = remaining[: match.start()] + remaining[match.end() :]
 
     cleaned_lines = [
-        line.strip() for line in remaining.splitlines()
+        line.strip()
+        for line in remaining.splitlines()
         if line.strip() and not line.strip().startswith("```")
     ]
     joined = "\n".join(cleaned_lines)
@@ -1268,7 +1378,9 @@ def _atomic_write_text(path: Path, text: str) -> None:
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """Durably atomically replace a file with exact bytes."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, delete=False, suffix=".tmp")
+    handle = tempfile.NamedTemporaryFile(
+        mode="wb", dir=path.parent, delete=False, suffix=".tmp"
+    )
     try:
         with handle:
             handle.write(data)
@@ -1330,7 +1442,10 @@ def _confined_amendment_target(
         resolved_target = original_target.resolve(strict=False)
     except OSError:
         return None, "target_path_invalid"
-    if resolved_target.parent != resolved_root or resolved_target.name not in AMENDMENT_TARGETS:
+    if (
+        resolved_target.parent != resolved_root
+        or resolved_target.name not in AMENDMENT_TARGETS
+    ):
         return None, "target_path_invalid"
     return resolved_target, None
 
@@ -1407,7 +1522,7 @@ def _block_content(block: str) -> str:
     """Extract the amendment content text from one marker block."""
 
     newline = block.find("\n")
-    body = block[newline + 1:] if newline != -1 else ""
+    body = block[newline + 1 :] if newline != -1 else ""
     cut = body.find("\n  - source:")
     if cut != -1:
         body = body[:cut]

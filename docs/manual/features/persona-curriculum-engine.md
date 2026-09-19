@@ -1,8 +1,8 @@
 # Persona Curriculum Engine
 
-Status: Implemented and live-accepted on `ai-engineer`. The Windows scheduler
-installer is intentionally run only after this branch lands in the canonical
-checkout so its persistent action never targets a disposable worktree.
+Status: Shipped baseline, with harness evidence integration available in v1.8.0.
+Scheduler activation is an installation state to verify separately; its action
+must target the canonical checkout, never a disposable worktree.
 
 Owner: persona profiles + curriculum controller + memory/recall
 
@@ -62,6 +62,29 @@ study prompt, grant tools, escape profile paths, or mint an `explicit`
 self-belief. External curriculum changes domain doctrine only. Operator grades
 enter the existing persona reflection staging pipeline with
 `source="reflection"`.
+
+## Source Evidence In The Learning Harness
+
+A completed study also contributes to the
+[persona learning harness](persona-harness-learning.md). The host records the
+study experience, its actual execution, and a source-evidence observation.
+Literal transcript windows (up to 16,000 characters total) remain separate from
+generated dossier excerpts (up to 6,000 characters). Each selected window carries
+its exact source offsets, hash, collection time, and provenance. Support review
+can inspect those captured bytes; a URL or dossier path alone is insufficient.
+
+Dossier validation proves that the study artifact passed its checks. It does
+not establish that a source claim is true or that a proposed method works in
+practice. Source-derived candidates retain that uncertainty and enter the same
+qualification and later-outcome lifecycle as other harness hypotheses.
+
+When study synthesis uses an active learned method, host-owned runtime receipts
+link its model/provider and executed context to the resulting study experience.
+That linkage supports later reassessment without inventing a second model call
+or duplicating its cost. The
+[harness developer guide](persona-harness-learning-developer.md) explains the
+producer contract. Existing curriculum admission, operator grades, and external
+action permissions remain separate controls.
 
 ## Configuration
 

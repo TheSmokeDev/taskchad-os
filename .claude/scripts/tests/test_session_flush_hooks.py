@@ -33,8 +33,8 @@ SYNTHETIC_CHAT_ID = "telegram:1111111111:2222222222"
 SYNTHETIC_SAFE_ID = "telegram-1111111111-2222222222"
 SYNTHETIC_UUID = "11784e97-1111-2222-3333-444444444444"
 
-SESSION_END_NAME_RE = re.compile(r"^session-flush-[A-Za-z0-9._-]+-\d{8}-\d{6}\.md$")
-PRE_COMPACT_NAME_RE = re.compile(r"^flush-context-[A-Za-z0-9._-]+-\d{8}-\d{6}\.md$")
+SESSION_END_NAME_RE = re.compile(r"^session-flush-[A-Za-z0-9._-]+-\d{8}-\d{6}(?:-\d{6})?\.md$")
+PRE_COMPACT_NAME_RE = re.compile(r"^flush-context-[A-Za-z0-9._-]+-\d{8}-\d{6}(?:-\d{6})?\.md$")
 
 
 def _load_hook_module(filename: str, module_name: str):
@@ -72,10 +72,11 @@ def _wire_hook(hook, tmp_path: Path, monkeypatch, *, payload: dict) -> dict:
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir(exist_ok=True)
 
-    harness: dict = {"popen": [], "events": [], "state_dir": state_dir}
+    harness: dict = {"popen": [], "environments": [], "events": [], "state_dir": state_dir}
 
     def fake_popen(cmd, **kwargs):
         harness["popen"].append(list(cmd))
+        harness["environments"].append(kwargs.get("env", {}))
         return SimpleNamespace(pid=123)
 
     monkeypatch.setattr(hook, "STATE_DIR", state_dir)
@@ -203,10 +204,10 @@ class TestSessionEndColonFix:
         assert name.startswith(f"session-flush-{SYNTHETIC_UUID}-")
         assert SESSION_END_NAME_RE.fullmatch(name), name
 
-    def test_dedup_compares_raw_with_raw(
+    def test_recent_time_marker_cannot_drop_a_new_source_revision(
         self, session_end_hook, tmp_path, monkeypatch
     ):
-        """Sanitize-at-composition only: the 60s dedup still keys the RAW id."""
+        """Time proximity is not evidence identity; the durable queue deduplicates."""
         transcript = tmp_path / "session.jsonl"
         _write_transcript(
             transcript,
@@ -228,15 +229,13 @@ class TestSessionEndColonFix:
             encoding="utf-8",
         )
 
-        with pytest.raises(SystemExit) as exc_info:
-            session_end_hook.main()
+        session_end_hook.main()
 
-        assert exc_info.value.code == 0
-        assert ("SKIP", "dedup 60s") in harness["events"]
-        assert not harness["popen"]
-        assert not list(harness["state_dir"].glob("session-flush-*.md"))
+        assert harness["popen"]
+        assert ("SKIP", "dedup 60s") not in harness["events"]
+        assert list(harness["state_dir"].glob("session-flush-*.md"))
 
-    def test_dedup_state_written_with_raw_id_after_spawn(
+    def test_physical_session_id_passes_to_admission_child(
         self, session_end_hook, tmp_path, monkeypatch
     ):
         transcript = tmp_path / "session.jsonl"
@@ -257,10 +256,8 @@ class TestSessionEndColonFix:
 
         session_end_hook.main()
 
-        dedup = json.loads(
-            (harness["state_dir"] / "flush-dedup.json").read_text(encoding="utf-8")
-        )
-        assert dedup["session_id"] == SYNTHETIC_CHAT_ID  # raw, not sanitized
+        assert harness["environments"][0]["HOMIE_LEARNING_SESSION_ID"] == SYNTHETIC_CHAT_ID
+        assert not (harness["state_dir"] / "flush-dedup.json").exists()
 
 
 # =============================================================================

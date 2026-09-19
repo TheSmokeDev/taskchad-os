@@ -94,14 +94,16 @@ def _bounded_monologue_wm(wm, *, max_chars: int):
     except Exception:
         REGION_BUDGETS = {}
 
-    regions = prompt_regions_from_working_memory(wm, REGION_BUDGETS)
+    retained = tuple(m for m in wm.memories if m.region == "persona_learning" and m.role == "system")
+    reserved = sum(len(m.content) + 32 for m in retained)
+    regions = prompt_regions_from_working_memory(wm.without_regions("persona_learning"), REGION_BUDGETS)
     assembled = assemble_regions(regions)
     # ``assemble_regions`` already emits the per-region ``# Header`` blocks; strip
     # the single outer header ``to_system_prompt`` would add (the injected memory
     # gets ONE wrapper) so the bounded block is not double-headered. The win32
     # head cap is the LAST step — it bounds the total argv length regardless of
     # how the regions compose (the reply path's exact ordering).
-    bounded_text = truncate_for_win32_argv(assembled, max_chars)
+    bounded_text = truncate_for_win32_argv(assembled, max(0, max_chars - reserved))
 
     # Preserve the live conversation trace (the non-system memories — what the
     # monologue actually needs to think about THIS turn) and drop the raw
@@ -123,6 +125,8 @@ def _bounded_monologue_wm(wm, *, max_chars: int):
             region="identity",
             source="cognition",
         ))
+    for memory in retained:
+        bounded = bounded.with_memory(memory)
     return bounded
 
 
@@ -244,6 +248,12 @@ async def run_cognitive_monologue(
         return wm, "", [], False
 
     thought = (thought or "").strip()
+    receipt = {}
+    for memory in reversed(getattr(_scratch, "memories", ())):
+        candidate = dict(getattr(memory, "metadata", ())).get("runtime_receipt")
+        if isinstance(candidate, dict):
+            receipt = candidate
+            break
     enriched = wm
     if thought:
         enriched = wm.with_memory(Memory(
@@ -251,6 +261,7 @@ async def run_cognitive_monologue(
             content=thought,
             region="internal",
             source="cognition",
+            metadata=(("runtime_receipt", receipt),),
         ))
     return enriched, thought, list(actions or []), True
 

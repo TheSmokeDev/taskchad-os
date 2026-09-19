@@ -37,8 +37,10 @@ def _capture_options() -> tuple[dict[str, object], type, object]:
 
     async def _empty_query(prompt, options):  # noqa: ARG001
         # Async iterator returning nothing — exits the async-for cleanly.
-        if False:
-            yield None
+        from claude_agent_sdk import ResultMessage
+        yield ResultMessage(subtype="success", duration_ms=0, duration_api_ms=0,
+                            is_error=False, num_turns=1, session_id="fixture",
+                            total_cost_usd=None, usage={}, result="OK")
 
     return captured, _DummyOptions, _empty_query
 

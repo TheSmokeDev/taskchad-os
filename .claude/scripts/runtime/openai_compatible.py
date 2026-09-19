@@ -1,4 +1,4 @@
-"""OpenAI-compatible runtime adapter — text plus caller-supplied tool calling.
+"""OpenAI-compatible runtime adapter â€” text plus caller-supplied tool calling.
 
 The ``chat_completions`` wire carries caller-supplied OpenAI-format tool
 definitions natively; the ``responses`` wire does not yet, and says so rather
@@ -30,7 +30,7 @@ _logger = logging.getLogger(__name__)
 # How many model round trips one tool-carrying turn may take. Deliberately NOT
 # `request.max_turns`: that is a Claude-Agent-SDK concept and defaults to 1,
 # which would cap every generic tool turn at "call a tool, never see the
-# result" — the model would be cut off before it could use what it asked for.
+# result" â€” the model would be cut off before it could use what it asked for.
 _DEFAULT_TOOL_LOOP_ITERATIONS = 8
 
 
@@ -44,11 +44,68 @@ def _tool_loop_max_iterations() -> int:
     return max(1, value)
 
 
+def _model_only_output_limit(request: RuntimeRequest) -> int:
+    """Respect an explicit installation ceiling; use 4096 only as an unset default."""
+    env = {**os.environ, **(request.env or {})}
+    raw = env.get("SECOND_BRAIN_GENERIC_MAX_OUTPUT_TOKENS", "").strip()
+    ceiling = None
+    if raw:
+        try:
+            ceiling = int(raw)
+        except ValueError as exc:
+            raise RuntimeConfigError(
+                "generic output token ceiling must be a positive integer"
+            ) from exc
+        if ceiling <= 0:
+            raise RuntimeConfigError("generic output token ceiling must be a positive integer")
+    requested = (request.metadata or {}).get("max_output_tokens")
+    if requested is not None and (type(requested) is not int or requested <= 0):
+        raise RuntimeConfigError("max_output_tokens must be a positive integer")
+    if ceiling is not None:
+        return min(ceiling, requested) if requested is not None else ceiling
+    return requested if requested is not None else 4096
+
+
+def _require_model_only_request(request: RuntimeRequest) -> None:
+    if not request.model_only:
+        return
+    _base.assert_model_only_contract(request)
+    if request.max_budget_usd is not None:
+        # Tokens are measurable; an arbitrary provider's billing/pricing is not.
+        # Do not pretend a token limit enforces an operator's USD ceiling.
+        raise RuntimeUnsupportedCapabilityError(
+            "OpenAI-compatible model-only runtime cannot enforce a non-null USD budget; "
+            "configure a supported budget-aware runtime or an explicit token-only policy"
+        )
+    _model_only_output_limit(request)
+
+
+def _data_url(block: dict) -> str:
+    source = block["source"]
+    return f"data:{source['media_type']};base64,{source['data']}"
+
+
+def _validate_model_only_response(response) -> None:
+    if getattr(response, "status", None) != "completed":
+        raise RuntimeExecutionError("model-only response did not complete")
+    for item in getattr(response, "output", []) or []:
+        if getattr(item, "type", None) not in {"message", "reasoning"}:
+            raise RuntimeExecutionError(
+                "model-only response returned unexpected tool/output activity"
+            )
+        if getattr(item, "type", None) == "message":
+            for content in getattr(item, "content", []) or []:
+                if getattr(content, "type", None) not in {"output_text", "refusal"}:
+                    raise RuntimeExecutionError(
+                        "model-only response returned unexpected message activity"
+                    )
+
+
 def _accumulate_usage(usage: dict[str, int], usage_raw: Any) -> None:
     """Sum token counts ACROSS loop iterations.
 
     A tool turn is several round trips; reporting only the last one would
-    under-report a multi-call turn by most of its real cost. Cost stays unset —
+    under-report a multi-call turn by most of its real cost. Cost stays unset â€”
     no price table is configured, and an invented number is worse than none.
     """
     if usage_raw is None:
@@ -93,14 +150,14 @@ class OpenAICompatibleRuntime:
         """Which wire this profile speaks. Resolved at CALL time (Rule 1).
 
         One adapter class serves several providers (``openai-compatible``,
-        ``openrouter``, ``kimi``) and they do NOT share a wire — so capability
+        ``openrouter``, ``kimi``) and they do NOT share a wire â€” so capability
         is a per-PROFILE question, never a per-class one.
         """
         from .profiles import GENERIC_PROVIDER_REGISTRY
 
         provider = getattr(self.profile, "provider", None)
         if not provider:
-            # No profile (capability probed before binding) — fall back to the
+            # No profile (capability probed before binding) â€” fall back to the
             # NON-carrying wire. The router's probe catches exceptions and
             # fails closed anyway, but relying on that is luck: an adapter must
             # be able to answer "can you carry tools?" without a profile, and
@@ -117,14 +174,14 @@ class OpenAICompatibleRuntime:
         returning True while quietly dropping definitions is exactly the Codex
         failure mode, reproduced in our own code.
 
-        ``chat_completions`` — TRUE. The loop below sends ``tools=[...]``,
+        ``chat_completions`` â€” TRUE. The loop below sends ``tools=[...]``,
         parses ``tool_calls``, executes through ``request.tool_dispatch``, feeds
         results back as ``role: "tool"`` messages, and iterates. Measured
         2026-07-27: Kimi K3 returned ``finish_reason: tool_calls`` with a
         structured ``get_weather({"city": "Reykjavik"})`` for an
         OpenAI-format definition.
 
-        ``responses`` — FALSE, deliberately. That branch builds a request with
+        ``responses`` â€” FALSE, deliberately. That branch builds a request with
         no tools parameter at all and would return a confident tool-free
         answer: a polite drop, indistinguishable from a persona refusing to
         act. Declaring False means the router skips this lane for tool turns
@@ -134,19 +191,29 @@ class OpenAICompatibleRuntime:
         return self._wire_api() == "chat_completions"
 
     def supports_model_only(self) -> bool:
-        """False until this adapter enforces token/cost ceilings for strict jobs."""
-        return False
+        """Both HTTP wires explicitly disable tools and enforce output token limits.
+
+        Requests with a USD budget are refused before network I/O because this
+        adapter has no provider pricing authority. The lane router reports that
+        per-request limitation without weakening the budget.
+        """
+        return self._wire_api() in {"chat_completions", "responses"}
 
     def supports(self, request: RuntimeRequest) -> bool:
+        if request.model_only:
+            try:
+                _base.assert_model_only_contract(request)
+            except ValueError:
+                return False
         if _base.request_carries_tools(request):
             # A tool-carrying request the wire cannot execute must never reach
-            # the body. NOT covered by the `allowed_tools` clause — `tool_defs`
+            # the body. NOT covered by the `allowed_tools` clause â€” `tool_defs`
             # is a different field, and a caller may legitimately send tool_defs
             # on a TEXT_REASONING turn.
             if not self.supports_caller_tool_defs():
                 return False
             # Tool turns are TOOL_REASONING by convention but the tier is not
-            # what makes them executable here — carrying the definitions is.
+            # what makes them executable here â€” carrying the definitions is.
             # Accept both tiers rather than forcing callers to pick one.
             if request.capability not in {TEXT_REASONING, TOOL_REASONING}:
                 return False
@@ -159,22 +226,27 @@ class OpenAICompatibleRuntime:
         )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        _require_model_only_request(request)
         if not self.supports(request):
             raise RuntimeUnsupportedCapabilityError(
                 f"OpenAI-compatible runtime does not support capability {request.capability}"
             )
         if not self.profile.api_key:
-            raise RuntimeConfigError(
-                f"API key is not configured for {self.profile.provider}"
-            )
+            raise RuntimeConfigError(f"API key is not configured for {self.profile.provider}")
 
         try:
             from openai import AsyncOpenAI
         except ImportError as exc:
             raise RuntimeConfigError("openai package is not installed") from exc
 
-        client = AsyncOpenAI(api_key=self.profile.api_key, base_url=self.profile.base_url)
-        model = request.fallback_model or request.model or self.profile.model
+        client = AsyncOpenAI(
+            api_key=self.profile.api_key,
+            base_url=self.profile.base_url,
+            default_headers=dict(self.profile.default_headers),
+        )
+        # The resolved profile already applies explicit matching provider pins.
+        # Request hints may belong to Claude and never override another provider.
+        model = self.profile.model
         instructions: str | None = None
         usage: dict[str, int] = {}
         if isinstance(request.system_prompt, str):
@@ -184,27 +256,80 @@ class OpenAICompatibleRuntime:
 
         wire_api = self._wire_api()
         tool_calls: list[RuntimeToolCall] = []
+        from . import image_input
+
+        blocks, image_receipts = (
+            image_input.image_blocks(request) if request.image_paths else ([], [])
+        )
+        actual = {"model": model}
+        metadata: dict[str, Any] = {}
+        if request.model_only:
+            metadata["model_only"] = {
+                "tools": "none",
+                "wire_api": wire_api,
+                "max_output_tokens": _model_only_output_limit(request),
+                "usd_budget": None,
+            }
 
         try:
             if wire_api == "chat_completions":
                 # request.model/fallback_model carry the Claude-lane value
                 # (engine.py builds it from SECOND_BRAIN_CLAUDE_MODEL). Generic
-                # providers use their own pinned model — the profiles contract
+                # providers use their own pinned model â€” the profiles contract
                 # ("model names are provider-specific").
                 model = self.profile.model
                 messages: list[dict[str, Any]] = []
                 if instructions:
                     messages.append({"role": "system", "content": instructions})
-                messages.append({"role": "user", "content": request.prompt})
+                content = (
+                    [
+                        {"type": "text", "text": request.prompt},
+                        *[
+                            {"type": "image_url", "image_url": {"url": _data_url(b)}}
+                            for b in blocks
+                        ],
+                    ]
+                    if blocks
+                    else request.prompt
+                )
+                messages.append({"role": "user", "content": content})
                 text, tool_calls = await self._run_chat_completions(
-                    client, model, request, messages, usage
+                    client, model, request, messages, usage, actual=actual
                 )
             else:
-                response = await client.responses.create(
-                    model=model,
-                    input=request.prompt,
-                    instructions=instructions,
+                input_value = (
+                    [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": request.prompt},
+                                *[
+                                    {"type": "input_image", "image_url": _data_url(b)}
+                                    for b in blocks
+                                ],
+                            ],
+                        }
+                    ]
+                    if blocks
+                    else request.prompt
                 )
+                kwargs = {"model": model, "input": input_value, "instructions": instructions}
+                if request.model_only:
+                    kwargs.update(
+                        tools=[],
+                        tool_choice="none",
+                        max_output_tokens=_model_only_output_limit(request),
+                    )
+                response = await client.responses.create(**kwargs)
+                if request.model_only:
+                    _validate_model_only_response(response)
+                actual["model"] = getattr(response, "model", None) or model
+                raw_usage = getattr(response, "usage", None)
+                if raw_usage is not None:
+                    for field in ("input_tokens", "output_tokens", "total_tokens"):
+                        value = getattr(raw_usage, field, None)
+                        if type(value) is int:
+                            usage[field] = value
                 text = getattr(response, "output_text", "").strip()
                 if not text:
                     text = _extract_response_text(response)
@@ -219,12 +344,16 @@ class OpenAICompatibleRuntime:
                 raise RuntimeConfigError(str(exc)) from exc
             raise
 
+        if request.model_only and not text.strip():
+            raise RuntimeExecutionError("model-only runtime returned no completed text")
+        metadata["image_inputs"] = [{**r, "delivered": True} for r in image_receipts]
         return RuntimeResult(
             text=text.strip(),
             runtime_lane=RUNTIME_LANE_GENERIC,
             provider=self.profile.provider,
-            model=model,
+            model=actual["model"],
             profile_key=self.profile.key,
+            metadata=metadata,
             usage=usage or None,
             tool_call_count=len(tool_calls),
             tool_names_used=sorted({c.name for c in tool_calls if c.name}),
@@ -238,6 +367,8 @@ class OpenAICompatibleRuntime:
         request: RuntimeRequest,
         messages: list[dict[str, Any]],
         usage: dict[str, int],
+        *,
+        actual: dict | None = None,
     ) -> tuple[str, list[RuntimeToolCall]]:
         """Drive a chat_completions turn, looping while the model calls tools.
 
@@ -246,7 +377,7 @@ class OpenAICompatibleRuntime:
         ``tool_calls`` through ``request.tool_dispatch``, append the results as
         ``role: "tool"`` messages, and go again until the model answers in text.
 
-        Every execution goes through ``request.tool_dispatch`` — the ONE
+        Every execution goes through ``request.tool_dispatch`` â€” the ONE
         chokepoint. This adapter never calls a handler directly, so guardrails,
         the kill switch, and the audit row (#242) fire identically here and for
         the disclosure bridge (#245). Two execution paths would mean two places
@@ -268,14 +399,36 @@ class OpenAICompatibleRuntime:
             kwargs: dict[str, Any] = {"model": model, "messages": messages}
             if carries_tools:
                 kwargs["tools"] = tool_defs
+            if request.model_only:
+                _require_model_only_request(request)
+                kwargs.update(
+                    tools=[],
+                    tool_choice="none",
+                    max_completion_tokens=_model_only_output_limit(request),
+                )
 
             completion = await client.chat.completions.create(**kwargs)
             _accumulate_usage(usage, getattr(completion, "usage", None))
+            if actual is not None:
+                actual["model"] = getattr(completion, "model", None) or model
 
             choice = (getattr(completion, "choices", None) or [None])[0]
             message = getattr(choice, "message", None)
             text = str(getattr(message, "content", "") or "").strip()
             raw_calls = list(getattr(message, "tool_calls", None) or [])
+            if request.model_only:
+                if (
+                    raw_calls
+                    or getattr(message, "function_call", None)
+                    or getattr(choice, "finish_reason", None) != "stop"
+                ):
+                    raise RuntimeExecutionError(
+                        "model-only chat returned unexpected tool activity or incomplete output"
+                    )
+                if len(getattr(completion, "choices", []) or []) != 1 or not text:
+                    raise RuntimeExecutionError(
+                        "model-only chat requires one completed text output"
+                    )
 
             if not carries_tools or not raw_calls:
                 return text, collected
@@ -286,7 +439,7 @@ class OpenAICompatibleRuntime:
                 # returning its empty text would look like a considered answer.
                 raise RuntimeExecutionError(
                     "model requested tool calls but the request carries no "
-                    "tool_dispatch — the caller supplied definitions it cannot "
+                    "tool_dispatch â€” the caller supplied definitions it cannot "
                     "execute"
                 )
 
@@ -306,7 +459,7 @@ class OpenAICompatibleRuntime:
                 )
 
         # Loop bound reached with the model still calling tools. Return the last
-        # text rather than raising — the turn produced real work, and the caller
+        # text rather than raising â€” the turn produced real work, and the caller
         # sees the full tool_calls trail. Silence here would look like a hang.
         _logger.warning(
             "chat_completions tool loop hit its iteration bound with tools still "
@@ -323,7 +476,7 @@ class OpenAICompatibleRuntime:
     ) -> tuple[RuntimeToolCall, str]:
         """Execute one model-requested call. Never raises to the loop.
 
-        A failing tool is normal conversational input — the model should SEE
+        A failing tool is normal conversational input â€” the model should SEE
         the error and get a chance to recover, exactly as it would on the
         Claude lane. Raising instead would turn a recoverable tool error into a
         failed turn and a lane fallback.
@@ -351,7 +504,7 @@ class OpenAICompatibleRuntime:
             # Scope guard: the model asked for something it was not offered.
             record.status = "refused"
             _logger.warning(
-                "refusing tool call %r — not in the definitions offered this turn (offered: %s)",
+                "refusing tool call %r â€” not in the definitions offered this turn (offered: %s)",
                 name,
                 ", ".join(sorted(offered)) or "none",
             )
@@ -359,7 +512,7 @@ class OpenAICompatibleRuntime:
 
         try:
             # Sync dispatchers do blocking work (SQLite, filesystem, browser
-            # subprocesses — e.g. the persona action gate's proposal write).
+            # subprocesses â€” e.g. the persona action gate's proposal write).
             # Running one directly here would stall this runtime's event loop
             # for the full duration (Codex R1), so sync dispatch hops a
             # thread; an async dispatcher is awaited in place. Mirrors the
@@ -372,7 +525,7 @@ class OpenAICompatibleRuntime:
                 outcome = await outcome
             record.status = "completed"
             return record, outcome if isinstance(outcome, str) else json.dumps(outcome, default=str)
-        except Exception as exc:  # noqa: BLE001 — surfaced to the model, not swallowed
+        except Exception as exc:  # noqa: BLE001 â€” surfaced to the model, not swallowed
             record.status = "failed"
             _logger.warning("tool %r raised during dispatch: %s", name, exc)
             return record, json.dumps({"error": f"{type(exc).__name__}: {exc}"})

@@ -190,6 +190,18 @@ def _start_session_flush_inner(
     config.STATE_DIR.mkdir(parents=True, exist_ok=True)
     context_path.write_text(context, encoding="utf-8")
 
+    # Same durable cognitive lifecycle as chat; rendered text has already passed
+    # the Talk role/size filters. Failure keeps the ordinary memory flush intact.
+    try:
+        import personas
+        from personas.learning import hooks as learning_hooks
+        learning_hooks.enqueue_session_debrief(
+            persona_id=personas.get_active_profile_name() or "default",
+            session_id=flush_session_id, surface="talk", transcript=context,
+            reason="talk_session_end")
+    except Exception as exc:
+        logger.warning("Talk cognitive debrief unavailable: %s", type(exc).__name__)
+
     try:
         _spawn_flush(context_path)
     except Exception:

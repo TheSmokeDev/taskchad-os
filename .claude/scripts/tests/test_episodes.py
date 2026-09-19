@@ -1,3 +1,5 @@
+# Explicit legacy flush helper compatibility; automatic queue admission and
+# completed-debrief projections are covered by test_unified_nightly_bridge.py.
 """Tests for episodes.py — Living Mind Act 3 (the self's autobiography).
 
 Test design split by code path (categories map to the PRP's validation plan):
@@ -1032,7 +1034,7 @@ class TestSyntheticEndToEnd:
         )
         monkeypatch.setattr(memory_flush, "_reindex_episode", lambda _p: None)
 
-        result = await memory_flush.run_flush(context_file)
+        result = await memory_flush._run_flush_legacy_inner(context_file)
         assert result == GOOD_RESPONSE.strip()
         episode_files = list((vault / "episodes").glob("*.md"))
         assert len(episode_files) == 1
@@ -1124,7 +1126,7 @@ class TestSyntheticEndToEnd:
 
         ctx_a = tmp_path / CTX_LIFECYCLE_A
         ctx_a.write_text("**User:** first\n", encoding="utf-8")
-        await memory_flush.run_flush(ctx_a)
+        await memory_flush._run_flush_legacy_inner(ctx_a)
 
         first = next((vault / "episodes").glob("*.md"))
         assert mark_episodes_consolidated([first]) == 1
@@ -1138,7 +1140,7 @@ class TestSyntheticEndToEnd:
 
         ctx_b = tmp_path / CTX_LIFECYCLE_B
         ctx_b.write_text("**User:** second\n", encoding="utf-8")
-        await memory_flush.run_flush(ctx_b)
+        await memory_flush._run_flush_legacy_inner(ctx_b)
 
         all_files = sorted(f.name for f in (vault / "episodes").glob("*.md"))
         assert len(all_files) == 2
@@ -1183,7 +1185,7 @@ class TestNoEpisodeRegistryInState:
         monkeypatch.setattr(memory_flush, "append_to_daily_log", lambda *_a: None)
         monkeypatch.setattr(memory_flush, "_reindex_episode", lambda _p: None)
 
-        await memory_flush.run_flush(context_file)
+        await memory_flush._run_flush_legacy_inner(context_file)
 
         state = json.loads(state_file.read_text(encoding="utf-8"))
         assert set(state.keys()) == {

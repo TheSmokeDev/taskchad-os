@@ -1004,6 +1004,16 @@ class TestF1Win32Cap:
 
 
 class TestF2CheapTierAndF4Cwd:
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def native_model_hint_contract(self, monkeypatch):
+        from runtime import selection
+
+        monkeypatch.setattr(
+            selection, "resolve_runtime_selection", lambda: SimpleNamespace(lane="claude_native")
+        )
+
     def test_monologue_request_carries_haiku_hint(self, monkeypatch):
         # The real chain must hand render_runtime_request the "fast" processor ->
         # claude-haiku-4-5 model hint (NOT None = the default reply profile).

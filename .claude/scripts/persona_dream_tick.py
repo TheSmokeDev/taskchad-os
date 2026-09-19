@@ -1,56 +1,9 @@
-"""
-Persona Dream Tick — nightly fan-out of the FULL dream cycle, one per persona.
+"""Legacy nightly dream command backed by the shared persona queue.
 
-The equality doctrine made real: a persona is not a sub-homie, so it gets the
-same 5-phase dream (Orient / Gather / Consolidate / Prune / Belief-Evolve) the
-main homie gets, scoped to its own vault.
-
-NO dream internals are ported. ``memory_dream.py`` already carries the
-``apply_persona_override()`` boot-shim ABOVE its config import, so every path
-constant it uses (MEMORY_DIR, STATE_DIR, DREAM_STATE_FILE, SELF_FILE,
-AMENDMENT_LEDGER_FILE, BELIEF_EVOLVE_DECISION_DIR) re-roots into the profile
-tree under ``-p <name>``. This module is the fan-out and the receipt, nothing
-more.
-
-CRITICAL: config.py binds paths at import time. The tick itself runs as the
-DEFAULT profile and NEVER loops profiles in-process — each persona's dream runs
-as a subprocess with HOMIE_HOME set by build_capability_scoped_env plus an
-explicit ``-p <name>`` (rank-1 selection, which also strips the flag before the
-child's argparse sees it).
-
-Sibling of ``persona_learning_tick.py``, deliberately NOT an extension of it
-(architecture Q5): the cadences differ (nightly dream vs 12h-interval reflect)
-and coupling them in one scheduler entry makes both harder to reason about.
-
-Two deliberate divergences from the learning tick, both doctrine-driven:
-
-  1. NO per-persona ``learning.enabled`` filter. "I want the full dream cycle on
-     everybody… there shouldn't be no off button." Every named profile is
-     enumerated; the only switch is the framework-wide PERSONA_DREAM_ENABLED
-     fire-extinguisher. This is affordable because the child's own DREAM_SILENT
-     fast path means a persona with no fresh signal costs ZERO LLM calls — the
-     nightly bill is bounded by signal, not by roster size.
-  2. The parent reads the child's dream-state.json back off DISK (Rule 2) and
-     CLASSIFIES what it finds against ONE table — ``RECEIPT_CONTRACT`` below.
-     An assumed success is not a receipt, and neither is a file that merely
-     exists: a receipt counts only when it carries the nonce this spawn handed
-     the child. Every other shape (missing / unreadable / unrecognised /
-     future-dated / stale / child-failed / kill-switched) has its own row, and
-     each row states all three consequences — what gets stamped, whether the
-     persona's recency budget is spent, and whether the scheduler is told.
-
-Exit code: non-zero when any persona's dream FAILED — a failed spawn, a child
-that recorded ``failed``, a receipt that cannot be trusted, a refusal, or the
-parent's own stamp I/O failing. Silent skips (recency guard, kill switch, a
-child that skipped on its own guard) are not failures. The scheduler wrappers
-key their FAILED branch off this. One persona's failure is contained to that
-persona: the roster keeps moving and the exit code carries the news.
-
-Usage:
-    uv run python persona_dream_tick.py               # Nightly fan-out
-    uv run python persona_dream_tick.py --test        # Dry run (no spawn)
-    uv run python persona_dream_tick.py --child-test  # Real spawn, child --test --no-llm
-    uv run python persona_dream_tick.py --once        # First eligible persona only
+Named profiles use shared learning pause/disablement and source/interval policy.
+The dispatcher executes admitted work with foreground priority and durable retry.
+--test and --child-test are read-only previews; no independent child is spawned.
+Historical subprocess receipt readers remain for inspecting pre-cutover state.
 """
 
 from __future__ import annotations
@@ -525,6 +478,23 @@ def run_tick(
     child_test: bool = False,
     once: bool = False,
 ) -> TickOutcome:
+    """Admit nightly dreams; shared pause/disable and signal policy applies."""
+    if not is_active_default_profile():
+        return TickOutcome()
+    from personas.learning.legacy_adapters import admit_profile_synthesis
+
+    receipt = admit_profile_synthesis(
+        "dream", profiles=list_profiles(), test_mode=test_mode or child_test, once=once
+    )
+    return TickOutcome(tuple(receipt["attempted"]), tuple(receipt["failed"]), ())
+
+
+def _run_legacy_tick(
+    *,
+    test_mode: bool = False,
+    child_test: bool = False,
+    once: bool = False,
+) -> TickOutcome:
     """Main tick: enumerate every named persona, spawn its full dream cycle.
 
     Returns a ``TickOutcome`` whose ``exit_code`` the entrypoint exits with, so
@@ -756,6 +726,11 @@ def run_tick(
             summary += f", {len(truncated)} never attempted (operator wall-clock cap)"
         _log(None, summary)
 
+    try:
+        from personas.learning import worker as learning_worker
+        learning_worker.run_pending_profiles(test_mode=test_mode or child_test, once=once)
+    except Exception as exc:
+        _log(None, f"Learning queue wake failed (non-blocking): {exc}")
     return TickOutcome(tuple(attempted), tuple(failed), tuple(truncated))
 
 

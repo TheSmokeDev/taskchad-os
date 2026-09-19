@@ -2,8 +2,8 @@
 Session End Memory Flush Hook
 
 Called by Claude Code when a session ends. Extracts readable conversation
-context from the JSONL transcript and spawns a background Agent SDK process
-(memory_flush.py) that intelligently decides what to save to the daily log.
+context from the JSONL transcript and spawns the admission adapter memory_flush.py. The shared learner
+produces the debrief, daily summary, and episode from one completed pass.
 
 This hook does NO API calls — pure local file I/O for speed (<10s).
 Mirrors pre-compact-flush.py architecture.
@@ -12,6 +12,7 @@ Mirrors pre-compact-flush.py architecture.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -146,16 +147,12 @@ def main() -> None:
     source = str(hook_input.get("source", "unknown"))
     transcript_path_str = hook_input.get("transcript_path", "")
 
-    # Dedup: skip if this session was flushed within the last 60 seconds
-    _dedup_path = STATE_DIR / "flush-dedup.json"
-    try:
-        if _dedup_path.exists():
-            _dedup = json.loads(_dedup_path.read_text(encoding="utf-8"))
-            if _dedup.get("session_id") == session_id and (_time.time() - _dedup.get("timestamp", 0)) < 60:
-                log_hook_execution("session-end-flush", source, "SKIP", _time.time() - _start, "dedup 60s")
-                sys.exit(0)
-    except Exception:
-        pass  # Dedup check is best-effort
+    # /clear already committed this debrief or its durable replay envelope.
+    receipt = hook_input.get("learning_debrief_receipt")
+    if isinstance(receipt, dict) and (receipt.get("cognitive_cycle_id") or receipt.get("outbox_id")):
+        log_hook_execution("session-end-flush", source, "SKIP", _time.time() - _start,
+                           "debrief already durable")
+        return
 
     # Handle empty/missing transcript_path
     if not transcript_path_str or not isinstance(transcript_path_str, str):
@@ -185,10 +182,14 @@ def main() -> None:
         sys.exit(0)
 
     # Write context file for background process
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     context_filename = f"session-flush-{_safe_filename_component(session_id)}-{timestamp}.md"
     context_path = STATE_DIR / context_filename
-    context_path.write_text(context, encoding="utf-8")
+    from personas.learning.lifecycle_outbox import canonical_session_transcript
+
+    # Preserve physical message identities; the child only admits shared work.
+    retained = canonical_session_transcript(transcript_path.read_text(encoding="utf-8"))
+    context_path.write_text(retained, encoding="utf-8")
 
     # Spawn background flush process
     cmd = [
@@ -211,12 +212,8 @@ def main() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creation_flags,
+            env={**os.environ, "HOMIE_LEARNING_SESSION_ID": str(session_id)},
         )
-        # Write dedup state
-        try:
-            _dedup_path.write_text(json.dumps({"session_id": session_id, "timestamp": _time.time()}), encoding="utf-8")
-        except Exception:
-            pass
         log_hook_execution("session-end-flush", source, "OK", _time.time() - _start, "spawned flush")
     except Exception as e:
         print(f"[session-end-flush] Failed to spawn flush: {e}", file=sys.stderr)

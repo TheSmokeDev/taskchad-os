@@ -894,6 +894,9 @@ def test_private_seed_import_builds_delta_manifest_idempotently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import curriculum.seed as seed_module
+    # This test asserts import/manifest reconciliation; recall has its own suite.
+    # Do not let default embedding generation invoke a real provider here.
+    monkeypatch.setattr("memory_index.sync_index", lambda **kwargs: {"indexed": 2})
 
     seed_root = tmp_path / "vendor"
     (seed_root / "concepts").mkdir(parents=True)

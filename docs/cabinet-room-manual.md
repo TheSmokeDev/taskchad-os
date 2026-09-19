@@ -60,7 +60,7 @@ npm run dev -- --host 127.0.0.1
 Open:
 
 ```text
-http://127.0.0.1:5173/cabinet
+http://127.0.0.1:5473/cabinet
 ```
 
 Smoke tests from the browser:
@@ -278,7 +278,7 @@ npm run typecheck
 
 Live browser smoke:
 
-1. Open `http://127.0.0.1:5173/cabinet`.
+1. Open `http://127.0.0.1:5473/cabinet`.
 2. Send a no-mention message and confirm all active participants respond.
 3. Send `@content @finance you there?`.
 4. Confirm Content speaks as Content and Finance speaks as Finance.

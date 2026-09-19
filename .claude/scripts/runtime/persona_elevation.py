@@ -368,8 +368,16 @@ def build_turn_context(
         str(turn_id or "").strip()
         or str(raw_event.get("elevation_original_turn_id") or "").strip()
         or str(getattr(incoming, "platform_message_id", "") or "").strip()
+        or str(raw_event.get("learning_generated_turn_id") or "").strip()
         or uuid.uuid4().hex
     )
+    # Persist before either elevation or learning consumes this turn. CLI and
+    # other no-message-ID ingresses must reuse it on an approval resume.
+    raw_event["elevation_original_turn_id"] = stable_turn_id
+    try:
+        incoming.raw_event = raw_event
+    except (AttributeError, TypeError):
+        pass
     return {
         "persona_id": persona_id,
         "platform": str(platform),

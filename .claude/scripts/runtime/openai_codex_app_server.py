@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -26,7 +27,12 @@ from typing import Any
 from . import base as _base
 from .base import RUNTIME_LANE_GENERIC, RuntimeRequest, RuntimeResult, RuntimeToolCall
 from .capabilities import TEXT_REASONING, TOOL_REASONING
-from .errors import RuntimeConfigError, RuntimeExecutionError, RuntimeRetryableError
+from .errors import (
+    RuntimeConfigError,
+    RuntimeExecutionError,
+    RuntimeRetryableError,
+    RuntimeUnsupportedCapabilityError,
+)
 from .openai_codex import OpenAICodexRuntime
 from .profiles import RuntimeProfile
 from .subprocess_env import get_scrubbed_tool_sandbox_env
@@ -93,9 +99,7 @@ _DISABLED_FEATURES = (
     "use_agent_identity",
     "workspace_dependencies",
 )
-_ALLOWED_ITEM_TYPES = frozenset(
-    {"userMessage", "reasoning", "dynamicToolCall", "agentMessage"}
-)
+_ALLOWED_ITEM_TYPES = frozenset({"userMessage", "reasoning", "dynamicToolCall", "agentMessage"})
 _AMBIENT_METHOD_MARKERS = (
     "commandexecution",
     "filechange",
@@ -191,6 +195,30 @@ def convert_openai_tool_defs(tool_defs: list[dict[str, Any]]) -> list[dict[str, 
         )
         seen.add(name)
     return converted
+
+
+def _model_only_byte_limit(request: RuntimeRequest) -> int:
+    """Bound local stream processing; never claim this is a provider billing cap."""
+    _base.assert_model_only_contract(request)
+    if request.image_paths:
+        raise RuntimeUnsupportedCapabilityError(
+            "Codex model-only app-server image carriage is unverified"
+        )
+    if request.max_budget_usd is not None:
+        raise RuntimeUnsupportedCapabilityError(
+            "Codex model-only app-server cannot enforce a USD budget"
+        )
+    env = {**os.environ, **(request.env or {})}
+    if (request.metadata or {}).get("max_output_tokens") is not None or env.get(
+        "SECOND_BRAIN_GENERIC_MAX_OUTPUT_TOKENS", ""
+    ).strip():
+        raise RuntimeUnsupportedCapabilityError(
+            "Codex app-server cannot enforce an explicit provider output-token ceiling"
+        )
+    value = (request.metadata or {}).get("max_output_bytes", 262144)
+    if type(value) is not int or not 1024 <= value <= 1048576:
+        raise RuntimeConfigError("max_output_bytes must be an integer between 1024 and 1048576")
+    return value
 
 
 def least_authority_args(executable: str) -> list[str]:
@@ -303,14 +331,10 @@ def _assert_no_ambient_event(message: dict[str, Any]) -> None:
     if isinstance(method, str):
         lowered = method.lower()
         if any(marker in lowered for marker in _AMBIENT_METHOD_MARKERS):
-            raise CodexAmbientAuthorityError(
-                f"Codex emitted forbidden native method {method!r}"
-            )
+            raise CodexAmbientAuthorityError(f"Codex emitted forbidden native method {method!r}")
     item_type = _native_item_type(message)
     if item_type is not None and item_type not in _ALLOWED_ITEM_TYPES:
-        raise CodexAmbientAuthorityError(
-            f"Codex emitted forbidden native item type {item_type!r}"
-        )
+        raise CodexAmbientAuthorityError(f"Codex emitted forbidden native item type {item_type!r}")
 
 
 class CodexAppServerClient:
@@ -329,6 +353,21 @@ class CodexAppServerClient:
     ) -> None:
         self.request = request
         self.profile = profile
+        self._output_byte_limit = _model_only_byte_limit(request) if request.model_only else None
+        self._output_bytes = 0
+        self._wire_bytes = 0
+        self._input_bytes = 0
+        # Pin only the caller-tool transport. Ordinary codex exec keeps the
+        # user's current CLI; a global upgrade cannot silently change this gate.
+        configured = os.getenv("SECOND_BRAIN_CODEX_APP_SERVER_COMMAND", "").strip()
+        if executable is None and configured:
+            pinned = Path(configured)
+            if not pinned.is_absolute() or not pinned.is_file():
+                raise RuntimeConfigError(
+                    "SECOND_BRAIN_CODEX_APP_SERVER_COMMAND must name "
+                    "an existing absolute executable"
+                )
+            executable = resolve_codex_executable(str(pinned))
         self.executable = executable or resolve_codex_executable(profile.command or "codex")
         if request.allowed_tools:
             raise ValueError("Codex app-server refuses provider-owned allowed_tools")
@@ -338,8 +377,10 @@ class CodexAppServerClient:
             raise ValueError("Codex app-server refuses image inputs")
         if request.workspace_write_tools:
             raise ValueError("Codex app-server refuses workspace-write authority")
-        self.dynamic_tools = convert_openai_tool_defs(list(request.tool_defs or []))
-        if request.tool_dispatch is None:
+        self.dynamic_tools = (
+            [] if request.model_only else convert_openai_tool_defs(list(request.tool_defs or []))
+        )
+        if request.tool_dispatch is None and not request.model_only:
             raise ValueError("caller-tool request has no tool_dispatch")
         self._dispatch = request.tool_dispatch
         self._allowed_names = frozenset(tool["name"] for tool in self.dynamic_tools)
@@ -360,9 +401,7 @@ class CodexAppServerClient:
             await self._initialize()
             thread = await self._start_thread()
             thread_record = thread.get("thread")
-            if not isinstance(thread_record, dict) or not isinstance(
-                thread_record.get("id"), str
-            ):
+            if not isinstance(thread_record, dict) or not isinstance(thread_record.get("id"), str):
                 raise CodexAppServerProtocolError("thread/start omitted the thread id")
             self.receipt.thread_id = thread_record["id"]
             self.receipt.model = str(thread.get("model") or self.profile.model or "")
@@ -395,6 +434,22 @@ class CodexAppServerClient:
             tool_names_used=[call.name for call in self.receipt.tool_calls],
             tool_calls=list(self.receipt.tool_calls),
             execution_time_ms=self.receipt.duration_ms,
+            metadata={
+                "model_only": {
+                    "transport": "codex_app_server",
+                    "version": SUPPORTED_CODEX_VERSION,
+                    "tools": "none",
+                    "output_limit_mode": "host_generated_content_bytes",
+                    "max_output_bytes": self._output_byte_limit,
+                    "generated_content_bytes": self._output_bytes,
+                    "total_wire_bytes": self._wire_bytes,
+                    "max_total_wire_bytes": self._wire_byte_limit(),
+                    "provider_token_budget_enforced": False,
+                    "usd_budget_enforced": False,
+                }
+            }
+            if self.request.model_only
+            else {},
         )
 
     async def _start(self) -> None:
@@ -433,6 +488,10 @@ class CodexAppServerClient:
         if process is None or process.stdin is None:
             raise CodexAppServerProtocolError("app-server stdin is unavailable")
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+        if self.request.model_only:
+            if len(encoded) > _MAX_JSONL_BYTES:
+                raise CodexAppServerProtocolError("model-only app-server input frame exceeds limit")
+            self._input_bytes += len(encoded)
         process.stdin.write(encoded)
         await process.stdin.drain()
 
@@ -470,13 +529,69 @@ class CodexAppServerClient:
             )
         if len(line) > _MAX_JSONL_BYTES:
             raise CodexAppServerProtocolError("Codex app-server JSONL frame exceeds limit")
+        if self._output_byte_limit is not None:
+            self._wire_bytes += len(line)
+            if self._wire_bytes > self._wire_byte_limit():
+                raise CodexAppServerProtocolError("model-only app-server wire byte limit exceeded")
         try:
             message = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CodexAppServerProtocolError("Codex app-server emitted malformed JSONL") from exc
         if not isinstance(message, dict):
             raise CodexAppServerProtocolError("Codex app-server emitted a non-object message")
+        if self.request.model_only:
+            _assert_no_ambient_event(message)
+            self._output_bytes += self._generated_bytes(message)
+            if self._output_bytes > self._output_byte_limit:
+                raise CodexAppServerProtocolError(
+                    "model-only app-server generated content byte limit exceeded"
+                )
+            if _native_item_type(message) == "dynamicToolCall" or (
+                "method" in message and "id" in message
+            ):
+                raise CodexAmbientAuthorityError(
+                    "model-only app-server emitted forbidden tool/server request"
+                )
         return message
+
+    def _wire_byte_limit(self) -> int:
+        # Input echoes and JSON framing are transport overhead, not generation.
+        # The independent cap still terminates metadata loops and oversized echoes.
+        return _MAX_JSONL_BYTES + self._input_bytes * 4 + (self._output_byte_limit or 0) * 16
+
+    @staticmethod
+    def _generated_bytes(message: dict[str, Any]) -> int:
+        params = message.get("params") or {}
+        if not isinstance(params, dict):
+            return 0
+        method = str(message.get("method", ""))
+        if method in {
+            "item/agentMessage/delta",
+            "item/reasoning/textDelta",
+            "item/reasoning/summaryTextDelta",
+        }:
+            delta = params.get("delta")
+            return len(delta.encode("utf-8")) if isinstance(delta, str) else 0
+        item = params.get("item") or {}
+        if (
+            method != "item/completed"
+            or not isinstance(item, dict)
+            or item.get("type") not in {"agentMessage", "reasoning"}
+        ):
+            return 0
+
+        # Snapshot text is charged too: providers that omit deltas remain bounded.
+        # Some providers send both, so this is a conservative upper bound.
+        def size(value):
+            if isinstance(value, str):
+                return len(value.encode("utf-8"))
+            if isinstance(value, list):
+                return sum(size(v) for v in value)
+            if isinstance(value, dict):
+                return sum(size(v) for k, v in value.items() if k in {"text", "summary", "content"})
+            return 0
+
+        return size({k: v for k, v in item.items() if k in {"text", "summary", "content"}})
 
     def _record_event(self, message: dict[str, Any]) -> None:
         method = message.get("method")
@@ -525,10 +640,17 @@ class CodexAppServerClient:
             raw_system_prompt = raw_system_prompt.get("append", "")
         persona_instructions = str(raw_system_prompt or "").strip()
         safety_instructions = (
-            "Use only the caller-supplied dynamic tools. Native shell, file, "
-            "web, MCP, app, skill, browser, computer, image, and collaboration "
-            "capabilities are unavailable and must not be attempted. Never "
-            "invent a tool result."
+            (
+                "Use only supplied evidence and model reasoning. No tools exist for this turn. "
+                "Do not claim to access files, skills, the network or other tools."
+            )
+            if self.request.model_only
+            else (
+                "Use only the caller-supplied dynamic tools. Native shell, file, "
+                "web, MCP, app, skill, browser, computer, image, and collaboration "
+                "capabilities are unavailable and must not be attempted. Never "
+                "invent a tool result."
+            )
         )
         params: dict[str, Any] = {
             "ephemeral": True,
@@ -607,9 +729,7 @@ class CodexAppServerClient:
                 self._consume_turn_completed(message)
                 return
 
-    async def _handle_server_request(
-        self, message: dict[str, Any], *, pre_turn: bool
-    ) -> None:
+    async def _handle_server_request(self, message: dict[str, Any], *, pre_turn: bool) -> None:
         request_id = message.get("id")
         await self._send(
             {
@@ -626,6 +746,8 @@ class CodexAppServerClient:
         )
 
     async def _handle_dynamic_tool_call(self, message: dict[str, Any]) -> None:
+        if self.request.model_only:
+            raise CodexAmbientAuthorityError("model-only app-server refuses all dynamic calls")
         params = message.get("params")
         if not isinstance(params, dict):
             raise CodexAppServerProtocolError("dynamic tool call params are malformed")
@@ -644,9 +766,7 @@ class CodexAppServerClient:
         if not isinstance(name, str) or name not in self._allowed_names:
             raise CodexAppServerProtocolError(f"unknown dynamic tool call: {name!r}")
         if not isinstance(arguments, dict):
-            raise CodexAppServerProtocolError(
-                f"dynamic tool {name!r} arguments must be an object"
-            )
+            raise CodexAppServerProtocolError(f"dynamic tool {name!r} arguments must be an object")
 
         started = time.monotonic()
         success = True
@@ -766,7 +886,20 @@ class OpenAICodexAppServerRuntime(OpenAICodexRuntime):
     def supports_caller_tool_defs(self) -> bool:
         return True
 
+    def supports_model_only(self) -> bool:
+        """True only through the pinned isolated app-server with dynamicTools=[]."""
+        return True
+
+    def supports_model_only_images(self) -> bool:
+        return False
+
     def supports(self, request: RuntimeRequest) -> bool:
+        if request.model_only:
+            try:
+                _base.assert_model_only_contract(request)
+            except ValueError:
+                return False
+            return request.resume is None and not request.image_paths
         if not _base.request_carries_tools(request):
             return super().supports(request)
         return (
@@ -780,13 +913,17 @@ class OpenAICodexAppServerRuntime(OpenAICodexRuntime):
         )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
-        if not _base.request_carries_tools(request):
+        if request.model_only:
+            _model_only_byte_limit(request)
+        elif not _base.request_carries_tools(request):
             return await super().run(request)
         if not self.supports(request):
             raise RuntimeConfigError(
                 "Codex app-server requires non-empty tool_defs and tool_dispatch"
             )
         timeout = float(os.getenv("SECOND_BRAIN_CODEX_APP_SERVER_TIMEOUT_S", "120"))
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise RuntimeConfigError("Codex app-server timeout must be finite and positive")
         client = CodexAppServerClient(request, self.profile)
         try:
             return await asyncio.wait_for(client.run(), timeout=timeout)

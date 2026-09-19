@@ -1,3 +1,5 @@
+# Legacy diagnostic helper compatibility. Production queue entrypoints are tested
+# in test_unified_nightly_bridge.py; these helpers are not scheduled entrypoints.
 """Tests for the persona dream tick (issue #423, epic #418).
 
 Path map — one non-vacuous test per distinct path:
@@ -148,7 +150,7 @@ class _FanOutHarness:
         self.write_child_state(name, payload)
 
     def run(self, **kwargs):
-        from persona_dream_tick import run_tick
+        from persona_dream_tick import _run_legacy_tick as run_tick
 
         stack = self.patches()
         for p in stack:
@@ -326,7 +328,7 @@ class TestGuards:
 
     @patch("persona_dream_tick.is_active_default_profile", return_value=False)
     def test_refuses_under_named_profile(self, _default, capsys) -> None:
-        from persona_dream_tick import run_tick
+        from persona_dream_tick import _run_legacy_tick as run_tick
 
         with patch("persona_dream_tick._spawn_persona_dream") as spawn:
             run_tick()
@@ -334,7 +336,7 @@ class TestGuards:
         assert "must run under default profile" in capsys.readouterr().out
 
     def test_zero_named_profiles_is_noop(self, tmp_path: Path, capsys) -> None:
-        from persona_dream_tick import run_tick
+        from persona_dream_tick import _run_legacy_tick as run_tick
 
         with patch("persona_dream_tick.is_active_default_profile", return_value=True), \
              patch(
@@ -704,7 +706,7 @@ class TestStateCollisionGuard:
                  side_effect=lambda n: {"state": collide},
              ), \
              patch("persona_dream_tick._spawn_persona_dream") as spawn:
-            from persona_dream_tick import run_tick
+            from persona_dream_tick import _run_legacy_tick as run_tick
 
             run_tick()
 
@@ -1093,7 +1095,7 @@ class TestAggregateExitStatus:
                  side_effect=lambda n: {"state": collide},
              ), \
              patch("persona_dream_tick._spawn_persona_dream"):
-            from persona_dream_tick import run_tick
+            from persona_dream_tick import _run_legacy_tick as run_tick
 
             outcome = run_tick()
         assert outcome.failed == ("alpha",)
@@ -1139,7 +1141,7 @@ class TestAggregateExitStatus:
         }
 
     def test_guard_early_returns_exit_zero(self, tmp_path: Path) -> None:
-        from persona_dream_tick import run_tick
+        from persona_dream_tick import _run_legacy_tick as run_tick
 
         with patch("persona_dream_tick.is_active_default_profile", return_value=False):
             assert run_tick().exit_code == 0
@@ -1292,7 +1294,7 @@ class TestIsolation:
         by hand and asserted B was unchanged, so it passed without executing a
         single line of production code.
         """
-        homie_root = tmp_path / "homie"
+        homie_root = tmp_path / ".homie"
 
         # The DEFAULT (main) tree for this root — what a leak would land in.
         main_mem = homie_root / "memory"
@@ -1360,6 +1362,7 @@ class TestIsolation:
         )
 
         env = dict(os.environ)
+        env["USERPROFILE"] = str(tmp_path)
         env["HOMIE_HOME"] = str(homie_root)
         env.pop("HOMIE_VAULT_DIR", None)
         env["DREAM_SIGNAL_THRESHOLD"] = "1"
@@ -1383,14 +1386,20 @@ class TestIsolation:
         assert resolved["dream_state"].startswith(str(alpha_root.resolve()))
         assert resolved["memory_dir"].startswith(str(alpha_root.resolve()))
 
-        # A's receipt — written by the dream itself, not by this test.
-        alpha_dream_state = alpha_root / "state" / "dream-state.json"
-        assert alpha_dream_state.exists(), proc.stdout[-3000:]
-        state = json.loads(alpha_dream_state.read_text(encoding="utf-8"))
-        assert state["result"] == "consolidated", state
-        assert state["belief_evolve"]["adopted"] == 1, state["belief_evolve"]
-        assert b"profile-scoped" in (alpha_mem / "SELF.md").read_bytes()
-        assert list((alpha_root / "data" / "evolve" / "belief").glob("decision-*.json"))
+        # The real command now durably admits one source snapshot in A's shared
+        # journal. It cannot execute the old independent consolidation writers.
+        from personas.learning.models import LearningTarget
+        from personas.learning.service import LearningService
+
+        target = LearningTarget("alpha", alpha_mem, alpha_root / "data",
+                                alpha_root / "state", alpha_root / "skills")
+        cycles = LearningService(target).store.all("synthesis_cycle")
+        assert len(cycles) == 1, proc.stdout[-3000:]
+        assert cycles[0]["synthesis_kind"] == "dream"
+        assert cycles[0]["status"] == "pending"
+        assert cycles[0]["input_manifest"]
+        assert (alpha_mem / "SELF.md").read_text() == "# Alpha SELF\n"
+        assert not (alpha_root / "state" / "dream-state.json").exists()
 
         # …and nothing moved anywhere else.
         assert (_dir_hash(homie_root / "memory"), _dir_hash(main_state)) == main_hash, \
@@ -1471,7 +1480,7 @@ def _phase5_fake_reasoning(parsed: dict):
 
 
 class TestPhase5BeliefChainOnPersonaVault:
-    def test_propose_belief_adopts_on_a_persona_vault(self, tmp_path: Path) -> None:
+    def test_propose_belief_preview_requires_shared_evaluation(self, tmp_path: Path) -> None:
         """The full rail — evidence gate + deterministic floor + judge + decision
         artifact — exercised end-to-end against a PERSONA vault (not the main
         one), reaching a real ADOPT. Proves the chain the spike claimed to
@@ -1521,20 +1530,18 @@ class TestPhase5BeliefChainOnPersonaVault:
             )
             self_after = (mem / "SELF.md").read_bytes()
 
-            assert result["evidence_ok"] is True
-            assert result["outcome"] == "adopt"
+            assert result["evidence_ok"] is False
+            assert result["outcome"] == "pending"
+            assert result["reason"] == "shared_evaluation_required"
             # dry_run=True must never touch the target file.
             assert self_after == self_before
             decision_dir = _config_mod.BELIEF_EVOLVE_DECISION_DIR
-            assert decision_dir.exists()
-            assert list(decision_dir.glob("decision-*.json")), (
-                "propose_belief must write a decision artifact even under dry_run"
-            )
+            assert not decision_dir.exists(), "dry-run admission must not write an artifact"
         finally:
             for k, v in originals.items():
                 setattr(_config_mod, k, v)
 
-    def test_propose_belief_rejects_cross_vault_evidence_on_a_persona_vault(
+    def test_propose_belief_preview_does_not_evaluate_untrusted_paths(
         self, tmp_path: Path
     ) -> None:
         """A candidate citing evidence OUTSIDE the persona vault (traversal to a
@@ -1583,7 +1590,8 @@ class TestPhase5BeliefChainOnPersonaVault:
             )
 
             assert result["evidence_ok"] is False
-            assert result["outcome"] == "reject"
+            assert result["outcome"] == "pending"
+            assert result["evidence_reason"] == "not_evaluated"
             assert result["adopt"] is False
         finally:
             for k, v in originals.items():
@@ -1707,7 +1715,7 @@ def _seed_persona_shaped_memory_dir(tmp_path: Path) -> Path:
 
 class TestRunDreamBeliefEvolutionOnPersonaVault:
     @pytest.mark.asyncio
-    async def test_run_dream_adopts_a_belief_on_a_persona_shaped_vault(
+    async def test_legacy_dream_cannot_adopt_without_shared_qualification(
         self, tmp_path: Path
     ) -> None:
         """The real orchestration path — run_dream -> consolidate (mocked LLM)
@@ -1748,15 +1756,13 @@ class TestRunDreamBeliefEvolutionOnPersonaVault:
         assert state["result"] == "consolidated"
         belief_evolve = state["belief_evolve"]
         assert belief_evolve["result"] == "ran"
-        assert belief_evolve["adopted"] == 1, belief_evolve
+        assert belief_evolve["adopted"] == 0, belief_evolve
 
         self_after = (mem / "SELF.md").read_bytes()
-        assert self_after != self_before
-        assert b"profile-scoped" in self_after
+        assert self_after == self_before
 
         decision_dir = tmp_path / "data" / "evolve" / "belief"
-        assert decision_dir.exists()
-        assert list(decision_dir.glob("decision-*.json"))
+        assert not decision_dir.exists()
 
     @pytest.mark.asyncio
     async def test_run_dream_belief_evolution_honors_kill_switch_on_persona_vault(

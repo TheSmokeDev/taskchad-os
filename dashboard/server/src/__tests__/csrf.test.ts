@@ -32,7 +32,7 @@ describe('csrf: origin allowlist', () => {
 
     const a = await app.request('/api/agents', {
       method: 'POST',
-      headers: { Origin: 'http://localhost:5173' },
+      headers: { Origin: 'http://localhost:5473' },
     });
     expect(a.status).toBe(200);
 

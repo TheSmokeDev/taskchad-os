@@ -19,7 +19,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -481,64 +481,78 @@ class TestCrossContamination:
 
 
 class TestZeroEnabledParity:
-    """With zero learning-enabled personas, the tick is a no-op."""
+    """Disabled admission records a skip without cognitive work or cross-profile writes."""
 
-    @patch("persona_learning_tick.is_active_default_profile", return_value=True)
-    @patch("persona_learning_tick.get_default_paths")
-    @patch("persona_learning_tick.list_profiles")
-    @patch("persona_learning_tick.load_persona_config")
-    @patch("persona_learning_tick._spawn_persona_pipeline")
     def test_zero_enabled_spawns_nothing(
         self,
-        mock_spawn: MagicMock,
-        mock_config: MagicMock,
-        mock_profiles: MagicMock,
-        mock_paths: MagicMock,
-        mock_default: MagicMock,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        mock_paths.return_value = {"data": tmp_path}
-        (tmp_path / "chat.db").touch()
+        import persona_learning_tick as tick
+        import personas
+        from personas.learning import service
+        from personas.learning.models import LearningTarget
+        from personas.learning.queue import LearningQueue
 
+        root = tmp_path / "sales"
+        config_path = root / "persona.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("learning:\n  enabled: false\n", encoding="utf-8")
+        target = service.LearningService(LearningTarget(
+            "sales", root / "memory", root / "data", root / "state", root / "skills", config_path
+        ))
+        untouched = tmp_path / "main" / "state.json"
+        untouched.parent.mkdir()
+        untouched.write_text('{"operator": "unchanged"}', encoding="utf-8")
+        before = _file_hash(untouched)
         p1 = MagicMock()
         p1.name = "sales"
         p1.is_default = False
-        p1.path = tmp_path / "sales"
+        p1.path = root
         default_p = MagicMock()
         default_p.is_default = True
-        mock_profiles.return_value = [default_p, p1]
-        mock_config.return_value = {"learning": {"enabled": False}}
+        monkeypatch.setenv("PERSONA_LEARNING_ENABLED", "true")
+        monkeypatch.delenv("HOMIE_KILLSWITCH_HARNESS_LEARNING", raising=False)
+        monkeypatch.setattr(tick, "is_active_default_profile", lambda: True)
+        monkeypatch.setattr(tick, "list_profiles", lambda: [default_p, p1])
+        lookup = MagicMock(return_value=target)
+        monkeypatch.setattr(service, "get_learning_service", lookup)
+        config = MagicMock(return_value={"learning": {"enabled": False}})
+        monkeypatch.setattr(personas, "load_persona_config", config)
+        spawn = MagicMock(side_effect=AssertionError("disabled profiles must not spawn"))
+        monkeypatch.setattr(tick, "_spawn_persona_pipeline", spawn)
 
-        from persona_learning_tick import run_tick
+        assert tick.run_tick() == tick.TickOutcome()
+        lookup.assert_called_once_with("sales")
+        config.assert_called_once_with("sales")
+        spawn.assert_not_called()
+        requests = target.store.all("synthesis_request")
+        assert len(requests) == 1 and requests[0]["status"] == "disabled"
+        assert target.store.all("synthesis_cycle") == []
+        assert LearningQueue(target).list() == []
+        assert _file_hash(untouched) == before
+        assert not target.target.memory_dir.exists()
+        assert "sales: disabled" in capsys.readouterr().out
 
-        run_tick(test_mode=True)
-
-        mock_spawn.assert_not_called()
-        captured = capsys.readouterr()
-        assert "no learning-enabled personas" in captured.out
-
-    @patch("persona_learning_tick.is_active_default_profile", return_value=True)
-    @patch("persona_learning_tick.get_default_paths")
-    @patch("persona_learning_tick.list_profiles")
     def test_zero_named_profiles_is_noop(
         self,
-        mock_profiles: MagicMock,
-        mock_paths: MagicMock,
-        mock_default: MagicMock,
         tmp_path: Path,
-        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        mock_paths.return_value = {"data": tmp_path}
+        import persona_learning_tick as tick
+        from personas.learning import service
+
         default_p = MagicMock()
         default_p.is_default = True
-        mock_profiles.return_value = [default_p]
-
-        from persona_learning_tick import run_tick
-
-        run_tick(test_mode=True)
-        captured = capsys.readouterr()
-        assert "no named profiles found" in captured.out
+        monkeypatch.setattr(tick, "is_active_default_profile", lambda: True)
+        monkeypatch.setattr(tick, "list_profiles", lambda: [default_p])
+        lookup = MagicMock(side_effect=AssertionError("default is outside named-profile fanout"))
+        monkeypatch.setattr(service, "get_learning_service", lookup)
+        before = _dir_hash(tmp_path)
+        assert tick.run_tick(test_mode=True) == tick.TickOutcome()
+        lookup.assert_not_called()
+        assert _dir_hash(tmp_path) == before
 
 
 # ============================================================================

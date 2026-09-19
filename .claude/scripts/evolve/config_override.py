@@ -16,8 +16,17 @@ take effect on the next call without requiring module reload.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from contextvars import ContextVar
+from typing import Any
+
+_diagnostic_override = ContextVar("legacy_recall_diagnostic_override", default=False)
+
+
+def diagnostic_override_active() -> bool:
+    """Legacy offline experiments may use unnormalized diagnostic weights."""
+    return _diagnostic_override.get()
 
 
 @contextmanager
@@ -34,6 +43,7 @@ def override_config(**overrides: Any) -> Iterator[dict[str, Any]]:
 
     originals: dict[str, Any] = {}
     applied: dict[str, Any] = {}
+    handle = _diagnostic_override.set(True)
     try:
         for key, value in overrides.items():
             if not hasattr(config, key):
@@ -47,6 +57,7 @@ def override_config(**overrides: Any) -> Iterator[dict[str, Any]]:
     finally:
         for key, value in originals.items():
             setattr(config, key, value)
+        _diagnostic_override.reset(handle)
 
 
 @contextmanager

@@ -1,3 +1,5 @@
+# Legacy diagnostic helper compatibility. Production queue entrypoints are tested
+# in test_unified_nightly_bridge.py; these helpers are not scheduled entrypoints.
 """Tests for persona learning tick (US-006).
 
 Covers:
@@ -68,7 +70,7 @@ class TestBootOrder:
 class TestDefaultProfileGuard:
     @patch("persona_learning_tick.is_active_default_profile", return_value=False)
     def test_refuses_named_profile(self, mock_default: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        from persona_learning_tick import run_tick
+        from persona_learning_tick import _run_legacy_tick as run_tick
 
         run_tick(test_mode=True)
         captured = capsys.readouterr()
@@ -82,7 +84,7 @@ class TestDefaultProfileGuard:
         mock_default: MagicMock,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from persona_learning_tick import run_tick
+        from persona_learning_tick import _run_legacy_tick as run_tick
 
         run_tick(test_mode=True)
         captured = capsys.readouterr()
@@ -216,7 +218,7 @@ class TestFailOpen:
                 beta_state = state_dir / "persona-learning-beta-state.json"
                 mock_sf.side_effect = lambda n: state_dir / f"persona-learning-{n}-state.json"
 
-                from persona_learning_tick import run_tick
+                from persona_learning_tick import _run_legacy_tick as run_tick
 
                 run_tick()
 
@@ -244,7 +246,7 @@ class TestFailOpen:
         default_p.is_default = True
         mock_profiles.return_value = [default_p, p1]
 
-        from persona_learning_tick import run_tick
+        from persona_learning_tick import _run_legacy_tick as run_tick
 
         run_tick(test_mode=True)
         captured = capsys.readouterr()
@@ -279,7 +281,7 @@ class TestNoEnabledParity:
         mock_profiles.return_value = [default_p, p1]
         mock_config.return_value = {"learning": {"enabled": False}}
 
-        from persona_learning_tick import run_tick
+        from persona_learning_tick import _run_legacy_tick as run_tick
 
         run_tick(test_mode=True)
         captured = capsys.readouterr()
@@ -745,7 +747,7 @@ class TestComposedGate:
             import io
             from contextlib import redirect_stdout
 
-            from persona_learning_tick import run_tick
+            from persona_learning_tick import _run_legacy_tick as run_tick
 
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -906,7 +908,7 @@ class TestSilentSkipWindowWiring:
                     lambda n: state_dir / f"persona-learning-{n}-state.json"
                 )
 
-                from persona_learning_tick import run_tick
+                from persona_learning_tick import _run_legacy_tick as run_tick
 
                 run_tick(test_mode=True)
 
@@ -968,7 +970,7 @@ class TestSharedBoundaryReachesBothCounters:
              patch("persona_learning_tick.STATE_DIR", state_dir), \
              patch("persona_learning_tick._persona_state_file",
                    side_effect=lambda n: state_dir / f"persona-learning-{n}-state.json"):
-            tick.run_tick()
+            tick._run_legacy_tick()
 
         assert captured["rows"], "row counter was never called"
         assert captured["notes"], "note counter was never called"

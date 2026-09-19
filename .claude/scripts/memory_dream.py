@@ -1,36 +1,12 @@
-"""
-Dream Cycle — Memory Consolidation for The Homie.
+"""Nightly dream compatibility entrypoint for unified persona cognition.
 
-4-phase pipeline: Orient -> Gather Signal -> Consolidate -> Prune & Reindex.
-Phases 1-2 are pure Python (no LLM). Phase 2 exits with DREAM_SILENT if no
-signal found, skipping all LLM calls entirely.
+The public command admits a deeper consolidation to the shared learning queue.
+It preserves --force, --days and --test/--no-llm command compatibility; test mode
+is an admission preview with no provider calls or filesystem writes. The shared
+queue controls pause, disablement, intervals, source consumption and evaluation.
 
-Inspired by Claude Code Auto-Dream but built at the FRAMEWORK level -
-provider-agnostic via the lane-first runtime router. Works with Claude, Codex,
-Gemini, or any provider configured in the runtime.
-
-Patterns borrowed from Hermes Agent cron scheduler:
-- [SILENT] suppression (no signal → no LLM call)
-- Crash-safe scheduling (advance state BEFORE execution)
-- Cross-platform file locking (shared.file_lock)
-
-Usage:
-    uv run python memory_dream.py              # Run dream cycle
-    uv run python memory_dream.py --test       # Dry run (no file edits)
-    uv run python memory_dream.py --force      # Skip recency guard
-    uv run python memory_dream.py --days 14    # Scan 14 days of logs
-
-``--test`` means NO FILE EDITS, and that is a contract, not a description: no
-dream-state write, no daily-log line, no belief decision artifact, no lock
-sidecar, no directory creation. It is the only reason ``persona_dream_tick.py
---child-test`` is a safe probe, and the only reason a --test run cannot make
-the 20-hour recency guard swallow that night's real dream.
-
-``--test`` is still a real dry run: it CALLS the LLM so an operator can see what
-the dream would write. Add ``--no-llm`` (requires ``--test``) to stop after the
-free phases instead — same no-edit contract, zero tokens. That is what a
-fan-out probe across a whole roster wants: proof the plumbing works, not a
-night's bill.
+Legacy low-level signal/prompt helpers remain for explicit migration diagnostics.
+They are not the automatic nightly pipeline.
 """
 
 from __future__ import annotations
@@ -92,7 +68,8 @@ from config import (  # noqa: E402
     get_today_log_path,
     now_local,
 )
-from shared import append_to_daily_log, file_lock, load_state, save_state
+from shared import append_to_daily_log, load_state, save_state  # noqa: E402
+from shared import file_lock as file_lock  # noqa: E402 - legacy diagnostic compatibility
 
 # =============================================================================
 # CONSTANTS
@@ -1016,25 +993,18 @@ async def run_dream(
     post_weekly: bool = False,
     no_llm: bool = False,
 ) -> str | None:
-    """Run dream consolidation cycle with concurrency guard.
+    """Admit deeper consolidation to the shared queue, preserving old flags.
 
-    Returns:
-        "DREAM_SILENT" if no signal found.
-        "DREAM_NO_LLM" if ``no_llm`` stopped a signal-bearing run before Phase 3.
-        Response text if consolidation ran.
-        None if skipped (recency guard or lock).
+    No provider, pruning, or automatic amendment runs in this entrypoint.
+    ``--test`` previews admission without a lock, cursor, or filesystem write.
     """
-    if test_mode:
-        # The lock is a physical write (a .lock sidecar plus its parent dirs) in
-        # the profile tree, and --test promises none. A preview that mutates
-        # nothing also needs no mutual exclusion, so it simply runs unlocked.
-        return await _run_dream_inner(test_mode, force, days, post_weekly, no_llm)
-    try:
-        with file_lock(DREAM_STATE_FILE, timeout=5.0):
-            return await _run_dream_inner(test_mode, force, days, post_weekly, no_llm)
-    except TimeoutError:
-        print(f"[{now_local()}] Another dream cycle is already running, skipping")
-        return None
+    from personas.learning.legacy_adapters import request_active_synthesis
+
+    receipt = request_active_synthesis(
+        "dream", source_key="legacy-memory-dream", test_mode=test_mode or no_llm,
+        force=force,
+    )
+    return json.dumps(receipt, sort_keys=True)
 
 
 async def _run_dream_inner(

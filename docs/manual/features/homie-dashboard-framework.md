@@ -14,7 +14,7 @@ features through Hono proxy routes over Python-owned APIs.
 ## Operator Entry Points
 
 - Dashboard root: `dashboard/`
-- Web dev surface: `http://127.0.0.1:5173`
+- Web dev surface: `http://127.0.0.1:5473`
 - Hono server: `http://127.0.0.1:3141`
 - Python orchestration/dashboard API: `http://127.0.0.1:4322`
 - Key routes: `/mission`, `/work`, `/convoy`, `/agents`, `/chat`, `/browser`,
@@ -72,7 +72,7 @@ npm run dev
 Open:
 
 ```text
-http://127.0.0.1:5173
+http://127.0.0.1:5473
 ```
 
 ## How To Test It
@@ -121,7 +121,7 @@ focused suite.
 - Current stack for the Mobile Access proof:
   - Python API `4322`
   - Hono `3141`
-  - Vite web `5173`
+  - Vite web `5473`
   - visible Chrome CDP `9222`
 
 ## Public Export Status

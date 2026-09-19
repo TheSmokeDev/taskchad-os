@@ -3,8 +3,9 @@
  * /api/capabilities*.
  *
  * These endpoints belong to the orchestration slice (orchestration-owner).
- * Hono forwards verbatim — no body translation, no persona-id mapping
- * (orchestration uses agent_id/team_id keyspace, not persona_id).
+ * Convoy/mailbox/team remain verbatim. Capability catalog queries carry the
+ * framework persona id, so that one route honors the canonical main↔default
+ * boundary mapping.
  *
  * The catch-all matches GET/POST/PATCH/DELETE on the three prefixes.
  */
@@ -12,9 +13,6 @@
 import { Hono } from 'hono';
 import { authedFetch } from '../framework-client.js';
 import { inboundPersonaId, outboundPersonaId } from '../translate.js';
-
-void inboundPersonaId; // imported for static-invariants grep gate.
-void outboundPersonaId;
 
 export const missionRoute = new Hono();
 
@@ -24,8 +22,35 @@ function isPassthrough(pathname: string): boolean {
   return PASSTHROUGH_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
 
+export function translateCapabilityQuery(url: URL): URL {
+  const translated = new URL(url);
+  if (translated.pathname.startsWith('/api/capabilities')) {
+    const personaId = translated.searchParams.get('persona_id');
+    if (personaId !== null) {
+      translated.searchParams.set('persona_id', inboundPersonaId(personaId) ?? personaId);
+    }
+  }
+  return translated;
+}
+
+export function translateCapabilityResponse(pathname: string, body: string): string {
+  if (!pathname.startsWith('/api/capabilities')) return body;
+  try {
+    const payload = JSON.parse(body) as {
+      capabilities?: { catalog?: { persona_id?: string | null } };
+    };
+    const catalog = payload.capabilities?.catalog;
+    if (catalog && typeof catalog.persona_id === 'string') {
+      catalog.persona_id = outboundPersonaId(catalog.persona_id) ?? catalog.persona_id;
+    }
+    return JSON.stringify(payload);
+  } catch {
+    return body;
+  }
+}
+
 async function forward(c: import('hono').Context): Promise<Response> {
-  const url = new URL(c.req.url);
+  const url = translateCapabilityQuery(new URL(c.req.url));
   const upstreamPath = `${url.pathname}${url.search}`;
   const method = c.req.method;
   const hasBody = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
@@ -40,7 +65,7 @@ async function forward(c: import('hono').Context): Promise<Response> {
     body: bodyText,
     headers,
   });
-  return c.body(result.body, result.status as 200, {
+  return c.body(translateCapabilityResponse(url.pathname, result.body), result.status as 200, {
     'Content-Type': result.headers.get('content-type') ?? 'application/json',
   });
 }

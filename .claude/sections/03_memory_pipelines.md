@@ -281,7 +281,7 @@ Every named persona gets the SAME 5-phase dream cycle the main homie gets, scope
 | Tick | `.claude/scripts/persona_dream_tick.py` |
 | Fan-out stamp (parent) | MAIN `STATE_DIR/persona-dream-<name>-state.json` |
 | Dream state (child) | `~/.homie/profiles/<name>/state/dream-state.json` |
-| Runners / installer | `run_persona_dream.bat` / `.sh`, `setup_persona_dream_scheduler.ps1` (`SecondBrain-PersonaDream`) |
+| Runners / installer | `run_persona_dream.bat` / `.sh`, `setup_persona_dream_scheduler.ps1` (`SecondBrain-PersonaDream`). **Installer shipped but the task is NOT installed on this box** (checked 2026-09-18 — `SecondBrain-PersonaLearning` exists, `SecondBrain-PersonaDream` does not); run the installer to enable the nightly fan-out |
 | Config resolver | `config.get_persona_dream_settings()` (Rule 1, call-time) |
 
 ```bash

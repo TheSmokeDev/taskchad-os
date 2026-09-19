@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from types import SimpleNamespace
 
+import pytest
 import social_write_driver
 from browser_control import CommandResult
 
@@ -22,7 +23,8 @@ def _result(*, ok: bool, output: str = "") -> CommandResult:
 def test_linkedin_post_opens_feed_in_fresh_tab(monkeypatch):
     calls: list[tuple[list[str], int, int]] = []
 
-    def fake_run(args: list[str], *, port: int, timeout: int):
+    def fake_run(args: list[str], *, port: int, timeout: int, session=None):
+        assert session == "linkedin-social"
         calls.append((args, port, timeout))
         if args[:2] == ["tab", "new"]:
             return _result(ok=True, output=args[2])
@@ -40,7 +42,7 @@ def test_linkedin_post_opens_feed_in_fresh_tab(monkeypatch):
     assert calls[0] == (
         ["tab", "new", "https://www.linkedin.com/feed/"],
         18222,
-        20,
+        45,
     )
     assert ["open", "https://www.linkedin.com/feed/"] not in [call[0] for call in calls]
 
@@ -48,7 +50,8 @@ def test_linkedin_post_opens_feed_in_fresh_tab(monkeypatch):
 def test_linkedin_post_stops_when_fresh_tab_fails(monkeypatch):
     calls: list[list[str]] = []
 
-    def fake_run(args: list[str], *, port: int, timeout: int):
+    def fake_run(args: list[str], *, port: int, timeout: int, session=None):
+        assert session == "linkedin-social"
         calls.append(args)
         return _result(ok=False, output="new tab unavailable")
 
@@ -77,18 +80,27 @@ def test_linkedin_post_accepts_link_trigger_and_attaches_reviewed_media(
     snapshots = iter(
         [
             'link "Start a post" [ref=e10]',
-            'textbox "Text editor for creating content" [ref=e11]',
             'button "Add media" [ref=e12]',
             'button "Upload from computer" [ref=e13]',
             'button "Next" [ref=e14]',
+            'button "Edit media preview" [ref=e15]',
+            'textbox "Text editor for creating content" [ref=e11]',
+            'textbox "Text editor for creating content" [ref=e18]\n'
             'button "Edit media preview" [ref=e15]\nbutton "Post" [ref=e16]',
+            'status "Post successful"\nlink "View post" [ref=e17]',
         ]
     )
 
-    def fake_run(args: list[str], *, port: int, timeout: int):
+    def fake_run(args: list[str], *, port: int, timeout: int, session=None):
+        assert session == "linkedin-social"
         calls.append(args)
         if args[0] == "snapshot":
             return _result(ok=True, output=next(snapshots))
+        if args[:2] == ["get", "attr"]:
+            return _result(
+                ok=True,
+                output="https://www.linkedin.com/feed/update/urn:li:share:123456/",
+            )
         if args[0] == "get":
             return _result(ok=True, output="A real post")
         if args[0] == "eval":
@@ -112,9 +124,8 @@ def test_linkedin_post_accepts_link_trigger_and_attaches_reviewed_media(
         media_path=str(media),
     )
 
-    ok, detail = social_write_driver.AgentBrowserSocialWriteDriver()._drive_post(
-        task, port=18222
-    )
+    driver = social_write_driver.AgentBrowserSocialWriteDriver()
+    ok, detail = driver._drive_post(task, port=18222)
 
     assert ok is True
     assert detail == "post submitted and confirmed"
@@ -122,7 +133,96 @@ def test_linkedin_post_accepts_link_trigger_and_attaches_reviewed_media(
     assert ["click", "e12"] in calls
     assert ["upload", "e13", str(media.resolve())] in calls
     assert ["click", "e14"] in calls
+    assert ["click", "e16"] in calls
+    assert calls.index(["click", "e14"]) < calls.index(["keyboard", "inserttext", "A real post"])
+    assert ["get", "text", "e18"] in calls
+    assert not any(args[0] == "eval" and ".click()" in args[1] for args in calls)
     assert dialog_cleanup_calls == [True]
+    assert driver.verification_receipt()["verification_state"] == "verified"
+    assert driver.verification_receipt()["post_url"].endswith(
+        "/feed/update/urn:li:share:123456/"
+    )
+
+
+def test_linkedin_submit_without_permalink_requires_verification(monkeypatch):
+    snapshots = iter(
+        [
+            'button "Start a post" [ref=e10]',
+            'textbox "Text editor for creating content" [ref=e11]',
+            'textbox "Text editor for creating content" [ref=e18]\nbutton "Post" [ref=e16]',
+            'status "Post successful"',
+            'status "Post successful"',
+            'status "Post successful"',
+        ]
+    )
+
+    def fake_run(args: list[str], *, port: int, timeout: int, session=None):
+        assert session == "linkedin-social"
+        if args[0] == "snapshot":
+            return _result(ok=True, output=next(snapshots))
+        if args[:2] == ["get", "text"]:
+            return _result(ok=True, output="A real post")
+        if args[0] == "eval":
+            if "ED_OK" in args[1]:
+                return _result(ok=True, output="ED_OK")
+            return _result(ok=True, output="CLICKED")
+        return _result(ok=True, output="Done")
+
+    monkeypatch.setattr(social_write_driver, "run_agent_browser", fake_run)
+    driver = social_write_driver.AgentBrowserSocialWriteDriver()
+    ok, detail = driver._drive_post(
+        SimpleNamespace(payload_text="A real post", target_url="", media_path=""),
+        port=18222,
+    )
+
+    assert ok is True
+    assert "verification required" in detail
+    receipt = driver.verification_receipt()
+    assert receipt["verification_state"] == "verification_required"
+    assert receipt["confirmation_result"] == "confirmation_seen_without_permalink"
+
+
+def test_linkedin_post_click_timeout_stays_verification_required(monkeypatch):
+    snapshot_count = 0
+
+    def fake_run(args: list[str], *, port: int, timeout: int, session=None):
+        assert session == "linkedin-social"
+        nonlocal snapshot_count
+        if args[0] == "snapshot":
+            snapshot_count += 1
+            if snapshot_count == 1:
+                return _result(ok=True, output='button "Start a post" [ref=e10]')
+            if snapshot_count == 2:
+                return _result(
+                    ok=True,
+                    output='textbox "Text editor for creating content" [ref=e11]',
+                )
+            if snapshot_count == 3:
+                return _result(
+                    ok=True,
+                    output='textbox "Text editor for creating content" [ref=e18]\n'
+                    'button "Post" [ref=e16]',
+                )
+            raise subprocess.TimeoutExpired(args, timeout)
+        if args[:2] == ["get", "text"]:
+            return _result(ok=True, output="A real post")
+        if args[0] == "eval":
+            if "ED_OK" in args[1]:
+                return _result(ok=True, output="ED_OK")
+            return _result(ok=True, output="CLICKED")
+        return _result(ok=True, output="Done")
+
+    monkeypatch.setattr(social_write_driver, "run_agent_browser", fake_run)
+    driver = social_write_driver.AgentBrowserSocialWriteDriver()
+    ok, detail = driver._drive_post(
+        SimpleNamespace(payload_text="A real post", target_url="", media_path=""),
+        port=18222,
+    )
+    assert ok is True
+    assert "verification required" in detail
+    receipt = driver.verification_receipt()
+    assert receipt["verification_state"] == "verification_required"
+    assert receipt["submitted_at"]
 
 
 def test_drive_routes_x_workflow_to_x_driver(monkeypatch):
@@ -145,6 +245,53 @@ def test_drive_routes_x_workflow_to_x_driver(monkeypatch):
     assert ok is True
     assert detail == "x ok"
     assert calls == [(task, 18222)]
+
+
+def test_linkedin_actual_submit_timeout_is_not_retryable(monkeypatch):
+    snapshots = iter([
+        'button "Start a post" [ref=e10]',
+        'textbox "Text editor for creating content" [ref=e11]',
+        'textbox "Text editor for creating content" [ref=e18]\nbutton "Post" [ref=e16]',
+    ])
+    submits = []
+
+    def fake_run(args, *, port, timeout, session=None):
+        assert session == "linkedin-social"
+        if args[0] == "snapshot":
+            return _result(ok=True, output=next(snapshots))
+        if args[:2] == ["get", "text"]:
+            return _result(ok=True, output="A real post")
+        if args[0] == "eval":
+            return _result(ok=True, output="ED_OK")
+        if args == ["click", "e16"]:
+            submits.append(args)
+            raise subprocess.TimeoutExpired(args, timeout)
+        return _result(ok=True, output="Done")
+
+    monkeypatch.setattr(social_write_driver, "run_agent_browser", fake_run)
+    driver = social_write_driver.AgentBrowserSocialWriteDriver()
+    ok, detail = driver._drive_post(
+        SimpleNamespace(payload_text="A real post", target_url="", media_path=""),
+        port=18222,
+    )
+    assert ok is True
+    assert "outcome unknown" in detail
+    assert len(submits) == 1
+    assert driver.verification_receipt()["verification_state"] == "verification_required"
+
+
+def test_linkedin_screenshot_uses_the_posting_session(monkeypatch, tmp_path):
+    seen = {}
+
+    def capture(**kwargs):
+        seen.update(kwargs)
+        return b"png"
+
+    monkeypatch.setattr(social_write_driver, "capture_browser_screenshot_png", capture)
+    driver = social_write_driver.AgentBrowserSocialWriteDriver(screenshot_dir=tmp_path)
+    path = driver.screenshot(port=18222, workflow_id="linkedin.post.create")
+    assert path
+    assert seen == {"port": 18222, "session": "linkedin-social"}
 
 
 def test_x_post_uses_live_composer_refs_and_confirms(monkeypatch):
@@ -347,3 +494,66 @@ def test_x_post_retries_slow_composer_snapshot(monkeypatch):
     assert detail == "X post submitted and confirmed"
     assert calls.count(["snapshot", "-i"]) == 3
     assert ["wait", "10000"] in calls
+
+@pytest.mark.parametrize("caption", ["", "A fake post", "A real post plus extra words"])
+def test_linkedin_final_caption_mismatch_never_submits(monkeypatch, caption):
+    snapshots = iter([
+        'button "Start a post" [ref=e10]',
+        'textbox "Text editor for creating content" [ref=e11]',
+        'textbox "Text editor for creating content" [ref=e18]\nbutton "Post" [ref=e16]',
+    ])
+    calls = []
+
+    def fake_run(args, *, port, timeout, session=None):
+        calls.append(args)
+        if args[0] == "snapshot":
+            return _result(ok=True, output=next(snapshots))
+        if args[:2] == ["get", "text"]:
+            assert args[2] == "e18"
+            return _result(ok=True, output=caption)
+        if args[0] == "eval":
+            return _result(ok=True, output="ED_OK")
+        return _result(ok=True, output="Done")
+
+    monkeypatch.setattr(social_write_driver, "run_agent_browser", fake_run)
+    driver = social_write_driver.AgentBrowserSocialWriteDriver()
+    ok, detail = driver._drive_post(
+        SimpleNamespace(payload_text="A real post", target_url="", media_path=""),
+        port=18222,
+    )
+    assert not ok
+    assert "does not match" in detail
+    assert ["click", "e16"] not in calls
+    assert not driver.verification_receipt().get("submitted_at")
+
+
+def test_linkedin_prepare_only_checks_content_without_clicking_post(monkeypatch):
+    snapshots = iter([
+        'button "Start a post" [ref=e10]',
+        'textbox "Text editor for creating content" [ref=e11]',
+        'textbox "Text editor for creating content" [ref=e18]\nbutton "Post" [ref=e16]',
+    ])
+    calls = []
+
+    def fake_run(args, *, port, timeout, session=None):
+        calls.append(args)
+        if args[0] == "snapshot":
+            return _result(ok=True, output=next(snapshots))
+        if args[:2] == ["get", "text"]:
+            return _result(ok=True, output="A real post\n")
+        if args[0] == "eval":
+            return _result(ok=True, output="ED_OK")
+        return _result(ok=True, output="Done")
+
+    monkeypatch.setattr(social_write_driver, "run_agent_browser", fake_run)
+    driver = social_write_driver.AgentBrowserSocialWriteDriver()
+    ok, detail = driver._drive_post(
+        SimpleNamespace(payload_text="A real post", target_url="", media_path=""),
+        port=18222, prepare_only=True,
+    )
+    assert ok
+    assert "not submitted" in detail
+    assert ["click", "e16"] not in calls
+    receipt = driver.verification_receipt()
+    assert receipt["verification_state"] == "prepared_only"
+    assert receipt["expected_caption_sha256"] == receipt["observed_caption_sha256"]

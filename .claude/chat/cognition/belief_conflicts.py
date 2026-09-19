@@ -82,7 +82,7 @@ def find_candidate_pairs(
     eligible = [
         r
         for r in records
-        if r.status != "decayed" and r.source in ("reflection", "explicit")
+        if r.status in {"active", "confirmed"} and r.source in ("reflection", "explicit")
     ]
     if len(eligible) < settings.min_records:
         return []
@@ -273,11 +273,14 @@ def _decide_loser(a, b, settings) -> tuple:
         loser, winner = (b, a) if ra > rb else (a, b)  # the reflection ALWAYS loses
         return loser, winner, f"{winner.source}>{loser.source}", False
     # --- reflection vs reflection (or explicit-vs-explicit opted-in) ---
-    if a.evidence_count != b.evidence_count:
+    # Legacy reported counters may include repeated windows. Only physically
+    # identified original sources can establish an independent support edge.
+    a_count, b_count = a.known_evidence_count, b.known_evidence_count
+    if a_count != b_count:
         loser, winner = (
-            (b, a) if a.evidence_count > b.evidence_count else (a, b)
+            (b, a) if a_count > b_count else (a, b)
         )
-        return loser, winner, f"evidence {winner.evidence_count}>{loser.evidence_count}", False
+        return loser, winner, f"evidence {winner.known_evidence_count}>{loser.known_evidence_count}", False
     if (a.last_updated or "") != (b.last_updated or ""):
         loser, winner = (
             (b, a) if (a.last_updated or "") > (b.last_updated or "") else (a, b)
@@ -359,6 +362,8 @@ def apply_contradictions(
         a, b = by_id.get(c.get("a_id")), by_id.get(c.get("b_id"))
         if a is None or b is None:  # judge id not in corpus -> drop (fail-open)
             continue
+        if a.status not in {"active", "confirmed"} or b.status not in {"active", "confirmed"}:
+            continue  # a concurrent correction retired one of the judged sources
         loser, winner, reason, held = _decide_loser(a, b, settings)
         if held:  # B1: explicit-vs-explicit -> hold BOTH, drop NEITHER
             if loser.id not in seen_losers and _record(loser, winner, reason, True):
@@ -449,7 +454,7 @@ async def resolve_write_time_contradiction(
         eligible = [
             r
             for r in records
-            if r.status != "decayed"
+            if r.status in {"active", "confirmed"}
             and r.source in ("reflection", "explicit")
             and r.id != new_record.id
         ]

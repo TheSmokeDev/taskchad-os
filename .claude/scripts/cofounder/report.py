@@ -671,7 +671,7 @@ def _build_services():
     from orchestration.db import OrchestrationDB
     from orchestration.mailbox_service import MailboxService
 
-    db = OrchestrationDB(config.ORCHESTRATION_DB_PATH)
+    db = OrchestrationDB(config.get_orchestration_db_path())
     return ConvoyService(db), MailboxService(db)
 
 

@@ -160,6 +160,7 @@ class EpisodeWriteStatus(enum.Enum):
     UPDATED = "updated"
     SKIPPED_MIN_CHARS = "skipped_min_chars"
     SKIPPED_DAY_CAP = "skipped_day_cap"
+    DUPLICATE = "duplicate"
 
 
 def derive_flush_meta(
@@ -182,6 +183,11 @@ def derive_flush_meta(
         now = datetime.now()
     stem = Path(str(context_filename)).stem
     parts = stem.split("-")
+    micros = ""
+    if (len(parts) >= 6 and _TIMESTAMP_DATE_RE.fullmatch(parts[-3])
+            and _TIMESTAMP_TIME_RE.fullmatch(parts[-2])
+            and _TIMESTAMP_TIME_RE.fullmatch(parts[-1])):
+        micros = parts.pop()
 
     # Session id parse — mirrors memory_flush._extract_session_id.
     if len(parts) >= 5:
@@ -199,6 +205,9 @@ def derive_flush_meta(
         lifecycle_ts = f"{date_part}-{time_part}"
         episode_date = f"{date_part[0:4]}-{date_part[4:6]}-{date_part[6:8]}"
         time_token = time_part
+        if micros:
+            lifecycle_ts += "-" + micros
+            time_token += micros
     else:
         # Malformed-stem fallback (pure defense; deterministic, never raises):
         # same stem -> same key within a day.
@@ -317,6 +326,7 @@ def write_episode_from_flush(
     now: datetime | None = None,
     settings=None,
     persona_id: str | None = None,
+    projection_id: str | None = None,
 ) -> tuple[EpisodeWriteStatus, Path | None]:
     """Write (or same-lifecycle-update) an episode from a flush response.
 
@@ -339,6 +349,12 @@ def write_episode_from_flush(
     meta = derive_flush_meta(context_filename, now=now)
     sections = parse_flush_sections(response_text)
     body = _render_section_blocks(sections)
+    marker = ""
+    if projection_id is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", projection_id):
+            raise ValueError("invalid debrief projection identity")
+        marker = f"<!-- learning-debrief:{projection_id} -->"
+        body += f"\n\n{marker}"
 
     with _langfuse_span("episode_write") as span:
         if len(body.strip()) < settings.min_chars:
@@ -362,6 +378,8 @@ def write_episode_from_flush(
                 # Same key = SAME LIFECYCLE by construction (retry/double-spawn):
                 # append an Update block, refresh date, re-open status.
                 content = path.read_text(encoding="utf-8")
+                if marker and marker in content:
+                    return (EpisodeWriteStatus.DUPLICATE, path)
                 frontmatter, rest = _split_frontmatter(content)
                 if frontmatter:
                     frontmatter = _CONSOLIDATED_AT_LINE_RE.sub("", frontmatter)
@@ -615,7 +633,8 @@ class EpisodeFlipError(RuntimeError):
 
 
 def mark_episodes_consolidated(
-    paths: list[Path], *, now: datetime | None = None
+    paths: list[Path], *, now: datetime | None = None,
+    expected_revisions: dict[str, str] | None = None,
 ) -> int:
     """Flip frontmatter ``status: open -> consolidated`` on the given files.
 
@@ -643,6 +662,11 @@ def mark_episodes_consolidated(
                     continue
                 with file_lock(path, timeout=5.0):
                     content = path.read_text(encoding="utf-8")
+                    if expected_revisions is not None:
+                        expected = expected_revisions.get(str(path))
+                        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                        if expected is None or actual != expected:
+                            continue  # Changed after inference: the new revision stays open.
                     frontmatter, rest = _split_frontmatter(content)
                     if not frontmatter:
                         continue

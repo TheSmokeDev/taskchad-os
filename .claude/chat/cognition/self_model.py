@@ -48,6 +48,19 @@ class InferenceRecord:
     last_updated: str = ""
     source: str = "auto_capture"  # auto_capture | explicit | reflection
     status: str = "active"  # active | decayed | confirmed
+    # Historical numeric counters are retained for compatibility, not converted
+    # into invented independent observations. Only these physical refs count.
+    source_evidence: list[dict[str, str]] = field(default_factory=list)
+    historical_evidence_count: int | None = None
+    provenance_tracked: bool = False
+    journal_record_id: str | None = None
+    journal_persona_id: str | None = None
+    journal_revision: str | None = None
+    journal_content_revision: str | None = None
+
+    @property
+    def known_evidence_count(self) -> int:
+        return len({item["ref"] for item in self.source_evidence})
 
 
 @dataclass
@@ -158,8 +171,13 @@ class InferenceTracker:
         observation: str,
         confidence: float,
         source: str = "auto_capture",
+        *,
+        source_evidence: list[dict[str, str]] | None = None,
     ) -> InferenceRecord:
-        """Add new inference, or strengthen + merge into an existing similar one.
+        """Add an inference, or merge with independently sourced reinforcement.
+
+        Missing source IDs never add confidence or evidence. Historical counters
+        remain untouched until original observations are actually identified.
 
         On merge, ``source`` can only RAISE the existing record's provenance
         rank (auto_capture < reflection < explicit), never lower it — see the
@@ -182,20 +200,72 @@ class InferenceTracker:
 
         records = self.load()
         now_iso = datetime.now(UTC).isoformat()
+        incoming = {
+            item["ref"]: item["revision"]
+            for item in (source_evidence or [])
+            if isinstance(item, dict)
+            and isinstance(item.get("ref"), str) and item["ref"]
+            and isinstance(item.get("revision"), str) and item["revision"]
+        }
+        # A corrected physical message is a revision of ONE event, never a
+        # second independent witness. Remove stale citations even when the new
+        # wording no longer semantically matches the old claim.
+        changed_refs: set[str] = set()
+        for old in records:
+            stale = {
+                item["ref"] for item in old.source_evidence
+                if item["ref"] in incoming and incoming[item["ref"]] != item["revision"]
+            }
+            changed_refs.update(stale)
+        actives = [r for r in records if r.status in {"active", "confirmed"}]
+        hit = self._find_similar_active(inference, actives)
+        if (
+            hit is not None
+            and changed_refs.intersection(item["ref"] for item in hit.source_evidence)
+            and not _exact_similar(hit.inference, inference)
+        ):
+            # Corrections often remain embedding-near their opposites ("short"
+            # versus "detailed"). Do not preserve the obsolete claim merely
+            # because semantic dedup returned a neighbor.
+            hit = None
+        for old in records:
+            if old is hit:
+                continue
+            stale = {
+                item["ref"] for item in old.source_evidence
+                if item["ref"] in incoming and incoming[item["ref"]] != item["revision"]
+            }
+            if stale:
+                old.source_evidence = [i for i in old.source_evidence if i["ref"] not in stale]
+                if old.historical_evidence_count == 0:
+                    old.evidence_count = old.known_evidence_count
+                    if not old.source_evidence:
+                        old.status = "superseded"
+                old.last_updated = now_iso
 
         # M1 skip-decayed: never compare a fresh belief against a decayed
         # poisoned record — a cosine match there would merge the new belief into
         # the decayed id/observation and resurrect poison. load() returns the
         # FULL file (incl. decayed rows); filter them out of the dedup set.
-        actives = [r for r in records if r.status != "decayed"]
-
-        # Find a similar existing active record.
-        hit = self._find_similar_active(inference, actives)
         if hit is not None:
-            hit.confidence = min(1.0, hit.confidence + confirm_boost)
-            hit.evidence_count += 1
-            hit.last_updated = now_iso
-            if hit.evidence_count >= 3:
+            existing = {item["ref"]: item["revision"] for item in hit.source_evidence}
+            fresh = set(incoming) - set(existing) - changed_refs
+            # The first linked source on a historical row may be the very
+            # event already represented by its unknown old counter. Attach
+            # it without awarding retrospective independent confirmation.
+            reinforcement = len(fresh)
+            if hit.historical_evidence_count is None and not existing:
+                reinforcement = max(0, reinforcement - 1)
+            if reinforcement:
+                hit.confidence = min(1.0, hit.confidence + confirm_boost * reinforcement)
+            if incoming != {ref: existing.get(ref) for ref in incoming}:
+                hit.last_updated = now_iso
+            existing.update(incoming)
+            hit.source_evidence = [{"ref": ref, "revision": rev} for ref, rev in sorted(existing.items())]
+            hit.provenance_tracked = True
+            if hit.historical_evidence_count == 0:
+                hit.evidence_count = len(existing)
+            if len(existing) >= 3:
                 hit.status = "confirmed"
             # One-way source ratchet (B1): a merge can only RAISE provenance rank
             # (auto_capture < reflection < explicit), never lower it. An explicit
@@ -219,11 +289,14 @@ class InferenceTracker:
             inference=inference,
             observation=observation,
             confidence=confidence,
-            evidence_count=1,
+            evidence_count=len(incoming),
             first_seen=now_iso,
             last_updated=now_iso,
             source=source,
             status="active",
+            source_evidence=[{"ref": ref, "revision": rev} for ref, rev in sorted(incoming.items())],
+            historical_evidence_count=0 if incoming else None,
+            provenance_tracked=True,
         )
         records.append(record)
         self.save(records)
@@ -290,6 +363,8 @@ class InferenceTracker:
         decayed = 0
 
         for r in records:
+            if r.source == "explicit":
+                continue
             if r.status == "active" and r.last_updated and r.last_updated < cutoff_iso:
                 old_confidence = r.confidence
                 r.confidence = max(min_confidence, r.confidence - decay_rate)
@@ -343,12 +418,27 @@ class InferenceTracker:
                 return True
         return False
 
-    def get_active(self, min_confidence: float = 0.3) -> list[InferenceRecord]:
+    def get_active(self, min_confidence: float = 0.3, *, learning_service=None) -> list[InferenceRecord]:
         """Return active inferences above min_confidence threshold."""
-        return [
+        records = [
             r for r in self.load()
-            if r.status != "decayed" and r.confidence >= min_confidence
+            if r.status in {"active", "confirmed"} and r.confidence >= min_confidence
+            and (
+                r.source == "explicit" or not r.contradicted_by
+                or (not r.journal_record_id and not r.provenance_tracked)
+            )
         ]
+        if any(record.journal_record_id for record in records):
+            from personas.learning.legacy_beliefs import reconcile_active_beliefs
+
+            return reconcile_active_beliefs(records, self._path, service=learning_service)
+        return records
+
+    def sync_journal(self, service) -> dict:
+        """Add immutable versions and links without reconstructing lost sources."""
+        from personas.learning.legacy_beliefs import sync_legacy_beliefs
+
+        return sync_legacy_beliefs(service, self._path)
 
 
 def build_self_model_state(

@@ -1061,7 +1061,8 @@ def test_doctor_crypto_renderer_uses_only_allowlisted_nft_status() -> None:
                 },
             }
         )
-    rendered = streams[0].getvalue().decode()
+        # Click closes its isolated streams on context exit.
+        rendered = streams[0].getvalue().decode()
     assert "NFT intelligence: unavailable; healthy=False; code=unavailable" in rendered
     assert "secret endpoint" not in rendered
     assert "raw exception" not in rendered
@@ -1195,3 +1196,7 @@ def test_detect_providers_includes_nvidia() -> None:
     providers = cli_module._detect_providers({"NVIDIA_API_KEY": "nvapi-test"})
     assert providers["nvidia"] is True
     assert cli_module._detect_providers({})["nvidia"] is False
+
+
+def test_detect_providers_includes_keyless_opencode_free() -> None:
+    assert cli_module._detect_providers({})["free"] is True

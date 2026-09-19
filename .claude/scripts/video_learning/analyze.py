@@ -45,7 +45,6 @@ async def analyze_video(
                     task_name="video_learning_extract",
                     capability=TEXT_REASONING,
                     max_turns=1,
-                    max_budget_usd=0.30,
                 )
             )
             chunk_findings.append(result.text.strip())
@@ -71,7 +70,6 @@ async def analyze_video(
             task_name="video_learning_synthesis",
             capability=TEXT_REASONING,
             max_turns=1,
-            max_budget_usd=0.75,
         )
     )
     return AnalysisResult(
@@ -104,7 +102,6 @@ async def propose_application(
             task_name="video_learning_application_proposal",
             capability=TEXT_REASONING,
             max_turns=1,
-            max_budget_usd=0.40,
         )
     )
     proposal = _safe_markdown(result.text)
@@ -141,7 +138,6 @@ async def apply_approved_proposal(
             permission_mode="acceptEdits",
             workspace_write_tools=True,
             max_turns=24,
-            max_budget_usd=1.50,
         )
     )
 
@@ -163,7 +159,6 @@ async def _analyze_frames(extraction: ExtractionResult, workspace: Path) -> str:
             image_paths=list(extraction.frame_paths),
             read_only_tools=True,
             max_turns=8,
-            max_budget_usd=0.50,
         )
     )
     return _safe_markdown(result.text)

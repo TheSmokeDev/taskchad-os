@@ -20,13 +20,13 @@ function mobileAccessPayload() {
       error: null,
     },
     dashboard: {
-      web_port: 5173,
-      request_host: '100.64.0.10:5173',
+      web_port: 5473,
+      request_host: '100.64.0.10:5473',
       urls: {
-        root: 'http://100.64.0.10:5173/',
-        browser: 'http://100.64.0.10:5173/browser',
-        teams: 'http://100.64.0.10:5173/teams',
-        mobile: 'http://100.64.0.10:5173/mobile',
+        root: 'http://100.64.0.10:5473/',
+        browser: 'http://100.64.0.10:5473/browser',
+        teams: 'http://100.64.0.10:5473/teams',
+        mobile: 'http://100.64.0.10:5473/mobile',
       },
       bind_hint: 'npm run dev -- --host 100.64.0.10',
     },
@@ -68,14 +68,14 @@ describe('Mobile Access page', () => {
   it('renders copyable tailnet dashboard URLs from the Python status endpoint', async () => {
     render(<MobileAccess />);
 
-    expect(await screen.findByText('http://100.64.0.10:5173/browser')).toBeInTheDocument();
-    expect(screen.getByText('http://100.64.0.10:5173/teams')).toBeInTheDocument();
+    expect(await screen.findByText('http://100.64.0.10:5473/browser')).toBeInTheDocument();
+    expect(screen.getByText('http://100.64.0.10:5473/teams')).toBeInTheDocument();
     expect(screen.getByText('homie.tailnet.test')).toBeInTheDocument();
     expect(screen.getByText('npm run dev -- --host 100.64.0.10')).toBeInTheDocument();
 
     fireEvent.click(screen.getByTitle('Copy Browser Viewer'));
     await waitFor(() => {
-      expect(navigator.clipboard.writeText).toHaveBeenCalledWith('http://100.64.0.10:5173/browser');
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith('http://100.64.0.10:5473/browser');
     });
   });
 
@@ -92,7 +92,7 @@ describe('Mobile Access page', () => {
 
     render(<MobileAccess />);
 
-    await screen.findByText('http://100.64.0.10:5173/teams');
+    await screen.findByText('http://100.64.0.10:5473/teams');
     fireEvent.click(screen.getByTitle('Copy Teams'));
     await waitFor(() => {
       expect(execCommand).toHaveBeenCalledWith('copy');

@@ -11,8 +11,10 @@ OAuth token never leaves this process.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -362,6 +364,36 @@ def _parse_client_secret(payload: dict) -> tuple[str, int | None]:
     return value, expires_at_ms
 
 
+def _prepare_learning_session(instructions: str, model: str):
+    """Include retained understanding; minting alone is not model execution."""
+    try:
+        import personas
+        from personas.learning import hooks
+        svc = hooks._service_for(personas.get_active_profile_name() or "default")
+        if not svc.enabled():
+            return instructions, None
+        context = svc.render_cognitive_context(
+            "Continue this voice conversation", model=model, max_chars=4000
+        )
+        # Opening an empty voice session is not new evidence for more thinking.
+        if not context.text:
+            return instructions, None
+        prompt = instructions + "\n\n" + context.text
+        experience = svc.capture_experience(
+            "talk-session:" + uuid.uuid4().hex, "talk_session",
+            "Open voice conversation with retained understanding",
+            metadata={"capture_scope": "host", "context_only": True},
+        )
+        svc.record_context_receipt(
+            experience["id"], context, prompt, attempt_key="mint",
+            phase="prepared", model=model, provider="openai_realtime",
+        )
+        return prompt, (svc, experience, context)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Talk learning context unavailable: %s", type(exc).__name__)
+        return instructions, None
+
+
 def create_talk_session(*, voice: str | None = None, model: str | None = None) -> TalkSessionDescriptor:
     """Mint an ephemeral Realtime client secret for one browser Talk session."""
 
@@ -384,10 +416,13 @@ def create_talk_session(*, voice: str | None = None, model: str | None = None) -
     except openai_platform_auth.OpenAIPlatformAuthError as exc:
         raise TalkAuthError(str(exc)) from exc
 
+    instructions, learning_context = _prepare_learning_session(
+        build_talk_instructions(), selected_model
+    )
     session = build_session_payload(
         model=selected_model,
         voice=selected_voice,
-        instructions=build_talk_instructions(),
+        instructions=instructions,
         tools=talk_tools.default_talk_tools(),
     )
     try:
@@ -414,6 +449,15 @@ def create_talk_session(*, voice: str | None = None, model: str | None = None) -
             raise TalkUpstreamError(f"OpenAI Realtime auth failed (401): {remediation}") from exc
         raise
     secret, expires_at_ms = _parse_client_secret(payload)
+    if learning_context:
+        try:
+            svc, experience, context = learning_context
+            svc.record_context_receipt(
+                experience["id"], context, instructions, attempt_key="mint", phase="submitted",
+                model=selected_model, provider="openai_realtime",
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Talk learning receipt unavailable: %s", type(exc).__name__)
 
     return TalkSessionDescriptor(
         client_secret=secret,
@@ -440,6 +484,9 @@ def talk_status() -> dict:
         ),
         "voices": list(OPENAI_REALTIME_VOICES),
         "tools": [tool["name"] for tool in talk_tools.default_talk_tools()],
+        "learningCoverage": (
+            "mint_context_submitted; transcript_end_reflection; provider_execution_unconfirmed"
+        ),
         "killSwitchVoiceDisabled": kill_switches.is_disabled("voice"),
     }
 

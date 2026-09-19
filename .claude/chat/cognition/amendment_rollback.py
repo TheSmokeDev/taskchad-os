@@ -398,6 +398,7 @@ def rollback_amendment(
     *,
     ledger: ProposalLedger,
     memory_dir: Path | str,
+    preserve_later: bool = False,
 ) -> AmendmentRollbackResult:
     """Compensate one applied amendment with an exact-byte target restore.
 
@@ -444,7 +445,8 @@ def rollback_amendment(
 
             with target_file_lock(target_path):
                 return _rollback_locked(
-                    raw_id, actor_text, reason_text, record, target_path, ledger
+                    raw_id, actor_text, reason_text, record, target_path, ledger,
+                    preserve_later=preserve_later,
                 )
     except TimeoutError:
         return AmendmentRollbackResult(
@@ -478,6 +480,7 @@ def _rollback_locked(
     record: dict[str, Any],
     target_path: Path,
     ledger: ProposalLedger,
+    *, preserve_later: bool = False,
 ) -> AmendmentRollbackResult:
     status = str(record.get("status") or "")
 
@@ -504,7 +507,8 @@ def _rollback_locked(
         return AmendmentRollbackResult(
             proposal_id=proposal_id, status="refused", reason=target_reason
         )
-    if _sha256_bytes(target_data) != after_hash:
+    selective = _sha256_bytes(target_data) != after_hash
+    if selective and not (preserve_later and record.get("source") == "harness_learning"):
         return AmendmentRollbackResult(
             proposal_id=proposal_id, status="conflict", reason="target_hash_conflict"
         )
@@ -519,6 +523,31 @@ def _rollback_locked(
         return AmendmentRollbackResult(
             proposal_id=proposal_id, status="refused", reason="snapshot_hash_mismatch"
         )
+
+    restore_path = None
+    if selective:
+        # An independently evaluated amendment owns exactly its marked append.
+        # Remove those exact bytes only; every newer byte remains untouched.
+        # Editing the owned block itself is a conflict, never a guessed merge.
+        marker = f"<!-- HOMIE_AUTO_AMENDMENT:{proposal_id} -->"
+        block = (f"{marker}\n- {str(record.get('proposed_content', '')).strip()}\n"
+                 f"  - source: {record['source']}\n"
+                 f"  - evidence: {', '.join(record.get('evidence_paths', []))}\n").encode("utf-8")
+        blocks = [form for form in (block, block.replace(b"\n", b"\r\n")) if target_data.count(form) == 1]
+        if len(blocks) != 1 or target_data.count(marker.encode()) != 1:
+            return AmendmentRollbackResult(proposal_id, "conflict", "target_hash_conflict")
+        snap_data = target_data.replace(blocks[0], b"", 1)
+        after_hash = _sha256_bytes(target_data)
+        before_hash = _sha256_bytes(snap_data)
+        restore_path = _rescue_snapshot_path(ledger.path, target_path, proposal_id).with_suffix(".selective")
+        try:
+            if _has_link_component(restore_path):
+                raise OSError("restore path substituted")
+            _atomic_write_bytes(restore_path, snap_data)
+            if _sha256_bytes(restore_path.read_bytes()) != before_hash:
+                raise OSError("restore snapshot verification failed")
+        except OSError:
+            return AmendmentRollbackResult(proposal_id, "failed", "rescue_snapshot_failed")
 
     rescue_path = _rescue_snapshot_path(ledger.path, target_path, proposal_id)
     try:
@@ -546,6 +575,9 @@ def _rollback_locked(
                 "rollback_reason": reason_text,
                 "rollback_requested_at": requested_at,
                 "rollback_before_hash": after_hash,
+                "rollback_after_hash": before_hash if selective else "",
+                "rollback_mode": "block" if selective else "snapshot",
+                "rollback_restore_snapshot_path": str(restore_path) if restore_path else "",
                 "rollback_rescue_snapshot_path": str(rescue_path),
                 "rollback_error": None,
             },
@@ -685,6 +717,9 @@ def _recover_pending(
     rollback_before_hash = str(record.get("rollback_before_hash") or "")
     rescue_value = str(record.get("rollback_rescue_snapshot_path") or "")
     original_snapshot_value = str(record.get("rollback_snapshot_path") or "")
+    if record.get("rollback_mode") == "block":
+        before_hash = str(record.get("rollback_after_hash") or "")
+        original_snapshot_value = str(record.get("rollback_restore_snapshot_path") or "")
     if not before_hash or not rollback_before_hash:
         return AmendmentRollbackResult(
             proposal_id=proposal_id, status="failed", reason="ledger_prepare_failed"

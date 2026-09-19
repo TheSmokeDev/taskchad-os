@@ -81,7 +81,7 @@ uv run thehomie chat -q "/cabinet voice" -Q
 Dashboard:
 
 ```text
-http://127.0.0.1:5173/voices
+http://127.0.0.1:5473/voices
 ```
 
 The `/voices` page creates or reuses the Cabinet room, polls lifecycle status,

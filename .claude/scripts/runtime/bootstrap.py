@@ -18,7 +18,15 @@ if str(_CHAT_DIR) not in sys.path:
 MAX_DAILY_LOG_LINES = 30
 MAX_CONTEXT_CHARS = 20_000
 RESUME_MAX_CHARS = 20_000
-MAX_BRIEFING_CHARS = 6000
+MAX_BRIEFING_CHARS = 10700
+# Session-start caps for the proactive brief's two uncapped sections (belief
+# lines are verbatim paragraphs, WORKING.md dumps whole — 43KB observed
+# 2026-09-18, which ate the whole briefing budget and starved the tail
+# sections). Scheduled/heartbeat callers keep the full brief (caps default off).
+PROACTIVE_BRIEF_BELIEFS_CHARS = 1200
+PROACTIVE_BRIEF_WORKING_CHARS = 800
+PROACTIVE_BRIEF_DAILY_CHARS = 400
+PROACTIVE_BRIEF_HEARTBEAT_CHARS = 400
 
 # Degraded-path mirror of ``cognition.amendments._SECTION_HEADER``. Used ONLY
 # when that module cannot be imported at all, so the machine-authored tail can
@@ -186,6 +194,13 @@ def _extract_section(content: str, heading: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _extract_subsection(content: str, heading: str) -> str:
+    """Extract body of an H3 subsection by name from markdown content."""
+    pattern = rf"^### {re.escape(heading)}\s*\n(.*?)(?=\n### |\n## |\Z)"
+    m = re.search(pattern, content, re.DOTALL | re.MULTILINE)
+    return m.group(1).strip() if m else ""
+
+
 def _extract_project_status(memory: str) -> str:
     """Extract terse project status lines from Active Projects section.
 
@@ -319,6 +334,10 @@ def _build_proactive_brief(memory_dir: Path, daily_dir: Path) -> str:
             daily_dir=daily_dir,
             include_identity=False,
             header="### Proactive Brief",
+            max_daily_chars=PROACTIVE_BRIEF_DAILY_CHARS,
+            max_heartbeat_chars=PROACTIVE_BRIEF_HEARTBEAT_CHARS,
+            max_beliefs_chars=PROACTIVE_BRIEF_BELIEFS_CHARS,
+            max_working_chars=PROACTIVE_BRIEF_WORKING_CHARS,
         )
     except Exception:
         return _extract_working_memory(memory_dir)
@@ -422,8 +441,15 @@ def build_session_briefing(
     # below reads it, so splitting once here means no extractor can ever pull
     # model-authored amendment text into an authoritative briefing section.
     memory, machine_memory = read_durable_memory(memory_dir)
-    rules = _extract_section(memory, "Global Rules") if memory else ""
-    prefs = _extract_section(memory, "Preferences") if memory else ""
+    # The vault nests Global Rules / Preferences as H3s under `## Reference`;
+    # older persona vaults keep them as top-level H2s. Try H2 first, then H3.
+    reference = _extract_section(memory, "Reference") if memory else ""
+    rules = (
+        _extract_section(memory, "Global Rules") or _extract_subsection(reference, "Global Rules")
+    ) if memory else ""
+    prefs = (
+        _extract_section(memory, "Preferences") or _extract_subsection(reference, "Preferences")
+    ) if memory else ""
     rules_block = ""
     if rules:
         rules_block += rules

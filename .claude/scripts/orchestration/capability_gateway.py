@@ -3,13 +3,37 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
-def collect_capability_gateway_status() -> dict[str, Any]:
+def collect_capability_gateway_status(
+    *,
+    query: Any | None = None,
+    persona_id: str | None = None,
+    search: str = "",
+    kinds: tuple[str, ...] = (),
+    sources: tuple[str, ...] = (),
+    limit: int = 50,
+    cursor: str | None = None,
+    plugin_views: Any | None = None,
+) -> dict[str, Any]:
     """Return operator-safe runtime, toolset, integration, and policy status."""
-    capabilities, toolsets = _collect_capabilities_and_toolsets()
+    if query is None:
+        from personas.capability_catalog import CapabilityCatalogQuery, CapabilityKind
+
+        query = CapabilityCatalogQuery(
+            search=search,
+            kinds=tuple(CapabilityKind(value) for value in kinds),
+            sources=sources,
+            limit=limit,
+            cursor=cursor,
+        )
+    capabilities, toolsets = _collect_capabilities_and_toolsets(
+        query=query,
+        persona_id=persona_id,
+        plugin_views=plugin_views,
+    )
     integrations = _collect_integrations()
     runtime = _collect_runtime()
     browserops = _collect_browserops()
@@ -32,7 +56,7 @@ def collect_capability_gateway_status() -> dict[str, Any]:
     ]
 
     return {
-        "status": "ok",
+        "status": "partial" if capabilities.get("status") != "ok" else "ok",
         "timestamp": _utc_timestamp(),
         "runtime": runtime,
         "capabilities": capabilities,
@@ -63,15 +87,126 @@ def collect_capability_gateway_status() -> dict[str, Any]:
     }
 
 
-def _collect_capabilities_and_toolsets() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _collect_capabilities_and_toolsets(
+    *,
+    query: Any | None = None,
+    persona_id: str | None = None,
+    plugin_views: Any | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    from personas import capability_catalog
+
+    views = None if plugin_views is None else tuple(plugin_views)
+    safe_persona_id = (
+        capability_catalog.validate_persona_reference(persona_id)
+        if persona_id is not None
+        else None
+    )
+    catalog_errors: list[dict[str, str]] = []
+    catalog_payload: dict[str, Any]
+    snapshot = None
+    page = None
+    try:
+        snapshot = capability_catalog.build_capability_catalog(plugin_views=views)
+        resolved_query = query or capability_catalog.CapabilityCatalogQuery()
+        page = capability_catalog.query_capabilities(snapshot, resolved_query)
+        normalized = [{**item.as_dict(), "available": True} for item in page.items]
+        source_counts: dict[str, int] = {}
+        for row in snapshot.items:
+            source = row.source or "unknown"
+            source_counts[source] = source_counts.get(source, 0) + 1
+        catalog_errors.extend(error.as_dict() for error in snapshot.errors)
+        catalog_payload = {
+            "schema_version": snapshot.schema_version,
+            "status": snapshot.status,
+            "persona_id": safe_persona_id,
+            "total_count": len(snapshot.items),
+            "matched_count": page.matched_count,
+            "available_count": len(snapshot.items),
+            "enabled_count": None,
+            "sources": source_counts,
+            "items": normalized,
+            "next_cursor": page.next_cursor,
+            "errors": list(catalog_errors),
+        }
+        if safe_persona_id:
+            try:
+                projection_kwargs = {"catalog": snapshot}
+                if views is not None:
+                    projection_kwargs["plugin_views"] = views
+                projection = capability_catalog.build_persona_capability_state(
+                    safe_persona_id,
+                    **projection_kwargs,
+                )
+            except capability_catalog.CapabilityCatalogQueryError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - preserve the healthy page.
+                detail = _short_error(exc)
+                print(
+                    "CAPABILITY_GATEWAY_PROJECTION_ERROR "
+                    f"code=persona_projection_failed detail={detail}"
+                )
+                projection_error = {
+                    "source": "persona_projection",
+                    "code": "source_read_failed",
+                    "detail": detail,
+                }
+                catalog_errors.append(projection_error)
+                catalog_payload["status"] = "partial"
+                catalog_payload["errors"] = list(catalog_errors)
+                catalog_payload["enabled_count"] = 0
+            else:
+                states = {state.descriptor.id: state for state in projection.states}
+                catalog_payload.update(
+                    {
+                        "status": projection.status,
+                        "persona_id": projection.persona_id,
+                        "available_count": sum(state.available for state in projection.states),
+                        "enabled_count": sum(state.enabled for state in projection.states),
+                        "items": [states[item.id].as_dict() for item in page.items],
+                    }
+                )
+    except capability_catalog.CapabilityCatalogQueryError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - normalized catalog degrades alone.
+        detail = _short_error(exc)
+        print(
+            "CAPABILITY_GATEWAY_CATALOG_ERROR "
+            f"code=normalized_catalog_failed detail={detail}"
+        )
+        catalog_errors.append(
+            {
+                "source": "normalized_catalog",
+                "code": "source_read_failed",
+                "detail": detail,
+            }
+        )
+        catalog_payload = {
+            "schema_version": 1,
+            "status": "partial",
+            "persona_id": safe_persona_id,
+            "total_count": 0,
+            "matched_count": 0,
+            "available_count": 0,
+            "enabled_count": 0 if persona_id else None,
+            "sources": {},
+            "items": [],
+            "next_cursor": None,
+            "errors": list(catalog_errors),
+        }
+
+    legacy_errors: list[dict[str, str]] = []
+    legacy_error_detail: str | None = None
+    toolsets: list[dict[str, Any]] = []
     try:
         import integrations.registry  # noqa: F401
         import runtime.overlays  # noqa: F401
-        from runtime.capabilities import list_capabilities, resolve_toolset
-        from runtime.toolsets import TOOLSETS
+        from runtime import capabilities as runtime_capabilities
+        from runtime import toolsets as runtime_toolsets
 
-        rows = list_capabilities(sources=["chat_extensions", "integrations", "runtime_overlays"])
-        capabilities = [
+        legacy_rows = runtime_capabilities.list_capabilities(
+            sources=["chat_extensions", "integrations", "runtime_overlays"]
+        )
+        legacy = [
             {
                 "id": row.id,
                 "display_name": row.display_name,
@@ -79,42 +214,65 @@ def _collect_capabilities_and_toolsets() -> tuple[dict[str, Any], list[dict[str,
                 "source": row.source,
                 "description": row.description,
             }
-            for row in rows
+            for row in legacy_rows
         ]
         source_counts: dict[str, int] = {}
-        for row in capabilities:
+        for row in legacy:
             source = str(row.get("source") or "unknown")
             source_counts[source] = source_counts.get(source, 0) + 1
         toolsets = [
             {
                 "name": name,
                 "description": spec.get("description", ""),
-                "capability_ids": resolve_toolset(name, registry=TOOLSETS),
+                "capability_ids": runtime_capabilities.resolve_toolset(
+                    name,
+                    registry=runtime_toolsets.TOOLSETS,
+                ),
             }
-            for name, spec in TOOLSETS.items()
+            for name, spec in runtime_toolsets.TOOLSETS.items()
         ]
         for item in toolsets:
             item["capability_count"] = len(item["capability_ids"])
-        return (
-            {
-                "total_count": len(capabilities),
-                "enabled_count": sum(1 for row in capabilities if row["enabled"]),
-                "sources": source_counts,
-                "items": capabilities,
-            },
-            toolsets,
+    except Exception as exc:  # noqa: BLE001 - legacy envelope degrades alone.
+        detail = _short_error(exc)
+        legacy_error_detail = detail
+        print(
+            "CAPABILITY_GATEWAY_LEGACY_ERROR "
+            f"code=legacy_capabilities_failed detail={detail}"
         )
-    except Exception as exc:  # noqa: BLE001 - gateway must degrade read-only.
-        return (
+        legacy = []
+        source_counts = {}
+        legacy_errors.append(
             {
-                "total_count": 0,
-                "enabled_count": 0,
-                "sources": {},
-                "items": [],
-                "error": _short_error(exc),
-            },
-            [],
+                "source": "legacy_capabilities",
+                "code": "source_read_failed",
+                "detail": detail,
+            }
         )
+
+    all_errors = [*catalog_errors, *legacy_errors]
+    status = (
+        "partial"
+        if catalog_payload["status"] != "ok" or legacy_errors
+        else "ok"
+    )
+    capabilities_payload = {
+            # Preserve the original Gateway envelope exactly for old clients.
+            "total_count": len(legacy),
+            "available_count": len(legacy),
+            "enabled_count": sum(1 for row in legacy if row["enabled"]),
+            "sources": source_counts,
+            "items": legacy,
+            "legacy_items": legacy,
+            # New consumers adopt the bounded normalized projection here.
+            "schema_version": catalog_payload["schema_version"],
+            "status": status,
+            "catalog": catalog_payload,
+            "errors": all_errors,
+        }
+    if legacy_error_detail is not None:
+        capabilities_payload["error"] = legacy_error_detail
+    return capabilities_payload, toolsets
 
 
 def _collect_integrations() -> dict[str, Any]:
@@ -220,12 +378,15 @@ def _action_to_dict(action: Any) -> dict[str, Any]:
 
 
 def _utc_timestamp() -> str:
-    value = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    value = datetime.now(UTC).replace(microsecond=0).isoformat()
     return value[:-6] + "Z" if value.endswith("+00:00") else value
 
 
 def _short_error(exc: Exception, *, max_chars: int = 220) -> str:
-    text = " ".join(str(exc).strip().split())
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 3] + "..."
+    from personas.capability_catalog import safe_operator_text
+
+    try:
+        rendered = str(exc)
+    except Exception:
+        rendered = f"<unprintable-{type(exc).__name__}>"
+    return safe_operator_text(f"{type(exc).__name__}: {rendered}", max_chars)

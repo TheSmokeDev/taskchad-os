@@ -30,7 +30,7 @@ apply_persona_override()
 
 import asyncio  # noqa: E402
 import json as json_mod  # noqa: E402
-from datetime import datetime  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
 
 import click  # noqa: E402
 from engine import ConversationEngine  # noqa: E402
@@ -95,6 +95,10 @@ main.add_command(session_group)
 main.add_command(backup_cmd)
 main.add_command(restore_cmd)
 main.add_command(snapshot_group)
+
+
+
+
 
 
 def _resolve_vault_memory_dir(vault: str) -> Path:
@@ -898,7 +902,7 @@ def setup(check, advanced, headless_google):
 @main.command()
 @click.option("--api-port", default=4322, show_default=True, type=int, help="Python orchestration API port.")
 @click.option("--dashboard-port", default=3141, show_default=True, type=int, help="Hono dashboard port.")
-@click.option("--web-port", default=5173, show_default=True, type=int, help="Vite web port.")
+@click.option("--web-port", default=5473, show_default=True, type=int, help="Vite web port.")
 @click.option("--no-open", "no_open", is_flag=True, help="Do not open the Operating Room in a browser.")
 @click.option("--no-vite", "no_vite", is_flag=True, help="Use Hono/static only instead of Vite dev.")
 @click.option("--shell", "shell_mode", is_flag=True, help="Launch the Electron Desktop v0 shell.")
@@ -1207,11 +1211,11 @@ def _get_orchestration_services():
     from orchestration.mailbox_service import MailboxService
     from orchestration.observability import init_orchestration_observability
 
-    from config import ORCHESTRATION_DB_PATH
+    from config import get_orchestration_db_path
 
     ensure_directories()
     init_orchestration_observability()
-    db = OrchestrationDB(ORCHESTRATION_DB_PATH)
+    db = OrchestrationDB(get_orchestration_db_path())
     return db, ConvoyService(db), MailboxService(db)
 
 
@@ -1222,11 +1226,11 @@ def _get_team_services():
     from orchestration.observability import init_orchestration_observability
     from orchestration.team_service import TeamService
 
-    from config import ORCHESTRATION_DB_PATH
+    from config import get_orchestration_db_path
 
     ensure_directories()
     init_orchestration_observability()
-    db = OrchestrationDB(ORCHESTRATION_DB_PATH)
+    db = OrchestrationDB(get_orchestration_db_path())
     return db, TeamService(db), MailboxService(db)
 
 
@@ -3386,6 +3390,7 @@ def _detect_providers(env_values: dict[str, str]) -> dict[str, bool]:
         "openai": bool(env_values.get("OPENAI_API_KEY", "")),
         "kimi": bool(env_values.get("KIMI_API_KEY", "")),
         "nvidia": bool(env_values.get("NVIDIA_API_KEY", "")),
+        "free": True,
     }
 
 
@@ -4093,6 +4098,11 @@ def evolve_propose(
             click.echo("\n[--force] Overriding soft veto for adoption.", err=True)
 
     sys.exit(exit_code)
+
+
+from evolve.tuning_cli import register_tuning_commands  # noqa: E402
+
+register_tuning_commands(evolve)
 
 
 # ── Profile commands (PRD-7 Phase 2) ───────────────────────────────────────
@@ -5107,8 +5117,13 @@ def profile_repair(name, all_profiles, check, json_mode):
 
 @profile.group("learning")
 def profile_learning():
-    """Toggle persona learning (reflection pipeline opt-in)."""
+    """Inspect, pause, resume, and manage persona learning."""
     pass
+
+
+from cli_learning import register_learning_commands  # noqa: E402
+
+register_learning_commands(profile_learning)
 
 
 @profile_learning.command("enable")

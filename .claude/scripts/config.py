@@ -33,6 +33,15 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 import personas
+from personas.deployment import bootstrap_deployment_pins
+
+bootstrap_deployment_pins(
+    Path(__file__).resolve().parent,
+    profile_env_file=(
+        personas.get_persona_paths(personas.get_active_profile_name())["env_file"]
+        if personas.get_active_profile_name() != "default" else None
+    ),
+)
 
 # === Persona-resolved paths (PRP-7a Workstream 2) ===
 # Resolve once at import time. Default profile ("default") returns the legacy
@@ -56,16 +65,49 @@ ENV_FILE: Path = _paths["env_file"]
 # values can never grant a capability back — it can only keep one withheld.
 from security.kill_switches import is_disabled_value  # noqa: E402
 
-_operator_disabled_switches = {
-    key: value
-    for key, value in os.environ.items()
-    if key.upper().startswith("HOMIE_KILLSWITCH_") and is_disabled_value(value)
-}
+def _load_profile_environment() -> None:
+    """Reload profile values without redirecting bound storage or undoing stops."""
+    _operator_disabled_switches = {
+        key: value
+        for key, value in os.environ.items()
+        if (key.upper().startswith("HOMIE_KILLSWITCH_") and is_disabled_value(value))
+        or (key.upper() in {
+            "X_NETWORKING_ENABLED", "DISCORD_ALPHA_ENABLED",
+            "UPWORK_SCOUT_ENABLED", "UPWORK_SUBMIT_ENABLED",
+            "CRYPTO_PLAYS_DEPLOYER_ENABLED", "CRYPTO_CREDIBILITY_ENABLED",
+        } and value.strip().casefold() in {"0", "false", "no", "off", "disabled"})
+    }
 
-load_dotenv(ENV_FILE, override=True)
+    _active_home_before_dotenv = os.environ.get("HOMIE_HOME")
 
-if _operator_disabled_switches:
-    os.environ.update(_operator_disabled_switches)
+    # Deployment identity is chosen by the launcher. A stale profile dotenv must
+    # not redirect an already-bound process to another installation or queue.
+    _deployment_path_overrides = {
+        key: os.environ[key]
+        for key in (
+            "HOMIE_DEFAULT_PROFILE_ROOT", "HOMIE_VAULT_DIR", "HOMIE_HOME", "HOMIE_NAME",
+            "ORCHESTRATION_DB_PATH", "SECOND_BRAIN_RUNTIME_ACTIVITY_DB",
+            "SECOND_BRAIN_GENERIC_MAX_OUTPUT_TOKENS",
+            "SECOND_BRAIN_CODEX_APP_SERVER_COMMAND",
+            "UPWORK_DATA_DIR", "CRYPTO_PLAYS_DB_PATH", "DISCORD_CHANNEL_BINDINGS_FILE",
+        )
+        if key in os.environ
+    }
+
+    try:
+        load_dotenv(ENV_FILE, override=True)
+    finally:
+        os.environ.update(_deployment_path_overrides)
+        if _active_home_before_dotenv is None:
+            os.environ.pop("HOMIE_HOME", None)
+        else:
+            os.environ["HOMIE_HOME"] = _active_home_before_dotenv
+
+        if _operator_disabled_switches:
+            os.environ.update(_operator_disabled_switches)
+
+
+_load_profile_environment()
 
 # Repo / install-dir locations — kept for back-compat (``runtime/bootstrap.py``,
 # hooks, etc. import ``PROJECT_ROOT`` and ``SCRIPTS_DIR`` from config).
@@ -364,7 +406,26 @@ SLACK_OWNER_USER_ID = os.getenv("SLACK_OWNER_USER_ID", "")
 # Chat Interface
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
 CHAT_DB_PATH = DATA_DIR / "chat.db"
-ORCHESTRATION_DB_PATH = DATA_DIR / "orchestration.db"
+_ORCHESTRATION_DB_LEGACY_DEFAULT = DATA_DIR / "orchestration.db"
+# Compatibility for callers that intentionally replace the old module constant.
+ORCHESTRATION_DB_PATH = _ORCHESTRATION_DB_LEGACY_DEFAULT
+
+
+def get_orchestration_db_path() -> Path:
+    """Resolve an explicit ledger pin at call time without changing persona.
+
+    Existing constant overrides remain supported. Otherwise resolve the actual
+    active persona through the shared path contract on every call.
+    """
+    override = os.getenv("ORCHESTRATION_DB_PATH", "").strip()
+    if override:
+        return Path(override).expanduser().resolve(strict=False)
+    if ORCHESTRATION_DB_PATH != _ORCHESTRATION_DB_LEGACY_DEFAULT:
+        return Path(ORCHESTRATION_DB_PATH)
+    paths = personas.get_persona_paths(personas.get_active_profile_name())
+    return paths["data"] / "orchestration.db"
+
+
 # Dashboard (PRD-8 Phase 3 / WS1) — operator-facing dashboard slice.
 # DASHBOARD_DB_PATH env-overridable so tests can point at a tmp file without
 # re-rooting HOMIE_HOME. Default mirrors CHAT_DB_PATH / ORCHESTRATION_DB_PATH
@@ -381,7 +442,21 @@ DASHBOARD_DB_PATH = Path(
 # and resolves to this constant inside the body, never at def time).
 DASHBOARD_BOT_GRACE_SECONDS = int(os.getenv("DASHBOARD_BOT_GRACE_SECONDS", "5"))
 CHAT_MAX_TURNS = int(os.getenv("CHAT_MAX_TURNS", "25"))
-CHAT_MAX_BUDGET_USD = float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0"))
+
+
+def _optional_float_env(name: str) -> float | None:
+    """A float knob with NO default: unset, blank, or none/off means "no limit"."""
+    raw = os.getenv(name, "").strip()
+    if not raw or raw.lower() in {"none", "null", "off", "unlimited"}:
+        return None
+    return float(raw)
+
+
+# No default cost cap. The Homie runs on subscription lanes (Claude Max, Codex,
+# Kimi) where ``cost_usd`` is subscription-backed accounting, not money — a
+# dollar ceiling there only ever killed real work ("Reached maximum budget").
+# Set CHAT_MAX_BUDGET_USD explicitly to cap an API-key deployment.
+CHAT_MAX_BUDGET_USD: float | None = _optional_float_env("CHAT_MAX_BUDGET_USD")
 CHAT_ENGINE_TIMEOUT_SECONDS = float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "900"))
 # doc-upload-truthful-reads Phase 2 — attachment full-read caps + attachment-turn
 # timeout. Consumers resolve these at CALL TIME via None-sentinel params
@@ -451,8 +526,8 @@ DRAFT_EXPIRY_HOURS = int(os.getenv("DRAFT_EXPIRY_HOURS", "24"))
 # === Search Configuration ===
 SEARCH_CHUNK_MAX_TOKENS = 400
 SEARCH_CHUNK_OVERLAP_TOKENS = 80
-SEARCH_VECTOR_WEIGHT = 0.7
-SEARCH_KEYWORD_WEIGHT = 0.3
+SEARCH_VECTOR_WEIGHT = float(os.getenv("SEARCH_VECTOR_WEIGHT", "0.7"))
+SEARCH_KEYWORD_WEIGHT = float(os.getenv("SEARCH_KEYWORD_WEIGHT", "0.3"))
 SEARCH_DEFAULT_LIMIT = 10
 SEARCH_MIN_SCORE = 0.2
 
@@ -3843,12 +3918,14 @@ class PersonaLearningSettings(NamedTuple):
     enabled: bool
     tick_interval_hours: float
     silent_skip_window_hours: float
+    timeout_seconds: float = 900.0
 
 
 def get_persona_learning_settings(
     enabled: bool | None = None,
     tick_interval_hours: float | None = None,
     silent_skip_window_hours: float | None = None,
+    timeout_seconds: float | None = None,
 ) -> PersonaLearningSettings:
     """Resolve persona-learning-tick knobs at CALL TIME (Rule 1).
 
@@ -3864,6 +3941,11 @@ def get_persona_learning_settings(
         PERSONA_LEARNING_SILENT_SKIP_WINDOW ("24") — hours: if a persona
             has zero attributed rows newer than this window, skip it with no
             model call (``PERSONA_REFLECT_SILENT``).
+        PERSONA_LEARNING_TIMEOUT ("900") — seconds one persona's reflection
+            child may run before the tick kills it and records a timeout
+            receipt (boundary held, notes retained, retried next slot). A
+            working child — distillation, belief extraction, the contradiction
+            judge — needs more than the 300 s that used to be hard-coded.
 
     None-sentinel pattern: explicit values pass through; ``None`` resolves
     the matching env var inside the body so ``monkeypatch.setenv`` takes
@@ -3885,10 +3967,15 @@ def get_persona_learning_settings(
         silent_skip_window_hours = _finite_or_default(
             _safe_float_env("PERSONA_LEARNING_SILENT_SKIP_WINDOW", 24.0), 24.0
         )
+    if timeout_seconds is None:
+        timeout_seconds = _finite_or_default(
+            _safe_float_env("PERSONA_LEARNING_TIMEOUT", 900.0), 900.0
+        )
     return PersonaLearningSettings(
         enabled=enabled,
         tick_interval_hours=tick_interval_hours,
         silent_skip_window_hours=silent_skip_window_hours,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -5087,7 +5174,7 @@ def reload_config() -> dict[str, tuple[str, str]]:
     # Re-read .env from the persona-resolved path. Routing through ENV_FILE
     # (rather than recomputing ``Path(__file__).parent / ".env"``) keeps the
     # reload path aligned with the active profile (PRP-7a Workstream 2).
-    load_dotenv(ENV_FILE, override=True)
+    _load_profile_environment()
 
     # Re-evaluate from env
     changes: dict[str, tuple[str, str]] = {}
@@ -5100,7 +5187,7 @@ def reload_config() -> dict[str, tuple[str, str]]:
         "VOICE_TTS_VOICE_EDGE": os.getenv("VOICE_TTS_VOICE_EDGE", "en-US-AndrewMultilingualNeural|+14%"),
         "VOICE_TTS_VOICE_OPENAI": os.getenv("VOICE_TTS_VOICE_OPENAI", "alloy"),
         "CHAT_MAX_TURNS": int(os.getenv("CHAT_MAX_TURNS", "25")),
-        "CHAT_MAX_BUDGET_USD": float(os.getenv("CHAT_MAX_BUDGET_USD", "2.0")),
+        "CHAT_MAX_BUDGET_USD": _optional_float_env("CHAT_MAX_BUDGET_USD"),
         "CHAT_ENGINE_TIMEOUT_SECONDS": float(os.getenv("CHAT_ENGINE_TIMEOUT_SECONDS", "900")),
         "SESSION_TURN_THRESHOLD": int(os.getenv("SESSION_TURN_THRESHOLD", "0")),
         "RECENT_CONVERSATION_COUNT": int(os.getenv("RECENT_CONVERSATION_COUNT", "80")),

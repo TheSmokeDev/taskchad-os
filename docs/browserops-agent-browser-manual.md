@@ -171,7 +171,7 @@ npm run dev -- --host 127.0.0.1
 Open:
 
 ```text
-http://127.0.0.1:5173/browser
+http://127.0.0.1:5473/browser
 ```
 
 Expected viewer behavior: read-only status, manual screenshot capture, optional local stream start/stop, and viewport image rendering. There must be no URL open field, tab URL list, mouse control, keyboard control, profile edit control, post control, DM control, or connection request control.
@@ -459,7 +459,7 @@ Manual browser proof:
 agent-browser --cdp 18222 stream status
 ```
 
-Then open `http://127.0.0.1:5173/browser` and verify either live frames or screenshot fallback. Confirm controls stay read-only.
+Then open `http://127.0.0.1:5473/browser` and verify either live frames or screenshot fallback. Confirm controls stay read-only.
 
 Always finish with:
 
@@ -513,6 +513,26 @@ LinkedIn write command blocked:
   segment (see `docs/social-write-executor-manual.md`).
 - `/linkedin_profile edit` should remain default-denied/not implemented. Do not
   implement profile edits or DMs without a new PRP.
+
+LinkedIn browser write timeout:
+
+- LinkedIn post creation uses the dedicated Agent Browser session
+  `linkedin-social` on visible CDP `18222` for navigation, composer, upload,
+  submit, verification, and screenshots. It must not use the shared default
+  helper. Feed navigation gets 45 seconds and waits for `domcontentloaded`.
+- Submission uses the enabled Post button from a fresh snapshot. A timeout
+  after attempting that click remains `verification_required`; never retry it
+  without checking LinkedIn. Failed initial navigation preserves the failed
+  row; an operator-requested retry preview copies the exact text and image into
+  a new draft with its own approval buttons.
+- Upload media and finish its editor before entering the caption. Scope all
+  composer/media snapshots to `#interop-outlet` so a feed advertisement's Next
+  button cannot be mistaken for the upload control. Immediately before submit,
+  re-read the fresh caption editor and compare its full text with the approved
+  body (normalizing display whitespace only), and confirm the attachment is
+  still present. A mismatch blocks submission. Retain both caption hashes in
+  the receipt. `_drive_post(..., prepare_only=True)` tests this same path and
+  stops before clicking Post.
 
 Primo X browser write timeout:
 

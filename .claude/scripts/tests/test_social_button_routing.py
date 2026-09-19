@@ -13,7 +13,7 @@ import types
 from types import SimpleNamespace
 
 import pytest
-
+from models import Platform
 from router import ChatRouter
 
 
@@ -31,18 +31,83 @@ def _shim(approved: bool):
     obj._handle_social_button = ChatRouter._handle_social_button.__get__(obj)
     obj._social_edit_reply = ChatRouter._social_edit_reply.__get__(obj)
     obj._social_post_is_approved = lambda pid: approved
+    obj._social_button_binding = lambda pid, revision, digest: (
+        True,
+        SimpleNamespace(
+            id=int(pid),
+            revision=int(revision),
+            status="draft",
+            channel="linkedin",
+            body="current body",
+        ),
+    )
     return obj
 
 
-def _incoming(*, button: bool):
-    raw_event = {"interaction_type": "button"} if button else {}
-    return SimpleNamespace(raw_event=raw_event, channel=None, thread=None)
+def _incoming(*, button: bool, own: bool = True, platform=Platform.TELEGRAM):
+    raw_event = (
+        {"interaction_type": "button", "source_message_is_own": own}
+        if button
+        else {}
+    )
+    return SimpleNamespace(
+        raw_event=raw_event,
+        channel=None,
+        thread=None,
+        platform=platform,
+    )
 
 
 def test_social_button_is_immediate_so_active_turn_does_not_block_tap():
-    incoming = SimpleNamespace(text="__button:social:approve:5")
+    incoming = SimpleNamespace(text="__button:social:approve:5:1:abcdef123456")
 
     assert ChatRouter._is_immediate_button(incoming) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["approve", "reject", "edit", "image"])
+async def test_company_buttons_use_same_handlers(fake_core_handlers, monkeypatch, action):
+    from social import publishers
+
+    monkeypatch.setattr(publishers, "is_linkedin_channel", lambda cid: cid == "company-lane")
+    obj = _shim(approved=True)
+    obj._social_button_binding = lambda *_: (
+        True, SimpleNamespace(id=250, revision=2, status="draft", channel="company-lane"),
+    )
+    await obj._handle_social_button(
+        _RecordingAdapter(), _incoming(button=True), f"social:{action}:250:2:abcdef123456",
+    )
+    expected = {
+        "approve": ["approve 250 2 abcdef123456", "post 250"],
+        "reject": ["reject 250 2 abcdef123456"],
+        "edit": ["linkedin_flow:revise:250:2:abcdef123456"],
+        "image": ["linkedin_flow:image:250:2:abcdef123456"],
+    }
+    assert fake_core_handlers == expected[action]
+
+
+@pytest.mark.asyncio
+async def test_stale_company_button_returns_canonical_preview(fake_core_handlers, monkeypatch):
+    from social import publishers
+
+    monkeypatch.setattr(publishers, "is_linkedin_channel", lambda _: True)
+    calls = []
+
+    async def preview(_adapter, _incoming, post):
+        calls.append(post.revision)
+
+    monkeypatch.setattr(
+        sys.modules["core_handlers"], "_send_linkedin_preview", preview, raising=False,
+    )
+    obj = _shim(approved=False)
+    obj._social_button_binding = lambda *_: (
+        False, SimpleNamespace(id=250, revision=3, status="draft", channel="company-lane"),
+    )
+    await obj._handle_social_button(
+        _RecordingAdapter(), _incoming(button=True), "social:approve:250:2:abcdef123456",
+    )
+    assert calls == [3]
+    assert fake_core_handlers == []
 
 
 @pytest.fixture()
@@ -59,8 +124,12 @@ def fake_core_handlers(monkeypatch):
             return "Post #5 rejected."
         return "?"
 
+    async def fake_handle_linkedin_button(adapter, incoming, custom_id):
+        calls.append(custom_id)
+
     mod = types.ModuleType("core_handlers")
     mod.handle_social = fake_handle_social
+    mod.handle_linkedin_button = fake_handle_linkedin_button
     monkeypatch.setitem(sys.modules, "core_handlers", mod)
     return calls
 
@@ -71,8 +140,31 @@ async def test_non_button_interaction_is_refused(fake_core_handlers):
     ingress must NOT trigger a write."""
     adapter = _RecordingAdapter()
     obj = _shim(approved=True)
-    await obj._handle_social_button(adapter, _incoming(button=False), "social:approve:5")
+    await obj._handle_social_button(
+        adapter,
+        _incoming(button=False),
+        "social:approve:5:1:abcdef123456",
+    )
     assert fake_core_handlers == []  # handle_social never called
+    assert "only run from the draft buttons" in adapter.sent[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "incoming",
+    [
+        _incoming(button=True, own=False),
+        _incoming(button=True, platform=Platform.DISCORD),
+    ],
+)
+async def test_social_button_requires_owned_telegram_provenance(
+    fake_core_handlers, incoming
+):
+    adapter = _RecordingAdapter()
+    await _shim(approved=True)._handle_social_button(
+        adapter, incoming, "social:approve:5:1:abcdef123456"
+    )
+    assert fake_core_handlers == []
     assert "only run from the draft buttons" in adapter.sent[0]
 
 
@@ -80,8 +172,12 @@ async def test_non_button_interaction_is_refused(fake_core_handlers):
 async def test_approve_runs_approve_then_post_when_approved(fake_core_handlers):
     adapter = _RecordingAdapter()
     obj = _shim(approved=True)
-    await obj._handle_social_button(adapter, _incoming(button=True), "social:approve:5")
-    assert fake_core_handlers == ["approve 5", "post 5"]
+    await obj._handle_social_button(
+        adapter,
+        _incoming(button=True),
+        "social:approve:5:1:abcdef123456",
+    )
+    assert fake_core_handlers == ["approve 5 1 abcdef123456", "post 5"]
     assert "dispatched successfully" in adapter.sent[-1]
 
 
@@ -90,8 +186,12 @@ async def test_approve_does_not_post_when_not_approved(fake_core_handlers):
     """If the post never reached 'approved' state, dispatch must NOT run."""
     adapter = _RecordingAdapter()
     obj = _shim(approved=False)
-    await obj._handle_social_button(adapter, _incoming(button=True), "social:approve:5")
-    assert fake_core_handlers == ["approve 5"]  # no "post 5"
+    await obj._handle_social_button(
+        adapter,
+        _incoming(button=True),
+        "social:approve:5:1:abcdef123456",
+    )
+    assert fake_core_handlers == ["approve 5 1 abcdef123456"]  # no "post 5"
     assert "approved" in adapter.sent[-1].lower()
 
 
@@ -99,8 +199,12 @@ async def test_approve_does_not_post_when_not_approved(fake_core_handlers):
 async def test_reject_routes_to_reject(fake_core_handlers):
     adapter = _RecordingAdapter()
     obj = _shim(approved=False)
-    await obj._handle_social_button(adapter, _incoming(button=True), "social:reject:5")
-    assert fake_core_handlers == ["reject 5"]
+    await obj._handle_social_button(
+        adapter,
+        _incoming(button=True),
+        "social:reject:5:1:abcdef123456",
+    )
+    assert fake_core_handlers == ["reject 5 1 abcdef123456"]
     assert "rejected" in adapter.sent[-1].lower()
 
 
@@ -117,9 +221,49 @@ async def test_malformed_custom_id_is_rejected(fake_core_handlers):
 async def test_unknown_action_is_reported(fake_core_handlers):
     adapter = _RecordingAdapter()
     obj = _shim(approved=True)
-    await obj._handle_social_button(adapter, _incoming(button=True), "social:frobnicate:5")
+    await obj._handle_social_button(
+        adapter,
+        _incoming(button=True),
+        "social:frobnicate:5:1:abcdef123456",
+    )
     assert fake_core_handlers == []
     assert "unknown social action" in adapter.sent[-1].lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_routes_into_linkedin_workshop(fake_core_handlers):
+    adapter = _RecordingAdapter()
+    obj = _shim(approved=False)
+    await obj._handle_social_button(
+        adapter,
+        _incoming(button=True),
+        "social:edit:5:1:abcdef123456",
+    )
+    assert fake_core_handlers == ["linkedin_flow:revise:5:1:abcdef123456"]
+
+
+@pytest.mark.asyncio
+async def test_stale_button_fails_closed_and_returns_current_body(fake_core_handlers):
+    adapter = _RecordingAdapter()
+    obj = _shim(approved=False)
+    obj._social_button_binding = lambda *_args: (
+        False,
+        SimpleNamespace(
+            id=5,
+            revision=2,
+            status="superseded",
+            channel="linkedin",
+            body="new current body",
+        ),
+    )
+    await obj._handle_social_button(
+        adapter,
+        _incoming(button=True),
+        "social:approve:5:1:abcdef123456",
+    )
+    assert fake_core_handlers == []
+    assert "stale" in adapter.sent[0].lower()
+    assert "new current body" in adapter.sent[-1]
 
 
 def test_social_post_is_approved_reads_real_db(monkeypatch, tmp_path):

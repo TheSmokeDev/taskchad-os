@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from business_signal.config import SIGNAL_STATE_FILE, get_signal_settings
 from business_signal.models import SignalItem
@@ -94,8 +94,7 @@ def _parse_feed(
         if len(summary) > 500:
             summary = summary[:497] + "..."
 
-        published = getattr(entry, "published", "") or ""
-        fetched_at = datetime.now(timezone.utc).isoformat()
+        fetched_at = datetime.now(UTC).isoformat()
 
         items.append(
             SignalItem(

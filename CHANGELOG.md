@@ -13,6 +13,112 @@ context. They are not public release tags unless a matching public tag exists.
 
 ---
 
+## TaskChad OS v1.10.0 — Unified Persona Learning
+
+**Release Date:** September 10, 2026
+
+Reflection, dreaming, and evolution share the persona learning journal, queue,
+source identities, and evaluation policy across configured runtimes.
+
+### Highlights
+
+- Dreaming consumes retained understanding, investigations, counterevidence,
+  episodes, and original observations. Exact excerpt receipts leave omitted
+  material eligible for a later pass and skip unchanged inputs.
+- Foreground cognition receives retained context before thinking and reuses its
+  actual runtime receipt. Session completion, compaction, and clearing share a
+  durable debrief; long transcripts retain every source portion across retries.
+- Physical message identities survive both session backends. Repeated summaries
+  and edited revisions cannot inflate independent evidence counts.
+- Automatic lasting changes use bound evaluation receipts. Tentative conclusions
+  remain available; behavioral changes require separate qualification, respect
+  operator directives, and retain existing rollback owners.
+- Evolve can qualify per-persona retrieval weights and score floors against
+  validated relevance cases, with a held-out family split, uncertainty and
+  regression checks, versioned activation, and automatic rollback. Insufficient
+  evidence produces an explicit no-change result.
+- The Learning view, API, and CLI expose stage inputs, consumers, actual model
+  calls, skips, deferrals, tuning readiness, and retained context delivery.
+
+Mem0 remains a future comparison against this baseline. The framework owns the
+lifecycle; it does not depend on a particular model or Claude hook implementation.
+
+## TaskChad OS v1.9.0 — Continuous Persona Cognition
+
+**Release Date:** September 10, 2026
+
+Personas can retain developing understanding and pursue investigations through
+real model reasoning, independently of whether a trade or procedure is adopted.
+
+### Highlights
+
+- Model-independent framework function hooks connect work, evidence, completion,
+  failure, and due follow-ups to one persistent cognitive lifecycle.
+- Understanding and investigations carry evidence, uncertainty, revisions, and
+  follow-up conditions across sessions and model changes. Historical recall and
+  identity context remain persona-scoped and auditable.
+- A supervised minute-level dispatcher resumes due work, rotates personas fairly,
+  prioritizes fresh follow-ups over historical recovery, and yields to foreground
+  activity. Durable lifecycle outboxes recover debriefs after interruptions and
+  storage outages.
+- Vision-capable runtimes accept hash-verified chart images alongside numeric
+  evidence. Domain observer plugins can revisit candles or versioned source
+  material independently of action eligibility.
+- Evaluator v3 separates declared hard criteria from advisory criticism and keeps
+  infrastructure interruption distinct from failed learning.
+- The Learning view and CLI/API show understanding, investigations, exact host
+  counts, reports, and actual context use. Daily recaps use existing notification
+  policy and deduplication.
+- Default profile storage and orchestration storage have explicit independent
+  configuration, closing scheduler/runtime and named-profile path mismatches.
+
+Claude Mods are an optional, feature-probed adapter; the core runs without them.
+Configured Kimi/OpenAI-compatible providers support bounded no-tools reasoning.
+Providers that cannot enforce requested capabilities or explicit monetary caps
+report that limitation rather than silently weakening the contract. Existing
+external-action authority and paper-risk controls remain unchanged.
+
+See the [operator guide](docs/manual/features/persona-harness-learning.md) and
+[developer guide](docs/manual/features/persona-harness-learning-developer.md).
+
+## TaskChad OS v1.8.0 — Persona Harness Learning
+
+**Release Date:** September 6, 2026
+
+Personas can develop and revise their working methods through a persistent,
+model-independent learning cycle owned by the framework.
+
+### Highlights
+
+- **Complete learning cycle:** capture expectations before meaningful actions,
+  reconcile observed outcomes, propose conditional improvements, and evaluate
+  them on separate cases before autonomous provisional adoption.
+- **Framework lifecycle hooks:** chat, host tools, curriculum, background work,
+  Cabinet, and Talk delegation share persona-owned learning records and context.
+- **Versioned methods:** existing skill and amendment lifecycles supply actual
+  content, tested-content binding, correction-aware reassessment, and selective
+  rollback. Learning persists across model changes with per-model qualification.
+- **Idle learning:** a resumable queue uses existing heartbeat, reflection, and
+  dream entry points. Foreground work takes priority; quota, auth, and observation
+  failures retain visible retry states.
+- **Learning controls:** named and default personas have a Learning tab, shared
+  Python API, and CLI for history, linked evidence, pause/resume, and rollback.
+- **Outcome evidence:** read-only email observers distinguish actual replies from
+  drafts or sent messages. An optional Outlook write tool preserves the existing
+  exact-action approval gate and verifies sent-message receipts without resending.
+
+### Validation and limits
+
+The implementation passed 680 Python/CLI checks, 55 dashboard/proxy tests,
+TypeScript checks, the production web build, and canonical export validation.
+Live synthetic method-use checks passed on Sonnet and Haiku; a live second-vendor
+check remains pending because the tested Gemini account lacked a valid license.
+Qualification and synthetic results do not establish long-term professional
+improvement. Existing external-action authority remains separate from learning.
+
+See [Persona Harness Learning](docs/manual/features/persona-harness-learning.md)
+for lifecycle, configuration, evidence coverage, and recovery behavior.
+
 ## The Homie v1.7.1
 
 **Release Date:** August 22, 2026

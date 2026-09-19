@@ -332,7 +332,8 @@ class TestDreamSilent:
             mock_lock.return_value.__enter__ = MagicMock()
             mock_lock.return_value.__exit__ = MagicMock(return_value=False)
 
-            from memory_dream import DREAM_SILENT, run_dream
+            from memory_dream import DREAM_SILENT
+            from memory_dream import _run_dream_inner as run_dream
 
             result = await run_dream(test_mode=False, force=True, days=7)
 
@@ -566,7 +567,7 @@ class TestDryRunNeverMutatesTheVault:
         with _patch_dream(mock_memory_dir, tmp_path), \
              patch("memory_dream.DREAM_STATE_FILE", state_file), \
              patch("memory_dream.append_to_daily_log"):
-            from memory_dream import run_dream
+            from memory_dream import _run_dream_inner as run_dream
 
             result = await run_dream(test_mode=True, force=True, days=7)
 

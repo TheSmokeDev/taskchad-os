@@ -211,4 +211,25 @@ describe('cabinet route — voice proxy behavior', () => {
     expect(upstreamUrl).toContain('/api/cabinet/voice/livekit/session?meetingId=7&chatId=cabinet-browser');
     expect(res.headers.get('Referrer-Policy')).toBe('no-referrer');
   });
+
+  it('preserves the client.js query string when forwarding to Python (P0-1)', async () => {
+    // The Python-served voice document references client.js with its own
+    // `?token=` — dropping the query string 401s at Python's query-only
+    // voice auth. Regression: this forward must keep url.search.
+    const fetchMock = vi.fn(async () =>
+      new Response('// voice client', {
+        status: 200,
+        headers: { 'content-type': 'application/javascript' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const app = new Hono();
+    app.route('/', cabinetRoute);
+
+    const res = await app.request('/api/cabinet/voice/client.js?token=secret');
+    expect(res.status).toBe(200);
+    const upstreamUrl = String(fetchMock.mock.calls[0]?.[0] ?? '');
+    expect(upstreamUrl).toContain('/api/cabinet/voice/client.js?token=secret');
+    expect(res.headers.get('Referrer-Policy')).toBe('no-referrer');
+  });
 });

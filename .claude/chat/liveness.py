@@ -501,6 +501,7 @@ class DiagnosticsCache:
                 "memory_embedding_status": report.memory_embedding_status,
                 "cognition_available": report.cognition_available,
                 "sessions_active": report.sessions_active,
+                "learning_dispatcher": report.learning_dispatcher,
             }
 
         try:

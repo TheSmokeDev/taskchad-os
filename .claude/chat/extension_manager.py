@@ -211,6 +211,66 @@ class ExtensionManager:
         """Register a data intent."""
         self._intents.append(spec)
 
+    def unregister_command(self, name: str, *, extension_id: str | None) -> bool:
+        """Compare-and-remove one command owned by ``extension_id``.
+
+        Returns True when the row was removed, False when it was already gone
+        (disposal must be idempotent). Raises ``ValueError`` when the installed
+        command belongs to a different owner — a capability plugin unloading
+        must never delete a core command or another package's command.
+
+        The regex is invalidated rather than edited: it is DERIVED from
+        ``self._commands`` and recompiled on next read, so the dispatch view can
+        never disagree with the registry it is supposed to describe.
+        """
+        registered = self._commands.get(name)
+        if registered is None:
+            return False
+        if registered.extension_id != extension_id:
+            raise ValueError(
+                f"/{name} is owned by {registered.extension_id or 'core'!r}; "
+                f"refusing to unregister it for {extension_id or 'core'!r}"
+            )
+        del self._commands[name]
+        self._command_regex = None  # invalidate — recompiled from live state
+        return True
+
+    def unregister_intent(self, spec: IntentSpec, *, extension_id: str | None) -> bool:
+        """Compare-and-remove the exact intent object registered earlier.
+
+        Identity, not equality: two extensions may legitimately register
+        equal-valued intents for the same command, and removing "an equal one"
+        would silently disable the wrong owner's row.
+        """
+        if spec.extension_id != extension_id:
+            raise ValueError(
+                f"intent for /{spec.command} is owned by "
+                f"{spec.extension_id or 'core'!r}; refusing to unregister it "
+                f"for {extension_id or 'core'!r}"
+            )
+        for index, registered in enumerate(self._intents):
+            if registered is spec:
+                del self._intents[index]
+                return True
+        return False
+
+    def list_commands_for_extension(self, extension_id: str) -> list[CommandSpec]:
+        """Commands physically registered under one owner, name-sorted.
+
+        Reads the live registry rather than ``ExtensionMeta.commands`` (which
+        records what was DECLARED, not what survived collision handling), so a
+        residue check answers what is actually dispatchable.
+        """
+        return [
+            self._commands[name]
+            for name in sorted(self._commands)
+            if self._commands[name].extension_id == extension_id
+        ]
+
+    def list_intents_for_extension(self, extension_id: str) -> list[IntentSpec]:
+        """Intents physically registered under one owner, registration-ordered."""
+        return [spec for spec in self._intents if spec.extension_id == extension_id]
+
     def register_core_commands(
         self,
         commands: list[tuple[str, str, str, str]],

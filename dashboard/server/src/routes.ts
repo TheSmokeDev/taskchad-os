@@ -11,9 +11,12 @@
  * Maintenance contract (R3 NB1):
  *   - Add a new entry whenever a new route is mounted in any file under
  *     `dashboard/server/src/routes/`.
- *   - Path parameters use the colon-style Hono prefix (`/:id`) — the
- *     manifest test normalizes both `${...}` and `:id` shapes to `:id`
- *     before checking membership.
+ *   - Path parameters use the colon-style Hono prefix (`/:id`). Routes
+ *     mounted by template-literal loops in `routes/*.ts` are listed verbatim
+ *     (keeping their `${...}` placeholder) — the server manifest test
+ *     compares source-form literals as-is, while the dashboard/web donor
+ *     test normalizes both `${...}` and `:id` shapes to `:id` before
+ *     checking membership.
  *   - The list is kept in declaration order across files: health, agents,
  *     conversation, scheduled, memories, hive-mind, settings, mission, work.
  *   - Mission proxy routes are mounted as wildcards on the Hono side
@@ -86,6 +89,17 @@ export const ROUTE_MANIFEST: readonly string[] = [
 
   // agents.ts — dynamic per-persona
   '/api/agents/:id',
+  '/api/agents/:id/learning',
+  // agents.ts — loop-mounted learning subroutes; listed verbatim in the
+  // template-literal form the manifest test extracts.
+  '/api/agents/:id/learning/${path}',
+  '/api/agents/:id/learning/tuning/${action}',
+  '/api/agents/:id/learning/report',
+  '/api/agents/:id/learning/records',
+  '/api/agents/:id/learning/records/:recordId',
+  '/api/agents/:id/learning/pause',
+  '/api/agents/:id/learning/resume',
+  '/api/agents/:id/learning/activations/:activationId/rollback',
   '/api/agents/:id/full',
   '/api/agents/:id/avatar',
   '/api/agents/:id/activate',
@@ -136,6 +150,7 @@ export const ROUTE_MANIFEST: readonly string[] = [
   '/api/dashboard/mobile-access',
   '/api/dashboard/settings',
   '/api/autostart',
+  '/api/audit-log',
 
   // mission.ts — wildcard pass-throughs to the orchestration framework
   // surface (docs/mc-profile-contract.md § 3.2). Listed as both the

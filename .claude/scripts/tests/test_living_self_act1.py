@@ -190,22 +190,28 @@ def test_dedup_paraphrase_converges(tmp_path, monkeypatch):
     """Two paraphrases of one preference -> ONE record, evidence_count == 2."""
     _patch_fake_embed_batch(monkeypatch)
     tracker = InferenceTracker(tmp_path / "inf.json")
-    tracker.add_inference("prefers concise answers", "obs1", 0.7, source="reflection")
-    r2 = tracker.add_inference("likes short replies", "obs2", 0.7, source="reflection")
+    tracker.add_inference(
+        "prefers concise answers", "obs1", 0.7, source="reflection",
+        source_evidence=[{"ref": "m1", "revision": "v1"}],
+    )
+    r2 = tracker.add_inference(
+        "likes short replies", "obs2", 0.7, source="reflection",
+        source_evidence=[{"ref": "m2", "revision": "v1"}],
+    )
     records = tracker.load()
     assert len(records) == 1
     assert r2.evidence_count == 2
 
 
 def test_dedup_distinct_stays_separate(tmp_path, monkeypatch):
-    """Two genuinely different beliefs -> TWO records, both evidence_count == 1."""
+    """Two different beliefs without identified evidence remain separate and tentative."""
     _patch_fake_embed_batch(monkeypatch)
     tracker = InferenceTracker(tmp_path / "inf.json")
     tracker.add_inference("prefers concise answers", "obs1", 0.7, source="reflection")
     tracker.add_inference("prefers dark mode", "obs2", 0.7, source="reflection")
     records = tracker.load()
     assert len(records) == 2
-    assert all(r.evidence_count == 1 for r in records)
+    assert all(r.evidence_count == 0 for r in records)
 
 
 def test_dedup_threshold_is_live_knob(tmp_path, monkeypatch):
@@ -245,9 +251,15 @@ def test_dedup_fail_open_on_raising_embed(tmp_path, monkeypatch):
     monkeypatch.setattr("embeddings.embed_batch", boom)
     monkeypatch.setattr("embeddings.embed_text", boom)
     tracker = InferenceTracker(tmp_path / "inf.json")
-    tracker.add_inference("PREFERS  Concise", "obs1", 0.7, source="reflection")
+    tracker.add_inference(
+        "PREFERS  Concise", "obs1", 0.7, source="reflection",
+        source_evidence=[{"ref": "m1", "revision": "v1"}],
+    )
     # normalized-equal -> exact-match fallback merges:
-    r2 = tracker.add_inference("prefers concise", "obs2", 0.7, source="reflection")
+    r2 = tracker.add_inference(
+        "prefers concise", "obs2", 0.7, source="reflection",
+        source_evidence=[{"ref": "m2", "revision": "v1"}],
+    )
     assert len(tracker.load()) == 1
     assert r2.evidence_count == 2
     # A distinct string still inserts a new record under the fallback.
@@ -285,7 +297,7 @@ def test_dedup_skips_decayed_records(tmp_path, monkeypatch):
     new = tracker.add_inference("likes short replies", "obs", 0.7, source="reflection")
     records = tracker.load()
     assert len(records) == 2  # fresh record inserted, NOT merged into the decayed one
-    assert new.evidence_count == 1
+    assert new.evidence_count == 0  # source text alone is not a physical identity
     decayed_after = next(r for r in records if r.id == "decayed-1")
     assert decayed_after.status == "decayed"
     assert decayed_after.evidence_count == 1  # untouched

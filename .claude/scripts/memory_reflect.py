@@ -1,14 +1,12 @@
-"""
-Daily Reflection Script for The Homie
+"""Daily reflection compatibility entrypoint for unified persona cognition.
 
-Reviews yesterday's daily log (and optionally last N days) and uses Claude
-Agent SDK to promote important items to MEMORY.md. Runs daily at 8 AM via
-OS scheduler.
+The public command admits changed sources to personas.learning.synthesis. The
+shared dispatcher owns inference, evaluation and automatic changes. --test is
+read-only and calls no provider. Legacy --days/--notes-since flags remain accepted;
+exact source revision/range consumption replaces rolling watermarks.
 
-Usage:
-    uv run python memory_reflect.py              # Run reflection
-    uv run python memory_reflect.py --test       # Dry run (no file edits)
-    uv run python memory_reflect.py --days 3     # Review last 3 days
+Low-level legacy helpers remain for explicit diagnostics and migration tests;
+no scheduler calls the independent legacy reflection pipeline.
 """
 
 from __future__ import annotations
@@ -77,7 +75,7 @@ from runtime.lane_router import run_with_runtime_lanes  # noqa: E402
 from repository_memory import read_text_safe  # noqa: E402
 from shared import (  # noqa: E402
     append_to_daily_log,
-    file_lock,
+    file_lock as file_lock,
     load_state,
     safe_exc_text,
     save_state,
@@ -550,7 +548,6 @@ def build_persona_notes_request(memory_dir: Path, instruction: str) -> RuntimeRe
             # operator's interactive flagship model.
             model=get_background_models()["quality"],
             max_turns=1,
-            max_budget_usd=0.10,
         )
     )
 
@@ -918,14 +915,18 @@ async def _run_self_model_pass(days: int, test_mode: bool) -> None:
             # profile resolution (a custom profile reads the store it writes to).
             install_store = get_session_store()
         user_turns = read_operator_user_turns(
-            window_start, store=install_store, persona_id=corpus_persona_id
+            window_start, store=install_store, persona_id=corpus_persona_id,
+            include_provenance=True,
         )
 
         if is_persona_run and user_turns:
             from cognition.injection import is_injection_attempt
 
             pre_filter = len(user_turns)
-            user_turns = [t for t in user_turns if not is_injection_attempt(t)]
+            user_turns = [
+                t for t in user_turns
+                if not is_injection_attempt(t.get("text", "") if isinstance(t, dict) else t)
+            ]
             dropped = pre_filter - len(user_turns)
             if dropped:
                 print(
@@ -1031,19 +1032,17 @@ async def run_reflection(
     days: int = 1,
     notes_since: str | None = None,
 ) -> str | None:
-    """Run daily reflection with concurrency guard.
+    """Compatibility admission; shared dispatcher owns reasoning and writes.
 
-    Wraps the inner reflection with a file lock to prevent simultaneous runs.
-    ``notes_since`` is the persona note-freshness boundary handed down by the
-    learning tick (``--notes-since``); ``None`` falls back to the configured
-    window.
+    ``days`` and ``notes_since`` remain accepted for old scheduler commands.
+    Exact source revision/range cursors replace their lossy rolling watermark.
     """
-    try:
-        with file_lock(REFLECTION_STATE_FILE, timeout=5.0):
-            return await _run_reflection_inner(test_mode, days, notes_since)
-    except TimeoutError:
-        print(f"[{now_local()}] Another reflection is already running, skipping")
-        return None
+    from personas.learning.legacy_adapters import request_active_synthesis
+
+    receipt = request_active_synthesis(
+        "reflection", source_key="legacy-memory-reflect", test_mode=test_mode
+    )
+    return json.dumps(receipt, sort_keys=True)
 
 
 async def _run_crypto_plays_post_step() -> str:
@@ -1665,7 +1664,8 @@ def main() -> None:
         print(json.dumps(report, indent=2))
         return
 
-    ensure_directories()
+    if not args.test:
+        ensure_directories()
 
     if args.test:
         print("Running in TEST MODE (dry run, no file edits)")

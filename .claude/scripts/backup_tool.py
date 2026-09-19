@@ -700,7 +700,7 @@ def _snapshot_targets() -> list[tuple[Path, str]]:
 
     candidates: list[tuple[Path, str]] = [
         (Path(config.CHAT_DB_PATH), _PREFIX_DATA + "chat.db"),
-        (Path(config.ORCHESTRATION_DB_PATH), _PREFIX_DATA + "orchestration.db"),
+        (Path(config.get_orchestration_db_path()), _PREFIX_DATA + "orchestration.db"),
         (Path(config.DASHBOARD_DB_PATH), _PREFIX_DATA + "dashboard.db"),
     ]
     state_dir = Path(config.STATE_DIR)

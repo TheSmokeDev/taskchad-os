@@ -26,6 +26,10 @@ class RuntimeProfile:
     command: str | None = None
     auth_profile: str | None = None
     candidate_models: tuple[str, ...] = field(default_factory=tuple)
+    # Some OpenAI-compatible relays need transport-level overrides. In
+    # particular, OpenCode Free rejects a non-empty Authorization header even
+    # when the SDK needs a non-empty placeholder API key locally.
+    default_headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -38,7 +42,7 @@ class GenericProviderOverlay:
     """
 
     transport: str                  # "subprocess_cli" | "openai_responses"
-    auth_type: str                  # "codex" | "gemini" | "api_key"
+    auth_type: str                  # "codex" | "gemini" | "api_key" | "keyless"
     display_name: str
     model_env_var: str
     default_model: str
@@ -53,6 +57,10 @@ class GenericProviderOverlay:
     # Call shape for the shared OpenAICompatibleRuntime adapter:
     # "responses" (OpenAI Responses API) | "chat_completions".
     wire_api: str = "responses"
+    # Selectable providers need not participate in automatic routing/fallback.
+    auto_route: bool = True
+    # Transport-level headers applied by the OpenAI SDK for this provider.
+    default_headers: dict[str, str] = field(default_factory=dict)
 
 
 GENERIC_PROVIDER_REGISTRY: dict[str, GenericProviderOverlay] = {
@@ -136,6 +144,24 @@ GENERIC_PROVIDER_REGISTRY: dict[str, GenericProviderOverlay] = {
         base_url="https://integrate.api.nvidia.com/v1",
         base_url_env_var="SECOND_BRAIN_NVIDIA_BASE_URL",
         wire_api="chat_completions",
+    ),
+    # OpenCode's anonymous Free relay rejects every non-empty bearer token.
+    # Keep a non-empty SDK placeholder in the resolved profile while forcing an
+    # empty Authorization header on the actual request.
+    "opencode-free": GenericProviderOverlay(
+        transport="openai_responses",
+        auth_type="keyless",
+        display_name="OpenCode Free",
+        model_env_var="SECOND_BRAIN_OPENCODE_FREE_MODEL",
+        default_model="deepseek-v4-flash-free",
+        text_route_priority=6,
+        tool_route_priority=-1,
+        aliases=("free", "opencode_free", "opencode-free"),
+        legacy_write_key="opencode_free",
+        base_url="https://opencode.ai/zen/v1",
+        wire_api="chat_completions",
+        auto_route=False,
+        default_headers={"Authorization": "", "X-Title": "The Homie"},
     ),
 }
 
@@ -273,11 +299,16 @@ def _subprocess_profile(
 def _http_profile(
     *, key_prefix: str, provider: str, overlay: GenericProviderOverlay
 ) -> RuntimeProfile | None:
-    """Build a profile for openai_responses providers (OpenAI, OpenRouter)."""
+    """Build a profile for OpenAI-compatible HTTP providers."""
 
-    api_key = _resolve_api_key_from_env_vars(overlay.api_key_env_vars)
-    if not api_key:
-        return None
+    if overlay.auth_type == "keyless":
+        # AsyncOpenAI validates this locally, but the header override above is
+        # what makes the request anonymous at OpenCode's Free relay.
+        api_key = "opencode-free-keyless"
+    else:
+        api_key = _resolve_api_key_from_env_vars(overlay.api_key_env_vars)
+        if not api_key:
+            return None
     base_url = (
         (overlay.base_url_env_var and os.getenv(overlay.base_url_env_var, "").strip())
         or overlay.base_url
@@ -289,6 +320,7 @@ def _http_profile(
         model=_model_from_env(overlay.model_env_var, overlay.default_model),
         api_key=api_key,
         base_url=base_url,
+        default_headers=dict(overlay.default_headers),
     )
 
 
@@ -357,7 +389,7 @@ def normalize_provider(provider: str) -> str:
     return PROVIDER_ALIASES.get(normalized, normalized)
 
 
-def build_profile_for_provider(
+def _build_profile_for_provider(
     provider: str,
     *,
     key_prefix: str,
@@ -406,6 +438,26 @@ def build_profile_for_provider(
             overlay=overlay,
         )
     return None
+
+
+def build_profile_for_provider(
+    provider: str, *, key_prefix: str, request: RuntimeRequest | None = None,
+    model: str | None = None,
+) -> RuntimeProfile | None:
+    """Canonical profile builder with an explicit provider-bound model override.
+
+    Generic models historically ignore RuntimeRequest.model because a Claude
+    model name cannot be sent to arbitrary fallbacks. An explicit matching
+    provider removes that ambiguity; no global environment mutation is needed.
+    """
+    profile = _build_profile_for_provider(provider, key_prefix=key_prefix,
+                                          request=request, model=model)
+    if (profile is not None and request is not None and request.preferred_provider
+            and normalize_provider(request.preferred_provider) == profile.provider
+            and request.model):
+        from dataclasses import replace
+        profile = replace(profile, model=request.model, candidate_models=(request.model,))
+    return profile
 
 
 def resolve_runtime_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:

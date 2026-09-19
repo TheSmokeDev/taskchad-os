@@ -482,7 +482,8 @@ cabinetRoute.get('/api/cabinet/voice/client.bundle.js', async (c) => {
 });
 
 cabinetRoute.get('/api/cabinet/voice/client.js', async (c) => {
-  const upstream = await authedFetch('/api/cabinet/voice/client.js');
+  const url = new URL(c.req.url);
+  const upstream = await authedFetch(`/api/cabinet/voice/client.js${url.search}`);
   return c.body(upstream.body, upstream.status as 200, {
     'Content-Type': upstream.headers.get('content-type') ?? 'application/javascript',
     'Cache-Control': upstream.headers.get('cache-control') ?? 'public, max-age=86400',

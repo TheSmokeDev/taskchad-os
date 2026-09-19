@@ -30,6 +30,7 @@ import logging
 import re
 import shutil
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 from cognition import skill_usage
@@ -287,6 +288,11 @@ def promote(
     *,
     operator_approved: bool,
     override_caution: bool = False,
+    evaluation_check: Callable[[Path, str], bool] | None = None,
+    persona_id: str = "",
+    skills_dir: Path | None = None,
+    sidecar_path: Path | None = None,
+    audit_path: Path | None = None,
 ) -> dict:
     """Promote an eligible, scan-passed, operator-approved skill draft.
 
@@ -311,21 +317,34 @@ def promote(
     may read the result. :func:`rollback_promotion` undoes it for a caller
     whose own work fails afterwards.
     """
+    # Evaluated adoption is an explicit host-owned authority, never fabricated
+    # operator approval. The shared scan/staging/publication path remains below.
+    evaluated = evaluation_check is not None
+    if evaluated and (not persona_id or skills_dir is None or sidecar_path is None or audit_path is None):
+        return {"status": "evaluation_scope_missing"}
+
+    def audit(action, skill_name, outcome, *, verdict="", reason=""):
+        if audit_path is None:
+            return _audit(action, skill_name, outcome, verdict=verdict, reason=reason)
+        from skill_audit import append_skill_audit_record
+        return append_skill_audit_record(action, skill_name, outcome, verdict=verdict,
+            reason=reason, surface="learning" if evaluated else "", path=audit_path)
+
     # 1) Kill-switch (Rule 3).
     try:
         kill_switches.requireEnabled(_KILLSWITCH_NAME, caller="skill_promotion.promote")
     except kill_switches.KillSwitchDisabled:
-        _audit("promote", name, "refused", reason="killswitch_disabled")
+        audit("promote", name, "refused", reason="killswitch_disabled")
         return {"status": "killswitch_disabled"}
 
     threshold = _resolve_threshold()
 
     # 2) Reuse-eligibility — read the PHYSICAL sidecar (B3, Rule 2).
-    usage = skill_usage.get_usage(name)
-    if not (usage and usage.state == "eligible" and usage.recurrence_count >= threshold):
+    usage = skill_usage.get_usage(name, sidecar_path=sidecar_path)
+    if not evaluated and not (usage and usage.state == "eligible" and usage.recurrence_count >= threshold):
         state = usage.state if usage else "absent"
         count = usage.recurrence_count if usage else 0
-        _audit(
+        audit(
             "promote",
             name,
             "refused",
@@ -333,13 +352,13 @@ def promote(
         )
         return {"status": "not_eligible"}
 
-    skills_dir = _resolve_skills_dir()
+    skills_dir = Path(skills_dir) if skills_dir is not None else _resolve_skills_dir()
 
     # 3) Locate the generated draft on disk.
     hint = usage.path if usage else ""
     skill_md = _find_generated_draft(name, skills_dir, hint_path=hint)
     if skill_md is None:
-        _audit("promote", name, "refused", reason="not_found")
+        audit("promote", name, "refused", reason="not_found")
         return {"status": "not_found"}
 
     # 3c) Take POSSESSION of the draft (#429 codex R4 BLOCKER): move it to a
@@ -359,7 +378,7 @@ def promote(
     try:
         shutil.move(str(original_dir), str(staged_dir))
     except (OSError, shutil.Error) as exc:
-        _audit("promote", name, "refused", reason=f"staging_failed: {exc}")
+        audit("promote", name, "refused", reason=f"staging_failed: {exc}")
         return {"status": "not_found"}
     skill_md = staged_dir / "SKILL.md"
 
@@ -375,7 +394,7 @@ def promote(
         try:
             pinned_digest = hashlib.sha256(skill_md.read_bytes()).hexdigest()
         except OSError:
-            _audit("promote", name, "refused", reason="not_found")
+            audit("promote", name, "refused", reason="not_found")
             return {"status": "not_found"}
 
         # 4) Security scan (WS1) — the configured blocking verdict always refuses;
@@ -384,15 +403,16 @@ def promote(
         block_verdict = _resolve_block_verdict()
         result = scan_skill(skill_md)
         if result.verdict == block_verdict:
-            _audit("promote", name, "refused", verdict=result.verdict, reason="scan_dangerous")
+            audit("promote", name, "refused", verdict=result.verdict, reason="scan_dangerous")
             return {"status": "scan_dangerous", "verdict": result.verdict}
         if result.verdict == "caution" and not override_caution:
-            _audit("promote", name, "refused", verdict=result.verdict, reason="scan_caution")
+            audit("promote", name, "refused", verdict=result.verdict, reason="scan_caution")
             return {"status": "scan_caution", "verdict": result.verdict}
 
         # 5) Operator approval (default-deny).
-        if not operator_approved:
-            _audit("promote", name, "refused", verdict=result.verdict, reason="not_approved")
+        machine_allowed = bool(evaluated and evaluation_check(skill_md, pinned_digest))
+        if not operator_approved and not machine_allowed:
+            audit("promote", name, "refused", verdict=result.verdict, reason="not_approved")
             return {"status": "not_approved", "verdict": result.verdict}
 
         # 6) Physical move out of generated/ -> skills/promoted/<name> (sanitized).
@@ -407,7 +427,7 @@ def promote(
             # leave an empty or invalid dir; trusting `exists()` there would mark
             # usage promoted against a target that never enters the prompt.
             if not _promoted_target_is_valid(target_dir):
-                _audit(
+                audit(
                     "promote",
                     name,
                     "refused",
@@ -426,7 +446,7 @@ def promote(
             # different content is a name collision and refuses rather than
             # silently keeping the old artifact.
             if not _skill_content_matches(skill_md, target_dir / "SKILL.md"):
-                _audit(
+                audit(
                     "promote",
                     name,
                     "refused",
@@ -435,9 +455,9 @@ def promote(
                 )
                 return {"status": "promoted_name_collision", "verdict": result.verdict}
             # Idempotent: a prior promote already moved THIS content. Reconcile + report.
-            if usage.state != "promoted":
-                skill_usage.mark_state(name, "promoted")
-            _audit("promote", name, "promoted", verdict=result.verdict, reason="already_promoted")
+            if not usage or usage.state != "promoted":
+                skill_usage.mark_state(name, "promoted", sidecar_path=sidecar_path)
+            audit("promote", name, "promoted", verdict=result.verdict, reason="already_promoted")
             return {
                 "status": "already_promoted",
                 "path": str(target_dir / "SKILL.md"),
@@ -448,8 +468,13 @@ def promote(
         #     readable; a scope decision recorded after it would leave a window —
         #     and every failure in that window used to leave the skill live and
         #     unscoped while the operator was told it was refused.
-        if not _record_scope_before_publication(name):
-            _audit(
+        if evaluated:
+            scope = skill_usage.record_persona_assignment(name, persona_id, sidecar_path=sidecar_path)
+            scope_ok = bool(scope and scope.assigned_personas == [persona_id])
+        else:
+            scope_ok = _record_scope_before_publication(name)
+        if not scope_ok:
+            audit(
                 "promote",
                 name,
                 "refused",
@@ -469,7 +494,7 @@ def promote(
         except OSError:
             current_digest = ""
         if current_digest != pinned_digest:
-            _audit(
+            audit(
                 "promote",
                 name,
                 "refused",
@@ -483,15 +508,15 @@ def promote(
             shutil.move(str(src_dir), str(target_dir))
             staged_dir = None  # consumed — the staged copy IS the artifact
         except (OSError, shutil.Error) as exc:
-            _audit("promote", name, "refused", verdict=result.verdict, reason=f"move_failed: {exc}")
+            audit("promote", name, "refused", verdict=result.verdict, reason=f"move_failed: {exc}")
             return {"status": "move_failed", "verdict": result.verdict}
 
         moved_md = target_dir / "SKILL.md"
         _flip_generated_to_promoted(moved_md)
 
         # 7) Mark promoted + audit success.
-        skill_usage.mark_state(name, "promoted")
-        _audit("promote", name, "promoted", verdict=result.verdict)
+        skill_usage.mark_state(name, "promoted", sidecar_path=sidecar_path)
+        audit("promote", name, "promoted", verdict=result.verdict)
         return {"status": "promoted", "path": str(moved_md), "verdict": result.verdict}
     finally:
         if staged_dir is not None:
@@ -510,7 +535,7 @@ def promote(
                         f"{original_dir.name}.refused-{uuid4().hex[:8]}"
                     )
                     shutil.move(str(staged_dir), str(parked))
-                    _audit(
+                    audit(
                         "promote",
                         name,
                         "refused",
@@ -534,6 +559,10 @@ def rollback_promotion(
     draft_dir: Path | str,
     *,
     reason: str = "",
+    skills_dir: Path | None = None,
+    sidecar_path: Path | None = None,
+    audit_path: Path | None = None,
+    expected_hash: str | None = None,
 ) -> dict:
     """Undo a promotion this process just performed — the inverse of step 6/7.
 
@@ -556,7 +585,14 @@ def rollback_promotion(
     ``restore_failed`` (the move back itself failed — the caller must then tell
     the operator the skill IS live centrally, and where).
     """
-    skills_dir = _resolve_skills_dir()
+    skills_dir = Path(skills_dir) if skills_dir is not None else _resolve_skills_dir()
+
+    def audit(action, skill_name, outcome, *, reason=""):
+        if audit_path is None:
+            return _audit(action, skill_name, outcome, reason=reason)
+        from skill_audit import append_skill_audit_record
+        return append_skill_audit_record(action, skill_name, outcome, reason=reason,
+            surface="learning", path=audit_path)
     try:
         safe_name = sanitize_skill_path_component(name)
     except ValueError as exc:
@@ -565,6 +601,12 @@ def rollback_promotion(
     if not target_dir.is_dir():
         return {"status": "absent"}
 
+    if expected_hash is not None:
+        try:
+            if hashlib.sha256((target_dir / "SKILL.md").read_bytes()).hexdigest() != expected_hash:
+                return {"status": "target_hash_conflict", "path": str(target_dir)}
+        except OSError:
+            return {"status": "target_hash_conflict", "path": str(target_dir)}
     draft = Path(draft_dir)
     if draft.name.upper() == "SKILL.MD":
         draft = draft.parent
@@ -585,7 +627,7 @@ def rollback_promotion(
         draft.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(target_dir), str(draft))
     except (OSError, shutil.Error) as exc:
-        _audit("promote", name, "refused", reason=f"rollback_failed: {exc}")
+        audit("promote", name, "refused", reason=f"rollback_failed: {exc}")
         return {"status": "restore_failed", "path": str(target_dir), "error": str(exc)}
 
     _flip_promoted_to_generated(draft / "SKILL.md")
@@ -593,10 +635,10 @@ def rollback_promotion(
         # Back to the pre-promote lifecycle state so a retry is a normal
         # promote rather than a "not_eligible" that has to be reconciled
         # against the filesystem.
-        skill_usage.mark_state(name, "eligible")
+        skill_usage.mark_state(name, "eligible", sidecar_path=sidecar_path)
     except Exception as exc:  # noqa: BLE001 — the physical move is the gate
         logger.warning("could not reset usage state for %s after rollback: %s", name, exc)
-    _audit("promote", name, "rolled_back", reason=reason or "post_promote_failure")
+    audit("promote", name, "rolled_back", reason=reason or "post_promote_failure")
     return {"status": "rolled_back", "path": str(draft)}
 
 

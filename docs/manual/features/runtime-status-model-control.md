@@ -2,7 +2,7 @@
 
 Status: active baseline
 Owner: lane-first runtime selection
-Last updated: 2026-08-16
+Last updated: 2026-09-11
 
 ## What It Does
 
@@ -15,6 +15,12 @@ the runtime layer.
 dependencies, configured/enabled persona counts, the global curriculum kill
 switch, and malformed profile config. Per-persona physical state is available
 without side effects through `thehomie curriculum status <persona> --json`.
+
+v1.9.0 adds learning-dispatcher diagnostics. Use
+`thehomie profile learning summary default --json` and the persona's Learning tab
+to inspect cognitive cycles, investigations, queue state, and context receipts.
+A healthy runtime or configured model alone does not prove that reasoning
+completed. See [Persona Harness Learning](persona-harness-learning.md).
 
 ## Operator Entry Points
 
@@ -63,7 +69,7 @@ uv run pytest tests/test_runtime_selection.py tests/test_diagnostics.py tests/te
 ## Model Pinning And Codex Aliases
 
 Runtime selection is lane-first: `/model claude`, `/model codex`, `/model
-gemini`, `/model openrouter`, `/model openai`, `/model kimi`, and `/model auto`
+gemini`, `/model openrouter`, `/model openai`, `/model kimi`, `/model free`, and `/model auto`
 choose where the next request runs. Provider-specific model pins use
 `provider:model`, but Codex also accepts short GPT-style aliases:
 
@@ -90,8 +96,45 @@ cost/latency setting cannot silently stick to a later model choice.
 
 `/provider`, `/diagnostics`, and `thehomie status --json` report the configured
 model. When Codex is set to `chatgpt-plan-default`, the CLI/ChatGPT plan
-chooses the concrete backend model and The Homie reports that backend as
-unobserved.
+chooses the concrete backend model; the configured setting alone does not
+identify it. Inspect the completed execution receipt for the actual model when
+the transport exposes it. Do not infer execution from the configured default.
+
+## Learning When You Change Models
+
+Learning belongs to the framework and persona. Selecting Codex, Kimi, Claude,
+or another configured runtime keeps the same understanding, investigations,
+evidence, and method history. Shared function hooks invoke the same cognitive
+lifecycle; Claude-native hooks are an optional adapter, not a prerequisite.
+The selected runtime still needs the capabilities and account availability
+required by that request. Recorded attempts show any actual fallback.
+
+Foreground model selection and background selection are distinct. A one-turn
+CLI override selects that conversation; background cognition uses the configured
+quality tier on `claude_native` and canonical configured selection on generic
+lanes. Existing provider permissions, pause controls, and explicit budgets remain
+in effect. See the [developer guide](persona-harness-learning-developer.md#hooks-dispatch-and-reporting).
+
+| Runtime path | Learning behavior and capability boundary |
+|---|---|
+| Framework hooks and storage | Shared across models; retained state survives a switch or process restart |
+| Codex strict background reasoning | Uses the verified isolated app-server bridge with no tools; supports numeric/text evidence. Its image transport remains unverified and unavailable. |
+| Codex caller tools | Uses the same verified bridge with only the host-supplied tools; ordinary `codex exec` can retain a different global binary |
+| Kimi / generic HTTP model-only calls | Explicitly disable tools; image carriage depends on the selected model/runtime capability and actual inclusion receipt |
+| Claude | Uses framework callbacks or verified Mods for lifecycle capture; strict background reasoning remains framework-owned |
+
+`SECOND_BRAIN_CODEX_APP_SERVER_COMMAND` can pin the proven bridge independently
+of the global CLI. A version-gate failure is visible; upgrading the global CLI
+does not automatically validate its protocol. Follow the
+[pinned transport guide](persona-harness-learning-developer.md#pinned-codex-reasoning-and-caller-tool-transport)
+instead of disabling that check. Explicit unsupported provider-token or USD
+ceilings produce a refusal/fallback, not a silently unenforced budget.
+
+To check continuity, inspect a retained version before changing models, run a
+normal relevant conversation afterward, and confirm its ID/hash in a delivered
+context receipt whose phase is `executed`. A report or response that merely
+says it remembers is not the receipt. Provider outages defer pending work;
+they do not erase retained understanding or turn it into a failed hypothesis.
 
 ## Kimi Lane
 
@@ -115,6 +158,24 @@ not currently list a Kimi K3 endpoint, so this route is intentionally separate
 from the native `/model kimi:k3` coding lane. The NVIDIA route uses the shared
 OpenAI-compatible chat-completions adapter and is last in the generic text
 fallback route.
+
+## OpenCode Free Lane
+
+`/model free` selects the keyless OpenCode Free relay at
+`https://opencode.ai/zen/v1`; it needs no account, API key, OAuth login, or
+environment setup. The current integration default is
+`deepseek-v4-flash-free`. Pin any model currently offered by the anonymous
+catalog with `/model free:<model>` (for example,
+`/model free:mimo-v2.5-free`), or set `SECOND_BRAIN_OPENCODE_FREE_MODEL`.
+
+The relay rejects a non-empty bearer token. The adapter therefore keeps an
+SDK-only placeholder key and forces the outgoing `Authorization` header to the
+empty string. It uses the OpenAI chat-completions wire, so the framework can
+carry caller-supplied tool definitions when the selected free model supports
+them. `/model free` is deliberately selectable-only: it never enters automatic
+generic routing or fallback chains. OpenCode's free promotions rotate; this
+integration does not poll the catalog, so pin a currently listed model when the
+default is retired.
 
 ## Per-Adapter Runtime Deadlines (#133)
 

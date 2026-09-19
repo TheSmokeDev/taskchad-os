@@ -100,7 +100,11 @@ describe('auth: 4-branch boot policy (R4 NM1)', () => {
     ).toBe(200);
   });
 
-  it('query token is accepted for Cabinet voice document/static GETs only', async () => {
+  it('query token is accepted for Cabinet voice GETs (document/static + status/livekit), not POSTs', async () => {
+    // P0-1: Python's /api/cabinet/voice/ prefix accepts query tokens ONLY
+    // (no Bearer). Hono must let the query style reach Python for every
+    // browser-consumable voice GET — the Python-served voice document only
+    // holds the `?token=` from its own URL.
     _resetAuthPolicyForTest();
     setAuthPolicy({
       mode: 'token-equal',
@@ -112,18 +116,39 @@ describe('auth: 4-branch boot policy (R4 NM1)', () => {
     app.use('*', buildAuthMiddleware());
     app.get('/api/cabinet/voice/ui', (c) => c.json({ ok: true }));
     app.get('/api/cabinet/voice/client.bundle.js', (c) => c.text('js'));
+    app.get('/api/cabinet/voice/client.js', (c) => c.text('js'));
     app.get('/api/cabinet/voice/avatars/:id.png', (c) => c.text('png'));
     app.get('/api/cabinet/voice/status', (c) => c.json({ ok: true }));
+    app.get('/api/cabinet/voice/livekit/session', (c) => c.json({ ok: true }));
     app.post('/api/cabinet/voice/start', (c) => c.json({ ok: true }));
     app.post('/api/cabinet/voice/ui', (c) => c.json({ ok: true }));
+    app.get('/api/cabinet/list', (c) => c.json({ ok: true }));
+    app.get('/api/info', (c) => c.json({ ok: true }));
 
+    // Query token passes Hono for every browser-consumable voice GET —
+    // Python accepts the query style on the whole voice prefix.
     expect((await app.request('/api/cabinet/voice/ui?token=voice-token')).status).toBe(200);
     expect((await app.request('/api/cabinet/voice/client.bundle.js?token=voice-token')).status).toBe(200);
+    expect((await app.request('/api/cabinet/voice/client.js?token=voice-token')).status).toBe(200);
     expect((await app.request('/api/cabinet/voice/avatars/main.png?token=voice-token')).status).toBe(200);
+    expect((await app.request('/api/cabinet/voice/status?token=voice-token')).status).toBe(200);
+    expect((await app.request('/api/cabinet/voice/livekit/session?token=voice-token')).status).toBe(200);
+
+    // Bearer passes Hono unchanged on the voice prefix — Python's voice
+    // branch remains the Bearer gate there (its decision, unchanged here).
+    expect(
+      (await app.request('/api/cabinet/voice/status', {
+        headers: { Authorization: 'Bearer voice-token' },
+      })).status,
+    ).toBe(200);
+
     expect((await app.request('/api/cabinet/voice/ui?token=wrong')).status).toBe(401);
     expect((await app.request('/api/cabinet/voice/ui?token=voice-token', { method: 'POST' })).status).toBe(401);
-    expect((await app.request('/api/cabinet/voice/status?token=voice-token')).status).toBe(401);
+    // Voice POSTs stay Bearer-only — the query escape hatch is GET-only.
     expect((await app.request('/api/cabinet/voice/start?token=voice-token', { method: 'POST' })).status).toBe(401);
+    // Unrelated paths do NOT gain query-token acceptance.
+    expect((await app.request('/api/cabinet/list?token=voice-token')).status).toBe(401);
+    expect((await app.request('/api/info?token=voice-token')).status).toBe(401);
   });
 
   it('token-to-Bearer translation: query token must match expectedToken', async () => {

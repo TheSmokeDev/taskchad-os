@@ -154,6 +154,32 @@ def test_generic_text_route_prefers_api_profiles_before_cli(
     ]
 
 
+def test_opencode_free_is_selectable_but_never_an_automatic_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_LANE", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_GENERIC_PROVIDER", raising=False)
+    monkeypatch.delenv("SECOND_BRAIN_RUNTIME_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        routing,
+        "build_profile_for_provider",
+        lambda provider, *, key_prefix, request=None: _profile(provider, key_prefix),
+    )
+    monkeypatch.setattr(routing, "is_profile_available", lambda _profile: True)
+
+    automatic = routing.resolve_generic_runtime_profiles(
+        RuntimeRequest(prompt="hi", cwd=".", task_name="chat_turn")
+    )
+    assert "opencode-free" not in [profile.provider for profile in automatic]
+
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", "generic_runtime")
+    monkeypatch.setenv("SECOND_BRAIN_GENERIC_PROVIDER", "free")
+    selected = routing.resolve_generic_runtime_profiles(
+        RuntimeRequest(prompt="hi", cwd=".", task_name="chat_turn")
+    )
+    assert [profile.provider for profile in selected] == ["opencode-free"]
+
+
 def test_generic_tool_route_uses_only_tool_capable_profiles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

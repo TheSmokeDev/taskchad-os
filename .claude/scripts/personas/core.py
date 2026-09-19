@@ -196,7 +196,10 @@ def get_homie_home() -> Path:
 
 
 def get_default_paths() -> dict[str, Path]:
-    """Return the legacy install-dir paths used by the default profile.
+    """Return the deployed default installation paths (legacy layout).
+
+    HOMIE_DEFAULT_PROFILE_ROOT pins the absolute installation root across
+    runtime/scheduler checkouts. Unset preserves this module's installation.
 
     Used when ``get_active_profile_name()`` returns ``"default"``.
 
@@ -215,13 +218,28 @@ def get_default_paths() -> dict[str, Path]:
     """
     # personas/core.py -> personas/ -> scripts/
     scripts_dir = Path(__file__).resolve().parent.parent
+    from .deployment import read_deployment_pins
+
+    local_pins = read_deployment_pins(scripts_dir / ".env", ignore_keys=os.environ)
     # scripts/ -> .claude/ -> repo/
-    project_root = scripts_dir.parent.parent
+    # Deployments may execute the same persona from more than one checkout.
+    # This is the DEFAULT installation root, not the active named persona home.
+    # Keeping these concepts separate preserves named/custom isolation.
+    deployed_root = os.environ.get(
+        "HOMIE_DEFAULT_PROFILE_ROOT", local_pins.get("HOMIE_DEFAULT_PROFILE_ROOT", "")
+    ).strip()
+    if deployed_root and not Path(deployed_root).expanduser().is_absolute():
+        raise ValueError("HOMIE_DEFAULT_PROFILE_ROOT must be an absolute installation root")
+    project_root = (
+        _normalize_env_home(deployed_root) if deployed_root else scripts_dir.parent.parent
+    )
 
     # PRP-7a R1 B5 — preserve HOMIE_VAULT_DIR override on MEMORY_DIR.
     # ``config.py:23-31`` reads this env var today; the resolver inherits
     # that contract verbatim so default-profile users see no change.
-    vault_override = os.environ.get("HOMIE_VAULT_DIR", "").strip()
+    vault_override = os.environ.get(
+        "HOMIE_VAULT_DIR", local_pins.get("HOMIE_VAULT_DIR", "")
+    ).strip()
     memory_dir = (
         Path(vault_override).expanduser().resolve(strict=False)
         if vault_override

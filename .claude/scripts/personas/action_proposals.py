@@ -780,6 +780,14 @@ def card_text(proposal: ActionProposal) -> str:
         f"Approve: {approve_cmd} · Deny: {deny_cmd}",
         f"Expires in ~{minutes}m if untouched.",
     ]
+    if proposal.tool_name == "outlook_send_email":
+        # Reopened cards must show the same exact email as the initial card;
+        # a shortened summary is insufficient authority for hidden mail text.
+        args = proposal.arguments
+        preview = (f"From: {args.get('mailbox_id', '')}\nTo: {args.get('to_email', '')}\n"
+                   f"Subject: {args.get('subject', '')}\n\n{args.get('body', '')}")
+        lines.extend(["", "Exact email content:",
+                      "\n".join("> " + line for line in preview.split("\n"))])
     return "\n".join(lines)
 
 

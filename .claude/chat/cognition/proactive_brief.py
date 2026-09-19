@@ -35,12 +35,18 @@ def build_proactive_brief(
     header: str = "## Proactive Brief",
     max_daily_chars: int = 1200,
     max_heartbeat_chars: int = 1500,
+    max_beliefs_chars: int | None = None,
+    max_working_chars: int | None = None,
 ) -> ProactiveBrief:
     """Build the shared proactive cognition brief.
 
     This is intentionally read-only. It gives chat bootstrap, heartbeat, and
     scheduled cognition one canonical proactive context path without granting
     any automatic memory mutation behavior.
+
+    ``max_beliefs_chars`` / ``max_working_chars`` cap the two uncapped payload
+    sections (belief lines are verbatim paragraphs; WORKING.md dumps whole).
+    None (default) preserves the full sections for scheduled/LLM callers.
     """
 
     memory_dir = Path(memory_dir)
@@ -55,10 +61,16 @@ def build_proactive_brief(
         identity = render_identity_context(payload)
         if identity:
             sections.append(identity)
-    if payload.active_inference_section:
-        sections.append(payload.active_inference_section)
-    if payload.working_memory_section:
-        sections.append(payload.working_memory_section)
+    active_section = payload.active_inference_section
+    if max_beliefs_chars is not None:
+        active_section = _cap_section(active_section, max_beliefs_chars)
+    if active_section:
+        sections.append(active_section)
+    working_section = payload.working_memory_section
+    if max_working_chars is not None:
+        working_section = _cap_section(working_section, max_working_chars)
+    if working_section:
+        sections.append(working_section)
 
     if inference_state_file is not None:
         self_model_state = build_self_model_state(Path(inference_state_file))
@@ -94,6 +106,10 @@ def build_proactive_brief_section(
     inference_state_file: Path | None = None,
     include_identity: bool = False,
     header: str = "## Proactive Brief",
+    max_daily_chars: int = 1200,
+    max_heartbeat_chars: int = 1500,
+    max_beliefs_chars: int | None = None,
+    max_working_chars: int | None = None,
 ) -> str:
     """Return only the rendered proactive brief section."""
 
@@ -103,6 +119,10 @@ def build_proactive_brief_section(
         inference_state_file=inference_state_file,
         include_identity=include_identity,
         header=header,
+        max_daily_chars=max_daily_chars,
+        max_heartbeat_chars=max_heartbeat_chars,
+        max_beliefs_chars=max_beliefs_chars,
+        max_working_chars=max_working_chars,
     ).section
 
 
@@ -116,6 +136,17 @@ def _read_recent_daily_signal(daily_dir: Path, max_chars: int) -> str:
         if text:
             return f"### {path.stem}\n\n{text}"
     return ""
+
+
+def _cap_section(text: str, max_chars: int) -> str:
+    """Cap an already-rendered section at a newline boundary (matches _read_limited)."""
+    if not text or len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    last_newline = cut.rfind("\n")
+    if last_newline > max_chars // 2:
+        cut = cut[:last_newline]
+    return cut + "\n[TRUNCATED]"
 
 
 def _read_limited(path: Path, max_chars: int) -> str:

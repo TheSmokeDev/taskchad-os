@@ -50,9 +50,9 @@ Python-owned chat router used by CLI and channel adapters.
 ## How To Run It
 
 ```text
-http://127.0.0.1:5173/memories
-http://127.0.0.1:5173/hive
-http://127.0.0.1:5173/chat
+http://127.0.0.1:5473/memories
+http://127.0.0.1:5473/hive
+http://127.0.0.1:5473/chat
 ```
 
 ## How To Test It

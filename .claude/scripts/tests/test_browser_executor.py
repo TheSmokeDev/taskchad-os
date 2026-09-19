@@ -106,6 +106,38 @@ def test_metadata_round_trips_through_allowlist() -> None:
     assert not hasattr(parsed, "approval_token")
 
 
+def test_company_publisher_snapshot_round_trips_without_extra_metadata() -> None:
+    """The publisher is content; it survives the explicit executor allowlist."""
+    publisher_json = json.dumps({
+        "schema_version": 1,
+        "kind": "organization",
+        "id": "131153956",
+        "name": "YourProduct",
+        "url": "https://www.linkedin.com/company/YourProduct/",
+    }, sort_keys=True)
+    task = SocialWriteTask(
+        workflow_id="linkedin.post.create",
+        target_url=(
+            "https://www.linkedin.com/company/131153956/"
+            "admin/page-posts/published/?share=true"
+        ),
+        payload_text="One defined workflow.",
+        media_path="C:/approved/YourProduct.png",
+        publisher_json=publisher_json,
+    )
+    raw = dataclasses.asdict(task)
+    raw["approval_token"] = "forged"
+    raw["unapproved_destination"] = "https://www.linkedin.com/feed/"
+
+    parsed = parse_social_write_task(json.dumps(raw))
+
+    assert parsed.publisher_json == publisher_json
+    assert parsed.target_url == task.target_url
+    assert parsed.media_path == task.media_path
+    assert not hasattr(parsed, "approval_token")
+    assert not hasattr(parsed, "unapproved_destination")
+
+
 def test_parse_rejects_malformed_metadata() -> None:
     with pytest.raises(ValueError):
         parse_social_write_task(None)
@@ -168,6 +200,23 @@ def test_drive_failure_returns_failed_receipt() -> None:
     assert receipt.metadata == {} or receipt.metadata.get("screenshot_path") is None
     # no screenshot on a failed drive
     assert driver.screenshot_calls == []
+
+
+def test_audit_failure_cannot_downgrade_completed_browser_write() -> None:
+    class AuditFailureDriver(FakeDriver):
+        def audit(self, **kwargs) -> None:
+            raise RuntimeError("audit unavailable")
+
+    driver = AuditFailureDriver(enabled=True, drive_ok=True)
+    task = SocialWriteTask(
+        workflow_id="linkedin.post.create",
+        target_url="https://www.linkedin.com/feed/",
+        payload_text="body",
+        action="post",
+    )
+    receipt = BrowserExecutor(driver).dispatch(_subtask_for(task))
+    assert receipt.status == "completed"
+    assert receipt.metadata["audit_error"] == "RuntimeError"
 
 
 def test_executor_never_calls_gate_even_when_body_contains_phrase() -> None:

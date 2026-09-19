@@ -580,3 +580,43 @@ _METHOD_MARKERS_FOR_ASSERT = {
     "websearch",
     "imagegeneration",
 }
+
+
+def test_explicit_app_server_executable_pin_is_call_time_and_does_not_change_exec(
+    tmp_path, monkeypatch
+):
+    from runtime import openai_codex_app_server as module
+
+    pinned = tmp_path / "pinned-codex.exe"
+    pinned.write_bytes(b"fixture")
+    requested = []
+    monkeypatch.setattr(
+        module,
+        "resolve_codex_executable",
+        lambda command: requested.append(command) or command,
+    )
+    monkeypatch.setenv("SECOND_BRAIN_CODEX_APP_SERVER_COMMAND", str(pinned))
+    client = CodexAppServerClient(_request(), _profile())
+    assert client.executable == str(pinned)
+    assert _profile().command == "codex"
+    monkeypatch.delenv("SECOND_BRAIN_CODEX_APP_SERVER_COMMAND")
+    fresh = CodexAppServerClient(_request(), _profile())
+    assert fresh.executable == "codex"
+    assert requested == [str(pinned), "codex"]
+
+
+@pytest.mark.parametrize("bad", ["relative-codex.exe", "C:/missing/pinned-codex.exe"])
+def test_invalid_app_server_pin_fails_closed_without_selecting_global_cli(
+    monkeypatch, bad
+):
+    from runtime import openai_codex_app_server as module
+    from runtime.errors import RuntimeConfigError
+
+    monkeypatch.setenv("SECOND_BRAIN_CODEX_APP_SERVER_COMMAND", bad)
+    monkeypatch.setattr(
+        module,
+        "resolve_codex_executable",
+        lambda _: pytest.fail("must not ignore bad pin"),
+    )
+    with pytest.raises(RuntimeConfigError, match="absolute executable"):
+        CodexAppServerClient(_request(), _profile())

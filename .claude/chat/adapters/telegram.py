@@ -1239,6 +1239,11 @@ class TelegramAdapter:
                 "interaction_type": "button",
                 "custom_id": custom_id,
                 "callback_data": raw,
+                "callback_query_id": str(getattr(query, "id", "") or "") or None,
+                "source_message_id": (
+                    str(getattr(query.message, "message_id", "") or "") or None
+                    if query.message else None
+                ),
                 # Callback queries can only target a message emitted by this
                 # bot instance.  Stamp the common provenance bit used by the
                 # capability-approval router gate.

@@ -69,7 +69,7 @@ and `--runtime`.
 Dashboard path:
 
 ```text
-http://127.0.0.1:5173/teams
+http://127.0.0.1:5473/teams
 ```
 
 ## How To Test It
@@ -97,7 +97,7 @@ npm run typecheck
 Dashboard artifact panel proof:
 
 - Date: 2026-05-31
-- Surface: Tailscale raw-IP Vite URL, `http://<tailscale-ip>:5173/teams`
+- Surface: Tailscale raw-IP Vite URL, `http://<tailscale-ip>:5473/teams`
 - Result: Hono `POST /api/team/room/run` created a facilitated boardroom result
   with completed progress, role votes, interrupts/challenges, agreements, and
   disagreements.

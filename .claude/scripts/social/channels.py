@@ -19,6 +19,11 @@ class SocialChannel:
     execution_method: str = "manual"
     cadence_enabled: bool = False
     cadence_interval_hours: int = 24
+    # Optional named Homie profile that owns editorial judgment for this
+    # channel.  This is identity selection only: queue storage, credentials,
+    # and operational config continue to use the process' active/default
+    # profile.  ``None`` preserves the legacy voice-profile path.
+    persona_id: str | None = None
     voice_profile: str = ""
     topic_pool: list[str] = field(default_factory=list)
     browser_workflow_id: str | None = None
@@ -38,6 +43,8 @@ class SocialChannel:
     # Preferred still-image aspect for social image generation. Channels that
     # omit this keep the historical square default.
     image_aspect: str = "1:1"
+    platform: str | None = None
+    publisher: dict[str, Any] | None = None
 
 
 _DEFAULT_YAML_PATH: Path | None = None
@@ -66,6 +73,11 @@ def _load_channels(yaml_path: Path | None = None) -> dict[str, SocialChannel]:
             execution_method=cfg.get("execution_method", "manual"),
             cadence_enabled=bool(cfg.get("cadence_enabled", False)),
             cadence_interval_hours=int(cfg.get("cadence_interval_hours", 24)),
+            persona_id=(
+                str(cfg["persona_id"]).strip()
+                if cfg.get("persona_id") is not None and str(cfg["persona_id"]).strip()
+                else None
+            ),
             voice_profile=cfg.get("voice_profile", ""),
             topic_pool=cfg.get("topic_pool", []) or [],
             browser_workflow_id=cfg.get("browser_workflow_id"),
@@ -74,13 +86,13 @@ def _load_channels(yaml_path: Path | None = None) -> dict[str, SocialChannel]:
             design_file=str(cfg.get("design_file", "") or ""),
             persona_pack=str(cfg.get("persona_pack", "") or ""),
             image_aspect=str(cfg.get("image_aspect", "1:1") or "1:1"),
+            platform=cfg.get("platform"),
+            publisher=cfg.get("publisher"),
         )
     return result
 
 
-def get_channel(
-    channel_id: str, *, yaml_path: Path | None = None
-) -> SocialChannel | None:
+def get_channel(channel_id: str, *, yaml_path: Path | None = None) -> SocialChannel | None:
     channels = _load_channels(yaml_path)
     return channels.get(channel_id)
 

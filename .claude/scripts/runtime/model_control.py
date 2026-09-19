@@ -53,7 +53,7 @@ MODEL_CONFIGS: dict[str, RuntimeModelConfig] = {
         default_model=CLAUDE_DEFAULT_MODEL,
         aliases={
             "sonnet": "claude-sonnet-5",
-            "opus": "claude-opus-4-8",
+            "opus": "claude-opus-5",
             "fable": "claude-fable-5",
         },
     ),
@@ -69,6 +69,17 @@ MODEL_CONFIGS: dict[str, RuntimeModelConfig] = {
             "luna": "gpt-5.6-luna",
         },
     ),
+    # OpenRouter bare-name shortcuts — the two operator-picked workhorses
+    # (pinned 2026-09-18): GLM 5.3 primary, DeepSeek V4.1 Flash alternate.
+    "openrouter": RuntimeModelConfig(
+        provider="openrouter",
+        model_env_key=GENERIC_PROVIDER_REGISTRY["openrouter"].model_env_var,
+        default_model=GENERIC_PROVIDER_REGISTRY["openrouter"].default_model,
+        aliases={
+            "glm": "z-ai/glm-5.3",
+            "deepseek": "deepseek/deepseek-v4.1-flash",
+        },
+    ),
     **{
         provider: RuntimeModelConfig(
             provider=provider,
@@ -77,7 +88,7 @@ MODEL_CONFIGS: dict[str, RuntimeModelConfig] = {
             aliases={},
         )
         for provider, overlay in GENERIC_PROVIDER_REGISTRY.items()
-        if provider != "openai-codex"
+        if provider not in ("openai-codex", "openrouter")
     },
 }
 
@@ -125,6 +136,10 @@ def resolve_runtime_model_choice(raw_choice: str) -> RuntimeModelChoice | None:
     codex_config = MODEL_CONFIGS["openai-codex"]
     if lowered in codex_config.aliases:
         return _choice_for_provider_model(codex_config, lowered)
+
+    openrouter_config = MODEL_CONFIGS["openrouter"]
+    if lowered in openrouter_config.aliases:
+        return _choice_for_provider_model(openrouter_config, lowered)
 
     bare_codex_model = _bare_codex_model_shorthand(raw)
     if bare_codex_model is not None:

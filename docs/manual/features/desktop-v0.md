@@ -180,7 +180,7 @@ uv run pytest tests/test_cli.py::TestCLIHelp::test_desktop_shell_dry_run_shows_e
   - shell reported `python-api` PID `59164` and `hono-dashboard` PID `28636`
   - shell stopped both services and ports `45136/33154` were closed after
     smoke
-  - original services remained running on `4322`, `3141`, `5173`, and `7860`
+  - original services remained running on `4322`, `3141`, `5473`, and `7860`
 - Private portable smoke report:
   `.codex/artifacts/desktop-v0-portable-smoke/report.json`
 - Date: 2026-06-05

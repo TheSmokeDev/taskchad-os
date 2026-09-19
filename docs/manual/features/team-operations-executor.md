@@ -48,7 +48,7 @@ uv run thehomie team --help
 Dashboard:
 
 ```text
-http://127.0.0.1:5173/teams
+http://127.0.0.1:5473/teams
 ```
 
 ## How To Test It

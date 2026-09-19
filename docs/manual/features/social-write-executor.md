@@ -2,7 +2,44 @@
 
 Status: Shipped, default-denied, operator-gated per action
 Owner: `.claude/scripts/orchestration/` browser executor plus `.claude/chat/` approval handlers and driver
-Last updated: 2026-06-15
+Last updated: 2026-09-09
+
+## Company-page approval cards
+
+Company posts use the same queue and authenticated Telegram controls as personal
+LinkedIn posts: **Approve & Post**, **Revise Copy**, **Redo Image**, and **Reject**.
+The review names the company publisher, sends the complete public caption and
+image before the buttons, and keeps internal evidence outside the public copy.
+An image or transport failure does not produce a publishable approval card.
+
+`SocialChannel.platform` and `publisher` configure an explicit company target.
+The versioned publisher snapshot is stored as `SocialPost.publisher_json` and
+travels through `SocialWriteTask.publisher_json`. Its numeric company ID, name,
+canonical URL, channel, revision and caption/media hashes bind the approval.
+Changing company configuration invalidates pending target approvals; never
+alias a company channel to the personal `linkedin` channel to make it post.
+Legacy personal channels without publisher configuration retain their binding.
+
+The company workshop uses its configured Socials identity and company voice/design,
+not global identity or personal image references. `company-editorial/v1` review
+packages preserve operator-provided context and exact copy/image review without
+inventing an Authority Signal research packet. Failed revisions preserve the
+previous pair; stale feedback cannot overwrite a later revision.
+
+Telegram delivery records persist each message ID per recipient, post, revision
+and binding in `social_review_deliveries`. Complete delivery is idempotent.
+Ambiguous transport outcomes must be reconciled rather than blindly replayed.
+
+The visible browser checks the company actor, uploads media first, enters and
+re-reads the caption, then checks the actor again before submitting. A post
+requires author, caption, image and permalink confirmation; ambiguous submission
+stays `verification_required` and cannot dispatch again. `prepare_only=True`
+exercises the same composer checks without clicking Post.
+
+The initial company channel remains unscheduled. This addition does not change
+the personal daily cadence, enable unattended posting, or activate another brand.
+Deploy source changes to the actual `hr` runtime before sending new controls;
+updating the development checkout alone does not update the running bot.
 
 ## What It Does
 

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
 import os
 import shutil
 import sys
+from collections.abc import AsyncIterator
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +21,85 @@ from .base import (
     RuntimeToolCall,
 )
 from .capabilities import TEXT_REASONING, TOOL_REASONING
-from .errors import RuntimeConfigError, RuntimeRetryableError, RuntimeUnsupportedCapabilityError
+from .errors import (
+    RuntimeConfigError,
+    RuntimeExecutionError,
+    RuntimeRetryableError,
+    RuntimeUnsupportedCapabilityError,
+)
 from .profiles import RuntimeProfile
 
 _logger = logging.getLogger(__name__)
+
+_MAX_MODEL_ONLY_IMAGE_BYTES = 5 * 1024 * 1024
+_MAX_MODEL_ONLY_IMAGE_PIXELS = 36_000_000
+_MAX_MODEL_ONLY_IMAGES = 4
+
+
+def _model_only_image_blocks(paths: list[Path | str]) -> list[dict[str, Any]]:
+    """Snapshot validated local bitmaps as image inputs, never model file access.
+
+    Errors deliberately omit local filenames. Validate the same bounded bytes
+    that will be sent, so a changed path cannot swap the image after inspection.
+    """
+    from PIL import Image
+
+    if len(paths) > _MAX_MODEL_ONLY_IMAGES:
+        raise ValueError("model-only image input exceeds the attachment limit")
+    blocks: list[dict[str, Any]] = []
+    for image_path in paths:
+        try:
+            path = Path(image_path)
+            suffix = path.suffix.lower()
+            if suffix not in {".png", ".jpg", ".jpeg"}:
+                raise ValueError("only PNG and JPEG image attachments are supported")
+            if not path.is_file():
+                raise ValueError("image attachment must be an existing local file")
+            with path.open("rb") as handle:
+                data = handle.read(_MAX_MODEL_ONLY_IMAGE_BYTES + 1)
+        except OSError:
+            raise ValueError("image attachment could not be read") from None
+        if not data or len(data) > _MAX_MODEL_ONLY_IMAGE_BYTES:
+            raise ValueError("image attachment is empty or exceeds the byte limit")
+        if data.startswith(b"\x89PNG\r\n\x1a\n") and suffix == ".png":
+            image_format, media_type = "PNG", "image/png"
+        elif data.startswith(b"\xff\xd8\xff") and suffix in {".jpg", ".jpeg"}:
+            image_format, media_type = "JPEG", "image/jpeg"
+        else:
+            raise ValueError("image attachment type and magic bytes do not agree")
+        try:
+            with Image.open(BytesIO(data)) as bitmap:
+                if bitmap.format != image_format or getattr(bitmap, "n_frames", 1) != 1:
+                    raise ValueError("attachment must be one static PNG or JPEG bitmap")
+                if bitmap.width * bitmap.height > _MAX_MODEL_ONLY_IMAGE_PIXELS:
+                    raise ValueError("image attachment exceeds the pixel limit")
+                bitmap.verify()
+            # verify() checks container integrity; load() checks pixel decoding.
+            with Image.open(BytesIO(data)) as bitmap:
+                bitmap.load()
+        except Exception:
+            raise ValueError("image attachment is not a valid supported bitmap") from None
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.b64encode(data).decode("ascii"),
+            },
+        })
+    return blocks
+
+
+async def _image_prompt(
+    prompt: str, blocks: list[dict[str, Any]],
+) -> AsyncIterator[dict[str, Any]]:
+    """SDK streaming user-message contract, with host-attached image bytes."""
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": prompt}, *blocks]},
+        "parent_tool_use_id": None,
+        "session_id": "",
+    }
 
 
 def _system_cli_path() -> str | None:
@@ -141,7 +220,8 @@ def _ensure_system_cli_patch() -> None:
                                 f"Claude Code {version} < minimum {MINIMUM_CLAUDE_CODE_VERSION}"
                             )
                             print(
-                                f"Warning: Claude Code {version} < minimum {MINIMUM_CLAUDE_CODE_VERSION}",
+                                f"Warning: Claude Code {version} < minimum "
+                                f"{MINIMUM_CLAUDE_CODE_VERSION}",
                                 file=_sys.stderr,
                             )
         except Exception:
@@ -185,6 +265,10 @@ class ClaudeSdkRuntime:
         """True: Claude receives `tools=[]` plus the deny-all marker."""
         return True
 
+    def supports_model_only_images(self) -> bool:
+        """True: validated image bytes travel in the SDK user-message content."""
+        return True
+
     def supports(self, request: RuntimeRequest) -> bool:
         if request.capability not in {TEXT_REASONING, TOOL_REASONING}:
             return False
@@ -196,10 +280,18 @@ class ClaudeSdkRuntime:
         return True
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        # Direct adapter callers must obey the same zero-tool boundary as the
+        # lane router. Host image reads add no authority to the model.
+        _base.assert_model_only_contract(request)
         if not self.supports(request):
             raise RuntimeUnsupportedCapabilityError(
                 f"Claude runtime does not support capability {request.capability}"
             )
+
+        image_blocks = (
+            _model_only_image_blocks(request.image_paths)
+            if request.model_only and request.image_paths else []
+        )
 
         from claude_agent_sdk import (
             AssistantMessage,
@@ -210,6 +302,16 @@ class ClaudeSdkRuntime:
             query,
         )
 
+        if request.model_only:
+            _base.assert_model_only_contract(request)
+        from . import image_input
+        from . import claude_function_hooks as function_hooks
+        blocks, image_receipts = image_input.image_blocks(request)
+        try:
+            bridge_options, bridge_receipt = await asyncio.to_thread(function_hooks.prepare, request)
+        except Exception as exc:
+            bridge_options, bridge_receipt = {}, {
+                "adapter": "engine_sdk", "reason": "bridge_unavailable:" + type(exc).__name__}
         allowed_tools = ["Read"] if request.read_only_tools else request.allowed_tools
         if request.workspace_write_tools:
             allowed_tools = ["Read", "Write", "Edit", "Glob", "Grep"]
@@ -233,7 +335,11 @@ class ClaudeSdkRuntime:
             "max_turns": request.max_turns,
             "allowed_tools": allowed_tools,
         }
-        if not request.allowed_tools and request.disallowed_tools == ["*"] and not caller_tool_names:
+        if (
+            not request.allowed_tools
+            and request.disallowed_tools == ["*"]
+            and not caller_tool_names
+        ):
             # Empty allowed_tools alone omits --allowedTools, and the CLI still
             # exposes its default tool surface. Pair the default-deny marker
             # with --tools "" so no built-ins are advertised for the turn.
@@ -249,7 +355,8 @@ class ClaudeSdkRuntime:
         # Redirect SDK to system CLI instead of bundled CLI.
         # On Windows, cli.js can't be executed directly — must use monkey-patch
         # which prepends `node` to the command. cli_path only works for native binaries.
-        _ensure_system_cli_patch()
+        if not bridge_options.get("cli_path"):
+            _ensure_system_cli_patch()
 
         if request.model or self.profile.model:
             options_kwargs["model"] = request.model or self.profile.model
@@ -317,7 +424,30 @@ class ClaudeSdkRuntime:
                 claude_tool_bridge.TOOL_SERVER_NAME: caller_tool_server
             }
 
+        if bridge_options:
+            bridge_env = bridge_options.pop("env", {})
+            options_kwargs.update(bridge_options)
+            options_kwargs["env"] = {**options_kwargs.get("env", {}), **bridge_env}
+        if request.model_only:
+            # None means CLI defaults, not absence. Explicitly close filesystem
+            # settings, discovered MCP servers, hooks and skill catalog loading.
+            options_kwargs.update(
+                tools=[],
+                allowed_tools=[],
+                disallowed_tools=["*"],
+                setting_sources=[],
+                mcp_servers={},
+                strict_mcp_config=True,
+                hooks={},
+                skills=[],
+                settings='{"disableAllHooks":true}',
+            )
+            options_kwargs["plugins"] = []
+            options_kwargs["extra_args"] = {"strict-mcp-config": None}
+
         response_text = ""
+        actual_model = request.model or self.profile.model
+        completed = False
         session_id: str | None = None
         cost_usd: float | None = None
         subtype: str | None = None
@@ -327,15 +457,23 @@ class ClaudeSdkRuntime:
 
         try:
             async for message in query(
-                prompt=request.prompt,
+                prompt=image_input.image_prompt(request.prompt, blocks) if blocks else request.prompt,
                 options=ClaudeAgentOptions(**options_kwargs),
             ):
+                if getattr(message, "subtype", None) == "init":
+                    data = getattr(message, "data", {})
+                    if isinstance(data, dict) and data.get("model"):
+                        actual_model = data["model"]
                 if isinstance(message, AssistantMessage):
                     turn_text = ""
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             turn_text += block.text
                         elif isinstance(block, ToolUseBlock):
+                            if request.model_only:
+                                raise RuntimeExecutionError(
+                                    "model-only runtime returned a forbidden tool call"
+                                )
                             tool_call_count += 1
                             tool_names_used.append(block.name)
                             tool_calls.append(
@@ -363,9 +501,14 @@ class ClaudeSdkRuntime:
                     if turn_text.strip():
                         response_text = turn_text
                 elif isinstance(message, ResultMessage):
+                    if request.model_only and getattr(message, "is_error", False):
+                        raise RuntimeExecutionError("model-only runtime returned an error result")
                     session_id = message.session_id
                     cost_usd = message.total_cost_usd
                     subtype = message.subtype
+                    if getattr(message, "is_error", False):
+                        raise RuntimeExecutionError(str(message.result or "native model execution failed"))
+                    completed = True
                     if message.result:
                         response_text = message.result
         except Exception as exc:
@@ -378,12 +521,16 @@ class ClaudeSdkRuntime:
             if "auth" in text or "credential" in text or "login" in text:
                 raise RuntimeConfigError(str(exc)) from exc
             raise
+        finally:
+            bridge_receipt = await asyncio.to_thread(function_hooks.finish, bridge_receipt)
 
+        if not completed:
+            raise RuntimeRetryableError("Native stream ended without a terminal model result")
         return RuntimeResult(
             text=response_text.strip(),
             runtime_lane=RUNTIME_LANE_CLAUDE_NATIVE,
             provider=self.profile.provider,
-            model=request.model or self.profile.model,
+            model=actual_model,
             profile_key=self.profile.key,
             session_id=session_id,
             cost_usd=cost_usd,
@@ -391,4 +538,6 @@ class ClaudeSdkRuntime:
             tool_call_count=tool_call_count,
             tool_names_used=tool_names_used,
             tool_calls=tool_calls,
+            metadata={"image_inputs": [{**r, "delivered": completed} for r in image_receipts],
+                      "cognitive_hook_adapter": bridge_receipt},
         )

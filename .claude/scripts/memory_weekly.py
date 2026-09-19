@@ -476,8 +476,10 @@ If there is no real cross-domain signal this week, write: `No cross-domain signa
             _sys.path.insert(0, str(_chat_dir))
         from cognition.connections import find_emergent_connections
 
-        from config import MEMORY_DIR
-
+        # NOTE: MEMORY_DIR is already imported at module scope. Re-importing it
+        # here made it a function-local for the WHOLE body, so the earlier uses
+        # at the recall + identity-section seams raised UnboundLocalError and
+        # every Sunday synthesis died before writing a note (2026-W19..W36).
         connections = await find_emergent_connections(
             MEMORY_DIR, similarity_threshold=0.75, max_results=10,
         )

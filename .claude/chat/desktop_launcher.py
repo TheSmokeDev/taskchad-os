@@ -16,7 +16,7 @@ from pathlib import Path
 class DesktopLaunchConfig:
     api_port: int = 4322
     dashboard_port: int = 3141
-    vite_port: int = 5173
+    vite_port: int = 5473
     open_browser: bool = True
     use_vite: bool = True
 

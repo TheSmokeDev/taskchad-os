@@ -8,7 +8,7 @@ keyword-matching stage, returning ``SignalItem`` instances.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from business_signal.models import SignalItem
 
@@ -76,7 +76,7 @@ def scan_haro_emails(
         return []
 
     items: list[SignalItem] = []
-    fetched_at = datetime.now(timezone.utc).isoformat()
+    fetched_at = datetime.now(UTC).isoformat()
 
     for email in haro_emails:
         try:

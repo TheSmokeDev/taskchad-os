@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from pathlib import Path
 
 # Boot-shim: must run BEFORE any framework imports (config, runtime, etc.)
 from personas import apply_persona_override
@@ -59,12 +60,20 @@ def _open_search_db(_cfg, memory_dir):
     """
     from pathlib import Path
 
+    from evolve.policy import is_replaying
+
     db_path = _cfg.resolve_db_path(memory_dir)
     read_only = _cfg.is_readonly_vault(memory_dir)
+    # Preserve the selected backend; SQLite experiments open the existing
+    # index read-only and PostgreSQL experiments skip schema initialization.
+    if is_replaying() and not _cfg.DATABASE_URL:
+        if not Path(db_path).is_file():
+            raise FileNotFoundError("recall evaluation index is unavailable")
+        read_only = True
     if read_only and not Path(db_path).exists():
         return None
     db = get_memory_db(db_path=db_path, read_only=read_only)
-    if not read_only:
+    if not read_only and not is_replaying():
         db.init_schema()
     return db
 
@@ -73,7 +82,7 @@ def search_keyword(
     query: str,
     limit: int | None = None,
     path_prefix: str = "",
-    memory_dir: "Path | str | None" = None,
+    memory_dir: Path | str | None = None,
 ) -> list[SearchResult]:
     """Keyword search (FTS5 for SQLite, tsvector for Postgres)."""
     import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
@@ -107,7 +116,7 @@ def search_semantic(
     limit: int | None = None,
     min_score: float | None = None,
     path_prefix: str = "",
-    memory_dir: "Path | str | None" = None,
+    memory_dir: Path | str | None = None,
 ) -> list[SearchResult]:
     """Semantic search using vector similarity."""
     import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
@@ -151,7 +160,7 @@ def search_hybrid(
     keyword_weight: float | None = None,
     path_prefix: str = "",
     graph_scores: dict[str, float] | None = None,
-    memory_dir: "Path | str | None" = None,
+    memory_dir: Path | str | None = None,
 ) -> list[SearchResult]:
     """Hybrid search combining keyword and semantic with weighted scoring."""
     import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
@@ -160,9 +169,13 @@ def search_hybrid(
     if min_score is None:
         min_score = _cfg.SEARCH_MIN_SCORE
     if vector_weight is None:
-        vector_weight = _cfg.SEARCH_VECTOR_WEIGHT
+        from evolve.policy import resolve_values
+
+        vector_weight = resolve_values(memory_dir)["SEARCH_VECTOR_WEIGHT"]
     if keyword_weight is None:
-        keyword_weight = _cfg.SEARCH_KEYWORD_WEIGHT
+        from evolve.policy import resolve_values
+
+        keyword_weight = resolve_values(memory_dir)["SEARCH_KEYWORD_WEIGHT"]
     if not query.strip():
         return []
 
@@ -234,7 +247,7 @@ def search(
     limit: int | None = None,
     min_score: float | None = None,
     path_prefix: str = "",
-    memory_dir: "Path | str | None" = None,
+    memory_dir: Path | str | None = None,
 ) -> list[SearchResult]:
     """Main search entry point. Dispatches to a (possibly persona-scoped) index."""
     import config as _cfg  # noqa: PLC0415 — dynamic config resolution (Rule 2).
@@ -243,9 +256,13 @@ def search(
     if mode == "keyword":
         return search_keyword(query, limit, path_prefix=path_prefix, memory_dir=memory_dir)
     elif mode == "semantic":
-        return search_semantic(query, limit, min_score, path_prefix=path_prefix, memory_dir=memory_dir)
+        return search_semantic(
+            query, limit, min_score, path_prefix=path_prefix, memory_dir=memory_dir
+        )
     elif mode == "hybrid":
-        return search_hybrid(query, limit, min_score, path_prefix=path_prefix, memory_dir=memory_dir)
+        return search_hybrid(
+            query, limit, min_score, path_prefix=path_prefix, memory_dir=memory_dir
+        )
     else:
         print(f"Unknown search mode: {mode}")
         return []
@@ -307,7 +324,10 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=_cfg.SEARCH_DEFAULT_LIMIT, help="Max results")
     parser.add_argument("--min-score", type=float, default=_cfg.SEARCH_MIN_SCORE, help="Min score")
-    parser.add_argument("--path-prefix", default="", help="Filter results to files under this path prefix (e.g. 'drafts/sent')")
+    parser.add_argument(
+        "--path-prefix", default="",
+        help="Filter results to files under this path prefix (e.g. 'drafts/sent')",
+    )
     parser.add_argument("--test", action="store_true", help="Run test queries")
     args = parser.parse_args()
 
@@ -318,7 +338,10 @@ def main() -> None:
     if not args.query:
         parser.error("query is required (or use --test)")
 
-    results = search(args.query, mode=args.mode, limit=args.limit, min_score=args.min_score, path_prefix=args.path_prefix)
+    results = search(
+        args.query, mode=args.mode, limit=args.limit,
+        min_score=args.min_score, path_prefix=args.path_prefix,
+    )
     output = format_results(results)
     # Handle Windows console encoding issues with Unicode characters
     try:

@@ -125,6 +125,8 @@ def runtime_selection_choice(selection: RuntimeSelection) -> str:
         return "kimi"
     if selection.generic_provider == "nvidia-kimi":
         return "nvidia"
+    if selection.generic_provider == "opencode-free":
+        return "free"
     return "auto"
 
 

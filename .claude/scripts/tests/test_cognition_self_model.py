@@ -15,10 +15,8 @@ lives in ``test_living_self_act1.py`` (with injected fake/real vectors).
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
-
 from cognition.self_model import InferenceRecord, InferenceTracker
 
 
@@ -51,7 +49,7 @@ def test_add_inference(tmp_path):
     record = tracker.add_inference("User prefers concise", "rejected verbose", 0.7)
     assert record.confidence == 0.7
     assert record.status == "active"
-    assert record.evidence_count == 1
+    assert record.evidence_count == 0  # no physical source was supplied
     assert record.id  # UUID assigned
 
 
@@ -81,8 +79,12 @@ def test_add_multiple_inferences(tmp_path):
 
 def test_strengthen_existing(tmp_path):
     tracker = InferenceTracker(tmp_path / "inf.json")
-    tracker.add_inference("prefers concise", "obs1", 0.7)
-    r2 = tracker.add_inference("prefers concise", "obs2", 0.7)
+    tracker.add_inference(
+        "prefers concise", "obs1", 0.7, source_evidence=[{"ref": "m1", "revision": "v1"}]
+    )
+    r2 = tracker.add_inference(
+        "prefers concise", "obs2", 0.7, source_evidence=[{"ref": "m2", "revision": "v1"}]
+    )
     assert r2.evidence_count == 2
     assert r2.confidence > 0.7  # Boosted by INFERENCE_CONFIRM_BOOST
 
@@ -171,9 +173,15 @@ def test_new_record_case_variant_source_is_normalized(tmp_path):
 
 def test_strengthen_three_times_confirms(tmp_path):
     tracker = InferenceTracker(tmp_path / "inf.json")
-    tracker.add_inference("likes dark mode", "obs1", 0.7)
-    tracker.add_inference("likes dark mode", "obs2", 0.7)
-    r3 = tracker.add_inference("likes dark mode", "obs3", 0.7)
+    tracker.add_inference(
+        "likes dark mode", "obs1", 0.7, source_evidence=[{"ref": "m1", "revision": "v1"}]
+    )
+    tracker.add_inference(
+        "likes dark mode", "obs2", 0.7, source_evidence=[{"ref": "m2", "revision": "v1"}]
+    )
+    r3 = tracker.add_inference(
+        "likes dark mode", "obs3", 0.7, source_evidence=[{"ref": "m3", "revision": "v1"}]
+    )
     assert r3.evidence_count == 3
     assert r3.status == "confirmed"
 
@@ -191,7 +199,7 @@ def test_strengthen_does_not_exceed_max(tmp_path):
 
 def test_decay_old_inference(tmp_path):
     tracker = InferenceTracker(tmp_path / "inf.json")
-    record = tracker.add_inference("old pref", "obs", 0.7)
+    tracker.add_inference("old pref", "obs", 0.7)
     # Manually set last_updated to 30 days ago
     records = tracker.load()
     records[0].last_updated = (datetime.now(UTC) - timedelta(days=30)).isoformat()
@@ -227,9 +235,10 @@ def test_decayed_status_below_threshold(tmp_path):
 def test_decay_confirmed_skipped(tmp_path):
     """Confirmed inferences are not subject to decay (status != 'active')."""
     tracker = InferenceTracker(tmp_path / "inf.json")
-    tracker.add_inference("solid pref", "obs1", 0.7)
-    tracker.add_inference("solid pref", "obs2", 0.7)
-    tracker.add_inference("solid pref", "obs3", 0.7)  # Now confirmed
+    for i in range(3):
+        tracker.add_inference(
+            "solid pref", f"obs{i}", 0.7, source_evidence=[{"ref": f"m{i}", "revision": "v1"}]
+        )
 
     records = tracker.load()
     records[0].last_updated = (datetime.now(UTC) - timedelta(days=30)).isoformat()

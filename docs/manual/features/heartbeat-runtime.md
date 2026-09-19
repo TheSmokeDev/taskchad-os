@@ -2,7 +2,7 @@
 
 Status: active baseline, runtime contract corrected, blocker escalation live, ambient observations live
 Owner: scheduled cognition/runtime layers
-Last updated: 2026-06-12
+Last updated: 2026-09-06
 
 ## What It Does
 
@@ -70,6 +70,30 @@ runs through the Claude SDK lane.
 > Canonical doc: Lane-First Routing in `.claude/sections/01_architecture.md`
 > § Runtime And Auth Boundary — this page keeps only the heartbeat-specific
 > lane behavior above.
+
+## Harness Learning During Idle Capacity
+
+Since v1.8.0, the heartbeat command's existing post-run seam can drain useful
+[persona harness learning](persona-harness-learning.md) work after its ordinary
+heartbeat and cofounder duties. It calls the shared Python worker; no additional
+cron registration or heartbeat loop is required. Reflection and dream use the
+same service and queue lifecycle.
+
+The dispatcher checks foreground activity before starting profile children.
+The worker holds an installation-wide learner lease and checks foreground
+leases again between stages and evaluation checkpoints. Interactive work takes
+priority: queued learning waits or yields, retaining progress for a later wake.
+This is cooperative yielding, not a promise that an already running provider
+call is instantly cancelled. Queue wake failures are logged without failing
+the heartbeat's existing duties.
+
+With `heartbeat.py --test`, this harness seam returns before queue discovery,
+child spawning, writes, or learning model calls. The rest of heartbeat test mode
+keeps its existing behavior: it can read live integrations, call the heartbeat
+model, and write memory/state. Use isolated fixtures for a non-mutating proof.
+The [harness developer guide](persona-harness-learning-developer.md) covers the
+worker and lifecycle interfaces; the Learning tab exposes pending, deferred,
+and failed work.
 
 ## Blocker Escalation Into Working Memory
 

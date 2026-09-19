@@ -9,8 +9,8 @@ place that changes.
 
 from __future__ import annotations
 
+import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +84,14 @@ def render_runtime_request(
         }
 
     # Wire processor to model hint for battery selection
-    model_hint = _PROCESSOR_MODEL_HINTS.get(processor)
+    from runtime.selection import resolve_runtime_selection
+    import config
+
+    model_hint = (
+        _PROCESSOR_MODEL_HINTS.get(processor)
+        if resolve_runtime_selection().lane == "claude_native"
+        else None
+    )
 
     return RuntimeRequest(
         prompt=prompt,
@@ -93,9 +100,14 @@ def render_runtime_request(
         capability=TEXT_REASONING,
         model=model_hint,
         max_turns=1,
-        max_budget_usd=0.10,
         allowed_tools=[],
+        model_only=True,
+        disallowed_tools=["*"],
+        mcp_servers=[],
+        setting_sources=[],
+        max_budget_usd=config.CHAT_MAX_BUDGET_USD,
         system_prompt=system_prompt,
+        metadata={"cognitive_generated": True, "learning_role": "foreground_cognition"},
     )
 
 
@@ -122,11 +134,23 @@ def apply_runtime_result(
 
     # Append assistant response
     response_text = result.text.strip() if hasattr(result, "text") else str(result)
+    receipt = {
+        key: getattr(result, key, None)
+        for key in ("runtime_lane", "provider", "model", "session_id", "execution_time_ms")
+    }
+    receipt.update(
+        output_hash=hashlib.sha256(response_text.encode("utf-8")).hexdigest(),
+        success=bool(receipt.get("provider") and receipt.get("model")),
+    )
+    retained = [m for m in wm.memories if m.region == "persona_learning"]
+    if len(retained) == 1:
+        receipt["retained_context_hash"] = dict(retained[0].metadata).get("context_hash")
     wm = wm.with_memory(Memory(
         role="assistant",
         content=response_text,
         region="recent_conversation",
         source="cognition",
+        metadata=(("runtime_receipt", receipt),),
     ))
 
     # Extract structured value if JSON

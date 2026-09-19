@@ -15,13 +15,13 @@ provider). win32 + provider-agnostic.
      contract).
   4. The evidence-READ gate — open + verify + M4 SECURITY (traversal / absolute /
      oversized / missing all rejected + never read) (FAILS pre-fix: no module).
-  5. The additive amendment seam — PARITY off, REJECT on (FAILS pre-fix: no seam).
-  6. The scheduled LLM judge — INDEPENDENT prompt (circularity) + fail-open +
+  5. Automatic amendment admission plus explicitly reviewed evidence/static gates.
+  6. The scheduled LLM judge — INDEPENDENT prompt + typed infrastructure deferral +
      M5 OBJECT-tolerant parse (NOT _coerce_claim_list) (FAILS pre-fix: no module).
-  7. The orchestrator propose-belief — end-to-end fake-runtime, adopt vs reject,
-     B1 (ledger flips applied), B2 (extra prediction key), N1 (prediction wired).
+  7. The compatibility adapter — shared queue admission, scoped provenance,
+     duplicate coalescing, read-only dry runs, and no inline provider execution.
   8. propose (recall safe-first) writes a decision artifact via a fake replay.
-  9. The crux re-test (program acceptance — persist-only-if-earned -> audited act).
+  9. Explicit operator review preserves the existing physical application owner.
 """
 
 from __future__ import annotations
@@ -154,9 +154,7 @@ def test_belief_evolve_settings_env_flips_on_next_call(monkeypatch):
 
 def test_belief_evolve_settings_explicit_args_passthrough(monkeypatch):
     monkeypatch.setenv("EVOLVE_ENABLED", "false")  # ignored — explicit wins
-    s = config.get_belief_evolve_settings(
-        enabled=True, min_supporting_paths=2, min_correctness=0.9
-    )
+    s = config.get_belief_evolve_settings(enabled=True, min_supporting_paths=2, min_correctness=0.9)
     assert s.enabled is True
     assert s.min_supporting_paths == 2
     assert s.min_correctness == 0.9
@@ -181,16 +179,12 @@ def test_floor_no_unread_claim_passes_with_nonempty_evidence():
     cand = {"proposed_content": "I verified the doc: routing is lane-first by provider."}
     texts = {"daily/x.md": "the system routes by lane first then provider, verified doc"}
     summary = br.evaluate_belief_regression(cand, texts, corpus)
-    assert not any(
-        f.reason == "claims_read_but_evidence_empty_or_missing" for f in summary.failed
-    )
+    assert not any(f.reason == "claims_read_but_evidence_empty_or_missing" for f in summary.failed)
 
 
 def test_floor_no_unread_claim_not_applicable_when_no_read_asserted():
     corpus = [
-        br.BeliefRegressionEntry(
-            check_id="c", kind="no_unread_claim", description="", params={}
-        )
+        br.BeliefRegressionEntry(check_id="c", kind="no_unread_claim", description="", params={})
     ]
     cand = {"proposed_content": "The operator prefers concise replies."}  # no read verb
     summary = br.evaluate_belief_regression(cand, {}, corpus)
@@ -434,9 +428,7 @@ def test_gate_m4_absolute_system_path_rejected(tmp_path):
     """M4 — an absolute system path is non-supporting and never read."""
     s = config.get_belief_evolve_settings()
     abs_path = (
-        "C:\\Windows\\System32\\drivers\\etc\\hosts"
-        if sys.platform == "win32"
-        else "/etc/passwd"
+        "C:\\Windows\\System32\\drivers\\etc\\hosts" if sys.platform == "win32" else "/etc/passwd"
     )
     spy: list[str] = []
     reader = _dict_reader({"hosts": "x", "passwd": "x"}, spy=spy)
@@ -537,8 +529,8 @@ def _ledger(tmp_path) -> am.ProposalLedger:
     return am.ProposalLedger(tmp_path / "ledger.jsonl")
 
 
-def test_seam_off_is_parity(tmp_path):
-    """evidence_check=None (default) -> apply behaves byte-for-byte as pre-Act-4."""
+def test_seam_without_qualification_stays_pending(tmp_path):
+    """An ordinary automatic caller cannot publish a high-confidence belief."""
     led = _ledger(tmp_path)
     (tmp_path / "SELF.md").write_text("# SELF\n", encoding="utf-8")
     prop = am.AmendmentProposal(
@@ -550,11 +542,11 @@ def test_seam_off_is_parity(tmp_path):
     )
     led.append(prop)
     result = am.apply_amendment_if_allowed(prop, led, tmp_path, policy=am.AmendmentPolicy())
-    assert result.status == "applied"
-    assert result.policy_decision == "apply"
-    # the .bak rollback + the target mutation happened (parity)
-    assert "routing" in (tmp_path / "SELF.md").read_text(encoding="utf-8")
-    assert (tmp_path / "rollback").exists()
+    assert result.status == "pending"
+    assert result.policy_decision == "defer"
+    assert result.policy_reason == "automatic_evaluation_required"
+    assert (tmp_path / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"
+    assert not (tmp_path / "rollback").exists()
 
 
 def test_seam_on_reject_blocks_even_at_high_confidence(tmp_path):
@@ -570,9 +562,8 @@ def test_seam_on_reject_blocks_even_at_high_confidence(tmp_path):
         confidence_score=0.99,
     )
     led.append(prop)
-    policy = am.AmendmentPolicy(
-        evidence_check=lambda p, m: (False, "evidence_unsupported")
-    )
+    assert led.mark_reviewed(prop.id, status="approved", reviewer="test-operator")
+    policy = am.AmendmentPolicy(evidence_check=lambda p, m: (False, "evidence_unsupported"))
     result = am.apply_amendment_if_allowed(prop, led, tmp_path, policy=policy)
     assert result.status == "policy_rejected"
     assert result.policy_reason == "evidence_unsupported"
@@ -595,6 +586,7 @@ def test_seam_on_pass_falls_through_to_unchanged_gate(tmp_path):
         confidence_score=0.10,  # below the 0.75 gate
     )
     led.append(prop)
+    assert led.mark_reviewed(prop.id, status="approved", reviewer="test-operator")
     policy = am.AmendmentPolicy(evidence_check=lambda p, m: (True, "ok"))
     result = am.apply_amendment_if_allowed(prop, led, tmp_path, policy=policy)
     assert result.status == "policy_rejected"
@@ -647,33 +639,32 @@ def test_judge_unwraps_single_key_wrap():
     assert verdict["correctness"] == 0.9
 
 
-def test_judge_m5_list_result_does_not_silently_pass(capsys):
-    """M5 — a LIST result (the shape _coerce_claim_list would pass) -> {} ->
-    conservative not-supported + a VISIBLE parse-failure print."""
-    verdict = asyncio.run(
-        jd.judge_belief_candidate(
-            _candidate(),
-            {"daily/x.md": "lane first"},
-            cwd=Path.cwd(),
-            reasoning=_fake_reasoning([{"supported": True}]),  # a LIST
+def test_judge_m5_list_result_raises_output_error_without_semantic_rejection():
+    from personas.learning.errors import LearningOutputError
+
+    with pytest.raises(LearningOutputError):
+        asyncio.run(
+            jd.judge_belief_candidate(
+                _candidate(),
+                {"daily/x.md": "lane first"},
+                cwd=Path.cwd(),
+                reasoning=_fake_reasoning([{"supported": True}]),
+            )
         )
-    )
-    assert verdict["supported"] is False  # the list coercer would WRONGLY adopt
-    out = capsys.readouterr().out
-    assert "[evolve.judge] unparseable verdict" in out
 
 
-def test_judge_raising_reasoning_fails_open_visible(capsys):
+def test_judge_provider_outage_is_typed_deferral_not_negative_evidence(capsys):
+    from personas.learning.errors import LearningUnavailableError
+
     async def _boom(context, instruction, output_schema=None, cwd=None):
         raise RuntimeError("provider down")
 
-    verdict = asyncio.run(
-        jd.judge_belief_candidate(
-            _candidate(), {"daily/x.md": "lane first"}, cwd=Path.cwd(), reasoning=_boom
+    with pytest.raises(LearningUnavailableError, match="belief_judge_unavailable"):
+        asyncio.run(
+            jd.judge_belief_candidate(
+                _candidate(), {"daily/x.md": "lane first"}, cwd=Path.cwd(), reasoning=_boom
+            )
         )
-    )
-    assert verdict["supported"] is False
-    assert verdict["reason"] == "judge_failed"
     out = capsys.readouterr().out
     assert "[evolve.judge] judge failed" in out
 
@@ -740,532 +731,226 @@ def _supporting_memory(tmp_path) -> Path:
     return tmp_path
 
 
-def test_propose_belief_dryrun_writes_artifact_no_mutation(tmp_path, monkeypatch):
-    mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    before = (mem / "SELF.md").read_text(encoding="utf-8")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
+def _learning_service(tmp_path, mem):
+    from personas.learning.models import LearningTarget
+    from personas.learning.service import LearningService
+
+    return LearningService(
+        LearningTarget("demo", mem, tmp_path / "data", tmp_path / "state", tmp_path / "skills")
     )
+
+
+async def _no_inline_reasoning(*args, **kwargs):
+    raise AssertionError("Admission must never run the former support-only judge")
+
+
+def test_propose_belief_dryrun_is_read_only_pending(tmp_path, monkeypatch):
+    mem = _supporting_memory(tmp_path)
+    decisions = tmp_path / "decisions"
+    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", decisions)
+    service = _learning_service(tmp_path, mem)
+    before = (mem / "SELF.md").read_bytes()
     result = asyncio.run(
         el.propose_belief(
-            cand,
+            _candidate(),
             dry_run=True,
             memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.8, "evidence_fidelity": 0.8}
-            ),
+            service=service,
+            reasoning=_no_inline_reasoning,
         )
     )
-    assert result["adopt"] is True
-    assert (mem / "SELF.md").read_text(encoding="utf-8") == before  # dry-run: UNCHANGED
-    # the belief-decision artifact was written
-    decisions = list((tmp_path / "decisions").glob("decision-*.json"))
-    assert len(decisions) == 1
-    payload = json.loads(decisions[0].read_text(encoding="utf-8"))
-    assert payload["outcome"] == "adopt"
+    assert result["outcome"] == "pending"
+    assert result["reason"] == "shared_evaluation_required"
+    assert result["adopt"] is result["supported"] is False
+    assert result["attempts"] == 0
+    assert (mem / "SELF.md").read_bytes() == before
+    assert not service.target.data_dir.exists()
+    assert not decisions.exists()
 
 
-def test_propose_belief_apply_b1_ledger_flips_applied(tmp_path, monkeypatch):
-    """B1 — a candidate dict with NO id: the SINGLE ledger row is `applied` (not
-    `pending`), proving the proposal was constructed once and the same id reached
-    _update_record (a double-construct would leave the row pending)."""
+@pytest.mark.parametrize("path", ["daily/x.md", "daily/missing.md", "../../.env"])
+def test_propose_belief_paths_are_unverified_provenance_not_support(tmp_path, path):
     mem = _supporting_memory(tmp_path)
-    ledger_file = tmp_path / "ledger.jsonl"
-    monkeypatch.setattr(config, "AMENDMENT_LEDGER_FILE", ledger_file)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-    )
-    assert "id" not in cand  # Archon-/LLM-proposed candidate has no id
+    service = _learning_service(tmp_path, mem)
+    before = (mem / "SELF.md").read_bytes()
     result = asyncio.run(
         el.propose_belief(
-            cand,
+            _candidate(evidence_paths=[path]),
             dry_run=False,
             memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.8, "evidence_fidelity": 0.8}
-            ),
+            service=service,
+            reasoning=_no_inline_reasoning,
         )
     )
-    assert result["adopt"] is True
-    assert result["outcome"] == "adopt"
-    assert result["retryable"] is False  # a settled adopt is never retryable
-    led = am.ProposalLedger(ledger_file)
-    rows = led.read_all()
-    assert len(rows) == 1
-    assert rows[0].status == "applied"  # NOT pending — the B1 break would leave pending
-    # SELF.md gained the block
-    assert "lane first" in (mem / "SELF.md").read_text(encoding="utf-8").lower()
+    assert result["outcome"] == "pending"
+    assert result["reason"] == "missing_supporting_evidence"
+    assert result["candidate_id"] is None
+    assert result["adopt"] is result["evidence_ok"] is False
+    change = service.get_record(result["change_proposal_id"])
+    assert change["evidence_ids"] == []
+    assert change["source_manifest"] == [
+        {"ref": path, "kind": "legacy_citation", "unverified": True}
+    ]
+    assert service.store.all("experience") == []
+    assert service.store.all("evaluation") == []
+    assert service.store.all("activation") == []
+    assert (mem / "SELF.md").read_bytes() == before
 
 
-def test_propose_belief_apply_pending_is_retryable_error_not_reject(
-    tmp_path, monkeypatch
-):
-    """Finding 1 (code-review, #169) — a live apply that WRITES the target but
-    fails the final ledger flip (``AmendmentApplyResult.status ==
-    "apply_pending"``) must be reported as a retryable "error", never a
-    "reject" — the policy gate did NOT decline this belief, it physically
-    landed. Collapsing it into "reject" would be exactly the Rule-2 lie F4a
-    was written to fix, one hop downstream."""
+def test_propose_belief_original_evidence_routes_to_shared_candidate(tmp_path):
+    from personas.learning.queue import LearningQueue
+
     mem = _supporting_memory(tmp_path)
-    ledger_file = tmp_path / "ledger.jsonl"
-    monkeypatch.setattr(config, "AMENDMENT_LEDGER_FILE", ledger_file)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    monkeypatch.setattr(am.ProposalLedger, "_update_record", lambda self, pid, updates: False)
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-    )
+    service = _learning_service(tmp_path, mem)
+    experience = service.capture_experience("origin", "test", "Observed lane selection")
+    execution = service.record_execution(experience["id"], {"success": True}, attempt_key="one")
+    candidate = _candidate()
+    candidate["evidence_ids"] = [experience["id"], execution["id"]]
+    before = (mem / "SELF.md").read_bytes()
     result = asyncio.run(
         el.propose_belief(
-            cand,
+            candidate,
             dry_run=False,
             memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.8, "evidence_fidelity": 0.8}
-            ),
+            service=service,
+            reasoning=_no_inline_reasoning,
         )
     )
-    assert result["outcome"] == "error"  # NOT "reject" — content physically landed
-    assert result["outcome_reason"] == "applied_but_ledger_update_failed"
-    assert result["retryable"] is True  # self-heals on the next apply pass
-    # the target bytes ARE on disk despite the ledger flip failing
-    assert "lane first" in (mem / "SELF.md").read_text(encoding="utf-8").lower()
-    decisions = list((tmp_path / "decisions").glob("decision-*.json"))
-    payload = json.loads(decisions[0].read_text(encoding="utf-8"))
-    assert payload["outcome"] == "error"
-    assert payload["retryable"] is True
+    assert result["shared_queue"] is True and result["adopt"] is False
+    actual = service.get_record(result["candidate_id"])
+    assert set(actual["evidence_ids"]) == {experience["id"], execution["id"]}
+    assert any(
+        job["payload"].get("candidate_id") == actual["id"] for job in LearningQueue(service).list()
+    )
+    assert not service.store.all("evaluation")
+    assert not service.store.all("activation")
+    assert (mem / "SELF.md").read_bytes() == before
 
 
-def test_propose_belief_b2_extra_prediction_key_no_typeerror(tmp_path, monkeypatch):
-    """B2 — a candidate carrying an Archon `prediction` key does NOT raise
-    TypeError (the _coerce_dataclass field-filter drops it)."""
+def test_propose_belief_duplicate_uuid_windows_coalesce(tmp_path):
     mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-        prediction="the logs show lane-first provider routing",
-    )
-    # no TypeError raised
-    result = asyncio.run(
+    service = _learning_service(tmp_path, mem)
+    candidate = _candidate()
+    first = asyncio.run(
         el.propose_belief(
-            cand,
-            dry_run=True,
-            memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.8, "evidence_fidelity": 0.8}
-            ),
-        )
-    )
-    assert "adopt" in result
-
-
-def test_propose_belief_n1_prediction_recorded_in_artifact(tmp_path, monkeypatch):
-    """N1 — the candidate's prediction is RECORDED in the decision artifact."""
-    mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-        prediction="PREDICTION_SENTINEL routes by lane first provider",
-    )
-    asyncio.run(
-        el.propose_belief(
-            cand,
-            dry_run=True,
-            memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.8, "evidence_fidelity": 0.8}
-            ),
-        )
-    )
-    decisions = list((tmp_path / "decisions").glob("decision-*.json"))
-    payload = json.loads(decisions[0].read_text(encoding="utf-8"))
-    assert payload["candidate"]["prediction"] == "PREDICTION_SENTINEL routes by lane first provider"
-
-
-def test_propose_belief_n1_prediction_failure_blocks_adopt(tmp_path, monkeypatch):
-    """N1 — a prediction the cited evidence does NOT satisfy fails the floor ->
-    adopt=False even when the judge says supported."""
-    mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-        prediction="the logs show a Stripe checkout failure and refund",  # not in evidence
-    )
-    result = asyncio.run(
-        el.propose_belief(
-            cand,
-            dry_run=True,
-            memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.9, "evidence_fidelity": 0.9}
-            ),
-        )
-    )
-    assert result["adopt"] is False  # the floor (prediction) blocked it
-    assert result["evidence_reason"] == "belief_regression_floor"
-
-
-def test_propose_belief_missing_evidence_rejects(tmp_path, monkeypatch):
-    mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="I verified the doc: routing is lane-first.",
-        evidence_paths=["daily/does_not_exist.md"],
-        confidence_score=0.99,
-    )
-    result = asyncio.run(
-        el.propose_belief(
-            cand,
+            {**candidate, "id": "producer-one"},
             dry_run=False,
             memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.9, "evidence_fidelity": 0.9}
-            ),
+            service=service,
         )
     )
-    assert result["adopt"] is False  # the floor, regardless of the judge
-    assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"  # UNCHANGED
-
-
-def test_propose_belief_judge_says_no_rejects(tmp_path, monkeypatch):
-    mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-    )
-    result = asyncio.run(
+    second = asyncio.run(
         el.propose_belief(
-            cand,
+            {**candidate, "id": "producer-two"},
             dry_run=False,
             memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": False, "correctness": 0.2, "evidence_fidelity": 0.1, "reason": "no"}
-            ),
+            service=service,
         )
     )
-    assert result["adopt"] is False  # evidence read OK, judge said no
-    assert result["outcome"] == "reject"
-    assert result["retryable"] is False  # a real semantic reject is never retryable
-    assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"
+    assert first["change_proposal_id"] == second["change_proposal_id"]
+    assert len(service.store.all("change_proposal")) == 1
+    assert service.store.all("experience") == []
 
 
-def test_propose_belief_judge_outage_is_retryable_error(tmp_path, monkeypatch):
-    """Finding 2 (#169) — a judge INFRA failure (provider raises) must be
-    outcome="error" + retryable=True, NOT a terminal "reject" indistinguishable
-    from a real evidence-does-not-support-claim verdict."""
+def test_propose_belief_rejects_cross_profile_target_before_admission(tmp_path):
+    from personas.learning.models import LearningError
+
     mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-    )
-
-    async def _boom(context, instruction, output_schema=None, cwd=None):
-        raise RuntimeError("provider down")
-
-    result = asyncio.run(
-        el.propose_belief(cand, dry_run=False, memory_dir=mem, reasoning=_boom)
-    )
-    assert result["adopt"] is False
-    assert result["outcome"] == "error"
-    assert result["outcome_reason"] == "judge_failed"
-    assert result["retryable"] is True
-    decisions = list((tmp_path / "decisions").glob("decision-*.json"))
-    payload = json.loads(decisions[0].read_text(encoding="utf-8"))
-    assert payload["outcome"] == "error"
-    assert payload["retryable"] is True
-    assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"  # UNCHANGED
-
-
-def test_propose_belief_semantic_reason_matching_judge_failed_string_is_retryable(
-    tmp_path, monkeypatch
-):
-    """Test-coverage Finding 2 (#169) — documents a KNOWN GAP: a REAL
-    (non-exception) judge verdict whose LLM-authored ``reason`` happens to
-    equal the literal ``"judge_failed"`` sentinel is indistinguishable, at
-    ``evolve_loop.py``'s bare string-equality gate, from the except-Exception
-    infra-outage sentinel judge.py:176 exclusively produces today. The gate has
-    no structural (typed/boolean) signal to tell the two apart, since judge.py
-    is out of scope for this PR (read-only reference) — see the code-review
-    Finding 3 / error-handling Finding 2 recommended follow-up (a dedicated
-    ``infra_failed`` boolean from judge.py) before tightening this assertion."""
-    mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-    )
-    result = asyncio.run(
-        el.propose_belief(
-            cand,
-            dry_run=False,
-            memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {
-                    "supported": False,
-                    "correctness": 0.1,
-                    "evidence_fidelity": 0.1,
-                    "reason": "judge_failed",  # coincidental/LLM-echoed, NOT an exception
-                }
-            ),
+    service = _learning_service(tmp_path, mem)
+    foreign = tmp_path / "foreign-vault"
+    foreign.mkdir()
+    with pytest.raises(LearningError, match="belief_target_does_not_match_persona"):
+        asyncio.run(
+            el.propose_belief(
+                _candidate(),
+                dry_run=False,
+                memory_dir=foreign,
+                service=service,
+            )
         )
-    )
-    # KNOWN GAP: a genuine semantic reject is misclassified as retryable when its
-    # LLM-authored reason string collides with the exception-path sentinel.
-    assert result["outcome"] == "error"
-    assert result["retryable"] is True
-    assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"  # UNCHANGED
+    assert not service.target.data_dir.exists()
 
 
-def test_propose_belief_disabled_kill_switch(tmp_path, monkeypatch):
+def test_propose_belief_unavailable_admission_is_typed_and_retryable(tmp_path, monkeypatch):
+    from personas.learning import authority
+    from personas.learning.errors import LearningUnavailableError
+
+    mem = _supporting_memory(tmp_path)
+    service = _learning_service(tmp_path, mem)
+    before = (mem / "SELF.md").read_bytes()
+
+    def unavailable(*args, **kwargs):
+        raise OSError("temporary storage unavailable")
+
+    monkeypatch.setattr(authority, "submit_proposal", unavailable)
+    with pytest.raises(LearningUnavailableError, match="belief_admission_unavailable"):
+        asyncio.run(
+            el.propose_belief(
+                _candidate(),
+                dry_run=False,
+                memory_dir=mem,
+                service=service,
+            )
+        )
+    assert not service.store.all("change_proposal")
+    assert (mem / "SELF.md").read_bytes() == before
+
+
+def test_propose_belief_disabled_stays_read_only(tmp_path, monkeypatch):
     monkeypatch.setenv("EVOLVE_ENABLED", "false")
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
     mem = _supporting_memory(tmp_path)
-    cand = _candidate(evidence_paths=["daily/x.md"])
-    result = asyncio.run(el.propose_belief(cand, dry_run=False, memory_dir=mem))
-    assert result["adopt"] is False
-    assert result["evidence_reason"] == "evolve_disabled"
-    # no artifact written, no mutation
-    assert not (tmp_path / "decisions").exists()
-    assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"
-
-
-# ===========================================================================
-# Post-build fixes — F1 (malformed -> reject, no crash), F2 (artifact reflects
-# REALITY not a prediction; apply exception contained), F3 (.env confinement)
-# ===========================================================================
-
-
-def test_f1_malformed_candidate_missing_evidence_paths_rejects_no_crash(
-    tmp_path, monkeypatch, capsys
-):
-    """F1 — a candidate with NO ``evidence_paths`` (-> ``_coerce_dataclass``
-    returns ``None`` -> ``_proposal_from`` raises ``ValueError``) must NOT crash:
-    it writes a reject artifact (``outcome="reject"``, ``malformed_candidate``),
-    prints a distinct line, returns the conservative reject dict, mutates NOTHING.
-
-    Pre-fix: ``propose_belief`` raised the unhandled ``ValueError`` (PROBE5/PROBE9)
-    -> the Archon bash node dies on a raw traceback.
-    """
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    (tmp_path / "SELF.md").write_text("# SELF\n", encoding="utf-8")
-    # a candidate MISSING the required evidence_paths field
-    malformed = {
-        "source": "reflection",
-        "target_file": "SELF.md",
-        "summary": "no evidence_paths key at all",
-        "proposed_content": "An asserted belief with a missing required field.",
-        "confidence_score": 0.9,
-    }
-    assert "evidence_paths" not in malformed
-
-    # must NOT raise (a reasoning that would raise proves the judge is never reached)
-    async def _must_not_call(*a, **k):
-        raise AssertionError("judge must not run on a malformed candidate")
-
+    service = _learning_service(tmp_path, mem)
     result = asyncio.run(
         el.propose_belief(
-            malformed, dry_run=False, memory_dir=tmp_path, reasoning=_must_not_call
-        )
-    )
-    assert result["adopt"] is False
-    assert result["evidence_reason"] == "malformed_candidate"
-    # a reject artifact was written (NOT a crash)
-    decisions = list((tmp_path / "decisions").glob("decision-*.json"))
-    assert len(decisions) == 1
-    payload = json.loads(decisions[0].read_text(encoding="utf-8"))
-    assert payload["outcome"] == "reject"
-    assert payload["outcome_reason"] == "malformed_candidate"
-    assert payload["retryable"] is False  # F2 (#169) — malformed is terminal, never retryable
-    # SELF.md untouched
-    assert (tmp_path / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"
-    # a distinct visible print
-    out = capsys.readouterr().out
-    assert "malformed candidate" in out
-
-
-def test_f2_low_confidence_gate_reject_artifact_says_reject_not_adopt(
-    tmp_path, monkeypatch
-):
-    """F2 — a confidence=0.5 belief: the loop's prediction says adopt (the gate +
-    judge pass), but the UNCHANGED apply policy gate REJECTS on ``low_confidence``.
-    The artifact MUST say ``outcome="reject"`` with the real ``low_confidence``
-    reason, and SELF.md MUST be unchanged.
-
-    Pre-fix: the artifact was written from the pre-gate prediction -> ``"adopt"``
-    while the ledger said ``policy_rejected`` and SELF.md was unchanged (PROBE6) —
-    a LYING artifact.
-    """
-    mem = _supporting_memory(tmp_path)
-    ledger_file = tmp_path / "ledger.jsonl"
-    monkeypatch.setattr(config, "AMENDMENT_LEDGER_FILE", ledger_file)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    before = (mem / "SELF.md").read_text(encoding="utf-8")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-        confidence_score=0.5,  # passes the gate (no confidence check) but < 0.75 policy
-    )
-    result = asyncio.run(
-        el.propose_belief(
-            cand,
+            _candidate(),
             dry_run=False,
             memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.9, "evidence_fidelity": 0.9}
-            ),
+            service=service,
+            reasoning=_no_inline_reasoning,
         )
     )
-    # the REAL outcome is reject — the artifact does NOT lie
-    assert result["adopt"] is False
+    assert result["outcome"] == "disabled" and result["adopt"] is False
+    assert not service.target.data_dir.exists()
+
+
+@pytest.mark.parametrize("missing", ["evidence_paths", "proposed_content", "summary"])
+def test_propose_belief_missing_required_field_rejects_without_state(tmp_path, missing):
+    mem = _supporting_memory(tmp_path)
+    service = _learning_service(tmp_path, mem)
+    candidate = _candidate()
+    candidate.pop(missing)
+    result = asyncio.run(
+        el.propose_belief(
+            candidate,
+            dry_run=False,
+            memory_dir=mem,
+            service=service,
+            reasoning=_no_inline_reasoning,
+        )
+    )
     assert result["outcome"] == "reject"
-    assert result["outcome_reason"] == "low_confidence"
-    decisions = list((tmp_path / "decisions").glob("decision-*.json"))
-    assert len(decisions) == 1
-    payload = json.loads(decisions[0].read_text(encoding="utf-8"))
-    assert payload["outcome"] == "reject"  # NOT "adopt"
-    assert payload["outcome_reason"] == "low_confidence"
-    # SELF.md unchanged; the ledger row is policy_rejected (the apply DID run)
-    assert (mem / "SELF.md").read_text(encoding="utf-8") == before
-    rows = am.ProposalLedger(ledger_file).read_all()
-    assert rows[0].status == "policy_rejected"
+    assert result["reason"] == "malformed_candidate"
+    assert not service.target.data_dir.exists()
 
 
-def test_f2_oversized_content_gate_reject_artifact_says_reject(tmp_path, monkeypatch):
-    """F2 — a realistic rich belief > 1200 chars: prediction adopts, the UNCHANGED
-    gate rejects on ``content_too_large``, the artifact says ``reject`` (PROBE7)."""
+@pytest.mark.parametrize("prediction", [None, "Future replies will use the correct lane."])
+def test_propose_belief_extra_prediction_never_bypasses_shared_evaluation(tmp_path, prediction):
     mem = _supporting_memory(tmp_path)
-    ledger_file = tmp_path / "ledger.jsonl"
-    monkeypatch.setattr(config, "AMENDMENT_LEDGER_FILE", ledger_file)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    # a long belief whose vocabulary overlaps the evidence (so the floor/judge pass)
-    long_belief = (
-        "The Homie routes tasks by lane first then provider, observed across "
-        "sessions. " * 40
-    )
-    assert len(long_belief) > 1200
-    cand = _candidate(
-        proposed_content=long_belief,
-        evidence_paths=["daily/x.md"],
-        confidence_score=0.9,
-    )
+    service = _learning_service(tmp_path, mem)
     result = asyncio.run(
         el.propose_belief(
-            cand,
+            _candidate(prediction=prediction),
             dry_run=False,
             memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.9, "evidence_fidelity": 0.9}
-            ),
+            service=service,
+            reasoning=_no_inline_reasoning,
         )
     )
-    assert result["adopt"] is False
-    assert result["outcome"] == "reject"
-    assert result["outcome_reason"] == "content_too_large"
-    payload = json.loads(
-        next((tmp_path / "decisions").glob("decision-*.json")).read_text(encoding="utf-8")
-    )
-    assert payload["outcome"] == "reject"
-    assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"
+    assert result["outcome"] == "pending" and result["adopt"] is False
+    assert not service.store.all("evaluation")
 
 
-def test_f2_apply_exception_contained_artifact_says_error(tmp_path, monkeypatch):
-    """F2 — an apply-time exception (SELF.md unwritable / locked on win32) must NOT
-    crash the loop and must NOT leave a lying ``adopt`` artifact: the loop catches
-    it, the artifact says ``outcome="error"`` with the repr, SELF.md is untouched.
-
-    Pre-fix: ``apply_amendment_if_allowed`` at :250 had no try/except -> the loop
-    CRASHED with an unhandled exception AND the artifact was already persisted as
-    ``"adopt"`` (PROBE8).
-    """
-    mem = _supporting_memory(tmp_path)
-    ledger_file = tmp_path / "ledger.jsonl"
-    monkeypatch.setattr(config, "AMENDMENT_LEDGER_FILE", ledger_file)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-
-    def _boom_apply(*a, **k):
-        raise OSError("SELF.md is locked (simulated win32 apply failure)")
-
-    # the loop imports apply_amendment_if_allowed from cognition.amendments at call
-    # time -> patching the module attribute is seen
-    monkeypatch.setattr(am, "apply_amendment_if_allowed", _boom_apply)
-
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-        confidence_score=0.9,
-    )
-    # must NOT raise
-    result = asyncio.run(
-        el.propose_belief(
-            cand,
-            dry_run=False,
-            memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.9, "evidence_fidelity": 0.9}
-            ),
-        )
-    )
-    assert result["adopt"] is False  # NOT a lying True
-    assert result["outcome"] == "error"
-    assert "locked" in result["outcome_reason"]
-    payload = json.loads(
-        next((tmp_path / "decisions").glob("decision-*.json")).read_text(encoding="utf-8")
-    )
-    assert payload["outcome"] == "error"  # NOT "adopt"
-    # no partial write — SELF.md untouched
-    assert (mem / "SELF.md").read_text(encoding="utf-8") == "# SELF\n"
-
-
-def test_f2_happy_path_artifact_adopt_matches_applied_ledger_row(tmp_path, monkeypatch):
-    """F2 — the happy path STILL adopts: a clean, in-policy belief -> the artifact
-    says ``outcome="adopt"`` AND the ledger row is ``applied`` AND SELF.md changed.
-    The artifact's ``adopt`` now means the belief ACTUALLY landed (apply-reconciled),
-    not merely that the prediction was favourable."""
-    mem = _supporting_memory(tmp_path)
-    ledger_file = tmp_path / "ledger.jsonl"
-    monkeypatch.setattr(config, "AMENDMENT_LEDGER_FILE", ledger_file)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-        confidence_score=0.9,
-    )
-    result = asyncio.run(
-        el.propose_belief(
-            cand,
-            dry_run=False,
-            memory_dir=mem,
-            reasoning=_fake_reasoning(
-                {"supported": True, "correctness": 0.8, "evidence_fidelity": 0.8}
-            ),
-        )
-    )
-    assert result["adopt"] is True
-    assert result["outcome"] == "adopt"
-    payload = json.loads(
-        next((tmp_path / "decisions").glob("decision-*.json")).read_text(encoding="utf-8")
-    )
-    assert payload["outcome"] == "adopt"
-    # the artifact's adopt MATCHES the real applied ledger row + SELF.md change
-    rows = am.ProposalLedger(ledger_file).read_all()
-    assert len(rows) == 1
-    assert rows[0].status == "applied"
-    assert rows[0].id == payload["proposal_id"]  # artifact + ledger share the id (B1)
-    assert "lane first" in (mem / "SELF.md").read_text(encoding="utf-8").lower()
-
-
-def test_f3_env_outside_vault_rejected_never_read_never_in_judge_feed(
-    tmp_path, monkeypatch
-):
+def test_f3_env_outside_vault_rejected_never_read_never_in_judge_feed(tmp_path, monkeypatch):
     """F3 — a candidate citing ``.claude/scripts/.env`` (a repo path OUTSIDE the
     vault ``memory_dir``) is REJECTED at confinement, the secret file is NEVER
     read, and its bytes NEVER reach the judge feed.
@@ -1380,76 +1065,31 @@ def test_propose_recall_writes_artifact_no_identity_mutation(tmp_path, monkeypat
 # ===========================================================================
 
 
-def test_crux_persist_only_if_earned(tmp_path, monkeypatch):
-    """The adoption ANCHOR — the single test the whole program exists to pass.
-
-    FORM (Act 1) + HOLD (Act 2) are supplied as FIXTURES (a reflection-source
-    candidate + an Act-2 contradicted_by note in the corpus context) — those acts
-    own forming/disconfirming. This proves the PERSIST-only-if-EARNED leg LIVE:
-      - candidate #1 (evidence SUPPORTS it + beats the floor + judge says yes) ->
-        APPLIED (SELF.md gains it, ledger audited).
-      - candidate #2 (cites an empty/missing file, the no_unread_claim floor) ->
-        REJECTED (policy_rejected, belief_regression_floor), SELF.md UNCHANGED,
-        EVEN at confidence_score=0.99.
-    """
-    mem = tmp_path / "vault"
-    mem.mkdir()
-    (mem / "daily").mkdir()
-    # the REAL non-empty evidence file for candidate #1 (FORM: a reflection belief
-    # synthesized from the system's own episodes)
-    (mem / "daily" / "episode.md").write_text(
-        "the system routes tasks by lane first then provider, observed across sessions",
-        encoding="utf-8",
-    )
-    (mem / "SELF.md").write_text("# SELF\n", encoding="utf-8")
-    ledger_file = tmp_path / "ledger.jsonl"
-    monkeypatch.setattr(config, "AMENDMENT_LEDGER_FILE", ledger_file)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-
-    # candidate #1 — operator-NOT-given (reflection source), HOLD: carries an
-    # Act-2 contradicted_by note (fixture) — Act 2's holding does not block Act 4.
-    earned = _candidate(
+def test_manual_review_keeps_existing_evidence_and_static_gates(tmp_path):
+    mem = _supporting_memory(tmp_path)
+    ledger = _ledger(tmp_path)
+    proposal = am.AmendmentProposal(
+        source="reflection",
+        target_file="SELF.md",
         proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/episode.md"],
-        confidence_score=0.85,
-        source="reflection",
+        evidence_paths=["daily/x.md"],
+        confidence_score=0.9,
     )
-    earned["contradicted_by"] = ["other-id:held-under-tension"]  # Act-2 state fixture
-
-    # candidate #2 — asserted-but-unsupported: claims a read, cites an empty file,
-    # at MAX confidence
-    (mem / "daily" / "empty.md").write_text("", encoding="utf-8")
-    asserted = _candidate(
-        proposed_content="I verified the doc and it proves lane-first routing.",
-        evidence_paths=["daily/empty.md"],
-        confidence_score=0.99,
-        source="reflection",
+    ledger.append(proposal)
+    pending = am.apply_amendment_if_allowed(proposal, ledger, mem)
+    assert pending.status == "pending"
+    assert pending.policy_reason == "automatic_evaluation_required"
+    assert ledger.mark_reviewed(proposal.id, status="approved", reviewer="test-operator")
+    policy = am.AmendmentPolicy(
+        evidence_check=lambda item, root: eg.verify_evidence_support(
+            item, root, settings=config.get_belief_evolve_settings(), corpus=_seed_corpus()
+        )
     )
-
-    judge_yes = _fake_reasoning(
-        {"supported": True, "correctness": 0.85, "evidence_fidelity": 0.8}
-    )
-
-    r1 = asyncio.run(
-        el.propose_belief(earned, dry_run=False, memory_dir=mem, reasoning=judge_yes)
-    )
-    r2 = asyncio.run(
-        el.propose_belief(asserted, dry_run=False, memory_dir=mem, reasoning=judge_yes)
-    )
-
-    # #1 EARNED -> applied, SELF.md gained it, ledger audited
-    assert r1["adopt"] is True
-    led = am.ProposalLedger(ledger_file)
-    applied = [r for r in led.read_all() if r.status == "applied"]
-    assert len(applied) == 1
-    self_text = (mem / "SELF.md").read_text(encoding="utf-8")
-    assert "lane first" in self_text.lower()
-
-    # #2 asserted-but-unsupported -> rejected by the floor, SELF.md has ONLY #1
-    assert r2["adopt"] is False
-    assert r2["evidence_reason"] == "belief_regression_floor"
-    # the asserted candidate's content never reached SELF.md
-    assert "i verified the doc" not in self_text.lower()
+    applied = am.apply_amendment_if_allowed(proposal, ledger, mem, policy=policy)
+    assert applied.status == "applied"
+    assert "lane first" in (mem / "SELF.md").read_text(encoding="utf-8")
+    assert ledger.read_all()[0].status == "applied"
+    assert (mem / "rollback").exists()
 
 
 # ===========================================================================
@@ -1485,101 +1125,39 @@ def test_belief_evolve_settings_new_knobs_env_override(monkeypatch):
     assert s.candidate_min_confidence == 0.9
 
 
-def test_propose_belief_attempts_below_cap_stays_retryable(tmp_path, monkeypatch):
-    """A judge-infra failure with attempts=0 (next=1 < 3) stays retryable, and the
-    artifact records attempts=1, max_attempts=3."""
+@pytest.mark.parametrize("attempts", [0, 2, 100])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_compatibility_admission_never_exhausts_provider_retry_budget(tmp_path, attempts, dry_run):
     mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-    )
-
-    async def _boom(context, instruction, output_schema=None, cwd=None):
-        raise RuntimeError("provider down")
-
+    service = _learning_service(tmp_path, mem)
     result = asyncio.run(
-        el.propose_belief(cand, dry_run=False, memory_dir=mem, reasoning=_boom, attempts=0)
+        el.propose_belief(
+            _candidate(),
+            dry_run=dry_run,
+            memory_dir=mem,
+            service=service,
+            reasoning=_no_inline_reasoning,
+            attempts=attempts,
+        )
     )
-    assert result["outcome"] == "error"
-    assert result["retryable"] is True
-    assert result["attempts"] == 1
-    assert result["max_attempts"] == 3
-    payload = json.loads(
-        next((tmp_path / "decisions").glob("decision-*.json")).read_text(encoding="utf-8")
-    )
-    assert payload["attempts"] == 1
-    assert payload["max_attempts"] == 3
-    assert payload["retryable"] is True
-
-
-def test_propose_belief_attempts_at_cap_goes_terminal(tmp_path, monkeypatch):
-    """Same judge-infra failure with attempts=2 (next=3 >= 3) goes TERMINAL:
-    retryable=False, outcome_reason='retry_budget_exhausted', artifact reflects both."""
-    mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-    )
-
-    async def _boom(context, instruction, output_schema=None, cwd=None):
-        raise RuntimeError("provider down")
-
-    result = asyncio.run(
-        el.propose_belief(cand, dry_run=False, memory_dir=mem, reasoning=_boom, attempts=2)
-    )
-    assert result["outcome"] == "error"  # still an error outcome...
-    assert result["retryable"] is False  # ...but no longer re-pickable
-    assert result["outcome_reason"] == "retry_budget_exhausted"
-    assert result["attempts"] == 3
-    payload = json.loads(
-        next((tmp_path / "decisions").glob("decision-*.json")).read_text(encoding="utf-8")
-    )
-    assert payload["retryable"] is False
-    assert payload["outcome_reason"] == "retry_budget_exhausted"
-    assert payload["attempts"] == 3
-    assert payload["max_attempts"] == 3
-
-
-def test_propose_belief_dryrun_at_cap_does_not_burn_budget(tmp_path, monkeypatch):
-    """Kimi gate MAJOR on PR #181: a dry-run (--test) at attempts=2 (one below
-    the cap) must NOT increment to 3 and go terminal — the documented safe probe
-    can never push a queued candidate to retry_budget_exhausted. Contrast with
-    test_propose_belief_attempts_at_cap_goes_terminal (dry_run=False -> terminal)."""
-    mem = _supporting_memory(tmp_path)
-    monkeypatch.setattr(config, "BELIEF_EVOLVE_DECISION_DIR", tmp_path / "decisions")
-    cand = _candidate(
-        proposed_content="The Homie routes tasks by lane first then provider.",
-        evidence_paths=["daily/x.md"],
-    )
-
-    async def _boom(context, instruction, output_schema=None, cwd=None):
-        raise RuntimeError("provider down")
-
-    result = asyncio.run(
-        el.propose_belief(cand, dry_run=True, memory_dir=mem, reasoning=_boom, attempts=2)
-    )
-    # attempts UNCHANGED (2, not 3) and still retryable — no budget burned.
-    assert result["attempts"] == 2
-    assert result["retryable"] is True
-    assert result["outcome_reason"] != "retry_budget_exhausted"
-    payload = json.loads(
-        next((tmp_path / "decisions").glob("decision-*.json")).read_text(encoding="utf-8")
-    )
-    assert payload["attempts"] == 2
-    assert payload["retryable"] is True
+    assert result["outcome"] == "pending" and result["retryable"] is True
+    assert result["attempts"] == attempts
+    assert result["adopt"] is False
+    assert not service.store.all("execution")
+    assert not service.store.all("evaluation")
 
 
 def test_extract_belief_candidates_filters_by_kind():
-    belief_block = json.dumps({
-        "kind": "belief_candidate",
-        "target_file": "SELF.md",
-        "summary": "lane-first",
-        "evidence_paths": ["daily/x.md"],
-        "proposed_content": "y",
-        "confidence_score": 0.8,
-    })
+    belief_block = json.dumps(
+        {
+            "kind": "belief_candidate",
+            "target_file": "SELF.md",
+            "summary": "lane-first",
+            "evidence_paths": ["daily/x.md"],
+            "proposed_content": "y",
+            "confidence_score": 0.8,
+        }
+    )
     text = (
         "Some consolidation prose.\n"
         '{"target_file": "MEMORY.md", "summary": "a routine amendment", "proposed_content": "x"}\n'

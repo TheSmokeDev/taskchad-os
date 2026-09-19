@@ -724,6 +724,7 @@ async def test_diagnostics_cache_populates_off_the_request_path(monkeypatch) -> 
         memory_embedding_status = "ready"
         cognition_available = True
         sessions_active = 4
+        learning_dispatcher = {"state": "idle", "tick_count": 3}
 
     fake_mod = type("M", (), {"collect_diagnostics": staticmethod(lambda: FakeReport())})
     monkeypatch.setitem(sys.modules, "diagnostics", fake_mod)
@@ -737,6 +738,7 @@ async def test_diagnostics_cache_populates_off_the_request_path(monkeypatch) -> 
         "memory_embedding_status": "ready",
         "cognition_available": True,
         "sessions_active": 4,
+        "learning_dispatcher": {"state": "idle", "tick_count": 3},
     }
     assert cache.age_seconds() is not None
 
@@ -753,6 +755,7 @@ async def test_diagnostics_refresh_failure_keeps_the_previous_snapshot(monkeypat
         memory_embedding_status = "ready"
         cognition_available = True
         sessions_active = 1
+        learning_dispatcher = {"state": "working", "tick_count": 4}
 
     calls = {"n": 0}
 
@@ -772,3 +775,58 @@ async def test_diagnostics_refresh_failure_keeps_the_previous_snapshot(monkeypat
 
     assert cache.snapshot() == first
     assert first is not None
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_physical_state_reaches_cached_health_response(tmp_path, monkeypatch):
+    """Exercise the omitted projection between dispatcher DB and HTTP JSON."""
+    import json
+    import time
+
+    import diagnostics
+    from health import HealthServer, HealthStatus
+
+    from personas.learning import dispatcher
+    from runtime import activity
+
+    path = tmp_path / "activity.db"
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_ACTIVITY_DB", str(path))
+    lease = activity.acquire_lease(
+        "learning_dispatcher", owner="health-test", exclusive=True, path=path, ttl_seconds=90
+    )
+    assert lease
+
+    def collect():
+        report = diagnostics.DiagnosticsReport(timestamp="test", uptime_seconds=1)
+        diagnostics._check_learning_dispatcher(report)
+        return report
+
+    monkeypatch.setattr(diagnostics, "collect_diagnostics", collect)
+    cache = DiagnosticsCache()
+
+    def health_status():
+        return HealthStatus(
+            status="ok", uptime_seconds=1, adapters={}, sessions_active=0,
+            cognition_available=True, timestamp="test",
+            learning_dispatcher=cache.snapshot()["learning_dispatcher"],
+            diagnostics_age_seconds=cache.age_seconds(),
+        )
+
+    server = HealthServer(0, health_status)
+    for state in (
+        {"state": "working", "tick_count": 42, "consecutive_failures": 0},
+        {"state": "degraded", "tick_count": 43, "consecutive_failures": 3,
+         "error_type": "RuntimeConfigError"},
+    ):
+        physical = {**state, "updated_at": time.time(), "interval_seconds": 60}
+        dispatcher._write_status(physical, path, lease)
+        await cache.refresh_once()
+        # Once refreshed, serving /health must not read even the dispatcher DB.
+        with monkeypatch.context() as request_patch:
+            def no_probe():
+                raise AssertionError("Health request must use the diagnostic cache")
+            request_patch.setattr(dispatcher, "dispatcher_status", no_probe)
+            response = await server._handle_health(None)
+        payload = json.loads(response.body)
+        assert payload["learning_dispatcher"] == physical
+        assert payload["diagnostics_age_seconds"] is not None

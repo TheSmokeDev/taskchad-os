@@ -198,7 +198,7 @@ For phone testing, open the dashboard over the machine's Tailscale URL and
 include the Cabinet chat scope, for example:
 
 ```text
-http://<TAILSCALE_IP>:5173/voices?chatId=cabinet-browser
+http://<TAILSCALE_IP>:5473/voices?chatId=cabinet-browser
 ```
 
 ### Direct browser URL

@@ -13,6 +13,13 @@ experience/, ...). The persona learning loop, reflection, episode, and
 experience-note writers all write into that tree; the cabinet/persona turn
 context is built FROM it.
 
+> **Seeded is not loaded.** Only **seven** of those 15 identity files reach a
+> chat prompt; the rest are inert, so rules written into them have no effect.
+> Which files load, their region budgets, the ordering authority, and the rule
+> for what belongs in an identity file versus a per-turn prompt are documented
+> in [Persona Identity And Prompt Architecture](persona-identity-and-prompt.md).
+> Read it before authoring persona files.
+
 `experience/` joined the required inventory in #422 (2026-08-13) so a persona
 is BORN with the substrate its learning loop needs. Profiles created before
 that report `inventory_ok: false` until touched — inventory health is

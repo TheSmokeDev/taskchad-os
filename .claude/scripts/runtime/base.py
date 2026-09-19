@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,15 @@ from .capabilities import TEXT_REASONING
 
 RUNTIME_LANE_CLAUDE_NATIVE = "claude_native"
 RUNTIME_LANE_GENERIC = "generic_runtime"
+
+
+# The provider attempt follows copied async/thread context even when a cancelled
+# adapter leaves a host tool finishing after fallback has begun.
+_ATTEMPT_CONTEXT: ContextVar[dict | None] = ContextVar("runtime_attempt", default=None)
+
+
+def current_runtime_attempt() -> dict:
+    return dict(_ATTEMPT_CONTEXT.get() or {})
 
 
 @dataclass(slots=True)
@@ -50,12 +60,19 @@ class RuntimeRequest:
     mcp_servers: list[str] | None = None
     metadata: dict[str, Any] | None = None
     auth_profile: str | None = None
+    # Explicit per-request provider selection for paired learning evaluation.
+    # Credential selection remains auth_profile; ordinary callers keep ambient
+    # lane selection. A pinned request model belongs only to this provider.
+    preferred_provider: str | None = None
     # User-facing conversational turn (cabinet personas, chat replies). When True,
     # the CLI prompt builder uses an in-character preamble instead of the backstage
     # "safe text-only reasoning task" framing, so the homie never narrates the
     # runtime/lanes/tools to the user. Provider-agnostic (Codex + Gemini share the
     # builder); ignored on the claude_native lane, which has no such preamble.
     conversational: bool = False
+    # Scheduling only; never selects a lane or changes tool authority. Existing
+    # conversational callers count as foreground automatically.
+    workload: str = "auto"  # auto | foreground | background | learning
     # Homie Mobile M7 — per-message cockpit controls. `effort` maps to the SDK
     # options `effort` knob (low|medium|high|xhigh|max) on the claude_native lane;
     # generic lanes ignore it. `on_tool_event` is a fail-open callback the
@@ -66,8 +83,9 @@ class RuntimeRequest:
     on_tool_event: Any | None = None
     # Read-only multimodal work (for example `/watch` frame inspection).
     # Generic CLI adapters use these fields to attach images without granting
-    # write/shell authority; Claude keeps only its Read tool.  Additive defaults
-    # preserve every existing caller.
+    # write/shell authority; ordinary Claude read-only work keeps its Read tool.
+    # Strict model_only work requires an explicit image-carriage guarantee;
+    # Claude attaches validated bitmap bytes without granting a Read tool.
     image_paths: list[Path | str] = field(default_factory=list)
     read_only_tools: bool = False
     # Approved local-file application lane. Adapters must contain this more
@@ -105,6 +123,8 @@ class RuntimeRequest:
     tool_defs: list[dict[str, Any]] | None = None
     tool_dispatch: Callable[..., Any] | None = None
     tool_scope_version: str | None = None
+    # Host callback, excluded from prompt/metadata serialization.
+    attempt_observer: Callable[..., Any] | None = None
 
 
 def assert_model_only_contract(request: RuntimeRequest) -> None:
@@ -266,3 +286,5 @@ class RuntimeResult:
     tool_calls: list[RuntimeToolCall] = field(default_factory=list)
     usage: dict[str, int] | None = None
     execution_time_ms: int | None = None
+    # Adapter-owned receipts, never a claim inferred from requested inputs.
+    metadata: dict[str, Any] = field(default_factory=dict)

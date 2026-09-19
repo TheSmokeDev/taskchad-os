@@ -243,6 +243,36 @@ def get_personal_email(msg_id: str) -> PersonalEmail | None:
     return _get_email_details(session, msg_id, include_body=True)
 
 
+def observe_inbound_response(
+    *, thread_id: str, outbound_id: str, recipient_email: str, mailbox_id: str,
+    collected_at: str, deadline: str | None = None, session: Any = None,
+) -> dict[str, Any]:
+    """Observe actual inbound mail; unavailable access never means no reply."""
+    from urllib.parse import quote
+
+    from integrations.capabilities import require_integration_action
+    from personas.learning.observers import (
+        gmail_messages,
+        observe_mail_response,
+        unavailable_observation,
+    )
+
+    require_integration_action("personal_gmail", "read")
+    try:
+        client = session if session is not None else get_personal_gmail_session()
+        profile = _gmail_get(client, "profile")
+        if str(profile.get("emailAddress") or "").casefold() != mailbox_id.casefold():
+            return unavailable_observation("personal_gmail", "mailbox_identity_mismatch")
+        data = _gmail_get(client, f"threads/{quote(thread_id, safe='')}", format="full")
+        return observe_mail_response(
+            provider="personal_gmail", mailbox_id=mailbox_id, outbound_id=outbound_id,
+            recipient_email=recipient_email, messages=gmail_messages(data),
+            collected_at=collected_at, deadline=deadline,
+        )
+    except Exception as exc:
+        return unavailable_observation("personal_gmail", type(exc).__name__)
+
+
 def format_personal_emails_for_context(
     emails: list[PersonalEmail], max_chars: int = 2000
 ) -> str:

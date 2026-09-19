@@ -10,7 +10,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Boot-shim: must run BEFORE any framework imports
@@ -22,6 +22,9 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from business_signal.config import SIGNAL_STATE_FILE, get_signal_settings  # noqa: E402
+from business_signal.focus import default_focus  # noqa: E402
+from business_signal.models import SignalDigest  # noqa: E402
 from config import now_local  # noqa: E402
 from shared import (  # noqa: E402
     append_to_daily_log,
@@ -29,10 +32,6 @@ from shared import (  # noqa: E402
     load_state,
     save_state,
 )
-
-from business_signal.config import SIGNAL_STATE_FILE, get_signal_settings  # noqa: E402
-from business_signal.focus import default_focus  # noqa: E402
-from business_signal.models import SignalDigest  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -59,19 +58,25 @@ async def _run_pipeline(test_mode: bool, days: int) -> str:
 
     settings = get_signal_settings()
     focus = default_focus()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
 
     # Stage 1: Fetch
     print(f"[{now_local()}] Signal: fetching from all sources...")
     registry = default_registry()
     all_items, sources_checked, sources_failed = await registry.fetch_all()
     total_fetched = len(all_items)
-    print(f"[{now_local()}] Signal: {total_fetched} items from {sources_checked} sources ({sources_failed} failed)")
+    print(
+        f"[{now_local()}] Signal: {total_fetched} items from "
+        f"{sources_checked} sources ({sources_failed} failed)"
+    )
 
     # Stage 2: Triage
     triaged = triage_items(all_items, focus, threshold=settings.triage_threshold)
     triaged = triaged[: settings.max_items_per_run]
-    print(f"[{now_local()}] Signal: {len(triaged)} items passed triage (threshold={settings.triage_threshold})")
+    print(
+        f"[{now_local()}] Signal: {len(triaged)} items passed triage "
+        f"(threshold={settings.triage_threshold})"
+    )
 
     # SIGNAL_SILENT — zero LLM cost
     if not triaged:
@@ -100,7 +105,7 @@ async def _run_pipeline(test_mode: bool, days: int) -> str:
 
     # Stage 5: Synthesis (LLM)
     digest = SignalDigest(
-        date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        date=datetime.now(UTC).strftime("%Y-%m-%d"),
         items=triaged,
         sources_checked=sources_checked,
         sources_failed=sources_failed,
@@ -129,7 +134,10 @@ async def _run_pipeline(test_mode: bool, days: int) -> str:
             from business_signal.output import write_signal_output
             result = await write_signal_output(digest)
             drafts_count = len(result.get("drafts_created", []))
-            print(f"[{now_local()}] Signal: output written — digest={result.get('digest_path')}, drafts={drafts_count}")
+            print(
+                f"[{now_local()}] Signal: output written — "
+                f"digest={result.get('digest_path')}, drafts={drafts_count}"
+            )
         except Exception as exc:
             print(f"[{now_local()}] Signal: output failed: {exc}")
             _save_run_state(now_iso, "failed", len(triaged), 0)
@@ -174,8 +182,12 @@ def get_latest_status() -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Business signal engine — daily intelligence digest")
-    parser.add_argument("--test", action="store_true", help="Dry run (no file writes, no LLM calls)")
+    parser = argparse.ArgumentParser(
+        description="Business signal engine — daily intelligence digest"
+    )
+    parser.add_argument(
+        "--test", action="store_true", help="Dry run (no file writes, no LLM calls)"
+    )
     parser.add_argument("--days", type=int, default=7, help="Lookback days for dedup window")
     args = parser.parse_args()
 

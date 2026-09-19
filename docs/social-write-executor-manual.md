@@ -291,6 +291,59 @@ Hard rules (shared with BrowserOps, enforced here):
 
 ## 9. Platform Notes
 
+### Configured LinkedIn company publishers
+
+Company posts use the same queue, authenticated Telegram approval, and
+`linkedin.post.create` browser workflow as personal posts. `SocialWriteTask`
+adds optional `publisher_json`: the immutable versioned organization snapshot
+from the reviewed queue revision, never an approval token. The metadata
+allowlist carries that field explicitly. Legacy personal tasks omit it.
+
+The company driver accepts only the snapshot-derived numeric admin composer
+URL (`/company/<id>/admin/page-posts/published/?share=true`). There is no fallback
+to the personal feed or personal LinkedIn API. A fresh tab is resolved from the
+before/after tab inventory, pinned by its observed tab ID, and reselected with
+an active-tab and origin/path check before each browser command. Reselect only
+before a fresh snapshot: selecting even the same tab invalidates Agent Browser
+refs. Drift between snapshot and ref action stops the drive without clicking.
+
+Observed company UI on 2026-09-09 differs from the personal feed: its editor is
+in the light-DOM `[role="dialog"].share-box-v2__modal`, not `#interop-outlet`.
+The publisher header has no numeric company attribute; its control opens
+audience settings, not an actor picker. Publisher verification therefore uses
+a composite of independently checked visible DOM facts:
+
+- Exact numeric company admin URL and selected Page posts navigation URL.
+- Exact admin company heading and single composer actor name.
+- Composer actor logo matching the numerically identified admin company logo
+  (origin/path only; signed image query strings are never persisted).
+
+All checks must agree before image upload and again immediately before submit.
+The driver uploads the reviewed image first, then fills and verifies the full
+caption. `prepare_only=True` uses this identical path but never clicks Post.
+Missing image, wrong publisher, missing identity evidence, or altered caption
+blocks submission. Unknown DOM layouts fail closed rather than guessing.
+
+Company media Next uses an exact XPath scoped to that observed light-DOM modal
+and an enabled native `button` whose normalized text is exactly `Next`. A bounded
+25-second read-only readiness wait replaces trusting a fixed upload sleep. A fresh
+scoped snapshot and matching DOM count of one are required before the real
+Agent Browser CDP click. This bypasses mutable `eN` references: a cache reset or
+reassignment cannot turn Next into Post. XPath support is implemented by the
+installed [v0.33.2 native element resolver](https://github.com/vercel-labs/agent-browser/blob/v0.33.2/cli/src/native/element.rs).
+No failed click, timeout, upload, or public Post attempt is automatically retried.
+Personal LinkedIn keeps its existing media-ref path.
+
+After submission, a View post permalink alone is insufficient for company
+posts. Read the actual post container and verify its company author link,
+matching logo, complete caption, and attached media. Capture the screenshot
+and persist only proof flags, caption hashes, publisher ID, permalink, and
+submission time in the allowlisted receipt. A clicked submit with missing or
+ambiguous publisher/content proof remains `verification_required`, preserving
+the known permalink and preventing repeat dispatch. Never mark that state as a
+retryable failure merely because subsequent navigation, reads, or screenshots
+were inconclusive.
+
 LinkedIn (executor path): the drive opens the feed URL (defaulting to the
 LinkedIn feed when none is supplied), clicks "Start a post", fills the
 contenteditable composer textbox, and clicks "Post". For a connect it opens the

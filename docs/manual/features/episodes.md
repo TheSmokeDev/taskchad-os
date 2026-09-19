@@ -2,7 +2,7 @@
 
 Status: Shipped
 Owner: Framework (memory pipelines)
-Last updated: 2026-06-12
+Last updated: 2026-09-10
 
 ## What It Does
 
@@ -14,9 +14,10 @@ the EXISTING session-end flush; there is no new pipeline and no new LLM call.
 
 Episodes ship with two consumers in the same act:
 
-- **Dream cycle** — open episodes join the gather scan (they raise the
-  weighted signal score), feed a capped digest into the consolidate prompt,
-  and get flipped to `status: consolidated` after a successful review.
+- **Dream cycle** — episode revisions supply bounded ranges to the shared
+  synthesis queue. Successful retention records the exact consumed ranges;
+  omitted portions remain eligible. A whole episode is consolidated only when
+  the corresponding current revision has been fully consumed.
 - **Recall** — `episodes/` is part of the vault, so the unfiltered index
   rglob picks episodes up automatically. No recall code changed.
 
@@ -98,18 +99,21 @@ provider's output produces a valid episode.
 
 ```
 flush fires -> episode WRITTEN (status: open)
-        dream gather scans open episodes (date window, newest-first)
-        dream consolidate reviews the capped digest
-        -> mark_episodes_consolidated flips status + adds consolidated_at
+        dream admission freezes source revision and bounded character ranges
+        reasoning -> retention -> exact synthesis_consumed receipt
+        -> projection consolidates only fully consumed current revisions
 same-lifecycle re-flush -> ## Update appended, episode RE-OPENED
 ```
 
-"Consolidated" means "a successful dream Phase 3 reviewed it" — the flip
-happens after `consolidate()` returns regardless of whether the LLM proposed
-changes (reviewed-and-empty is still reviewed). A consolidate failure leaves
-episodes open for the retry run; a flip failure is warning-logged and the
-dream still reports success. Episodes are insert-only history — no archive
-or aging pass touches `episodes/`.
+"Consolidated" means the recorded current revision has been consumed completely.
+A successful no-change conclusion still consumes the exact reviewed input; it
+does not consume omitted material. Interrupted retention retries reuse completed
+reasoning. Failed projection stays pending instead of claiming physical success.
+Later episode edits create a new source revision and remain eligible. Inspect
+input, omitted, and consumed manifests through the persona Learning tab or
+`thehomie profile learning lifecycle <persona> --json`. Episodes remain history;
+no archive or aging pass touches `episodes/`. Confirm the running installation
+supports the unified contracts before relying on these receipts.
 
 ## Knobs (env vars, call-time resolved)
 

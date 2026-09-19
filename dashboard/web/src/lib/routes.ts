@@ -1,6 +1,6 @@
 import {
   LayoutGrid, ListTodo, Users, MessageSquare,
-  Brain, Network, Activity, ShieldCheck,
+  Brain, Network, Activity, Radar, ShieldCheck,
   Briefcase, Mic, AudioLines, Calendar,
   Kanban, Monitor, PlugZap, Settings as SettingsIcon,
   Smartphone, Share2, Ghost, Workflow,
@@ -36,6 +36,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/memories',      label: 'Memories',        section: 'intelligence', icon: Brain,         shortcut: 'g e' },
   { path: '/hive',          label: 'Knowledge Graph', section: 'intelligence', icon: Network,       shortcut: 'g h' },
   { path: '/usage',         label: 'Usage',           section: 'intelligence', icon: Activity,      shortcut: 'g u' },
+  { path: '/jarvis',        label: 'Jarvis',          section: 'intelligence', icon: Radar,         shortcut: 'g j' },
   { path: '/capabilities',  label: 'Capabilities',    section: 'intelligence', icon: PlugZap                      },
   { path: '/audit',         label: 'Audit',           section: 'intelligence', icon: ShieldCheck                   },
 

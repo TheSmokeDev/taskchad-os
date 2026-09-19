@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,8 @@ class McpServerEntry:
     transport: str
     config: dict[str, Any]
     source: str
+    configured: bool | None = None
+    callable: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -52,16 +56,234 @@ def discover_framework_registry(
     *,
     mcp_config_path: Path | str | None = None,
 ) -> FrameworkRegistry:
-    """Discover skills and MCP config without loading Claude-specific docs."""
+    """Discover skills and MCP config without loading Claude-specific docs.
+
+    Filesystem/config discovery is the BASELINE and always wins. Capability
+    plugins may add process-local rows on top of it (issue #531); a plugin row
+    whose name collides with a baseline row is dropped here rather than merged,
+    so a plugin can never redefine a skill or MCP server that physically exists
+    on disk. Registration refuses that collision up front — this merge-side
+    check is the second line, for a plugin row that was legal at load time and
+    then had a file appear underneath it.
+    """
 
     root = resolve_project_root(project_root)
     config_path = resolve_mcp_config_path(root, explicit=mcp_config_path)
+    skills = list(discover_skills(root))
+    mcp_servers = list(discover_mcp_servers(root, config_path=config_path))
+
+    baseline_skill_names = {entry.name for entry in skills}
+    skills.extend(
+        entry
+        for entry, _owner in _plugin_skill_rows()
+        if entry.name not in baseline_skill_names
+    )
+    baseline_mcp_names = {entry.name for entry in mcp_servers}
+    mcp_servers.extend(
+        entry
+        for entry, _owner in _plugin_mcp_rows()
+        if entry.name not in baseline_mcp_names
+    )
+
     return FrameworkRegistry(
         project_root=root,
-        skills=tuple(discover_skills(root)),
-        mcp_servers=tuple(discover_mcp_servers(root, config_path=config_path)),
+        skills=tuple(skills),
+        mcp_servers=tuple(mcp_servers),
         mcp_config_path=config_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# Capability-plugin discovery overlay (issue #531)
+# ---------------------------------------------------------------------------
+
+
+class FrameworkOverlayError(ValueError):
+    """Raised on a plugin skill/MCP row that would shadow or corrupt discovery."""
+
+
+_OVERLAY_LOCK = threading.RLock()
+# name -> (entry, plugin_id, plugin_version)
+_PLUGIN_SKILLS: dict[str, tuple[SkillEntry, str, str]] = {}
+_PLUGIN_MCP_SERVERS: dict[str, tuple[McpServerEntry, str, str]] = {}
+_OVERLAY_GENERATION: int = 0
+
+
+def get_overlay_generation() -> int:
+    """Current plugin-overlay generation. Bumps on every overlay mutation."""
+    return _OVERLAY_GENERATION
+
+
+def _plugin_skill_rows() -> tuple[tuple[SkillEntry, tuple[str, str]], ...]:
+    with _OVERLAY_LOCK:
+        rows = sorted(_PLUGIN_SKILLS.items())
+    return tuple((entry, (owner, version)) for _name, (entry, owner, version) in rows)
+
+
+def _plugin_mcp_rows() -> tuple[tuple[McpServerEntry, tuple[str, str]], ...]:
+    with _OVERLAY_LOCK:
+        rows = sorted(_PLUGIN_MCP_SERVERS.items())
+    return tuple((entry, (owner, version)) for _name, (entry, owner, version) in rows)
+
+
+def register_plugin_skill(
+    entry: SkillEntry,
+    *,
+    plugin_id: str,
+    plugin_version: str,
+    project_root: Path | str | None = None,
+) -> None:
+    """Install one plugin-owned skill row into generic-lane discovery.
+
+    Raises:
+        FrameworkOverlayError: on a blank owner, on a name another plugin
+            already owns, or on a name that physically exists on disk.
+    """
+    global _OVERLAY_GENERATION
+
+    _require_overlay_owner(plugin_id, plugin_version)
+    root = resolve_project_root(project_root)
+    with _OVERLAY_LOCK:
+        existing = _PLUGIN_SKILLS.get(entry.name)
+        if existing is not None:
+            raise FrameworkOverlayError(
+                f"skill {entry.name!r} is already contributed by "
+                f"{existing[1]}@{existing[2]}; refusing to shadow it for "
+                f"{plugin_id!r}"
+            )
+        # Physical read, not a cached name set: the baseline is the filesystem.
+        if any(found.name == entry.name for found in discover_skills(root)):
+            raise FrameworkOverlayError(
+                f"skill {entry.name!r} already exists on disk; a plugin may add "
+                "a skill but may never redefine one"
+            )
+        _PLUGIN_SKILLS[entry.name] = (entry, plugin_id.strip(), plugin_version.strip())
+        _OVERLAY_GENERATION += 1
+
+
+def unregister_plugin_skill(
+    name: str,
+    *,
+    plugin_id: str,
+    plugin_version: str,
+) -> bool:
+    """Compare-and-remove one plugin-owned skill row. True if it was removed."""
+    global _OVERLAY_GENERATION
+
+    with _OVERLAY_LOCK:
+        existing = _PLUGIN_SKILLS.get(name)
+        if existing is None:
+            return False
+        if existing[1] != plugin_id or existing[2] != plugin_version:
+            raise FrameworkOverlayError(
+                f"skill {name!r} is owned by {existing[1]}@{existing[2]}; "
+                f"refusing to unregister it for {plugin_id}@{plugin_version}"
+            )
+        del _PLUGIN_SKILLS[name]
+        _OVERLAY_GENERATION += 1
+        return True
+
+
+def register_plugin_mcp_server(
+    entry: McpServerEntry,
+    *,
+    plugin_id: str,
+    plugin_version: str,
+    project_root: Path | str | None = None,
+    mcp_config_path: Path | str | None = None,
+) -> None:
+    """Install one plugin-owned MCP server row.
+
+    The stored config is re-redacted here rather than trusted from the caller:
+    the row is rendered into prompts and catalogs, and a plugin-supplied config
+    is hostile input.
+    """
+    global _OVERLAY_GENERATION
+
+    _require_overlay_owner(plugin_id, plugin_version)
+    root = resolve_project_root(project_root)
+    with _OVERLAY_LOCK:
+        existing = _PLUGIN_MCP_SERVERS.get(entry.name)
+        if existing is not None:
+            raise FrameworkOverlayError(
+                f"MCP server {entry.name!r} is already contributed by "
+                f"{existing[1]}@{existing[2]}; refusing to shadow it for "
+                f"{plugin_id!r}"
+            )
+        configured = discover_mcp_servers(root, config_path=mcp_config_path)
+        if any(found.name == entry.name for found in configured):
+            raise FrameworkOverlayError(
+                f"MCP server {entry.name!r} is already configured on disk; a "
+                "plugin may add a server but may never redefine one"
+            )
+        configured = entry.configured
+        callable_state = entry.callable
+        if configured is None or callable_state is None:
+            derived_configured, derived_callable = _mcp_physical_state(
+                dict(entry.config),
+                entry.transport,
+            )
+            configured = derived_configured if configured is None else configured
+            callable_state = derived_callable if callable_state is None else callable_state
+        redacted = McpServerEntry(
+            name=entry.name,
+            transport=entry.transport,
+            config=redact_mcp_config(dict(entry.config)),
+            source=entry.source,
+            configured=bool(configured),
+            callable=bool(callable_state),
+        )
+        _PLUGIN_MCP_SERVERS[entry.name] = (
+            redacted,
+            plugin_id.strip(),
+            plugin_version.strip(),
+        )
+        _OVERLAY_GENERATION += 1
+
+
+def unregister_plugin_mcp_server(
+    name: str,
+    *,
+    plugin_id: str,
+    plugin_version: str,
+) -> bool:
+    """Compare-and-remove one plugin-owned MCP server row."""
+    global _OVERLAY_GENERATION
+
+    with _OVERLAY_LOCK:
+        existing = _PLUGIN_MCP_SERVERS.get(name)
+        if existing is None:
+            return False
+        if existing[1] != plugin_id or existing[2] != plugin_version:
+            raise FrameworkOverlayError(
+                f"MCP server {name!r} is owned by {existing[1]}@{existing[2]}; "
+                f"refusing to unregister it for {plugin_id}@{plugin_version}"
+            )
+        del _PLUGIN_MCP_SERVERS[name]
+        _OVERLAY_GENERATION += 1
+        return True
+
+
+def list_plugin_overlay_rows() -> tuple[tuple[str, str, str, str], ...]:
+    """Every overlay row as ``(kind, name, plugin_id, plugin_version)``."""
+    rows = [
+        ("skill", entry.name, owner[0], owner[1])
+        for entry, owner in _plugin_skill_rows()
+    ]
+    rows.extend(
+        ("mcp_server", entry.name, owner[0], owner[1])
+        for entry, owner in _plugin_mcp_rows()
+    )
+    return tuple(sorted(rows))
+
+
+def _require_overlay_owner(plugin_id: str, plugin_version: str) -> None:
+    if not plugin_id or not plugin_id.strip():
+        raise FrameworkOverlayError("plugin overlay registration requires a plugin id")
+    if not plugin_version or not plugin_version.strip():
+        raise FrameworkOverlayError(
+            "plugin overlay registration requires a plugin version"
+        )
 
 
 def resolve_project_root(start: Path | str | None = None) -> Path:
@@ -255,15 +477,66 @@ def discover_mcp_servers(
         if _is_zapier_server(name, raw_config):
             continue
         redacted = redact_mcp_config(raw_config)
+        transport = _transport_for_config(raw_config)
+        configured, callable_state = _mcp_physical_state(raw_config, transport)
         entries.append(
             McpServerEntry(
                 name=name,
-                transport=_transport_for_config(raw_config),
+                transport=transport,
                 config=redacted,
                 source=source,
+                configured=configured,
+                callable=callable_state,
             )
         )
     return entries
+
+
+def _mcp_physical_state(
+    config: dict[str, Any],
+    transport: str,
+) -> tuple[bool, bool]:
+    normalized_transport = str(transport or "").strip().casefold().replace("-", "_")
+    env = config.get("env")
+    env_ready = True
+    if isinstance(env, dict):
+        for raw_value in env.values():
+            value = str(raw_value or "").strip()
+            placeholder = ENV_PLACEHOLDER_RE.fullmatch(value)
+            if not value or (placeholder and not os.environ.get(placeholder.group(1))):
+                env_ready = False
+                break
+    if normalized_transport == "stdio":
+        command = str(config.get("command") or "").strip()
+        configured = bool(command and env_ready)
+        command_path = Path(command).expanduser() if command else None
+        callable_state = bool(
+            configured
+            and (
+                shutil.which(command) is not None
+                or (command_path is not None and command_path.is_file())
+            )
+        )
+        return configured, callable_state
+    if normalized_transport in {"http", "sse", "streamable_http"}:
+        url = str(config.get("url") or "").strip()
+        configured = bool(_valid_http_url(url) and env_ready)
+        return configured, configured
+    return False, False
+
+
+def _valid_http_url(value: str) -> bool:
+    """Require a concrete HTTP(S) authority without resolving the network."""
+    try:
+        parsed = urlsplit(value)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        parsed.scheme.casefold() in {"http", "https"}
+        and parsed.netloc
+        and parsed.hostname
+        and not any(character.isspace() for character in value)
+    )
 
 
 def redact_mcp_config(config: dict[str, Any]) -> dict[str, Any]:

@@ -102,7 +102,7 @@ async def test_quiet_heartbeat_still_invokes_runtime(monkeypatch: pytest.MonkeyP
     request = captured_requests[0]
     assert request.task_name == "heartbeat"
     assert request.capability == TOOL_REASONING
-    assert request.fallback_model == "gpt-5.4-mini"
+    assert request.fallback_model is None
     assert "No urgent emails." in request.prompt
     assert "No active drafts pending review." in request.prompt
 
@@ -117,7 +117,7 @@ async def test_heartbeat_model_override_does_not_change_chat_model_env(
 
     await heartbeat.run_heartbeat(test_mode=True)
 
-    assert captured_requests[0].fallback_model == "gpt-5.4-mini"
+    assert captured_requests[0].fallback_model is None
     assert __import__("os").environ["SECOND_BRAIN_CODEX_MODEL"] == "gpt-5.5"
 
 
@@ -131,3 +131,62 @@ async def test_heartbeat_model_override_can_be_configured(
     await heartbeat.run_heartbeat(test_mode=True)
 
     assert captured_requests[0].fallback_model == "gpt-5.4-nano"
+
+
+# =============================================================================
+# REGRESSION — the Codex model override must be resolved at CALL time (Rule 1)
+# =============================================================================
+#
+# 2026-09-07..09-10: 14 consecutive scheduled heartbeats died with
+#   400 invalid_request_error: "The 'gpt-5.4-mini' model is not supported when
+#   using Codex with a ChatGPT account."
+# heartbeat.py carried a hardcoded DEFAULT_HEARTBEAT_CODEX_MODEL that pinned an
+# alias the operator's ChatGPT-account Codex path is not entitled to, so the
+# generic lane failed before it could run. The fix (9bbf35ef) resolves the
+# override from the environment inside the function and returns None when unset,
+# which hands model choice back to the operator's canonical runtime selection.
+#
+# Two invariants are load-bearing and neither is covered above:
+#   1. UNSET means None — never a vendor-pinned literal. A hardcoded default is
+#      what broke production, and it is also a lane-first violation: the
+#      heartbeat must ride whatever provider the operator has configured.
+#   2. The value is re-read per call, not snapshotted at import/def time. A
+#      cached read is the Rule 1 trap — the operator could clear a bad pin and
+#      the process would keep using it until restart.
+
+
+def test_heartbeat_codex_model_is_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No env pin => no model pin. Guards against a hardcoded default returning."""
+    monkeypatch.delenv("HEARTBEAT_CODEX_MODEL", raising=False)
+
+    assert heartbeat._heartbeat_codex_model() is None
+
+
+def test_heartbeat_codex_model_blank_is_treated_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty/whitespace value must not pin the empty string as a model."""
+    monkeypatch.setenv("HEARTBEAT_CODEX_MODEL", "   ")
+
+    assert heartbeat._heartbeat_codex_model() is None
+
+
+def test_heartbeat_codex_model_is_reread_every_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rule 1: the override is resolved at call time, never cached.
+
+    Fails if the value is ever bound in a default arg or a module constant —
+    the same class of bug that let a stale pin survive a config change.
+    """
+    monkeypatch.delenv("HEARTBEAT_CODEX_MODEL", raising=False)
+    assert heartbeat._heartbeat_codex_model() is None
+
+    monkeypatch.setenv("HEARTBEAT_CODEX_MODEL", "gpt-5.6-terra")
+    assert heartbeat._heartbeat_codex_model() == "gpt-5.6-terra"
+
+    monkeypatch.setenv("HEARTBEAT_CODEX_MODEL", "gpt-5.6-sol")
+    assert heartbeat._heartbeat_codex_model() == "gpt-5.6-sol"
+
+    monkeypatch.delenv("HEARTBEAT_CODEX_MODEL", raising=False)
+    assert heartbeat._heartbeat_codex_model() is None
