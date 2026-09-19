@@ -3387,63 +3387,6 @@ class ChatRouter:
 
         _, action, pid, revision, digest = parts
         import core_handlers
-        from social.publishers import is_linkedin_channel
-
-        if action not in {"approve", "reject", "edit", "image"}:
-            await adapter.send(
-                OutgoingMessage(
-                    text=f"Unknown social action: {action}",
-                    channel=incoming.channel,
-                    thread=incoming.thread,
-                    is_error=True,
-                )
-            )
-            return
-
-        try:
-            matches, current = self._social_button_binding(
-                pid, revision, digest
-            )
-        except Exception as exc:  # noqa: BLE001 - button handling fails closed
-            await adapter.send(
-                OutgoingMessage(
-                    text=f"Social action failed closed: {type(exc).__name__}: {exc}",
-                    channel=incoming.channel,
-                    thread=incoming.thread,
-                    is_error=True,
-                )
-            )
-            return
-        if not matches:
-            await adapter.send(
-                OutgoingMessage(
-                    text=(
-                        f"That button is stale. Draft #{pid} is now revision "
-                        f"{current.revision} with status '{current.status}'. "
-                        "No action was taken."
-                    ),
-                    channel=incoming.channel,
-                    thread=incoming.thread,
-                    is_error=True,
-                )
-            )
-            if (
-                current.status == "draft"
-                and is_linkedin_channel(current.channel)
-                and hasattr(core_handlers, "_send_linkedin_preview")
-            ):
-                await core_handlers._send_linkedin_preview(
-                    adapter, incoming, current
-                )
-            else:
-                await adapter.send(
-                    OutgoingMessage(
-                        text=f"Current draft #{pid}:\n\n{current.body}",
-                        channel=incoming.channel,
-                        thread=incoming.thread,
-                    )
-                )
-            return
 
         if action not in {"approve", "reject", "edit", "image"}:
             await adapter.send(
@@ -3518,7 +3461,10 @@ class ChatRouter:
                 reply = await core_handlers.handle_social(
                     adapter, incoming, f"reject {pid} {revision} {digest}"
                 )
-            elif action in {"edit", "image"} and is_linkedin_channel(current.channel):
+            elif action in {"edit", "image"} and current.channel.lower() in {
+                "linkedin",
+                "li",
+            }:
                 workshop_action = "revise" if action == "edit" else "image"
                 await core_handlers.handle_linkedin_button(
                     adapter,

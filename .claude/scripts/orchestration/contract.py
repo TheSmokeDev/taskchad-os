@@ -184,7 +184,6 @@ SOCIAL_WRITE_FIELDS: frozenset[str] = frozenset(
         "action",
         "post_action_snapshot",
         "media_path",
-        "publisher_json",
     ]
 )
 

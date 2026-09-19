@@ -752,8 +752,10 @@ def check_environment() -> list[tuple[str, str, str]]:
     # Runtime provider available
     from runtime.profiles import GENERIC_PROVIDER_REGISTRY
 
-    keyless_runtime_available = any(
-        overlay.auth_type == "keyless" for overlay in GENERIC_PROVIDER_REGISTRY.values()
+    from runtime.selection import resolve_runtime_selection
+    selected_overlay = GENERIC_PROVIDER_REGISTRY.get(resolve_runtime_selection().generic_provider)
+    keyless_runtime_available = bool(
+        selected_overlay and selected_overlay.auth_type == "keyless"
     )
     runtime_api_keys = [
         "ANTHROPIC_API_KEY",

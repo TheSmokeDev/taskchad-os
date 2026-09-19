@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import UTC, date, datetime, timedelta
-from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -13,12 +12,12 @@ from business_signal.models import (
     AuthorityVisualBrief,
     authority_signal_id,
 )
-from social import authority_content, authority_image_factory, draft_generator
+from social import authority_content, draft_generator
 from social.authority_content import create_authority_linkedin_draft
 from social.channels import SocialChannel
 from social.service import SocialPostService
 
-NOW = datetime.now(UTC)
+NOW = datetime(2026, 9, 3, 14, 0, tzinfo=UTC)
 CLAIM = "Official documentation says cited sources can be inspected by readers."
 SOURCE = "https://example.com/official/ai-search-sources"
 
@@ -39,34 +38,6 @@ def _public_template_socials_binding(monkeypatch):
         draft_generator,
         "_load_persona_identity_context",
         lambda _persona_id: "TEST SOCIALS IDENTITY",
-    )
-    grounding = SimpleNamespace(
-        grounded=True,
-        exemplars=(
-            SimpleNamespace(
-                id=17,
-                title="Grounded infographic",
-                prompt="Use a clear visual hierarchy and one focal mechanism.",
-                styles=("editorial",),
-                scenes=("diagram",),
-            ),
-        ),
-        resolved_case_ids=(17,),
-        provenance={
-            "prompt_engine": "gpt-image-2-style-library",
-            "corpus_pin": "a" * 40,
-            "corpus_sha256": "b" * 64,
-            "license": "MIT",
-        },
-        full=lambda: {"grounded": True, "resolved_case_ids": [17]},
-    )
-    monkeypatch.setattr(
-        authority_image_factory,
-        "_load_style_corpus",
-        lambda: SimpleNamespace(
-            require_corpus=lambda: object(),
-            select=lambda *_args, **_kwargs: grounding,
-        ),
     )
 
 
@@ -111,266 +82,176 @@ def _packet(*, expires: datetime | None = None, first_person: bool = False):
     )
 
 
-def _plan(body=None):
-    return {
-        "public_body": body
-        or (
-            "Stop rewriting the whole page.\n\nReaders can inspect cited sources.\n\n"
-            "I would open one citation, compare the passage with the answer, "
-            "and change one section before retesting."
-        ),
-        "format": "compact_workflow",
-        "factual_statements": [
-            {"text": "Readers can inspect cited sources.", "claim_indices": [0]}
-        ],
-        "cta": {"kind": "none", "text": ""},
-        "visual_brief": {
-            "eyebrow": "PAGE CHECK",
-            "headline": "Inspect one citation",
-            "accent": "",
-            "subhead": "Compare. Change. Retest.",
-            "cta": "",
-            "concept": "Three editorial panels showing a page comparison and one marked passage",
-        },
-    }
+def _valid_body() -> str:
+    return f"{CLAIM}\n\nSave this verification checklist.\n\nSource: {SOURCE}"
 
 
-def _review(prompt, **kwargs):
-    from social.authority_editorial import EditorialVisualBrief, editorial_segments
-
-    plan = _plan()
-    return json.dumps(
-        {
-            "accepted": True,
-            "visual_agreement": True,
-            "resource_agreement": True,
-            "useful_method": True,
-            "commenter_claims_supported": True,
-            "issues": [],
-            "segments": [
-                {
-                    "segment_id": s["segment_id"],
-                    "classification": "factual"
-                    if s["text"] == "Readers can inspect cited sources."
-                    else "recommendation",
-                    "factual_claims": (
-                        [
-                            {
-                                "text": s["text"],
-                                "claim_indices": [0],
-                                "supported": True,
-                                "rationale": "The documentation explicitly supports inspection.",
-                            }
-                        ]
-                        if s["text"] == "Readers can inspect cited sources."
-                        else []
-                    ),
-                    "rationale": "An actionable editorial recommendation, not a result claim.",
-                }
-                for s in editorial_segments(
-                    plan["public_body"], EditorialVisualBrief(**plan["visual_brief"])
-                )
-            ],
-        }
+def test_structured_editorial_selection_renders_only_bound_claims():
+    body = authority_content._render_editorial_selection(
+        '{"claim_indices":[0],"include_cta":true}', _packet()
     )
+    assert body == _valid_body()
+    assert authority_content.validate_authority_copy(
+        body, _packet(), allow_resource_drop=False
+    ) == ()
 
 
-def _fake_factory(tmp_path, captured=None):
-    from PIL import Image
-
-    path = tmp_path / "reviewed.png"
-    Image.new("RGB", (1080, 1350), "black").save(path)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-
-    def render(packet, copy, **kwargs):
-        if captured is not None:
-            captured.update(copy=copy, **kwargs)
-        visible = {key: value for key, value in copy.items() if value}
-        copy_digest = hashlib.sha256(
-            json.dumps(visible, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        ).hexdigest()
-        return SimpleNamespace(
-            media_path=str(path),
-            reason=None,
-            media_validation={
-                "schema_version": "authority-image-review/v1",
-                "validation_method": "attached_bitmap_review",
-                "visual_quality_review": "operator_required",
-                "accepted": True, "media_digest": digest,
-                "visible_copy_digest": copy_digest, "image_inspected": True,
-                "caption_agreement": True, "resource_agreement": True,
-                "objective_defects": [], "reasons": [],
-                "observed_text": list(visible.values()),
-            },
-            prompt_pack_path=None,
-            manifest_path=None,
-            template_id="infographic-engine",
-            example_case_ids=(17,),
-        )
-
-    return render
+@pytest.mark.parametrize("payload", [
+    '{"claim_indices":[99],"include_cta":false}',
+    '{"claim_indices":[true],"include_cta":false}',
+    '{"claim_indices":[0,0],"include_cta":false}',
+    '{"claim_indices":[0],"include_cta":false,"story":"invented"}',
+])
+def test_invalid_editorial_selection_is_rejected(payload):
+    with pytest.raises(ValueError):
+        authority_content._render_editorial_selection(payload, _packet())
 
 
-def test_original_paraphrase_is_reviewed_before_media_and_queue(monkeypatch, tmp_path):
-    calls = []
-    monkeypatch.setattr(
-        authority_image_factory, "render_grounded_authority_card", _fake_factory(tmp_path)
-    )
+def test_copy_is_validated_before_media_and_queue(tmp_path: Path):
+    calls: list[str] = []
 
-    def writer(*a, **k):
-        calls.append("writer")
-        assert "TEST SOCIALS IDENTITY" in k["system_prompt"]
-        return json.dumps(_plan())
+    def model(*args, **kwargs):
+        calls.append("copy")
+        return "I built this system. " + _valid_body()
 
-    def reviewer(*a, **k):
-        calls.append("reviewer")
-        assert "independent" in k["system_prompt"]
-        return _review(*a, **k)
+    def card(*args, **kwargs):
+        calls.append("media")
+        raise AssertionError("media must not run for unsupported autobiography")
 
     result = create_authority_linkedin_draft(
-        _packet(),
-        now=NOW,
-        db_path=tmp_path / "social.db",
-        deliver=False,
-        model_invoke=writer,
-        review_invoke=reviewer,
-    )
-    assert result.status == "queued", result.reasons
-    assert calls == ["writer", "reviewer"]
-    service = SocialPostService(tmp_path / "social.db")
-    post = service.get_post(result.post_id)
-    package = service.get_editorial_package(post.id)
-    assert post.body == _plan()["public_body"]
-    assert "Source:" not in post.body and SOURCE not in post.body
-    assert package["evidence_sources"][0]["source_url"] == SOURCE
-    assert package["validation"]["accepted"] is True
-    assert post.media_type == "image"
-    assert service.list_delivered_editorial() == []
-
-
-@pytest.mark.parametrize(
-    "body,reason",
-    [
-        (
-            "I built this system. Readers can inspect cited sources.",
-            "unsupported_operator_experience",
-        ),
-        (
-            "Readers can inspect cited sources. Our revenue grew 17.3 percent.",
-            "experimental_statistics_not_methods_first",
-        ),
-        ("Readers can inspect cited sources. YourBusiness uses this.", "private_or_secret_text"),
-        (
-            "Readers can inspect cited sources.\nSource: https://example.com/official/ai-search-sources",
-            "public_source_narration",
-        ),
-    ],
-)
-def test_invalid_copy_never_renders_or_queues(monkeypatch, tmp_path, body, reason):
-    monkeypatch.setattr(
-        authority_image_factory,
-        "render_grounded_authority_card",
-        lambda *a, **k: pytest.fail("render happened before valid copy"),
-    )
-    result = create_authority_linkedin_draft(
-        _packet(),
-        now=NOW,
-        db_path=tmp_path / "social.db",
-        deliver=False,
-        model_invoke=lambda *a, **k: json.dumps(_plan(body)),
+        _packet(), now=NOW, db_path=tmp_path / "social.db", deliver=False,
+        model_invoke=model, card_renderer=card,
     )
     assert result.status == "skipped"
-    assert reason in result.reasons
+    assert "unsupported_autobiography" in result.reasons
+    assert calls == ["copy"]
     assert SocialPostService(tmp_path / "social.db").list_queue() == []
 
 
-def test_model_or_review_failure_never_substitutes_canned_copy(tmp_path):
-    for reviewer in (lambda *a, **k: "not json", lambda *a, **k: '{"accepted":false}'):
+def test_expired_packet_never_calls_model(tmp_path: Path):
+    called = False
+
+    def model(*args, **kwargs):
+        nonlocal called
+        called = True
+        return _valid_body()
+
+    result = create_authority_linkedin_draft(
+        _packet(expires=NOW), now=NOW, db_path=tmp_path / "social.db",
+        deliver=False, model_invoke=model,
+    )
+    assert result.status == "skipped"
+    assert called is False
+
+
+def test_educational_card_is_4x5_without_owner_refs_and_packet_persists(tmp_path: Path):
+    captured: dict = {}
+
+    def card(scene_prompt, copy, **kwargs):
+        captured.update(kwargs)
+        out = tmp_path / "card.png"
+        out.write_bytes(b"\x89PNG\r\n")
+        return str(out)
+
+    packet = _packet()
+    result = create_authority_linkedin_draft(
+        packet, now=NOW, db_path=tmp_path / "social.db", deliver=False,
+        model_invoke=lambda *a, **k: _valid_body(), card_renderer=card,
+    )
+    assert result.status == "queued"
+    assert captured["aspect"] == "4:5"
+    assert captured["refs"] is None
+    post = SocialPostService(tmp_path / "social.db").get_post(result.post_id)
+    assert post is not None
+    assert post.source_packet_id == packet.signal_id
+    assert post.status == "draft"
+    assert post.media_type == "image"
+
+
+def test_media_failure_degrades_to_text_only_draft(tmp_path: Path):
+    result = create_authority_linkedin_draft(
+        _packet(), now=NOW, db_path=tmp_path / "social.db", deliver=False,
+        model_invoke=lambda *a, **k: _valid_body(),
+        card_renderer=lambda *a, **k: None,
+    )
+    assert result.status == "queued"
+    assert result.media_path is None
+    post = SocialPostService(tmp_path / "social.db").get_post(result.post_id)
+    assert post is not None and post.media_path is None
+
+
+def test_weekly_resource_drop_cap_blocks_unapproved_cta(tmp_path: Path):
+    body = _valid_body() + "\n\nComment STACK and I will send the playbook."
+    result = create_authority_linkedin_draft(
+        _packet(first_person=True), now=NOW, db_path=tmp_path / "social.db",
+        deliver=False, allow_resource_drop=False,
+        model_invoke=lambda *a, **k: body,
+    )
+    assert result.status == "skipped"
+    assert "weekly_resource_drop_cap" in result.reasons
+
+
+def test_secret_and_unsupported_extra_fact_never_queue(tmp_path: Path):
+    for suffix, expected in (
+        ("\n\nBearer synthetic-secret-value", "private_or_secret_text"),
+        ("\n\nAI engines reward longer pages.", "unsupported_statement"),
+        ("\n\nWhy does Google reward longer pages?", "unsupported_statement"),
+        (
+            "\n\nVerify pages because Google rewards longer content.",
+            "unsupported_statement",
+        ),
+    ):
         result = create_authority_linkedin_draft(
             _packet(),
             now=NOW,
-            db_path=tmp_path / "social.db",
+            db_path=tmp_path / f"{expected}.db",
             deliver=False,
-            model_invoke=lambda *a, **k: json.dumps(_plan()),
-            review_invoke=reviewer,
+            model_invoke=lambda *a, suffix=suffix, **k: _valid_body() + suffix,
         )
         assert result.status == "skipped"
-    assert SocialPostService(tmp_path / "social.db").list_queue() == []
+        assert expected in result.reasons
 
 
-def test_expired_packet_never_calls_writer(tmp_path):
+def test_verified_receipt_does_not_license_unrelated_autobiography(tmp_path: Path):
     result = create_authority_linkedin_draft(
-        _packet(expires=NOW),
+        _packet(first_person=True),
         now=NOW,
-        db_path=tmp_path / "social.db",
+        db_path=tmp_path / "receipt.db",
         deliver=False,
-        model_invoke=lambda *a, **k: pytest.fail("expired evidence reached writer"),
+        model_invoke=lambda *a, **k: _valid_body() + "\n\nI built ten client systems.",
     )
     assert result.status == "skipped"
+    assert "unsupported_autobiography" in result.reasons
 
 
-def test_weak_packet_never_calls_writer(tmp_path):
-    packet = _packet()
-    weak = packet.model_copy(
-        update={"claims": (packet.claims[0].model_copy(update={"confidence": 0.4}),)}
-    )
-    result = create_authority_linkedin_draft(
-        weak,
-        now=NOW,
-        db_path=tmp_path / "social.db",
-        deliver=False,
-        model_invoke=lambda *a, **k: pytest.fail("weak evidence reached writer"),
-    )
-    assert "no_high_confidence_primary_claim" in result.reasons
-
-
-def test_placeholder_title_is_not_public_evidence(tmp_path):
-    packet = _packet()
-    weak = packet.model_copy(update={"claims": (
-        packet.claims[0].model_copy(update={"source_title": "N/A"}),)})
-    result = create_authority_linkedin_draft(
-        weak, now=NOW, db_path=tmp_path / "social.db", deliver=False,
-        model_invoke=lambda *a, **k: pytest.fail("placeholder source reached writer"),
-    )
-    assert "source_title_missing" in result.reasons
-
-
-def test_missing_or_disagreeing_media_blocks_queue(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        authority_image_factory,
-        "render_grounded_authority_card",
-        lambda *a, **k: SimpleNamespace(
-            media_path=None,
-            media_validation={"accepted": False},
-            reason="image_caption_disagreement",
-        ),
+def test_exact_claim_prefix_cannot_smuggle_an_extra_fact(tmp_path: Path):
+    body = _valid_body().replace(
+        CLAIM,
+        CLAIM + " Acme cuts costs by 50%.",
+        1,
     )
     result = create_authority_linkedin_draft(
         _packet(),
         now=NOW,
-        db_path=tmp_path / "social.db",
+        db_path=tmp_path / "smuggle.db",
         deliver=False,
-        model_invoke=lambda *a, **k: json.dumps(_plan()),
-        review_invoke=_review,
+        model_invoke=lambda *a, **k: body,
     )
     assert result.status == "skipped"
-    assert SocialPostService(tmp_path / "social.db").list_queue() == []
+    assert "unsupported_statement" in result.reasons
 
 
-def test_argument_not_research_hook_drives_image(monkeypatch, tmp_path):
-    captured = {}
-    monkeypatch.setattr(
-        authority_image_factory, "render_grounded_authority_card", _fake_factory(tmp_path, captured)
+def test_source_line_cannot_smuggle_an_extra_fact(tmp_path: Path):
+    body = _valid_body().replace(
+        f"Source: {SOURCE}",
+        f"Source: {SOURCE} Acme cuts costs by 50%.",
     )
     result = create_authority_linkedin_draft(
         _packet(),
         now=NOW,
-        db_path=tmp_path / "social.db",
+        db_path=tmp_path / "source-smuggle.db",
         deliver=False,
-        model_invoke=lambda *a, **k: json.dumps(_plan()),
-        review_invoke=_review,
+        model_invoke=lambda *a, **k: body,
     )
-    assert result.status == "queued", result.reasons
-    assert captured["copy"]["headline"] == "Inspect one citation"
-    assert captured["editorial_brief"]["public_body"] == _plan()["public_body"]
-    assert captured["editorial_brief"]["format"] == "compact_workflow"
+    assert result.status == "skipped"
+    assert "unsupported_statement" in result.reasons

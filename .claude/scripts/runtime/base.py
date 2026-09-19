@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextvars import ContextVar
 
 from collections.abc import Callable
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -85,9 +84,8 @@ class RuntimeRequest:
     on_tool_event: Any | None = None
     # Read-only multimodal work (for example `/watch` frame inspection).
     # Generic CLI adapters use these fields to attach images without granting
-    # write/shell authority; ordinary Claude read-only work keeps its Read tool.
-    # Strict model_only work requires an explicit image-carriage guarantee;
-    # Claude attaches validated bitmap bytes without granting a Read tool.
+    # write/shell authority; Claude keeps only its Read tool.  Additive defaults
+    # preserve every existing caller.
     image_paths: list[Path | str] = field(default_factory=list)
     read_only_tools: bool = False
     # Approved local-file application lane. Adapters must contain this more

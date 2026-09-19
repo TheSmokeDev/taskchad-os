@@ -11,19 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from integrations.capabilities import IntegrationPolicyError, require_integration_action
 from social.audit import append_social_audit_record
 from social.channels import get_channel
-from social.publishers import (
-    assert_publisher_matches_channel,
-    channel_platform,
-    is_linkedin_channel,
-    parse_publisher,
-)
 from social.service import SocialPostService
 
 logger = logging.getLogger(__name__)
@@ -34,10 +27,7 @@ def _is_linkedin_permalink(value: str) -> bool:
     return (
         parsed.scheme == "https"
         and (parsed.hostname or "").lower() in {"linkedin.com", "www.linkedin.com"}
-        and re.fullmatch(r"/feed/update/urn:li:(?:share|activity):\d+/?", parsed.path)
-        is not None
-        and not parsed.query
-        and not parsed.fragment
+        and parsed.path.startswith("/feed/update/urn:li:")
     )
 
 
@@ -52,16 +42,6 @@ def _receipt_json(receipt: object, metadata: dict) -> str:
         "post_url",
         "submitted_at",
         "confirmation_result",
-        "caption_verified_before_submit",
-        "expected_caption_sha256",
-        "observed_caption_sha256",
-        "media_verified_before_submit",
-        "publisher_id",
-        "publisher_verified_before_submit",
-        "publisher_verified_after_submit",
-        "caption_verified_after_submit",
-        "media_verified_after_submit",
-        "published_caption_sha256",
     }
     payload = {key: metadata.get(key) for key in allowed if key in metadata}
     payload["executor_status"] = str(getattr(receipt, "status", ""))
@@ -154,17 +134,7 @@ def dispatch_post(
         return _dispatch_api(svc, post, channel)
 
     if channel.execution_method == "browser":
-        # Read the durable result after transport settles. Learning failures must
-        # never enter the dispatch exception handler or turn success into retry.
-        try:
-            return _dispatch_browser(svc, post, channel)
-        finally:
-            try:
-                from social.learning import record_post_receipt
-
-                record_post_receipt(svc.get_post(post.id), channel, db_path=svc.db_path)
-            except Exception as exc:
-                logger.warning("social learning post hook failed: %s", type(exc).__name__)
+        return _dispatch_browser(svc, post, channel)
 
     if channel.execution_method == "postiz":
         return _dispatch_postiz(svc, post, channel)
@@ -237,7 +207,7 @@ def sweep_stale_claims(
     for post in svc.list_stale_claims(ttl_minutes):
         label = f"#{post.id} ({post.channel})"
         try:
-            if is_linkedin_channel(post.channel) or post.publisher_json is not None:
+            if post.channel.lower() in {"linkedin", "li"}:
                 receipt = json.dumps(
                     {
                         "verification_state": "verification_required",
@@ -583,12 +553,9 @@ def _dispatch_browser(
         "li": "post_linkedin",
         "reddit": "post_reddit",
     }
-    platform = channel_platform(channel)
-    action_name = action_map.get(platform, f"post_{platform}")
+    action_name = action_map.get(post.channel.lower(), f"post_{post.channel.lower()}")
 
     try:
-        assert_publisher_matches_channel(post, channel)
-        publisher = parse_publisher(getattr(post, "publisher_json", None))
         # Gate check: require integration action before external post
         require_integration_action(
             "social",
@@ -611,15 +578,11 @@ def _dispatch_browser(
         from orchestration.models import SocialWriteTask, Subtask
 
         task = SocialWriteTask(
-            workflow_id=channel.browser_workflow_id or f"{platform}.post.create",
-            target_url=(
-                f"https://www.linkedin.com/company/{publisher.id}/admin/page-posts/published/?share=true"
-                if publisher else ""
-            ),
+            workflow_id=channel.browser_workflow_id or f"{post.channel}.post.create",
+            target_url="",
             payload_text=post.body,
             action="post",
             media_path=post.media_path,
-            publisher_json=getattr(post, "publisher_json", None),
         )
 
         subtask = Subtask(
@@ -632,7 +595,6 @@ def _dispatch_browser(
                 "payload_text": task.payload_text,
                 "action": task.action,
                 "media_path": task.media_path,
-                "publisher_json": task.publisher_json,
             }),
         )
 
@@ -672,29 +634,17 @@ def _dispatch_browser(
         if receipt.status == "completed":
             post_url = str(metadata.get("post_url") or "")
             verification_state = str(metadata.get("verification_state") or "")
-            linkedin_write = is_linkedin_channel(channel)
-            company_proof_ok = not publisher or (
-                str(metadata.get("publisher_id")) == publisher.id
-                and all(metadata.get(key) == "true" for key in (
-                    "publisher_verified_before_submit",
-                    "publisher_verified_after_submit",
-                    "caption_verified_before_submit",
-                    "caption_verified_after_submit",
-                    "media_verified_before_submit",
-                    "media_verified_after_submit",
-                ))
-            )
+            linkedin_write = post.channel.lower() in {"linkedin", "li"}
             if linkedin_write and (
                 verification_state != "verified"
                 or not _is_linkedin_permalink(post_url)
-                or not company_proof_ok
             ):
                 svc.mark_verification_required(
                     post.id,
                     receipt_json=receipt_json,
                     error=(
-                        "LinkedIn submission is missing verified permalink, publisher, "
-                        "caption, or media proof; do not retry"
+                        "LinkedIn submit was clicked but no verifiable View post "
+                        "permalink was captured; do not retry"
                     ),
                 )
                 append_social_audit_record(
@@ -703,7 +653,7 @@ def _dispatch_browser(
                     post_id=post.id,
                     outcome="verification_required",
                     body_preview=post.body,
-                    error="missing or invalid LinkedIn publication proof",
+                    error="missing or invalid LinkedIn permalink",
                 )
                 return False
             svc.mark_posted(

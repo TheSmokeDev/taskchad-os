@@ -15,7 +15,6 @@ import re
 import signal
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -492,56 +491,20 @@ def file_lock(lock_path: Path, timeout: float = 30.0) -> Iterator[None]:
         f.close()
 
 
-def browserops_state_dir() -> Path:
-    """Physical-browser state shared across checkouts and personas, at call time."""
-    return Path.home() / ".homie" / "browserops"
-
-
-_browser_thread_lock = threading.RLock()
-_browser_lock_local = threading.local()
-
-
 @contextlib.contextmanager
 def browser_write_lock(timeout: float = 600.0) -> Iterator[None]:
-    """Serialize coordinated visible-browser reads/writes across checkouts.
+    """Serialize visible-Chrome WRITE drives across processes.
 
     The CDP browser is ONE logged-in session — concurrent drives interleave
     tabs and keystrokes. Every browser-write ingress (Browser Homie runner,
     cadence cron dispatch, per-action chat writes) must hold this lock for
-    the browser drive only, not model work or delivery. Same-thread helpers
-    reuse an outer lease. Raises TimeoutError when another owner holds it past
+    the whole drive. Raises TimeoutError when another write holds it past
     *timeout* (default 10 min — longer than any sane drive).
     """
-    import math
+    import config
 
-    timeout = float(timeout)
-    if not math.isfinite(timeout) or timeout < 0:
-        raise ValueError("Browser lease timeout must be finite and nonnegative")
-    deadline = time.monotonic() + timeout
-    lock_path = (browserops_state_dir() / "cdp-18222").resolve()
-    if not _browser_thread_lock.acquire(timeout=timeout):
-        raise TimeoutError("Shared browser is busy in another thread")
-    try:
-        depth = getattr(_browser_lock_local, "depth", 0)
-        if depth:
-            if getattr(_browser_lock_local, "path", None) != lock_path:
-                raise RuntimeError("Shared browser lock path changed during a lease")
-            _browser_lock_local.depth = depth + 1
-            try:
-                yield
-            finally:
-                _browser_lock_local.depth -= 1
-            return
-        with file_lock(lock_path, timeout=max(0.0, deadline - time.monotonic())):
-            _browser_lock_local.depth = 1
-            _browser_lock_local.path = lock_path
-            try:
-                yield
-            finally:
-                _browser_lock_local.depth = 0
-                _browser_lock_local.path = None
-    finally:
-        _browser_thread_lock.release()
+    with file_lock(Path(config.DATA_DIR) / "browser-write", timeout=timeout):
+        yield
 
 
 def atomic_write_text(path: Path, content: str) -> int:

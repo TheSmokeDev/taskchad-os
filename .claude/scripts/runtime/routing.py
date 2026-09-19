@@ -386,14 +386,15 @@ def _pinned_primary_provider() -> str | None:
 
 
 def _preferred_generic_provider(request: RuntimeRequest) -> str | None:
+    if requires_free(request):
+        bind_free_request(request)
+        return FREE_PROVIDER
     if request.preferred_provider:
         provider = normalize_provider(request.preferred_provider)
         allowed = _allowed_generic_providers_for_capability(
             request.capability, carries_caller_tools=_base.request_carries_tools(request),
         )
-        if provider not in allowed and not _is_explicitly_selectable_generic_provider(
-            provider, request
-        ):
+        if provider not in allowed:
             raise ValueError(
                 "requested provider is not eligible for this generic runtime capability"
             )
@@ -416,31 +417,10 @@ def _preferred_generic_provider(request: RuntimeRequest) -> str | None:
         request.capability,
         carries_caller_tools=_base.request_carries_tools(request),
     )
-    if provider in allowed or _is_explicitly_selectable_generic_provider(provider, request):
+    if provider in allowed:
         return provider
     return None
 
-
-def _is_explicitly_selectable_generic_provider(provider: str, request: RuntimeRequest) -> bool:
-    """Whether an operator may select a non-automatic generic provider.
-
-    ``auto_route=False`` prevents an opt-in provider from silently becoming a
-    fallback. It must not make ``/model free`` or ``-m free`` a no-op. The
-    adapter remains the final capability gate; this narrow pre-check only
-    preserves the routes that its OpenAI chat-completions transport can carry.
-    """
-
-    overlay = GENERIC_PROVIDER_REGISTRY.get(provider)
-    if (
-        overlay is None
-        or overlay.auto_route
-        or request.resume is not None
-        or request.hooks is not None
-    ):
-        return False
-    if _base.request_carries_tools(request):
-        return overlay.wire_api == "chat_completions"
-    return request.capability == TEXT_REASONING and not request.allowed_tools
 
 
 def _default_route(request: RuntimeRequest) -> tuple[str, ...]:

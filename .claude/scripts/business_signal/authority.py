@@ -329,9 +329,7 @@ def _packet_from_proposal(
     )
     series, signal_type = _series_and_type(document)
     evidence_class = {
-        "repository": (
-            "verified_repository" if document.verified_repository else "public_primary"
-        ),
+        "repository": "verified_repository",
         "official_documentation": "public_primary",
         "primary_source": "public_primary",
         "vendor_research": "public_vendor_research",
@@ -605,13 +603,7 @@ def _is_stale(document: ResearchDocument, now: datetime, freshness_days: int) ->
     published = document.published_at.astimezone(UTC)
     if published > now + timedelta(days=1):
         return True
-    horizon = freshness_days
-    if (
-        document.lane == "practical_geo_evidence"
-        and document.source_class == "primary_source"
-    ):
-        horizon = max(horizon, 365)
-    return published < now - timedelta(days=horizon)
+    return published < now - timedelta(days=freshness_days)
 
 
 def _active_seen_keys(state: dict[str, Any], now: datetime) -> dict[str, str]:

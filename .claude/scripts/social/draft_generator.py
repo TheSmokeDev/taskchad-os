@@ -1,7 +1,6 @@
 """Content draft generator — idea to voice-matched draft per channel.
 
-Uses the runtime layer with the ``fast`` background model tier by default.
-Evidence-critical editorial callers can explicitly select configured ``quality``.
+Uses the runtime layer with the ``fast`` background model tier.
 """
 
 from __future__ import annotations
@@ -213,13 +212,7 @@ def _load_persona_identity_context(persona_id: str | None) -> str | None:
     )
 
 
-def _invoke_runtime(
-    prompt: str,
-    *,
-    system_prompt: str | None = None,
-    model_tier: str = "fast",
-    task_name: str = "social_draft_generator",
-) -> str:
+def _invoke_runtime(prompt: str, *, system_prompt: str | None = None) -> str:
     """Run one background-model completion and return the text.
 
     Bridges the async runtime from this sync function: a plain ``asyncio.run``
@@ -234,19 +227,11 @@ def _invoke_runtime(
     from runtime.capabilities import TEXT_REASONING
     from runtime.lane_router import run_with_runtime_lanes
 
-    from social.learning import current_binding, run_model
-
-    # Resolve before entering a worker thread: contextvars do not cross that hop.
-    binding = current_binding()
-    if model_tier not in {"fast", "quality"}:
-        raise ValueError("social runtime model_tier must be fast or quality")
-    model = config.get_background_models().get(
-        model_tier, "haiku" if model_tier == "fast" else "sonnet",
-    )
+    model = config.get_background_models().get("fast", "haiku")
     request = RuntimeRequest(
         prompt=prompt,
         cwd=config.PROJECT_ROOT,
-        task_name=task_name,
+        task_name="social_draft_generator",
         capability=TEXT_REASONING,
         model=model,
         max_turns=1,
@@ -259,7 +244,8 @@ def _invoke_runtime(
     )
 
     async def _go() -> str:
-        return await run_model(request, run_with_runtime_lanes, binding)
+        result = await run_with_runtime_lanes(request)
+        return (getattr(result, "text", "") or "").strip()
 
     try:
         asyncio.get_running_loop()
@@ -315,7 +301,6 @@ def generate_draft(
     topic_source: str = "manual",
     scheduled_for: str | None = None,
     db_path: str | Path | None = None,
-    origin_id: str | None = None,
 ) -> int | None:
     """Generate a voice-matched draft and save to the post queue.
 
@@ -346,19 +331,8 @@ def generate_draft(
     )
     prompt = _build_draft_prompt(channel_id, topic, voice_ctx, constraints)
 
-    from contextlib import nullcontext
-    from uuid import uuid4
-
-    from social.learning import SocialLearningBinding, bind_learning, record_post_receipt
-
-    binding = SocialLearningBinding(
-        channel.persona_id, origin_id or f"social-draft:{uuid4().hex}",
-        f"Draft {channel_id} content: {topic}",
-    ) if channel.persona_id else None
-
     try:
-        with bind_learning(binding) if binding else nullcontext():
-            body = _invoke_runtime(prompt, system_prompt=persona_context)
+        body = _invoke_runtime(prompt, system_prompt=persona_context)
 
         if not body:
             logger.error("Empty draft from runtime for %s", channel_id)
@@ -408,8 +382,5 @@ def generate_draft(
         outcome="created",
         body_preview=body,
     )
-
-    if binding:
-        record_post_receipt(svc.get_post(pid), channel, db_path=svc.db_path, binding=binding)
 
     return pid

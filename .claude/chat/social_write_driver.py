@@ -22,8 +22,6 @@ Hard invariants this driver upholds:
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 import subprocess
 from datetime import UTC, datetime
@@ -53,192 +51,11 @@ _SOCIAL_CDP_ENV_NAMES = (
     "AGENT_BROWSER_CDP_PORT",
 )
 _X_BROWSER_SESSION = "primo-x"
-_LINKEDIN_BROWSER_SESSION = "linkedin-social"
 _LINKEDIN_PERMALINK_RE = re.compile(
     r"(?:https://(?:www\.)?linkedin\.com)?"
     r"(/feed/update/urn:li:(?:share|activity):\d+/?)",
     re.IGNORECASE,
 )
-
-
-def _browser_json(result: Any) -> dict[str, Any]:
-    """Decode an Agent Browser read-only JSON projection, never raw page state."""
-
-    if not result.ok:
-        return {}
-    try:
-        value = json.loads(result.stdout or "")
-        if isinstance(value, str):
-            value = json.loads(value)
-        return value if isinstance(value, dict) else {}
-    except (ValueError, TypeError):
-        return {}
-
-
-def _company_composer_url(publisher: Any) -> str:
-    return (
-        f"https://www.linkedin.com/company/{publisher.id}"
-        "/admin/page-posts/published/?share=true"
-    )
-
-
-def _company_composer_probe() -> str:
-    """Read visible composer actor attributes; do not infer actor from page name.
-
-    The current company composer has no numeric actor attribute. Bind its
-    exact name and logo to the selected numeric organization admin navigation,
-    in addition to the exact admin URL. A name or background link alone is not
-    evidence. The probe only reads visible DOM; interaction uses current refs.
-    """
-
-    return """(() => {
-      function deep(r) { const a=[...r.querySelectorAll('*')];
-        return a.flatMap(e=>[e,...(e.shadowRoot?deep(e.shadowRoot):[])]); }
-      const nodes=deep(document);
-      const visible=e=>!!(e.getClientRects().length);
-      const dialogs=nodes.filter(e=>visible(e)&&e.matches('[role="dialog"].share-box-v2__modal'));
-      if(dialogs.length!==1) return {actor_count:0};
-      const actors=deep(dialogs[0]).filter(e=>visible(e) &&
-        (e.tagName==='BUTTON'||e.getAttribute('role')==='button') &&
-        /Post to (Anyone|Connections)/i.test(
-          (e.innerText||'')+' '+(e.getAttribute('aria-label')||'')));
-      if(actors.length!==1) return {actor_count:actors.length};
-      const actor=actors[0], scoped=deep(actor);
-      const navSelector='section[aria-label="Organizational page admin navigation section"]';
-      const navs=nodes.filter(e=>visible(e)&&e.matches(navSelector));
-      if(navs.length!==1) return {actor_count:1};
-      const nav=deep(navs[0]);
-      const current='a.org-menu-item--selected[aria-current="true"][href], '+
-        'a.org-menu-item--selected[aria-current="page"][href]';
-      const selected=nav.filter(e=>visible(e)&&e.matches(current));
-      // A compact admin layout removes the vertical Page posts item. Its
-      // observed Published tab is in the bounded org feed header menu instead.
-      const header='section.org-feed__page-header .org-page-header__menu ';
-      selected.push(...nodes.filter(e=>visible(e)&&e.matches(
-        header+'a.org-menu-item--selected[aria-current="true"][href], '+
-        header+'a.org-menu-item--selected[aria-current="page"][href]')));
-      const selected_urls=[...new Set(selected.map(e=>e.href))];
-      const heads=nav.filter(e=>visible(e)&&e.tagName==='H1');
-      const logos=nav.filter(e=>visible(e)&&e.tagName==='IMG');
-      const actorImages=scoped.filter(e=>visible(e)&&e.tagName==='IMG');
-      const imageKey=e=>{try {const u=new URL(e.currentSrc||e.src);return u.origin+u.pathname;}
-        catch(_){return '';}};
-      return {actor_count:1, actor_text:actor.innerText||actor.getAttribute('aria-label')||'',
-        actor_names:actorImages.map(e=>e.alt), actor_logos:actorImages.map(imageKey),
-        admin_names:heads.map(e=>e.innerText), admin_logos:logos.map(imageKey),
-        selected_urls, url:location.href};
-    })()"""
-
-
-def _valid_company_composer_proof(proof: dict, publisher: Any) -> bool:
-    parsed = urlsplit(str(proof.get("url") or ""))
-    expected_path = f"/company/{publisher.id}/admin/page-posts/published/"
-    selected = proof.get("selected_urls")
-    if not isinstance(selected, list) or len(selected) != 1:
-        return False
-    selected_url = urlsplit(str(selected[0]))
-    expected_actor = " ".join(publisher.name.split()).casefold()
-    actor_text = " ".join(str(proof.get("actor_text") or "").split()).casefold()
-    # innerText may omit duplicated avatar-alt text, unlike the AX snapshot.
-    valid_actor_text = {
-        f"{name} post to {audience}"
-        for name in (expected_actor, f"{expected_actor} {expected_actor}")
-        for audience in ("anyone", "connections")
-    }
-    actor_logos = proof.get("actor_logos")
-    admin_logos = proof.get("admin_logos")
-    expected_name = " ".join(publisher.name.split())
-    actor_names = proof.get("actor_names")
-    admin_names = proof.get("admin_names")
-    names_bound = (
-        isinstance(actor_names, list) and isinstance(admin_names, list)
-        and [" ".join(str(name).split()) for name in actor_names] == [expected_name]
-        and [" ".join(str(name).split()) for name in admin_names] == [expected_name]
-    )
-    logo_bound = (
-        isinstance(actor_logos, list) and len(actor_logos) == 1
-        and bool(actor_logos[0]) and isinstance(admin_logos, list)
-        and actor_logos[0] in admin_logos
-    )
-    return (
-        parsed.scheme == "https"
-        and parsed.hostname in {"linkedin.com", "www.linkedin.com"}
-        and parsed.path.rstrip("/") == expected_path.rstrip("/")
-        and selected_url.scheme == "https"
-        and selected_url.hostname in {"linkedin.com", "www.linkedin.com"}
-        and selected_url.path.rstrip("/") == expected_path.rstrip("/")
-        and proof.get("actor_count") == 1
-        and names_bound
-        and actor_text in valid_actor_text
-        and logo_bound
-    )
-
-
-def _company_post_probe(permalink: str) -> str:
-    """Project a single permalink post's public author, caption, and media.
-
-    Only the actual post container is inspected, not the page's navigation,
-    comments, author avatar, or suggested posts. Unknown DOM layouts fail closed.
-    """
-
-    urn = urlsplit(permalink).path.rstrip("/").rsplit("/", 1)[-1]
-    return """(() => {
-      const expectedUrn=URN;
-      function deep(r) { const a=[...r.querySelectorAll('*')];
-        return a.flatMap(e=>[e,...(e.shadowRoot?deep(e.shadowRoot):[])]); }
-      const all=deep(document), visible=e=>!!e.getClientRects().length;
-      let posts=all.filter(e=>visible(e)&&e.getAttribute('data-urn')===expectedUrn);
-      if(!posts.length) posts=all.filter(e=>visible(e)&&e.getAttribute('role')==='article');
-      posts=posts.filter(e=>!posts.some(p=>p!==e&&p.contains(e)));
-      if(posts.length!==1) return {post_count:posts.length};
-      const post=posts[0], nodes=deep(post);
-      const textSelector='.update-components-text, [data-view-name="feed-commentary"]';
-      const text=nodes.filter(e=>visible(e)&&e.matches(textSelector));
-      const captions=text.filter(e=>!text.some(p=>p!==e&&p.contains(e)))
-        .map(e=>(e.querySelector('.break-words')||e).innerText||'');
-      const actorSelector='a.update-components-actor__meta-link, '+
-        'a.update-components-actor__image, a[data-view-name="feed-actor-name"]';
-      const actorLinks=nodes.filter(e=>visible(e)&&e.matches(actorSelector));
-      const actor_urls=actorLinks.map(e=>e.href).filter(Boolean);
-      const imageSelector='.update-components-actor img, img.update-components-actor__avatar-image';
-      const actorImages=nodes.filter(e=>visible(e)&&e.matches(imageSelector));
-      const actor_logos=actorImages.map(e=>{try{const u=new URL(e.currentSrc||e.src);
-        return u.origin+u.pathname;}catch(_){return '';}});
-      const mediaSelector='.update-components-image img, .update-components-video video, '+
-        '[data-view-name="feed-image"] img';
-      const media=nodes.filter(e=>visible(e)&&e.matches(mediaSelector));
-      return {post_count:1, actor_urls, actor_logos, captions,
-        media_count:media.length, url:location.href};
-    })()""".replace("URN", json.dumps(urn))
-
-
-def _valid_company_post_proof(
-    proof: dict, publisher: Any, body: str, *, expected_logo: str | None = None,
-) -> bool:
-    if proof.get("post_count") != 1 or proof.get("media_count", 0) < 1:
-        return False
-    captions = proof.get("captions")
-    if not isinstance(captions, list) or len(captions) != 1:
-        return False
-    if " ".join(str(captions[0]).split()) != " ".join(body.split()):
-        return False
-    urls = proof.get("actor_urls")
-    if not isinstance(urls, list) or not urls:
-        return False
-    expected_paths = {
-        urlsplit(publisher.url).path.rstrip("/"), f"/company/{publisher.id}",
-    }
-    for raw in urls:
-        url = urlsplit(str(raw))
-        if (
-            url.scheme != "https"
-            or url.hostname not in {"linkedin.com", "www.linkedin.com"}
-            or url.path.rstrip("/") not in expected_paths
-        ):
-            return False
-    if expected_logo and expected_logo not in (proof.get("actor_logos") or []):
-        return False
-    return True
 
 
 def _data_dir() -> Path:
@@ -272,64 +89,6 @@ def _step_fail(label: str, result: Any) -> tuple[bool, str]:
 
     detail = redact_text_urls(result.output[:600]) or "(no output)"
     return False, f"{label}: {detail}"
-
-
-def _unique_enabled_button_ref(snapshot: str, name: str) -> str | None:
-    """Select one exact enabled button, deduplicating repeated AX output."""
-
-    refs = set()
-    for line in snapshot.splitlines():
-        match = re.fullmatch(
-            rf'\s*(?:-\s*)?button "{re.escape(name)}"(?P<attrs>.*)', line,
-        )
-        if not match or re.search(r"\bdisabled\b", match.group("attrs")):
-            continue
-        ref = re.search(r"\bref=(e\d+)\b", match.group("attrs"))
-        if ref:
-            refs.add(ref.group(1))
-    return next(iter(refs)) if len(refs) == 1 else None
-
-
-def _company_media_next_xpath() -> str:
-    # v0.33.2 native/element.rs resolves xpath= directly to the DOM and uses a
-    # real CDP click, independent of the mutable eN RefMap. The light-DOM modal,
-    # button role and exact Next label were observed in the supervised canary.
-    return (
-        "xpath=//*[@role='dialog' and "
-        "contains(concat(' ',normalize-space(@class),' '),' share-box-v2__modal ')]"
-        "//button[normalize-space(.)='Next' and not(@disabled) "
-        "and not(@aria-disabled='true')]"
-    )
-
-
-def _advance_company_media(li_run: Any, *, scope: str, port: int) -> tuple[bool, str]:
-    """Advance only the exact company media Next control, without cached refs.
-
-    Require fresh scoped accessibility evidence and one matching enabled DOM
-    button. All failures and timeouts stop; neither this step, uploads, nor the
-    public Post control are retried.
-    """
-
-    selector = _company_media_next_xpath()
-    xpath = json.dumps(selector.removeprefix("xpath="))
-    readiness = (
-        "(()=>{const nodes=document.evaluate(" + xpath
-        + ",document,null,XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,null);"
-        "return nodes.snapshotLength===1&&nodes.snapshotItem(0).getClientRects().length>0;})()"
-    )
-    ready = li_run(["wait", "--fn", readiness], port=port, timeout=25)
-    if not ready.ok:
-        return _step_fail("media preview readiness failed", ready)
-    snapshot = li_run(["snapshot", "-i", "-s", scope], port=port, timeout=30)
-    if not snapshot.ok:
-        return _step_fail("media preview snapshot failed", snapshot)
-    if not _unique_enabled_button_ref(snapshot.stdout or "", "Next"):
-        return False, "LinkedIn media preview has no unique enabled Next control"
-    count = li_run(["get", "count", selector], port=port, timeout=20)
-    if not count.ok or (count.stdout or "").strip() != "1":
-        return False, "LinkedIn media Next DOM identity is missing or ambiguous"
-    result = li_run(["click", selector], port=port, timeout=20)
-    return (True, "media Next advanced") if result.ok else _step_fail("media Next failed", result)
 
 
 def _validated_linkedin_permalink(raw: str) -> str | None:
@@ -614,81 +373,23 @@ class AgentBrowserSocialWriteDriver:
             return True, "X post submitted and confirmed"
         return False, "X submit returned without a confirmation"
 
-    def _drive_post(
-        self, task: Any, *, port: int, prepare_only: bool = False,
-    ) -> tuple[bool, str]:
-        """Publish approved copy/media through a dedicated visible-CDP session."""
+    def _drive_post(self, task: Any, *, port: int) -> tuple[bool, str]:
+        """Publish a feed post via the shadow-DOM composer (playbook §4.6).
 
-        bound_tab_id: str | None = None
-        bound_paths: set[str] = set()
-        refs_live = False
-
-        def raw_run(args: list[str], *, port: int, timeout: int) -> Any:
-            return run_agent_browser(
-                args, port=port, session=_LINKEDIN_BROWSER_SESSION, timeout=timeout,
-            )
-
-        def li_run(args: list[str], *, port: int, timeout: int) -> Any:
-            nonlocal refs_live
-            if bound_tab_id:
-                inventory = _browser_json(raw_run(["tab", "--json"], port=port, timeout=20))
-                data = inventory.get("data")
-                tabs = data.get("tabs") if isinstance(data, dict) else None
-                if inventory.get("success") is not True or not isinstance(tabs, list):
-                    raise ValueError("LinkedIn company tab inventory unavailable; drive stopped")
-                active = [
-                    tab.get("tabId") for tab in tabs
-                    if isinstance(tab, dict) and tab.get("active") is True
-                ]
-                if active != [bound_tab_id]:
-                    # Selecting even the SAME tab resets Agent Browser refs.
-                    # Reselect only before a new snapshot (or initial hydration)
-                    # and never between an existing snapshot and its actions.
-                    if refs_live and args[0] != "snapshot":
-                        raise ValueError(
-                            "LinkedIn company tab changed after snapshot; drive stopped"
-                        )
-                    selected = raw_run(["tab", bound_tab_id], port=port, timeout=20)
-                    if not selected.ok:
-                        raise ValueError("LinkedIn company tab selection failed; drive stopped")
-                    refs_live = False
-                current = raw_run(["get", "url"], port=port, timeout=20)
-                current_url = urlsplit((current.stdout or "").strip().strip('"'))
-                if (
-                    not current.ok
-                    or current_url.scheme != "https"
-                    or current_url.hostname not in {"linkedin.com", "www.linkedin.com"}
-                    or current_url.path.rstrip("/") not in bound_paths
-                ):
-                    raise ValueError("LinkedIn company tab identity changed; drive stopped")
-            result = raw_run(args, port=port, timeout=timeout)
-            if args[0] == "snapshot" and result.ok:
-                refs_live = True
-            elif args[0] in {"open", "tab"}:
-                refs_live = False
-            return result
+        The composer editor is a Quill ``.ql-editor`` rendered inside a SHADOW
+        ROOT — ``find role textbox`` / ``fill`` miss it and a plain
+        ``querySelector`` returns nothing. The modal also opens as an empty
+        shell and hydrates the editor a few seconds later. So: wait for
+        hydration, shadow-pierce to the editor, synthetic-PASTE the body
+        (base64'd so subprocess/shell quoting can't corrupt apostrophes,
+        quotes, ``$``, ``#`` or newlines), then deep-find + ``.click()`` the
+        enabled "Post" button (a CDP click is eaten). Confirm via the toast.
+        """
 
         body = getattr(task, "payload_text", "") or ""
         if not body.strip():
             return False, "post body is empty"
-        from social.publishers import parse_publisher
-
-        try:
-            publisher = parse_publisher(getattr(task, "publisher_json", None))
-        except ValueError:
-            return False, "invalid approved LinkedIn publisher snapshot"
         feed_url = getattr(task, "target_url", "") or "https://www.linkedin.com/feed/"
-        media_path = (getattr(task, "media_path", None) or "").strip()
-        if publisher:
-            if feed_url != _company_composer_url(publisher):
-                return False, "company target URL differs from the approved publisher"
-            if not media_path or not Path(media_path).is_file():
-                return False, "company draft requires the reviewed image; nothing submitted"
-        elif "/company/" in urlsplit(feed_url).path:
-            return False, "company target requires an approved publisher snapshot"
-        composer_scope = (
-            '[role="dialog"].share-box-v2__modal' if publisher else "#interop-outlet"
-        )
 
         # A REUSED tab can carry an injected overlay (e.g. the Gemini side
         # panel) that silently blocks the composer from opening. Always post
@@ -697,59 +398,11 @@ class AgentBrowserSocialWriteDriver:
         # the dedicated LinkedIn CDP session. Open the feed as part of tab
         # creation and check that result before continuing; otherwise the
         # executor records an opaque subprocess timeout after approval.
-        before_ids: set[str] = set()
-        if publisher:
-            before = _browser_json(raw_run(["tab", "--json"], port=port, timeout=20))
-            before_data = before.get("data")
-            tabs = before_data.get("tabs") if isinstance(before_data, dict) else None
-            if before.get("success") is not True or not isinstance(tabs, list):
-                return False, "company browser tab inventory unavailable; nothing submitted"
-            before_ids = {str(tab.get("tabId")) for tab in tabs if isinstance(tab, dict)}
-        fresh_tab = li_run(["tab", "new", feed_url], port=port, timeout=45)
+        fresh_tab = run_agent_browser(["tab", "new", feed_url], port=port, timeout=20)
         if not fresh_tab.ok:
             return _step_fail("fresh tab failed", fresh_tab)
-        if publisher:
-            after = _browser_json(raw_run(["tab", "--json"], port=port, timeout=20))
-            after_data = after.get("data")
-            tabs = after_data.get("tabs", []) if isinstance(after_data, dict) else []
-            added = [
-                tab for tab in tabs if isinstance(tab, dict)
-                and tab.get("tabId") not in before_ids
-                and re.fullmatch(r"t\d+", str(tab.get("tabId") or ""))
-                and urlsplit(str(tab.get("url") or "")).hostname
-                in {"linkedin.com", "www.linkedin.com"}
-                and urlsplit(str(tab.get("url") or "")).path.rstrip("/")
-                == urlsplit(feed_url).path.rstrip("/")
-            ]
-            if after.get("success") is not True or len(added) != 1:
-                return False, "fresh company browser tab identity is ambiguous; nothing submitted"
-            bound_tab_id = str(added[0]["tabId"])
-            bound_paths.add(urlsplit(feed_url).path.rstrip("/"))
-            # Tab inventory can report the pending destination before the
-            # document commits. Settle that one new tab BEFORE strict steady-
-            # state guards or snapshot refs exist. Only about:blank is a valid
-            # transient; login, wrong origins, and wrong companies fail closed.
-            selected = raw_run(["tab", bound_tab_id], port=port, timeout=20)
-            bootstrap = raw_run(["get", "url"], port=port, timeout=20)
-            if not selected.ok or not bootstrap.ok:
-                return False, "fresh company tab bootstrap failed; nothing submitted"
-            if (bootstrap.stdout or "").strip().strip('"') == "about:blank":
-                expected_url = feed_url.split("?", 1)[0] + "**"
-                settled = raw_run(
-                    ["wait", "--url", expected_url], port=port, timeout=45,
-                )
-                if not settled.ok:
-                    return False, "company navigation did not settle; nothing submitted"
-                bootstrap = raw_run(["get", "url"], port=port, timeout=20)
-            bootstrap_url = urlsplit((bootstrap.stdout or "").strip().strip('"'))
-            if (
-                not bootstrap.ok or bootstrap_url.scheme != "https"
-                or bootstrap_url.hostname not in {"linkedin.com", "www.linkedin.com"}
-                or bootstrap_url.path.rstrip("/") not in bound_paths
-            ):
-                return False, "company navigation reached an unapproved URL; nothing submitted"
-        for step in (["wait", "--load", "domcontentloaded"], ["wait", "3000"]):
-            result = li_run(step, port=port, timeout=45)
+        for step in (["wait", "--load", "networkidle"], ["wait", "3000"]):
+            result = run_agent_browser(step, port=port, timeout=45)
             if not result.ok:
                 return _step_fail(f"{step[0]} failed", result)
 
@@ -766,20 +419,11 @@ class AgentBrowserSocialWriteDriver:
         )
         opened = False
         for _ in range(5):
-            if publisher:
-                # The allowlisted company admin URL bootstraps the existing
-                # share composer. Never click a personal Start a post fallback.
-                probe = li_run(["eval", editor_probe], port=port, timeout=20)
-                if probe.ok and "ED_OK" in (probe.output or ""):
-                    opened = True
-                    break
-                li_run(["wait", "2000"], port=port, timeout=8)
-                continue
             # Open via snapshot REF + `click @ref` (a CDP click) — proven
             # reliable. `find role button click --name` is flaky (it reports
             # done without opening). The utf-8 decode fix lets us parse the
             # snapshot safely; refs reach across the composer's frame boundary.
-            snap = li_run(["snapshot", "-i"], port=port, timeout=30)
+            snap = run_agent_browser(["snapshot", "-i"], port=port, timeout=30)
             # LinkedIn has exposed this trigger as both a button and a link.
             # Match either role; the accessible name + REF is the stable part.
             match = re.search(
@@ -787,26 +431,44 @@ class AgentBrowserSocialWriteDriver:
                 snap.stdout or "",
             )
             if match:
-                li_run(["click", match.group(1)], port=port, timeout=20)
+                run_agent_browser(["click", match.group(1)], port=port, timeout=20)
                 for _ in range(5):  # poll ~10s for the editor to hydrate
-                    li_run(["wait", "2000"], port=port, timeout=8)
-                    probe = li_run(["eval", editor_probe], port=port, timeout=20)
+                    run_agent_browser(["wait", "2000"], port=port, timeout=8)
+                    probe = run_agent_browser(["eval", editor_probe], port=port, timeout=20)
                     if probe.ok and "ED_OK" in (probe.output or ""):
                         opened = True
                         break
             if opened:
                 break
-            li_run(["wait", "2000"], port=port, timeout=8)  # feed still rendering
+            run_agent_browser(["wait", "2000"], port=port, timeout=8)  # feed still rendering
         if not opened:
             return False, "could not open the LinkedIn composer (trigger or editor not found)"
 
-        if publisher:
-            actor = _browser_json(li_run(
-                ["eval", _company_composer_probe()], port=port, timeout=20,
-            ))
-            if not _valid_company_composer_proof(actor, publisher):
-                return False, "company composer publisher could not be verified; nothing uploaded"
-            expected_company_logo = str(actor["actor_logos"][0])
+        # Focus the editor by its REF (a CDP click reaches across the
+        # composer's frame boundary), then type the body LINE BY LINE.
+        # `keyboard inserttext` truncates at newlines through the shell, and the
+        # synthetic ClipboardEvent paste is ignored by Quill (untrusted) — so
+        # real Enter key-presses make the paragraph breaks.
+        snap = run_agent_browser(["snapshot", "-i"], port=port, timeout=30)
+        editor_match = re.search(
+            r'textbox "Text editor for creating content" \[ref=(e\d+)\]', snap.stdout or ""
+        )
+        if not editor_match:
+            return False, "composer editor ref not found after open"
+        editor_ref = editor_match.group(1)
+        run_agent_browser(["click", editor_ref], port=port, timeout=20)
+        lines = body.split("\n")
+        for idx, line in enumerate(lines):
+            if line:
+                run_agent_browser(["keyboard", "inserttext", line], port=port, timeout=20)
+            if idx < len(lines) - 1:
+                run_agent_browser(["press", "Enter"], port=port, timeout=15)
+        readback = run_agent_browser(["get", "text", editor_ref], port=port, timeout=20)
+        rb_len = len((readback.stdout or "").strip())
+        if rb_len < len(body) * 0.8:
+            return False, f"editor text incomplete after typing ({rb_len}/{len(body)} chars)"
+
+        media_path = (getattr(task, "media_path", None) or "").strip()
         if media_path:
             media_file = Path(media_path).expanduser()
             allowed_suffixes = {
@@ -830,33 +492,27 @@ class AgentBrowserSocialWriteDriver:
             # Open LinkedIn's media editor, target its accessible upload REF
             # (the hidden input lives behind the same shadow boundary), wait
             # for the preview, and return to the composer with Next.
-            media_snap = li_run(
-                ["snapshot", "-i", "-s", composer_scope], port=port, timeout=30,
-            )
+            media_snap = run_agent_browser(["snapshot", "-i"], port=port, timeout=30)
             add_match = re.search(
                 r'button "Add media" \[ref=(e\d+)\]', media_snap.stdout or ""
             )
             if not add_match:
                 return False, "LinkedIn Add media control not found"
-            add_result = li_run(
+            add_result = run_agent_browser(
                 ["click", add_match.group(1)], port=port, timeout=20
             )
             if not add_result.ok:
                 return _step_fail("open media editor failed", add_result)
-            li_run(["wait", "1000"], port=port, timeout=8)
+            run_agent_browser(["wait", "1000"], port=port, timeout=8)
 
-            upload_snap = li_run(
-
-                ["snapshot", "-i", "-s", composer_scope], port=port, timeout=30,
-
-            )
+            upload_snap = run_agent_browser(["snapshot", "-i"], port=port, timeout=30)
             upload_match = re.search(
                 r'button "Upload from computer" \[ref=(e\d+)\]',
                 upload_snap.stdout or "",
             )
             if not upload_match:
                 return False, "LinkedIn media upload control not found"
-            upload_result = li_run(
+            upload_result = run_agent_browser(
                 ["upload", upload_match.group(1), str(media_file.resolve())],
                 port=port,
                 timeout=45,
@@ -864,156 +520,72 @@ class AgentBrowserSocialWriteDriver:
             if not upload_result.ok:
                 return _step_fail("media upload failed", upload_result)
             _dismiss_windows_chrome_file_dialog()
-            li_run(["wait", "2500"], port=port, timeout=10)
+            run_agent_browser(["wait", "2500"], port=port, timeout=10)
 
-            if publisher:
-                advanced, detail = _advance_company_media(
-                    li_run, scope=composer_scope, port=port,
-                )
-                if not advanced:
-                    return False, detail
-            else:
-                preview_snap = li_run(
-                    ["snapshot", "-i", "-s", composer_scope], port=port, timeout=30,
-                )
-                next_match = re.search(
-                    r'button "Next"(?: \[[^\]]*\])* \[ref=(e\d+)\]',
-                    preview_snap.stdout or "",
-                ) or re.search(r'button "Next" \[ref=(e\d+)\]', preview_snap.stdout or "")
-                if not next_match:
-                    return False, "LinkedIn media preview did not become ready"
-                next_result = li_run(
-                    ["click", next_match.group(1)], port=port, timeout=20,
-                )
-                if not next_result.ok:
-                    return _step_fail("media Next failed", next_result)
-            li_run(["wait", "1500"], port=port, timeout=8)
-
-            attached_snap = li_run(
-
-                ["snapshot", "-i", "-s", composer_scope], port=port, timeout=30,
-
+            preview_snap = run_agent_browser(["snapshot", "-i"], port=port, timeout=30)
+            next_match = re.search(
+                r'button "Next"(?: \[[^\]]*\])* \[ref=(e\d+)\]',
+                preview_snap.stdout or "",
+            ) or re.search(r'button "Next" \[ref=(e\d+)\]', preview_snap.stdout or "")
+            if not next_match:
+                return False, "LinkedIn media preview did not become ready"
+            next_result = run_agent_browser(
+                ["click", next_match.group(1)], port=port, timeout=20
             )
+            if not next_result.ok:
+                return _step_fail("media Next failed", next_result)
+            run_agent_browser(["wait", "1500"], port=port, timeout=8)
+
+            attached_snap = run_agent_browser(["snapshot", "-i"], port=port, timeout=30)
             if not re.search(
                 r'button "(?:Edit media preview|Remove media)"',
                 attached_snap.stdout or "",
             ):
                 return False, "LinkedIn media attachment was not confirmed"
 
-        # Media upload/Next can rebuild the composer and discard existing text.
-        # Enter the approved caption only after the media editor has finished.
-        caption_snapshot = li_run(
-            ["snapshot", "-i", "-s", composer_scope], port=port, timeout=30,
-        )
-        editor_match = re.search(
-            r'textbox "Text editor for creating content" \[ref=(e\d+)\]',
-            caption_snapshot.stdout or "",
-        )
-        if not caption_snapshot.ok or not editor_match:
-            return False, "composer editor ref not found after media upload"
-        editor_ref = editor_match.group(1)
-        focused = li_run(["click", editor_ref], port=port, timeout=20)
-        if not focused.ok:
-            return _step_fail("caption focus failed", focused)
-        # Clear any existing LinkedIn draft text without changing the queue row.
-        for command in (["press", "Control+a"], ["press", "Backspace"]):
-            cleared = li_run(command, port=port, timeout=15)
-            if not cleared.ok:
-                return _step_fail("caption clear failed", cleared)
-        lines = body.split("\n")
-        for idx, line in enumerate(lines):
-            if line:
-                typed = li_run(["keyboard", "inserttext", line], port=port, timeout=20)
-                if not typed.ok:
-                    return _step_fail("caption input failed", typed)
-            if idx < len(lines) - 1:
-                entered = li_run(["press", "Enter"], port=port, timeout=15)
-                if not entered.ok:
-                    return _step_fail("caption paragraph failed", entered)
-
         # Give LinkedIn a beat to enable the Post button after the input lands.
-        li_run(["wait", "2000"], port=port, timeout=8)
+        run_agent_browser(["wait", "2000"], port=port, timeout=8)
 
-        # Resolve the enabled submit control from the current snapshot. Stamp
-        # ambiguity BEFORE clicking: even a click timeout may have submitted.
-        submit_snapshot = li_run(
-            ["snapshot", "-i", "-s", composer_scope], port=port, timeout=30,
+        # CDP click on "Post" is eaten by overlays — deep-find the enabled
+        # BUTTON whose text is exactly "Post" and fire its real onClick.
+        click_js = (
+            "(()=>{function deep(r){let a=[...r.querySelectorAll('*')];"
+            "r.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)"
+            "a=a.concat(deep(e.shadowRoot));});return a;}"
+            "const b=deep(document).find(e=>e.tagName==='BUTTON'&&!e.disabled"
+            "&&(e.innerText||'').trim()==='Post');"
+            "if(!b)return 'NO_POST_BTN';b.click();return 'CLICKED';})()"
         )
-        submit_match = re.search(
-            r'button "Post" \[ref=(e\d+)\]', submit_snapshot.stdout or ""
-        )
-        if not submit_snapshot.ok or not submit_match:
-            return False, "enabled LinkedIn Post control not found"
-        # Read the fresh editor ref after all upload/navigation/input work.
-        # Full text equality is required, never a length or substring threshold.
-        final_editor = re.search(
-            r'textbox "Text editor for creating content" \[ref=(e\d+)\]',
-            submit_snapshot.stdout or "",
-        )
-        if not final_editor:
-            return False, "final caption editor not found; nothing submitted"
-        final_caption = li_run(
-            ["get", "text", final_editor.group(1)], port=port, timeout=20,
-        )
-        expected_text = " ".join(body.split())
-        observed_text = " ".join((final_caption.stdout or "").split())
-        if not final_caption.ok or observed_text != expected_text:
-            return False, "final caption does not match the approved copy; nothing submitted"
-        if media_path and not re.search(
-            r'button "(?:Edit media preview|Remove media)"', submit_snapshot.stdout or "",
-        ):
-            return False, "approved media missing from final composer; nothing submitted"
-        caption_proof = {
-            "caption_verified_before_submit": "true",
-            "expected_caption_sha256": hashlib.sha256(expected_text.encode()).hexdigest(),
-            "observed_caption_sha256": hashlib.sha256(observed_text.encode()).hexdigest(),
-            "media_verified_before_submit": "true" if media_path else "not_requested",
-        }
-        if publisher:
-            # Re-read after upload/Next and text entry: either can rebuild the
-            # composer. An actor switch never inherits the earlier approval.
-            actor = _browser_json(li_run(
-                ["eval", _company_composer_probe()], port=port, timeout=20,
-            ))
-            if not _valid_company_composer_proof(actor, publisher):
-                return False, "final company publisher does not match approval; nothing submitted"
-            caption_proof.update({
-                "publisher_id": publisher.id,
-                "publisher_verified_before_submit": "true",
-            })
-        if prepare_only:
-            self._last_verification = {
-                **caption_proof,
-                "verification_state": "prepared_only",
-                "confirmation_result": "caption_and_media_ready_no_submit",
-            }
-            return True, "caption and media verified in composer; not submitted"
+        submit = run_agent_browser(["eval", click_js], port=port, timeout=40)
+        if not submit.ok:
+            return _step_fail("post submit failed", submit)
+        if "CLICKED" not in (submit.output or ""):
+            return False, f"post button not found: {redact_text_urls((submit.output or '')[:200])}"
 
+        # A successful click is not proof of publication.  Read the visible
+        # "View post" link by accessibility REF, fetch its href, and validate
+        # it as a LinkedIn feed-update permalink.  No permalink means an
+        # intentionally non-retryable verification_required queue state.
         submitted_at = datetime.now(UTC).isoformat(timespec="seconds")
+        # The external boundary has already been crossed.  Stamp quarantine
+        # proof immediately so any later browser timeout/error can never make
+        # this look retryable or "failed before confirmation".
         self._last_verification = {
-            **caption_proof,
             "verification_state": "verification_required",
             "post_url": "",
             "submitted_at": submitted_at,
-            "confirmation_result": "submit_attempted_proof_pending",
+            "confirmation_result": "submit_clicked_proof_pending",
         }
-        try:
-            submit = li_run(["click", submit_match.group(1)], port=port, timeout=40)
-        except Exception:
-            return True, "post submit outcome unknown; permalink verification required"
-        if not submit.ok:
-            return True, "post submit outcome unknown; permalink verification required"
-
         confirmation_seen = False
         permalink: str | None = None
         for attempt in range(3):
             try:
-                li_run(
+                run_agent_browser(
                     ["wait", "3000" if attempt == 0 else "1500"],
                     port=port,
                     timeout=10,
                 )
-                snap = li_run(
+                snap = run_agent_browser(
                     ["snapshot", "-i"], port=port, timeout=30
                 )
                 if not snap.ok:
@@ -1033,7 +605,7 @@ class AgentBrowserSocialWriteDriver:
                 )
                 if not view_match:
                     continue
-                href = li_run(
+                href = run_agent_browser(
                     ["get", "attr", view_match.group(1), "href"],
                     port=port,
                     timeout=20,
@@ -1046,58 +618,7 @@ class AgentBrowserSocialWriteDriver:
                 continue
 
         if permalink:
-            if publisher:
-                # Open only the verified View post URL. A toast/permalink alone
-                # cannot prove that the approved company, caption and media won.
-                try:
-                    bound_paths.add(urlsplit(permalink).path.rstrip("/"))
-                    navigated = li_run(["open", permalink], port=port, timeout=45)
-                    proof = {}
-                    if navigated.ok:
-                        # LinkedIn may redirect a share permalink to an activity
-                        # permalink. Pin the same tab, accept only its validated
-                        # public post URL, then continue reading that exact tab.
-                        raw_run(["tab", bound_tab_id], port=port, timeout=20)
-                        actual_url = raw_run(["get", "url"], port=port, timeout=20)
-                        canonical = _validated_linkedin_permalink(actual_url.stdout or "")
-                        if not actual_url.ok or not canonical:
-                            raise ValueError("company post did not resolve to a public permalink")
-                        bound_paths.add(urlsplit(canonical).path.rstrip("/"))
-                        li_run(["wait", "--load", "domcontentloaded"], port=port, timeout=30)
-                        for _ in range(3):
-                            li_run(["wait", "1500"], port=port, timeout=8)
-                            proof = _browser_json(li_run(
-                                ["eval", _company_post_probe(canonical)], port=port, timeout=20,
-                            ))
-                            if _valid_company_post_proof(
-                                proof, publisher, body, expected_logo=expected_company_logo,
-                            ):
-                                break
-                    if not _valid_company_post_proof(
-                        proof, publisher, body, expected_logo=expected_company_logo,
-                    ):
-                        self._last_verification.update({
-                            "post_url": permalink,
-                            "confirmation_result": "company_post_content_or_publisher_unverified",
-                        })
-                        return True, (
-                            "company post submitted; publisher, caption and media "
-                            "verification required"
-                        )
-                except Exception:
-                    self._last_verification.update({
-                        "post_url": permalink,
-                        "confirmation_result": "company_post_verification_failed",
-                    })
-                    return True, "company post submitted; verification required"
-                caption_proof.update({
-                    "publisher_verified_after_submit": "true",
-                    "caption_verified_after_submit": "true",
-                    "media_verified_after_submit": "true",
-                    "published_caption_sha256": hashlib.sha256(expected_text.encode()).hexdigest(),
-                })
             self._last_verification = {
-                **caption_proof,
                 "verification_state": "verified",
                 "post_url": permalink,
                 "submitted_at": submitted_at,
@@ -1106,7 +627,6 @@ class AgentBrowserSocialWriteDriver:
             return True, "post submitted and confirmed"
 
         self._last_verification = {
-            **caption_proof,
             "verification_state": "verification_required",
             "post_url": "",
             "submitted_at": submitted_at,
@@ -1154,12 +674,7 @@ class AgentBrowserSocialWriteDriver:
         path enters the receipt metadata, never the bytes.
         """
 
-        if workflow_id == "linkedin.post.create":
-            data = capture_browser_screenshot_png(
-                port=port, session=_LINKEDIN_BROWSER_SESSION,
-            )
-        else:
-            data = capture_browser_screenshot_png(port=port)
+        data = capture_browser_screenshot_png(port=port)
         out_dir = self._screenshot_dir or (_data_dir() / "browser_writes")
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")

@@ -84,7 +84,7 @@ _RESOURCE_TERMS = (
 )
 _RESOURCE_ACTIONS = ("comment", "dm", "message", "reply", "send")
 
-CadenceMode = Literal["auto", "research", "slot", "article"]
+CadenceMode = Literal["auto", "research", "slot"]
 SlotKind = Literal["geo_signal", "article", "geo_howto", "repo_field_note"]
 
 
@@ -180,25 +180,7 @@ def _operation_key(kind: str, local_day: date) -> str:
     return f"{kind}:{local_day.isoformat()}"
 
 
-def _delivery_pending(receipt: Any) -> bool:
-    """Only an explicitly requested, failed LinkedIn delivery can retry."""
-    if not isinstance(receipt, Mapping) or receipt.get("status") != "queued":
-        return False
-    detail = receipt.get("detail")
-    return bool(
-        receipt.get("slot") != "article"
-        and type(receipt.get("post_id")) is int
-        and receipt["post_id"] > 0
-        and isinstance(detail, Mapping)
-        and detail.get("delivery_requested") is True
-        and detail.get("delivered") is False
-        and detail.get("delivery_retry_stopped") is not True
-    )
-
-
-def _claim_operation(
-    path: Path, key: str, now: datetime, *, retry_delivery: bool = False,
-) -> tuple[str, dict[str, Any]]:
+def _claim_operation(path: Path, key: str, now: datetime) -> tuple[str, dict[str, Any]]:
     """Atomically claim one day/slot, recovering only genuinely stale claims."""
 
     from shared import file_lock
@@ -206,8 +188,7 @@ def _claim_operation(
     with file_lock(path, timeout=10.0):
         state = _load_state(path)
         completed = state.setdefault("completed", {})
-        retry = retry_delivery and _delivery_pending(completed.get(key))
-        if key in completed and not retry:
+        if key in completed:
             return "completed", dict(completed[key])
         inflight = state.setdefault("inflight", {})
         started_raw = inflight.get(key)
@@ -222,7 +203,7 @@ def _claim_operation(
                     return "busy", {"started_at": started.isoformat()}
         inflight[key] = now.astimezone(UTC).isoformat()
         _save_state(path, state)
-        return ("delivery_claimed", dict(completed[key])) if retry else ("claimed", state)
+        return "claimed", state
 
 
 def _finish_operation(
@@ -255,86 +236,13 @@ def _finish_operation(
         _save_state(path, state)
 
 
-def _retry_slot_delivery(
-    *, path: Path, key: str, previous: Mapping[str, Any], local: datetime,
-    db_path: str | Path | None,
-) -> CadenceReceipt:
-    """Retry the exact persisted package, never generation or publication.
-
-    The caller owns the same daily operation claim used by generation. An
-    operator revision, approval, rejection, or invalidated review stops this
-    automatic retry; workshop delivery has its own explicit operator flow.
-    """
-    from social.notify import deliver_draft_to_telegram
-    from social.service import SocialPostService
-
-    detail = dict(previous.get("detail") or {})
-    post_id = int(previous["post_id"])
-    status = "delivery_failed"
-    reasons: tuple[str, ...] = ("Telegram delivery failed; the queued package will retry",)
-    try:
-        service = SocialPostService(db_path=db_path)
-        post = service.get_post(post_id)
-        if (
-            post is None or post.status != "draft"
-            or post.topic_source != "authority_signal"
-            or post.channel.lower() not in {"linkedin", "li"}
-            or post.revision != detail.get("delivery_revision")
-        ):
-            detail["delivery_retry_stopped"] = True
-            status = "delivery_skipped"
-            reasons = (
-                "Queued draft changed or is no longer awaiting review; no delivery attempted",
-            )
-        else:
-            try:
-                service.assert_editorial_integrity(post)
-            except ValueError:
-                detail["delivery_retry_stopped"] = True
-                status = "delivery_skipped"
-                reasons = (
-                    "Queued package needs renewed editorial/image review; no delivery attempted",
-                )
-            else:
-                if deliver_draft_to_telegram(post, db_path=db_path):
-                    detail["delivered"] = True
-                    status = "delivery_retried"
-                    reasons = ()
-    except Exception as exc:
-        reasons = (f"delivery_retry_failed:{type(exc).__name__}",)
-    detail["delivery_last_status"] = status
-    detail["delivery_attempt_at"] = local.astimezone(UTC).isoformat()
-    receipt_fields = {
-        "mode": "slot", "local_date": str(previous["local_date"]),
-        "slot": previous.get("slot"), "signal_id": previous.get("signal_id"),
-        "post_id": post_id, "repository": previous.get("repository"),
-        "heartbeat": previous.get("heartbeat"), "detail": detail,
-    }
-    # Generation remains terminal, even if its delivery is temporarily down.
-    # Preserve the original consumed signal and weekly reservation unchanged.
-    stored = CadenceReceipt(status="queued", reasons=reasons, **receipt_fields)
-    _finish_operation(path, key, stored, terminal=True)
-    return CadenceReceipt(status=status, reasons=reasons, **receipt_fields)
-
-
 def _slot_for_day(day: date) -> SlotKind | None:
-    """Return the daily LinkedIn editorial preference for a local date."""
-
     return {
         0: "geo_signal",
-        1: "geo_howto",
+        1: "article",
         2: "geo_howto",
-        3: "geo_signal",
         4: "repo_field_note",
-        5: "geo_howto",
-        6: "geo_signal",
     }.get(day.weekday())
-
-
-def _article_due(day: date) -> bool:
-    """Keep the weekly Insights package in addition to Tuesday's LinkedIn draft."""
-
-    return day.weekday() == 1
 
 
 def repository_for_day(day: date) -> str:
@@ -377,7 +285,6 @@ def _load_valid_packets(
     queue_loader: Callable[..., list[dict[str, Any]]] | None,
 ) -> list[Any]:
     from business_signal.models import AuthoritySignalPacket
-    from social.authority_content import authority_packet_postability_reasons
 
     if queue_loader is None:
         from business_signal.authority import list_authority_queue
@@ -398,8 +305,6 @@ def _load_valid_packets(
             if packet.expires_at <= now.astimezone(UTC):
                 continue
             packet.to_public_dict()
-            if authority_packet_postability_reasons(packet):
-                continue
             packets.append(packet)
         except (KeyError, OSError, UnicodeError, ValueError):
             continue
@@ -443,32 +348,6 @@ def _select_packet(
             packet for packet in available if packet.content_series in _WEDNESDAY_SERIES
         ]
         preferred = _WEDNESDAY_SERIES
-    return max(available, key=lambda packet: _packet_sort_key(packet, preferred), default=None)
-
-
-def _select_daily_fallback_packet(
-    packets: Sequence[Any],
-    *,
-    state: Mapping[str, Any],
-) -> Any | None:
-    """Choose another validated social packet when the day's preference is empty.
-
-    This is not a topic-string or autobiographical fallback. The candidate must
-    still be an unconsumed, source-bound Authority packet that passed research
-    validation. It exists so a missing Friday repository event does not silence
-    the whole daily LinkedIn review lane when a strong education packet exists.
-    """
-
-    used_ids = set((state.get("consumed_signal_ids") or {}).keys())
-    used_dedup = set((state.get("consumed_dedup_keys") or {}).keys())
-    preferred = (*_MONDAY_SERIES, "Factory Floor / Dark Factory")
-    available = [
-        packet
-        for packet in packets
-        if packet.signal_id not in used_ids
-        and packet.dedup_key not in used_dedup
-        and packet.content_series in preferred
-    ]
     return max(available, key=lambda packet: _packet_sort_key(packet, preferred), default=None)
 
 
@@ -614,9 +493,8 @@ def _run_slot(
     queue_loader: Callable[..., list[dict[str, Any]]] | None,
     draft_creator: Callable[..., Any] | None,
     article_handoff: Callable[..., Any] | None,
-    slot_override: SlotKind | None = None,
 ) -> CadenceReceipt:
-    slot = slot_override or _slot_for_day(local.date())
+    slot = _slot_for_day(local.date())
     if slot is None:
         return CadenceReceipt(
             status="no_slot",
@@ -626,22 +504,8 @@ def _run_slot(
             heartbeat=checklist.public_dict(),
         )
     key = _operation_key(f"slot:{slot}", local.date())
-    if dry_run and deliver and _delivery_pending(
-        (_load_state(state_path).get("completed") or {}).get(key)
-    ):
-        return CadenceReceipt(
-            status="dry_run", mode="slot", local_date=local.date().isoformat(),
-            slot=slot, heartbeat=checklist.public_dict(),
-            reasons=(
-                "Queued package needs delivery only; no provider, queue or Telegram write was made",
-            ),
-        )
     if not dry_run:
-        claim, previous = _claim_operation(state_path, key, local, retry_delivery=deliver)
-        if claim == "delivery_claimed":
-            return _retry_slot_delivery(
-                path=state_path, key=key, previous=previous, local=local, db_path=db_path,
-            )
+        claim, previous = _claim_operation(state_path, key, local)
         if claim != "claimed":
             return CadenceReceipt(
                 status="already_complete" if claim == "completed" else "busy",
@@ -668,14 +532,6 @@ def _run_slot(
             if article_packets is not None
             else _select_packet(packets, slot=slot, day=local.date(), state=state)
         )
-        selection_fallback: str | None = None
-        if packet is None and slot != "article":
-            packet = _select_daily_fallback_packet(packets, state=state)
-            if packet is not None:
-                selection_fallback = (
-                    f"No packet matched the preferred {slot} slot; used the strongest "
-                    "fresh validated education packet"
-                )
         if packet is None or (slot == "article" and article_packets is None):
             receipt = CadenceReceipt(
                 status="no_signal",
@@ -764,19 +620,11 @@ def _run_slot(
                 packet,
                 now=local.astimezone(UTC),
                 allow_resource_drop=allow_resource,
-                resource_week=resource_week,
                 db_path=db_path,
                 deliver=deliver,
             )
         )
-        if selection_fallback:
-            detail["selection_fallback"] = selection_fallback
         queued = detail.get("status") == "queued" and detail.get("post_id") is not None
-        if queued:
-            detail["delivery_requested"] = deliver
-            # The authority bridge creates revision 1. Later workshop revisions
-            # must be delivered through that operator flow, not this retry.
-            detail["delivery_revision"] = 1
         receipt = CadenceReceipt(
             status="queued" if queued else "no_draft",
             mode="slot",
@@ -785,10 +633,7 @@ def _run_slot(
             signal_id=packet.signal_id,
             post_id=int(detail["post_id"]) if queued else None,
             repository=packet.destination_repo,
-            reasons=tuple(
-                [str(item) for item in detail.get("reasons", [])[:19]]
-                + ([selection_fallback] if selection_fallback else [])
-            ),
+            reasons=tuple(str(item) for item in detail.get("reasons", [])[:20]),
             heartbeat=checklist.public_dict(),
             detail=detail,
         )
@@ -796,14 +641,10 @@ def _run_slot(
             state_path,
             key,
             receipt,
-            terminal=queued,
+            terminal=True,
             consumed_signal_id=packet.signal_id if queued else None,
             consumed_dedup_key=packet.dedup_key if queued else None,
-            resource_week=(
-                resource_week
-                if queued and detail.get("resource_drop_included") is True
-                else None
-            ),
+            resource_week=resource_week if queued and allow_resource else None,
         )
         return receipt
     except Exception as exc:  # noqa: BLE001 - one bad slot cannot become filler
@@ -838,8 +679,8 @@ def run_authority_cadence(
 ) -> dict[str, Any]:
     """Run a due research/slot tick while preserving the disabled hard gate."""
 
-    if mode not in {"auto", "research", "slot", "article"}:
-        raise ValueError("mode must be auto, research, slot, or article")
+    if mode not in {"auto", "research", "slot"}:
+        raise ValueError("mode must be auto, research, or slot")
     local = _local_now(now)
     if not _engine_enabled(environ):
         return CadenceReceipt(
@@ -874,20 +715,6 @@ def run_authority_cadence(
             draft_creator=draft_creator,
             article_handoff=article_handoff,
         ).as_dict()
-    if mode == "article":
-        return _run_slot(
-            local=local,
-            state_path=resolved_state,
-            packet_dir=resolved_packets,
-            checklist=checklist,
-            dry_run=dry_run,
-            db_path=db_path,
-            deliver=deliver,
-            queue_loader=queue_loader,
-            draft_creator=draft_creator,
-            article_handoff=article_handoff,
-            slot_override="article",
-        ).as_dict()
 
     output: dict[str, Any] = {
         "status": "no_due_work",
@@ -915,13 +742,7 @@ def run_authority_cadence(
     if (
         slot is not None
         and local.timetz().replace(tzinfo=None) >= _SLOT_DUE
-        and (
-            slot_key not in (state.get("completed") or {})
-            or (
-                deliver
-                and _delivery_pending((state.get("completed") or {}).get(slot_key))
-            )
-        )
+        and slot_key not in (state.get("completed") or {})
     ):
         output["slot"] = _run_slot(
             local=local,
@@ -936,42 +757,19 @@ def run_authority_cadence(
             article_handoff=article_handoff,
         ).as_dict()
         output["status"] = "ran"
-    state = _load_state(resolved_state)
-    article_key = _operation_key("slot:article", local.date())
-    if (
-        _article_due(local.date())
-        and local.timetz().replace(tzinfo=None) >= _SLOT_DUE
-        and article_key not in (state.get("completed") or {})
-    ):
-        output["article"] = _run_slot(
-            local=local,
-            state_path=resolved_state,
-            packet_dir=resolved_packets,
-            checklist=checklist,
-            dry_run=dry_run,
-            db_path=db_path,
-            deliver=deliver,
-            queue_loader=queue_loader,
-            draft_creator=draft_creator,
-            article_handoff=article_handoff,
-            slot_override="article",
-        ).as_dict()
-        output["status"] = "ran"
     return output
 
 
 def _receipt_exit_code(receipt: Mapping[str, Any]) -> int:
     """Expose operational failures without treating editorial no-ops as errors."""
     status = receipt.get("status")
-    if status in {"failed", "error", "delivery_failed"}:
-        return 1
-    if status == "queued" and _delivery_pending(receipt):
+    if status in {"failed", "error"}:
         return 1
     if status == "ran":
         return max(
             (
                 _receipt_exit_code(child)
-                for key in ("research", "slot", "article")
+                for key in ("research", "slot")
                 if isinstance(child := receipt.get(key), Mapping)
             ),
             default=0,
@@ -986,14 +784,8 @@ def _receipt_exit_code(receipt: Mapping[str, Any]) -> int:
                 return 1
             failure_reasons = {
                 "copy_generation_failed",
-                "editorial_generation_failed",
-                "independent_review_failed",
-                "invalid_editorial_generation",
-                "invalid_independent_review",
-                "editorial_pipeline_failed",
                 "article_generation_failed",
                 "article_media_failed",
-                "media_generation_failed",
             }
             if any(
                 str(reason).split(":", 1)[0] in failure_reasons
@@ -1009,9 +801,7 @@ def main() -> int:
     import config  # noqa: F401
 
     parser = argparse.ArgumentParser(description="GEO Authority coordinated cadence")
-    parser.add_argument(
-        "--mode", choices=("auto", "research", "slot", "article"), default="auto"
-    )
+    parser.add_argument("--mode", choices=("auto", "research", "slot"), default="auto")
     parser.add_argument(
         "--dry-run",
         action="store_true",

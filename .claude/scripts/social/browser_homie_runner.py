@@ -14,8 +14,7 @@ Modes:
                               holds the claim for this row.
     --sweep                   stale-claim sweep: rows claimed longer than
                               SOCIAL_RUNNER_CLAIM_TTL_MIN (default 15) that
-                              are still 'approved' -> quarantine LinkedIn
-                              (including company publishers) + notify.
+                              are still 'approved' -> mark failed + notify.
 
 The runner never approves anything: dispatch_post() refuses non-approved rows
 and the require_integration_action default-deny gate stays inside
@@ -60,7 +59,6 @@ def _send_receipt(text: str) -> None:
 def run_post(post_id: int, *, claimed: bool, db_path: str | None = None) -> int:
     from integrations.capabilities import IntegrationPolicyError
     from social.post_executor import dispatch_post
-    from social.publishers import is_linkedin_channel
     from social.service import SocialPostService
 
     svc = SocialPostService(db_path=db_path)
@@ -91,10 +89,7 @@ def run_post(post_id: int, *, claimed: bool, db_path: str | None = None) -> int:
         try:
             refreshed = svc.get_post(post_id)
             if refreshed is not None and refreshed.status == "approved":
-                if (
-                    is_linkedin_channel(refreshed.channel)
-                    or refreshed.publisher_json is not None
-                ):
+                if refreshed.channel.lower() in {"linkedin", "li"}:
                     svc.mark_verification_required(
                         post_id,
                         receipt_json=json.dumps(
@@ -133,8 +128,8 @@ def run_post(post_id: int, *, claimed: bool, db_path: str | None = None) -> int:
             pass
         _log(f"{label}: verification required — do not retry")
         _send_receipt(
-            f"⚠️ Post {label} may have submitted, but LinkedIn publication proof "
-            "is incomplete. It is locked in verification_required "
+            f"⚠️ Post {label} may have submitted, but LinkedIn did not return a "
+            "verifiable View post permalink. It is locked in verification_required "
             f"and will not retry. Screenshot: {screenshot}"
         )
         return 0

@@ -1,7 +1,6 @@
 @echo off
 REM Coordinated GEO Authority runner for Windows Task Scheduler.
-REM One task invokes this at 06:30 PT daily and 07:00 PT daily.
-REM Tuesday's 07:00 tick also attempts the separately approval-gated article package.
+REM One task invokes this at 06:30 PT daily and 07:00 PT on Mon/Tue/Wed/Fri.
 REM social.authority_cadence determines which work is due and is inert unless
 REM AUTHORITY_ENGINE_ENABLED=true. It never auto-approves or auto-posts.
 

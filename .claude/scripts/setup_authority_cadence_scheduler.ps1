@@ -2,10 +2,9 @@ param(
     [switch]$Enable
 )
 
-# Registers ONE coordinated GEO Authority task with three triggers:
+# Registers ONE coordinated GEO Authority task with two triggers:
 #   06:30 daily                  source research + packet persistence
-#   07:00 daily                  LinkedIn review draft (+ Tuesday article package)
-#   08:00 daily                  retry only when the 07:00 draft did not complete
+#   07:00 Mon/Tue/Wed/Fri       deterministic content slot
 #
 # The task is registered disabled unless -Enable is passed. Even when enabled,
 # the Python entrypoint remains inert until AUTHORITY_ENGINE_ENABLED=true.
@@ -40,8 +39,11 @@ $action = New-ScheduledTaskAction `
     -WorkingDirectory $PSScriptRoot
 
 $researchTrigger = New-ScheduledTaskTrigger -Daily -At "06:30"
-$slotTrigger = New-ScheduledTaskTrigger -Daily -At "07:00"
-$retryTrigger = New-ScheduledTaskTrigger -Daily -At "08:00"
+$slotTrigger = New-ScheduledTaskTrigger `
+    -Weekly `
+    -WeeksInterval 1 `
+    -DaysOfWeek Monday, Tuesday, Wednesday, Friday `
+    -At "07:00"
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -75,7 +77,7 @@ Register-ScheduledTask `
     -TaskName $TaskName `
     -TaskPath "\" `
     -Action $action `
-    -Trigger @($researchTrigger, $slotTrigger, $retryTrigger) `
+    -Trigger @($researchTrigger, $slotTrigger) `
     -Settings $settings `
     -Principal $principal `
     -Force `
@@ -84,9 +86,7 @@ Register-ScheduledTask `
 $status = if ($Enable) { "ENABLED" } else { "DISABLED" }
 Write-Host "Task '$TaskName' registered $status."
 Write-Host "Research: daily 06:30 Pacific time"
-Write-Host "LinkedIn review draft: daily 07:00 Pacific time"
-Write-Host "Failed-draft retry: daily 08:00 Pacific time"
-Write-Host "Tenant Insights article package: Tuesday 07:00 Pacific time (additional)"
+Write-Host "Content: Monday, Tuesday, Wednesday, Friday 07:00 Pacific time"
 Write-Host "Hidden-run log: $LogPath"
 Write-Host "Runtime gate: AUTHORITY_ENGINE_ENABLED=true is still required"
 Write-Host "Verify: Get-ScheduledTask -TaskName '$TaskName'"

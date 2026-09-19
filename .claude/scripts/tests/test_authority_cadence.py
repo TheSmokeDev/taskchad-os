@@ -170,23 +170,6 @@ def test_monday_packet_uses_strict_queue_bridge(tmp_path: Path) -> None:
     assert "autopilot" not in captured["kwargs"]
 
 
-@pytest.mark.parametrize(
-    ("day", "expected"),
-    [
-        (7, "geo_signal"),
-        (8, "geo_howto"),
-        (9, "geo_howto"),
-        (10, "geo_signal"),
-        (11, "repo_field_note"),
-        (12, "geo_howto"),
-        (13, "geo_signal"),
-    ],
-)
-def test_linkedin_slot_is_scheduled_every_day(day: int, expected: str) -> None:
-    local_day = _now(day).astimezone(authority_cadence._PACIFIC).date()
-    assert authority_cadence._slot_for_day(local_day) == expected
-
-
 def test_empty_slot_is_terminal_no_filler(tmp_path: Path) -> None:
     called = False
 
@@ -233,8 +216,7 @@ def test_resource_drop_is_allowed_at_most_once_per_iso_week(tmp_path: Path) -> N
 
     def create(packet: AuthoritySignalPacket, **kwargs: Any) -> dict[str, Any]:
         allowed.append(kwargs["allow_resource_drop"])
-        return {"status": "queued", "post_id": len(allowed), "reasons": [],
-                "resource_drop_included": kwargs["allow_resource_drop"]}
+        return {"status": "queued", "post_id": len(allowed), "reasons": []}
 
     common = {
         "environ": {"AUTHORITY_ENGINE_ENABLED": "true"},
@@ -266,7 +248,7 @@ def test_tuesday_bridge_absence_is_bounded_noop(tmp_path: Path) -> None:
         return {"status": "bridge_unavailable", "reason": "not installed"}
 
     result = run_authority_cadence(
-        mode="article",
+        mode="slot",
         now=_now(8),
         environ={"AUTHORITY_ENGINE_ENABLED": "true"},
         state_path=tmp_path / "state.json",
@@ -285,7 +267,7 @@ def test_tuesday_requires_two_unique_sources_before_handoff(tmp_path: Path) -> N
     packets = tmp_path / "packets"
     _packet(packets, token="only-one", observed=_now(7), series="AI Search Teardown")
     result = run_authority_cadence(
-        mode="article",
+        mode="slot",
         now=_now(8),
         environ={"AUTHORITY_ENGINE_ENABLED": "true"},
         state_path=tmp_path / "state.json",
@@ -313,7 +295,7 @@ def test_tuesday_missing_YourProduct_bridge_is_quiet_before_generation(
     _packet(packets, token="article-ready-b", observed=_now(6), series="GEO Tip")
     state = tmp_path / "state.json"
     result = run_authority_cadence(
-        mode="article",
+        mode="slot",
         now=_now(8),
         environ={"AUTHORITY_ENGINE_ENABLED": "true"},
         state_path=state,
@@ -353,7 +335,7 @@ def test_successful_article_package_consumes_both_packets_atomically(tmp_path: P
     _packet(packets, token="article-support", observed=_now(6), series="GEO Tip")
     state = tmp_path / "state.json"
     result = run_authority_cadence(
-        mode="article",
+        mode="slot",
         now=_now(8),
         environ={"AUTHORITY_ENGINE_ENABLED": "true"},
         state_path=state,
@@ -372,155 +354,12 @@ def test_successful_article_package_consumes_both_packets_atomically(tmp_path: P
     assert len(saved["consumed_dedup_keys"]) == 2
 
 
-def test_tuesday_auto_runs_linkedin_and_article_independently(tmp_path: Path) -> None:
-    packets = tmp_path / "packets"
-    _packet(packets, token="tuesday-social", observed=_now(8), series="GEO Tip")
-    _packet(
-        packets,
-        token="tuesday-article-primary",
-        observed=_now(7),
-        series="AI Search Teardown",
-    )
-    _packet(
-        packets,
-        token="tuesday-article-support",
-        observed=_now(6),
-        series="Citation Anatomy",
-    )
-    drafted: list[str] = []
-    handed_off: list[tuple[str, ...]] = []
-    common = {
-        "mode": "auto",
-        "now": _now(8),
-        "environ": {"AUTHORITY_ENGINE_ENABLED": "true"},
-        "state_path": tmp_path / "state.json",
-        "packet_dir": packets,
-        "heartbeat_loader": _heartbeat,
-        "refresh_runner": lambda **_kwargs: {"status": "success"},
-        "queue_loader": lambda **kwargs: _queue(packets, **kwargs),
-        "draft_creator": lambda packet, **_kwargs: (
-            drafted.append(packet.signal_id) or {"status": "queued", "post_id": 82}
-        ),
-        "article_handoff": lambda selected, **_kwargs: (
-            handed_off.append(tuple(packet.signal_id for packet in selected))
-            or {"status": "awaiting_content_approval"}
-        ),
-        "deliver": False,
-    }
-
-    first = run_authority_cadence(**common)
-    second = run_authority_cadence(**common)
-
-    assert first["slot"]["status"] == "queued"
-    assert first["slot"]["slot"] == "geo_howto"
-    assert first["article"]["status"] == "article_handoff"
-    assert len(drafted) == 1
-    assert len(handed_off) == 1
-    assert len(handed_off[0]) == 2
-    assert second["status"] == "no_due_work"
-
-
-def test_friday_repo_miss_uses_fresh_validated_education_packet(tmp_path: Path) -> None:
-    packets = tmp_path / "packets"
-    _packet(packets, token="friday-education", observed=_now(10), series="GEO Tip")
-    captured: list[AuthoritySignalPacket] = []
-
-    result = run_authority_cadence(
-        mode="slot",
-        now=_now(11),
-        environ={"AUTHORITY_ENGINE_ENABLED": "true"},
-        state_path=tmp_path / "state.json",
-        packet_dir=packets,
-        heartbeat_loader=_heartbeat,
-        queue_loader=lambda **kwargs: _queue(packets, **kwargs),
-        draft_creator=lambda packet, **_kwargs: (
-            captured.append(packet) or {"status": "queued", "post_id": 91}
-        ),
-        deliver=False,
-    )
-
-    assert result["status"] == "queued"
-    assert result["slot"] == "repo_field_note"
-    assert captured[0].content_series == "GEO Tip"
-    assert "selection_fallback" in result["detail"]
-    assert "fresh validated education packet" in result["reasons"][-1]
-
-
-def test_friday_repo_miss_never_substitutes_a_different_repo(tmp_path: Path) -> None:
-    packets = tmp_path / "packets"
-    _packet(
-        packets,
-        token="wrong-friday-repo",
-        observed=_now(10),
-        series="Repo Field Note",
-        repository="your-github-user/geo-skills",
-    )
-
-    result = run_authority_cadence(
-        mode="slot",
-        now=_now(11),
-        environ={"AUTHORITY_ENGINE_ENABLED": "true"},
-        state_path=tmp_path / "state.json",
-        packet_dir=packets,
-        heartbeat_loader=_heartbeat,
-        queue_loader=lambda **kwargs: _queue(packets, **kwargs),
-        draft_creator=lambda *_args, **_kwargs: pytest.fail("wrong repo fallback leaked"),
-        deliver=False,
-    )
-
-    assert result["status"] == "no_signal"
-    local_day = _now(11).astimezone(authority_cadence._PACIFIC).date()
-    assert result["repository"] == repository_for_day(local_day)
-
-
 def test_repository_rotation_is_locked() -> None:
     assert repository_for_day(date(2026, 9, 4)) == "hermes-talk"
     assert repository_for_day(date(2026, 9, 11)) == "taskchad-os"
     assert repository_for_day(date(2026, 9, 18)) == "hermes-talk"
     assert repository_for_day(date(2026, 9, 25)) == "geo-skills"
     assert repository_for_day(date(2026, 10, 2)) == "hermes-talk"
-
-
-def test_windows_scheduler_registers_all_authority_triggers_daily() -> None:
-    script = (
-        Path(__file__).resolve().parents[1] / "setup_authority_cadence_scheduler.ps1"
-    ).read_text(encoding="utf-8")
-    assert script.count("New-ScheduledTaskTrigger -Daily") == 3
-    assert "-DaysOfWeek" not in script
-    assert 'LinkedIn review draft: daily 07:00 Pacific time' in script
-
-
-def test_failed_media_draft_stays_retryable(tmp_path: Path) -> None:
-    packets = tmp_path / "packets"
-    _packet(packets, token="retry-media", observed=_now(6))
-    calls = 0
-
-    def create(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        return {
-            "status": "skipped",
-            "post_id": None,
-            "reasons": ["media_generation_failed"],
-        }
-
-    common = {
-        "mode": "slot",
-        "now": _now(7),
-        "environ": {"AUTHORITY_ENGINE_ENABLED": "true"},
-        "state_path": tmp_path / "state.json",
-        "packet_dir": packets,
-        "heartbeat_loader": _heartbeat,
-        "queue_loader": lambda **kwargs: _queue(packets, **kwargs),
-        "draft_creator": create,
-    }
-    first = run_authority_cadence(**common)
-    second = run_authority_cadence(**common)
-
-    assert first["status"] == "no_draft"
-    assert second["status"] == "no_draft"
-    assert calls == 2
-    assert authority_cadence._receipt_exit_code(first) == 1
 
 
 def test_packet_path_outside_authority_root_is_rejected(tmp_path: Path) -> None:
@@ -553,11 +392,6 @@ def test_naive_now_is_rejected() -> None:
             "status": "ran",
             "research": {"status": "success"},
             "slot": {"status": "failed"},
-        },
-        {
-            "status": "ran",
-            "slot": {"status": "queued"},
-            "article": {"status": "failed"},
         },
         {"status": "no_draft", "detail": {"status": "failed"}},
         {

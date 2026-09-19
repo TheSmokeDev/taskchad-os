@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time as _time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +24,6 @@ sys.path.insert(0, str(_SCRIPTS.parent / "chat"))
 import browser_control  # type: ignore[import-not-found]  # noqa: E402
 import browser_workflows  # type: ignore[import-not-found]  # noqa: E402
 import core_handlers  # type: ignore[import-not-found]  # noqa: E402
-
 import shared  # noqa: E402
 from social import post_executor  # noqa: E402
 from social.browser_homie_runner import run_post, run_sweep  # noqa: E402
@@ -185,50 +184,12 @@ def test_run_post_crash_quarantines_linkedin_claim(
     assert "do not retry" in receipts[0]
 
 
-def _approved_company_post(svc: SocialPostService) -> int:
-    from social.models import SocialPost
-    from social.publishers import canonical_publisher_json
-
-    return svc._db.insert(SocialPost(
-        channel="linkedin_YourProduct_company", status="approved", title="One workflow",
-        body="Keep human approval explicit.", publisher_json=canonical_publisher_json({
-            "schema_version": 1, "kind": "organization", "id": "131153956",
-            "name": "YourProduct", "url": "https://www.linkedin.com/company/YourProduct/",
-        }),
-    ))
-
-
-@pytest.mark.parametrize("configured", [True, False])
-def test_company_runner_crash_quarantines_even_if_channel_config_disappears(
-    monkeypatch, svc, db_path, configured,
-):
-    import social.channels
-    import social.notify
-
-    monkeypatch.setattr(social.channels, "get_channel", lambda _cid: (
-        SimpleNamespace(channel_id="linkedin_YourProduct_company", platform="linkedin")
-        if configured else None
-    ))
-    pid = _approved_company_post(svc)
-    assert svc.claim_post(pid)
-    monkeypatch.setattr(
-        post_executor, "dispatch_post",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("lost company receipt")),
-    )
-    receipts = []
-    monkeypatch.setattr(social.notify, "send_text_to_telegram", lambda t: receipts.append(t))
-    assert run_post(pid, claimed=True, db_path=str(db_path)) == 0
-    assert svc.get_post(pid).status == "verification_required"
-    assert not svc.claim_post(pid)
-    assert "do not retry" in receipts[0]
-
-
 # ---------------------------------------------------------------- sweep
 
 
 def _stale_claim(svc: SocialPostService, pid: int, minutes_ago: int) -> None:
     stamp = (
-        datetime.now(UTC) - timedelta(minutes=minutes_ago)
+        datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
     ).isoformat(timespec="seconds")
     svc.set_post_fields(pid, claimed_at=stamp)
 
@@ -252,28 +213,6 @@ def test_sweep_locks_stale_linkedin_claim_for_verification_and_notifies(
     assert post is not None and post.status == "verification_required"
     assert "runner died mid-flight" in (post.error or "")
     assert len(receipts) == 1 and "manual verification" in receipts[0]
-
-
-@pytest.mark.parametrize("configured", [True, False])
-def test_company_stale_claim_is_quarantined_even_without_current_config(
-    monkeypatch, svc, db_path, configured,
-):
-    import social.channels
-    import social.notify
-
-    monkeypatch.setattr(social.channels, "get_channel", lambda _cid: (
-        SimpleNamespace(channel_id="linkedin_YourProduct_company", platform="linkedin")
-        if configured else None
-    ))
-    pid = _approved_company_post(svc)
-    assert svc.claim_post(pid)
-    _stale_claim(svc, pid, minutes_ago=60)
-    receipts = []
-    monkeypatch.setattr(social.notify, "send_text_to_telegram", lambda t: receipts.append(t))
-    assert post_executor.sweep_stale_claims(db_path=db_path, ttl_minutes=15)["swept"] == 1
-    assert svc.get_post(pid).status == "verification_required"
-    assert not svc.claim_post(pid)
-    assert "Do not retry" in receipts[0]
 
 
 def test_sweep_ignores_fresh_claims(svc: SocialPostService, db_path: Path) -> None:
@@ -303,7 +242,7 @@ def test_dispatch_due_posts_skips_already_claimed_rows(
     monkeypatch: pytest.MonkeyPatch, svc: SocialPostService, db_path: Path
 ) -> None:
     pid = _approved_post(svc)
-    past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat(timespec="seconds")
+    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="seconds")
     svc.schedule_post(pid, past)
     assert svc.claim_post(pid)  # an approve-tap runner already owns it
 

@@ -550,7 +550,6 @@ async def test_callback_tap_on_a_reply_thread_card_keeps_the_thread_session() ->
         reply_markup=None,
     )
     query = SimpleNamespace(
-        id="native-review-callback-123",
         from_user=SimpleNamespace(id=42, first_name="owner"),
         data="pgrant:approve:sales:abc123",
         message=card,
@@ -561,9 +560,6 @@ async def test_callback_tap_on_a_reply_thread_card_keeps_the_thread_session() ->
 
     assert len(enqueued) == 1
     incoming = enqueued[0]
-    assert incoming.raw_event["callback_query_id"] == "native-review-callback-123"
-    assert incoming.raw_event["source_message_id"] == "888"
-    assert incoming.raw_event["source_message_is_own"] is True
     assert incoming.thread.thread_id == "555:777"
     assert incoming.thread.parent_message_id == "777"
     # The durable identity: the tap's persist must land in the thread's

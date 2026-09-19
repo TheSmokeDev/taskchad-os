@@ -163,6 +163,26 @@ GENERIC_PROVIDER_REGISTRY: dict[str, GenericProviderOverlay] = {
         auto_route=False,
         default_headers={"Authorization": "", "X-Title": "The Homie"},
     ),
+    # Operator's own box on the tailnet (llama.cpp llama-server). Keyless —
+    # llama-server ignores the SDK's placeholder bearer when no --api-key is
+    # set. auto_route=False: the box can be off, and a heartbeat must never
+    # silently re-home onto it. Selectable via /model local only.
+    "local": GenericProviderOverlay(
+        transport="openai_responses",
+        auth_type="keyless",
+        display_name="Local",
+        model_env_var="SECOND_BRAIN_LOCAL_MODEL",
+        default_model="Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+        text_route_priority=7,
+        tool_route_priority=-1,
+        aliases=("local", "bonsai"),
+        legacy_write_key="local",
+        base_url="http://127.0.0.1:8080/v1",
+        base_url_env_var="SECOND_BRAIN_LOCAL_BASE_URL",
+        wire_api="chat_completions",
+        auto_route=False,
+        default_headers={"Authorization": "", "X-Title": "The Homie"},
+    ),
 }
 
 

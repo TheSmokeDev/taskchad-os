@@ -13,6 +13,7 @@ generated-images root (a tmp dir). Covers:
 from __future__ import annotations
 
 import io
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -130,25 +131,10 @@ def test_success_copies_newest_png_into_assets(
     assert (assets_dir / "hero.png").is_file()
     # The invocation went through exec with the feature flag, prompt on stdin.
     assert "exec" in captured["cmd"]
-    model_position = captured["cmd"].index("-m")
-    assert captured["cmd"][model_position + 1] == "gpt-5.5"
     assert "--enable" in captured["cmd"]
     assert "image_generation" in captured["cmd"]
     assert "--skip-git-repo-check" in captured["cmd"]
     assert "a stadium at night" in captured["input"]
-
-
-def test_image_model_override_is_resolved_at_call_time(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("IMAGEGEN_CODEX_MODEL", "gpt-image-test")
-    captured = _install_codex(monkeypatch, tmp_path)
-
-    assert video_imagegen.generate_hero(
-        "a stadium at night", _design(), "9:16", str(tmp_path / "assets")
-    )
-    model_position = captured["cmd"].index("-m")
-    assert captured["cmd"][model_position + 1] == "gpt-image-test"
 
 
 def test_stdout_path_fallback_discovery(

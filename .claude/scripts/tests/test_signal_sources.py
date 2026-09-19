@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from integrations.research_sources import (  # noqa: E402
     ResearchSourcesClient,
-    _parse_exa_documents,
     classify_public_source,
 )
 
@@ -99,40 +98,3 @@ def test_source_classification_keeps_vendor_and_practitioner_non_primary():
         "practitioner_self_report",
         False,
     )
-
-
-def test_exa_labeled_text_preserves_academic_title_date_and_primary_class():
-    raw = """Title: Structural GEO Research
-URL: https://arxiv.org/html/2603.29979v1
-Published: N/A
-Author: Example
-Highlights:
-The paper studies how structure shapes citation behavior.
-
-Title: ACL Citation Study
-URL: https://aclanthology.org/2026.acl-long.929.pdf
-Published: N/A
-Author: Example
-Highlights:
-The paper reports a bounded citation experiment.
-"""
-
-    documents = _parse_exa_documents(raw, lane="practical_geo_evidence", limit=5)
-
-    assert [document.title for document in documents] == [
-        "Structural GEO Research",
-        "ACL Citation Study",
-    ]
-    assert all(document.source_class == "primary_source" for document in documents)
-    assert all(document.primary_source for document in documents)
-    assert documents[0].published_at.isoformat() == "2026-03-01T00:00:00+00:00"
-    assert documents[1].published_at.isoformat() == "2026-01-01T00:00:00+00:00"
-
-
-def test_bare_url_without_title_is_not_promoted_to_a_document():
-    documents = _parse_exa_documents(
-        "A result at https://arxiv.org/html/2603.29979v1",
-        lane="practical_geo_evidence",
-        limit=5,
-    )
-    assert documents == []

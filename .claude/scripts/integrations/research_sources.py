@@ -34,13 +34,6 @@ _DEFAULT_FIRECRAWL_MCP_CONFIG = Path.home() / ".claude" / "mcp.json"
 _GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]{1,300})\]\((https?://[^)\s]+)\)")
 _BARE_URL_RE = re.compile(r"https?://[^\s<>\])]+")
-_EXA_TEXT_RESULT_RE = re.compile(
-    r"(?m)^Title:\s*(?P<title>[^\r\n]+)\r?\n"
-    r"URL:\s*(?P<url>https?://\S+)\r?\n"
-    r"Published:\s*(?P<published>[^\r\n]+)"
-)
-_ARXIV_DATE_RE = re.compile(r"/(?:abs|html|pdf)/(\d{2})(\d{2})\.")
-_ACL_YEAR_RE = re.compile(r"/(\d{4})\.[^/]+$")
 
 
 class ResearchSourceError(RuntimeError):
@@ -91,19 +84,6 @@ def classify_public_source(url: str) -> tuple[AuthoritySourceClass, bool]:
     )
     if any(host == suffix or host.endswith(f".{suffix}") for suffix in official_suffixes):
         return "official_documentation", True
-    primary_research_suffixes = (
-        "arxiv.org",
-        "aclanthology.org",
-        "dl.acm.org",
-        "ieeexplore.ieee.org",
-        "openreview.net",
-        "proceedings.mlr.press",
-    )
-    if any(
-        host == suffix or host.endswith(f".{suffix}")
-        for suffix in primary_research_suffixes
-    ):
-        return "primary_source", True
     vendor_suffixes = ("ahrefs.com", "semrush.com", "moz.com", "searchengineland.com")
     if any(host == suffix or host.endswith(f".{suffix}") for suffix in vendor_suffixes):
         return "vendor_research", False
@@ -417,29 +397,6 @@ def _parse_exa_documents(raw: str, *, lane: str, limit: int) -> list[ResearchDoc
     if documents:
         return documents
 
-    # Exa's current text renderer emits repeated labeled result blocks rather
-    # than JSON or Markdown links. Parse those before the lossy bare-URL fallback
-    # so source title, date, classification, and per-result highlights stay bound.
-    text_rows = list(_EXA_TEXT_RESULT_RE.finditer(raw))
-    for index, match in enumerate(text_rows):
-        end = text_rows[index + 1].start() if index + 1 < len(text_rows) else len(raw)
-        document = _make_document(
-            lane=lane,
-            title=match.group("title"),
-            url=match.group("url"),
-            snippet=raw[match.end() : end].strip(),
-            published_at=match.group("published"),
-            provider="exa",
-        )
-        if document and document.url not in seen_urls:
-            seen_urls.add(document.url)
-            documents.append(document)
-        if len(documents) >= limit:
-            return documents
-
-    if documents:
-        return documents
-
     # Exa's MCP text renderer is not guaranteed to emit JSON.  Parse explicit
     # links conservatively and use only bounded nearby text as the snippet.
     link_rows = list(_MARKDOWN_LINK_RE.finditer(raw))
@@ -496,15 +453,13 @@ def _make_document(
         return None
     if not normalized_title or not normalized_snippet:
         return None
-    if normalized_title.casefold() == normalized_url.casefold():
-        return None
     source_class, primary = classify_public_source(normalized_url)
     return ResearchDocument(
         lane=lane,
         title=normalized_title,
         url=normalized_url,
         snippet=normalized_snippet,
-        published_at=_parse_published_at(published_at, normalized_url),
+        published_at=_parse_datetime(published_at),
         source_class=source_class,
         primary_source=primary,
         provider=provider,
@@ -522,20 +477,6 @@ def _parse_datetime(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _parse_published_at(value: Any, url: str) -> datetime | None:
-    parsed = _parse_datetime(value)
-    if parsed is not None:
-        return parsed
-    if match := _ARXIV_DATE_RE.search(url):
-        year = 2000 + int(match.group(1))
-        month = int(match.group(2))
-        if 1 <= month <= 12:
-            return datetime(year, month, 1, tzinfo=UTC)
-    if "aclanthology.org" in url and (match := _ACL_YEAR_RE.search(url)):
-        return datetime(int(match.group(1)), 1, 1, tzinfo=UTC)
-    return None
 
 
 __all__ = [

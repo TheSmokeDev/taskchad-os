@@ -422,6 +422,3 @@ class SocialWriteTask:
     # This is content, not an approval claim; the handler/button remains the
     # only approval authority.
     media_path: str | None = None
-    # Versioned publisher snapshot from the reviewed queue revision. Content,
-    # not an approval claim; company writes must never infer the logged-in actor.
-    publisher_json: str | None = None

@@ -18,7 +18,6 @@ from business_signal.authority import (  # noqa: E402
     AuthorityCandidate,
     FirecrawlBudgetError,
     FirecrawlUsageLedger,
-    _is_stale,
     build_authority_packet,
     fence_untrusted_source,
     list_authority_queue,
@@ -37,33 +36,6 @@ from business_signal.models import (  # noqa: E402
 from integrations.research_sources import ResearchDocument  # noqa: E402
 
 NOW = datetime(2026, 9, 3, 13, 30, tzinfo=UTC)
-
-
-def test_primary_geo_research_gets_evergreen_window_but_platform_news_does_not():
-    published = NOW - timedelta(days=180)
-    research = ResearchDocument(
-        lane="practical_geo_evidence",
-        title="Primary GEO paper",
-        url="https://arxiv.org/abs/2603.29979",
-        snippet="A primary study of structural citation behavior.",
-        published_at=published,
-        source_class="primary_source",
-        primary_source=True,
-        provider="exa",
-    )
-    news = ResearchDocument(
-        lane="platform_changes",
-        title="Old platform update",
-        url="https://developers.google.com/search/docs/old-update",
-        snippet="An old official platform update.",
-        published_at=published,
-        source_class="official_documentation",
-        primary_source=True,
-        provider="exa",
-    )
-
-    assert _is_stale(research, NOW, 30) is False
-    assert _is_stale(news, NOW, 30) is True
 
 
 def _document(

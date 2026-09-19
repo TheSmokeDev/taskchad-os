@@ -212,11 +212,10 @@ def _adapter_carries_tool_defs(adapter: object) -> bool:
     return False
 
 
-def _adapter_supports_model_only(adapter: object, *, images: bool = False) -> bool:
-    """Require literal synchronous guarantees for authority and image carriage."""
+def _adapter_supports_model_only(adapter: object) -> bool:
+    """True only for a literal synchronous adapter zero-tool guarantee."""
     try:
-        method = "supports_model_only_images" if images else "supports_model_only"
-        probe = getattr(adapter, method, None)
+        probe = getattr(adapter, "supports_model_only", None)
     except Exception:
         return False
     if probe is None:
@@ -366,9 +365,9 @@ async def _run_observed_attempt(adapter, request, timeout_s, attempt):
         try:
             result = await asyncio.wait_for(adapter.run(request), timeout=timeout_s)
         except BaseException as exc:
-            await _observe_attempt(
-                request, {**attempt, "phase": "failed", "error_type": type(exc).__name__},
-            )
+            await _observe_attempt(request, {
+                **attempt, "phase": "failed", "error_type": type(exc).__name__,
+            })
             raise
         await _observe_attempt(request, {
             **attempt, "phase": "succeeded", "model": result.model or attempt["model"],
@@ -384,6 +383,7 @@ async def run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
 
     from . import activity
 
+    request = bind_free_request(request)
     async with activity.foreground_request(request):
         return await _run_with_runtime_lanes(request)
 
@@ -436,16 +436,6 @@ async def _run_with_runtime_lanes(request: RuntimeRequest) -> RuntimeResult:
             errors.append(
                 f"{profile.key}: cannot prove a zero-tool model-only runtime "
                 "(skipped rather than weakening authority)"
-            )
-            continue
-        if (
-            effective_request.model_only
-            and effective_request.image_paths
-            and not _adapter_supports_model_only(adapter, images=True)
-        ):
-            errors.append(
-                f"{profile.key}: cannot attach model-only image inputs "
-                "(skipped to prevent silent image loss)"
             )
             continue
         # Epic #236 — tool-turn lane exclusion. Checked BEFORE supports() so the

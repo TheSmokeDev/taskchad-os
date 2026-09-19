@@ -64,52 +64,6 @@ def test_social_button_is_immediate_so_active_turn_does_not_block_tap():
     assert ChatRouter._is_immediate_button(incoming) is True
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["approve", "reject", "edit", "image"])
-async def test_company_buttons_use_same_handlers(fake_core_handlers, monkeypatch, action):
-    from social import publishers
-
-    monkeypatch.setattr(publishers, "is_linkedin_channel", lambda cid: cid == "company-lane")
-    obj = _shim(approved=True)
-    obj._social_button_binding = lambda *_: (
-        True, SimpleNamespace(id=250, revision=2, status="draft", channel="company-lane"),
-    )
-    await obj._handle_social_button(
-        _RecordingAdapter(), _incoming(button=True), f"social:{action}:250:2:abcdef123456",
-    )
-    expected = {
-        "approve": ["approve 250 2 abcdef123456", "post 250"],
-        "reject": ["reject 250 2 abcdef123456"],
-        "edit": ["linkedin_flow:revise:250:2:abcdef123456"],
-        "image": ["linkedin_flow:image:250:2:abcdef123456"],
-    }
-    assert fake_core_handlers == expected[action]
-
-
-@pytest.mark.asyncio
-async def test_stale_company_button_returns_canonical_preview(fake_core_handlers, monkeypatch):
-    from social import publishers
-
-    monkeypatch.setattr(publishers, "is_linkedin_channel", lambda _: True)
-    calls = []
-
-    async def preview(_adapter, _incoming, post):
-        calls.append(post.revision)
-
-    monkeypatch.setattr(
-        sys.modules["core_handlers"], "_send_linkedin_preview", preview, raising=False,
-    )
-    obj = _shim(approved=False)
-    obj._social_button_binding = lambda *_: (
-        False, SimpleNamespace(id=250, revision=3, status="draft", channel="company-lane"),
-    )
-    await obj._handle_social_button(
-        _RecordingAdapter(), _incoming(button=True), "social:approve:250:2:abcdef123456",
-    )
-    assert calls == [3]
-    assert fake_core_handlers == []
-
-
 @pytest.fixture()
 def fake_core_handlers(monkeypatch):
     calls: list[str] = []

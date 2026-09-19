@@ -65,8 +65,6 @@ import uuid
 from pathlib import Path
 
 GENERATION_TIMEOUT_S = 900
-_CODEX_IMAGE_MODEL_ENV = "IMAGEGEN_CODEX_MODEL"
-_CODEX_IMAGE_MODEL_DEFAULT = "gpt-5.5"
 
 # How often to poll for codex's produced png while it is still running (seconds).
 # Small enough to grab the file promptly after codex writes it, large enough to
@@ -121,15 +119,6 @@ def cli_available() -> bool:
     """True when the codex CLI is on PATH."""
 
     return shutil.which("codex") is not None
-
-
-def _resolve_codex_image_model() -> str:
-    """Use a tool-capable model instead of inheriting an incompatible chat default."""
-
-    return (
-        os.environ.get(_CODEX_IMAGE_MODEL_ENV, "").strip()
-        or _CODEX_IMAGE_MODEL_DEFAULT
-    )
 
 
 _CLAIMS_DIR = ".claims"
@@ -225,7 +214,7 @@ def _newest_new_png(roots: list[Path], before: set[Path]) -> Path | None:
         return None
 
 
-def _kill_process_tree(proc: subprocess.Popen | None) -> None:
+def _kill_process_tree(proc: "subprocess.Popen | None") -> None:
     """Force-kill a subprocess AND all of its children. The codex CLI can leave
     a surviving grandchild that never exits (it holds the stdout pipe open), so a
     plain proc.kill() reaps only the parent and the tree keeps hanging. taskkill
@@ -652,8 +641,6 @@ def _generate_image_once(
         cmd = [
             exe,
             "exec",
-            "-m",
-            _resolve_codex_image_model(),
             "--enable",
             "image_generation",
             "--skip-git-repo-check",

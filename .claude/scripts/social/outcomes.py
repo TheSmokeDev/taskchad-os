@@ -259,8 +259,6 @@ def record_outcome(
     store_path: Path | None = None,
     persona_root: Path | None = None,
     reindex: bool = True,
-    learning_service: Any = None,
-    db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Persist one idempotent outcome and mirror it to Socials experience."""
 
@@ -278,26 +276,11 @@ def record_outcome(
         persona_root=persona_root,
         reindex=reindex,
     )
-    from social.learning import record_operator_outcome
-
-    if learning_service is None and persona_root is not None:
-        # Explicit local/test roots cannot silently resolve the installed profile.
-        from personas.learning.models import LearningTarget
-        from personas.learning.service import LearningService
-
-        root = Path(persona_root)
-        learning_service = LearningService(LearningTarget(
-            _PERSONA_ID, root / "memory", root / "data", root / "state", root / "skills",
-        ))
-    learning_receipt = record_operator_outcome(
-        outcome.as_dict(), db_path=db_path, service=learning_service,
-    )
     return {
         "status": ledger_status,
         "outcome": outcome.as_dict(),
         "store_path": str(path),
         "experience_note": note_receipt,
-        "learning": learning_receipt,
     }
 
 

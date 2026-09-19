@@ -914,7 +914,7 @@ def setup(check, advanced, headless_google):
 @main.command()
 @click.option("--api-port", default=4322, show_default=True, type=int, help="Python orchestration API port.")
 @click.option("--dashboard-port", default=3141, show_default=True, type=int, help="Hono dashboard port.")
-@click.option("--web-port", default=5473, show_default=True, type=int, help="Vite web port.")
+@click.option("--web-port", default=5173, show_default=True, type=int, help="Vite web port.")
 @click.option("--no-open", "no_open", is_flag=True, help="Do not open the Operating Room in a browser.")
 @click.option("--no-vite", "no_vite", is_flag=True, help="Use Hono/static only instead of Vite dev.")
 @click.option("--shell", "shell_mode", is_flag=True, help="Launch the Electron Desktop v0 shell.")
@@ -3411,7 +3411,9 @@ def _detect_providers(env_values: dict[str, str]) -> dict[str, bool]:
         "openai": bool(env_values.get("OPENAI_API_KEY", "")),
         "kimi": bool(env_values.get("KIMI_API_KEY", "")),
         "nvidia": bool(env_values.get("NVIDIA_API_KEY", "")),
-        "free": True,
+        # Installed is not selected: otherwise setup's first-available branch
+        # silently opted a credential-free installation into this external relay.
+        "free": resolve_runtime_selection(env_values).generic_provider == "opencode-free",
     }
 
 

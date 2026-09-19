@@ -79,14 +79,7 @@ def approval_binding_digest(post: SocialPost, *, length: int = 12) -> str:
 
     content = post.content_digest or compute_content_digest(post.title, post.body)
     media = post.media_digest or compute_media_digest(post.media_path)
-    if post.publisher_json is not None:
-        from social.publishers import canonical_publisher_json
-
-        target = canonical_publisher_json(post.publisher_json)
-        payload = f"publisher-v1:{post.channel}:{target}:{post.revision}:{content}:{media}".encode()
-    else:
-        # Preserve existing personal approval cards during the additive rollout.
-        payload = f"{post.revision}:{content}:{media}".encode("ascii")
+    payload = f"{post.revision}:{content}:{media}".encode("ascii")
     return hashlib.sha256(payload).hexdigest()[:length]
 
 
@@ -124,4 +117,3 @@ class SocialPost:
     verification_state: str = "pending"
     receipt_json: str | None = None
     supersede_reason: str | None = None
-    publisher_json: str | None = None

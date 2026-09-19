@@ -43,8 +43,6 @@ class SocialChannel:
     # Preferred still-image aspect for social image generation. Channels that
     # omit this keep the historical square default.
     image_aspect: str = "1:1"
-    platform: str | None = None
-    publisher: dict[str, Any] | None = None
 
 
 _DEFAULT_YAML_PATH: Path | None = None
@@ -75,7 +73,8 @@ def _load_channels(yaml_path: Path | None = None) -> dict[str, SocialChannel]:
             cadence_interval_hours=int(cfg.get("cadence_interval_hours", 24)),
             persona_id=(
                 str(cfg["persona_id"]).strip()
-                if cfg.get("persona_id") is not None and str(cfg["persona_id"]).strip()
+                if cfg.get("persona_id") is not None
+                and str(cfg["persona_id"]).strip()
                 else None
             ),
             voice_profile=cfg.get("voice_profile", ""),
@@ -86,13 +85,13 @@ def _load_channels(yaml_path: Path | None = None) -> dict[str, SocialChannel]:
             design_file=str(cfg.get("design_file", "") or ""),
             persona_pack=str(cfg.get("persona_pack", "") or ""),
             image_aspect=str(cfg.get("image_aspect", "1:1") or "1:1"),
-            platform=cfg.get("platform"),
-            publisher=cfg.get("publisher"),
         )
     return result
 
 
-def get_channel(channel_id: str, *, yaml_path: Path | None = None) -> SocialChannel | None:
+def get_channel(
+    channel_id: str, *, yaml_path: Path | None = None
+) -> SocialChannel | None:
     channels = _load_channels(yaml_path)
     return channels.get(channel_id)
 

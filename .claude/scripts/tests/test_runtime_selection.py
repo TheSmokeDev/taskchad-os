@@ -115,45 +115,6 @@ def test_resolve_runtime_model_choice_maps_bare_claude_alias() -> None:
     assert choice.persist_model == "claude-sonnet-5"
 
 
-def test_resolve_runtime_model_choice_maps_openrouter_bare_aliases() -> None:
-    """2026-09-18: operator-picked OpenRouter workhorses as bare tokens."""
-
-    glm = resolve_runtime_model_choice("glm")
-    assert glm is not None
-    assert glm.provider == "openrouter"
-    assert glm.model == "z-ai/glm-5.3"
-    assert glm.model_env_key == "SECOND_BRAIN_OPENROUTER_MODEL"
-    assert glm.persist_model == "z-ai/glm-5.3"
-
-    assert resolve_runtime_model_choice("GLM") == glm
-
-    deepseek = resolve_runtime_model_choice("deepseek")
-    assert deepseek is not None
-    assert deepseek.provider == "openrouter"
-    assert deepseek.model == "deepseek/deepseek-v4.1-flash"
-
-    pinned = resolve_runtime_model_choice("openrouter:z-ai/glm-5.3")
-    assert pinned is not None
-    assert pinned.provider == glm.provider
-    assert pinned.model == glm.model
-    assert pinned.persist_model == glm.persist_model
-
-
-def test_apply_openrouter_alias_persists_model_and_lane() -> None:
-    writes: list[tuple[str, str]] = []
-    env: dict[str, str] = {}
-
-    choice = apply_runtime_model_choice(
-        "deepseek",
-        environ=env,
-        write_key=lambda key, value: writes.append((key, value)),
-    )
-
-    assert choice.provider == "openrouter"
-    assert ("SECOND_BRAIN_OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash") in writes
-    assert env["SECOND_BRAIN_OPENROUTER_MODEL"] == "deepseek/deepseek-v4.1-flash"
-
-
 def test_resolve_runtime_model_choice_maps_flagship_and_codex_tier_aliases() -> None:
     """2026-07 catalog: flagship Claude alias + named GPT-5.6 tier aliases."""
 
@@ -330,35 +291,11 @@ def test_switch_provider_writes_lane_aware_env(monkeypatch: pytest.MonkeyPatch) 
     assert removals == []
 
 
-def test_switch_provider_free_writes_keyless_provider_selection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import config
+def test_sync_free_switch_cannot_bypass_verification() -> None:
     import core_handlers
 
-    writes: list[tuple[str, str]] = []
-    removals: list[str] = []
-    monkeypatch.setattr(
-        core_handlers,
-        "_write_env_var",
-        lambda _path, key, value: writes.append((key, value)),
-    )
-    monkeypatch.setattr(
-        core_handlers,
-        "_delete_env_var",
-        lambda _path, key: removals.append(key),
-    )
-    monkeypatch.setattr(config, "reload_config", lambda: None)
-
-    message = core_handlers._switch_provider("free")
-
-    assert "generic runtime via OpenCode Free" in message
-    assert writes == [
-        (RUNTIME_LANE_ENV_KEY, RUNTIME_LANE_GENERIC),
-        (GENERIC_PROVIDER_ENV_KEY, "opencode-free"),
-        (LEGACY_RUNTIME_PROVIDER_KEY, "opencode_free"),
-    ]
-    assert removals == []
+    with pytest.raises(ValueError, match="verified async switching"):
+        core_handlers._switch_provider("free")
 
 
 def test_model_help_lists_keyless_free_selector(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -527,7 +464,8 @@ def test_provider_status_lists_selected_keyless_free_lane(
     message = core_handlers._get_provider_status()
 
     assert "configured model: deepseek-v4-flash-free" in message
-    assert "ON *OpenCode Free* (keyless)" in message
+    assert "CONFIGURED *OpenCode Free*" in message
+    assert "live availability not checked" in message
 
 
 @pytest.mark.asyncio

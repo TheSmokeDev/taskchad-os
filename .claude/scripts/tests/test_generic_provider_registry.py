@@ -40,6 +40,7 @@ CANONICAL_KEYS = (
     "kimi",
     "nvidia-kimi",
     "opencode-free",
+    "local",
 )
 
 
@@ -114,6 +115,9 @@ def test_text_route_derivation() -> None:
     )
     assert "opencode-free" not in GENERIC_TEXT_ROUTE
     assert "opencode-free" not in GENERIC_CALLER_TOOLS_ROUTE
+    # local is operator-selectable only (auto_route=False): never a silent fallback
+    assert "local" not in GENERIC_TEXT_ROUTE
+    assert "local" not in GENERIC_CALLER_TOOLS_ROUTE
 
     text_priorities = [
         overlay.text_route_priority
@@ -159,6 +163,7 @@ def test_legacy_write_values_derivation() -> None:
         "kimi": "kimi",
         "nvidia-kimi": "nvidia",
         "opencode-free": "opencode_free",
+        "local": "local",
     }
 
     for canonical, overlay in GENERIC_PROVIDER_REGISTRY.items():
@@ -181,6 +186,7 @@ def test_legacy_write_values_derivation() -> None:
         ("kimi", OpenAICompatibleRuntime),
         ("nvidia-kimi", OpenAICompatibleRuntime),
         ("opencode-free", OpenAICompatibleRuntime),
+        ("local", OpenAICompatibleRuntime),
     ],
 )
 def test_adapter_for_dispatch(provider: str, adapter_cls: type) -> None:
@@ -205,8 +211,13 @@ def test_build_profile_returns_none_when_unavailable(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(profiles, "codex_auth_available", lambda _auth: False)
     monkeypatch.setattr(profiles, "gemini_auth_available", lambda _auth: False)
 
+    # keyless providers (opencode-free, local) build without any credentials
     request = RuntimeRequest(prompt="hi", cwd=".", task_name="memory_flush")
-    for canonical in (key for key in CANONICAL_KEYS if key != "opencode-free"):
+    for canonical in (
+        key
+        for key in CANONICAL_KEYS
+        if GENERIC_PROVIDER_REGISTRY[key].auth_type != "keyless"
+    ):
         profile = build_profile_for_provider(canonical, key_prefix="primary", request=request)
         assert profile is None, f"{canonical}: expected None when unavailable, got {profile!r}"
 
@@ -394,6 +405,7 @@ def test_opencode_free_runtime_clears_sdk_bearer_header(monkeypatch: pytest.Monk
 
     class _FakeChoice:
         message = _FakeMessage()
+        finish_reason = "stop"
 
     class _FakeCompletion:
         choices = [_FakeChoice()]
@@ -497,3 +509,25 @@ def test_kimi_adapter_ignores_claude_lane_request_model(
         "total_tokens": 120,
         "cached_tokens": 89,
     }
+
+
+def test_local_provider_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The local tailnet lane (llama.cpp llama-server on the operator's box)."""
+
+    monkeypatch.delenv("SECOND_BRAIN_LOCAL_BASE_URL", raising=False)
+
+    overlay = GENERIC_PROVIDER_REGISTRY["local"]
+    assert overlay.auth_type == "keyless"
+    assert overlay.wire_api == "chat_completions"
+    assert overlay.auto_route is False
+    assert overlay.tool_route_priority == -1
+    assert overlay.aliases == ("local", "bonsai")
+    assert PROVIDER_ALIASES["local"] == "local"
+    assert PROVIDER_ALIASES["bonsai"] == "local"
+    # keyless: profile builds with no credentials at all
+    request = RuntimeRequest(prompt="hi", cwd=".", task_name="memory_flush")
+    profile = build_profile_for_provider("local", key_prefix="primary", request=request)
+    assert profile is not None
+    assert profile.provider == "local"
+    # loopback default; the operator's mesh URL lives in (private) .env
+    assert profile.base_url == "http://127.0.0.1:8080/v1"

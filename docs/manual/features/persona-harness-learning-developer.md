@@ -276,6 +276,12 @@ a host `max_output_tokens` request can change that default but cannot exceed an
 explicit installation ceiling. These adapters do not invent pricing to enforce
 USD budgets: a non-null dollar budget requires a budget-aware configured runtime,
 and an unsupported request remains a visible routing refusal or fallback.
+The sole zero-dollar exception is the fixed anonymous OpenCode Free endpoint:
+`/model free` pins learning requests to it, keeps the token ceiling and zero-tool
+contract, and never widens into a paid lane on failure. An alternate endpoint,
+credentialed profile, or conflicting provider pin cannot use this exception.
+See [Runtime Status And Model Control](runtime-status-model-control.md#opencode-free-lane)
+for verification, failure codes, privacy and rollout boundaries.
 
 The supervised 60-second dispatcher is an installation-wide leader with
 foreground priority and fair persona selection. Existing scheduled jobs are

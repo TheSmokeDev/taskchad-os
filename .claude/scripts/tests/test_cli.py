@@ -1195,5 +1195,11 @@ def test_detect_providers_includes_nvidia() -> None:
     assert cli_module._detect_providers({})["nvidia"] is False
 
 
-def test_detect_providers_includes_keyless_opencode_free() -> None:
-    assert cli_module._detect_providers({})["free"] is True
+def test_setup_does_not_auto_select_keyless_opencode_free() -> None:
+    assert cli_module._detect_providers({})["free"] is False
+    assert cli_module._detect_providers(
+        {
+            "SECOND_BRAIN_RUNTIME_LANE": "generic_runtime",
+            "SECOND_BRAIN_GENERIC_PROVIDER": "opencode-free",
+        }
+    )["free"] is True

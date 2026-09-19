@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
-import core_handlers
 import pytest
-from models import Platform
-from router import ChatRouter
 
+import core_handlers
+from router import ChatRouter
 from social import linkedin_workshop
-from social.models import SocialPost, approval_binding_digest
 
 
 def _incoming(
@@ -20,21 +19,20 @@ def _incoming(
     channel_id: str = "100",
     user_id: str = "200",
 ) -> SimpleNamespace:
-    channel = SimpleNamespace(platform=Platform.TELEGRAM, platform_id=channel_id)
+    channel = SimpleNamespace(platform="telegram", platform_id=channel_id)
     return SimpleNamespace(
         text=text,
         channel=channel,
-        platform=Platform.TELEGRAM,
+        platform="telegram",
         thread=None,
         user=SimpleNamespace(platform_id=user_id),
-        raw_event={"interaction_type": "button", "source_message_is_own": True} if button else {},
+        raw_event={"interaction_type": "button"} if button else {},
     )
 
 
 class FakeAdapter:
     def __init__(self) -> None:
         self.sent: list = []
-        self._app = SimpleNamespace(bot=SimpleNamespace(token="fake-review-token"))
 
     async def send(self, message) -> str:
         self.sent.append(message)
@@ -49,37 +47,14 @@ class FakeAdapter:
 
 
 @pytest.fixture(autouse=True)
-def _clean_state(monkeypatch):
-    from models import MessageComponent, OutgoingMessage
-
-    from social import notify
-
-    adapters = []
-    original_init = FakeAdapter.__init__
-
-    def init(self):
-        original_init(self)
-        adapters.append(self)
-
-    def deliver(post, **kwargs):
-        adapter = adapters[-1]
-        adapter.sent.append(OutgoingMessage(
-            text=post.body, channel=None, components=[
-                MessageComponent(label=button["text"], custom_id=button["callback_data"])
-                for row in notify._build_reply_markup(post)["inline_keyboard"] for button in row
-            ],
-        ))
-        return True
-
-    monkeypatch.setattr(FakeAdapter, "__init__", init)
-    monkeypatch.setattr(notify, "deliver_draft_to_telegram", deliver)
+def _clean_state():
     core_handlers._LINKEDIN_PENDING.clear()
     yield
     core_handlers._LINKEDIN_PENDING.clear()
 
 
 def _post(post_id: int = 41, *, body: str = "Draft body", media_path: str = ""):
-    return SocialPost(id=post_id, channel="linkedin", body=body, media_path=media_path)
+    return SimpleNamespace(id=post_id, body=body, media_path=media_path)
 
 
 def test_linkedin_is_router_handler() -> None:
@@ -129,10 +104,10 @@ async def test_cook_button_then_topic_generates_approval_preview(monkeypatch) ->
 
     assert seen["mode"] == "cook"
     assert "repairing a real browser workflow" in seen["topic"]
-    assert {cid.split(":")[1] for cid in adapter.custom_ids()} == {
-        "approve", "edit", "image", "reject",
-    }
-    assert all(cid.split(":")[2] == "41" for cid in adapter.custom_ids())
+    assert "social:approve:41" in adapter.custom_ids()
+    assert "linkedin_flow:revise:41" in adapter.custom_ids()
+    assert "linkedin_flow:image:41" in adapter.custom_ids()
+    assert "social:reject:41" in adapter.custom_ids()
 
 
 @pytest.mark.asyncio
@@ -153,14 +128,14 @@ async def test_run_button_generates_without_topic(monkeypatch) -> None:
     )
 
     assert seen == {"topic": None, "mode": "run"}
-    assert any(cid.startswith("social:approve:42:") for cid in adapter.custom_ids())
+    assert "social:approve:42" in adapter.custom_ids()
 
 
 @pytest.mark.asyncio
 async def test_review_reply_revises_copy_in_place(monkeypatch) -> None:
     seen: dict = {}
 
-    def fake_revise(post_id, feedback, *, db_path=None, **binding):
+    def fake_revise(post_id, feedback, *, db_path=None):
         seen.update(post_id=post_id, feedback=feedback)
         return _post(post_id, body="Revised body")
 
@@ -169,8 +144,7 @@ async def test_review_reply_revises_copy_in_place(monkeypatch) -> None:
     incoming = _incoming()
     key = core_handlers._linkedin_channel_key(incoming)
     core_handlers._linkedin_workshop_set(
-        key, stage="await_review", post_id=55, mode="cook",
-        expected_revision=1, expected_digest=approval_binding_digest(_post(55)),
+        key, stage="await_review", post_id=55, mode="cook"
     )
 
     assert await core_handlers.try_consume_linkedin_message(
@@ -179,14 +153,14 @@ async def test_review_reply_revises_copy_in_place(monkeypatch) -> None:
 
     assert seen == {"post_id": 55, "feedback": "Make the hook more direct"}
     assert "Revised body" in adapter.texts[-1]
-    assert any(cid.startswith("social:approve:55:") for cid in adapter.custom_ids())
+    assert "social:approve:55" in adapter.custom_ids()
 
 
 @pytest.mark.asyncio
 async def test_image_direction_regenerates_same_draft(monkeypatch) -> None:
     seen: dict = {}
 
-    def fake_image(post_id, direction, *, db_path=None, **binding):
+    def fake_image(post_id, direction, *, db_path=None):
         seen.update(post_id=post_id, direction=direction)
         return _post(post_id, media_path="")
 
@@ -194,9 +168,7 @@ async def test_image_direction_regenerates_same_draft(monkeypatch) -> None:
     adapter = FakeAdapter()
     incoming = _incoming()
     key = core_handlers._linkedin_channel_key(incoming)
-    core_handlers._linkedin_workshop_set(key, stage="await_review", post_id=56,
-                                       expected_revision=1,
-                                       expected_digest=approval_binding_digest(_post(56)))
+    core_handlers._linkedin_workshop_set(key, stage="await_review", post_id=56)
 
     assert await core_handlers.try_consume_linkedin_message(
         adapter, _incoming("image: darker editorial control room")
@@ -206,7 +178,7 @@ async def test_image_direction_regenerates_same_draft(monkeypatch) -> None:
         "post_id": 56,
         "direction": "darker editorial control room",
     }
-    assert any(cid.startswith("social:approve:56:") for cid in adapter.custom_ids())
+    assert "social:approve:56" in adapter.custom_ids()
 
 
 @pytest.mark.asyncio
@@ -243,56 +215,3 @@ async def test_commands_and_unmatched_mode_text_fall_through() -> None:
     assert not await core_handlers.try_consume_linkedin_message(
         adapter, _incoming("unrelated conversation")
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("image", [False, True])
-async def test_followup_keeps_original_clicked_revision(monkeypatch, image):
-    seen = {}
-
-    def revise(post_id, text, **kwargs):
-        seen.update(kwargs)
-        return _post(post_id)
-
-    monkeypatch.setattr(linkedin_workshop, "revise_linkedin_copy", revise)
-    monkeypatch.setattr(linkedin_workshop, "regenerate_linkedin_image", revise)
-    adapter = FakeAdapter()
-    incoming = _incoming("different composition" if image else "Make it direct")
-    core_handlers._linkedin_workshop_set(
-        core_handlers._linkedin_channel_key(incoming),
-        stage="await_image" if image else "await_revision", post_id=250,
-        expected_revision=2, expected_digest="abcdef123456",
-    )
-    assert await core_handlers.try_consume_linkedin_message(adapter, incoming)
-    assert seen == {"expected_revision": 2, "expected_digest": "abcdef123456"}
-
-
-@pytest.mark.asyncio
-async def test_preview_passes_exact_adapter_recipient_and_thread(monkeypatch):
-    from social import notify
-
-    seen = {}
-
-    def deliver(post, **kwargs):
-        seen.update(kwargs)
-        return True
-
-    monkeypatch.setattr(notify, "deliver_draft_to_telegram", deliver)
-    incoming = _incoming(channel_id="999")
-    incoming.thread = SimpleNamespace(parent_message_id="888")
-    await core_handlers._send_linkedin_preview(FakeAdapter(), incoming, _post())
-    assert seen == {
-        "token": "fake-review-token", "chat_id": "999", "reply_to_message_id": "888",
-        "delivery_request_id": None,
-    }
-
-
-@pytest.mark.asyncio
-async def test_unbound_legacy_workshop_cannot_revise(monkeypatch):
-    adapter = FakeAdapter()
-    incoming = _incoming("replace it")
-    core_handlers._linkedin_workshop_set(
-        core_handlers._linkedin_channel_key(incoming), stage="await_revision", post_id=250,
-    )
-    assert await core_handlers.try_consume_linkedin_message(adapter, incoming)
-    assert "no bound revision" in adapter.texts[-1]

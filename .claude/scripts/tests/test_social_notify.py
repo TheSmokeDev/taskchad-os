@@ -13,16 +13,14 @@ from social.models import SocialPost, approval_binding_digest
 
 
 def _post(**kw) -> SocialPost:
-    # Legacy non-LinkedIn transport remains compatible. Strict LinkedIn review
-    # has durable-row/receipt tests in test_company_review_delivery.py.
-    base = dict(id=5, channel="reddit", topic_source="cadence", body="Hello world.")
+    base = dict(id=5, channel="linkedin", topic_source="cadence", body="Hello world.")
     base.update(kw)
     return SocialPost(**base)
 
 
 class TestCardText:
     def test_contains_header_body_footer(self):
-        card = notify._build_card_text(_post(channel="linkedin", body="My draft body."))
+        card = notify._build_card_text(_post(body="My draft body."))
         assert "#5" in card
         assert "YourProduct · LinkedIn" in card
         assert "My draft body." in card

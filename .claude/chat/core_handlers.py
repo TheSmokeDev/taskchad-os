@@ -6729,44 +6729,63 @@ def _bound_linkedin_callback(action: str, post: Any) -> str:
 
 
 async def _send_linkedin_preview(adapter: Any, incoming: Any, post: Any) -> None:
-    from models import Platform
-    from social.models import approval_binding_digest
-    from social.notify import deliver_draft_to_telegram
+    from models import Attachment, MessageComponent
 
-    _linkedin_workshop_set(
-        _linkedin_channel_key(incoming), stage="await_review", post_id=post.id,
-        expected_revision=post.revision, expected_digest=approval_binding_digest(post),
-    )
-    platform = getattr(incoming.channel, "platform", None) or getattr(incoming, "platform", None)
-    if platform is not Platform.TELEGRAM:
-        await _linkedin_send(
-            adapter, incoming,
-            f"LINKEDIN DRAFT #{post.id}\n\n{post.body}\n\n"
-            "Open the Telegram review package for image-backed approval.",
+    media_path = str(getattr(post, "media_path", "") or "")
+    attachments = []
+    if media_path and Path(media_path).is_file():
+        suffix = Path(media_path).suffix.lower()
+        mimetype = "image/png"
+        if suffix in {".jpg", ".jpeg"}:
+            mimetype = "image/jpeg"
+        elif suffix == ".webp":
+            mimetype = "image/webp"
+        attachments.append(
+            Attachment(
+                filename=Path(media_path).name,
+                mimetype=mimetype,
+                url=media_path,
+                size_bytes=Path(media_path).stat().st_size,
+            )
         )
-        return
-    bot = getattr(getattr(adapter, "_app", None), "bot", None)
-    token = getattr(bot, "token", None)
-    chat_id = str(getattr(incoming.channel, "platform_id", "") or "")
-    if not token or not chat_id:
-        await _linkedin_send(adapter, incoming,
-                             "Telegram review transport is unavailable; no controls issued.",
-                             is_error=True)
-        return
-    delivered = await asyncio.to_thread(
-        deliver_draft_to_telegram, post, token=token, chat_id=chat_id,
-        reply_to_message_id=getattr(incoming.thread, "parent_message_id", None),
-        delivery_request_id=(
-            (getattr(incoming, "raw_event", None) or {}).get("callback_query_id")
-            or getattr(incoming, "platform_message_id", None)
+    media_note = "image ready" if attachments else "image unavailable (copy is still editable)"
+    await _linkedin_send(
+        adapter,
+        incoming,
+        (
+            f"LINKEDIN DRAFT #{post.id} ({media_note})\n\n{post.body}\n\n"
+            "Reply with edits to keep cooking, start with `image:` to direct the visual, "
+            "or use the buttons below."
         ),
+        attachments=attachments,
+        components=[
+            MessageComponent(
+                label="Approve & Post",
+                custom_id=_bound_social_callback("approve", post),
+                style="success",
+            ),
+            MessageComponent(
+                label="Cook the Copy",
+                custom_id=_bound_linkedin_callback("revise", post),
+                style="primary",
+            ),
+            MessageComponent(
+                label="Redo Image",
+                custom_id=_bound_linkedin_callback("image", post),
+                style="secondary",
+            ),
+            MessageComponent(
+                label="Reject",
+                custom_id=_bound_social_callback("reject", post),
+                style="danger",
+            ),
+            MessageComponent(
+                label="Start Over",
+                custom_id="linkedin_flow:restart",
+                style="secondary",
+            ),
+        ],
     )
-    if not delivered:
-        await _linkedin_send(
-            adapter, incoming,
-            f"Draft #{post.id} could not complete caption, image and approval delivery. "
-            "No new approval is available. The saved draft is intact.", is_error=True,
-        )
 
 
 async def _generate_linkedin_workshop_draft(
@@ -6815,8 +6834,6 @@ async def _revise_linkedin_workshop_draft(
     *,
     post_id: int,
     feedback: str,
-    expected_revision: int | None = None,
-    expected_digest: str | None = None,
 ) -> None:
     key = _linkedin_channel_key(incoming)
     _linkedin_workshop_set(key, stage="generating", post_id=post_id)
@@ -6824,10 +6841,7 @@ async def _revise_linkedin_workshop_draft(
     try:
         from social.linkedin_workshop import revise_linkedin_copy
 
-        post = await asyncio.to_thread(
-            revise_linkedin_copy, post_id, feedback,
-            expected_revision=expected_revision, expected_digest=expected_digest,
-        )
+        post = await asyncio.to_thread(revise_linkedin_copy, post_id, feedback)
     except Exception as exc:
         _linkedin_workshop_set(key, stage="await_review", post_id=post_id)
         await _linkedin_send(
@@ -6847,8 +6861,6 @@ async def _regenerate_linkedin_workshop_image(
     *,
     post_id: int,
     direction: str,
-    expected_revision: int | None = None,
-    expected_digest: str | None = None,
 ) -> None:
     key = _linkedin_channel_key(incoming)
     _linkedin_workshop_set(key, stage="generating", post_id=post_id)
@@ -6860,8 +6872,6 @@ async def _regenerate_linkedin_workshop_image(
             regenerate_linkedin_image,
             post_id,
             direction,
-            expected_revision=expected_revision,
-            expected_digest=expected_digest,
         )
     except Exception as exc:
         _linkedin_workshop_set(key, stage="await_review", post_id=post_id)
@@ -6973,16 +6983,7 @@ async def handle_linkedin_button(
         )
         return
     action, post_id = parts[1], int(parts[2])
-    from models import Platform
     from social.service import SocialPostService
-
-    source_platform = getattr(incoming, "platform", None) or getattr(incoming.channel, "platform", None)
-    if (raw_event.get("source_message_is_own") is not True
-            or source_platform is not Platform.TELEGRAM):
-        await _linkedin_send(adapter, incoming,
-                             "Draft changes require the owned Telegram review buttons.",
-                             is_error=True)
-        return
 
     try:
         matches, current = SocialPostService().validate_binding(
@@ -7010,8 +7011,7 @@ async def handle_linkedin_button(
             )
         return
     if action == "revise":
-        _linkedin_workshop_set(key, stage="await_revision", post_id=post_id,
-                              expected_revision=int(parts[3]), expected_digest=parts[4])
+        _linkedin_workshop_set(key, stage="await_revision", post_id=post_id)
         await _linkedin_send(
             adapter,
             incoming,
@@ -7022,8 +7022,7 @@ async def handle_linkedin_button(
         )
         return
     if action == "image":
-        _linkedin_workshop_set(key, stage="await_image", post_id=post_id,
-                              expected_revision=int(parts[3]), expected_digest=parts[4])
+        _linkedin_workshop_set(key, stage="await_image", post_id=post_id)
         await _linkedin_send(
             adapter,
             incoming,
@@ -7055,15 +7054,6 @@ async def try_consume_linkedin_message(adapter: Any, incoming: Any) -> bool:
         return True
 
     stage = pending.get("stage")
-    if stage in {"await_revision", "await_review", "await_image"} and (
-        not isinstance(pending.get("expected_revision"), int)
-        or not pending.get("expected_digest")
-    ):
-        _LINKEDIN_PENDING.pop(key, None)
-        await _linkedin_send(adapter, incoming,
-                             "This workshop has no bound revision. Reopen the draft preview first.",
-                             is_error=True)
-        return True
     if stage == "await_mode":
         if lowered in {"1", "cook", "cook together"}:
             _linkedin_workshop_set(key, stage="await_topic", mode="cook")
@@ -7099,8 +7089,6 @@ async def try_consume_linkedin_message(adapter: Any, incoming: Any) -> bool:
                 incoming,
                 post_id=post_id,
                 direction=text.split(":", 1)[1].strip() or "surprise me",
-                expected_revision=pending.get("expected_revision"),
-                expected_digest=pending.get("expected_digest"),
             )
         else:
             await _revise_linkedin_workshop_draft(
@@ -7108,8 +7096,6 @@ async def try_consume_linkedin_message(adapter: Any, incoming: Any) -> bool:
                 incoming,
                 post_id=post_id,
                 feedback=text,
-                expected_revision=pending.get("expected_revision"),
-                expected_digest=pending.get("expected_digest"),
             )
         return True
     if stage == "await_image":
@@ -7123,8 +7109,6 @@ async def try_consume_linkedin_message(adapter: Any, incoming: Any) -> bool:
             incoming,
             post_id=post_id,
             direction=text,
-            expected_revision=pending.get("expected_revision"),
-            expected_digest=pending.get("expected_digest"),
         )
         return True
     if stage == "generating":
@@ -7988,37 +7972,8 @@ async def handle_social(
             return "Usage: `/social approve <id> [revision digest]`"
         try:
             from social.audit import append_social_audit_record
-            from social.channels import get_channel
             from social.service import SocialPostService
             svc = SocialPostService()
-            current = svc.get_post(post_id)
-            channel = get_channel(current.channel) if current else None
-            company_target = (
-                getattr(current, "publisher_json", None) is not None
-                or getattr(channel, "publisher", None) is not None
-            )
-            if company_target:
-                from models import Platform
-
-                raw_event = getattr(incoming, "raw_event", None) or {}
-                platform = getattr(incoming, "platform", None) or getattr(
-                    getattr(incoming, "channel", None), "platform", None
-                )
-                expected_callback = (
-                    f"social:approve:{post_id}:{expected_revision}:{expected_digest}"
-                )
-                if (
-                    raw_event.get("interaction_type") != "button"
-                    or raw_event.get("source_message_is_own") is not True
-                    or platform is not Platform.TELEGRAM
-                    or expected_revision is None or not expected_digest
-                    or raw_event.get("custom_id") != expected_callback
-                ):
-                    return (
-                        "Company posts can only be approved with Approve & Post "
-                        "on the exact Telegram caption-and-image review. "
-                        "No approval or publication occurred."
-                    )
             post = svc.approve_post(
                 post_id,
                 expected_revision=expected_revision,
