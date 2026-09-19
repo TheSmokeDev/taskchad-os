@@ -334,6 +334,9 @@ class OpenAICompatibleRuntime:
                 if not text:
                     text = _extract_response_text(response)
         except Exception as exc:
+            if free:
+                from .opencode_free import FreeRuntimeError, error_code
+                raise FreeRuntimeError(error_code(exc)) from exc
             error_text = str(exc).lower()
             if any(
                 token in error_text
@@ -343,6 +346,10 @@ class OpenAICompatibleRuntime:
             if "auth" in error_text or "api key" in error_text or "401" in error_text:
                 raise RuntimeConfigError(str(exc)) from exc
             raise
+        finally:
+            close = getattr(client, "close", None)
+            if close is not None:
+                await close()
 
         if request.model_only and not text.strip():
             raise RuntimeExecutionError("model-only runtime returned no completed text")
@@ -355,6 +362,7 @@ class OpenAICompatibleRuntime:
             profile_key=self.profile.key,
             metadata=metadata,
             usage=usage or None,
+            cost_usd=0.0 if free else None,
             tool_call_count=len(tool_calls),
             tool_names_used=sorted({c.name for c in tool_calls if c.name}),
             tool_calls=tool_calls,
@@ -431,6 +439,12 @@ class OpenAICompatibleRuntime:
                     )
 
             if not carries_tools or not raw_calls:
+                if self.profile.provider == "opencode-free" and (
+                    raw_calls or getattr(message, "function_call", None)
+                    or getattr(choice, "finish_reason", None) != "stop" or not text
+                ):
+                    from .opencode_free import FreeRuntimeError
+                    raise FreeRuntimeError("INCOMPLETE_RESPONSE")
                 return text, collected
 
             if request.tool_dispatch is None:

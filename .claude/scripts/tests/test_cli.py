@@ -535,7 +535,7 @@ class TestQuietModeRegression:
     def test_quiet_stdout_is_json_only(self):
         """Finding 1: -Q stdout must be JSON-only, no framework logs."""
         result = subprocess.run(
-            ["uv", "run", "thehomie", "chat", "-q", "/help", "-Q"],
+            [sys.executable, str(Path(_CHAT_DIR) / "cli.py"), "chat", "-q", "/help", "-Q"],
             capture_output=True,
             text=True,
             cwd=str(Path(__file__).parent.parent),
@@ -633,7 +633,7 @@ class TestDoctorRegression:
 
     def test_doctor_help_exits_zero(self):
         result = subprocess.run(
-            ["uv", "run", "thehomie", "doctor", "--help"],
+            [sys.executable, str(Path(_CHAT_DIR) / "cli.py"), "doctor", "--help"],
             capture_output=True,
             text=True,
             cwd=str(Path(__file__).parent.parent),
@@ -1069,14 +1069,11 @@ def test_doctor_crypto_renderer_uses_only_allowlisted_nft_status() -> None:
 
 
 class TestCLISubprocess:
-    """Subprocess tests — validates installed command (CLI-Anything pattern)."""
+    """Subprocess tests of this checkout, never a global live-runtime launcher."""
 
     @staticmethod
     def _resolve_cli():
-        path = shutil.which("thehomie")
-        if path:
-            return [path]
-        return ["uv", "run", "thehomie"]
+        return [sys.executable, str(Path(_CHAT_DIR) / "cli.py")]
 
     def test_help_via_subprocess(self):
         result = subprocess.run(

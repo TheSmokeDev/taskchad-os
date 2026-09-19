@@ -24,7 +24,7 @@ completed. See [Persona Harness Learning](persona-harness-learning.md).
 
 ## Operator Entry Points
 
-- Chat/Telegram: `/provider`, `/model`, `/diagnostics`
+- Chat/Telegram/Discord: `/provider`, `/model`, `/diagnostics`
 - CLI: `thehomie status --json`, `thehomie doctor`,
   `thehomie chat -m <lane-or-provider>`
 - Dashboard: `/agents`, `/usage`
@@ -194,7 +194,7 @@ Semantics to know:
   providers can legitimately take up to N x timeout before the request fails.
 - `<= 0` disables the deadline entirely (escape hatch — nothing bounds the call).
 - On timeout the profile is marked retryable-failed and the chain **continues**
-  to the next provider; an operator cancel (`CancelledError`) propagates
+  to the next provider **except under the strict Free-only policy**; an operator cancel (`CancelledError`) propagates
   untouched instead of being mislabeled a timeout.
 - On Windows the cancelled CLI child is **tree-killed** (`taskkill /T`) — the
   npm `.CMD` wrapper trap left the real Node process alive under a plain kill.

@@ -9,6 +9,7 @@ from . import base as _base
 from .base import RuntimeRequest
 from .capabilities import TEXT_REASONING, TOOL_REASONING
 from .health import is_profile_available
+from .opencode_free import FREE_PROVIDER, bind_free_request, requires_free
 from .profiles import (
     GENERIC_PROVIDER_REGISTRY,
     RuntimeProfile,
@@ -133,6 +134,7 @@ _GENERIC_CALLER_TOOLS_PROVIDER_SET = {
 def resolve_runtime_profiles(request: RuntimeRequest) -> list[RuntimeProfile]:
     """Resolve profiles from the compatibility provider ordering."""
 
+    request = bind_free_request(request)
     provider_order = _provider_order_for_request(request)
     return _resolve_profiles(
         provider_order,
@@ -159,6 +161,7 @@ def iter_generic_runtime_profiles(request: RuntimeRequest) -> Iterator[RuntimePr
     explicitly need the complete configured inventory.
     """
 
+    request = bind_free_request(request)
     provider_order = _generic_provider_order_for_request(request)
     if request.model_only:
         # Health selection happens before the lane router can ask adapters for
@@ -224,6 +227,9 @@ def _resolve_profiles(
 
 
 def _provider_order_for_request(request: RuntimeRequest) -> tuple[str, ...]:
+    if requires_free(request):
+        bind_free_request(request)
+        return (FREE_PROVIDER,)
     override = _route_override_for_task(request.task_name) or _route_override_for_capability(
         request.capability
     )
@@ -242,6 +248,9 @@ def _provider_order_for_request(request: RuntimeRequest) -> tuple[str, ...]:
 
 
 def _generic_provider_order_for_request(request: RuntimeRequest) -> tuple[str, ...]:
+    if requires_free(request):
+        bind_free_request(request)
+        return (FREE_PROVIDER,)
     carries_caller_tools = _base.request_carries_tools(request)
     preferred_provider = _preferred_generic_provider(request)
     if preferred_provider:

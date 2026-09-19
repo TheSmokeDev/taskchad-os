@@ -831,6 +831,8 @@ def test_check_environment_accepts_keyless_opencode_free_runtime(
     monkeypatch.setattr(diagnostics_module, "ENV_FILE", env_path)
     monkeypatch.setattr("shutil.which", lambda _name: None)
 
+    monkeypatch.setenv("SECOND_BRAIN_RUNTIME_LANE", "generic_runtime")
+    monkeypatch.setenv("SECOND_BRAIN_GENERIC_PROVIDER", "opencode-free")
     messages = [message for _level, message, _hint in check_environment()]
     assert "No runtime provider available" not in messages
 
@@ -847,3 +849,20 @@ def test_check_environment_accepts_nvidia_only_runtime(
 
     messages = [message for _level, message, _hint in check_environment()]
     assert "No runtime provider available" not in messages
+
+
+def test_unselected_keyless_provider_does_not_hide_missing_runtime(monkeypatch, tmp_path):
+    import diagnostics as diagnostics_module
+
+    path = tmp_path / ".env"
+    path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(diagnostics_module, "ENV_FILE", path)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    for key in (
+        "SECOND_BRAIN_RUNTIME_LANE",
+        "SECOND_BRAIN_GENERIC_PROVIDER",
+        "SECOND_BRAIN_RUNTIME_PROVIDER",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    messages = [message for _level, message, _hint in check_environment()]
+    assert "No runtime provider available" in messages

@@ -1232,6 +1232,7 @@ class ChatRouter:
                             cmd, adapter, incoming, cmd_args, collect_only=True,
                         )
                         if r:
+                            had_error = had_error or bool(getattr(r, "is_error", False))
                             replies.append(f"*/{cmd}*\n{r}")
                     except Exception as e:
                         had_error = True
@@ -1303,6 +1304,7 @@ class ChatRouter:
                     await adapter.send(
                         OutgoingMessage(
                             text=reply,
+                            is_error=bool(getattr(reply, "is_error", False)),
                             channel=incoming.channel,
                             thread=incoming.thread,
                         )
@@ -3428,6 +3430,62 @@ class ChatRouter:
             if (
                 current.status == "draft"
                 and is_linkedin_channel(current.channel)
+                and hasattr(core_handlers, "_send_linkedin_preview")
+            ):
+                await core_handlers._send_linkedin_preview(
+                    adapter, incoming, current
+                )
+            else:
+                await adapter.send(
+                    OutgoingMessage(
+                        text=f"Current draft #{pid}:\n\n{current.body}",
+                        channel=incoming.channel,
+                        thread=incoming.thread,
+                    )
+                )
+            return
+
+        if action not in {"approve", "reject", "edit", "image"}:
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Unknown social action: {action}",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+
+        try:
+            matches, current = self._social_button_binding(
+                pid, revision, digest
+            )
+        except Exception as exc:  # noqa: BLE001 - button handling fails closed
+            await adapter.send(
+                OutgoingMessage(
+                    text=f"Social action failed closed: {type(exc).__name__}: {exc}",
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            return
+        if not matches:
+            await adapter.send(
+                OutgoingMessage(
+                    text=(
+                        f"That button is stale. Draft #{pid} is now revision "
+                        f"{current.revision} with status '{current.status}'. "
+                        "No action was taken."
+                    ),
+                    channel=incoming.channel,
+                    thread=incoming.thread,
+                    is_error=True,
+                )
+            )
+            if (
+                current.status == "draft"
+                and current.channel.lower() in {"linkedin", "li"}
                 and hasattr(core_handlers, "_send_linkedin_preview")
             ):
                 await core_handlers._send_linkedin_preview(

@@ -391,3 +391,12 @@ thehomie team close <id>         # Force-close team session
 
 Public-framework safe. Public export still goes through `scripts/sanitize.py`;
 never copy manually.
+
+### Free model selection (Telegram, Discord and CLI)
+
+Use `/model free` or `/model free:<model>`. Discord's native command takes the
+selector in `args`. A synthetic anonymous probe must succeed before switching;
+failure preserves and names the previous selection. Once Free is selected,
+failure stops the request without paid/subscription fallback. See
+[Runtime Status And Model Control](runtime-status-model-control.md#opencode-free-lane)
+for capability limits, privacy, error codes and deployment requirements.

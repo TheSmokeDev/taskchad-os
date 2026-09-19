@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field

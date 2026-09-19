@@ -102,6 +102,36 @@ CREATE TABLE IF NOT EXISTS authority_resource_reservations (
 );
 """
 
+_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_social_post_status ON social_post_queue(status)",
+    "CREATE INDEX IF NOT EXISTS idx_social_post_channel ON social_post_queue(channel)",
+    """CREATE INDEX IF NOT EXISTS idx_social_post_scheduled
+       ON social_post_queue(scheduled_for) WHERE scheduled_for IS NOT NULL""",
+)
+
+_REQUIRED_INDEXES = {
+    "idx_social_post_status",
+    "idx_social_post_channel",
+    "idx_social_post_scheduled",
+}
+
+_NEW_COLUMNS: dict[str, str] = {
+    "external_ref": "TEXT",
+    "media_path": "TEXT",
+    "media_type": "TEXT",
+    "claimed_at": "TEXT",
+    "source_packet_id": "TEXT",
+    "revision": "INTEGER NOT NULL DEFAULT 1",
+    "content_digest": "TEXT NOT NULL DEFAULT ''",
+    "media_digest": "TEXT NOT NULL DEFAULT ''",
+    "verification_state": "TEXT NOT NULL DEFAULT 'pending'",
+    "receipt_json": "TEXT",
+    "supersede_reason": "TEXT",
+}
+
+_ALL_COLUMNS = tuple(SocialPost.__dataclass_fields__.keys())
+_MIGRATION_TABLE = "social_post_queue__authority_migration"
+
 
 def _row_to_post(row: sqlite3.Row) -> SocialPost:
     return SocialPost(**{k: row[k] for k in row.keys()})

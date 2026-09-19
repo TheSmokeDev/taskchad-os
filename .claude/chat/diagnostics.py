@@ -464,6 +464,12 @@ def _check_runtime(report: DiagnosticsReport) -> None:
             if normalized not in providers_to_check:
                 providers_to_check.append(normalized)
 
+        if selection.generic_provider == "opencode-free":
+            report.runtime_providers["opencode-free"] = "CONFIGURED"
+            report.runtime_provider_details["opencode-free"] = (
+                "Anonymous Free selected; paid fallback disabled. "
+                "Live availability is not checked by diagnostics."
+            )
         for provider in providers_to_check:
             try:
                 if provider == "openai-codex":
