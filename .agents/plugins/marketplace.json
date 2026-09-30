@@ -1,0 +1,12 @@
+{
+  "name": "taskchad-os-local",
+  "interface": { "displayName": "TaskChad OS" },
+  "plugins": [
+    {
+      "name": "taskchad-build-grow",
+      "source": { "source": "local", "path": "./plugins/taskchad-build-grow" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

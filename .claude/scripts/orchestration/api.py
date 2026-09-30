@@ -1518,6 +1518,12 @@ try:
 except Exception as _exc:  # noqa: BLE001
     logger.warning("dashboard_api router not mounted: %s", _exc)
 
+# Build + Grow owns briefs, scoped jobs, and reviews. Authentication and
+# workspace binding remain in the shared middleware above.
+from build_grow.api import router as _build_grow_router
+
+app.include_router(_build_grow_router)
+
 # QR device pairing (Homie Mobile M2) — same two-touch mount pattern as the
 # dashboard router: (a) the /api/pair/claim + /api/pair/poll exemptions in
 # auth_middleware above, (b) this include. Logic lives in pairing_api.py.

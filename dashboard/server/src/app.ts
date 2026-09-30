@@ -41,6 +41,7 @@ import { pairRoute } from './routes/pair.js';
 import { voiceRoute } from './routes/voice.js';
 import { talkRoute } from './routes/talk.js';
 import { archonRoute } from './routes/archon.js';
+import { buildGrowRoute } from './routes/build-grow.js';
 import { mountStaticWeb } from './static-web.js';
 
 export function buildDashboardApp(): Hono {
@@ -74,6 +75,7 @@ export function buildDashboardApp(): Hono {
   app.route('/', voiceRoute);
   app.route('/', talkRoute);
   app.route('/', archonRoute);
+  app.route('/', buildGrowRoute);
   mountStaticWeb(app);
 
   return app;

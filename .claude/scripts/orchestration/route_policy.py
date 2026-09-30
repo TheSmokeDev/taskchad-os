@@ -164,6 +164,32 @@ def all_registered_routes(app) -> set[tuple[str, str]]:
 #                     admin/global query-token path is unchanged.
 # ─────────────────────────────────────────────────────────────────────────────
 ROUTE_POLICY: dict[tuple[str, str], Policy] = {
+    # Build + Grow: all handlers bind the caller's workspace before reading state.
+    ("GET", "/api/build-grow/projects"): "tenant_workspace",
+    ("POST", "/api/build-grow/projects"): "tenant_workspace",
+    ("GET", "/api/build-grow/projects/{project_id}"): "tenant_workspace",
+    ("GET", "/api/build-grow/projects/{project_id}/brief"): "tenant_workspace",
+    ("PUT", "/api/build-grow/projects/{project_id}/brief"): "tenant_workspace",
+    ("GET", "/api/build-grow/projects/{project_id}/jobs"): "tenant_workspace",
+    ("POST", "/api/build-grow/projects/{project_id}/jobs"): "tenant_workspace",
+    ("GET", "/api/build-grow/jobs/{job_id}"): "tenant_workspace",
+    ("POST", "/api/build-grow/jobs/{job_id}/run"): "tenant_workspace",
+    ("GET", "/api/build-grow/deliverables/{deliverable_id}/download"): "tenant_workspace",
+    ("POST", "/api/build-grow/deliverables/{deliverable_id}/review"): "tenant_workspace",
+    # Existing learning routes read shared persona state. Their tenant boundary
+    # has not been established; explicit admin policy preserves default-deny.
+    ("GET", "/api/agents/{persona_id}/learning"): "admin",
+    ("GET", "/api/agents/{persona_id}/learning/lifecycle"): "admin",
+    ("GET", "/api/agents/{persona_id}/learning/records"): "admin",
+    ("GET", "/api/agents/{persona_id}/learning/records/{record_id}"): "admin",
+    ("GET", "/api/agents/{persona_id}/learning/report"): "admin",
+    ("GET", "/api/agents/{persona_id}/learning/tuning"): "admin",
+    ("POST", "/api/agents/{persona_id}/learning/activations/{activation_id}/rollback"): "admin",
+    ("POST", "/api/agents/{persona_id}/learning/pause"): "admin",
+    ("POST", "/api/agents/{persona_id}/learning/report"): "admin",
+    ("POST", "/api/agents/{persona_id}/learning/resume"): "admin",
+    ("POST", "/api/agents/{persona_id}/learning/tuning/rollback"): "admin",
+    ("POST", "/api/agents/{persona_id}/learning/tuning/run"): "admin",
     # ── FastAPI auto-routes (public; no tenant data) ────────────────────────
     ("GET", "/openapi.json"): "public",
     ("GET", "/docs"): "public",

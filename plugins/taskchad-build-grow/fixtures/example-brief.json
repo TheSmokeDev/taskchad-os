@@ -1,0 +1,11 @@
+{
+  "business_name": "Example Plumbing",
+  "description": "A fictional business brief for local development. Replace every fact before customer use.",
+  "industry": "Home services",
+  "location": "Example City",
+  "services": [
+    { "name": "Leak inspection", "description": "Inspect plumbing leaks and explain repair options." }
+  ],
+  "contact_email": "owner@example.com",
+  "brand_color": "#155e75"
+}
