@@ -1,0 +1,8 @@
+{
+  "name": "taskchad-build-grow-hosted-source",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node tests/run.mjs" },
+  "engines": { "node": ">=22.13.0" }
+}
