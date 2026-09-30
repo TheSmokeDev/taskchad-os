@@ -34,6 +34,16 @@
  */
 
 export const ROUTE_MANIFEST: readonly string[] = [
+  // build-grow.ts — durable business briefs, job receipts, and artifact reviews.
+  '/api/build-grow/projects',
+  '/api/build-grow/projects/:id',
+  '/api/build-grow/projects/:id/brief',
+  '/api/build-grow/projects/:id/jobs',
+  '/api/build-grow/jobs/:id',
+  '/api/build-grow/jobs/:id/run',
+  '/api/build-grow/deliverables/:id/download',
+  '/api/build-grow/deliverables/:id/review',
+
   // health.ts
   '/api/health',
   '/api/info',

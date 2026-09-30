@@ -34,6 +34,12 @@ corresponding receipt.
 | Visual factory | Grounded image concepts and validated prompt packs | [Image Node Factory](docs/manual/features/image-node-factory.md) |
 | Authority factory | Evidence-gated SEO/GEO pages and release waves | [TokenMax Authority Stack](docs/manual/features/tokenmax-seo-authority-stack.md) |
 | Client-site factory | Branded, testable service-business websites | [Client Site Factory](docs/manual/features/client-site-factory.md) |
+| Build + Grow workspace | Saved business briefs, website drafts, technical SEO/GEO artifact checks, and review history | [Build + Grow](docs/manual/features/build-grow.md) |
+
+The Build + Grow developer slice includes an operator dashboard and a portable
+local plugin under `plugins/taskchad-build-grow/`. It produces downloadable
+drafts and evidence reports from owner-provided facts. Production hosting,
+customer account flows and public plugin publication remain separate work.
 
 ## Lineage + Provenance
 

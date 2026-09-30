@@ -3,7 +3,7 @@ import {
   Brain, Network, Activity, Radar, ShieldCheck,
   Briefcase, Mic, AudioLines, Calendar,
   Kanban, Monitor, PlugZap, Settings as SettingsIcon,
-  Smartphone, Share2, Ghost, Workflow,
+  Smartphone, Share2, Ghost, Workflow, Globe,
 } from 'lucide-preact';
 import type { ComponentChildren } from 'preact';
 
@@ -22,6 +22,7 @@ export interface RouteDef {
 //   - WarRoom → Cabinet (Q-naming lock; route /cabinet)
 export const ROUTES: RouteDef[] = [
   { path: '/mission',       label: 'Homie Dashboard', section: 'workspace',    icon: LayoutGrid,    shortcut: 'g m' },
+  { path: '/build-grow',    label: 'Build + Grow',    section: 'workspace',    icon: Globe                         },
   { path: '/work',          label: 'Work Queue',      section: 'workspace',    icon: Kanban,        shortcut: 'g q' },
   { path: '/convoy',        label: 'Convoy',          section: 'workspace',    icon: Network,       shortcut: 'g v' },
   { path: '/runs',          label: 'Runs',            section: 'workspace',    icon: Workflow,      shortcut: 'g r' },

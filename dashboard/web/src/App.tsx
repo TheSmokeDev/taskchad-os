@@ -33,6 +33,7 @@ import { GhostViewer } from '@/pages/GhostViewer';
 import { Social } from '@/pages/Social';
 import { MobileAccess } from '@/pages/MobileAccess';
 import { DEFAULT_ROUTE } from '@/lib/routes';
+import { BuildGrow } from '@/pages/BuildGrow';
 
 export function App() {
   const open = sidebarOpen.value;
@@ -62,6 +63,7 @@ export function App() {
         <DesktopControls />
         <Switch>
           <Route path="/mission"><MissionControl /></Route>
+          <Route path="/build-grow"><BuildGrow /></Route>
           <Route path="/work"><WorkQueue /></Route>
           <Route path="/convoy"><Convoy /></Route>
           <Route path="/runs"><Runs /></Route>

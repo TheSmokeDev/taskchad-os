@@ -70,6 +70,7 @@ orchestration, and thin channel/desktop surfaces over one runtime. Use
 |---|---|---|---|
 | Buzz Native Collaboration | Implemented; official v0.5.3 local relay/Desktop foundation installed, signed Homie identity and channel activation pending | [buzz-native-collaboration](features/buzz-native-collaboration.md) | Buzz Desktop, `thehomie chat --buzz`, Settings, Capability Gateway |
 | Homie Dashboard Framework | Canonical operator shell | [homie-dashboard-framework](features/homie-dashboard-framework.md) | `dashboard/`, `/mission`, `/teams`, `/browser`, `/mobile` |
+| TaskChad Build + Grow | Developer slice: saved business briefs, scoped website/GEO jobs and artifact review; production and public plugin publication pending | [build-grow](features/build-grow.md) | `/build-grow`, `/api/build-grow/*`, `plugins/taskchad-build-grow/` |
 | Operating Room | Product slice implemented | [operating-room](features/operating-room.md) | `/teams`, `/api/team/operating-room/run` |
 | Capability Gateway | Read-only six-kind catalog deployed on Homie 1.7.1 | [capability-gateway](features/capability-gateway.md) | `/capabilities`, `/api/capabilities/status` |
 | Capability Plugin Kernel | Runtime foundation implemented; v1.7.0 release target, disabled fixture only, no production wiring | [capability-plugin-kernel](features/capability-plugin-kernel.md) | Python runtime boundary API; operator surfaces are later slices |

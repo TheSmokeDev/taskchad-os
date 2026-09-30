@@ -217,7 +217,7 @@ def test_route_policy_covers_every_real_route(tmp_path, monkeypatch):
 
 
 def test_route_policy_count_is_134(tmp_path, monkeypatch):
-    """165 declared routes + 4 FastAPI auto-routes = 169 (R2 count lock).
+    """188 declared routes + 4 FastAPI auto-routes = 192 (route count lock).
 
     History: 117 -> 123 on 2026-07-04 (+6 pairing routes, Homie Mobile M2);
     123 -> 125 on 2026-07-05 (+2 voice STT/TTS routes, Homie Mobile M4);
@@ -259,13 +259,16 @@ def test_route_policy_count_is_134(tmp_path, monkeypatch):
     on the talk-mode precedent — and +1 repair: POST /api/agents/preview
     shipped unclassified in the blueprint-unification commit 72a381c0 and
     this suite had been red since; classified `tenant_persona` matching its
-    own _require_persona_in_scope gate and the validate-id sibling).
+        own _require_persona_in_scope gate and the validate-id sibling).
+        169 -> 192 on 2026-09-30 (+11 workspace-scoped Build + Grow routes
+        and +12 existing persona-learning routes explicitly classified admin;
+        their shared persona state has no proven customer workspace boundary).
     """
     monkeypatch.setenv("HOMIE_ALLOW_LIVE_AGENT_RUN", "1")
     api_mod = _reload_real_api(tmp_path / "count.db")
     try:
-        assert len(all_registered_routes(api_mod.app)) == 169
-        assert len(ROUTE_POLICY) == 169
+        assert len(all_registered_routes(api_mod.app)) == 192
+        assert len(ROUTE_POLICY) == 192
     finally:
         api_mod._db.close()
 
@@ -481,3 +484,54 @@ def test_health_public_no_token_in_mt_mode(mt_app_voice):
     """/api/health is public — reachable tokenless even in multi-tenant mode."""
     client = TestClient(mt_app_voice.app)
     assert client.get("/api/health").status_code == 200
+
+
+@pytest.mark.parametrize("method,template", [
+    key for key in ROUTE_POLICY if "/learning" in key[1]
+])
+def test_existing_learning_routes_are_admin_only(mt_app_voice, method, template):
+    """Repair the registry gap without granting access to shared persona state."""
+    assert resolve_policy(method, template) == "admin"
+    assert enforce_policy(method, template, _ADMIN) is None
+    concrete = template.replace("{persona_id}", "pb").replace("{record_id}", "record")
+    concrete = concrete.replace("{activation_id}", "activation")
+    response = TestClient(mt_app_voice.app).request(method, concrete, headers=_auth(_TOKEN_B))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "admin-only"
+
+
+def test_build_grow_through_real_workspace_auth_middleware(mt_app_voice, tmp_path, monkeypatch):
+    """The mounted feature derives workspace from bound tokens, not client payloads."""
+    import config
+
+    monkeypatch.setattr(config, "ORCHESTRATION_DB_PATH", tmp_path / "build-grow-orch.db")
+    mt_app_voice._db.insert_tenant_token(hash_token(_TOKEN_A), 3, '["pa"]', False, "tenant-a")
+    client = TestClient(mt_app_voice.app)
+    base = "/api/build-grow"
+    assert client.get(f"{base}/projects").status_code == 401
+    brief = {
+        "business_name": "Example Services", "description": "Owner-provided services.",
+        "services": [{"name": "Repairs", "description": "Fixture repairs."}],
+        "contact_email": "hello@example.com",
+    }
+    created = client.post(f"{base}/projects", headers=_auth(_TOKEN_A),
+                          json={"name": "Website", "brief": brief})
+    assert created.status_code == 200
+    project = created.json()
+    project_path = f'{base}/projects/{project["id"]}'
+    assert client.get(project_path, headers=_auth(_TOKEN_B)).status_code == 404
+    queued = client.post(f"{project_path}/jobs", headers=_auth(_TOKEN_A),
+                         json={"kind": "website"}).json()
+    job_path = f'{base}/jobs/{queued["id"]}'
+    assert client.get(job_path, headers=_auth(_TOKEN_B)).status_code == 404
+    run = client.post(f"{job_path}/run", headers=_auth(_TOKEN_A))
+    assert run.status_code == 200
+    assert run.json()["status"] == "ready_for_review"
+    deliverable = run.json()["deliverables"][0]
+    deliverable_path = f'{base}/deliverables/{deliverable["id"]}'
+    assert client.get(f"{deliverable_path}/download", headers=_auth(_TOKEN_B)).status_code == 404
+    assert client.post(f"{deliverable_path}/review", headers=_auth(_TOKEN_B), json={
+        "decision": "approved", "expected_sha256": deliverable["sha256"],
+    }).status_code == 404
+    assert client.get(f"{deliverable_path}/download", headers=_auth(_TOKEN_A)).status_code == 200
+    assert client.get(f"{base}/projects", headers=_auth(_TOKEN_B)).json() == {"projects": []}

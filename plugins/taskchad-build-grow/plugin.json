@@ -1,0 +1,27 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "taskchad-build-grow",
+  "version": "0.1.0",
+  "description": "Build reviewable business websites, inspect technical SEO/GEO artifacts, and keep business briefs and delivery history in TaskChad OS.",
+  "author": { "name": "TaskChad", "url": "https://taskchad.com" },
+  "homepage": "https://taskchad.com",
+  "repository": "https://github.com/TheSmokeDev/taskchad-os",
+  "license": "MIT",
+  "keywords": ["websites", "seo", "geo", "business", "project-management"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "TaskChad Build + Grow",
+        "shortDescription": "Build sites. Improve search",
+        "longDescription": "Create business briefs, generate website drafts, inspect technical SEO/GEO issues, and review versioned deliverables through a configured TaskChad OS connection. Website generation and artifact auditing are local workflows; publication and live ranking measurement are separate actions.",
+        "developerName": "TaskChad",
+        "category": "Productivity",
+        "defaultPrompt": [
+          "Build a website from my business brief and prepare it for review.",
+          "Audit my website files for technical SEO and GEO issues.",
+          "Show my TaskChad projects and the deliverables awaiting review."
+        ]
+      }
+    }
+  }
+}
