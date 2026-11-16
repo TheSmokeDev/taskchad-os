@@ -1,3 +1,5 @@
+> **Archived.** This was my first version and is no longer maintained. A rebuilt version is in private beta and will be published soon.
+
 # TaskChad OS
 
 **A self-hosted cognitive agent OS and personal AI assistant with persistent memory, realtime voice, multi-agent orchestration, browser control, Telegram/Discord, and operator-controlled factories.**
